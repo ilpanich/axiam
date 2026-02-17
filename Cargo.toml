@@ -12,15 +12,15 @@ members = [
     "crates/axiam-audit",
     "crates/axiam-server",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["AXIAM Contributors"]
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/emanuele/axiam"
-rust-version = "1.75"
+rust-version = "1.93"
 
 [workspace.dependencies]
 # Serialization
@@ -35,21 +35,21 @@ actix-web = "4"
 actix-rt = "2"
 
 # gRPC
-tonic = "0.12"
-prost = "0.13"
-tonic-build = "0.12"
+tonic = "0.14"
+prost = "0.14"
+tonic-build = "0.14"
 
 # AMQP
-lapin = "2"
+lapin = "4"
 
 # Database
-surrealdb = "2"
+surrealdb = "3"
 
 # Authentication & Crypto
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 argon2 = "0.5"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
-rand = "0.8"
+rand = "0.9"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Time
@@ -64,11 +64,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Configuration
-config = "0.14"
+config = "0.15"
 
 # OpenAPI
 utoipa = { version = "5", features = ["actix_extras"] }
-utoipa-swagger-ui = { version = "8", features = ["actix-web"] }
+utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 
 # TLS
 rustls = "0.23"

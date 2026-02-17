@@ -1,0 +1,22 @@
+[package]
+name = "axiam-auth"
+description = "AXIAM authentication: password hashing, JWT, MFA"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axiam-core = { workspace = true }
+argon2 = { workspace = true }
+jsonwebtoken = { workspace = true }
+totp-rs = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

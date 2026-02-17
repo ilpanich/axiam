@@ -1,0 +1,16 @@
+[package]
+name = "axiam-authz"
+description = "AXIAM authorization engine: RBAC with resource hierarchy and scopes"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axiam-core = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

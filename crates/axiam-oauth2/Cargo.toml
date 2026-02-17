@@ -1,0 +1,22 @@
+[package]
+name = "axiam-oauth2"
+description = "AXIAM OAuth2 authorization server and OpenID Connect provider"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axiam-core = { workspace = true }
+axiam-auth = { workspace = true }
+axiam-db = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+jsonwebtoken = { workspace = true }
+rand = { workspace = true }

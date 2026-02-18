@@ -1,6 +1,6 @@
 services:
   surrealdb:
-    image: surrealdb/surrealdb:latest
+    image: surrealdb/surrealdb:v2
     container_name: axiam-surrealdb
     command: start --user root --pass root --log info
     ports:
@@ -8,7 +8,7 @@ services:
     volumes:
       - surrealdb-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "/surreal", "isready"]
       interval: 10s
       timeout: 5s
       retries: 5

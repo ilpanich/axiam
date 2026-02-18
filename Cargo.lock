@@ -762,6 +762,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiam-pki"
+version = "0.1.0"
+dependencies = [
+ "axiam-core",
+ "axiam-db",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "axiam-server"
 version = "0.1.0"
 dependencies = [

@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 axiam-core = { workspace = true }
 surrealdb = { workspace = true }
+surrealdb-types = "3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -17,3 +18,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+surrealdb = { workspace = true, features = ["kv-mem"] }
+tokio-test = { workspace = true }

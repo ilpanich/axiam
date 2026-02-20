@@ -46,7 +46,7 @@ Implement `OrganizationRepository` (CRUD, slug-based lookup) and `TenantReposito
 **Commit**: `feat(db): implement Organization and Tenant repositories`
 
 ### T1.4 — User Repository Implementation
-Implement `UserRepository` trait for SurrealDB: create, get by ID, get by username/email, update, delete (soft-delete), list with pagination. All operations scoped to tenant. Include password hash storage. Add unit/integration tests.
+Implement `UserRepository` trait for SurrealDB: create, get by ID, get by username/email, update, delete (soft-delete), list with pagination. All operations scoped to tenant. Include password hash storage (according to OWASP guidelines, argon2id with salt and pepper must be used). Add unit/integration tests.
 
 **Commit**: `feat(db): implement User repository with CRUD operations`
 

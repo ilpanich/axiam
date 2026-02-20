@@ -4,15 +4,15 @@
 //! This crate provides:
 //! - Connection management ([`DbManager`], [`DbConfig`])
 //! - Schema initialization and migrations ([`run_migrations`])
+//! - Repository implementations for `axiam-core` traits
 //! - Error types ([`DbError`])
-//!
-//! Repository trait implementations (for `axiam-core` traits) will be
-//! added in subsequent tasks.
 
 mod connection;
 mod error;
+pub mod repository;
 mod schema;
 
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
+pub use repository::{SurrealOrganizationRepository, SurrealTenantRepository};
 pub use schema::{run_migrations, schema_v1};

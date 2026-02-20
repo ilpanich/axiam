@@ -742,6 +742,7 @@ dependencies = [
 name = "axiam-db"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "axiam-core",
  "chrono",
  "serde",

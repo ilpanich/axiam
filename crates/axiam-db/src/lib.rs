@@ -14,5 +14,7 @@ mod schema;
 
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
-pub use repository::{SurrealOrganizationRepository, SurrealTenantRepository};
+pub use repository::{
+    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository, verify_password,
+};
 pub use schema::{run_migrations, schema_v1};

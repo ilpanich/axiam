@@ -1,6 +1,6 @@
 [package]
-name = "axiam-db"
-description = "AXIAM SurrealDB repository implementations"
+name = "axiam-pki"
+description = "AXIAM PKI — Certificate management, CA operations, and GnuPG integration"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -9,9 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 axiam-core = { workspace = true }
-argon2 = { workspace = true }
-surrealdb = { workspace = true }
-surrealdb-types = "3"
+axiam-db = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -19,10 +17,3 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-rand = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
-
-[dev-dependencies]
-surrealdb = { workspace = true, features = ["kv-mem"] }
-tokio-test = { workspace = true }

@@ -10,6 +10,7 @@ members = [
     "crates/axiam-oauth2",
     "crates/axiam-federation",
     "crates/axiam-audit",
+    "crates/axiam-pki",
     "crates/axiam-server",
 ]
 resolver = "3"
@@ -50,6 +51,8 @@ jsonwebtoken = "10"
 argon2 = "0.5"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 rand = "0.9"
+sha2 = "0.10"
+hex = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Time
@@ -87,3 +90,4 @@ axiam-amqp = { path = "crates/axiam-amqp" }
 axiam-oauth2 = { path = "crates/axiam-oauth2" }
 axiam-federation = { path = "crates/axiam-federation" }
 axiam-audit = { path = "crates/axiam-audit" }
+axiam-pki = { path = "crates/axiam-pki" }

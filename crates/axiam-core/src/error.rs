@@ -22,6 +22,21 @@ pub enum AxiamError {
     #[error("Database error: {0}")]
     Database(String),
 
+    #[error("Certificate error: {0}")]
+    Certificate(String),
+
+    #[error("Cryptography error: {0}")]
+    Crypto(String),
+
+    #[error("Webhook delivery failed: {0}")]
+    WebhookDelivery(String),
+
+    #[error("Tenant context missing or invalid")]
+    TenantContext,
+
+    #[error("Rate limit exceeded")]
+    RateLimited,
+
     #[error("Internal error: {0}")]
     Internal(String),
 }

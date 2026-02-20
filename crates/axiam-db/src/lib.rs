@@ -17,6 +17,7 @@ pub use error::DbError;
 pub use repository::{
     SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
     SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealTenantRepository, SurrealUserRepository, verify_password,
+    SurrealServiceAccountRepository, SurrealSessionRepository, SurrealTenantRepository,
+    SurrealUserRepository, hash_client_secret, verify_password,
 };
 pub use schema::{run_migrations, schema_v1};

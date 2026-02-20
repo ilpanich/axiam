@@ -51,6 +51,8 @@ jsonwebtoken = "10"
 argon2 = "0.5"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 rand = "0.9"
+sha2 = "0.10"
+hex = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Time

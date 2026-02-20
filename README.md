@@ -21,6 +21,10 @@ The goal: prove that a single architect, collaborating with an AI coding agent, 
 
 Every line of code, every test, every commit in this repository has been produced through human-AI pair programming — the architect provides vision, constraints, and review; the AI provides implementation at scale.
 
+While the aim is to build a fully functional IAM system, the deeper goal is to explore the future of software development itself — where human creativity and AI's generative capabilities combine to create software that neither could produce alone. AXIAM is a case study in this new paradigm, pushing the boundaries of what's possible with AI-assisted software engineering.
+
+**Note: AXIAM is a work in progress and should not be used in production environments until it reaches a stable release. The project is currently in active development, with core features being implemented and tested.**
+
 ## Key Features
 
 - **Multi-tenant architecture** — Organizations contain tenants; tenants provide full data isolation

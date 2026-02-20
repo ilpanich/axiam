@@ -20,49 +20,49 @@ AXIAM follows a **layered, modular architecture** with clear separation of conce
            │ REST/HTTPS   │ gRPC/TLS     │ AMQP
            ▼              ▼              ▼
 ┌──────────────────────────────────────────────────────────┐
-│                   API Gateway Layer                       │
-│  ┌─────────────┐ ┌─────────────┐ ┌────────────────────┐ │
-│  │  REST API    │ │  gRPC API   │ │  AMQP Consumer     │ │
-│  │  (Actix-Web) │ │  (Tonic)    │ │  (Lapin)           │ │
-│  └──────┬──────┘ └──────┬──────┘ └────────┬───────────┘ │
+│                   API Gateway Layer                      │
+│  ┌─────────────┐ ┌─────────────┐ ┌────────────────────┐  │
+│  │  REST API   │ │  gRPC API   │ │  AMQP Consumer     │  │
+│  │  (Actix-Web)│ │  (Tonic)    │ │  (Lapin)           │  │
+│  └──────┬──────┘ └──────┬──────┘ └────────┬───────────┘  │
 │         └───────────┬───┘                  │             │
 │                     ▼                      ▼             │
 │           ┌─────────────────────────────────┐            │
-│           │       Middleware Pipeline        │            │
-│           │  (Auth, Rate Limit, CORS, Audit) │            │
+│           │      Middleware Pipeline        │            │
+│           │ (Auth, Rate Limit, CORS, Audit) │            │
 │           └──────────────┬──────────────────┘            │
 └──────────────────────────┼───────────────────────────────┘
                            ▼
 ┌──────────────────────────────────────────────────────────┐
-│                   Service Layer                           │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐  │
-│  │ AuthN    │ │ AuthZ    │ │ User     │ │ Federation │  │
-│  │ Service  │ │ Engine   │ │ Service  │ │ Service    │  │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────┘  │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐  │
-│  │ Role     │ │ Resource │ │ Audit    │ │ OAuth2/    │  │
-│  │ Service  │ │ Service  │ │ Service  │ │ OIDC       │  │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────┘  │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐  │
-│  │ Tenant   │ │ PKI /    │ │ Webhook  │ │ GnuPG      │  │
-│  │ Service  │ │ Cert Svc │ │ Service  │ │ Service    │  │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────┘  │
+│                   Service Layer                          │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐   │
+│  │ AuthN    │ │ AuthZ    │ │ User     │ │ Federation │   │
+│  │ Service  │ │ Engine   │ │ Service  │ │ Service    │   │
+│  └──────────┘ └──────────┘ └──────────┘ └────────────┘   │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐   │
+│  │ Role     │ │ Resource │ │ Audit    │ │ OAuth2/    │   │
+│  │ Service  │ │ Service  │ │ Service  │ │ OIDC       │   │
+│  └──────────┘ └──────────┘ └──────────┘ └────────────┘   │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐   │
+│  │ Tenant   │ │ PKI /    │ │ Webhook  │ │ GnuPG      │   │
+│  │ Service  │ │ Cert Svc │ │ Service  │ │ Service    │   │
+│  └──────────┘ └──────────┘ └──────────┘ └────────────┘   │
 └──────────────────────────┬───────────────────────────────┘
                            ▼
 ┌──────────────────────────────────────────────────────────┐
-│                   Data Access Layer                       │
+│                   Data Access Layer                      │
 │  ┌────────────────────────────────────────────────────┐  │
-│  │           Repository Trait Abstractions             │  │
+│  │           Repository Trait Abstractions            │  │
 │  │  (UserRepo, RoleRepo, ResourceRepo, AuditRepo...)  │  │
 │  └───────────────────────┬────────────────────────────┘  │
 └──────────────────────────┼───────────────────────────────┘
                            ▼
-┌──────────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────────┐
 │                   SurrealDB Cluster                       │
-│  (Organizations, Tenants, Users, Groups, Roles,            │
-│   Permissions, Resources, Certificates, Audit Logs,        │
-│   Sessions, OAuth2 Clients, Federation Configs, Webhooks)  │
-└──────────────────────────────────────────────────────────┘
+│  (Organizations, Tenants, Users, Groups, Roles,           │
+│   Permissions, Resources, Certificates, Audit Logs,       │
+│   Sessions, OAuth2 Clients, Federation Configs, Webhooks) │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ### 2.1 Communication Protocols
@@ -163,7 +163,7 @@ AXIAM uses a two-level hierarchy for multi-tenancy:
 └──────┬───────┘       ┌──────┴───────┐        │              │
        │               │    Group     │        │ id           │
        │ N:M           │              │        │ tenant_id    │
-       ├──────────────▶│ id           │        │ name         │
+       ├─────────────▶│ id           │        │ name         │
        │               │ tenant_id    │        │ type         │
        │ 1:N           │ name         │        │ parent_id    │
        ▼               │ description  │        │ metadata     │
@@ -286,47 +286,47 @@ FROM user:$uid;
 ```
 Client                    AXIAM REST API              SurrealDB
   │                            │                         │
-  │── POST /auth/login ───────▶│                         │
-  │   {username, password}     │── Fetch user ──────────▶│
-  │                            │◀── user record ─────────│
+  │── POST /auth/login ──────▶│                         │
+  │   {username, password}     │── Fetch user ─────────▶│
+  │                            │◀── user record ────────│
   │                            │── Verify Argon2id       │
   │                            │── Check MFA required?   │
   │                            │                         │
   │ (if MFA not required)      │                         │
-  │◀── {access_token,          │── Create session ──────▶│
-  │     refresh_token} ────────│── Write audit log ─────▶│
+  │◀── {access_token,         │── Create session ─────▶│
+  │     refresh_token} ────────│── Write audit log ────▶│
   │                            │                         │
   │ (if MFA required)          │                         │
-  │◀── {mfa_challenge_token} ──│                         │
+  │◀── {mfa_challenge_token} ─│                         │
   │                            │                         │
-  │── POST /auth/mfa/verify ──▶│                         │
+  │─ POST /auth/mfa/verify ──▶│                         │
   │   {challenge_token, code}  │── Verify TOTP           │
-  │◀── {access_token,          │── Create session ──────▶│
-  │     refresh_token} ────────│── Write audit log ─────▶│
+  │◀── {access_token,         │── Create session ─────▶│
+  │     refresh_token} ────────│── Write audit log ────▶│
 ```
 
 ### 4.2 OAuth2 Authorization Code Flow
 
 ```
-Client        AXIAM (AuthZ Server)       Resource Server
-  │                │                          │
-  │── GET /oauth2/authorize ──▶│              │
-  │   (client_id, scope,       │              │
-  │    redirect_uri, state)    │              │
-  │                            │              │
-  │◀── Login page ─────────────│              │
-  │── Authenticate ───────────▶│              │
-  │◀── Consent screen ────────│              │
-  │── Approve ────────────────▶│              │
-  │◀── Redirect with code ─────│              │
-  │                            │              │
-  │── POST /oauth2/token ─────▶│              │
-  │   (code, client_secret)    │              │
-  │◀── {access_token, id_token}│              │
-  │                            │              │
-  │── API call + Bearer token ─┼─────────────▶│
-  │                            │              │── Validate JWT
-  │◀── Response ───────────────┼──────────────│
+Client              AXIAM (AuthZ Server)       Resource Server
+  │                              │                     │
+  │── GET /oauth2/authorize ───▶│                     │
+  │   (client_id, scope,         │                     │
+  │    redirect_uri, state)      │                     │
+  │                              │                     │
+  │◀── Login page ──────────────│                     │
+  │── Authenticate ────────────▶│                     │
+  │◀── Consent screen ──────────│                     │
+  │── Approve ─────────────────▶│                     │
+  │◀── Redirect with code ──────│                     │
+  │                              │                     │
+  │── POST /oauth2/token ──────▶│                     │
+  │   (code, client_secret)      │                     │
+  │◀── {access_token, id_token}─│                     │
+  │                              │                     │
+  │── API call + Bearer token ───┼───────────────────▶│
+  │                              │                     │── Validate JWT
+  │◀── Response ────────────────┼─────────────────────│
 ```
 
 ### 4.3 gRPC Authorization Check
@@ -360,12 +360,12 @@ For scenarios where authorization decisions can be deferred:
 Producer                    AMQP Broker              AXIAM Consumer
   │                            │                         │
   │── Publish to               │                         │
-  │   authz.request queue ────▶│                         │
-  │                            │── Deliver ─────────────▶│
+  │  authz.request queue ────▶│                         │
+  │                            │── Deliver ────────────▶│
   │                            │                         │── Evaluate authz
   │                            │                         │── Write audit log
-  │                            │◀── Publish to           │
-  │◀── Consume from            │    authz.response ──────│
+  │                            │◀── Publish to          │
+  │◀── Consume from           │    authz.response ──────│
   │    authz.response ─────────│                         │
 ```
 
@@ -583,39 +583,39 @@ All tenant-scoped endpoints are prefixed with `/api/v1/tenants/:tenant_id/` or u
 ### 11.1 Development (Docker Compose)
 
 ```
-┌─────────────────────────────────────────┐
+┌──────────────────────────────────────────┐
 │              docker-compose              │
-│  ┌──────────┐  ┌──────────┐  ┌────────┐ │
+│  ┌──────────┐  ┌──────────┐  ┌─────────┐ │
 │  │  AXIAM   │  │ SurrealDB│  │ RabbitMQ│ │
-│  │  Server  │──│  (single)│  │        │ │
-│  │  :8080   │  │  :8000   │  │  :5672 │ │
-│  └──────────┘  └──────────┘  └────────┘ │
-└─────────────────────────────────────────┘
+│  │  Server  │──│  (single)│  │         │ │
+│  │  :8080   │  │  :8000   │  │  :5672  │ │
+│  └──────────┘  └──────────┘  └─────────┘ │
+└──────────────────────────────────────────┘
 ```
 
 ### 11.2 Production (Kubernetes)
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   Kubernetes Cluster                  │
+┌──────────────────────────────────────────────────────┐
+│                   Kubernetes Cluster                 │
 │                                                      │
-│  ┌──────────┐   ┌──────────────────┐                │
+│  ┌──────────┐   ┌───────────────────┐                │
 │  │ Ingress  │──▶│ AXIAM Deployment │                │
-│  │ (TLS)    │   │ (N replicas, HPA)│                │
-│  └──────────┘   └────────┬─────────┘                │
+│  │ (TLS)    │   │ (N replicas, HPA) │                │
+│  └──────────┘   └────────┬──────────┘                │
 │                          │                           │
 │         ┌────────────────┼────────────────┐          │
 │         ▼                ▼                ▼          │
-│  ┌──────────┐   ┌──────────────┐  ┌───────────┐    │
-│  │ SurrealDB│   │   RabbitMQ   │  │ ConfigMap │    │
-│  │ StatefulSet│  │  StatefulSet │  │ + Secrets │    │
-│  │ (cluster) │  │  (cluster)   │  └───────────┘    │
-│  └──────────┘   └──────────────┘                    │
+│  ┌─────────────┐ ┌──────────────┐  ┌───────────┐     │
+│  │ SurrealDB   │ │   RabbitMQ   │  │ ConfigMap │     │
+│  │ StatefulSet │ │  StatefulSet │  │ + Secrets │     │
+│  │ (cluster)   │ │  (cluster)   │  └───────────┘     │
+│  └─────────────┘ └──────────────┘                    │
 │                                                      │
-│  ┌─────────────────────────────────────┐            │
-│  │ Monitoring: Prometheus + Grafana    │            │
-│  └─────────────────────────────────────┘            │
-└─────────────────────────────────────────────────────┘
+│  ┌─────────────────────────────────────┐             │
+│  │ Monitoring: Prometheus + Grafana    │             │
+│  └─────────────────────────────────────┘             │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---

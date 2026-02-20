@@ -16,6 +16,7 @@ pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use repository::{
     SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealRoleRepository, SurrealTenantRepository, SurrealUserRepository, verify_password,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
+    SurrealTenantRepository, SurrealUserRepository, verify_password,
 };
 pub use schema::{run_migrations, schema_v1};

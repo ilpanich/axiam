@@ -31,12 +31,12 @@ Review and update design document and roadmap to incorporate multi-tenancy (Tena
 ## Phase 1: Core Domain & Database
 
 ### T1.1 — Core Domain Types (`axiam-core`)
-Define core domain types: `Organization`, `Tenant`, `User`, `Role`, `Permission`, `Resource`, `Scope`, `ServiceAccount`, `Session`, `AuditLogEntry`, `OAuth2Client`, `FederationConfig`, `Certificate`, `CaCertificate`, `Webhook`. All tenant-scoped types include a `tenant_id` field. Define error types (`AxiamError`). Define repository traits (`UserRepository`, `RoleRepository`, `OrganizationRepository`, `TenantRepository`, `CertificateRepository`, `WebhookRepository`, etc.).
+Define core domain types: `Organization`, `Tenant`, `User`, `Group`, `Role`, `Permission`, `Resource`, `Scope`, `ServiceAccount`, `Session`, `AuditLogEntry`, `OAuth2Client`, `FederationConfig`, `Certificate`, `CaCertificate`, `Webhook`. All tenant-scoped types include a `tenant_id` field. Define error types (`AxiamError`). Define repository traits (`UserRepository`, `GroupRepository`, `RoleRepository`, `OrganizationRepository`, `TenantRepository`, `CertificateRepository`, `WebhookRepository`, etc.).
 
 **Commit**: `feat(core): define domain types, error types, and repository traits`
 
 ### T1.2 — SurrealDB Connection & Migrations (`axiam-db`)
-Implement SurrealDB connection pool/manager. Create schema initialization (table definitions, indexes, graph edge definitions) including `organization`, `tenant`, `ca_certificate`, `certificate`, and `webhook` tables. Write a migration runner that applies schema on startup. Add integration test with Docker-based SurrealDB.
+Implement SurrealDB connection pool/manager. Create schema initialization (table definitions, indexes, graph edge definitions) including `organization`, `tenant`, `group`, `ca_certificate`, `certificate`, and `webhook` tables plus `member_of` edge. Write a migration runner that applies schema on startup. Add integration test with in-memory SurrealDB.
 
 **Commit**: `feat(db): SurrealDB connection manager and schema initialization`
 
@@ -50,17 +50,22 @@ Implement `UserRepository` trait for SurrealDB: create, get by ID, get by userna
 
 **Commit**: `feat(db): implement User repository with CRUD operations`
 
-### T1.5 — Role & Permission Repository Implementation
-Implement `RoleRepository` and `PermissionRepository` for SurrealDB: CRUD operations, role-permission assignment (`grants` edge), global vs resource-scoped roles. All tenant-scoped. Add tests.
+### T1.5 — Group Repository Implementation
+Implement `GroupRepository` for SurrealDB: CRUD operations, user-group membership via `member_of` edge (add/remove members, list members, list user groups). All tenant-scoped. Add tests.
+
+**Commit**: `feat(db): implement Group repository with membership management`
+
+### T1.6 — Role & Permission Repository Implementation
+Implement `RoleRepository` and `PermissionRepository` for SurrealDB: CRUD operations, role-permission assignment (`grants` edge), role assignment to users/groups/service accounts via `has_role` edge, global vs resource-scoped roles. All tenant-scoped. Add tests.
 
 **Commit**: `feat(db): implement Role and Permission repositories`
 
-### T1.6 — Resource & Scope Repository Implementation
+### T1.7 — Resource & Scope Repository Implementation
 Implement `ResourceRepository` for SurrealDB: CRUD with hierarchical parent-child relationships (`child_of` edge), tree traversal queries. Implement `ScopeRepository`. All tenant-scoped. Add tests.
 
 **Commit**: `feat(db): implement Resource hierarchy and Scope repositories`
 
-### T1.7 — Service Account & Session Repositories
+### T1.8 — Service Account & Session Repositories
 Implement `ServiceAccountRepository` (CRUD, client credential management) and `SessionRepository` (create, validate, invalidate, cleanup expired). All tenant-scoped. Add tests.
 
 **Commit**: `feat(db): implement ServiceAccount and Session repositories`
@@ -94,7 +99,7 @@ Implement failed login tracking, account lockout with exponential backoff, rate 
 ## Phase 3: Authorization Engine
 
 ### T3.1 — Permission Evaluation Engine (`axiam-authz`)
-Implement the core authorization check: given (subject, action, resource), resolve roles, collect permissions, evaluate against resource hierarchy with inheritance. Default-deny policy. All evaluations scoped to tenant. Add unit tests with various hierarchy scenarios.
+Implement the core authorization check: given (subject, action, resource), resolve roles (direct + via group membership), collect permissions, evaluate against resource hierarchy with inheritance. Default-deny policy. All evaluations scoped to tenant. Add unit tests with various hierarchy scenarios.
 
 **Commit**: `feat(authz): permission evaluation engine with hierarchy inheritance`
 
@@ -132,17 +137,22 @@ Implement `GET/POST/PUT/DELETE /api/v1/users` with pagination, filtering, input 
 
 **Commit**: `feat(api-rest): user management CRUD endpoints`
 
-### T4.5 — Role & Permission Endpoints (REST)
-Implement CRUD for roles, permissions, and role-permission assignments. Implement role assignment to users (`has_role` edge management). Add tests.
+### T4.5 — Group Management Endpoints (REST)
+Implement `GET/POST/PUT/DELETE /api/v1/groups` and `POST/DELETE /api/v1/groups/:id/members` for group membership management. Protected by authorization middleware. Tenant-scoped. Add integration tests.
+
+**Commit**: `feat(api-rest): group management and membership endpoints`
+
+### T4.6 — Role & Permission Endpoints (REST)
+Implement CRUD for roles, permissions, and role-permission assignments. Implement role assignment to users and groups (`has_role` edge management). Add tests.
 
 **Commit**: `feat(api-rest): role and permission management endpoints`
 
-### T4.6 — Resource & Service Account Endpoints (REST)
+### T4.7 — Resource & Service Account Endpoints (REST)
 Implement CRUD for resources (including hierarchy), scopes, and service accounts. Add tests.
 
 **Commit**: `feat(api-rest): resource, scope, and service account endpoints`
 
-### T4.7 — OpenAPI Documentation
+### T4.8 — OpenAPI Documentation
 Add `utoipa` annotations to all REST endpoints. Generate and serve OpenAPI spec at `/api/docs`. Add Swagger UI integration. Verify spec completeness.
 
 **Commit**: `feat(api-rest): OpenAPI documentation with Swagger UI`
@@ -274,13 +284,13 @@ Implement organization list/detail pages, tenant list/creation/edit within organ
 
 **Commit**: `feat(frontend): organization and tenant management pages`
 
-### T12.3 — User Management UI
-Implement user list (paginated, searchable), user detail/edit page, user creation form, role assignment UI. Connect to REST API.
+### T12.3 — User & Group Management UI
+Implement user list (paginated, searchable), user detail/edit page, user creation form, role assignment UI. Implement group list, group detail with member management. Connect to REST API.
 
-**Commit**: `feat(frontend): user management pages`
+**Commit**: `feat(frontend): user and group management pages`
 
 ### T12.4 — Role & Permission Management UI
-Implement role list, role editor (permission assignment), permission list. Implement resource hierarchy viewer/editor.
+Implement role list, role editor (permission assignment), permission list. Implement resource hierarchy viewer/editor. Support role assignment to both users and groups.
 
 **Commit**: `feat(frontend): role, permission, and resource management pages`
 
@@ -332,6 +342,26 @@ Create `sdks/python/` with a Python client library wrapping REST API. Auth flows
 
 **Commit**: `feat(sdk): Python SDK with REST client`
 
+### T14.4 — Java SDK
+Create `sdks/java/` with a Java client library wrapping REST API. Auth flows, token management, tenant context, Spring Security integration helper. Add usage examples.
+
+**Commit**: `feat(sdk): Java SDK with REST client`
+
+### T14.5 — C# SDK
+Create `sdks/csharp/` with a C# client library wrapping REST API. Auth flows, token management, tenant context, ASP.NET Core middleware helper. Add usage examples.
+
+**Commit**: `feat(sdk): C# SDK with REST client`
+
+### T14.6 — PHP SDK
+Create `sdks/php/` with a PHP client library wrapping REST API. Auth flows, token management, tenant context, Laravel/Symfony middleware helper. Add usage examples.
+
+**Commit**: `feat(sdk): PHP SDK with REST client`
+
+### T14.7 — Go SDK
+Create `sdks/go/` with a Go client library wrapping REST and gRPC APIs. Auth flows, token management, tenant context, HTTP middleware helper. Add usage examples.
+
+**Commit**: `feat(sdk): Go SDK with REST and gRPC client`
+
 ---
 
 ## Phase 15: Hardening & Compliance
@@ -363,10 +393,10 @@ Write API documentation (REST, gRPC, AMQP), deployment guide, admin guide, PKI/c
 | Phase | Tasks | Focus |
 |-------|-------|-------|
 | Phase 0 | 4 | Project foundation, CI, dev environment, design review |
-| Phase 1 | 7 | Core domain types (with multi-tenancy) and DB repositories |
+| Phase 1 | 8 | Core domain types (with multi-tenancy, groups) and DB repositories |
 | Phase 2 | 4 | Authentication (password, JWT, MFA, brute-force) |
-| Phase 3 | 3 | Authorization engine |
-| Phase 4 | 7 | REST API (including org/tenant endpoints) |
+| Phase 3 | 3 | Authorization engine (with group role inheritance) |
+| Phase 4 | 8 | REST API (including org/tenant/group endpoints) |
 | Phase 5 | 2 | gRPC API |
 | Phase 6 | 3 | AMQP integration |
 | Phase 7 | 2 | Audit logging |
@@ -374,11 +404,11 @@ Write API documentation (REST, gRPC, AMQP), deployment guide, admin guide, PKI/c
 | Phase 9 | 1 | Webhook system |
 | Phase 10 | 3 | OAuth2 & OIDC |
 | Phase 11 | 2 | Federation (OIDC + SAML) |
-| Phase 12 | 6 | Admin frontend (with org/tenant/cert/webhook UI) |
+| Phase 12 | 6 | Admin frontend (with org/tenant/group/cert/webhook UI) |
 | Phase 13 | 3 | Docker, K8s, CD pipeline |
-| Phase 14 | 3 | SDKs (Rust, TypeScript, Python) |
+| Phase 14 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 15 | 4 | Security, compliance, performance, docs |
 
-**Total: 58 tasks across 16 phases**
+**Total: 64 tasks across 16 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

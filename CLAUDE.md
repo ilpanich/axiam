@@ -16,13 +16,14 @@ AXIAM is a **multi-tenant** system. Organizations are top-level entities contain
 - **Frontend**: React + TypeScript (Vite)
 - **API Protocols**: REST (OpenAPI documented), gRPC (Protocol Buffers), AMQP
 - **Deployment**: Docker, Kubernetes
-- **SDKs**: Planned for Rust, Python, TypeScript, Java, C#, Go
+- **SDKs**: Planned for Rust, Python, TypeScript, Java, C#, PHP, Go
 
 ## Core Domain Model
 
 - **Organizations** are top-level entities that hold CA certificates and contain tenants
 - **Tenants** provide data isolation; all domain entities are scoped to a tenant
 - **Users** authenticate via username/password, social login, MFA, or certificates
+- **Groups** are named collections of users; roles assigned to a group are inherited by all members
 - **Roles** are collections of permissions, can be global or resource-specific, and support inheritance through resource hierarchies
 - **Permissions** define actions on resources; **scopes** provide sub-resource granularity
 - **Resources** are organized hierarchically; role assignments on parent resources cascade to children unless overridden
@@ -68,7 +69,7 @@ axiam/
 
 All design/planning documents live in `claude_dev/`:
 - [`claude_dev/design-document.md`](claude_dev/design-document.md) — Architecture, data model, flows, security
-- [`claude_dev/roadmap.md`](claude_dev/roadmap.md) — 58 tasks across 16 phases
+- [`claude_dev/roadmap.md`](claude_dev/roadmap.md) — 64 tasks across 16 phases
 
 ## Development Process
 

@@ -10,6 +10,7 @@ use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, CreateCaCertificate, CreateCertificate},
     federation::{CreateFederationConfig, FederationConfig, UpdateFederationConfig},
+    group::{CreateGroup, Group, UpdateGroup},
     oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client},
     organization::{CreateOrganization, Organization, UpdateOrganization},
     permission::{CreatePermission, Permission, UpdatePermission},
@@ -166,11 +167,36 @@ pub trait RoleRepository: Send + Sync {
         resource_id: Option<Uuid>,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// Get all roles assigned to a user.
+    /// Get all roles assigned to a user (direct + via group membership).
     fn get_user_roles(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Role>>> + Send;
+
+    /// Assign a role to a group, optionally scoped to a resource.
+    fn assign_to_group(
+        &self,
+        tenant_id: Uuid,
+        group_id: Uuid,
+        role_id: Uuid,
+        resource_id: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Remove a role assignment from a group.
+    fn unassign_from_group(
+        &self,
+        tenant_id: Uuid,
+        group_id: Uuid,
+        role_id: Uuid,
+        resource_id: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Get all roles assigned to a group.
+    fn get_group_roles(
+        &self,
+        tenant_id: Uuid,
+        group_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Role>>> + Send;
 }
 
@@ -335,6 +361,62 @@ pub trait SessionRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<()>> + Send;
     /// Remove all expired sessions.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Groups (tenant-scoped)
+// ---------------------------------------------------------------------------
+
+pub trait GroupRepository: Send + Sync {
+    fn create(&self, input: CreateGroup) -> impl Future<Output = AxiamResult<Group>> + Send;
+    fn get_by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Group>> + Send;
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        input: UpdateGroup,
+    ) -> impl Future<Output = AxiamResult<Group>> + Send;
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+    fn list(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<Group>>> + Send;
+
+    /// Add a user to a group (creates a `member_of` edge).
+    fn add_member(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Remove a user from a group.
+    fn remove_member(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Get all members of a group.
+    fn get_members(
+        &self,
+        tenant_id: Uuid,
+        group_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<User>>> + Send;
+
+    /// Get all groups a user belongs to.
+    fn get_user_groups(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Group>>> + Send;
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ async fn schema_migration_applies_successfully() {
         "missing service_account table"
     );
     assert!(info_str.contains("scope"), "missing scope table");
+    assert!(info_str.contains("group"), "missing group table");
 
     // Verify edge tables.
     assert!(info_str.contains("has_tenant"), "missing has_tenant edge");
@@ -57,6 +58,7 @@ async fn schema_migration_applies_successfully() {
     assert!(info_str.contains("grants"), "missing grants edge");
     assert!(info_str.contains("child_of"), "missing child_of edge");
     assert!(info_str.contains("signed_by"), "missing signed_by edge");
+    assert!(info_str.contains("member_of"), "missing member_of edge");
 
     // Verify migration was recorded.
     assert!(info_str.contains("_migration"), "missing _migration table");

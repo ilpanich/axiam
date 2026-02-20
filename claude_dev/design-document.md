@@ -59,9 +59,9 @@ AXIAM follows a **layered, modular architecture** with clear separation of conce
                            ▼
 ┌──────────────────────────────────────────────────────────┐
 │                   SurrealDB Cluster                       │
-│  (Organizations, Tenants, Users, Roles, Permissions,     │
-│   Resources, Certificates, Audit Logs, Sessions,         │
-│   OAuth2 Clients, Federation Configs, Webhooks)           │
+│  (Organizations, Tenants, Users, Groups, Roles,            │
+│   Permissions, Resources, Certificates, Audit Logs,        │
+│   Sessions, OAuth2 Clients, Federation Configs, Webhooks)  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -97,7 +97,7 @@ axiam/
 ├── frontend/                   # React admin UI
 ├── docker/                     # Dockerfiles and compose configs
 ├── k8s/                        # Kubernetes manifests
-└── sdks/                       # SDK projects (rust, python, typescript, etc.)
+└── sdks/                       # SDK projects (Rust, Python, TypeScript, Java, C#, PHP, Go)
 ```
 
 ---
@@ -126,7 +126,7 @@ AXIAM uses a two-level hierarchy for multi-tenancy:
          ▼                          │
 ┌──────────────────┐                │ Scopes all entities below
 │  CA Certificate  │                ▼
-│ (org-level only) │     Users, Roles, Permissions,
+│ (org-level only) │     Users, Groups, Roles, Permissions,
 │                  │     Resources, Service Accounts,
 │ id               │     Sessions, OAuth2 Clients,
 │ organization_id  │     Federation Configs, Certificates,
@@ -157,28 +157,31 @@ AXIAM uses a two-level hierarchy for multi-tenancy:
 │ password_hash│       │ is_global    │       └──────┬───────┘
 │ mfa_secret   │       │ created_at   │              │
 │ status       │       │ updated_at   │              │ N:M
-│ metadata     │       └──────────────┘              │
-│ created_at   │                              ┌──────┴───────┐
-│ updated_at   │                              │   Resource   │
-└──────┬───────┘                              │              │
-       │                                      │ id           │
-       │ 1:N                                  │ tenant_id    │
-       ▼                                      │ name         │
-┌──────────────┐                              │ type         │
-│   Session    │                              │ parent_id    │
-│              │                              │ metadata     │
-│ id           │                              └──────┬───────┘
-│ tenant_id    │                                     │
-│ user_id      │                                     │ 1:N
-│ token_hash   │                              ┌──────┴───────┐
-│ ip_address   │                              │    Scope     │
-│ user_agent   │                              │              │
-│ expires_at   │                              │ id           │
-│ created_at   │                              │ tenant_id    │
-└──────────────┘                              │ resource_id  │
-                                              │ name         │
-┌──────────────┐       ┌──────────────┐       │ description  │
-│ServiceAccount│       │  AuditLog    │       └──────────────┘
+│ metadata     │       └──────┬───────┘              │
+│ created_at   │              │ N:M            ┌──────┴───────┐
+│ updated_at   │              │                │   Resource   │
+└──────┬───────┘       ┌──────┴───────┐        │              │
+       │               │    Group     │        │ id           │
+       │ N:M           │              │        │ tenant_id    │
+       ├──────────────▶│ id           │        │ name         │
+       │               │ tenant_id    │        │ type         │
+       │ 1:N           │ name         │        │ parent_id    │
+       ▼               │ description  │        │ metadata     │
+┌──────────────┐       │ metadata     │        └──────┬───────┘
+│   Session    │       │ created_at   │               │
+│              │       │ updated_at   │               │ 1:N
+│ id           │       └──────────────┘        ┌──────┴───────┐
+│ tenant_id    │                               │    Scope     │
+│ user_id      │                               │              │
+│ token_hash   │                               │ id           │
+│ ip_address   │                               │ tenant_id    │
+│ user_agent   │                               │ resource_id  │
+│ expires_at   │                               │ name         │
+│ created_at   │                               │ description  │
+└──────────────┘                               └──────────────┘
+
+┌──────────────┐       ┌──────────────┐
+│ServiceAccount│       │  AuditLog    │
 │              │       │              │
 │ id           │       │ id           │
 │ tenant_id    │       │ tenant_id    │
@@ -230,6 +233,7 @@ AXIAM uses a two-level hierarchy for multi-tenancy:
 | `tenant` | Global | Isolated tenant contexts within an organization |
 | `ca_certificate` | Organization | CA certificates for signing tenant certificates |
 | `user` | Tenant | User accounts with credentials and profile data |
+| `group` | Tenant | Named collections of users for simplified role management |
 | `service_account` | Tenant | Machine-to-machine accounts |
 | `role` | Tenant | Named collections of permissions |
 | `permission` | Tenant | Action definitions (e.g., `read`, `write`, `delete`) |
@@ -247,7 +251,8 @@ AXIAM uses a two-level hierarchy for multi-tenancy:
 | Edge | From | To | Description |
 |------|------|----|-------------|
 | `has_tenant` | `organization` | `tenant` | Organization-tenant membership |
-| `has_role` | `user` / `service_account` | `role` | Role assignment, optionally scoped to a resource |
+| `member_of` | `user` | `group` | User-group membership |
+| `has_role` | `user` / `service_account` / `group` | `role` | Role assignment, optionally scoped to a resource |
 | `grants` | `role` | `permission` | Permissions included in a role |
 | `on_resource` | `permission` | `resource` | Which resource a permission applies to |
 | `child_of` | `resource` | `resource` | Resource hierarchy |
@@ -255,7 +260,12 @@ AXIAM uses a two-level hierarchy for multi-tenancy:
 
 Using graph edges allows efficient traversal queries such as:
 ```surql
+-- Direct role assignments
 SELECT ->has_role->role->grants->permission->on_resource->resource
+FROM user:$uid;
+
+-- Roles inherited via group membership
+SELECT ->member_of->group->has_role->role->grants->permission
 FROM user:$uid;
 ```
 
@@ -367,7 +377,8 @@ Producer                    AMQP Broker              AXIAM Consumer
 
 When evaluating whether a subject can perform an action on a resource:
 
-1. **Fetch direct roles**: Get all roles assigned to the subject
+1. **Fetch direct roles**: Get all roles assigned directly to the subject
+1b. **Fetch group roles**: Get roles from all groups the subject belongs to
 2. **Filter by resource scope**: Keep global roles + roles assigned on the target resource or any ancestor in the hierarchy
 3. **Collect permissions**: Union of all permissions from the matching roles
 4. **Check scopes**: If the permission requires specific scopes, verify they are present
@@ -467,6 +478,7 @@ AXIAM supports webhook delivery for real-time event notifications to external sy
 |---------------|--------|
 | **User** | `user.created`, `user.updated`, `user.deleted`, `user.locked` |
 | **Auth** | `auth.login`, `auth.logout`, `auth.mfa_enrolled`, `auth.failed` |
+| **Group** | `group.created`, `group.updated`, `group.deleted`, `group.member_added`, `group.member_removed` |
 | **Role** | `role.created`, `role.updated`, `role.deleted`, `role.assigned`, `role.unassigned` |
 | **Resource** | `resource.created`, `resource.updated`, `resource.deleted` |
 | **Certificate** | `cert.issued`, `cert.revoked`, `cert.expiring` |
@@ -493,6 +505,7 @@ All tenant-scoped endpoints are prefixed with `/api/v1/tenants/:tenant_id/` or u
 | **Tenants** | `GET/POST/PUT/DELETE /api/v1/organizations/:org_id/tenants` | Tenant management |
 | **Auth** | `POST /auth/login`, `POST /auth/logout`, `POST /auth/refresh`, `POST /auth/mfa/*` | Authentication flows |
 | **Users** | `GET/POST/PUT/DELETE /api/v1/users` | User CRUD |
+| **Groups** | `GET/POST/PUT/DELETE /api/v1/groups`, `POST/DELETE /api/v1/groups/:id/members` | Group management and membership |
 | **Roles** | `GET/POST/PUT/DELETE /api/v1/roles` | Role management |
 | **Permissions** | `GET/POST/PUT/DELETE /api/v1/permissions` | Permission definitions |
 | **Resources** | `GET/POST/PUT/DELETE /api/v1/resources` | Resource hierarchy management |

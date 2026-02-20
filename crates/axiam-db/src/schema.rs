@@ -199,6 +199,21 @@ DEFINE INDEX idx_sa_tenant_client_id ON TABLE service_account \
     COLUMNS tenant_id, client_id UNIQUE;
 
 -- =======================================================================
+-- Groups (tenant scope)
+-- =======================================================================
+DEFINE TABLE group SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE group TYPE string;
+DEFINE FIELD name ON TABLE group TYPE string;
+DEFINE FIELD description ON TABLE group TYPE string;
+DEFINE FIELD metadata ON TABLE group TYPE object FLEXIBLE DEFAULT {};
+DEFINE FIELD created_at ON TABLE group TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE group TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_group_tenant_name ON TABLE group \
+    COLUMNS tenant_id, name UNIQUE;
+
+-- =======================================================================
 -- Sessions (tenant scope)
 -- =======================================================================
 DEFINE TABLE session SCHEMAFULL;
@@ -337,7 +352,10 @@ DEFINE FIELD updated_at ON TABLE webhook TYPE datetime \
 -- Organization -> Tenant membership
 DEFINE TABLE has_tenant TYPE RELATION SCHEMAFULL;
 
--- User/ServiceAccount -> Role assignment (optionally scoped to resource)
+-- User -> Group membership
+DEFINE TABLE member_of TYPE RELATION SCHEMAFULL;
+
+-- User/ServiceAccount/Group -> Role assignment (optionally scoped to resource)
 DEFINE TABLE has_role TYPE RELATION SCHEMAFULL;
 DEFINE FIELD resource_id ON TABLE has_role TYPE option<string>;
 

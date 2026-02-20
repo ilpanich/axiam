@@ -147,17 +147,17 @@ AXIAM uses a two-level hierarchy for multi-tenancy:
 ### 3.2 Entity-Relationship Diagram
 
 ```
-┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-│    User      │──N:M──│    Role      │──N:M──│  Permission  │
-│              │       │              │       │              │
-│ id           │       │ id           │       │ id           │
-│ tenant_id    │       │ tenant_id    │       │ tenant_id    │
-│ username     │       │ name         │       │ action       │
-│ email        │       │ description  │       │ description  │
-│ password_hash│       │ is_global    │       └──────┬───────┘
-│ mfa_secret   │       │ created_at   │              │
-│ status       │       │ updated_at   │              │ N:M
-│ metadata     │       └──────┬───────┘              │
+┌──────────────┐       ┌──────────────┐        ┌──────────────┐
+│    User      │──N:M──│    Role      │──N:M───│  Permission  │
+│              │       │              │        │              │
+│ id           │       │ id           │        │ id           │
+│ tenant_id    │       │ tenant_id    │        │ tenant_id    │
+│ username     │       │ name         │        │ action       │
+│ email        │       │ description  │        │ description  │
+│ password_hash│       │ is_global    │        └──────┬───────┘
+│ mfa_secret   │       │ created_at   │               │
+│ status       │       │ updated_at   │               │ N:M
+│ metadata     │       └──────┬───────┘               │
 │ created_at   │              │ N:M            ┌──────┴───────┐
 │ updated_at   │              │                │   Resource   │
 └──────┬───────┘       ┌──────┴───────┐        │              │

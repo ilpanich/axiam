@@ -6,8 +6,12 @@ pub mod error;
 pub mod password;
 pub mod service;
 pub mod token;
+pub mod totp;
 
 pub use config::AuthConfig;
 pub use error::AuthError;
-pub use service::{AuthService, LoginInput, LoginOutput, RefreshInput, RefreshOutput};
+pub use service::{
+    AuthService, EnrollMfaOutput, LoginInput, LoginOutput, LoginResult, MfaChallengeOutput,
+    RefreshInput, RefreshOutput, VerifyMfaInput,
+};
 pub use token::{AccessTokenClaims, ValidatedClaims};

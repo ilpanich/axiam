@@ -44,4 +44,7 @@ pub struct UpdateUser {
     pub email: Option<String>,
     pub status: Option<UserStatus>,
     pub metadata: Option<serde_json::Value>,
+    pub mfa_enabled: Option<bool>,
+    /// `Some(Some(val))` = set, `Some(None)` = clear, `None` = no change.
+    pub mfa_secret: Option<Option<String>>,
 }

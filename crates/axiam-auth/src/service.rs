@@ -1,16 +1,20 @@
-//! Authentication service — login and logout orchestration.
+//! Authentication service — login, logout, token refresh, and MFA.
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::session::CreateSession;
-use axiam_core::models::user::UserStatus;
+use axiam_core::models::user::{UpdateUser, UserStatus};
 use axiam_core::repository::{SessionRepository, UserRepository};
 use chrono::{Duration, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::AuthConfig;
 use crate::error::AuthError;
-use crate::password;
-use crate::token;
+use crate::{password, token, totp};
+
+// -----------------------------------------------------------------------
+// Input / output types
+// -----------------------------------------------------------------------
 
 /// Input for the login flow.
 #[derive(Debug)]
@@ -23,17 +27,29 @@ pub struct LoginInput {
     pub user_agent: Option<String>,
 }
 
-/// Successful login result.
+/// Successful login result (no MFA required).
 #[derive(Debug)]
 pub struct LoginOutput {
-    /// Signed JWT access token.
     pub access_token: String,
-    /// Raw opaque refresh token (return to client, not stored).
     pub refresh_token: String,
-    /// Session ID (can be used for logout).
     pub session_id: Uuid,
-    /// Access token lifetime in seconds.
     pub expires_in: u64,
+}
+
+/// Login result — either full success or MFA challenge.
+#[derive(Debug)]
+pub enum LoginResult {
+    /// Credentials valid, no MFA — tokens issued.
+    Success(LoginOutput),
+    /// Credentials valid, MFA required — client must call `verify_mfa`.
+    MfaRequired(MfaChallengeOutput),
+}
+
+/// MFA challenge token returned when login detects MFA is enabled.
+#[derive(Debug)]
+pub struct MfaChallengeOutput {
+    /// Short-lived JWT encoding user_id + tenant_id + org_id.
+    pub challenge_token: String,
 }
 
 /// Input for the refresh token rotation flow.
@@ -49,15 +65,48 @@ pub struct RefreshInput {
 /// Successful refresh result (new token pair).
 #[derive(Debug)]
 pub struct RefreshOutput {
-    /// New signed JWT access token.
     pub access_token: String,
-    /// New opaque refresh token (replaces the consumed one).
     pub refresh_token: String,
-    /// New session ID.
     pub session_id: Uuid,
-    /// Access token lifetime in seconds.
     pub expires_in: u64,
 }
+
+/// Result of MFA enrollment (step 1).
+#[derive(Debug)]
+pub struct EnrollMfaOutput {
+    /// Base32-encoded TOTP secret (for manual entry).
+    pub secret_base32: String,
+    /// `otpauth://` URI for QR code generation.
+    pub totp_uri: String,
+}
+
+/// Input for MFA verification after login challenge.
+#[derive(Debug)]
+pub struct VerifyMfaInput {
+    pub challenge_token: String,
+    pub totp_code: String,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+}
+
+// -----------------------------------------------------------------------
+// MFA challenge token claims (internal JWT)
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MfaChallengeClaims {
+    sub: String,
+    tenant_id: String,
+    org_id: String,
+    purpose: String,
+    iss: String,
+    iat: i64,
+    exp: i64,
+}
+
+// -----------------------------------------------------------------------
+// AuthService
+// -----------------------------------------------------------------------
 
 /// Authentication service.
 ///
@@ -78,9 +127,12 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
         }
     }
 
-    /// Authenticate a user with username/email + password and issue
-    /// tokens.
-    pub async fn login(&self, input: LoginInput) -> AxiamResult<LoginOutput> {
+    /// Authenticate a user with username/email + password.
+    ///
+    /// Returns `LoginResult::Success` if no MFA, or
+    /// `LoginResult::MfaRequired` with a challenge token if MFA is
+    /// enabled.
+    pub async fn login(&self, input: LoginInput) -> AxiamResult<LoginResult> {
         // 1. Look up user — try username first, then email.
         let user = match self
             .user_repo
@@ -109,60 +161,178 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
         }
 
         // 3. Check account status.
-        match user.status {
-            UserStatus::Active => {}
-            UserStatus::Locked => {
-                return Err(AuthError::AccountLocked.into());
-            }
-            UserStatus::Inactive => {
-                return Err(AuthError::AccountInactive.into());
-            }
-            UserStatus::PendingVerification => {
-                return Err(AuthError::AccountPendingVerification.into());
-            }
+        Self::check_user_status(&user.status)?;
+
+        // 4. Check MFA.
+        if user.mfa_enabled && user.mfa_secret.is_some() {
+            let challenge_token =
+                self.issue_mfa_challenge(user.id, input.tenant_id, input.org_id)?;
+            return Ok(LoginResult::MfaRequired(MfaChallengeOutput {
+                challenge_token,
+            }));
         }
 
-        // 4. Check MFA — if enabled, reject at this stage
-        //    (full MFA challenge flow is T2.3).
-        if user.mfa_enabled {
-            return Err(AuthError::MfaRequired.into());
-        }
-
-        // 5. Generate refresh token and create session.
-        let raw_refresh = token::generate_refresh_token();
-        let token_hash = token::hash_refresh_token(&raw_refresh);
-        let expires_at =
-            Utc::now() + Duration::seconds(self.config.refresh_token_lifetime_secs as i64);
-
-        let session = self
-            .session_repo
-            .create(CreateSession {
-                tenant_id: input.tenant_id,
-                user_id: user.id,
-                token_hash,
-                ip_address: input.ip_address,
-                user_agent: input.user_agent,
-                expires_at,
-            })
+        // 5. No MFA — issue tokens directly.
+        let output = self
+            .create_session_and_tokens(
+                user.id,
+                input.tenant_id,
+                input.org_id,
+                input.ip_address,
+                input.user_agent,
+            )
             .await?;
 
-        // 6. Issue JWT access token.
-        let access_token =
-            token::issue_access_token(user.id, input.tenant_id, input.org_id, &self.config)?;
+        Ok(LoginResult::Success(output))
+    }
 
-        Ok(LoginOutput {
-            access_token,
-            refresh_token: raw_refresh,
-            session_id: session.id,
-            expires_in: self.config.access_token_lifetime_secs,
+    /// Complete MFA verification after a login challenge.
+    pub async fn verify_mfa(&self, input: VerifyMfaInput) -> AxiamResult<LoginOutput> {
+        // 1. Decode the challenge token.
+        let claims = self.decode_mfa_challenge(&input.challenge_token)?;
+        let user_id: Uuid = claims
+            .sub
+            .parse()
+            .map_err(|_| AuthError::TokenInvalid("bad sub".into()))?;
+        let tenant_id: Uuid = claims
+            .tenant_id
+            .parse()
+            .map_err(|_| AuthError::TokenInvalid("bad tenant_id".into()))?;
+        let org_id: Uuid = claims
+            .org_id
+            .parse()
+            .map_err(|_| AuthError::TokenInvalid("bad org_id".into()))?;
+
+        // 2. Fetch user and verify TOTP.
+        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        Self::check_user_status(&user.status)?;
+
+        let encrypted_secret = user
+            .mfa_secret
+            .as_deref()
+            .ok_or(AuthError::MfaNotEnrolled)?;
+        let encryption_key = self
+            .config
+            .mfa_encryption_key
+            .as_ref()
+            .ok_or_else(|| AuthError::Crypto("MFA encryption key not configured".into()))?;
+
+        let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
+        let valid = totp::verify_code(
+            &secret_bytes,
+            &input.totp_code,
+            &self.config.totp_issuer,
+            &user.email,
+        )?;
+
+        if !valid {
+            return Err(AuthError::MfaInvalidCode.into());
+        }
+
+        // 3. Create session and issue tokens.
+        self.create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            input.ip_address,
+            input.user_agent,
+        )
+        .await
+    }
+
+    /// Start MFA enrollment for a user (step 1 of 2).
+    ///
+    /// Generates a TOTP secret, encrypts it, stores it on the user,
+    /// but does NOT enable MFA yet — call `confirm_mfa` with a valid
+    /// code to activate.
+    pub async fn enroll_mfa(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<EnrollMfaOutput> {
+        let encryption_key = self
+            .config
+            .mfa_encryption_key
+            .as_ref()
+            .ok_or_else(|| AuthError::Crypto("MFA encryption key not configured".into()))?;
+
+        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+
+        let (base32_secret, totp_uri) =
+            totp::generate_enrollment(&self.config.totp_issuer, &user.email)?;
+
+        // Parse the base32 secret to raw bytes for encryption.
+        let secret = totp_rs::Secret::Encoded(base32_secret.clone());
+        let secret_bytes = secret
+            .to_bytes()
+            .map_err(|e| AuthError::Crypto(format!("secret decode: {e}")))?;
+        let encrypted = totp::encrypt_secret(encryption_key, &secret_bytes)?;
+
+        // Store encrypted secret but leave mfa_enabled = false.
+        self.user_repo
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    mfa_secret: Some(Some(encrypted)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        Ok(EnrollMfaOutput {
+            secret_base32: base32_secret,
+            totp_uri,
         })
+    }
+
+    /// Confirm MFA enrollment (step 2 of 2).
+    ///
+    /// The user provides a TOTP code to prove they saved the secret.
+    /// On success, `mfa_enabled` is set to `true`.
+    pub async fn confirm_mfa(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        totp_code: &str,
+    ) -> AxiamResult<()> {
+        let encryption_key = self
+            .config
+            .mfa_encryption_key
+            .as_ref()
+            .ok_or_else(|| AuthError::Crypto("MFA encryption key not configured".into()))?;
+
+        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        let encrypted_secret = user
+            .mfa_secret
+            .as_deref()
+            .ok_or(AuthError::MfaNotEnrolled)?;
+
+        let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
+        let valid = totp::verify_code(
+            &secret_bytes,
+            totp_code,
+            &self.config.totp_issuer,
+            &user.email,
+        )?;
+
+        if !valid {
+            return Err(AuthError::MfaInvalidCode.into());
+        }
+
+        // Activate MFA.
+        self.user_repo
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    mfa_enabled: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        Ok(())
     }
 
     /// Rotate a refresh token: consume the old one, verify the user
     /// is still active, and issue a new token pair.
-    ///
-    /// Each refresh token is single-use — the old session is
-    /// invalidated before the new one is created.
     pub async fn refresh(&self, input: RefreshInput) -> AxiamResult<RefreshOutput> {
         // 1. Look up session by token hash.
         let token_hash = token::hash_refresh_token(&input.raw_refresh_token);
@@ -179,7 +349,6 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
 
         // 2. Check session expiry.
         if session.expires_at <= Utc::now() {
-            // Invalidate the expired session and reject.
             let _ = self
                 .session_repo
                 .invalidate(input.tenant_id, session.id)
@@ -197,15 +366,7 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
             .user_repo
             .get_by_id(input.tenant_id, session.user_id)
             .await?;
-
-        match user.status {
-            UserStatus::Active => {}
-            UserStatus::Locked => return Err(AuthError::AccountLocked.into()),
-            UserStatus::Inactive => return Err(AuthError::AccountInactive.into()),
-            UserStatus::PendingVerification => {
-                return Err(AuthError::AccountPendingVerification.into());
-            }
-        }
+        Self::check_user_status(&user.status)?;
 
         // 5. Create new session with rotated refresh token.
         let raw_refresh = token::generate_refresh_token();
@@ -247,5 +408,104 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
         self.session_repo
             .invalidate_user_sessions(tenant_id, user_id)
             .await
+    }
+
+    // -------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------
+
+    fn check_user_status(status: &UserStatus) -> Result<(), AuthError> {
+        match status {
+            UserStatus::Active => Ok(()),
+            UserStatus::Locked => Err(AuthError::AccountLocked),
+            UserStatus::Inactive => Err(AuthError::AccountInactive),
+            UserStatus::PendingVerification => Err(AuthError::AccountPendingVerification),
+        }
+    }
+
+    async fn create_session_and_tokens(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> AxiamResult<LoginOutput> {
+        let raw_refresh = token::generate_refresh_token();
+        let token_hash = token::hash_refresh_token(&raw_refresh);
+        let expires_at =
+            Utc::now() + Duration::seconds(self.config.refresh_token_lifetime_secs as i64);
+
+        let session = self
+            .session_repo
+            .create(CreateSession {
+                tenant_id,
+                user_id,
+                token_hash,
+                ip_address,
+                user_agent,
+                expires_at,
+            })
+            .await?;
+
+        let access_token = token::issue_access_token(user_id, tenant_id, org_id, &self.config)?;
+
+        Ok(LoginOutput {
+            access_token,
+            refresh_token: raw_refresh,
+            session_id: session.id,
+            expires_in: self.config.access_token_lifetime_secs,
+        })
+    }
+
+    fn issue_mfa_challenge(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        org_id: Uuid,
+    ) -> Result<String, AuthError> {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+
+        let now = Utc::now().timestamp();
+        let claims = MfaChallengeClaims {
+            sub: user_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            org_id: org_id.to_string(),
+            purpose: "mfa_challenge".into(),
+            iss: self.config.jwt_issuer.clone(),
+            iat: now,
+            exp: now + self.config.mfa_challenge_lifetime_secs as i64,
+        };
+
+        let key = EncodingKey::from_ed_pem(self.config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        let header = Header::new(Algorithm::EdDSA);
+        jsonwebtoken::encode(&header, &claims, &key)
+            .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+    }
+
+    fn decode_mfa_challenge(&self, token: &str) -> Result<MfaChallengeClaims, AuthError> {
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+
+        let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&self.config.jwt_issuer]);
+        validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+
+        let data =
+            jsonwebtoken::decode::<MfaChallengeClaims>(token, &key, &validation).map_err(|e| {
+                match e.kind() {
+                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
+                    _ => AuthError::TokenInvalid(e.to_string()),
+                }
+            })?;
+
+        if data.claims.purpose != "mfa_challenge" {
+            return Err(AuthError::TokenInvalid("not an MFA challenge token".into()));
+        }
+
+        Ok(data.claims)
     }
 }

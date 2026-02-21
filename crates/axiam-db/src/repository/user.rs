@@ -296,6 +296,12 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         if input.metadata.is_some() {
             sets.push("metadata = $metadata");
         }
+        if input.mfa_enabled.is_some() {
+            sets.push("mfa_enabled = $mfa_enabled");
+        }
+        if input.mfa_secret.is_some() {
+            sets.push("mfa_secret = $mfa_secret");
+        }
         sets.push("updated_at = time::now()");
 
         let query = format!(
@@ -321,6 +327,13 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         }
         if let Some(metadata) = input.metadata {
             builder = builder.bind(("metadata", metadata));
+        }
+        if let Some(mfa_enabled) = input.mfa_enabled {
+            builder = builder.bind(("mfa_enabled", mfa_enabled));
+        }
+        if let Some(mfa_secret) = input.mfa_secret {
+            // mfa_secret is Option<Option<String>>: Some(Some(v)) = set, Some(None) = clear
+            builder = builder.bind(("mfa_secret", mfa_secret));
         }
 
         let result = builder.await.map_err(DbError::from)?;

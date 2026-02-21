@@ -20,6 +20,12 @@ pub enum AuthError {
     #[error("MFA is required")]
     MfaRequired,
 
+    #[error("invalid MFA code")]
+    MfaInvalidCode,
+
+    #[error("MFA is not enrolled for this user")]
+    MfaNotEnrolled,
+
     #[error("token has expired")]
     TokenExpired,
 
@@ -37,7 +43,9 @@ impl From<AuthError> for AxiamError {
             | AuthError::AccountLocked
             | AuthError::AccountInactive
             | AuthError::AccountPendingVerification
-            | AuthError::MfaRequired => AxiamError::AuthenticationFailed {
+            | AuthError::MfaRequired
+            | AuthError::MfaInvalidCode
+            | AuthError::MfaNotEnrolled => AxiamError::AuthenticationFailed {
                 reason: err.to_string(),
             },
             AuthError::TokenExpired | AuthError::TokenInvalid(_) => {

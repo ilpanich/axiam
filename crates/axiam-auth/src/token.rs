@@ -145,6 +145,9 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             jwt_issuer: "axiam-test".into(),
             pepper: None,
             min_password_length: 12,
+            mfa_encryption_key: None,
+            mfa_challenge_lifetime_secs: 300,
+            totp_issuer: "AXIAM-Test".into(),
         }
     }
 

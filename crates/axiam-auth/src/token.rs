@@ -148,6 +148,10 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             mfa_encryption_key: None,
             mfa_challenge_lifetime_secs: 300,
             totp_issuer: "AXIAM-Test".into(),
+            max_failed_login_attempts: 5,
+            lockout_duration_secs: 300,
+            lockout_backoff_multiplier: 2.0,
+            max_lockout_duration_secs: 3600,
         }
     }
 

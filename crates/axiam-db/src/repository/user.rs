@@ -27,6 +27,9 @@ struct UserRow {
     status: String,
     mfa_enabled: bool,
     mfa_secret: Option<String>,
+    failed_login_attempts: u32,
+    last_failed_login_at: Option<DateTime<Utc>>,
+    locked_until: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -43,6 +46,9 @@ struct UserRowWithId {
     status: String,
     mfa_enabled: bool,
     mfa_secret: Option<String>,
+    failed_login_attempts: u32,
+    last_failed_login_at: Option<DateTime<Utc>>,
+    locked_until: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -80,6 +86,9 @@ impl UserRow {
             status: parse_status(&self.status)?,
             mfa_enabled: self.mfa_enabled,
             mfa_secret: self.mfa_secret,
+            failed_login_attempts: self.failed_login_attempts,
+            last_failed_login_at: self.last_failed_login_at,
+            locked_until: self.locked_until,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -102,6 +111,9 @@ impl UserRowWithId {
             status: parse_status(&self.status)?,
             mfa_enabled: self.mfa_enabled,
             mfa_secret: self.mfa_secret,
+            failed_login_attempts: self.failed_login_attempts,
+            last_failed_login_at: self.last_failed_login_at,
+            locked_until: self.locked_until,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -184,6 +196,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                  password_hash = $password_hash, \
                  status = $status, \
                  mfa_enabled = false, \
+                 failed_login_attempts = 0, \
+                 last_failed_login_at = NONE, \
+                 locked_until = NONE, \
                  metadata = $metadata",
             )
             .bind(("id", id_str.clone()))
@@ -302,6 +317,15 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         if input.mfa_secret.is_some() {
             sets.push("mfa_secret = $mfa_secret");
         }
+        if input.failed_login_attempts.is_some() {
+            sets.push("failed_login_attempts = $failed_login_attempts");
+        }
+        if input.last_failed_login_at.is_some() {
+            sets.push("last_failed_login_at = $last_failed_login_at");
+        }
+        if input.locked_until.is_some() {
+            sets.push("locked_until = $locked_until");
+        }
         sets.push("updated_at = time::now()");
 
         let query = format!(
@@ -334,6 +358,15 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         if let Some(mfa_secret) = input.mfa_secret {
             // mfa_secret is Option<Option<String>>: Some(Some(v)) = set, Some(None) = clear
             builder = builder.bind(("mfa_secret", mfa_secret));
+        }
+        if let Some(failed_login_attempts) = input.failed_login_attempts {
+            builder = builder.bind(("failed_login_attempts", failed_login_attempts));
+        }
+        if let Some(last_failed_login_at) = input.last_failed_login_at {
+            builder = builder.bind(("last_failed_login_at", last_failed_login_at));
+        }
+        if let Some(locked_until) = input.locked_until {
+            builder = builder.bind(("locked_until", locked_until));
         }
 
         let result = builder.await.map_err(DbError::from)?;

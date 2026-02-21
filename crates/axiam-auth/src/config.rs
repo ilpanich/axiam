@@ -24,6 +24,14 @@ pub struct AuthConfig {
     pub mfa_challenge_lifetime_secs: u64,
     /// Issuer name shown in authenticator apps.
     pub totp_issuer: String,
+    /// Max consecutive failed login attempts before lockout (default: 5).
+    pub max_failed_login_attempts: u32,
+    /// Initial lockout duration in seconds (default: 300 = 5 min).
+    pub lockout_duration_secs: u64,
+    /// Exponential backoff multiplier for repeated lockouts (default: 2.0).
+    pub lockout_backoff_multiplier: f64,
+    /// Maximum lockout duration in seconds (default: 3600 = 1 hour).
+    pub max_lockout_duration_secs: u64,
 }
 
 impl Default for AuthConfig {
@@ -39,6 +47,10 @@ impl Default for AuthConfig {
             mfa_encryption_key: None,
             mfa_challenge_lifetime_secs: 300,
             totp_issuer: "AXIAM".into(),
+            max_failed_login_attempts: 5,
+            lockout_duration_secs: 300,
+            lockout_backoff_multiplier: 2.0,
+            max_lockout_duration_secs: 3600,
         }
     }
 }

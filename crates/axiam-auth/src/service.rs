@@ -148,7 +148,14 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
             Err(e) => return Err(e),
         };
 
-        // 2. Verify password.
+        // 2. Check temporary lockout (brute force protection).
+        if let Some(locked_until) = user.locked_until
+            && locked_until > Utc::now()
+        {
+            return Err(AuthError::InvalidCredentials.into());
+        }
+
+        // 3. Verify password.
         let valid = password::verify_password(
             &input.password,
             &user.password_hash,
@@ -157,13 +164,19 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
         .map_err(|e| AxiamError::Crypto(e.to_string()))?;
 
         if !valid {
+            self.record_failed_login(input.tenant_id, &user).await?;
             return Err(AuthError::InvalidCredentials.into());
         }
 
-        // 3. Check account status.
+        // 4. Reset failed login counter on success.
+        if user.failed_login_attempts > 0 {
+            self.reset_failed_logins(input.tenant_id, user.id).await?;
+        }
+
+        // 5. Check account status.
         Self::check_user_status(&user.status)?;
 
-        // 4. Check MFA.
+        // 6. Check MFA.
         if user.mfa_enabled && user.mfa_secret.is_some() {
             let challenge_token =
                 self.issue_mfa_challenge(user.id, input.tenant_id, input.org_id)?;
@@ -172,7 +185,7 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
             }));
         }
 
-        // 5. No MFA — issue tokens directly.
+        // 7. No MFA — issue tokens directly.
         let output = self
             .create_session_and_tokens(
                 user.id,
@@ -507,5 +520,53 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
         }
 
         Ok(data.claims)
+    }
+
+    async fn record_failed_login(
+        &self,
+        tenant_id: Uuid,
+        user: &axiam_core::models::user::User,
+    ) -> AxiamResult<()> {
+        let new_count = user.failed_login_attempts + 1;
+        let now = Utc::now();
+
+        let locked_until = if new_count >= self.config.max_failed_login_attempts {
+            let exponent = (new_count - self.config.max_failed_login_attempts) as f64;
+            let duration_secs = (self.config.lockout_duration_secs as f64
+                * self.config.lockout_backoff_multiplier.powf(exponent))
+            .min(self.config.max_lockout_duration_secs as f64)
+                as i64;
+            Some(Some(now + Duration::seconds(duration_secs)))
+        } else {
+            None
+        };
+
+        let mut update = UpdateUser {
+            failed_login_attempts: Some(new_count),
+            last_failed_login_at: Some(Some(now)),
+            ..Default::default()
+        };
+        if let Some(lu) = locked_until {
+            update.locked_until = Some(lu);
+        }
+
+        self.user_repo.update(tenant_id, user.id, update).await?;
+        Ok(())
+    }
+
+    async fn reset_failed_logins(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        self.user_repo
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    failed_login_attempts: Some(0),
+                    last_failed_login_at: Some(None),
+                    locked_until: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(())
     }
 }

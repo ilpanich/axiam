@@ -12,6 +12,7 @@ use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealSessionRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
+use chrono::{Duration, Utc};
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -42,6 +43,10 @@ fn test_config() -> AuthConfig {
         mfa_encryption_key: Some(TEST_MFA_KEY),
         mfa_challenge_lifetime_secs: 300,
         totp_issuer: "AXIAM-Test".into(),
+        max_failed_login_attempts: 5,
+        lockout_duration_secs: 300,
+        lockout_backoff_multiplier: 2.0,
+        max_lockout_duration_secs: 3600,
     }
 }
 
@@ -663,4 +668,165 @@ async fn login_without_mfa_still_returns_success() {
         .unwrap();
 
     assert!(matches!(result, LoginResult::Success(_)));
+}
+
+// -----------------------------------------------------------------------
+// T2.4 — Brute force protection tests
+// -----------------------------------------------------------------------
+
+/// Helper: attempt a bad login.
+async fn bad_login(
+    svc: &AuthService<
+        SurrealUserRepository<surrealdb::engine::local::Db>,
+        SurrealSessionRepository<surrealdb::engine::local::Db>,
+    >,
+    tenant_id: Uuid,
+    org_id: Uuid,
+) {
+    let _ = svc
+        .login(LoginInput {
+            tenant_id,
+            org_id,
+            username_or_email: "alice".into(),
+            password: "wrong-password".into(),
+            ip_address: None,
+            user_agent: None,
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn failed_login_increments_counter() {
+    let (user_repo, session_repo, org_id, tenant_id, user_id, db) = setup().await;
+    let svc = AuthService::new(user_repo, session_repo, test_config());
+
+    bad_login(&svc, tenant_id, org_id).await;
+    bad_login(&svc, tenant_id, org_id).await;
+
+    let check_repo = SurrealUserRepository::new(db);
+    let user = check_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert_eq!(user.failed_login_attempts, 2);
+    assert!(user.last_failed_login_at.is_some());
+    assert!(user.locked_until.is_none()); // below threshold
+}
+
+#[tokio::test]
+async fn account_locks_after_max_attempts() {
+    let (user_repo, session_repo, org_id, tenant_id, user_id, db) = setup().await;
+    let mut config = test_config();
+    config.max_failed_login_attempts = 3; // lower threshold for test
+    let svc = AuthService::new(user_repo, session_repo, config);
+
+    for _ in 0..3 {
+        bad_login(&svc, tenant_id, org_id).await;
+    }
+
+    let check_repo = SurrealUserRepository::new(db);
+    let user = check_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert_eq!(user.failed_login_attempts, 3);
+    assert!(user.locked_until.is_some());
+    assert!(user.locked_until.unwrap() > Utc::now());
+
+    // Even correct password should fail while locked.
+    let err = svc
+        .login(LoginInput {
+            tenant_id,
+            org_id,
+            username_or_email: "alice".into(),
+            password: "correct-horse-battery".into(),
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AxiamError::AuthenticationFailed { .. }));
+}
+
+#[tokio::test]
+async fn lockout_expires_allows_login() {
+    let (user_repo, session_repo, org_id, tenant_id, user_id, db) = setup().await;
+    let svc = AuthService::new(user_repo, session_repo, test_config());
+
+    // Manually set locked_until in the past.
+    let lock_repo = SurrealUserRepository::new(db);
+    lock_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                failed_login_attempts: Some(5),
+                locked_until: Some(Some(Utc::now() - Duration::seconds(10))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Login should succeed (lockout expired).
+    let result = login_alice(&svc, tenant_id, org_id).await;
+    assert!(!result.access_token.is_empty());
+}
+
+#[tokio::test]
+async fn successful_login_resets_counter() {
+    let (user_repo, session_repo, org_id, tenant_id, user_id, db) = setup().await;
+    let svc = AuthService::new(user_repo, session_repo, test_config());
+
+    // Fail twice.
+    bad_login(&svc, tenant_id, org_id).await;
+    bad_login(&svc, tenant_id, org_id).await;
+
+    // Succeed.
+    login_alice(&svc, tenant_id, org_id).await;
+
+    let check_repo = SurrealUserRepository::new(db);
+    let user = check_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert_eq!(user.failed_login_attempts, 0);
+    assert!(user.last_failed_login_at.is_none());
+    assert!(user.locked_until.is_none());
+}
+
+#[tokio::test]
+async fn exponential_backoff_increases_lockout() {
+    let (user_repo, session_repo, org_id, tenant_id, user_id, db) = setup().await;
+    let mut config = test_config();
+    config.max_failed_login_attempts = 3;
+    config.lockout_duration_secs = 60;
+    config.lockout_backoff_multiplier = 2.0;
+    let svc = AuthService::new(user_repo, session_repo, config);
+
+    // 3 failures → first lockout (60s * 2^0 = 60s).
+    for _ in 0..3 {
+        bad_login(&svc, tenant_id, org_id).await;
+    }
+
+    let check_repo = SurrealUserRepository::new(db.clone());
+    let user = check_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    let first_lockout = user.locked_until.unwrap();
+    let expected_min = Utc::now() + Duration::seconds(55); // allow some slack
+    assert!(first_lockout > expected_min);
+
+    // Clear lockout to simulate expiry, keep the counter at 3.
+    let reset_repo = SurrealUserRepository::new(db.clone());
+    reset_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                locked_until: Some(Some(Utc::now() - Duration::seconds(1))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // 4th failure → lockout with backoff (60s * 2^1 = 120s).
+    bad_login(&svc, tenant_id, org_id).await;
+
+    let check_repo2 = SurrealUserRepository::new(db);
+    let user2 = check_repo2.get_by_id(tenant_id, user_id).await.unwrap();
+    let second_lockout = user2.locked_until.unwrap();
+    assert!(second_lockout > first_lockout);
+    let expected_min2 = Utc::now() + Duration::seconds(115);
+    assert!(second_lockout > expected_min2);
 }

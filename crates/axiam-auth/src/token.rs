@@ -77,6 +77,26 @@ pub fn decode_access_token(
         })
 }
 
+/// Validated JWT claims — a newtype proving the token was verified.
+///
+/// Used by the API layer to extract authenticated context from
+/// incoming requests.
+#[derive(Debug, Clone)]
+pub struct ValidatedClaims(pub AccessTokenClaims);
+
+/// Validate a JWT access token (signature, expiry, issuer) and return
+/// the verified claims.
+///
+/// This is the entry point for request-level authentication
+/// middleware. It is purely stateless — no database lookup is
+/// performed.
+pub fn validate_access_token(
+    token: &str,
+    config: &AuthConfig,
+) -> Result<ValidatedClaims, AuthError> {
+    decode_access_token(token, config).map(ValidatedClaims)
+}
+
 /// Generate a cryptographically random opaque refresh token
 /// (32 bytes → base64url-encoded, no padding).
 pub fn generate_refresh_token() -> String {

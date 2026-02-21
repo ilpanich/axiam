@@ -9,5 +9,5 @@ pub mod token;
 
 pub use config::AuthConfig;
 pub use error::AuthError;
-pub use service::{AuthService, LoginInput, LoginOutput};
-pub use token::AccessTokenClaims;
+pub use service::{AuthService, LoginInput, LoginOutput, RefreshInput, RefreshOutput};
+pub use token::{AccessTokenClaims, ValidatedClaims};

@@ -90,8 +90,8 @@ The project follows a structured roadmap of **64 tasks across 16 phases**:
 |-------|-------|--------|
 | Phase 0 | Project foundation, CI, dev environment | Done |
 | Phase 1 | Core domain types & DB repositories | Done |
-| Phase 2 | Authentication (password, JWT, MFA) | Next |
-| Phase 3 | Authorization engine | Planned |
+| Phase 2 | Authentication (password, JWT, MFA) | Done |
+| Phase 3 | Authorization engine | Next |
 | Phase 4 | REST API | Planned |
 | Phase 5 | gRPC API | Planned |
 | Phase 6 | AMQP integration | Planned |

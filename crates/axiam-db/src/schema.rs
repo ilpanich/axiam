@@ -112,6 +112,9 @@ DEFINE FIELD status ON TABLE user TYPE string \
     'PendingVerification'];
 DEFINE FIELD mfa_enabled ON TABLE user TYPE bool DEFAULT false;
 DEFINE FIELD mfa_secret ON TABLE user TYPE option<string>;
+DEFINE FIELD failed_login_attempts ON TABLE user TYPE int DEFAULT 0;
+DEFINE FIELD last_failed_login_at ON TABLE user TYPE option<datetime>;
+DEFINE FIELD locked_until ON TABLE user TYPE option<datetime>;
 DEFINE FIELD metadata ON TABLE user TYPE object FLEXIBLE DEFAULT {};
 DEFINE FIELD created_at ON TABLE user TYPE datetime \
     DEFAULT time::now();

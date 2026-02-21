@@ -23,6 +23,9 @@ pub struct User {
     pub mfa_enabled: bool,
     /// AES-256-GCM encrypted TOTP secret (if MFA is enrolled).
     pub mfa_secret: Option<String>,
+    pub failed_login_attempts: u32,
+    pub last_failed_login_at: Option<DateTime<Utc>>,
+    pub locked_until: Option<DateTime<Utc>>,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -44,4 +47,10 @@ pub struct UpdateUser {
     pub email: Option<String>,
     pub status: Option<UserStatus>,
     pub metadata: Option<serde_json::Value>,
+    pub mfa_enabled: Option<bool>,
+    /// `Some(Some(val))` = set, `Some(None)` = clear, `None` = no change.
+    pub mfa_secret: Option<Option<String>>,
+    pub failed_login_attempts: Option<u32>,
+    pub last_failed_login_at: Option<Option<DateTime<Utc>>>,
+    pub locked_until: Option<Option<DateTime<Utc>>>,
 }

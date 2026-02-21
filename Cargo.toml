@@ -53,6 +53,8 @@ totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 rand = "0.9"
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
+aes-gcm = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Time

@@ -1,0 +1,81 @@
+//! JWT-based authentication extractor.
+//!
+//! [`AuthenticatedUser`] implements Actix-Web's `FromRequest` trait.
+//! It extracts and validates the `Authorization: Bearer <token>` header,
+//! returning the authenticated user's identity.
+
+use actix_web::HttpRequest;
+use actix_web::dev::Payload;
+use actix_web::web;
+use axiam_auth::config::AuthConfig;
+use axiam_auth::token::{ValidatedClaims, validate_access_token};
+use axiam_core::error::AxiamError;
+use uuid::Uuid;
+
+use crate::error::AxiamApiError;
+
+/// Authenticated user context extracted from a valid JWT.
+///
+/// Use this as a handler parameter to require authentication.
+/// The extractor reads `AuthConfig` from app data and validates the
+/// `Authorization: Bearer <token>` header.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedUser {
+    pub user_id: Uuid,
+    pub tenant_id: Uuid,
+    pub org_id: Uuid,
+    pub claims: ValidatedClaims,
+}
+
+impl actix_web::FromRequest for AuthenticatedUser {
+    type Error = AxiamApiError;
+    type Future = std::future::Ready<Result<Self, Self::Error>>;
+
+    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        std::future::ready(extract_user(req))
+    }
+}
+
+fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
+    let config = req
+        .app_data::<web::Data<AuthConfig>>()
+        .ok_or(AxiamError::Internal("missing auth config".into()))?;
+
+    let header = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(AxiamError::AuthenticationFailed {
+            reason: "missing Authorization header".into(),
+        })?;
+
+    let token = header
+        .strip_prefix("Bearer ")
+        .ok_or(AxiamError::AuthenticationFailed {
+            reason: "invalid Authorization scheme, expected Bearer".into(),
+        })?;
+
+    let validated = validate_access_token(token, config).map_err(AxiamError::from)?;
+
+    let user_id =
+        Uuid::parse_str(&validated.0.sub).map_err(|_| AxiamError::AuthenticationFailed {
+            reason: "invalid sub claim".into(),
+        })?;
+
+    let tenant_id =
+        Uuid::parse_str(&validated.0.tenant_id).map_err(|_| AxiamError::AuthenticationFailed {
+            reason: "invalid tenant_id claim".into(),
+        })?;
+
+    let org_id =
+        Uuid::parse_str(&validated.0.org_id).map_err(|_| AxiamError::AuthenticationFailed {
+            reason: "invalid org_id claim".into(),
+        })?;
+
+    Ok(AuthenticatedUser {
+        user_id,
+        tenant_id,
+        org_id,
+        claims: validated,
+    })
+}

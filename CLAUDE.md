@@ -103,3 +103,9 @@ just check             # fmt + lint + test
 - Webhook signatures: HMAC-SHA256
 - Audit logs: Append-only (no UPDATE/DELETE)
 - TLS 1.3 minimum for all external communication
+
+## PR and issues guidelines
+- Github issues will be closed only after a PR merge
+- After a phase is completed, the corresponding issues will be included in the PR description and closed after the PR merge
+- PRs must reference the issue(s) they address and include a detailed description of the changes
+- PRs must be made by claude agents on behalf of the human developer

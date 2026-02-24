@@ -13,7 +13,7 @@ use crate::models::{
     group::{CreateGroup, Group, UpdateGroup},
     oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client},
     organization::{CreateOrganization, Organization, UpdateOrganization},
-    permission::{CreatePermission, Permission, UpdatePermission},
+    permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
     resource::{CreateResource, Resource, UpdateResource},
     role::{CreateRole, Role, RoleAssignment, UpdateRole},
     scope::{CreateScope, Scope, UpdateScope},
@@ -253,6 +253,23 @@ pub trait PermissionRepository: Send + Sync {
         tenant_id: Uuid,
         role_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Permission>>> + Send;
+
+    /// Grant a permission to a role with optional scope constraints.
+    /// Empty `scope_ids` means the grant covers all scopes (wildcard).
+    fn grant_to_role_with_scopes(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+        permission_id: Uuid,
+        scope_ids: Vec<Uuid>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Get all permission grants for a role, including scope constraints.
+    fn get_role_permission_grants(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<PermissionGrant>>> + Send;
 }
 
 pub trait ResourceRepository: Send + Sync {

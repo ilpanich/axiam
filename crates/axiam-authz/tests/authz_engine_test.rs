@@ -153,6 +153,51 @@ async fn grant_user_role_permission(
     (role.id, perm.id)
 }
 
+/// Helper: create role + permission, grant with scope constraints, assign to user.
+async fn grant_user_role_permission_with_scopes(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    role_name: &str,
+    action: &str,
+    resource_id: Uuid,
+    scope_ids: Vec<Uuid>,
+) -> (Uuid, Uuid) {
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: role_name.into(),
+            description: format!("Role: {role_name}"),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: action.into(),
+            description: format!("Can {action}"),
+        })
+        .await
+        .unwrap();
+
+    perm_repo
+        .grant_to_role_with_scopes(tenant_id, role.id, perm.id, scope_ids)
+        .await
+        .unwrap();
+
+    role_repo
+        .assign_to_user(tenant_id, user_id, role.id, Some(resource_id))
+        .await
+        .unwrap();
+
+    (role.id, perm.id)
+}
+
 // -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
@@ -494,6 +539,222 @@ async fn scope_validation() {
         .await
         .unwrap();
     assert!(matches!(denied, AccessDecision::Deny(_)));
+}
+
+#[tokio::test]
+async fn scoped_permission_grants_matching_scope() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "api", None).await;
+
+    // Define two scopes on the resource.
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let scope_a = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id,
+            name: "users:list".into(),
+            description: "list users".into(),
+        })
+        .await
+        .unwrap();
+    let _scope_b = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id,
+            name: "users:write".into(),
+            description: "write users".into(),
+        })
+        .await
+        .unwrap();
+
+    // Grant with scope constraint: only scope_a.
+    grant_user_role_permission_with_scopes(
+        &db,
+        tenant_id,
+        user_id,
+        "scoped-reader",
+        "read",
+        resource_id,
+        vec![scope_a.id],
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    // Request matching scope → Allow.
+    let decision = engine
+        .check_access(&AccessRequest {
+            tenant_id,
+            subject_id: user_id,
+            action: "read".into(),
+            resource_id,
+            scope: Some("users:list".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(decision, AccessDecision::Allow);
+}
+
+#[tokio::test]
+async fn scoped_permission_denies_wrong_scope() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "api", None).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let scope_a = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id,
+            name: "users:list".into(),
+            description: "list users".into(),
+        })
+        .await
+        .unwrap();
+    let _scope_b = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id,
+            name: "users:write".into(),
+            description: "write users".into(),
+        })
+        .await
+        .unwrap();
+
+    // Grant limited to scope_a only.
+    grant_user_role_permission_with_scopes(
+        &db,
+        tenant_id,
+        user_id,
+        "scoped-reader-2",
+        "read",
+        resource_id,
+        vec![scope_a.id],
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    // Request different scope → Deny.
+    let decision = engine
+        .check_access(&AccessRequest {
+            tenant_id,
+            subject_id: user_id,
+            action: "read".into(),
+            resource_id,
+            scope: Some("users:write".into()),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(decision, AccessDecision::Deny(_)));
+}
+
+#[tokio::test]
+async fn wildcard_permission_grants_any_scope() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "api", None).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id,
+            name: "anything".into(),
+            description: "any scope".into(),
+        })
+        .await
+        .unwrap();
+
+    // Grant with empty scope_ids (wildcard).
+    grant_user_role_permission_with_scopes(
+        &db,
+        tenant_id,
+        user_id,
+        "wildcard-reader",
+        "read",
+        resource_id,
+        vec![], // wildcard
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    let decision = engine
+        .check_access(&AccessRequest {
+            tenant_id,
+            subject_id: user_id,
+            action: "read".into(),
+            resource_id,
+            scope: Some("anything".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(decision, AccessDecision::Allow);
+}
+
+#[tokio::test]
+async fn multiple_scopes_in_grant() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "api", None).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let scope_x = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id,
+            name: "scope-x".into(),
+            description: "x".into(),
+        })
+        .await
+        .unwrap();
+    let scope_y = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id,
+            name: "scope-y".into(),
+            description: "y".into(),
+        })
+        .await
+        .unwrap();
+
+    // Grant with both scope_x and scope_y.
+    grant_user_role_permission_with_scopes(
+        &db,
+        tenant_id,
+        user_id,
+        "multi-scoped",
+        "read",
+        resource_id,
+        vec![scope_x.id, scope_y.id],
+    )
+    .await;
+
+    let engine = make_engine(&db);
+
+    // Access scope-y → Allow.
+    let decision = engine
+        .check_access(&AccessRequest {
+            tenant_id,
+            subject_id: user_id,
+            action: "read".into(),
+            resource_id,
+            scope: Some("scope-y".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(decision, AccessDecision::Allow);
+
+    // Access scope-x → Allow.
+    let decision = engine
+        .check_access(&AccessRequest {
+            tenant_id,
+            subject_id: user_id,
+            action: "read".into(),
+            resource_id,
+            scope: Some("scope-x".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(decision, AccessDecision::Allow);
 }
 
 #[tokio::test]

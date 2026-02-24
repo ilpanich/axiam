@@ -1,7 +1,9 @@
 //! SurrealDB implementation of [`PermissionRepository`].
 
 use axiam_core::error::AxiamResult;
-use axiam_core::models::permission::{CreatePermission, Permission, UpdatePermission};
+use axiam_core::models::permission::{
+    CreatePermission, Permission, PermissionGrant, UpdatePermission,
+};
 use axiam_core::repository::{PaginatedResult, Pagination, PermissionRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::{Connection, Surreal};
@@ -42,6 +44,48 @@ impl PermissionRowWithId {
             description: self.description,
             created_at: self.created_at,
             updated_at: self.updated_at,
+        })
+    }
+}
+
+#[derive(Debug, SurrealValue)]
+struct PermissionGrantRow {
+    record_id: String,
+    tenant_id: String,
+    action: String,
+    description: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    scope_ids: Option<Vec<String>>,
+}
+
+impl PermissionGrantRow {
+    fn try_into_grant(self) -> Result<PermissionGrant, DbError> {
+        let id = Uuid::parse_str(&self.record_id)
+            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
+        let tenant_id = Uuid::parse_str(&self.tenant_id)
+            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+
+        let scope_ids = self
+            .scope_ids
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| {
+                Uuid::parse_str(&s)
+                    .map_err(|e| DbError::Migration(format!("invalid scope UUID: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(PermissionGrant {
+            permission: Permission {
+                id,
+                tenant_id,
+                action: self.action,
+                description: self.description,
+                created_at: self.created_at,
+                updated_at: self.updated_at,
+            },
+            scope_ids,
         })
     }
 }
@@ -276,7 +320,10 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         let role_id_str = role_id.to_string();
         let perm_id_str = permission_id.to_string();
 
-        let query = format!("RELATE role:`{role_id_str}` -> grants -> permission:`{perm_id_str}`;");
+        let query = format!(
+            "RELATE role:`{role_id_str}` -> grants -> \
+             permission:`{perm_id_str}` SET scope_ids = NONE;"
+        );
 
         self.db.query(query).await.map_err(DbError::from)?;
 
@@ -334,5 +381,76 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         Ok(permissions)
+    }
+
+    async fn grant_to_role_with_scopes(
+        &self,
+        _tenant_id: Uuid,
+        role_id: Uuid,
+        permission_id: Uuid,
+        scope_ids: Vec<Uuid>,
+    ) -> AxiamResult<()> {
+        let role_id_str = role_id.to_string();
+        let perm_id_str = permission_id.to_string();
+
+        if scope_ids.is_empty() {
+            // Wildcard — same as grant_to_role
+            let query = format!(
+                "RELATE role:`{role_id_str}` -> grants -> \
+                 permission:`{perm_id_str}` SET scope_ids = NONE;"
+            );
+            self.db.query(query).await.map_err(DbError::from)?;
+        } else {
+            let scope_strs: Vec<String> = scope_ids.iter().map(|id| id.to_string()).collect();
+            let query = format!(
+                "RELATE role:`{role_id_str}` -> grants -> \
+                 permission:`{perm_id_str}` SET scope_ids = $scope_ids;"
+            );
+            self.db
+                .query(query)
+                .bind(("scope_ids", scope_strs))
+                .await
+                .map_err(DbError::from)?;
+        }
+
+        Ok(())
+    }
+
+    async fn get_role_permission_grants(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> AxiamResult<Vec<PermissionGrant>> {
+        let tenant_id_str = tenant_id.to_string();
+        let role_id_str = role_id.to_string();
+
+        let mut result = self
+            .db
+            .query(
+                "SELECT \
+                     meta::id(out.id) AS record_id, \
+                     out.tenant_id AS tenant_id, \
+                     out.action AS action, \
+                     out.description AS description, \
+                     out.created_at AS created_at, \
+                     out.updated_at AS updated_at, \
+                     scope_ids \
+                 FROM grants \
+                 WHERE in = type::record('role', $role_id) \
+                 AND out.tenant_id = $tenant_id",
+            )
+            .bind(("role_id", role_id_str))
+            .bind(("tenant_id", tenant_id_str))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<PermissionGrantRow> = result.take(0).map_err(DbError::from)?;
+
+        let grants = rows
+            .into_iter()
+            .map(|row| row.try_into_grant())
+            .collect::<Result<Vec<_>, DbError>>()?;
+
+        Ok(grants)
     }
 }

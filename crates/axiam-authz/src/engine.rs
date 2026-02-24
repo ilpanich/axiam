@@ -100,45 +100,72 @@ where
             ));
         }
 
-        // 4. Collect permissions from all applicable roles.
-        let mut has_matching_permission = false;
+        // 4. Resolve the requested scope to an ID (if specified).
+        let requested_scope_id = if let Some(ref scope_name) = request.scope {
+            let scopes = self
+                .scope_repo
+                .list_by_resource(request.tenant_id, request.resource_id)
+                .await?;
+
+            let scope = scopes.iter().find(|s| s.name == *scope_name);
+            match scope {
+                Some(s) => Some(s.id),
+                None => {
+                    return Ok(AccessDecision::Deny(format!(
+                        "scope '{}' not found on resource",
+                        scope_name
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
+        // 5. Collect permission grants from all applicable roles and check
+        //    action + scope constraints.
+        let mut has_matching_grant = false;
         let mut seen_roles = HashSet::new();
 
         for role_id in &applicable_role_ids {
             if !seen_roles.insert(*role_id) {
                 continue; // skip duplicates
             }
-            let permissions = self
+            let grants = self
                 .permission_repo
-                .get_role_permissions(request.tenant_id, *role_id)
+                .get_role_permission_grants(request.tenant_id, *role_id)
                 .await?;
 
-            if permissions.iter().any(|p| p.action == request.action) {
-                has_matching_permission = true;
+            for grant in &grants {
+                if grant.permission.action != request.action {
+                    continue;
+                }
+
+                // Action matches — now check scope constraint.
+                if let Some(scope_id) = requested_scope_id {
+                    // If grant has no scope constraints (wildcard), it
+                    // matches any scope. Otherwise the scope must be in
+                    // the grant's list.
+                    if grant.scope_ids.is_empty() || grant.scope_ids.contains(&scope_id) {
+                        has_matching_grant = true;
+                        break;
+                    }
+                } else {
+                    // No scope requested — action match is sufficient.
+                    has_matching_grant = true;
+                    break;
+                }
+            }
+
+            if has_matching_grant {
                 break;
             }
         }
 
-        if !has_matching_permission {
+        if !has_matching_grant {
             return Ok(AccessDecision::Deny(format!(
                 "no permission grants action '{}'",
                 request.action
             )));
-        }
-
-        // 5. Validate scope if specified.
-        if let Some(ref scope_name) = request.scope {
-            let scopes = self
-                .scope_repo
-                .list_by_resource(request.tenant_id, request.resource_id)
-                .await?;
-
-            if !scopes.iter().any(|s| s.name == *scope_name) {
-                return Ok(AccessDecision::Deny(format!(
-                    "scope '{}' not found on resource",
-                    scope_name
-                )));
-            }
         }
 
         Ok(AccessDecision::Allow)

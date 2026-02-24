@@ -55,13 +55,13 @@ Clients (Browser, Mobile, IoT, Services, SDKs)
     v           v           v
 +--------------------------------------+
 |          API Gateway Layer           |
-|  Actix-Web  |  Tonic  |  Lapin     |
+|  Actix-Web  |  Tonic  |  Lapin       |
 +--------------------------------------+
                 |
 +--------------------------------------+
 |          Service Layer               |
-|  AuthN | AuthZ | Users | Federation |
-|  Roles | PKI   | Audit | OAuth2     |
+|  AuthN | AuthZ | Users | Federation  |
+|  Roles | PKI   | Audit | OAuth2      |
 +--------------------------------------+
                 |
 +--------------------------------------+
@@ -91,8 +91,8 @@ The project follows a structured roadmap of **64 tasks across 16 phases**:
 | Phase 0 | Project foundation, CI, dev environment | Done |
 | Phase 1 | Core domain types & DB repositories | Done |
 | Phase 2 | Authentication (password, JWT, MFA) | Done |
-| Phase 3 | Authorization engine | Next |
-| Phase 4 | REST API | Planned |
+| Phase 3 | Authorization engine | Done |
+| Phase 4 | REST API | Next |
 | Phase 5 | gRPC API | Planned |
 | Phase 6 | AMQP integration | Planned |
 | Phase 7 | Audit logging | Planned |

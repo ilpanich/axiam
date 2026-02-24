@@ -15,7 +15,7 @@ use crate::models::{
     organization::{CreateOrganization, Organization, UpdateOrganization},
     permission::{CreatePermission, Permission, UpdatePermission},
     resource::{CreateResource, Resource, UpdateResource},
-    role::{CreateRole, Role, UpdateRole},
+    role::{CreateRole, Role, RoleAssignment, UpdateRole},
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
     session::{CreateSession, Session},
@@ -173,6 +173,14 @@ pub trait RoleRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Role>>> + Send;
+
+    /// Get all role assignments for a user (direct + via group membership)
+    /// including the resource scope of each assignment.
+    fn get_user_role_assignments(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RoleAssignment>>> + Send;
 
     /// Assign a role to a group, optionally scoped to a resource.
     fn assign_to_group(

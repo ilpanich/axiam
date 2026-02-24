@@ -751,9 +751,12 @@ name = "axiam-authz"
 version = "0.1.0"
 dependencies = [
  "axiam-core",
+ "axiam-db",
  "serde",
+ "surrealdb",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-test",
  "tracing",
  "uuid",
 ]

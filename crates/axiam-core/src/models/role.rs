@@ -30,3 +30,11 @@ pub struct UpdateRole {
     pub description: Option<String>,
     pub is_global: Option<bool>,
 }
+
+/// A role together with its assignment context (the resource it is scoped to).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleAssignment {
+    pub role: Role,
+    /// `None` means the role was assigned globally (no resource scope).
+    pub resource_id: Option<Uuid>,
+}

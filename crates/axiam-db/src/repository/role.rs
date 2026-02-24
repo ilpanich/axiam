@@ -1,7 +1,7 @@
 //! SurrealDB implementation of [`RoleRepository`].
 
 use axiam_core::error::AxiamResult;
-use axiam_core::models::role::{CreateRole, Role, UpdateRole};
+use axiam_core::models::role::{CreateRole, Role, RoleAssignment, UpdateRole};
 use axiam_core::repository::{PaginatedResult, Pagination, RoleRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::{Connection, Surreal};
@@ -52,6 +52,46 @@ impl RoleRowWithId {
 #[derive(Debug, SurrealValue)]
 struct CountRow {
     total: u64,
+}
+
+/// Row for querying has_role edges with the role data joined in.
+#[derive(Debug, SurrealValue)]
+struct RoleAssignmentRow {
+    record_id: String,
+    tenant_id: String,
+    name: String,
+    description: String,
+    is_global: bool,
+    resource_id: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl RoleAssignmentRow {
+    fn try_into_assignment(self) -> Result<RoleAssignment, DbError> {
+        let id = Uuid::parse_str(&self.record_id)
+            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
+        let tenant_id = Uuid::parse_str(&self.tenant_id)
+            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let resource_id = self
+            .resource_id
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|e| DbError::Migration(format!("invalid resource UUID: {e}")))?;
+        Ok(RoleAssignment {
+            role: Role {
+                id,
+                tenant_id,
+                name: self.name,
+                description: self.description,
+                is_global: self.is_global,
+                created_at: self.created_at,
+                updated_at: self.updated_at,
+            },
+            resource_id,
+        })
+    }
 }
 
 /// SurrealDB implementation of the Role repository.
@@ -377,6 +417,61 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         }
 
         Ok(roles)
+    }
+
+    async fn get_user_role_assignments(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<Vec<RoleAssignment>> {
+        let tenant_id_str = tenant_id.to_string();
+        let user_id_str = user_id.to_string();
+
+        // Query has_role edges (direct + via groups) and join with role data.
+        // Each result row contains role fields + the resource_id from the edge.
+        let mut result = self
+            .db
+            .query(
+                "SELECT meta::id(out.id) AS record_id, \
+                        out.tenant_id AS tenant_id, \
+                        out.name AS name, \
+                        out.description AS description, \
+                        out.is_global AS is_global, \
+                        out.created_at AS created_at, \
+                        out.updated_at AS updated_at, \
+                        resource_id \
+                 FROM has_role \
+                 WHERE in = type::record('user', $user_id) \
+                 AND out.tenant_id = $tenant_id; \
+                 SELECT meta::id(out.id) AS record_id, \
+                        out.tenant_id AS tenant_id, \
+                        out.name AS name, \
+                        out.description AS description, \
+                        out.is_global AS is_global, \
+                        out.created_at AS created_at, \
+                        out.updated_at AS updated_at, \
+                        resource_id \
+                 FROM has_role \
+                 WHERE in IN (\
+                     SELECT VALUE out FROM member_of \
+                     WHERE in = type::record('user', $user_id)\
+                 ) \
+                 AND out.tenant_id = $tenant_id;",
+            )
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("user_id", user_id_str))
+            .await
+            .map_err(DbError::from)?;
+
+        let direct: Vec<RoleAssignmentRow> = result.take(0).map_err(DbError::from)?;
+        let inherited: Vec<RoleAssignmentRow> = result.take(1).map_err(DbError::from)?;
+
+        let mut assignments = Vec::new();
+        for row in direct.into_iter().chain(inherited) {
+            assignments.push(row.try_into_assignment()?);
+        }
+
+        Ok(assignments)
     }
 
     async fn assign_to_group(

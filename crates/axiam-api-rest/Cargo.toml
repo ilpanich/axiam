@@ -23,3 +23,8 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
+
+[dev-dependencies]
+actix-rt = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }
+tokio-test = { workspace = true }

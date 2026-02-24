@@ -27,3 +27,11 @@ pub struct UpdatePermission {
     pub action: Option<String>,
     pub description: Option<String>,
 }
+
+/// A permission grant with optional scope constraints.
+/// Empty `scope_ids` means the grant covers all scopes (wildcard).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionGrant {
+    pub permission: Permission,
+    pub scope_ids: Vec<Uuid>,
+}

@@ -14,3 +14,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+axiam-db = { path = "../axiam-db" }
+surrealdb = { workspace = true, features = ["kv-mem"] }
+tokio-test = "0.4"

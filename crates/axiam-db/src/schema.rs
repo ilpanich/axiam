@@ -364,6 +364,7 @@ DEFINE FIELD resource_id ON TABLE has_role TYPE option<string>;
 
 -- Role -> Permission grants
 DEFINE TABLE grants TYPE RELATION SCHEMAFULL;
+DEFINE FIELD scope_ids ON TABLE grants TYPE option<array<string>>;
 
 -- Permission -> Resource association
 DEFINE TABLE on_resource TYPE RELATION SCHEMAFULL;

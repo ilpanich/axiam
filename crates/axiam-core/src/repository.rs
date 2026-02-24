@@ -13,9 +13,9 @@ use crate::models::{
     group::{CreateGroup, Group, UpdateGroup},
     oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client},
     organization::{CreateOrganization, Organization, UpdateOrganization},
-    permission::{CreatePermission, Permission, UpdatePermission},
+    permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
     resource::{CreateResource, Resource, UpdateResource},
-    role::{CreateRole, Role, UpdateRole},
+    role::{CreateRole, Role, RoleAssignment, UpdateRole},
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
     session::{CreateSession, Session},
@@ -174,6 +174,14 @@ pub trait RoleRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Role>>> + Send;
 
+    /// Get all role assignments for a user (direct + via group membership)
+    /// including the resource scope of each assignment.
+    fn get_user_role_assignments(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RoleAssignment>>> + Send;
+
     /// Assign a role to a group, optionally scoped to a resource.
     fn assign_to_group(
         &self,
@@ -245,6 +253,23 @@ pub trait PermissionRepository: Send + Sync {
         tenant_id: Uuid,
         role_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Permission>>> + Send;
+
+    /// Grant a permission to a role with optional scope constraints.
+    /// Empty `scope_ids` means the grant covers all scopes (wildcard).
+    fn grant_to_role_with_scopes(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+        permission_id: Uuid,
+        scope_ids: Vec<Uuid>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Get all permission grants for a role, including scope constraints.
+    fn get_role_permission_grants(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<PermissionGrant>>> + Send;
 }
 
 pub trait ResourceRepository: Send + Sync {

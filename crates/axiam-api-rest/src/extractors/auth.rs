@@ -49,12 +49,20 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
             reason: "missing Authorization header".into(),
         })?;
 
-    let token = header
-        .strip_prefix("Bearer ")
-        .ok_or(AxiamError::AuthenticationFailed {
-            reason: "invalid Authorization scheme, expected Bearer".into(),
-        })?;
+    // Parse `Authorization` as case-insensitive Bearer with flexible whitespace.
+    let header = header.trim();
+    let mut parts = header.splitn(2, char::is_whitespace);
+    let scheme = parts.next().unwrap_or("");
+    let credentials = parts.next().unwrap_or("").trim();
 
+    if !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
+        return Err(AxiamError::AuthenticationFailed {
+            reason: "invalid Authorization scheme, expected Bearer".into(),
+        }
+        .into());
+    }
+
+    let token = credentials;
     let validated = validate_access_token(token, config).map_err(AxiamError::from)?;
 
     let user_id =

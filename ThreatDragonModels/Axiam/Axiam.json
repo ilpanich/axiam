@@ -1,0 +1,20 @@
+{
+  "version": "2.5.0",
+  "summary": {
+    "title": "Axiam",
+    "owner": "ilpanich",
+    "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships",
+    "id": 0
+  },
+  "detail": {
+    "contributors": [
+      {
+        "name": "ilpanich"
+      }
+    ],
+    "diagrams": [],
+    "diagramTop": 0,
+    "reviewer": "",
+    "threatTop": 0
+  }
+}

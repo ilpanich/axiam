@@ -22,9 +22,18 @@ use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
+type TestDb = surrealdb::engine::local::Db;
+type TestEngine = AuthorizationEngine<
+    SurrealRoleRepository<TestDb>,
+    SurrealPermissionRepository<TestDb>,
+    SurrealResourceRepository<TestDb>,
+    SurrealScopeRepository<TestDb>,
+    SurrealGroupRepository<TestDb>,
+>;
+
 /// Spin up in-memory DB, run migrations, create org + tenant + user.
 async fn setup() -> (
-    Surreal<surrealdb::engine::local::Db>,
+    Surreal<TestDb>,
     Uuid, // tenant_id
     Uuid, // user_id
 ) {
@@ -69,15 +78,7 @@ async fn setup() -> (
 }
 
 /// Build an AuthorizationEngine from a db handle.
-fn make_engine(
-    db: &Surreal<surrealdb::engine::local::Db>,
-) -> AuthorizationEngine<
-    SurrealRoleRepository<surrealdb::engine::local::Db>,
-    SurrealPermissionRepository<surrealdb::engine::local::Db>,
-    SurrealResourceRepository<surrealdb::engine::local::Db>,
-    SurrealScopeRepository<surrealdb::engine::local::Db>,
-    SurrealGroupRepository<surrealdb::engine::local::Db>,
-> {
+fn make_engine(db: &Surreal<TestDb>) -> TestEngine {
     AuthorizationEngine::new(
         SurrealRoleRepository::new(db.clone()),
         SurrealPermissionRepository::new(db.clone()),
@@ -89,7 +90,7 @@ fn make_engine(
 
 /// Helper: create a resource.
 async fn create_resource(
-    db: &Surreal<surrealdb::engine::local::Db>,
+    db: &Surreal<TestDb>,
     tenant_id: Uuid,
     name: &str,
     parent_id: Option<Uuid>,
@@ -110,7 +111,7 @@ async fn create_resource(
 
 /// Helper: create a role, permission, grant permission to role, and assign role to user.
 async fn grant_user_role_permission(
-    db: &Surreal<surrealdb::engine::local::Db>,
+    db: &Surreal<TestDb>,
     tenant_id: Uuid,
     user_id: Uuid,
     role_name: &str,
@@ -155,7 +156,7 @@ async fn grant_user_role_permission(
 
 /// Helper: create role + permission, grant with scope constraints, assign to user.
 async fn grant_user_role_permission_with_scopes(
-    db: &Surreal<surrealdb::engine::local::Db>,
+    db: &Surreal<TestDb>,
     tenant_id: Uuid,
     user_id: Uuid,
     role_name: &str,

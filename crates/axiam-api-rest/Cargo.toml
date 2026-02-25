@@ -21,6 +21,8 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+actix-cors = { workspace = true }
+tracing-actix-web = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 

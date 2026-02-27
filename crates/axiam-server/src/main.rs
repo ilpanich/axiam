@@ -5,7 +5,7 @@ use std::sync::Arc;
 use actix_web::{App, HttpServer, web};
 use axiam_api_rest::{HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes};
 use axiam_auth::config::AuthConfig;
-use axiam_db::{DbConfig, DbManager};
+use axiam_db::{DbConfig, DbManager, SurrealOrganizationRepository, SurrealTenantRepository};
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
 use tracing_subscriber::EnvFilter;
@@ -44,6 +44,9 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("Database connected and migrations applied");
 
+    let org_repo = SurrealOrganizationRepository::new(db.client().clone());
+    let tenant_repo = SurrealTenantRepository::new(db.client().clone());
+
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
     let auth_config = config.auth.clone();
@@ -57,6 +60,8 @@ async fn main() -> std::io::Result<()> {
             .wrap(build_cors(&server_config.cors_allowed_origins))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(health_checker.clone()))
+            .app_data(web::Data::new(org_repo.clone()))
+            .app_data(web::Data::new(tenant_repo.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
     })

@@ -23,6 +23,24 @@ pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
 /// This allows tests to use an in-memory DB while production uses WebSocket.
 pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceConfig) {
     cfg.service(
+        web::scope("/auth")
+            .route("/login", web::post().to(handlers::auth::login::<C>))
+            .route("/logout", web::post().to(handlers::auth::logout::<C>))
+            .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
+            .route(
+                "/mfa/enroll",
+                web::post().to(handlers::auth::enroll_mfa::<C>),
+            )
+            .route(
+                "/mfa/confirm",
+                web::post().to(handlers::auth::confirm_mfa::<C>),
+            )
+            .route(
+                "/mfa/verify",
+                web::post().to(handlers::auth::verify_mfa::<C>),
+            ),
+    );
+    cfg.service(
         web::scope("/api/v1")
             .service(
                 web::resource("/organizations")

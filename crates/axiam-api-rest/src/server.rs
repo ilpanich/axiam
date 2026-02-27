@@ -63,6 +63,17 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::get().to(handlers::tenants::get::<C>))
                     .route(web::put().to(handlers::tenants::update::<C>))
                     .route(web::delete().to(handlers::tenants::delete::<C>)),
+            )
+            .service(
+                web::resource("/users")
+                    .route(web::post().to(handlers::users::create::<C>))
+                    .route(web::get().to(handlers::users::list::<C>)),
+            )
+            .service(
+                web::resource("/users/{user_id}")
+                    .route(web::get().to(handlers::users::get::<C>))
+                    .route(web::put().to(handlers::users::update::<C>))
+                    .route(web::delete().to(handlers::users::delete::<C>)),
             ),
     );
 }

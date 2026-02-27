@@ -52,7 +52,7 @@ async fn main() -> std::io::Result<()> {
     let tenant_repo = SurrealTenantRepository::new(db.client().clone());
     let user_repo = SurrealUserRepository::new(db.client().clone());
     let session_repo = SurrealSessionRepository::new(db.client().clone());
-    let auth_service = AuthService::new(user_repo, session_repo, config.auth.clone());
+    let auth_service = AuthService::new(user_repo.clone(), session_repo, config.auth.clone());
 
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
@@ -69,6 +69,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(health_checker.clone()))
             .app_data(web::Data::new(org_repo.clone()))
             .app_data(web::Data::new(tenant_repo.clone()))
+            .app_data(web::Data::new(user_repo.clone()))
             .app_data(web::Data::new(auth_service.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)

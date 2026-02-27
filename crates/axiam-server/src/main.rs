@@ -8,7 +8,8 @@ use axiam_auth::AuthService;
 use axiam_auth::config::AuthConfig;
 use axiam_db::{
     DbConfig, DbManager, SurrealGroupRepository, SurrealOrganizationRepository,
-    SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealPermissionRepository, SurrealRoleRepository, SurrealSessionRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
@@ -52,6 +53,8 @@ async fn main() -> std::io::Result<()> {
     let tenant_repo = SurrealTenantRepository::new(db.client().clone());
     let user_repo = SurrealUserRepository::new(db.client().clone());
     let group_repo = SurrealGroupRepository::new(db.client().clone());
+    let role_repo = SurrealRoleRepository::new(db.client().clone());
+    let permission_repo = SurrealPermissionRepository::new(db.client().clone());
     let session_repo = SurrealSessionRepository::new(db.client().clone());
     let auth_service = AuthService::new(user_repo.clone(), session_repo, config.auth.clone());
 
@@ -72,6 +75,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(tenant_repo.clone()))
             .app_data(web::Data::new(user_repo.clone()))
             .app_data(web::Data::new(group_repo.clone()))
+            .app_data(web::Data::new(role_repo.clone()))
+            .app_data(web::Data::new(permission_repo.clone()))
             .app_data(web::Data::new(auth_service.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)

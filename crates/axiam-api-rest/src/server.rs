@@ -94,6 +94,57 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .service(
                 web::resource("/groups/{group_id}/members/{user_id}")
                     .route(web::delete().to(handlers::groups::remove_member::<C>)),
+            )
+            // --- Roles ---
+            .service(
+                web::resource("/roles")
+                    .route(web::post().to(handlers::roles::create::<C>))
+                    .route(web::get().to(handlers::roles::list::<C>)),
+            )
+            .service(
+                web::resource("/roles/{role_id}")
+                    .route(web::get().to(handlers::roles::get::<C>))
+                    .route(web::put().to(handlers::roles::update::<C>))
+                    .route(web::delete().to(handlers::roles::delete::<C>)),
+            )
+            .service(
+                web::resource("/roles/{role_id}/users")
+                    .route(web::post().to(handlers::roles::assign_to_user::<C>)),
+            )
+            .service(
+                web::resource("/roles/{role_id}/users/{user_id}")
+                    .route(web::delete().to(handlers::roles::unassign_from_user::<C>)),
+            )
+            .service(
+                web::resource("/roles/{role_id}/groups")
+                    .route(web::post().to(handlers::roles::assign_to_group::<C>)),
+            )
+            .service(
+                web::resource("/roles/{role_id}/groups/{group_id}")
+                    .route(web::delete().to(handlers::roles::unassign_from_group::<C>)),
+            )
+            // --- Permissions ---
+            .service(
+                web::resource("/permissions")
+                    .route(web::post().to(handlers::permissions::create::<C>))
+                    .route(web::get().to(handlers::permissions::list::<C>)),
+            )
+            .service(
+                web::resource("/permissions/{permission_id}")
+                    .route(web::get().to(handlers::permissions::get::<C>))
+                    .route(web::put().to(handlers::permissions::update::<C>))
+                    .route(web::delete().to(handlers::permissions::delete::<C>)),
+            )
+            .service(
+                web::resource("/roles/{role_id}/permissions")
+                    .route(web::post().to(handlers::permissions::grant_to_role::<C>))
+                    .route(web::get().to(handlers::permissions::list_role_permissions::<C>)),
+            )
+            .service(
+                web::resource("/roles/{role_id}/permissions/{permission_id}")
+                    .route(
+                        web::delete().to(handlers::permissions::revoke_from_role::<C>),
+                    ),
             ),
     );
 }

@@ -74,6 +74,26 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::get().to(handlers::users::get::<C>))
                     .route(web::put().to(handlers::users::update::<C>))
                     .route(web::delete().to(handlers::users::delete::<C>)),
+            )
+            .service(
+                web::resource("/groups")
+                    .route(web::post().to(handlers::groups::create::<C>))
+                    .route(web::get().to(handlers::groups::list::<C>)),
+            )
+            .service(
+                web::resource("/groups/{group_id}")
+                    .route(web::get().to(handlers::groups::get::<C>))
+                    .route(web::put().to(handlers::groups::update::<C>))
+                    .route(web::delete().to(handlers::groups::delete::<C>)),
+            )
+            .service(
+                web::resource("/groups/{group_id}/members")
+                    .route(web::post().to(handlers::groups::add_member::<C>))
+                    .route(web::get().to(handlers::groups::list_members::<C>)),
+            )
+            .service(
+                web::resource("/groups/{group_id}/members/{user_id}")
+                    .route(web::delete().to(handlers::groups::remove_member::<C>)),
             ),
     );
 }

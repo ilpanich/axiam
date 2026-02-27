@@ -8,7 +8,8 @@ use axiam_auth::AuthService;
 use axiam_auth::config::AuthConfig;
 use axiam_db::{
     DbConfig, DbManager, SurrealGroupRepository, SurrealOrganizationRepository,
-    SurrealPermissionRepository, SurrealRoleRepository, SurrealSessionRepository,
+    SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
     SurrealTenantRepository, SurrealUserRepository,
 };
 use serde::Deserialize;
@@ -55,6 +56,9 @@ async fn main() -> std::io::Result<()> {
     let group_repo = SurrealGroupRepository::new(db.client().clone());
     let role_repo = SurrealRoleRepository::new(db.client().clone());
     let permission_repo = SurrealPermissionRepository::new(db.client().clone());
+    let resource_repo = SurrealResourceRepository::new(db.client().clone());
+    let scope_repo = SurrealScopeRepository::new(db.client().clone());
+    let service_account_repo = SurrealServiceAccountRepository::new(db.client().clone());
     let session_repo = SurrealSessionRepository::new(db.client().clone());
     let auth_service = AuthService::new(user_repo.clone(), session_repo, config.auth.clone());
 
@@ -77,6 +81,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(group_repo.clone()))
             .app_data(web::Data::new(role_repo.clone()))
             .app_data(web::Data::new(permission_repo.clone()))
+            .app_data(web::Data::new(resource_repo.clone()))
+            .app_data(web::Data::new(scope_repo.clone()))
+            .app_data(web::Data::new(service_account_repo.clone()))
             .app_data(web::Data::new(auth_service.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)

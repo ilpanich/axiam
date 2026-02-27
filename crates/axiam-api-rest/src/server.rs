@@ -145,6 +145,54 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(
                         web::delete().to(handlers::permissions::revoke_from_role::<C>),
                     ),
+            )
+            // --- Resources ---
+            .service(
+                web::resource("/resources")
+                    .route(web::post().to(handlers::resources::create::<C>))
+                    .route(web::get().to(handlers::resources::list::<C>)),
+            )
+            .service(
+                web::resource("/resources/{resource_id}")
+                    .route(web::get().to(handlers::resources::get::<C>))
+                    .route(web::put().to(handlers::resources::update::<C>))
+                    .route(web::delete().to(handlers::resources::delete::<C>)),
+            )
+            .service(
+                web::resource("/resources/{resource_id}/children")
+                    .route(web::get().to(handlers::resources::list_children::<C>)),
+            )
+            .service(
+                web::resource("/resources/{resource_id}/ancestors")
+                    .route(web::get().to(handlers::resources::list_ancestors::<C>)),
+            )
+            // --- Scopes (nested under resources) ---
+            .service(
+                web::resource("/resources/{resource_id}/scopes")
+                    .route(web::post().to(handlers::scopes::create::<C>))
+                    .route(web::get().to(handlers::scopes::list::<C>)),
+            )
+            .service(
+                web::resource("/resources/{resource_id}/scopes/{scope_id}")
+                    .route(web::get().to(handlers::scopes::get::<C>))
+                    .route(web::put().to(handlers::scopes::update::<C>))
+                    .route(web::delete().to(handlers::scopes::delete::<C>)),
+            )
+            // --- Service Accounts ---
+            .service(
+                web::resource("/service-accounts")
+                    .route(web::post().to(handlers::service_accounts::create::<C>))
+                    .route(web::get().to(handlers::service_accounts::list::<C>)),
+            )
+            .service(
+                web::resource("/service-accounts/{sa_id}")
+                    .route(web::get().to(handlers::service_accounts::get::<C>))
+                    .route(web::put().to(handlers::service_accounts::update::<C>))
+                    .route(web::delete().to(handlers::service_accounts::delete::<C>)),
+            )
+            .service(
+                web::resource("/service-accounts/{sa_id}/rotate-secret")
+                    .route(web::post().to(handlers::service_accounts::rotate_secret::<C>)),
             ),
     );
 }

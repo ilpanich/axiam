@@ -7,7 +7,7 @@ use uuid::Uuid;
 /// A group of users that can access resources based on their roles
 /// and permissions. Groups simplify role management by allowing roles
 /// to be assigned to a group rather than individual users.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Group {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -18,7 +18,7 @@ pub struct Group {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateGroup {
     pub tenant_id: Uuid,
     pub name: String,
@@ -26,7 +26,7 @@ pub struct CreateGroup {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct UpdateGroup {
     pub name: Option<String>,
     pub description: Option<String>,

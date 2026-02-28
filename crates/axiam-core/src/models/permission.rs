@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Permission {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -15,14 +15,14 @@ pub struct Permission {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreatePermission {
     pub tenant_id: Uuid,
     pub action: String,
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct UpdatePermission {
     pub action: Option<String>,
     pub description: Option<String>,
@@ -30,7 +30,7 @@ pub struct UpdatePermission {
 
 /// A permission grant with optional scope constraints.
 /// Empty `scope_ids` means the grant covers all scopes (wildcard).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PermissionGrant {
     pub permission: Permission,
     pub scope_ids: Vec<Uuid>,

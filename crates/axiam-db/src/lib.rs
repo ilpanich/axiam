@@ -21,3 +21,6 @@ pub use repository::{
     SurrealUserRepository, hash_client_secret, verify_password,
 };
 pub use schema::{run_migrations, schema_v1};
+/// Re-export SurrealDB connection types for use in repository type aliases.
+pub use surrealdb::Connection;
+pub use surrealdb::engine::remote::ws::Client as WsClient;

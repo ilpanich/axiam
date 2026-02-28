@@ -1,12 +1,14 @@
 //! SurrealDB connection management.
 
+use serde::Deserialize;
 use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::{Client, Ws};
 use surrealdb::opt::auth::Root;
 use tracing::info;
 
 /// Configuration for connecting to SurrealDB.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct DbConfig {
     /// WebSocket URL (e.g., `127.0.0.1:8000`).
     pub url: String,
@@ -71,5 +73,12 @@ impl DbManager {
     /// Returns a reference to the underlying SurrealDB client.
     pub fn client(&self) -> &Surreal<Client> {
         &self.db
+    }
+
+    /// Verify the database connection is alive.
+    pub async fn health_check(&self) -> Result<(), surrealdb::Error> {
+        let result = self.db.query("RETURN 1").await?;
+        result.check()?;
+        Ok(())
     }
 }

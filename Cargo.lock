@@ -20,6 +20,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "actix-cors"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daa239b93927be1ff123eebada5a3ff23e89f0124ccb8609234e5103d5a5ae6d"
+dependencies = [
+ "actix-utils",
+ "actix-web",
+ "derive_more",
+ "futures-util",
+ "log",
+ "once_cell",
+ "smallvec",
+]
+
+[[package]]
 name = "actix-http"
 version = "3.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -690,6 +705,7 @@ dependencies = [
 name = "axiam-api-rest"
 version = "0.1.0"
 dependencies = [
+ "actix-cors",
  "actix-rt",
  "actix-web",
  "axiam-audit",
@@ -705,6 +721,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "tracing-actix-web",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
@@ -773,6 +790,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "utoipa",
  "uuid",
 ]
 
@@ -848,6 +866,7 @@ dependencies = [
 name = "axiam-server"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
  "axiam-amqp",
  "axiam-api-grpc",
  "axiam-api-rest",
@@ -859,8 +878,11 @@ dependencies = [
  "axiam-federation",
  "axiam-oauth2",
  "config",
+ "hex",
+ "serde",
  "tokio",
  "tracing",
+ "tracing-actix-web",
  "tracing-subscriber",
 ]
 
@@ -3363,6 +3385,12 @@ dependencies = [
  "tagptr",
  "uuid",
 ]
+
+[[package]]
+name = "mutually_exclusive_features"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e94e1e6445d314f972ff7395df2de295fe51b71821694f0b0e1e79c4f12c8577"
 
 [[package]]
 name = "ndarray"
@@ -6039,6 +6067,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-actix-web"
+version = "0.7.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ca6b15407f9bfcb35f82d0e79e603e1629ece4e91cc6d9e58f890c184dd20af"
+dependencies = [
+ "actix-web",
+ "mutually_exclusive_features",
+ "pin-project",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "tracing-attributes"
 version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6271,6 +6312,7 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.116",
+ "uuid",
 ]
 
 [[package]]

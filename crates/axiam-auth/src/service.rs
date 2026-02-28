@@ -112,6 +112,7 @@ struct MfaChallengeClaims {
 ///
 /// Generic over repository implementations so that the auth layer
 /// has no dependency on the database crate.
+#[derive(Clone)]
 pub struct AuthService<U: UserRepository, S: SessionRepository> {
     user_repo: U,
     session_repo: S,

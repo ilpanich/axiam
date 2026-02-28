@@ -1,7 +1,10 @@
 //! Authentication configuration.
 
+use serde::Deserialize;
+
 /// Configuration for the authentication service.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct AuthConfig {
     /// PEM-encoded Ed25519 private key for JWT signing.
     pub jwt_private_key_pem: String,
@@ -18,7 +21,8 @@ pub struct AuthConfig {
     /// Minimum password length for policy enforcement.
     pub min_password_length: usize,
     /// 256-bit AES-GCM key for encrypting TOTP secrets at rest.
-    /// `None` disables MFA enrollment.
+    /// `None` disables MFA enrollment. Set programmatically (not from config files).
+    #[serde(skip)]
     pub mfa_encryption_key: Option<[u8; 32]>,
     /// MFA challenge token lifetime in seconds (default: 300 = 5 minutes).
     pub mfa_challenge_lifetime_secs: u64,

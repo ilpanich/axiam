@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::user::UserStatus;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ServiceAccount {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -21,13 +21,13 @@ pub struct ServiceAccount {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateServiceAccount {
     pub tenant_id: Uuid,
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct UpdateServiceAccount {
     pub name: Option<String>,
     pub status: Option<UserStatus>,

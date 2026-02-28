@@ -8,6 +8,8 @@ use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use axiam_core::error::AxiamError;
+
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -108,6 +110,13 @@ pub async fn get<C: Connection>(
     path: web::Path<TenantPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let tenant = repo.get_by_id(path.tenant_id).await?;
+    if tenant.organization_id != path.org_id {
+        return Err(AxiamError::NotFound {
+            entity: "Tenant".into(),
+            id: path.tenant_id.to_string(),
+        }
+        .into());
+    }
     Ok(HttpResponse::Ok().json(tenant))
 }
 
@@ -133,6 +142,14 @@ pub async fn update<C: Connection>(
     path: web::Path<TenantPath>,
     body: web::Json<UpdateTenant>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    let existing = repo.get_by_id(path.tenant_id).await?;
+    if existing.organization_id != path.org_id {
+        return Err(AxiamError::NotFound {
+            entity: "Tenant".into(),
+            id: path.tenant_id.to_string(),
+        }
+        .into());
+    }
     let tenant = repo.update(path.tenant_id, body.into_inner()).await?;
     Ok(HttpResponse::Ok().json(tenant))
 }
@@ -157,6 +174,14 @@ pub async fn delete<C: Connection>(
     repo: web::Data<SurrealTenantRepository<C>>,
     path: web::Path<TenantPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    let existing = repo.get_by_id(path.tenant_id).await?;
+    if existing.organization_id != path.org_id {
+        return Err(AxiamError::NotFound {
+            entity: "Tenant".into(),
+            id: path.tenant_id.to_string(),
+        }
+        .into());
+    }
     repo.delete(path.tenant_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

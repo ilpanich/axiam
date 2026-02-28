@@ -101,15 +101,20 @@ fn load_config() -> AppConfig {
         .add_source(config::File::with_name("config/default").required(false))
         .add_source(config::Environment::with_prefix("AXIAM").separator("__"));
 
-    match builder.build().and_then(|c| c.try_deserialize()) {
-        Ok(config) => config,
-        Err(e) => {
-            tracing::warn!(error = %e, "Config load failed, using defaults");
-            AppConfig {
-                server: ServerConfig::default(),
-                db: DbConfig::default(),
-                auth: AuthConfig::default(),
-            }
-        }
-    }
+    let config: AppConfig = builder
+        .build()
+        .and_then(|c| c.try_deserialize())
+        .expect("Failed to load configuration — check config/default.toml or AXIAM__* env vars");
+
+    // Validate critical fields to fail fast instead of booting an insecure/broken server.
+    assert!(
+        !config.auth.jwt_private_key_pem.is_empty(),
+        "AXIAM__AUTH__JWT_PRIVATE_KEY_PEM must be set (Ed25519 PEM)"
+    );
+    assert!(
+        !config.auth.jwt_public_key_pem.is_empty(),
+        "AXIAM__AUTH__JWT_PUBLIC_KEY_PEM must be set (Ed25519 PEM)"
+    );
+
+    config
 }

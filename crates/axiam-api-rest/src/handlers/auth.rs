@@ -101,7 +101,8 @@ fn user_agent(req: &HttpRequest) -> Option<String> {
     tag = "auth",
     request_body = LoginRequest,
     responses(
-        (status = 200, description = "Login successful or MFA required", body = LoginSuccessResponse),
+        (status = 200, description = "Login successful", body = LoginSuccessResponse),
+        (status = 202, description = "MFA challenge required", body = MfaRequiredResponse),
         (status = 401, description = "Invalid credentials"),
     )
 )]
@@ -132,7 +133,7 @@ pub async fn login<C: Connection>(
             }))
         }
         axiam_auth::LoginResult::MfaRequired(challenge) => {
-            Ok(HttpResponse::Ok().json(MfaRequiredResponse {
+            Ok(HttpResponse::Accepted().json(MfaRequiredResponse {
                 mfa_required: true,
                 challenge_token: challenge.challenge_token,
             }))

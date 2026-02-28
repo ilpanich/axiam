@@ -38,7 +38,23 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("Starting AXIAM server...");
 
-    let config = load_config();
+    let mut config = load_config();
+
+    // Load MFA encryption key from env (skipped by serde on AuthConfig).
+    if let Ok(hex) = std::env::var("AXIAM__AUTH__MFA_ENCRYPTION_KEY") {
+        let bytes = hex::decode(&hex).expect(
+            "AXIAM__AUTH__MFA_ENCRYPTION_KEY must be a 64-char hex string (32 bytes / 256 bits)",
+        );
+        let key: [u8; 32] = bytes
+            .try_into()
+            .expect("AXIAM__AUTH__MFA_ENCRYPTION_KEY must be exactly 32 bytes (256 bits)");
+        config.auth.mfa_encryption_key = Some(key);
+        tracing::info!("MFA encryption key loaded");
+    } else {
+        tracing::warn!(
+            "AXIAM__AUTH__MFA_ENCRYPTION_KEY not set — MFA enrollment will be unavailable"
+        );
+    }
 
     // Connect to SurrealDB
     let db = DbManager::connect(&config.db)

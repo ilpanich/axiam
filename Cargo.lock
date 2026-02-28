@@ -878,6 +878,7 @@ dependencies = [
  "axiam-federation",
  "axiam-oauth2",
  "config",
+ "hex",
  "serde",
  "tokio",
  "tracing",

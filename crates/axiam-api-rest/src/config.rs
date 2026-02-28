@@ -10,7 +10,7 @@ pub struct ServerConfig {
     pub host: String,
     /// Bind port (default: 8080).
     pub port: u16,
-    /// Allowed CORS origins. Empty means permissive (dev mode).
+    /// Allowed CORS origins. Empty disables cross-origin requests (restrictive).
     pub cors_allowed_origins: Vec<String>,
 }
 

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Role {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -16,7 +16,7 @@ pub struct Role {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateRole {
     pub tenant_id: Uuid,
     pub name: String,
@@ -24,7 +24,7 @@ pub struct CreateRole {
     pub is_global: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct UpdateRole {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -32,7 +32,7 @@ pub struct UpdateRole {
 }
 
 /// A role together with its assignment context (the resource it is scoped to).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RoleAssignment {
     pub role: Role,
     /// `None` means the role was assigned globally (no resource scope).

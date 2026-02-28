@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use actix_web::{App, HttpServer, web};
-use axiam_api_rest::{HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes};
+use axiam_api_rest::{
+    HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes, openapi_routes,
+};
 use axiam_auth::AuthService;
 use axiam_auth::config::AuthConfig;
 use axiam_db::{
@@ -87,6 +89,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(auth_service.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
+            .configure(openapi_routes)
     })
     .bind(&bind_addr)?
     .run()

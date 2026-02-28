@@ -1,8 +1,8 @@
 //! Tenant management endpoints (nested under organizations).
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::tenant::{CreateTenant, UpdateTenant};
-use axiam_core::repository::{Pagination, TenantRepository};
+use axiam_core::models::tenant::{CreateTenant, Tenant, UpdateTenant};
+use axiam_core::repository::{PaginatedResult, Pagination, TenantRepository};
 use axiam_db::SurrealTenantRepository;
 use serde::Deserialize;
 use surrealdb::Connection;
@@ -12,7 +12,7 @@ use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
 /// Request body for tenant creation (organization_id comes from the URL path).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateTenantRequest {
     pub name: String,
     pub slug: String,
@@ -33,6 +33,17 @@ pub struct TenantPath {
 }
 
 /// `POST /api/v1/organizations/{org_id}/tenants`
+#[utoipa::path(
+    post,
+    path = "/api/v1/organizations/{org_id}/tenants",
+    tag = "tenants",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    request_body = CreateTenantRequest,
+    responses(
+        (status = 201, description = "Tenant created", body = Tenant),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn create<C: Connection>(
     _user: AuthenticatedUser,
     repo: web::Data<SurrealTenantRepository<C>>,
@@ -51,6 +62,19 @@ pub async fn create<C: Connection>(
 }
 
 /// `GET /api/v1/organizations/{org_id}/tenants`
+#[utoipa::path(
+    get,
+    path = "/api/v1/organizations/{org_id}/tenants",
+    tag = "tenants",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        Pagination,
+    ),
+    responses(
+        (status = 200, description = "List of tenants", body = inline(PaginatedResult<Tenant>)),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn list<C: Connection>(
     _user: AuthenticatedUser,
     repo: web::Data<SurrealTenantRepository<C>>,
@@ -64,6 +88,20 @@ pub async fn list<C: Connection>(
 }
 
 /// `GET /api/v1/organizations/{org_id}/tenants/{tenant_id}`
+#[utoipa::path(
+    get,
+    path = "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
+    tag = "tenants",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("tenant_id" = Uuid, Path, description = "Tenant ID"),
+    ),
+    responses(
+        (status = 200, description = "Tenant found", body = Tenant),
+        (status = 404, description = "Tenant not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get<C: Connection>(
     _user: AuthenticatedUser,
     repo: web::Data<SurrealTenantRepository<C>>,
@@ -74,6 +112,21 @@ pub async fn get<C: Connection>(
 }
 
 /// `PUT /api/v1/organizations/{org_id}/tenants/{tenant_id}`
+#[utoipa::path(
+    put,
+    path = "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
+    tag = "tenants",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("tenant_id" = Uuid, Path, description = "Tenant ID"),
+    ),
+    request_body = UpdateTenant,
+    responses(
+        (status = 200, description = "Tenant updated", body = Tenant),
+        (status = 404, description = "Tenant not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn update<C: Connection>(
     _user: AuthenticatedUser,
     repo: web::Data<SurrealTenantRepository<C>>,
@@ -85,6 +138,20 @@ pub async fn update<C: Connection>(
 }
 
 /// `DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`
+#[utoipa::path(
+    delete,
+    path = "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
+    tag = "tenants",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("tenant_id" = Uuid, Path, description = "Tenant ID"),
+    ),
+    responses(
+        (status = 204, description = "Tenant deleted"),
+        (status = 404, description = "Tenant not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn delete<C: Connection>(
     _user: AuthenticatedUser,
     repo: web::Data<SurrealTenantRepository<C>>,

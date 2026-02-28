@@ -1,8 +1,10 @@
 //! Permission management and role-permission grant endpoints (tenant-scoped via JWT).
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::permission::{CreatePermission, UpdatePermission};
-use axiam_core::repository::{Pagination, PermissionRepository};
+use axiam_core::models::permission::{
+    CreatePermission, Permission, PermissionGrant, UpdatePermission,
+};
+use axiam_core::repository::{PaginatedResult, Pagination, PermissionRepository};
 use axiam_db::SurrealPermissionRepository;
 use serde::Deserialize;
 use surrealdb::Connection;
@@ -15,13 +17,13 @@ use crate::extractors::auth::AuthenticatedUser;
 // Request types
 // -----------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreatePermissionRequest {
     pub action: String,
     pub description: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct GrantPermissionRequest {
     pub permission_id: Uuid,
     #[serde(default)]
@@ -43,6 +45,16 @@ pub struct RolePermissionPath {
 // -----------------------------------------------------------------------
 
 /// `POST /api/v1/permissions`
+#[utoipa::path(
+    post,
+    path = "/api/v1/permissions",
+    tag = "permissions",
+    request_body = CreatePermissionRequest,
+    responses(
+        (status = 201, description = "Permission created", body = Permission),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealPermissionRepository<C>>,
@@ -59,6 +71,16 @@ pub async fn create<C: Connection>(
 }
 
 /// `GET /api/v1/permissions`
+#[utoipa::path(
+    get,
+    path = "/api/v1/permissions",
+    tag = "permissions",
+    params(Pagination),
+    responses(
+        (status = 200, description = "List of permissions", body = inline(PaginatedResult<Permission>)),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealPermissionRepository<C>>,
@@ -69,6 +91,17 @@ pub async fn list<C: Connection>(
 }
 
 /// `GET /api/v1/permissions/{permission_id}`
+#[utoipa::path(
+    get,
+    path = "/api/v1/permissions/{permission_id}",
+    tag = "permissions",
+    params(("permission_id" = Uuid, Path, description = "Permission ID")),
+    responses(
+        (status = 200, description = "Permission found", body = Permission),
+        (status = 404, description = "Permission not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealPermissionRepository<C>>,
@@ -79,6 +112,18 @@ pub async fn get<C: Connection>(
 }
 
 /// `PUT /api/v1/permissions/{permission_id}`
+#[utoipa::path(
+    put,
+    path = "/api/v1/permissions/{permission_id}",
+    tag = "permissions",
+    params(("permission_id" = Uuid, Path, description = "Permission ID")),
+    request_body = UpdatePermission,
+    responses(
+        (status = 200, description = "Permission updated", body = Permission),
+        (status = 404, description = "Permission not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealPermissionRepository<C>>,
@@ -92,6 +137,17 @@ pub async fn update<C: Connection>(
 }
 
 /// `DELETE /api/v1/permissions/{permission_id}`
+#[utoipa::path(
+    delete,
+    path = "/api/v1/permissions/{permission_id}",
+    tag = "permissions",
+    params(("permission_id" = Uuid, Path, description = "Permission ID")),
+    responses(
+        (status = 204, description = "Permission deleted"),
+        (status = 404, description = "Permission not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealPermissionRepository<C>>,
@@ -106,6 +162,17 @@ pub async fn delete<C: Connection>(
 // -----------------------------------------------------------------------
 
 /// `POST /api/v1/roles/{role_id}/permissions`
+#[utoipa::path(
+    post,
+    path = "/api/v1/roles/{role_id}/permissions",
+    tag = "permissions",
+    params(("role_id" = Uuid, Path, description = "Role ID")),
+    request_body = GrantPermissionRequest,
+    responses(
+        (status = 204, description = "Permission granted to role"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn grant_to_role<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealPermissionRepository<C>>,
@@ -124,6 +191,16 @@ pub async fn grant_to_role<C: Connection>(
 }
 
 /// `GET /api/v1/roles/{role_id}/permissions`
+#[utoipa::path(
+    get,
+    path = "/api/v1/roles/{role_id}/permissions",
+    tag = "permissions",
+    params(("role_id" = Uuid, Path, description = "Role ID")),
+    responses(
+        (status = 200, description = "Permission grants for role", body = Vec<PermissionGrant>),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn list_role_permissions<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealPermissionRepository<C>>,
@@ -136,6 +213,19 @@ pub async fn list_role_permissions<C: Connection>(
 }
 
 /// `DELETE /api/v1/roles/{role_id}/permissions/{permission_id}`
+#[utoipa::path(
+    delete,
+    path = "/api/v1/roles/{role_id}/permissions/{permission_id}",
+    tag = "permissions",
+    params(
+        ("role_id" = Uuid, Path, description = "Role ID"),
+        ("permission_id" = Uuid, Path, description = "Permission ID"),
+    ),
+    responses(
+        (status = 204, description = "Permission revoked from role"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn revoke_from_role<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealPermissionRepository<C>>,

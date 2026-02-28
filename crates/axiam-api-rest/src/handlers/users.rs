@@ -2,7 +2,7 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
-use axiam_core::repository::{Pagination, UserRepository};
+use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
 use axiam_db::SurrealUserRepository;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use crate::extractors::auth::AuthenticatedUser;
 // Request / response types
 // -----------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateUserRequest {
     pub username: String,
     pub email: String,
@@ -24,7 +24,7 @@ pub struct CreateUserRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateUserRequest {
     pub username: Option<String>,
     pub email: Option<String>,
@@ -33,7 +33,7 @@ pub struct UpdateUserRequest {
 }
 
 /// Public-safe user representation (no password_hash, no mfa_secret).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UserResponse {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -67,6 +67,16 @@ impl From<User> for UserResponse {
 // -----------------------------------------------------------------------
 
 /// `POST /api/v1/users`
+#[utoipa::path(
+    post,
+    path = "/api/v1/users",
+    tag = "users",
+    request_body = CreateUserRequest,
+    responses(
+        (status = 201, description = "User created", body = UserResponse),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealUserRepository<C>>,
@@ -85,6 +95,16 @@ pub async fn create<C: Connection>(
 }
 
 /// `GET /api/v1/users`
+#[utoipa::path(
+    get,
+    path = "/api/v1/users",
+    tag = "users",
+    params(Pagination),
+    responses(
+        (status = 200, description = "List of users", body = inline(PaginatedResult<UserResponse>)),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealUserRepository<C>>,
@@ -92,15 +112,26 @@ pub async fn list<C: Connection>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let result = repo.list(user.tenant_id, query.into_inner()).await?;
     let items: Vec<UserResponse> = result.items.into_iter().map(UserResponse::from).collect();
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "items": items,
-        "total": result.total,
-        "offset": result.offset,
-        "limit": result.limit,
-    })))
+    Ok(HttpResponse::Ok().json(PaginatedResult {
+        items,
+        total: result.total,
+        offset: result.offset,
+        limit: result.limit,
+    }))
 }
 
 /// `GET /api/v1/users/{user_id}`
+#[utoipa::path(
+    get,
+    path = "/api/v1/users/{user_id}",
+    tag = "users",
+    params(("user_id" = Uuid, Path, description = "User ID")),
+    responses(
+        (status = 200, description = "User found", body = UserResponse),
+        (status = 404, description = "User not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealUserRepository<C>>,
@@ -111,6 +142,18 @@ pub async fn get<C: Connection>(
 }
 
 /// `PUT /api/v1/users/{user_id}`
+#[utoipa::path(
+    put,
+    path = "/api/v1/users/{user_id}",
+    tag = "users",
+    params(("user_id" = Uuid, Path, description = "User ID")),
+    request_body = UpdateUserRequest,
+    responses(
+        (status = 200, description = "User updated", body = UserResponse),
+        (status = 404, description = "User not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealUserRepository<C>>,
@@ -132,6 +175,17 @@ pub async fn update<C: Connection>(
 }
 
 /// `DELETE /api/v1/users/{user_id}`
+#[utoipa::path(
+    delete,
+    path = "/api/v1/users/{user_id}",
+    tag = "users",
+    params(("user_id" = Uuid, Path, description = "User ID")),
+    responses(
+        (status = 204, description = "User deleted"),
+        (status = 404, description = "User not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealUserRepository<C>>,

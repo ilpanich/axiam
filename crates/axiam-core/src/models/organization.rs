@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// Organizations represent companies, departments, or business units.
 /// CA certificates are registered at the organization level, enabling
 /// a hierarchical trust model across all tenants.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Organization {
     pub id: Uuid,
     /// Human-readable name.
@@ -26,7 +26,7 @@ pub struct Organization {
 }
 
 /// Fields required to create a new organization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateOrganization {
     pub name: String,
     pub slug: String,
@@ -34,7 +34,7 @@ pub struct CreateOrganization {
 }
 
 /// Fields that can be updated on an existing organization.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct UpdateOrganization {
     pub name: Option<String>,
     pub slug: Option<String>,

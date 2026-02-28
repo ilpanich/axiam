@@ -17,7 +17,7 @@ type AuthSvc<C> = AuthService<SurrealUserRepository<C>, SurrealSessionRepository
 // Request / response types
 // -----------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
     pub tenant_id: Uuid,
     pub org_id: Uuid,
@@ -25,7 +25,7 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LoginSuccessResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -33,33 +33,44 @@ pub struct LoginSuccessResponse {
     pub expires_in: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MfaRequiredResponse {
     pub mfa_required: bool,
     pub challenge_token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RefreshRequest {
     pub tenant_id: Uuid,
     pub org_id: Uuid,
     pub refresh_token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LogoutRequest {
     pub session_id: Uuid,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MfaConfirmRequest {
     pub totp_code: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MfaVerifyRequest {
     pub challenge_token: String,
     pub totp_code: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MfaEnrollResponse {
+    pub secret_base32: String,
+    pub totp_uri: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MfaConfirmResponse {
+    pub mfa_enabled: bool,
 }
 
 // -----------------------------------------------------------------------
@@ -84,6 +95,16 @@ fn user_agent(req: &HttpRequest) -> Option<String> {
 // -----------------------------------------------------------------------
 
 /// `POST /auth/login`
+#[utoipa::path(
+    post,
+    path = "/auth/login",
+    tag = "auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful or MFA required", body = LoginSuccessResponse),
+        (status = 401, description = "Invalid credentials"),
+    )
+)]
 pub async fn login<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,
@@ -120,6 +141,17 @@ pub async fn login<C: Connection>(
 }
 
 /// `POST /auth/logout`
+#[utoipa::path(
+    post,
+    path = "/auth/logout",
+    tag = "auth",
+    request_body = LogoutRequest,
+    responses(
+        (status = 204, description = "Logged out"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn logout<C: Connection>(
     user: AuthenticatedUser,
     svc: web::Data<AuthSvc<C>>,
@@ -130,6 +162,16 @@ pub async fn logout<C: Connection>(
 }
 
 /// `POST /auth/refresh`
+#[utoipa::path(
+    post,
+    path = "/auth/refresh",
+    tag = "auth",
+    request_body = RefreshRequest,
+    responses(
+        (status = 200, description = "Tokens refreshed", body = LoginSuccessResponse),
+        (status = 401, description = "Invalid refresh token"),
+    )
+)]
 pub async fn refresh<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,
@@ -155,18 +197,39 @@ pub async fn refresh<C: Connection>(
 }
 
 /// `POST /auth/mfa/enroll`
+#[utoipa::path(
+    post,
+    path = "/auth/mfa/enroll",
+    tag = "auth",
+    responses(
+        (status = 200, description = "MFA enrollment initiated", body = MfaEnrollResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn enroll_mfa<C: Connection>(
     user: AuthenticatedUser,
     svc: web::Data<AuthSvc<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let out = svc.enroll_mfa(user.tenant_id, user.user_id).await?;
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "secret_base32": out.secret_base32,
-        "totp_uri": out.totp_uri,
-    })))
+    Ok(HttpResponse::Ok().json(MfaEnrollResponse {
+        secret_base32: out.secret_base32,
+        totp_uri: out.totp_uri,
+    }))
 }
 
 /// `POST /auth/mfa/confirm`
+#[utoipa::path(
+    post,
+    path = "/auth/mfa/confirm",
+    tag = "auth",
+    request_body = MfaConfirmRequest,
+    responses(
+        (status = 200, description = "MFA confirmed", body = MfaConfirmResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn confirm_mfa<C: Connection>(
     user: AuthenticatedUser,
     svc: web::Data<AuthSvc<C>>,
@@ -174,10 +237,20 @@ pub async fn confirm_mfa<C: Connection>(
 ) -> Result<HttpResponse, AxiamApiError> {
     svc.confirm_mfa(user.tenant_id, user.user_id, &body.totp_code)
         .await?;
-    Ok(HttpResponse::Ok().json(serde_json::json!({ "mfa_enabled": true })))
+    Ok(HttpResponse::Ok().json(MfaConfirmResponse { mfa_enabled: true }))
 }
 
 /// `POST /auth/mfa/verify`
+#[utoipa::path(
+    post,
+    path = "/auth/mfa/verify",
+    tag = "auth",
+    request_body = MfaVerifyRequest,
+    responses(
+        (status = 200, description = "MFA verified", body = LoginSuccessResponse),
+        (status = 401, description = "Invalid TOTP code"),
+    )
+)]
 pub async fn verify_mfa<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,

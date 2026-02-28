@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Scope {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -18,7 +18,7 @@ pub struct Scope {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateScope {
     pub tenant_id: Uuid,
     pub resource_id: Uuid,
@@ -26,7 +26,7 @@ pub struct CreateScope {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct UpdateScope {
     pub name: Option<String>,
     pub description: Option<String>,

@@ -1,8 +1,8 @@
 //! Resource management endpoints with hierarchy support (tenant-scoped via JWT).
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::resource::{CreateResource, UpdateResource};
-use axiam_core::repository::{Pagination, ResourceRepository};
+use axiam_core::models::resource::{CreateResource, Resource, UpdateResource};
+use axiam_core::repository::{PaginatedResult, Pagination, ResourceRepository};
 use axiam_db::SurrealResourceRepository;
 use serde::Deserialize;
 use surrealdb::Connection;
@@ -15,7 +15,7 @@ use crate::extractors::auth::AuthenticatedUser;
 // Request types
 // -----------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateResourceRequest {
     pub name: String,
     pub resource_type: String,
@@ -28,6 +28,16 @@ pub struct CreateResourceRequest {
 // -----------------------------------------------------------------------
 
 /// `POST /api/v1/resources`
+#[utoipa::path(
+    post,
+    path = "/api/v1/resources",
+    tag = "resources",
+    request_body = CreateResourceRequest,
+    responses(
+        (status = 201, description = "Resource created", body = Resource),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealResourceRepository<C>>,
@@ -46,6 +56,16 @@ pub async fn create<C: Connection>(
 }
 
 /// `GET /api/v1/resources`
+#[utoipa::path(
+    get,
+    path = "/api/v1/resources",
+    tag = "resources",
+    params(Pagination),
+    responses(
+        (status = 200, description = "List of resources", body = inline(PaginatedResult<Resource>)),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealResourceRepository<C>>,
@@ -56,6 +76,17 @@ pub async fn list<C: Connection>(
 }
 
 /// `GET /api/v1/resources/{resource_id}`
+#[utoipa::path(
+    get,
+    path = "/api/v1/resources/{resource_id}",
+    tag = "resources",
+    params(("resource_id" = Uuid, Path, description = "Resource ID")),
+    responses(
+        (status = 200, description = "Resource found", body = Resource),
+        (status = 404, description = "Resource not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealResourceRepository<C>>,
@@ -66,6 +97,18 @@ pub async fn get<C: Connection>(
 }
 
 /// `PUT /api/v1/resources/{resource_id}`
+#[utoipa::path(
+    put,
+    path = "/api/v1/resources/{resource_id}",
+    tag = "resources",
+    params(("resource_id" = Uuid, Path, description = "Resource ID")),
+    request_body = UpdateResource,
+    responses(
+        (status = 200, description = "Resource updated", body = Resource),
+        (status = 404, description = "Resource not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealResourceRepository<C>>,
@@ -79,6 +122,17 @@ pub async fn update<C: Connection>(
 }
 
 /// `DELETE /api/v1/resources/{resource_id}`
+#[utoipa::path(
+    delete,
+    path = "/api/v1/resources/{resource_id}",
+    tag = "resources",
+    params(("resource_id" = Uuid, Path, description = "Resource ID")),
+    responses(
+        (status = 204, description = "Resource deleted"),
+        (status = 404, description = "Resource not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealResourceRepository<C>>,
@@ -93,6 +147,16 @@ pub async fn delete<C: Connection>(
 // -----------------------------------------------------------------------
 
 /// `GET /api/v1/resources/{resource_id}/children`
+#[utoipa::path(
+    get,
+    path = "/api/v1/resources/{resource_id}/children",
+    tag = "resources",
+    params(("resource_id" = Uuid, Path, description = "Parent resource ID")),
+    responses(
+        (status = 200, description = "Child resources", body = Vec<Resource>),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn list_children<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealResourceRepository<C>>,
@@ -103,6 +167,16 @@ pub async fn list_children<C: Connection>(
 }
 
 /// `GET /api/v1/resources/{resource_id}/ancestors`
+#[utoipa::path(
+    get,
+    path = "/api/v1/resources/{resource_id}/ancestors",
+    tag = "resources",
+    params(("resource_id" = Uuid, Path, description = "Resource ID")),
+    responses(
+        (status = 200, description = "Ancestor resources", body = Vec<Resource>),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn list_ancestors<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealResourceRepository<C>>,

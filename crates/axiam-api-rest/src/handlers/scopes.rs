@@ -1,7 +1,7 @@
 //! Scope management endpoints (nested under resources, tenant-scoped via JWT).
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::scope::{CreateScope, UpdateScope};
+use axiam_core::models::scope::{CreateScope, Scope, UpdateScope};
 use axiam_core::repository::ScopeRepository;
 use axiam_db::SurrealScopeRepository;
 use serde::Deserialize;
@@ -30,7 +30,7 @@ pub struct ScopePath {
 // Request types
 // -----------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateScopeRequest {
     pub name: String,
     pub description: String,
@@ -41,6 +41,17 @@ pub struct CreateScopeRequest {
 // -----------------------------------------------------------------------
 
 /// `POST /api/v1/resources/{resource_id}/scopes`
+#[utoipa::path(
+    post,
+    path = "/api/v1/resources/{resource_id}/scopes",
+    tag = "scopes",
+    params(("resource_id" = Uuid, Path, description = "Resource ID")),
+    request_body = CreateScopeRequest,
+    responses(
+        (status = 201, description = "Scope created", body = Scope),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealScopeRepository<C>>,
@@ -59,6 +70,16 @@ pub async fn create<C: Connection>(
 }
 
 /// `GET /api/v1/resources/{resource_id}/scopes`
+#[utoipa::path(
+    get,
+    path = "/api/v1/resources/{resource_id}/scopes",
+    tag = "scopes",
+    params(("resource_id" = Uuid, Path, description = "Resource ID")),
+    responses(
+        (status = 200, description = "List of scopes", body = Vec<Scope>),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealScopeRepository<C>>,
@@ -71,6 +92,20 @@ pub async fn list<C: Connection>(
 }
 
 /// `GET /api/v1/resources/{resource_id}/scopes/{scope_id}`
+#[utoipa::path(
+    get,
+    path = "/api/v1/resources/{resource_id}/scopes/{scope_id}",
+    tag = "scopes",
+    params(
+        ("resource_id" = Uuid, Path, description = "Resource ID"),
+        ("scope_id" = Uuid, Path, description = "Scope ID"),
+    ),
+    responses(
+        (status = 200, description = "Scope found", body = Scope),
+        (status = 404, description = "Scope not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealScopeRepository<C>>,
@@ -81,6 +116,21 @@ pub async fn get<C: Connection>(
 }
 
 /// `PUT /api/v1/resources/{resource_id}/scopes/{scope_id}`
+#[utoipa::path(
+    put,
+    path = "/api/v1/resources/{resource_id}/scopes/{scope_id}",
+    tag = "scopes",
+    params(
+        ("resource_id" = Uuid, Path, description = "Resource ID"),
+        ("scope_id" = Uuid, Path, description = "Scope ID"),
+    ),
+    request_body = UpdateScope,
+    responses(
+        (status = 200, description = "Scope updated", body = Scope),
+        (status = 404, description = "Scope not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealScopeRepository<C>>,
@@ -94,6 +144,20 @@ pub async fn update<C: Connection>(
 }
 
 /// `DELETE /api/v1/resources/{resource_id}/scopes/{scope_id}`
+#[utoipa::path(
+    delete,
+    path = "/api/v1/resources/{resource_id}/scopes/{scope_id}",
+    tag = "scopes",
+    params(
+        ("resource_id" = Uuid, Path, description = "Resource ID"),
+        ("scope_id" = Uuid, Path, description = "Scope ID"),
+    ),
+    responses(
+        (status = 204, description = "Scope deleted"),
+        (status = 404, description = "Scope not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealScopeRepository<C>>,

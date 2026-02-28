@@ -26,7 +26,7 @@ use crate::models::{
 };
 
 /// Pagination parameters for list queries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(default)]
 pub struct Pagination {
     pub offset: u64,
@@ -43,7 +43,7 @@ impl Default for Pagination {
 }
 
 /// A paginated result set.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PaginatedResult<T> {
     pub items: Vec<T>,
     pub total: u64,

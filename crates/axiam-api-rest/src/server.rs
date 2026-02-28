@@ -4,13 +4,23 @@ use actix_cors::Cors;
 use actix_web::http::header;
 use actix_web::web;
 use axiam_db::WsClient;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::handlers;
+use crate::openapi::ApiDoc;
 
 /// Register health and readiness routes.
 pub fn health_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/health", web::get().to(crate::health::health))
         .route("/ready", web::get().to(crate::health::ready));
+}
+
+/// Register Swagger UI and OpenAPI JSON spec routes.
+pub fn openapi_routes(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        SwaggerUi::new("/api/docs/{_:.*}").url("/api/docs/openapi.json", ApiDoc::openapi()),
+    );
 }
 
 /// Register the API v1 scope with all domain endpoints (production WsClient).

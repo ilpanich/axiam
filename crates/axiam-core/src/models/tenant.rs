@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// Each tenant has its own set of users, roles, permissions, resources,
 /// certificates, and configuration. Tenants can represent environments
 /// (dev/staging/prod) or separate business contexts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Tenant {
     pub id: Uuid,
     /// The organization this tenant belongs to.
@@ -28,7 +28,7 @@ pub struct Tenant {
 }
 
 /// Fields required to create a new tenant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateTenant {
     pub organization_id: Uuid,
     pub name: String,
@@ -37,7 +37,7 @@ pub struct CreateTenant {
 }
 
 /// Fields that can be updated on an existing tenant.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct UpdateTenant {
     pub name: Option<String>,
     pub slug: Option<String>,

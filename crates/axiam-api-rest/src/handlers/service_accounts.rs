@@ -5,7 +5,7 @@ use axiam_core::models::service_account::{
     CreateServiceAccount, ServiceAccount, UpdateServiceAccount,
 };
 use axiam_core::models::user::UserStatus;
-use axiam_core::repository::{Pagination, ServiceAccountRepository};
+use axiam_core::repository::{PaginatedResult, Pagination, ServiceAccountRepository};
 use axiam_db::SurrealServiceAccountRepository;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ use crate::extractors::auth::AuthenticatedUser;
 // Request types
 // -----------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateServiceAccountRequest {
     pub name: String,
 }
@@ -29,7 +29,7 @@ pub struct CreateServiceAccountRequest {
 // -----------------------------------------------------------------------
 
 /// Public-safe service account representation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ServiceAccountResponse {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -55,7 +55,7 @@ impl From<ServiceAccount> for ServiceAccountResponse {
 }
 
 /// Response for service account creation — includes the one-time plaintext secret.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ServiceAccountCreatedResponse {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -68,7 +68,7 @@ pub struct ServiceAccountCreatedResponse {
 }
 
 /// Response for secret rotation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RotateSecretResponse {
     pub client_secret: String,
 }
@@ -78,6 +78,16 @@ pub struct RotateSecretResponse {
 // -----------------------------------------------------------------------
 
 /// `POST /api/v1/service-accounts`
+#[utoipa::path(
+    post,
+    path = "/api/v1/service-accounts",
+    tag = "service-accounts",
+    request_body = CreateServiceAccountRequest,
+    responses(
+        (status = 201, description = "Service account created (secret shown once)", body = ServiceAccountCreatedResponse),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
@@ -101,6 +111,16 @@ pub async fn create<C: Connection>(
 }
 
 /// `GET /api/v1/service-accounts`
+#[utoipa::path(
+    get,
+    path = "/api/v1/service-accounts",
+    tag = "service-accounts",
+    params(Pagination),
+    responses(
+        (status = 200, description = "List of service accounts", body = inline(PaginatedResult<ServiceAccountResponse>)),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
@@ -112,15 +132,26 @@ pub async fn list<C: Connection>(
         .into_iter()
         .map(ServiceAccountResponse::from)
         .collect();
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "items": items,
-        "total": result.total,
-        "offset": result.offset,
-        "limit": result.limit,
-    })))
+    Ok(HttpResponse::Ok().json(PaginatedResult {
+        items,
+        total: result.total,
+        offset: result.offset,
+        limit: result.limit,
+    }))
 }
 
 /// `GET /api/v1/service-accounts/{sa_id}`
+#[utoipa::path(
+    get,
+    path = "/api/v1/service-accounts/{sa_id}",
+    tag = "service-accounts",
+    params(("sa_id" = Uuid, Path, description = "Service account ID")),
+    responses(
+        (status = 200, description = "Service account found", body = ServiceAccountResponse),
+        (status = 404, description = "Service account not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
@@ -131,6 +162,18 @@ pub async fn get<C: Connection>(
 }
 
 /// `PUT /api/v1/service-accounts/{sa_id}`
+#[utoipa::path(
+    put,
+    path = "/api/v1/service-accounts/{sa_id}",
+    tag = "service-accounts",
+    params(("sa_id" = Uuid, Path, description = "Service account ID")),
+    request_body = UpdateServiceAccount,
+    responses(
+        (status = 200, description = "Service account updated", body = ServiceAccountResponse),
+        (status = 404, description = "Service account not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
@@ -144,6 +187,17 @@ pub async fn update<C: Connection>(
 }
 
 /// `DELETE /api/v1/service-accounts/{sa_id}`
+#[utoipa::path(
+    delete,
+    path = "/api/v1/service-accounts/{sa_id}",
+    tag = "service-accounts",
+    params(("sa_id" = Uuid, Path, description = "Service account ID")),
+    responses(
+        (status = 204, description = "Service account deleted"),
+        (status = 404, description = "Service account not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
@@ -154,6 +208,17 @@ pub async fn delete<C: Connection>(
 }
 
 /// `POST /api/v1/service-accounts/{sa_id}/rotate-secret`
+#[utoipa::path(
+    post,
+    path = "/api/v1/service-accounts/{sa_id}/rotate-secret",
+    tag = "service-accounts",
+    params(("sa_id" = Uuid, Path, description = "Service account ID")),
+    responses(
+        (status = 200, description = "Secret rotated", body = RotateSecretResponse),
+        (status = 404, description = "Service account not found"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn rotate_secret<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealServiceAccountRepository<C>>,

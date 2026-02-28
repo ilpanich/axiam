@@ -10,7 +10,7 @@ use crate::handlers;
         title = "AXIAM API",
         description = "Access eXtended Identity and Authorization Management — REST API",
         version = "0.1.0",
-        license(name = "AGPL-3.0-or-later"),
+        license(name = "Apache-2.0"),
     ),
     paths(
         // Health

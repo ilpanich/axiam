@@ -276,10 +276,7 @@ async fn refresh_with_invalid_token_returns_401() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    // Should be 401 (session not found maps to NotFound -> 404, or auth failed -> 401)
+    // Should be 401 Unauthorized when the refresh token is invalid
     let status = resp.status().as_u16();
-    assert!(
-        status == 401 || status == 404,
-        "Expected 401 or 404, got {status}"
-    );
+    assert_eq!(status, 401, "Expected 401, got {status}");
 }

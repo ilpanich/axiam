@@ -1,6 +1,7 @@
 //! Scope management endpoints (nested under resources, tenant-scoped via JWT).
 
 use actix_web::{HttpResponse, web};
+use axiam_core::error::AxiamError;
 use axiam_core::models::scope::{CreateScope, Scope, UpdateScope};
 use axiam_core::repository::ScopeRepository;
 use axiam_db::SurrealScopeRepository;
@@ -112,6 +113,13 @@ pub async fn get<C: Connection>(
     path: web::Path<ScopePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let scope = repo.get_by_id(user.tenant_id, path.scope_id).await?;
+    if scope.resource_id != path.resource_id {
+        return Err(AxiamError::NotFound {
+            entity: "Scope".into(),
+            id: path.scope_id.to_string(),
+        }
+        .into());
+    }
     Ok(HttpResponse::Ok().json(scope))
 }
 
@@ -137,6 +145,14 @@ pub async fn update<C: Connection>(
     path: web::Path<ScopePath>,
     body: web::Json<UpdateScope>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    let existing = repo.get_by_id(user.tenant_id, path.scope_id).await?;
+    if existing.resource_id != path.resource_id {
+        return Err(AxiamError::NotFound {
+            entity: "Scope".into(),
+            id: path.scope_id.to_string(),
+        }
+        .into());
+    }
     let scope = repo
         .update(user.tenant_id, path.scope_id, body.into_inner())
         .await?;
@@ -163,6 +179,14 @@ pub async fn delete<C: Connection>(
     repo: web::Data<SurrealScopeRepository<C>>,
     path: web::Path<ScopePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    let existing = repo.get_by_id(user.tenant_id, path.scope_id).await?;
+    if existing.resource_id != path.resource_id {
+        return Err(AxiamError::NotFound {
+            entity: "Scope".into(),
+            id: path.scope_id.to_string(),
+        }
+        .into());
+    }
     repo.delete(user.tenant_id, path.scope_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

@@ -177,9 +177,6 @@ use crate::handlers;
         (name = "scopes", description = "Scope management (sub-resource permissions)"),
         (name = "service-accounts", description = "Service account management"),
     ),
-    security(
-        ("bearer" = [])
-    ),
     modifiers(&SecurityAddon),
 )]
 pub struct ApiDoc;

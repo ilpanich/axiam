@@ -209,23 +209,21 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
 
 /// Build CORS middleware from configuration.
 ///
-/// An empty `allowed_origins` slice enables permissive mode (suitable for
-/// development). A populated slice restricts to those origins.
+/// An empty `allowed_origins` slice yields a restrictive default policy
+/// (denying cross-origin requests). A populated slice restricts CORS to the
+/// specified origins.
 pub fn build_cors(allowed_origins: &[String]) -> Cors {
-    if allowed_origins.is_empty() {
-        Cors::permissive()
-    } else {
-        let mut cors = Cors::default()
-            .allowed_methods(vec!["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
-            .allowed_headers(vec![
-                header::AUTHORIZATION,
-                header::CONTENT_TYPE,
-                header::ACCEPT,
-            ])
-            .max_age(3600);
-        for origin in allowed_origins {
-            cors = cors.allowed_origin(origin);
-        }
-        cors
+    let mut cors = Cors::default()
+        .allowed_methods(vec!["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+        .allowed_headers(vec![
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+        ])
+        .max_age(3600);
+
+    for origin in allowed_origins {
+        cors = cors.allowed_origin(origin);
     }
+    cors
 }

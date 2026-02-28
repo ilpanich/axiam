@@ -50,6 +50,14 @@ pub struct RoleGroupPath {
     pub group_id: Uuid,
 }
 
+/// Optional query parameter for scoped role unassignment.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct UnassignQuery {
+    /// If provided, only removes the assignment for this specific resource.
+    /// If omitted, removes the global (unscoped) assignment.
+    pub resource_id: Option<Uuid>,
+}
+
 // -----------------------------------------------------------------------
 // Handlers — CRUD
 // -----------------------------------------------------------------------
@@ -209,6 +217,7 @@ pub async fn assign_to_user<C: Connection>(
     params(
         ("role_id" = Uuid, Path, description = "Role ID"),
         ("user_id" = Uuid, Path, description = "User ID"),
+        UnassignQuery,
     ),
     responses(
         (status = 204, description = "Role unassigned from user"),
@@ -219,9 +228,10 @@ pub async fn unassign_from_user<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealRoleRepository<C>>,
     path: web::Path<RoleUserPath>,
+    query: web::Query<UnassignQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let p = path.into_inner();
-    repo.unassign_from_user(user.tenant_id, p.user_id, p.role_id, None)
+    repo.unassign_from_user(user.tenant_id, p.user_id, p.role_id, query.resource_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -267,6 +277,7 @@ pub async fn assign_to_group<C: Connection>(
     params(
         ("role_id" = Uuid, Path, description = "Role ID"),
         ("group_id" = Uuid, Path, description = "Group ID"),
+        UnassignQuery,
     ),
     responses(
         (status = 204, description = "Role unassigned from group"),
@@ -277,9 +288,10 @@ pub async fn unassign_from_group<C: Connection>(
     user: AuthenticatedUser,
     repo: web::Data<SurrealRoleRepository<C>>,
     path: web::Path<RoleGroupPath>,
+    query: web::Query<UnassignQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let p = path.into_inner();
-    repo.unassign_from_group(user.tenant_id, p.group_id, p.role_id, None)
+    repo.unassign_from_group(user.tenant_id, p.group_id, p.role_id, query.resource_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }

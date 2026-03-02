@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use actix_web::{App, HttpServer, web};
+use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::{
     HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes, openapi_routes,
 };
@@ -27,6 +28,8 @@ struct AppConfig {
     db: DbConfig,
     #[serde(default)]
     auth: AuthConfig,
+    #[serde(default)]
+    grpc: GrpcConfig,
 }
 
 #[tokio::main]
@@ -86,6 +89,14 @@ async fn main() -> std::io::Result<()> {
     let health_checker: Arc<dyn HealthChecker> = Arc::new(db);
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
+
+    // Spawn gRPC server on a background task.
+    let grpc_addr = config.grpc.bind_address();
+    tokio::spawn(async move {
+        if let Err(e) = start_grpc_server(grpc_addr).await {
+            tracing::error!(error = %e, "gRPC server failed");
+        }
+    });
 
     HttpServer::new(move || {
         App::new()

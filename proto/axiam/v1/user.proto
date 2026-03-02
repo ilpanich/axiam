@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package axiam.v1;
+
+// User service for lookups and credential validation.
+service UserService {
+  // Retrieve a user by ID.
+  rpc GetUser(GetUserRequest) returns (UserResponse);
+
+  // Validate username/email + password without issuing tokens.
+  rpc ValidateCredentials(ValidateCredentialsRequest) returns (ValidateCredentialsResponse);
+}
+
+message GetUserRequest {
+  string tenant_id = 1;
+  string user_id = 2;
+}
+
+message UserResponse {
+  string id = 1;
+  string tenant_id = 2;
+  string username = 3;
+  string email = 4;
+  string display_name = 5;
+  // User status: "active", "inactive", "locked".
+  string status = 6;
+  // RFC 3339 timestamps.
+  string created_at = 7;
+  string updated_at = 8;
+}
+
+message ValidateCredentialsRequest {
+  string tenant_id = 1;
+  string username_or_email = 2;
+  string password = 3;
+}
+
+message ValidateCredentialsResponse {
+  bool valid = 1;
+  // User UUID (set only when valid).
+  string user_id = 2;
+}

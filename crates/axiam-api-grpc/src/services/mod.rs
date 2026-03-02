@@ -1,8 +1,8 @@
 //! gRPC service implementations.
 
-mod authorization;
-mod token;
-mod user;
+pub mod authorization;
+pub mod token;
+pub mod user;
 
 pub use authorization::AuthorizationServiceImpl;
 pub use token::TokenServiceImpl;

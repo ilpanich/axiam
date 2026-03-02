@@ -90,10 +90,21 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
-    // Spawn gRPC server on a background task.
+    // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();
+    let grpc_engine = axiam_authz::AuthorizationEngine::new(
+        role_repo.clone(),
+        permission_repo.clone(),
+        resource_repo.clone(),
+        scope_repo.clone(),
+        group_repo.clone(),
+    );
+    let grpc_user_repo = user_repo.clone();
+    let grpc_auth_config = config.auth.clone();
     tokio::spawn(async move {
-        if let Err(e) = start_grpc_server(grpc_addr).await {
+        if let Err(e) =
+            start_grpc_server(grpc_addr, grpc_engine, grpc_user_repo, grpc_auth_config).await
+        {
             tracing::error!(error = %e, "gRPC server failed");
         }
     });

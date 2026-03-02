@@ -24,3 +24,6 @@ target
 #  Codegraph generates a .codegraph directory in the root of the project to store its
 #  internal data. This directory should be ignored to prevent it from being committed to version control.
 .codegraph/
+
+# CodeGraphContext
+mcp.json

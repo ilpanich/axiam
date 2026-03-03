@@ -388,6 +388,32 @@ Write API documentation (REST, gRPC, AMQP), deployment guide, admin guide, PKI/c
 
 ---
 
+## Phase 16: Deferred Improvements & Optimizations
+
+Items identified during development and PR reviews (PRs #70, #71) that were intentionally deferred to keep each phase focused.
+
+### T16.1 — gRPC Integration Tests
+Add integration tests for `axiam-api-grpc`: spin up a Tonic server with mock/in-memory repositories, use a generated gRPC client to test UUID parsing, error mapping, credential validation policy, token validation, and authorization checks. Ensure parity with existing REST integration tests.
+
+**Commit**: `test(api-grpc): integration tests for gRPC services`
+
+### T16.2 — Concurrent BatchCheckAccess
+Refactor `BatchCheckAccess` to evaluate requests concurrently using `futures::stream::FuturesUnordered` or `buffer_unordered` with bounded concurrency. Preserve result order. Benchmark against sequential implementation to validate improvement.
+
+**Commit**: `perf(api-grpc): concurrent batch authorization checks`
+
+### T16.3 — REST Endpoint Authorization Enforcement
+Wire the `RequirePermission` middleware and `AuthorizationEngine` to all REST CRUD endpoints (users, groups, roles, permissions, resources, scopes, service accounts, organizations, tenants). Define authorization policies and implement an admin bootstrap flow (initial super-admin creation). Currently only JWT authentication is enforced via `AuthenticatedUser`.
+
+**Commit**: `feat(api-rest): enforce per-endpoint authorization on all CRUD routes`
+
+### T16.4 — OpenAPI Login Response Schema
+Fix the OpenAPI annotation for `POST /auth/login` to accurately document both `LoginSuccessResponse` and `MfaRequiredResponse` as possible 200 response bodies (using `oneOf` or separate status codes). Ensures generated client SDKs correctly model the login response.
+
+**Commit**: `fix(api-rest): OpenAPI login response documents both success and MFA schemas`
+
+---
+
 ## Summary
 
 | Phase | Tasks | Focus |
@@ -408,7 +434,8 @@ Write API documentation (REST, gRPC, AMQP), deployment guide, admin guide, PKI/c
 | Phase 13 | 3 | Docker, K8s, CD pipeline |
 | Phase 14 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 15 | 4 | Security, compliance, performance, docs |
+| Phase 16 | 4 | Deferred improvements & optimizations from PR reviews |
 
-**Total: 64 tasks across 16 phases**
+**Total: 68 tasks across 17 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

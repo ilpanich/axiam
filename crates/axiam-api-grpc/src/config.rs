@@ -24,9 +24,9 @@ impl Default for GrpcConfig {
 
 impl GrpcConfig {
     pub fn bind_address(&self) -> SocketAddr {
-        format!("{}:{}", self.host, self.port)
-            .parse()
-            .expect("invalid gRPC bind address")
+        let addr = format!("{}:{}", self.host, self.port);
+        addr.parse()
+            .unwrap_or_else(|e| panic!("invalid gRPC bind address '{addr}': {e}"))
     }
 }
 

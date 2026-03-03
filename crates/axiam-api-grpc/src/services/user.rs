@@ -103,7 +103,8 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
                     .await
                 {
                     Ok(u) => u,
-                    Err(_) => return Ok(invalid),
+                    Err(AxiamError::NotFound { .. }) => return Ok(invalid),
+                    Err(e) => return Err(Status::internal(e.to_string())),
                 }
             }
             Err(e) => return Err(Status::internal(e.to_string())),

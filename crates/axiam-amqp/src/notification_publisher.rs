@@ -26,16 +26,24 @@ impl NotificationPublisher {
             AmqpError::Publish(e.to_string())
         })?;
 
-        self.channel
+        let confirm = self
+            .channel
             .basic_publish(
                 "".into(),
                 queues::NOTIFICATIONS.into(),
                 BasicPublishOptions::default(),
                 &payload,
-                BasicProperties::default().with_content_type("application/json".into()),
+                BasicProperties::default()
+                    .with_content_type("application/json".into())
+                    .with_delivery_mode(2),
             )
             .await
             .map_err(|e| AmqpError::Publish(e.to_string()))?;
+
+        confirm.await.map_err(|e| {
+            error!(error = %e, "Notification publish not confirmed by broker");
+            AmqpError::Publish(e.to_string())
+        })?;
 
         Ok(())
     }

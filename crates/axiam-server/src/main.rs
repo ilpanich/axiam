@@ -114,10 +114,11 @@ async fn main() -> std::io::Result<()> {
         scope_repo.clone(),
         group_repo.clone(),
     );
-    tokio::spawn(axiam_amqp::authz_consumer::start_authz_consumer(
-        amqp_channel,
-        amqp_engine,
-    ));
+    tokio::spawn(async move {
+        axiam_amqp::authz_consumer::start_authz_consumer(amqp_channel, amqp_engine).await;
+        tracing::error!("AMQP authz consumer exited — shutting down process");
+        std::process::exit(1);
+    });
 
     // Create notification publisher (available for services to emit events).
     let notif_channel = amqp

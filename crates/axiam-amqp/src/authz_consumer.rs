@@ -109,7 +109,7 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
                 AuthzResponse {
                     correlation_id,
                     allowed: false,
-                    reason: Some(format!("internal error: {e}")),
+                    reason: Some("internal error".to_string()),
                 }
             }
         };
@@ -124,23 +124,36 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
             }
         };
 
-        if let Err(e) = channel
+        let confirm = match channel
             .basic_publish(
                 "".into(),
                 queues::AUTHZ_RESPONSE.into(),
                 BasicPublishOptions::default(),
                 &payload,
-                BasicProperties::default().with_content_type("application/json".into()),
+                BasicProperties::default()
+                    .with_content_type("application/json".into())
+                    .with_delivery_mode(2),
             )
             .await
         {
+            Ok(confirm) => confirm,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    correlation_id = %correlation_id,
+                    "Failed to publish authz response"
+                );
+                let _ = delivery.acker.nack(BasicNackOptions::default()).await;
+                continue;
+            }
+        };
+
+        if let Err(e) = confirm.await {
             error!(
                 error = %e,
                 correlation_id = %correlation_id,
-                "Failed to publish authz response"
+                "Authz response publish not confirmed by broker"
             );
-            let _ = delivery.acker.nack(BasicNackOptions::default()).await;
-            continue;
         }
 
         if let Err(e) = delivery.acker.ack(BasicAckOptions::default()).await {

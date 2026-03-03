@@ -31,12 +31,13 @@ const ALL_QUEUES: &[&str] = &[
 pub struct AmqpManager {
     connection: Connection,
     channel: Channel,
+    prefetch_count: u16,
 }
 
 impl AmqpManager {
     /// Establish a connection to RabbitMQ and create a channel.
     pub async fn connect(config: &AmqpConfig) -> Result<Self, AmqpError> {
-        info!(url = %config.url, "Connecting to RabbitMQ");
+        info!("Connecting to RabbitMQ");
 
         let connection = Connection::connect(&config.url, ConnectionProperties::default())
             .await
@@ -57,19 +58,24 @@ impl AmqpManager {
         Ok(Self {
             connection,
             channel,
+            prefetch_count: config.prefetch_count,
         })
     }
 
     /// Connect with automatic retry on failure.
+    ///
+    /// Always attempts at least once. `max_retries` controls how many
+    /// additional attempts are made after the first failure.
     pub async fn connect_with_retry(config: &AmqpConfig) -> Result<Self, AmqpError> {
-        for attempt in 1..=config.max_retries {
+        let total_attempts = config.max_retries.saturating_add(1);
+        for attempt in 1..=total_attempts {
             match Self::connect(config).await {
                 Ok(manager) => return Ok(manager),
                 Err(e) => {
-                    if attempt == config.max_retries {
+                    if attempt == total_attempts {
                         tracing::error!(
                             error = %e,
-                            attempts = config.max_retries,
+                            attempts = total_attempts,
                             "Failed to connect to RabbitMQ after all retries"
                         );
                         return Err(AmqpError::MaxRetriesExhausted);
@@ -112,12 +118,18 @@ impl AmqpManager {
         &self.channel
     }
 
-    /// Create a new channel on the existing connection.
+    /// Create a new channel on the existing connection with QoS applied.
     pub async fn create_channel(&self) -> Result<Channel, AmqpError> {
-        self.connection
+        let channel = self
+            .connection
             .create_channel()
             .await
-            .map_err(AmqpError::Channel)
+            .map_err(AmqpError::Channel)?;
+        channel
+            .basic_qos(self.prefetch_count, BasicQosOptions::default())
+            .await
+            .map_err(AmqpError::Channel)?;
+        Ok(channel)
     }
 
     /// Returns a reference to the underlying AMQP connection.

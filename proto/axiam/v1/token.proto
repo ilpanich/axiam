@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package axiam.v1;
+
+// Token service for JWT validation and introspection.
+service TokenService {
+  // Validate a JWT access token (signature + expiry).
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+
+  // Introspect a token — returns full claims (RFC 7662-style).
+  rpc IntrospectToken(IntrospectTokenRequest) returns (IntrospectTokenResponse);
+}
+
+message ValidateTokenRequest {
+  string access_token = 1;
+}
+
+message ValidateTokenResponse {
+  bool valid = 1;
+  // Subject (user) UUID. Empty when token is invalid.
+  string subject_id = 2;
+  // Tenant UUID. Empty when token is invalid.
+  string tenant_id = 3;
+  // Organization UUID. Empty when token is invalid.
+  string org_id = 4;
+  // Expiration (Unix timestamp). Zero when token is invalid.
+  int64 exp = 5;
+}
+
+message IntrospectTokenRequest {
+  string access_token = 1;
+}
+
+message IntrospectTokenResponse {
+  // Whether the token is active (valid and not expired).
+  bool active = 1;
+  // Subject (user) UUID.
+  string sub = 2;
+  // Tenant UUID.
+  string tenant_id = 3;
+  // Organization UUID.
+  string org_id = 4;
+  // Issuer.
+  string iss = 5;
+  // Issued-at (Unix timestamp).
+  int64 iat = 6;
+  // Expiration (Unix timestamp).
+  int64 exp = 7;
+  // Unique token ID.
+  string jti = 8;
+}

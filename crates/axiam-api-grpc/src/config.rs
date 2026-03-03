@@ -1,0 +1,44 @@
+//! gRPC server configuration.
+
+use std::net::SocketAddr;
+
+use serde::Deserialize;
+
+/// Configuration for the gRPC server.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GrpcConfig {
+    #[serde(default = "default_host")]
+    pub host: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_port(),
+        }
+    }
+}
+
+impl GrpcConfig {
+    pub fn bind_address(&self) -> SocketAddr {
+        let addr = format!("{}:{}", self.host, self.port);
+        addr.parse()
+            .unwrap_or_else(|e| panic!("invalid gRPC bind address '{addr}': {e}"))
+    }
+}
+
+/// Default gRPC bind host.
+///
+/// Binds to loopback (`127.0.0.1`) so the gRPC API is not exposed on
+/// all interfaces unless explicitly configured. Deploy behind mTLS or
+/// an internal network when binding to `0.0.0.0`.
+fn default_host() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_port() -> u16 {
+    50051
+}

@@ -1,6 +1,7 @@
 //! TokenService gRPC implementation.
 
 use axiam_auth::config::AuthConfig;
+use axiam_auth::error::AuthError;
 use axiam_auth::token::validate_access_token;
 use tonic::{Request, Response, Status};
 
@@ -38,6 +39,9 @@ impl TokenService for TokenServiceImpl {
                     exp: claims.exp,
                 }))
             }
+            Err(AuthError::Crypto(msg)) => {
+                Err(Status::internal(format!("token validation error: {msg}")))
+            }
             Err(_) => Ok(Response::new(ValidateTokenResponse {
                 valid: false,
                 subject_id: String::new(),
@@ -67,6 +71,9 @@ impl TokenService for TokenServiceImpl {
                     exp: claims.exp,
                     jti: claims.jti,
                 }))
+            }
+            Err(AuthError::Crypto(msg)) => {
+                Err(Status::internal(format!("token validation error: {msg}")))
             }
             Err(_) => Ok(Response::new(IntrospectTokenResponse {
                 active: false,

@@ -1,6 +1,6 @@
 //! RabbitMQ connection management.
 
-use lapin::options::{BasicQosOptions, QueueDeclareOptions};
+use lapin::options::{BasicQosOptions, ConfirmSelectOptions, QueueDeclareOptions};
 use lapin::types::FieldTable;
 use lapin::{Channel, Connection, ConnectionProperties};
 use tracing::{info, warn};
@@ -128,6 +128,19 @@ impl AmqpManager {
             .map_err(AmqpError::Channel)?;
         channel
             .basic_qos(self.prefetch_count, BasicQosOptions::default())
+            .await
+            .map_err(AmqpError::Channel)?;
+        Ok(channel)
+    }
+
+    /// Create a new channel with QoS and publisher confirms enabled.
+    ///
+    /// Use this for channels that will publish messages and need broker
+    /// acknowledgement (`Confirmation::Ack`/`Nack` instead of `NotRequested`).
+    pub async fn create_publisher_channel(&self) -> Result<Channel, AmqpError> {
+        let channel = self.create_channel().await?;
+        channel
+            .confirm_select(ConfirmSelectOptions::default())
             .await
             .map_err(AmqpError::Channel)?;
         Ok(channel)

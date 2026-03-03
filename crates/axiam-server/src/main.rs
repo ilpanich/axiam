@@ -103,8 +103,9 @@ async fn main() -> std::io::Result<()> {
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
     // Spawn AMQP authorization consumer on a background task.
+    // Uses a publisher channel because the consumer also publishes responses.
     let amqp_channel = amqp
-        .create_channel()
+        .create_publisher_channel()
         .await
         .expect("Failed to create AMQP consumer channel");
     let amqp_engine = axiam_authz::AuthorizationEngine::new(
@@ -122,7 +123,7 @@ async fn main() -> std::io::Result<()> {
 
     // Create notification publisher (available for services to emit events).
     let notif_channel = amqp
-        .create_channel()
+        .create_publisher_channel()
         .await
         .expect("Failed to create AMQP notification channel");
     let notification_publisher = axiam_amqp::NotificationPublisher::new(notif_channel);

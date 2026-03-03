@@ -1,5 +1,6 @@
 //! AMQP message types for serialization/deserialization.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -53,7 +54,7 @@ pub struct NotificationEvent {
     pub actor_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
-    pub timestamp: String,
+    pub timestamp: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }

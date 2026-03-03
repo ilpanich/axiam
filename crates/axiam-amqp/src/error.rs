@@ -13,6 +13,9 @@ pub enum AmqpError {
     #[error("AMQP queue/exchange declaration failed: {0}")]
     Declaration(lapin::Error),
 
+    #[error("AMQP publish failed: {0}")]
+    Publish(String),
+
     #[error("AMQP connection failed after exhausting all retries")]
     MaxRetriesExhausted,
 }

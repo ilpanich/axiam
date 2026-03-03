@@ -119,6 +119,17 @@ async fn main() -> std::io::Result<()> {
         amqp_engine,
     ));
 
+    // Create notification publisher (available for services to emit events).
+    let notif_channel = amqp
+        .create_channel()
+        .await
+        .expect("Failed to create AMQP notification channel");
+    let notification_publisher = axiam_amqp::NotificationPublisher::new(notif_channel);
+
+    // NOTE: The audit event consumer (axiam_amqp::audit_consumer) requires an
+    // AuditLogRepository implementation (SurrealAuditLogRepository), which will
+    // be created in Phase 7 (T7.1). It will be wired here once available.
+
     // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();
     let grpc_engine = axiam_authz::AuthorizationEngine::new(
@@ -155,6 +166,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(scope_repo.clone()))
             .app_data(web::Data::new(service_account_repo.clone()))
             .app_data(web::Data::new(auth_service.clone()))
+            .app_data(web::Data::new(notification_publisher.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
             .configure(openapi_routes)

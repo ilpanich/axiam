@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use actix_web::{App, HttpServer, web};
+use axiam_amqp::{AmqpConfig, AmqpManager};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::{
     HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes, openapi_routes,
@@ -30,6 +31,8 @@ struct AppConfig {
     auth: AuthConfig,
     #[serde(default)]
     grpc: GrpcConfig,
+    #[serde(default)]
+    amqp: AmqpConfig,
 }
 
 #[tokio::main]
@@ -71,6 +74,15 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("Database connected and migrations applied");
 
+    // Connect to RabbitMQ and declare queues.
+    let amqp = AmqpManager::connect_with_retry(&config.amqp)
+        .await
+        .expect("Failed to connect to RabbitMQ");
+    amqp.declare_queues()
+        .await
+        .expect("Failed to declare AMQP queues");
+    tracing::info!("RabbitMQ connected and queues declared");
+
     let org_repo = SurrealOrganizationRepository::new(db.client().clone());
     let tenant_repo = SurrealTenantRepository::new(db.client().clone());
     let user_repo = SurrealUserRepository::new(db.client().clone());
@@ -89,6 +101,36 @@ async fn main() -> std::io::Result<()> {
     let health_checker: Arc<dyn HealthChecker> = Arc::new(db);
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
+
+    // Spawn AMQP authorization consumer on a background task.
+    // Uses a publisher channel because the consumer also publishes responses.
+    let amqp_channel = amqp
+        .create_publisher_channel()
+        .await
+        .expect("Failed to create AMQP authz publisher channel");
+    let amqp_engine = axiam_authz::AuthorizationEngine::new(
+        role_repo.clone(),
+        permission_repo.clone(),
+        resource_repo.clone(),
+        scope_repo.clone(),
+        group_repo.clone(),
+    );
+    tokio::spawn(async move {
+        axiam_amqp::authz_consumer::start_authz_consumer(amqp_channel, amqp_engine).await;
+        tracing::error!("AMQP authz consumer exited — shutting down process");
+        std::process::exit(1);
+    });
+
+    // Create notification publisher (available for services to emit events).
+    let notif_channel = amqp
+        .create_publisher_channel()
+        .await
+        .expect("Failed to create AMQP notification channel");
+    let notification_publisher = axiam_amqp::NotificationPublisher::new(notif_channel);
+
+    // NOTE: The audit event consumer (axiam_amqp::audit_consumer) requires an
+    // AuditLogRepository implementation (SurrealAuditLogRepository), which will
+    // be created in Phase 7 (T7.1). It will be wired here once available.
 
     // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();
@@ -126,6 +168,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(scope_repo.clone()))
             .app_data(web::Data::new(service_account_repo.clone()))
             .app_data(web::Data::new(auth_service.clone()))
+            .app_data(web::Data::new(notification_publisher.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
             .configure(openapi_routes)

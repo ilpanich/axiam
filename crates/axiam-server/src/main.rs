@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use actix_web::{App, HttpServer, web};
+use axiam_amqp::{AmqpConfig, AmqpManager};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::{
     HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes, openapi_routes,
@@ -30,6 +31,8 @@ struct AppConfig {
     auth: AuthConfig,
     #[serde(default)]
     grpc: GrpcConfig,
+    #[serde(default)]
+    amqp: AmqpConfig,
 }
 
 #[tokio::main]
@@ -70,6 +73,15 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to run database migrations");
 
     tracing::info!("Database connected and migrations applied");
+
+    // Connect to RabbitMQ and declare queues.
+    let amqp = AmqpManager::connect_with_retry(&config.amqp)
+        .await
+        .expect("Failed to connect to RabbitMQ");
+    amqp.declare_queues()
+        .await
+        .expect("Failed to declare AMQP queues");
+    tracing::info!("RabbitMQ connected and queues declared");
 
     let org_repo = SurrealOrganizationRepository::new(db.client().clone());
     let tenant_repo = SurrealTenantRepository::new(db.client().clone());

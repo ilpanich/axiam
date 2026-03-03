@@ -102,6 +102,23 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
+    // Spawn AMQP authorization consumer on a background task.
+    let amqp_channel = amqp
+        .create_channel()
+        .await
+        .expect("Failed to create AMQP consumer channel");
+    let amqp_engine = axiam_authz::AuthorizationEngine::new(
+        role_repo.clone(),
+        permission_repo.clone(),
+        resource_repo.clone(),
+        scope_repo.clone(),
+        group_repo.clone(),
+    );
+    tokio::spawn(axiam_amqp::authz_consumer::start_authz_consumer(
+        amqp_channel,
+        amqp_engine,
+    ));
+
     // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();
     let grpc_engine = axiam_authz::AuthorizationEngine::new(

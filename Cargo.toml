@@ -46,6 +46,7 @@ tonic-prost-build = "0.14"
 
 # AMQP
 lapin = "4"
+futures-lite = "2"
 
 # Database
 surrealdb = "3"

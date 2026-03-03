@@ -112,6 +112,14 @@ impl AmqpManager {
         &self.channel
     }
 
+    /// Create a new channel on the existing connection.
+    pub async fn create_channel(&self) -> Result<Channel, AmqpError> {
+        self.connection
+            .create_channel()
+            .await
+            .map_err(AmqpError::Channel)
+    }
+
     /// Returns a reference to the underlying AMQP connection.
     pub fn connection(&self) -> &Connection {
         &self.connection

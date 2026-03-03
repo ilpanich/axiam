@@ -105,7 +105,8 @@ async fn main() -> std::io::Result<()> {
         if let Err(e) =
             start_grpc_server(grpc_addr, grpc_engine, grpc_user_repo, grpc_auth_config).await
         {
-            tracing::error!(error = %e, "gRPC server failed");
+            tracing::error!(error = %e, "gRPC server failed — shutting down process");
+            std::process::exit(1);
         }
     });
 

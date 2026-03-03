@@ -30,8 +30,13 @@ impl GrpcConfig {
     }
 }
 
+/// Default gRPC bind host.
+///
+/// Binds to loopback (`127.0.0.1`) so the gRPC API is not exposed on
+/// all interfaces unless explicitly configured. Deploy behind mTLS or
+/// an internal network when binding to `0.0.0.0`.
 fn default_host() -> String {
-    "0.0.0.0".into()
+    "127.0.0.1".into()
 }
 
 fn default_port() -> u16 {

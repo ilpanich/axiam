@@ -21,12 +21,11 @@ message UserResponse {
   string tenant_id = 2;
   string username = 3;
   string email = 4;
-  string display_name = 5;
-  // User status: "active", "inactive", "locked".
-  string status = 6;
+  // User status: "active", "inactive", "locked", "pending_verification".
+  string status = 5;
   // RFC 3339 timestamps.
-  string created_at = 7;
-  string updated_at = 8;
+  string created_at = 6;
+  string updated_at = 7;
 }
 
 message ValidateCredentialsRequest {
@@ -37,6 +36,6 @@ message ValidateCredentialsRequest {
 
 message ValidateCredentialsResponse {
   bool valid = 1;
-  // User UUID (set only when valid).
+  // User UUID. Empty when credentials are invalid.
   string user_id = 2;
 }

@@ -5,6 +5,7 @@ use axiam_auth::password;
 use axiam_core::error::AxiamError;
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::UserRepository;
+use chrono::Utc;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -68,9 +69,8 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         Ok(Response::new(UserResponse {
             id: user.id.to_string(),
             tenant_id: user.tenant_id.to_string(),
-            username: user.username.clone(),
+            username: user.username,
             email: user.email,
-            display_name: user.username,
             status: status_to_string(&user.status),
             created_at: user.created_at.to_rfc3339(),
             updated_at: user.updated_at.to_rfc3339(),
@@ -83,6 +83,11 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
     ) -> Result<Response<ValidateCredentialsResponse>, Status> {
         let req = request.into_inner();
         let tenant_id = parse_uuid(&req.tenant_id, "tenant_id")?;
+
+        let invalid = Response::new(ValidateCredentialsResponse {
+            valid: false,
+            user_id: String::new(),
+        });
 
         // Look up user by username, then by email.
         let user = match self
@@ -98,16 +103,23 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
                     .await
                 {
                     Ok(u) => u,
-                    Err(_) => {
-                        return Ok(Response::new(ValidateCredentialsResponse {
-                            valid: false,
-                            user_id: String::new(),
-                        }));
-                    }
+                    Err(_) => return Ok(invalid),
                 }
             }
             Err(e) => return Err(Status::internal(e.to_string())),
         };
+
+        // Enforce lockout (brute force protection).
+        if let Some(locked_until) = user.locked_until
+            && locked_until > Utc::now()
+        {
+            return Ok(invalid);
+        }
+
+        // Enforce account status (only Active accounts can authenticate).
+        if user.status != UserStatus::Active {
+            return Ok(invalid);
+        }
 
         // Verify password.
         let valid = password::verify_password(
@@ -123,10 +135,7 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
                 user_id: user.id.to_string(),
             }))
         } else {
-            Ok(Response::new(ValidateCredentialsResponse {
-                valid: false,
-                user_id: String::new(),
-            }))
+            Ok(invalid)
         }
     }
 }

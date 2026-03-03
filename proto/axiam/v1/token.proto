@@ -17,13 +17,13 @@ message ValidateTokenRequest {
 
 message ValidateTokenResponse {
   bool valid = 1;
-  // Subject (user) UUID — set only when valid.
+  // Subject (user) UUID. Empty when token is invalid.
   string subject_id = 2;
-  // Tenant UUID — set only when valid.
+  // Tenant UUID. Empty when token is invalid.
   string tenant_id = 3;
-  // Organization UUID — set only when valid.
+  // Organization UUID. Empty when token is invalid.
   string org_id = 4;
-  // Expiration (Unix timestamp) — set only when valid.
+  // Expiration (Unix timestamp). Zero when token is invalid.
   int64 exp = 5;
 }
 

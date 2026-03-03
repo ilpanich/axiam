@@ -412,6 +412,11 @@ Fix the OpenAPI annotation for `POST /auth/login` to accurately document both `L
 
 **Commit**: `fix(api-rest): OpenAPI login response documents both success and MFA schemas`
 
+### T16.5 — ValidateCredentials Brute-Force Side Effects
+The gRPC `ValidateCredentials` RPC is intentionally side-effect-free (it checks lockout state but does not increment `failed_login_attempts` or set `locked_until` on failure). If this RPC is exposed to untrusted callers, add an option to record failed attempts — either by calling into `AuthService` failure-tracking logic or by factoring the lockout counter update into a shared helper used by both REST login and gRPC credential validation.
+
+**Commit**: `feat(api-grpc): track failed login attempts in ValidateCredentials`
+
 ---
 
 ## Summary
@@ -434,8 +439,8 @@ Fix the OpenAPI annotation for `POST /auth/login` to accurately document both `L
 | Phase 13 | 3 | Docker, K8s, CD pipeline |
 | Phase 14 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 15 | 4 | Security, compliance, performance, docs |
-| Phase 16 | 4 | Deferred improvements & optimizations from PR reviews |
+| Phase 16 | 5 | Deferred improvements & optimizations from PR reviews |
 
-**Total: 68 tasks across 17 phases**
+**Total: 69 tasks across 17 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

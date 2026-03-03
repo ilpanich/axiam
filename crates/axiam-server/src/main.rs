@@ -107,7 +107,7 @@ async fn main() -> std::io::Result<()> {
     let amqp_channel = amqp
         .create_publisher_channel()
         .await
-        .expect("Failed to create AMQP consumer channel");
+        .expect("Failed to create AMQP authz publisher channel");
     let amqp_engine = axiam_authz::AuthorizationEngine::new(
         role_repo.clone(),
         permission_repo.clone(),

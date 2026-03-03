@@ -73,12 +73,13 @@ impl AmqpManager {
                 Ok(manager) => return Ok(manager),
                 Err(e) => {
                     if attempt == total_attempts {
+                        let lapin_err = e.into_lapin_error();
                         tracing::error!(
-                            error = %e,
+                            error = %lapin_err,
                             attempts = total_attempts,
                             "Failed to connect to RabbitMQ after all retries"
                         );
-                        return Err(AmqpError::MaxRetriesExhausted);
+                        return Err(AmqpError::MaxRetriesExhausted(lapin_err));
                     }
                     warn!(
                         error = %e,
@@ -92,7 +93,7 @@ impl AmqpManager {
                 }
             }
         }
-        Err(AmqpError::MaxRetriesExhausted)
+        unreachable!("loop always returns")
     }
 
     /// Declare all AXIAM queues as durable.

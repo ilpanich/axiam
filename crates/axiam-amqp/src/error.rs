@@ -16,6 +16,16 @@ pub enum AmqpError {
     #[error("AMQP publish failed: {0}")]
     Publish(String),
 
-    #[error("AMQP connection failed after exhausting all retries")]
-    MaxRetriesExhausted,
+    #[error("AMQP connection failed after exhausting all retries: {0}")]
+    MaxRetriesExhausted(#[source] lapin::Error),
+}
+
+impl AmqpError {
+    /// Extract the underlying `lapin::Error` from connection-related variants.
+    pub(crate) fn into_lapin_error(self) -> lapin::Error {
+        match self {
+            Self::Connection(e) | Self::Channel(e) | Self::Declaration(e) => e,
+            _ => unreachable!("into_lapin_error called on non-lapin variant"),
+        }
+    }
 }

@@ -8,7 +8,7 @@ use axiam_core::repository::{
 use futures_lite::StreamExt;
 use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions};
 use lapin::types::FieldTable;
-use lapin::{BasicProperties, Channel};
+use lapin::{BasicProperties, Channel, Confirmation};
 use tracing::{error, info, warn};
 
 use crate::connection::queues;
@@ -148,12 +148,21 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
             }
         };
 
-        if let Err(e) = confirm.await {
-            error!(
-                error = %e,
-                correlation_id = %correlation_id,
-                "Authz response publish not confirmed by broker"
-            );
+        match confirm.await {
+            Ok(Confirmation::Nack(_)) => {
+                warn!(
+                    correlation_id = %correlation_id,
+                    "Authz response publish was nacked by broker"
+                );
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    correlation_id = %correlation_id,
+                    "Authz response publish not confirmed by broker"
+                );
+            }
+            Ok(_) => {}
         }
 
         if let Err(e) = delivery.acker.ack(BasicAckOptions::default()).await {

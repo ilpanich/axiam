@@ -1,7 +1,7 @@
 //! Publisher for notification events to the `axiam.notifications` queue.
 
 use lapin::options::BasicPublishOptions;
-use lapin::{BasicProperties, Channel};
+use lapin::{BasicProperties, Channel, Confirmation};
 use tracing::error;
 
 use crate::connection::queues;
@@ -40,10 +40,18 @@ impl NotificationPublisher {
             .await
             .map_err(|e| AmqpError::Publish(e.to_string()))?;
 
-        confirm.await.map_err(|e| {
-            error!(error = %e, "Notification publish not confirmed by broker");
-            AmqpError::Publish(e.to_string())
-        })?;
+        match confirm.await {
+            Ok(Confirmation::Nack(_)) => {
+                return Err(AmqpError::Publish(
+                    "broker nacked notification publish".into(),
+                ));
+            }
+            Err(e) => {
+                error!(error = %e, "Notification publish not confirmed by broker");
+                return Err(AmqpError::Publish(e.to_string()));
+            }
+            Ok(_) => {}
+        }
 
         Ok(())
     }

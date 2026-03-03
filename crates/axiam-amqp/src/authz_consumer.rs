@@ -148,12 +148,13 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
             }
         };
 
-        match confirm.await {
+        let confirmed = match confirm.await {
             Ok(Confirmation::Nack(_)) => {
                 warn!(
                     correlation_id = %correlation_id,
                     "Authz response publish was nacked by broker"
                 );
+                false
             }
             Err(e) => {
                 error!(
@@ -161,12 +162,23 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
                     correlation_id = %correlation_id,
                     "Authz response publish not confirmed by broker"
                 );
+                false
             }
-            Ok(_) => {}
-        }
+            Ok(_) => true,
+        };
 
-        if let Err(e) = delivery.acker.ack(BasicAckOptions::default()).await {
-            error!(error = %e, delivery_tag = tag, "Failed to ack delivery");
+        if confirmed {
+            if let Err(e) = delivery.acker.ack(BasicAckOptions::default()).await {
+                error!(error = %e, delivery_tag = tag, "Failed to ack delivery");
+            }
+        } else {
+            let _ = delivery
+                .acker
+                .nack(BasicNackOptions {
+                    requeue: true,
+                    ..BasicNackOptions::default()
+                })
+                .await;
         }
     }
 

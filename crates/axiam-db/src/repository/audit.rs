@@ -152,6 +152,69 @@ impl AuditLogRowWithId {
 }
 
 // ---------------------------------------------------------------------------
+// Filter helpers (shared between count + data queries to avoid drift)
+// ---------------------------------------------------------------------------
+
+/// Pre-computed bind values for filter parameters.
+enum FilterBind {
+    Str(&'static str, String),
+    DateTime(&'static str, DateTime<Utc>),
+}
+
+/// Build the WHERE clause and collected bind values from an `AuditLogFilter`.
+///
+/// Always includes `tenant_id = $tenant_id` (bound separately by the caller).
+fn build_filter_clause(filter: &AuditLogFilter) -> (String, Vec<FilterBind>) {
+    let mut conditions = vec!["tenant_id = $tenant_id".to_string()];
+    let mut binds: Vec<FilterBind> = Vec::new();
+
+    if let Some(actor_id) = &filter.actor_id {
+        conditions.push("actor_id = $actor_id".into());
+        binds.push(FilterBind::Str("actor_id", actor_id.to_string()));
+    }
+    if let Some(action) = &filter.action {
+        conditions.push("action = $action".into());
+        binds.push(FilterBind::Str("action", action.clone()));
+    }
+    if let Some(outcome) = &filter.outcome {
+        conditions.push("outcome = $outcome".into());
+        binds.push(FilterBind::Str("outcome", outcome_str(outcome).into()));
+    }
+    if let Some(resource_id) = &filter.resource_id {
+        conditions.push("resource_id = $resource_id".into());
+        binds.push(FilterBind::Str("resource_id", resource_id.to_string()));
+    }
+    if let Some(from) = &filter.from {
+        conditions.push("timestamp >= $from_ts".into());
+        binds.push(FilterBind::DateTime("from_ts", *from));
+    }
+    if let Some(to) = &filter.to {
+        conditions.push("timestamp <= $to_ts".into());
+        binds.push(FilterBind::DateTime("to_ts", *to));
+    }
+
+    (conditions.join(" AND "), binds)
+}
+
+/// Apply pre-computed filter binds to a query.
+fn apply_filter_binds<'a, C: Connection>(
+    mut query: surrealdb::method::Query<'a, C>,
+    binds: &'a [FilterBind],
+) -> surrealdb::method::Query<'a, C> {
+    for bind in binds {
+        match bind {
+            FilterBind::Str(key, val) => {
+                query = query.bind((*key, val.clone()));
+            }
+            FilterBind::DateTime(key, val) => {
+                query = query.bind((*key, *val));
+            }
+        }
+    }
+    query
+}
+
+// ---------------------------------------------------------------------------
 // Repository
 // ---------------------------------------------------------------------------
 
@@ -225,50 +288,14 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         let tenant_id_str = tenant_id.to_string();
 
         // Build dynamic WHERE clause.
-        let mut conditions = vec!["tenant_id = $tenant_id".to_string()];
-        if filter.actor_id.is_some() {
-            conditions.push("actor_id = $actor_id".into());
-        }
-        if filter.action.is_some() {
-            conditions.push("action = $action".into());
-        }
-        if filter.outcome.is_some() {
-            conditions.push("outcome = $outcome".into());
-        }
-        if filter.resource_id.is_some() {
-            conditions.push("resource_id = $resource_id".into());
-        }
-        if filter.from.is_some() {
-            conditions.push("timestamp >= $from_ts".into());
-        }
-        if filter.to.is_some() {
-            conditions.push("timestamp <= $to_ts".into());
-        }
-        let where_clause = conditions.join(" AND ");
+        let (where_clause, binds) = build_filter_clause(&filter);
 
         // Count query.
         let count_sql =
             format!("SELECT count() AS total FROM audit_log WHERE {where_clause} GROUP ALL");
         let mut count_query = self.db.query(&count_sql);
         count_query = count_query.bind(("tenant_id", tenant_id_str.clone()));
-        if let Some(actor_id) = &filter.actor_id {
-            count_query = count_query.bind(("actor_id", actor_id.to_string()));
-        }
-        if let Some(action) = &filter.action {
-            count_query = count_query.bind(("action", action.clone()));
-        }
-        if let Some(outcome) = &filter.outcome {
-            count_query = count_query.bind(("outcome", outcome.clone()));
-        }
-        if let Some(resource_id) = &filter.resource_id {
-            count_query = count_query.bind(("resource_id", resource_id.to_string()));
-        }
-        if let Some(from) = &filter.from {
-            count_query = count_query.bind(("from_ts", *from));
-        }
-        if let Some(to) = &filter.to {
-            count_query = count_query.bind(("to_ts", *to));
-        }
+        count_query = apply_filter_binds(count_query, &binds);
         let mut count_result = count_query.await.map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
         let total = count_rows.first().map(|r| r.total).unwrap_or(0);
@@ -282,24 +309,7 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         );
         let mut data_query = self.db.query(&data_sql);
         data_query = data_query.bind(("tenant_id", tenant_id_str));
-        if let Some(actor_id) = &filter.actor_id {
-            data_query = data_query.bind(("actor_id", actor_id.to_string()));
-        }
-        if let Some(action) = &filter.action {
-            data_query = data_query.bind(("action", action.clone()));
-        }
-        if let Some(outcome) = &filter.outcome {
-            data_query = data_query.bind(("outcome", outcome.clone()));
-        }
-        if let Some(resource_id) = &filter.resource_id {
-            data_query = data_query.bind(("resource_id", resource_id.to_string()));
-        }
-        if let Some(from) = &filter.from {
-            data_query = data_query.bind(("from_ts", *from));
-        }
-        if let Some(to) = &filter.to {
-            data_query = data_query.bind(("to_ts", *to));
-        }
+        data_query = apply_filter_binds(data_query, &binds);
         data_query = data_query.bind(("limit", pagination.limit));
         data_query = data_query.bind(("offset", pagination.offset));
 

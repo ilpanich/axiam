@@ -265,3 +265,61 @@ async fn list_audit_logs_requires_auth() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+#[actix_rt::test]
+async fn list_system_audit_logs_returns_only_nil_tenant() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+
+    // Seed a tenant-scoped entry.
+    seed_audit_entries(&audit_repo, tenant_id, user_id).await;
+
+    // Seed a system (nil tenant) entry.
+    audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id: Uuid::nil(),
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::System,
+            action: "GET /auth/login".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Failure,
+            ip_address: Some("10.0.0.1".into()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+
+    // System endpoint should only return the nil-tenant entry.
+    let req = test::TestRequest::get()
+        .uri("/api/v1/audit-logs/system")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["items"][0]["action"], "GET /auth/login");
+    assert_eq!(body["items"][0]["actor_type"], "System");
+}
+
+#[actix_rt::test]
+async fn list_system_audit_logs_requires_auth() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri("/api/v1/audit-logs/system")
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}

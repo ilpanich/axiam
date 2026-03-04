@@ -4,8 +4,8 @@
 //! status code. Audit writes are dispatched to a bounded background worker so
 //! they don't block the response and backpressure is controlled.
 //!
-//! Only authenticated requests are logged — unauthenticated calls (no valid
-//! JWT) are silently skipped to avoid unqueryable entries with nil tenant IDs.
+//! Unauthenticated requests are logged with `ActorType::System`, nil UUIDs,
+//! and `"authenticated": false` in metadata so they remain distinguishable.
 
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
@@ -121,13 +121,6 @@ where
 
         Box::pin(async move {
             let res = fut.await?;
-
-            // Only log authenticated requests — unauthenticated ones would
-            // get nil tenant/actor IDs and become unqueryable.
-            let Some((actor_id, tenant_id)) = user_info else {
-                return Ok(res);
-            };
-
             let status = res.status().as_u16();
 
             let outcome = if status < 400 {
@@ -138,16 +131,22 @@ where
                 AuditOutcome::Failure
             };
 
+            let (actor_id, tenant_id, actor_type) = match user_info {
+                Some((uid, tid)) => (uid, tid, ActorType::User),
+                None => (Uuid::nil(), Uuid::nil(), ActorType::System),
+            };
+
             let entry = CreateAuditLogEntry {
                 tenant_id,
                 actor_id,
-                actor_type: ActorType::User,
+                actor_type,
                 action: format!("{method} {path}"),
                 resource_id: None,
                 outcome,
                 ip_address,
                 metadata: Some(serde_json::json!({
                     "http_status": status,
+                    "authenticated": user_info.is_some(),
                 })),
             };
 

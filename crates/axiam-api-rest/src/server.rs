@@ -193,6 +193,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 web::resource("/audit-logs")
                     .route(web::get().to(handlers::audit::list::<C>)),
             )
+            .service(
+                web::resource("/audit-logs/system")
+                    .route(web::get().to(handlers::audit::list_system::<C>)),
+            )
             // --- Service Accounts ---
             .service(
                 web::resource("/service-accounts")

@@ -318,4 +318,13 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
             limit: pagination.limit,
         })
     }
+
+    async fn list_system(
+        &self,
+        filter: AuditLogFilter,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
+        // System/unauthenticated entries are stored with nil tenant_id.
+        self.list(Uuid::nil(), filter, pagination).await
+    }
 }

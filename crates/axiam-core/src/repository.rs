@@ -467,9 +467,16 @@ pub trait AuditLogRepository: Send + Sync {
         &self,
         input: CreateAuditLogEntry,
     ) -> impl Future<Output = AxiamResult<AuditLogEntry>> + Send;
+    /// List audit logs scoped to a specific tenant.
     fn list(
         &self,
         tenant_id: Uuid,
+        filter: AuditLogFilter,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;
+    /// List audit logs for unauthenticated/system requests (nil tenant_id).
+    fn list_system(
+        &self,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;

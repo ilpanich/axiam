@@ -9,9 +9,8 @@ use std::sync::Arc;
 use actix_web::dev::Payload;
 use actix_web::web;
 use actix_web::{HttpMessage, HttpRequest};
-use axiam_audit::middleware::CachedUserIdentity;
 use axiam_auth::config::AuthConfig;
-use axiam_auth::token::{ValidatedClaims, validate_access_token};
+use axiam_auth::token::{CachedUserIdentity, ValidatedClaims, validate_access_token};
 use axiam_core::error::AxiamError;
 use uuid::Uuid;
 

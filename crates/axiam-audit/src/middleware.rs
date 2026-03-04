@@ -167,23 +167,11 @@ where
     }
 }
 
-/// Cached validated user identity stored in request extensions.
-///
-/// Allows the `AuthenticatedUser` extractor to skip re-validating the JWT
-/// when the audit middleware has already done so.
-#[derive(Debug, Clone)]
-pub struct CachedUserIdentity {
-    pub user_id: Uuid,
-    pub tenant_id: Uuid,
-    pub org_id: Uuid,
-    pub claims: axiam_auth::token::ValidatedClaims,
-}
-
 /// Extract user info from cached extensions, or validate JWT and cache it.
 fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid)> {
     use actix_web::web;
     use axiam_auth::config::AuthConfig;
-    use axiam_auth::token::validate_access_token;
+    use axiam_auth::token::{CachedUserIdentity, validate_access_token};
 
     // Check cache first.
     if let Some(cached) = req.extensions().get::<Arc<CachedUserIdentity>>() {

@@ -84,6 +84,19 @@ pub fn decode_access_token(
 #[derive(Debug, Clone)]
 pub struct ValidatedClaims(pub AccessTokenClaims);
 
+/// Pre-validated user identity that can be cached in request extensions.
+///
+/// When the audit middleware (or any other middleware) validates a JWT,
+/// it stores a `CachedUserIdentity` so downstream extractors can skip
+/// re-verification.
+#[derive(Debug, Clone)]
+pub struct CachedUserIdentity {
+    pub user_id: uuid::Uuid,
+    pub tenant_id: uuid::Uuid,
+    pub org_id: uuid::Uuid,
+    pub claims: ValidatedClaims,
+}
+
 /// Validate a JWT access token (signature, expiry, issuer) and return
 /// the verified claims.
 ///

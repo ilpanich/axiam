@@ -85,6 +85,7 @@ use crate::handlers;
         handlers::scopes::delete,
         // Audit Logs
         handlers::audit::list,
+        handlers::audit::list_system,
         // Service Accounts
         handlers::service_accounts::create,
         handlers::service_accounts::list,

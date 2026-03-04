@@ -21,6 +21,9 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// Test-only placeholder password — not a real credential.
+const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
+
 fn test_keypair() -> (String, String) {
     let private_key = "\
 -----BEGIN PRIVATE KEY-----
@@ -80,7 +83,7 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
             tenant_id,
             username: "admin".into(),
             email: "admin@example.com".into(),
-            password: "password12345".into(),
+            password: TEST_PASSWORD.into(),
             metadata: None,
         })
         .await

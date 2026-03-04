@@ -677,6 +677,7 @@ dependencies = [
  "axiam-audit",
  "axiam-authz",
  "axiam-core",
+ "chrono",
  "futures-lite",
  "lapin",
  "serde",
@@ -736,8 +737,9 @@ dependencies = [
 name = "axiam-audit"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
+ "axiam-auth",
  "axiam-core",
- "axiam-db",
  "chrono",
  "serde",
  "serde_json",

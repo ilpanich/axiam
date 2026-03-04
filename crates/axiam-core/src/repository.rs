@@ -451,10 +451,11 @@ pub trait GroupRepository: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Query filters for audit log entries.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize, utoipa::IntoParams)]
 pub struct AuditLogFilter {
     pub actor_id: Option<Uuid>,
     pub action: Option<String>,
+    pub outcome: Option<crate::models::audit::AuditOutcome>,
     pub resource_id: Option<Uuid>,
     pub from: Option<chrono::DateTime<chrono::Utc>>,
     pub to: Option<chrono::DateTime<chrono::Utc>>,
@@ -466,9 +467,16 @@ pub trait AuditLogRepository: Send + Sync {
         &self,
         input: CreateAuditLogEntry,
     ) -> impl Future<Output = AxiamResult<AuditLogEntry>> + Send;
+    /// List audit logs scoped to a specific tenant.
     fn list(
         &self,
         tenant_id: Uuid,
+        filter: AuditLogFilter,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;
+    /// List audit logs for unauthenticated/system requests (nil tenant_id).
+    fn list_system(
+        &self,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;

@@ -120,8 +120,16 @@ where
         let fut = self.service.call(req);
 
         Box::pin(async move {
-            let res = fut.await?;
-            let status = res.status().as_u16();
+            let (status, result) = match fut.await {
+                Ok(res) => {
+                    let s = res.status().as_u16();
+                    (s, Ok(res))
+                }
+                Err(err) => {
+                    let s = err.as_response_error().status_code().as_u16();
+                    (s, Err(err))
+                }
+            };
 
             let outcome = if status < 400 {
                 AuditOutcome::Success
@@ -154,7 +162,7 @@ where
                 warn!("Audit channel full — dropping audit entry for {method} {path}");
             }
 
-            Ok(res)
+            result
         })
     }
 }

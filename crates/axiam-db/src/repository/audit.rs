@@ -232,6 +232,9 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         if filter.action.is_some() {
             conditions.push("action = $action".into());
         }
+        if filter.outcome.is_some() {
+            conditions.push("outcome = $outcome".into());
+        }
         if filter.resource_id.is_some() {
             conditions.push("resource_id = $resource_id".into());
         }
@@ -253,6 +256,9 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         }
         if let Some(action) = &filter.action {
             count_query = count_query.bind(("action", action.clone()));
+        }
+        if let Some(outcome) = &filter.outcome {
+            count_query = count_query.bind(("outcome", outcome.clone()));
         }
         if let Some(resource_id) = &filter.resource_id {
             count_query = count_query.bind(("resource_id", resource_id.to_string()));
@@ -281,6 +287,9 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         }
         if let Some(action) = &filter.action {
             data_query = data_query.bind(("action", action.clone()));
+        }
+        if let Some(outcome) = &filter.outcome {
+            data_query = data_query.bind(("outcome", outcome.clone()));
         }
         if let Some(resource_id) = &filter.resource_id {
             data_query = data_query.bind(("resource_id", resource_id.to_string()));

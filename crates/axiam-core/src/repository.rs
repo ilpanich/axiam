@@ -455,6 +455,7 @@ pub trait GroupRepository: Send + Sync {
 pub struct AuditLogFilter {
     pub actor_id: Option<Uuid>,
     pub action: Option<String>,
+    pub outcome: Option<String>,
     pub resource_id: Option<Uuid>,
     pub from: Option<chrono::DateTime<chrono::Utc>>,
     pub to: Option<chrono::DateTime<chrono::Utc>>,

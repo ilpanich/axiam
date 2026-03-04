@@ -92,11 +92,11 @@ The project follows a structured roadmap of **64 tasks across 16 phases**:
 | Phase 1 | Core domain types & DB repositories | Done |
 | Phase 2 | Authentication (password, JWT, MFA) | Done |
 | Phase 3 | Authorization engine | Done |
-| Phase 4 | REST API | Next |
-| Phase 5 | gRPC API | Planned |
-| Phase 6 | AMQP integration | Planned |
-| Phase 7 | Audit logging | Planned |
-| Phase 8 | PKI & certificates | Planned |
+| Phase 4 | REST API | Done |
+| Phase 5 | gRPC API | Done |
+| Phase 6 | AMQP integration | Done |
+| Phase 7 | Audit logging | Done |
+| Phase 8 | PKI & certificates | Next |
 | Phase 9 | Webhook system | Planned |
 | Phase 10 | OAuth2 & OIDC | Planned |
 | Phase 11 | Federation (SAML + OIDC) | Planned |

@@ -28,7 +28,7 @@ const CHANNEL_CAPACITY: usize = 4096;
 /// Middleware factory for audit logging.
 ///
 /// Wraps every HTTP request/response pair and emits an audit log entry for
-/// authenticated requests. A bounded channel dispatches entries to a
+/// each handled request. A bounded channel dispatches entries to a
 /// background worker task.
 #[derive(Clone)]
 pub struct AuditMiddleware {

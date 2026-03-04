@@ -1,80 +1,91 @@
 //! Actix-Web middleware that automatically logs HTTP requests to the audit trail.
 //!
-//! Captures: HTTP method, path, authenticated user (optional), client IP,
-//! and response status code. Audit writes are performed asynchronously via
-//! `tokio::spawn` so they don't block the response.
+//! Captures: HTTP method, path, authenticated user, client IP, and response
+//! status code. Audit writes are dispatched to a bounded background worker so
+//! they don't block the response and backpressure is controlled.
+//!
+//! Only authenticated requests are logged — unauthenticated calls (no valid
+//! JWT) are silently skipped to avoid unqueryable entries with nil tenant IDs.
 
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use actix_web::HttpMessage;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
-use actix_web::web;
-use axiam_auth::config::AuthConfig;
-use axiam_auth::token::validate_access_token;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
+use tokio::sync::mpsc;
 use tracing::warn;
 use uuid::Uuid;
 
 /// Paths that should not generate audit entries.
 const SKIP_PATHS: &[&str] = &["/health", "/ready"];
 
+/// Default capacity for the audit write channel.
+const CHANNEL_CAPACITY: usize = 4096;
+
 /// Middleware factory for audit logging.
 ///
-/// Wraps every HTTP request/response pair and emits an audit log entry.
-/// The `AuditLogRepository` is shared via `Arc` so it can be moved into
-/// spawned tasks.
-pub struct AuditMiddleware<A> {
-    repo: Arc<A>,
+/// Wraps every HTTP request/response pair and emits an audit log entry for
+/// authenticated requests. A bounded channel dispatches entries to a
+/// background worker task.
+#[derive(Clone)]
+pub struct AuditMiddleware {
+    tx: mpsc::Sender<CreateAuditLogEntry>,
 }
 
-impl<A> AuditMiddleware<A> {
-    pub fn new(repo: A) -> Self {
-        Self {
-            repo: Arc::new(repo),
-        }
+impl AuditMiddleware {
+    /// Create the middleware and spawn its background worker.
+    ///
+    /// The worker reads from a bounded channel and appends entries to the
+    /// given `AuditLogRepository`. The channel capacity defaults to
+    /// [`CHANNEL_CAPACITY`]; when full, new audit entries are dropped
+    /// (with a warning) to avoid blocking request handling.
+    pub fn spawn<A: AuditLogRepository + 'static>(repo: A) -> Self {
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        tokio::spawn(audit_worker(rx, repo));
+        Self { tx }
     }
 }
 
-impl<A: Clone> Clone for AuditMiddleware<A> {
-    fn clone(&self) -> Self {
-        Self {
-            repo: self.repo.clone(),
+async fn audit_worker<A: AuditLogRepository>(mut rx: mpsc::Receiver<CreateAuditLogEntry>, repo: A) {
+    while let Some(entry) = rx.recv().await {
+        if let Err(e) = repo.append(entry).await {
+            warn!(error = %e, "Failed to write audit log entry");
         }
     }
+    warn!("Audit worker channel closed — no more entries will be written");
 }
 
-impl<S, B, A> Transform<S, ServiceRequest> for AuditMiddleware<A>
+impl<S, B> Transform<S, ServiceRequest> for AuditMiddleware
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
     B: 'static,
-    A: AuditLogRepository + 'static,
 {
     type Response = ServiceResponse<B>;
     type Error = actix_web::Error;
-    type Transform = AuditMiddlewareService<S, A>;
+    type Transform = AuditMiddlewareService<S>;
     type InitError = ();
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
         ready(Ok(AuditMiddlewareService {
             service,
-            repo: self.repo.clone(),
+            tx: self.tx.clone(),
         }))
     }
 }
 
-pub struct AuditMiddlewareService<S, A> {
+pub struct AuditMiddlewareService<S> {
     service: S,
-    repo: Arc<A>,
+    tx: mpsc::Sender<CreateAuditLogEntry>,
 }
 
-impl<S, B, A> Service<ServiceRequest> for AuditMiddlewareService<S, A>
+impl<S, B> Service<ServiceRequest> for AuditMiddlewareService<S>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
     B: 'static,
-    A: AuditLogRepository + 'static,
 {
     type Response = ServiceResponse<B>;
     type Error = actix_web::Error;
@@ -101,14 +112,22 @@ where
             .realip_remote_addr()
             .map(|s| s.to_owned());
 
-        // Try to extract authenticated user from JWT (optional).
-        let user_info = extract_user_info(&req);
+        // Extract cached claims from extensions (set by middleware or
+        // extractor) or try to validate the JWT now and cache the result.
+        let user_info = extract_or_cache_user_info(&req);
 
-        let repo = self.repo.clone();
+        let tx = self.tx.clone();
         let fut = self.service.call(req);
 
         Box::pin(async move {
             let res = fut.await?;
+
+            // Only log authenticated requests — unauthenticated ones would
+            // get nil tenant/actor IDs and become unqueryable.
+            let Some((actor_id, tenant_id)) = user_info else {
+                return Ok(res);
+            };
+
             let status = res.status().as_u16();
 
             let outcome = if status < 400 {
@@ -119,21 +138,11 @@ where
                 AuditOutcome::Failure
             };
 
-            let action = format!("{method} {path}");
-
-            let (actor_id, tenant_id, actor_type) = match user_info {
-                Some((uid, tid)) => (uid, tid, ActorType::User),
-                None => {
-                    // Unauthenticated request — use nil UUIDs.
-                    (Uuid::nil(), Uuid::nil(), ActorType::System)
-                }
-            };
-
             let entry = CreateAuditLogEntry {
                 tenant_id,
                 actor_id,
-                actor_type,
-                action,
+                actor_type: ActorType::User,
+                action: format!("{method} {path}"),
                 resource_id: None,
                 outcome,
                 ip_address,
@@ -142,27 +151,41 @@ where
                 })),
             };
 
-            tokio::spawn(async move {
-                if let Err(e) = repo.append(entry).await {
-                    warn!(error = %e, "Failed to write audit log entry");
-                }
-            });
+            if tx.try_send(entry).is_err() {
+                warn!("Audit channel full — dropping audit entry for {method} {path}");
+            }
 
             Ok(res)
         })
     }
 }
 
-/// Try to extract (user_id, tenant_id) from the JWT Authorization header.
+/// Cached validated user identity stored in request extensions.
 ///
-/// Returns `None` if no valid bearer token is present (unauthenticated
-/// endpoints). This intentionally never fails — missing/invalid tokens
-/// just result in `None`.
-fn extract_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid)> {
+/// Allows the `AuthenticatedUser` extractor to skip re-validating the JWT
+/// when the audit middleware has already done so.
+#[derive(Debug, Clone)]
+pub struct CachedUserIdentity {
+    pub user_id: Uuid,
+    pub tenant_id: Uuid,
+    pub org_id: Uuid,
+    pub claims: axiam_auth::token::ValidatedClaims,
+}
+
+/// Extract user info from cached extensions, or validate JWT and cache it.
+fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid)> {
+    use actix_web::web;
+    use axiam_auth::config::AuthConfig;
+    use axiam_auth::token::validate_access_token;
+
+    // Check cache first.
+    if let Some(cached) = req.extensions().get::<Arc<CachedUserIdentity>>() {
+        return Some((cached.user_id, cached.tenant_id));
+    }
+
     let config = req.app_data::<web::Data<AuthConfig>>()?;
 
     let header = req.headers().get("Authorization")?.to_str().ok()?;
-
     let header = header.trim();
     let mut parts = header.splitn(2, char::is_whitespace);
     let scheme = parts.next()?;
@@ -172,9 +195,19 @@ fn extract_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid)> {
         return None;
     }
 
-    let claims = validate_access_token(credentials, config).ok()?;
-    let user_id = Uuid::parse_str(&claims.0.sub).ok()?;
-    let tenant_id = Uuid::parse_str(&claims.0.tenant_id).ok()?;
+    let validated = validate_access_token(credentials, config).ok()?;
+    let user_id = Uuid::parse_str(&validated.0.sub).ok()?;
+    let tenant_id = Uuid::parse_str(&validated.0.tenant_id).ok()?;
+    let org_id = Uuid::parse_str(&validated.0.org_id).ok()?;
+
+    let identity = Arc::new(CachedUserIdentity {
+        user_id,
+        tenant_id,
+        org_id,
+        claims: validated,
+    });
+
+    req.extensions_mut().insert(identity);
 
     Some((user_id, tenant_id))
 }

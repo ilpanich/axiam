@@ -740,7 +740,6 @@ dependencies = [
  "actix-web",
  "axiam-auth",
  "axiam-core",
- "axiam-db",
  "chrono",
  "serde",
  "serde_json",

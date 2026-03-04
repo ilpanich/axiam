@@ -162,7 +162,7 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    let audit_middleware = AuditMiddleware::new(audit_repo.clone());
+    let audit_middleware = AuditMiddleware::spawn(audit_repo.clone());
 
     HttpServer::new(move || {
         App::new()

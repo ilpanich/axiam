@@ -4,9 +4,12 @@
 //! It extracts and validates the `Authorization: Bearer <token>` header,
 //! returning the authenticated user's identity.
 
-use actix_web::HttpRequest;
+use std::sync::Arc;
+
 use actix_web::dev::Payload;
 use actix_web::web;
+use actix_web::{HttpMessage, HttpRequest};
+use axiam_audit::middleware::CachedUserIdentity;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{ValidatedClaims, validate_access_token};
 use axiam_core::error::AxiamError;
@@ -17,8 +20,8 @@ use crate::error::AxiamApiError;
 /// Authenticated user context extracted from a valid JWT.
 ///
 /// Use this as a handler parameter to require authentication.
-/// The extractor reads `AuthConfig` from app data and validates the
-/// `Authorization: Bearer <token>` header.
+/// If the audit middleware has already validated the token, the cached
+/// claims are reused to avoid double verification.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
@@ -37,6 +40,16 @@ impl actix_web::FromRequest for AuthenticatedUser {
 }
 
 fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
+    // Try to reuse claims cached by the audit middleware.
+    if let Some(cached) = req.extensions().get::<Arc<CachedUserIdentity>>() {
+        return Ok(AuthenticatedUser {
+            user_id: cached.user_id,
+            tenant_id: cached.tenant_id,
+            org_id: cached.org_id,
+            claims: cached.claims.clone(),
+        });
+    }
+
     let config = req
         .app_data::<web::Data<AuthConfig>>()
         .ok_or(AxiamError::Internal("missing auth config".into()))?;

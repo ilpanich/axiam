@@ -10,7 +10,6 @@ rust-version.workspace = true
 [dependencies]
 axiam-core = { workspace = true }
 axiam-auth = { workspace = true }
-axiam-db = { workspace = true }
 actix-web = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

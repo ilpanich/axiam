@@ -83,6 +83,8 @@ use crate::handlers;
         handlers::scopes::get,
         handlers::scopes::update,
         handlers::scopes::delete,
+        // Audit Logs
+        handlers::audit::list,
         // Service Accounts
         handlers::service_accounts::create,
         handlers::service_accounts::list,
@@ -161,6 +163,10 @@ use crate::handlers;
         handlers::service_accounts::ServiceAccountResponse,
         handlers::service_accounts::ServiceAccountCreatedResponse,
         handlers::service_accounts::RotateSecretResponse,
+        // Audit
+        axiam_core::models::audit::AuditLogEntry,
+        axiam_core::models::audit::ActorType,
+        axiam_core::models::audit::AuditOutcome,
         // Pagination
         axiam_core::repository::Pagination,
     )),
@@ -175,6 +181,7 @@ use crate::handlers;
         (name = "permissions", description = "Permission management and grants"),
         (name = "resources", description = "Resource management and hierarchy"),
         (name = "scopes", description = "Scope management (sub-resource permissions)"),
+        (name = "audit", description = "Audit log queries"),
         (name = "service-accounts", description = "Service account management"),
     ),
     modifiers(&SecurityAddon),

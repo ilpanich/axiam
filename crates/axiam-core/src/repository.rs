@@ -451,7 +451,7 @@ pub trait GroupRepository: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Query filters for audit log entries.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize, utoipa::IntoParams)]
 pub struct AuditLogFilter {
     pub actor_id: Option<Uuid>,
     pub action: Option<String>,

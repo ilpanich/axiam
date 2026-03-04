@@ -8,13 +8,14 @@ use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::{
     HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes, openapi_routes,
 };
+use axiam_audit::AuditMiddleware;
 use axiam_auth::AuthService;
 use axiam_auth::config::AuthConfig;
 use axiam_db::{
-    DbConfig, DbManager, SurrealGroupRepository, SurrealOrganizationRepository,
-    SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    DbConfig, DbManager, SurrealAuditLogRepository, SurrealGroupRepository,
+    SurrealOrganizationRepository, SurrealPermissionRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
@@ -93,6 +94,7 @@ async fn main() -> std::io::Result<()> {
     let scope_repo = SurrealScopeRepository::new(db.client().clone());
     let service_account_repo = SurrealServiceAccountRepository::new(db.client().clone());
     let session_repo = SurrealSessionRepository::new(db.client().clone());
+    let audit_repo = SurrealAuditLogRepository::new(db.client().clone());
     let auth_service = AuthService::new(user_repo.clone(), session_repo, config.auth.clone());
 
     let bind_addr = config.server.bind_address();
@@ -128,9 +130,17 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to create AMQP notification channel");
     let notification_publisher = axiam_amqp::NotificationPublisher::new(notif_channel);
 
-    // NOTE: The audit event consumer (axiam_amqp::audit_consumer) requires an
-    // AuditLogRepository implementation (SurrealAuditLogRepository), which will
-    // be created in Phase 7 (T7.1). It will be wired here once available.
+    // Spawn AMQP audit event consumer on a background task.
+    let audit_channel = amqp
+        .create_channel()
+        .await
+        .expect("Failed to create AMQP audit consumer channel");
+    let amqp_audit_repo = audit_repo.clone();
+    tokio::spawn(async move {
+        axiam_amqp::audit_consumer::start_audit_consumer(audit_channel, amqp_audit_repo).await;
+        tracing::error!("AMQP audit consumer exited — shutting down process");
+        std::process::exit(1);
+    });
 
     // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();
@@ -152,12 +162,16 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
+    let audit_middleware = AuditMiddleware::new(audit_repo.clone());
+
     HttpServer::new(move || {
         App::new()
             .wrap(TracingLogger::default())
+            .wrap(audit_middleware.clone())
             .wrap(build_cors(&server_config.cors_allowed_origins))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(health_checker.clone()))
+            .app_data(web::Data::new(audit_repo.clone()))
             .app_data(web::Data::new(org_repo.clone()))
             .app_data(web::Data::new(tenant_repo.clone()))
             .app_data(web::Data::new(user_repo.clone()))

@@ -15,10 +15,10 @@ mod schema;
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use repository::{
-    SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealServiceAccountRepository, SurrealSessionRepository, SurrealTenantRepository,
-    SurrealUserRepository, hash_client_secret, verify_password,
+    SurrealAuditLogRepository, SurrealGroupRepository, SurrealOrganizationRepository,
+    SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
+    SurrealTenantRepository, SurrealUserRepository, hash_client_secret, verify_password,
 };
 pub use schema::{run_migrations, schema_v1};
 /// Re-export SurrealDB connection types for use in repository type aliases.

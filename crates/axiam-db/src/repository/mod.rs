@@ -1,5 +1,6 @@
 //! SurrealDB repository implementations.
 
+mod audit;
 mod group;
 mod organization;
 mod permission;
@@ -11,6 +12,7 @@ mod session;
 mod tenant;
 mod user;
 
+pub use audit::SurrealAuditLogRepository;
 pub use group::SurrealGroupRepository;
 pub use organization::SurrealOrganizationRepository;
 pub use permission::SurrealPermissionRepository;

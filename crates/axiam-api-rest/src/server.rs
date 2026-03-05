@@ -74,6 +74,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::put().to(handlers::tenants::update::<C>))
                     .route(web::delete().to(handlers::tenants::delete::<C>)),
             )
+            // --- CA Certificates (nested under organizations) ---
+            .service(
+                web::resource("/organizations/{org_id}/ca-certificates")
+                    .route(web::post().to(handlers::ca_certificates::generate::<C>))
+                    .route(web::get().to(handlers::ca_certificates::list::<C>)),
+            )
+            .service(
+                web::resource("/organizations/{org_id}/ca-certificates/{id}")
+                    .route(web::get().to(handlers::ca_certificates::get::<C>)),
+            )
+            .service(
+                web::resource("/organizations/{org_id}/ca-certificates/{id}/revoke")
+                    .route(web::post().to(handlers::ca_certificates::revoke::<C>)),
+            )
             .service(
                 web::resource("/users")
                     .route(web::post().to(handlers::users::create::<C>))

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Status of a certificate in its lifecycle.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum CertificateStatus {
     Active,
     Revoked,
@@ -16,14 +16,14 @@ pub enum CertificateStatus {
 }
 
 /// The type of key algorithm used for a certificate.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum KeyAlgorithm {
     Rsa4096,
     Ed25519,
 }
 
 /// The purpose for which a certificate was issued.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum CertificateType {
     /// Certificate for authenticating a user.
     User,
@@ -39,7 +39,7 @@ pub enum CertificateType {
 /// within the organization. Private keys for signing CAs are encrypted
 /// with AES-256-GCM and stored separately; non-signing CAs only store
 /// the public certificate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CaCertificate {
     pub id: Uuid,
     /// The organization this CA belongs to.
@@ -58,13 +58,16 @@ pub struct CaCertificate {
     pub status: CertificateStatus,
     /// AES-256-GCM encrypted private key (only for signing CAs).
     /// `None` for uploaded CAs where the private key is not stored.
+    #[serde(skip_serializing)]
+    #[schema(read_only)]
     pub encrypted_private_key: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
 }
 
-/// Fields required to generate a new CA certificate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Fields required to generate a new CA certificate (user-facing DTO).
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateCaCertificate {
+    #[serde(default)]
     pub organization_id: Uuid,
     pub subject: String,
     pub key_algorithm: KeyAlgorithm,
@@ -72,11 +75,38 @@ pub struct CreateCaCertificate {
     pub validity_days: u32,
 }
 
+/// All fields required to store a CA certificate in the database.
+///
+/// Produced by the PKI service after generating the keypair and cert.
+#[derive(Debug, Clone)]
+pub struct StoreCaCertificate {
+    pub organization_id: Uuid,
+    pub subject: String,
+    pub public_cert_pem: String,
+    pub fingerprint: String,
+    pub key_algorithm: KeyAlgorithm,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+    pub encrypted_private_key: Option<Vec<u8>>,
+}
+
+/// Response returned when a CA certificate is generated.
+///
+/// Includes the private key PEM, which is returned **once** and never
+/// stored or retrievable again.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GeneratedCaCertificate {
+    #[serde(flatten)]
+    pub certificate: CaCertificate,
+    /// PEM-encoded private key — returned only on generation.
+    pub private_key_pem: String,
+}
+
 /// A tenant-level certificate for users, services, or IoT devices.
 ///
 /// Certificates are signed by the organization's CA. The private key is
 /// returned once on generation and never stored by AXIAM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Certificate {
     pub id: Uuid,
     /// The tenant this certificate belongs to.
@@ -102,7 +132,7 @@ pub struct Certificate {
 }
 
 /// Fields required to generate a new tenant certificate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateCertificate {
     pub tenant_id: Uuid,
     pub issuer_ca_id: Uuid,

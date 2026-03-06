@@ -2,6 +2,7 @@
 
 mod audit;
 mod ca_certificate;
+mod certificate;
 mod group;
 mod organization;
 mod permission;
@@ -15,6 +16,7 @@ mod user;
 
 pub use audit::SurrealAuditLogRepository;
 pub use ca_certificate::SurrealCaCertificateRepository;
+pub use certificate::SurrealCertificateRepository;
 pub use group::SurrealGroupRepository;
 pub use organization::SurrealOrganizationRepository;
 pub use permission::SurrealPermissionRepository;

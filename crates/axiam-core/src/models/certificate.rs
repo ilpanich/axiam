@@ -131,9 +131,10 @@ pub struct Certificate {
     pub created_at: DateTime<Utc>,
 }
 
-/// Fields required to generate a new tenant certificate.
+/// Fields required to generate a new tenant certificate (user-facing DTO).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateCertificate {
+    #[serde(default)]
     pub tenant_id: Uuid,
     pub issuer_ca_id: Uuid,
     pub subject: String,
@@ -142,4 +143,32 @@ pub struct CreateCertificate {
     /// Validity duration in days.
     pub validity_days: u32,
     pub metadata: Option<serde_json::Value>,
+}
+
+/// All fields required to store a tenant certificate in the database.
+///
+/// Produced by the PKI service after generating and signing the certificate.
+#[derive(Debug, Clone)]
+pub struct StoreCertificate {
+    pub tenant_id: Uuid,
+    pub issuer_ca_id: Uuid,
+    pub subject: String,
+    pub public_cert_pem: String,
+    pub fingerprint: String,
+    pub cert_type: CertificateType,
+    pub key_algorithm: KeyAlgorithm,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+    pub metadata: serde_json::Value,
+}
+
+/// Response returned when a tenant certificate is generated.
+///
+/// Includes the private key PEM, returned **once** and never stored.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GeneratedCertificate {
+    #[serde(flatten)]
+    pub certificate: Certificate,
+    /// PEM-encoded private key — returned only on generation.
+    pub private_key_pem: String,
 }

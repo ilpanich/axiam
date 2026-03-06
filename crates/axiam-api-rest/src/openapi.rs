@@ -88,6 +88,11 @@ use crate::handlers;
         handlers::ca_certificates::list,
         handlers::ca_certificates::get,
         handlers::ca_certificates::revoke,
+        // Certificates
+        handlers::certificates::generate,
+        handlers::certificates::list,
+        handlers::certificates::get,
+        handlers::certificates::revoke,
         // Audit Logs
         handlers::audit::list,
         handlers::audit::list_system,
@@ -175,6 +180,11 @@ use crate::handlers;
         axiam_core::models::certificate::GeneratedCaCertificate,
         axiam_core::models::certificate::CertificateStatus,
         axiam_core::models::certificate::KeyAlgorithm,
+        // Certificates
+        axiam_core::models::certificate::Certificate,
+        axiam_core::models::certificate::CreateCertificate,
+        axiam_core::models::certificate::GeneratedCertificate,
+        axiam_core::models::certificate::CertificateType,
         // Audit
         axiam_core::models::audit::AuditLogEntry,
         axiam_core::models::audit::ActorType,
@@ -194,6 +204,7 @@ use crate::handlers;
         (name = "resources", description = "Resource management and hierarchy"),
         (name = "scopes", description = "Scope management (sub-resource permissions)"),
         (name = "ca-certificates", description = "CA certificate management"),
+        (name = "certificates", description = "Tenant certificate lifecycle"),
         (name = "audit", description = "Audit log queries"),
         (name = "service-accounts", description = "Service account management"),
     ),

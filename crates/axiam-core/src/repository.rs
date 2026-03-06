@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::error::AxiamResult;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
-    certificate::{CaCertificate, Certificate, CreateCertificate, StoreCaCertificate},
+    certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
     federation::{CreateFederationConfig, FederationConfig, UpdateFederationConfig},
     group::{CreateGroup, Group, UpdateGroup},
     oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client},
@@ -568,7 +568,7 @@ pub trait CaCertificateRepository: Send + Sync {
 pub trait CertificateRepository: Send + Sync {
     fn create(
         &self,
-        input: CreateCertificate,
+        input: StoreCertificate,
     ) -> impl Future<Output = AxiamResult<Certificate>> + Send;
     fn get_by_id(
         &self,

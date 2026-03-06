@@ -6,5 +6,7 @@
 //! for audit signing and encrypted data exports.
 
 pub mod ca;
+pub mod cert;
 
 pub use ca::{CaService, PkiConfig};
+pub use cert::CertService;

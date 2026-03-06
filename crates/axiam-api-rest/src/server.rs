@@ -202,6 +202,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::put().to(handlers::scopes::update::<C>))
                     .route(web::delete().to(handlers::scopes::delete::<C>)),
             )
+            // --- Certificates (tenant scope) ---
+            .service(
+                web::resource("/certificates")
+                    .route(web::post().to(handlers::certificates::generate::<C>))
+                    .route(web::get().to(handlers::certificates::list::<C>)),
+            )
+            .service(
+                web::resource("/certificates/{id}")
+                    .route(web::get().to(handlers::certificates::get::<C>)),
+            )
+            .service(
+                web::resource("/certificates/{id}/revoke")
+                    .route(web::post().to(handlers::certificates::revoke::<C>)),
+            )
             // --- Audit Logs ---
             .service(
                 web::resource("/audit-logs")

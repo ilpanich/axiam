@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth;
 pub mod ca_certificates;
+pub mod certificates;
 pub mod groups;
 pub mod organizations;
 pub mod permissions;

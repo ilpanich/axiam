@@ -25,6 +25,7 @@ AXIAM (Access eXtended Identity and Authorization Management) is new open source
 - The design of the frontend must be responsive and allow the full usage from mobiles.
 - The frontend must include a set of default landing page for a user to manage it's identity (e.g.: change password, add MFA, ...) and for the password reset. The access to the user identity page is allowed also for social logins and federated accounts, but nothing can be changed by them.
 - Organizations and tenants admins can setup email notifications on critical or suspicious events.
+- For every settings that can be made at organization level can be replaced at tenant level only by more restrictive settings; this also applies recursively along the hierarchy.
 
 
 ## Key concepts

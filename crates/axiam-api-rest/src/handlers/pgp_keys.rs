@@ -122,6 +122,21 @@ pub async fn sign_audit_batch<C: Connection>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let request = body.into_inner();
 
+    // Reject empty or duplicate entry IDs
+    if request.entry_ids.is_empty() {
+        return Err(axiam_core::error::AxiamError::Validation {
+            message: "entry_ids must not be empty".into(),
+        }
+        .into());
+    }
+    let unique_ids: std::collections::HashSet<_> = request.entry_ids.iter().collect();
+    if unique_ids.len() != request.entry_ids.len() {
+        return Err(axiam_core::error::AxiamError::Validation {
+            message: "entry_ids must not contain duplicates".into(),
+        }
+        .into());
+    }
+
     let entries = audit_repo
         .get_by_ids(user.tenant_id, &request.entry_ids)
         .await?;

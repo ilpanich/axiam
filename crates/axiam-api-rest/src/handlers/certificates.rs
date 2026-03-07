@@ -4,8 +4,12 @@ use actix_web::{HttpResponse, web};
 use axiam_core::models::certificate::{
     BindCertificate, Certificate, CreateCertificate, GeneratedCertificate,
 };
-use axiam_core::repository::{CertificateRepository, PaginatedResult, Pagination};
-use axiam_db::{SurrealCaCertificateRepository, SurrealCertificateRepository};
+use axiam_core::repository::{
+    CertificateRepository, PaginatedResult, Pagination, TenantRepository,
+};
+use axiam_db::{
+    SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealTenantRepository,
+};
 use axiam_pki::CertService;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -30,11 +34,21 @@ pub async fn generate<C: Connection>(
     service: web::Data<
         CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
     >,
+    tenant_repo: web::Data<SurrealTenantRepository<C>>,
     body: web::Json<CreateCertificate>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let mut input = body.into_inner();
     input.tenant_id = user.tenant_id;
-    let result = service.generate(user.org_id, input).await?;
+
+    // Read tenant-level max_certificate_validity_days from metadata
+    let tenant = tenant_repo.get_by_id(user.tenant_id).await?;
+    let max_validity = tenant
+        .metadata
+        .get("max_certificate_validity_days")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+
+    let result = service.generate(user.org_id, input, max_validity).await?;
     Ok(HttpResponse::Created().json(result))
 }
 

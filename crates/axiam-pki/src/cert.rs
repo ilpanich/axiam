@@ -16,6 +16,17 @@ use uuid::Uuid;
 
 use crate::PkiConfig;
 
+/// Hard cap for leaf certificate validity: 825 days (~27 months).
+///
+/// Aligns with CA/Browser Forum Baseline Requirements and Apple/Mozilla
+/// root program policies. Internal PKI may allow up to this limit;
+/// tenants can configure a lower per-tenant maximum via the
+/// `max_certificate_validity_days` key in their metadata.
+pub const MAX_LEAF_CERT_VALIDITY_DAYS: u32 = 825;
+
+/// Default leaf certificate validity when no tenant override is set: 365 days.
+pub const DEFAULT_LEAF_CERT_VALIDITY_DAYS: u32 = 365;
+
 /// Service for tenant-level certificate operations.
 #[derive(Clone)]
 pub struct CertService<CA, CR> {
@@ -37,11 +48,30 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     ///
     /// `org_id` is required to look up the CA certificate and its encrypted
     /// private key for signing.
+    ///
+    /// `max_validity_days` is the tenant-level cap (from tenant metadata).
+    /// Pass `None` to use the default ([`DEFAULT_LEAF_CERT_VALIDITY_DAYS`]).
+    /// The hard cap ([`MAX_LEAF_CERT_VALIDITY_DAYS`], 825 days) is always
+    /// enforced per CA/Browser Forum Baseline Requirements.
     pub async fn generate(
         &self,
         org_id: Uuid,
         input: CreateCertificate,
+        max_validity_days: Option<u32>,
     ) -> AxiamResult<GeneratedCertificate> {
+        // Enforce validity_days bounds: > 0 and <= tenant/hard cap
+        let effective_max = max_validity_days
+            .unwrap_or(DEFAULT_LEAF_CERT_VALIDITY_DAYS)
+            .min(MAX_LEAF_CERT_VALIDITY_DAYS);
+        if input.validity_days == 0 || input.validity_days > effective_max {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "validity_days must be between 1 and {effective_max} \
+                     (CA/Browser Forum BR hard cap: {MAX_LEAF_CERT_VALIDITY_DAYS} days)"
+                ),
+            });
+        }
+
         // Fetch the CA cert to get the encrypted private key.
         let ca_cert = self.ca_repo.get_by_id(org_id, input.issuer_ca_id).await?;
 
@@ -79,7 +109,11 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         let private_key_pem = ee_key_pair.serialize_pem();
 
         let not_before = now;
-        let requested_not_after = now + Duration::days(i64::from(input.validity_days));
+        let requested_not_after = now
+            .checked_add_signed(Duration::days(i64::from(input.validity_days)))
+            .ok_or_else(|| AxiamError::Validation {
+                message: "validity_days produces a date out of range".into(),
+            })?;
         // Cap leaf validity to CA validity window
         let not_after = std::cmp::min(requested_not_after, ca_cert.not_after);
 

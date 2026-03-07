@@ -12,6 +12,13 @@ use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// Maximum validity for CA certificates: 20 years (7300 days).
+///
+/// Aligns with NIST SP 800-57 Part 1 Rev 5 recommendations for root CA
+/// certificate lifetimes. Values above this are rejected to prevent
+/// chrono/time overflow and to enforce security best practice.
+pub const MAX_CA_VALIDITY_DAYS: u32 = 7300;
+
 /// PKI configuration — holds the AES-256-GCM key for encrypting CA private keys.
 #[derive(Clone)]
 pub struct PkiConfig {
@@ -38,12 +45,25 @@ impl<R: CaCertificateRepository> CaService<R> {
         &self,
         input: CreateCaCertificate,
     ) -> AxiamResult<GeneratedCaCertificate> {
+        if input.validity_days == 0 || input.validity_days > MAX_CA_VALIDITY_DAYS {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "validity_days must be between 1 and {MAX_CA_VALIDITY_DAYS} \
+                     (NIST SP 800-57 max for CA certificates)"
+                ),
+            });
+        }
+
         let key_pair = generate_keypair(&input.key_algorithm)?;
         let private_key_pem = key_pair.serialize_pem();
 
         let now = Utc::now();
         let not_before = now;
-        let not_after = now + Duration::days(i64::from(input.validity_days));
+        let not_after = now
+            .checked_add_signed(Duration::days(i64::from(input.validity_days)))
+            .ok_or_else(|| AxiamError::Validation {
+                message: "validity_days produces a date out of range".into(),
+            })?;
 
         let mut params = CertificateParams::new(Vec::<String>::new())
             .map_err(|e| AxiamError::Certificate(e.to_string()))?;

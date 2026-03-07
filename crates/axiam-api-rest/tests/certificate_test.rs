@@ -105,6 +105,7 @@ macro_rules! test_app {
         let pki_config = test_pki_config();
         let ca_repo = SurrealCaCertificateRepository::new($db.clone());
         let cert_repo = SurrealCertificateRepository::new($db.clone());
+        let tenant_repo = SurrealTenantRepository::new($db.clone());
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
@@ -115,6 +116,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(CertService::new(
                     ca_repo, cert_repo, pki_config,
                 )))
+                .app_data(web::Data::new(tenant_repo))
                 .configure(register_api_v1_routes::<TestDb>),
         )
         .await

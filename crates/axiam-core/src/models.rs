@@ -10,6 +10,7 @@ pub mod group;
 pub mod oauth2_client;
 pub mod organization;
 pub mod permission;
+pub mod pgp_key;
 pub mod resource;
 pub mod role;
 pub mod scope;

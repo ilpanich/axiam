@@ -12,11 +12,13 @@ use axiam_audit::AuditMiddleware;
 use axiam_auth::AuthService;
 use axiam_auth::config::AuthConfig;
 use axiam_db::{
-    DbConfig, DbManager, SurrealAuditLogRepository, SurrealGroupRepository,
-    SurrealOrganizationRepository, SurrealPermissionRepository, SurrealResourceRepository,
+    DbConfig, DbManager, SurrealAuditLogRepository, SurrealCaCertificateRepository,
+    SurrealCertificateRepository, SurrealGroupRepository, SurrealOrganizationRepository,
+    SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealResourceRepository,
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
     SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
 use tracing_subscriber::EnvFilter;
@@ -95,7 +97,35 @@ async fn main() -> std::io::Result<()> {
     let service_account_repo = SurrealServiceAccountRepository::new(db.client().clone());
     let session_repo = SurrealSessionRepository::new(db.client().clone());
     let audit_repo = SurrealAuditLogRepository::new(db.client().clone());
+    let ca_cert_repo = SurrealCaCertificateRepository::new(db.client().clone());
     let auth_service = AuthService::new(user_repo.clone(), session_repo, config.auth.clone());
+
+    // PKI service — encryption key for CA private keys.
+    let pki_config = {
+        let key = if let Ok(hex_key) = std::env::var("AXIAM__PKI__ENCRYPTION_KEY") {
+            let bytes = hex::decode(&hex_key).expect(
+                "AXIAM__PKI__ENCRYPTION_KEY must be a 64-char hex string (32 bytes / 256 bits)",
+            );
+            let key: [u8; 32] = bytes
+                .try_into()
+                .expect("AXIAM__PKI__ENCRYPTION_KEY must be exactly 32 bytes (256 bits)");
+            key
+        } else {
+            tracing::warn!(
+                "AXIAM__PKI__ENCRYPTION_KEY not set — CA certificate generation will fail"
+            );
+            [0u8; 32]
+        };
+        PkiConfig {
+            encryption_key: key,
+        }
+    };
+    let cert_repo = SurrealCertificateRepository::new(db.client().clone());
+    let ca_service = CaService::new(ca_cert_repo.clone(), pki_config.clone());
+    let pgp_repo = SurrealPgpKeyRepository::new(db.client().clone());
+    let pgp_service = PgpService::new(pgp_repo, pki_config.clone());
+    let cert_service = CertService::new(ca_cert_repo, cert_repo.clone(), pki_config);
+    let device_auth_service = DeviceAuthService::new(cert_repo.clone());
 
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
@@ -183,6 +213,11 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(service_account_repo.clone()))
             .app_data(web::Data::new(auth_service.clone()))
             .app_data(web::Data::new(notification_publisher.clone()))
+            .app_data(web::Data::new(ca_service.clone()))
+            .app_data(web::Data::new(cert_service.clone()))
+            .app_data(web::Data::new(cert_repo.clone()))
+            .app_data(web::Data::new(device_auth_service.clone()))
+            .app_data(web::Data::new(pgp_service.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
             .configure(openapi_routes)

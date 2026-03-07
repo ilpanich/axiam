@@ -48,7 +48,8 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .route(
                 "/mfa/verify",
                 web::post().to(handlers::auth::verify_mfa::<C>),
-            ),
+            )
+            .route("/device", web::post().to(handlers::auth::device_auth::<C>)),
     );
     cfg.service(
         web::scope("/api/v1")
@@ -73,6 +74,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::get().to(handlers::tenants::get::<C>))
                     .route(web::put().to(handlers::tenants::update::<C>))
                     .route(web::delete().to(handlers::tenants::delete::<C>)),
+            )
+            // --- CA Certificates (nested under organizations) ---
+            .service(
+                web::resource("/organizations/{org_id}/ca-certificates")
+                    .route(web::post().to(handlers::ca_certificates::generate::<C>))
+                    .route(web::get().to(handlers::ca_certificates::list::<C>)),
+            )
+            .service(
+                web::resource("/organizations/{org_id}/ca-certificates/{id}")
+                    .route(web::get().to(handlers::ca_certificates::get::<C>)),
+            )
+            .service(
+                web::resource("/organizations/{org_id}/ca-certificates/{id}/revoke")
+                    .route(web::post().to(handlers::ca_certificates::revoke::<C>)),
             )
             .service(
                 web::resource("/users")
@@ -188,6 +203,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::put().to(handlers::scopes::update::<C>))
                     .route(web::delete().to(handlers::scopes::delete::<C>)),
             )
+            // --- Certificates (tenant scope) ---
+            .service(
+                web::resource("/certificates")
+                    .route(web::post().to(handlers::certificates::generate::<C>))
+                    .route(web::get().to(handlers::certificates::list::<C>)),
+            )
+            .service(
+                web::resource("/certificates/{id}")
+                    .route(web::get().to(handlers::certificates::get::<C>)),
+            )
+            .service(
+                web::resource("/certificates/{id}/revoke")
+                    .route(web::post().to(handlers::certificates::revoke::<C>)),
+            )
             // --- Audit Logs ---
             .service(
                 web::resource("/audit-logs")
@@ -212,6 +241,32 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .service(
                 web::resource("/service-accounts/{sa_id}/rotate-secret")
                     .route(web::post().to(handlers::service_accounts::rotate_secret::<C>)),
+            )
+            .service(
+                web::resource("/service-accounts/{sa_id}/bind-certificate")
+                    .route(web::post().to(handlers::certificates::bind::<C>)),
+            )
+            // --- PGP Keys ---
+            .service(
+                web::resource("/pgp-keys/sign-audit-batch")
+                    .route(web::post().to(handlers::pgp_keys::sign_audit_batch::<C>)),
+            )
+            .service(
+                web::resource("/pgp-keys")
+                    .route(web::post().to(handlers::pgp_keys::generate::<C>))
+                    .route(web::get().to(handlers::pgp_keys::list::<C>)),
+            )
+            .service(
+                web::resource("/pgp-keys/{id}")
+                    .route(web::get().to(handlers::pgp_keys::get::<C>)),
+            )
+            .service(
+                web::resource("/pgp-keys/{id}/revoke")
+                    .route(web::post().to(handlers::pgp_keys::revoke::<C>)),
+            )
+            .service(
+                web::resource("/pgp-keys/{id}/encrypt")
+                    .route(web::post().to(handlers::pgp_keys::encrypt::<C>)),
             ),
     );
 }

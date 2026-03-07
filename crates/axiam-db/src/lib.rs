@@ -15,8 +15,9 @@ mod schema;
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use repository::{
-    SurrealAuditLogRepository, SurrealGroupRepository, SurrealOrganizationRepository,
-    SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealAuditLogRepository, SurrealCaCertificateRepository, SurrealCertificateRepository,
+    SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
+    SurrealPgpKeyRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
     SurrealTenantRepository, SurrealUserRepository, hash_client_secret, verify_password,
 };

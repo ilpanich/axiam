@@ -1,4 +1,8 @@
-//! mTLS device authentication — validates client certificates against the CA chain.
+//! mTLS device authentication — validates client certificates via fingerprint lookup.
+//!
+//! CA chain validation is delegated to the TLS-terminating reverse proxy.
+//! This module verifies the certificate is known, active, not expired,
+//! and bound to a service account.
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{CertificateStatus, DeviceIdentity};

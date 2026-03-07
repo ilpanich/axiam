@@ -70,8 +70,6 @@ fn urldecode(input: &str) -> Result<String, ()> {
             let hi = hex_val(hi)?;
             let lo = hex_val(lo)?;
             result.push((hi << 4) | lo);
-        } else if b == b'+' {
-            result.push(b' ');
         } else {
             result.push(b);
         }

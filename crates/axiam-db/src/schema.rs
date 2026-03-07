@@ -398,6 +398,10 @@ DEFINE TABLE cert_bound_to TYPE RELATION SCHEMAFULL;
 DEFINE FIELD created_at ON TABLE cert_bound_to TYPE datetime \
     DEFAULT time::now();
 
+-- Each certificate can be bound to at most one service account
+DEFINE INDEX idx_cert_bound_unique ON TABLE cert_bound_to \
+    COLUMNS in UNIQUE;
+
 -- Global fingerprint index for cross-tenant cert lookup
 DEFINE INDEX idx_cert_fingerprint_global ON TABLE certificate \
     COLUMNS fingerprint UNIQUE;

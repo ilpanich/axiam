@@ -163,12 +163,8 @@ async fn pgp_key_generate_ed25519() {
     assert_eq!(status, 201, "generate failed: {body}");
     assert!(body["id"].as_str().is_some());
     assert!(body["fingerprint"].as_str().unwrap().len() > 10);
-    assert!(
-        body["private_key_armored"]
-            .as_str()
-            .unwrap()
-            .contains("PGP PRIVATE KEY")
-    );
+    // AuditSigning keys should NOT return the private key
+    assert!(body["private_key_armored"].is_null());
     assert!(
         body["public_key_armored"]
             .as_str()

@@ -54,7 +54,8 @@ impl<R: PgpKeyRepository> PgpService<R> {
         let fingerprint = hex::encode(public_key.fingerprint());
 
         // Encrypt private key for storage (only for AuditSigning)
-        let encrypted_private_key = if input.purpose == PgpKeyPurpose::AuditSigning {
+        let is_export = input.purpose == PgpKeyPurpose::Export;
+        let encrypted_private_key = if !is_export {
             Some(encrypt_private_key(
                 private_key_armored.as_bytes(),
                 &self.config.encryption_key,
@@ -75,9 +76,16 @@ impl<R: PgpKeyRepository> PgpService<R> {
 
         let key = self.repo.create(store).await?;
 
+        // Only return private key for Export keys; AuditSigning keys are server-side only.
+        let returned_private_key = if is_export {
+            Some(private_key_armored)
+        } else {
+            None
+        };
+
         Ok(GeneratedPgpKey {
             key,
-            private_key_armored,
+            private_key_armored: returned_private_key,
         })
     }
 

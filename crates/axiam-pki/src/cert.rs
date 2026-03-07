@@ -51,6 +51,14 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             ));
         }
 
+        // Validate CA certificate validity window
+        let now = Utc::now();
+        if now < ca_cert.not_before || now > ca_cert.not_after {
+            return Err(AxiamError::Certificate(
+                "CA certificate is expired or not yet valid".into(),
+            ));
+        }
+
         let encrypted_key = ca_cert.encrypted_private_key.ok_or_else(|| {
             AxiamError::Certificate("CA certificate has no stored private key".into())
         })?;
@@ -70,9 +78,10 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         let ee_key_pair = generate_keypair(&input.key_algorithm)?;
         let private_key_pem = ee_key_pair.serialize_pem();
 
-        let now = Utc::now();
         let not_before = now;
-        let not_after = now + Duration::days(i64::from(input.validity_days));
+        let requested_not_after = now + Duration::days(i64::from(input.validity_days));
+        // Cap leaf validity to CA validity window
+        let not_after = std::cmp::min(requested_not_after, ca_cert.not_after);
 
         // Build end-entity certificate request.
         let mut ee_params = CertificateParams::new(Vec::<String>::new())

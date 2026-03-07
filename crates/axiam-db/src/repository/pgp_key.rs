@@ -236,6 +236,7 @@ impl<C: Connection> PgpKeyRepository for SurrealPgpKeyRepository<C> {
                  WHERE tenant_id = $tenant_id \
                  AND purpose = 'AuditSigning' \
                  AND status = 'Active' \
+                 ORDER BY created_at DESC \
                  LIMIT 1",
             )
             .bind(("tenant_id", tenant_id.to_string()))

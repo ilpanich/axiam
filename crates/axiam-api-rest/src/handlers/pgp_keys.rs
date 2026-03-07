@@ -126,6 +126,19 @@ pub async fn sign_audit_batch<C: Connection>(
         .get_by_ids(user.tenant_id, &request.entry_ids)
         .await?;
 
+    if entries.len() != request.entry_ids.len() {
+        let found_ids: std::collections::HashSet<_> = entries.iter().map(|e| e.id).collect();
+        let missing: Vec<_> = request
+            .entry_ids
+            .iter()
+            .filter(|id| !found_ids.contains(id))
+            .collect();
+        return Err(axiam_core::error::AxiamError::Validation {
+            message: format!("audit entries not found: {missing:?}"),
+        }
+        .into());
+    }
+
     let result = pgp_service
         .sign_audit_batch(user.tenant_id, entries)
         .await?;

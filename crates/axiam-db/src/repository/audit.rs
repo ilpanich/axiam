@@ -353,8 +353,14 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
             .map_err(DbError::from)?;
         let mut result = r.check().map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<AuditLogRowWithId> = result.take(0).map_err(DbError::from)?;
-        rows.into_iter()
+        let entries: Vec<AuditLogEntry> = rows
+            .into_iter()
             .map(|r| r.try_into_entry().map_err(Into::into))
-            .collect()
+            .collect::<AxiamResult<Vec<_>>>()?;
+
+        // Preserve caller-provided order for deterministic signing
+        let index: std::collections::HashMap<Uuid, AuditLogEntry> =
+            entries.into_iter().map(|e| (e.id, e)).collect();
+        Ok(ids.iter().filter_map(|id| index.get(id).cloned()).collect())
     }
 }

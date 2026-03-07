@@ -399,16 +399,23 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
 
     async fn bind_to_service_account(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         cert_id: Uuid,
         sa_id: Uuid,
     ) -> AxiamResult<()> {
-        let relate_sql = format!(
-            "RELATE certificate:`{}`->cert_bound_to->service_account:`{}`",
-            cert_id, sa_id,
+        // Verify both certificate and service account belong to the same tenant
+        // before creating the binding.
+        let verify_sql = format!(
+            "LET $cert = (SELECT tenant_id FROM certificate:`{cert_id}` WHERE tenant_id = $tid);\
+             LET $sa = (SELECT tenant_id FROM service_account:`{sa_id}` WHERE tenant_id = $tid);\
+             IF array::len($cert) = 0 OR array::len($sa) = 0 {{ \
+                 THROW 'cross-tenant binding denied'; \
+             }};\
+             RELATE certificate:`{cert_id}`->cert_bound_to->service_account:`{sa_id}`",
         );
         self.db
-            .query(&relate_sql)
+            .query(&verify_sql)
+            .bind(("tid", tenant_id.to_string()))
             .await
             .map_err(DbError::from)?
             .check()

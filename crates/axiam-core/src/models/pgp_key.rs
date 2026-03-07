@@ -81,8 +81,10 @@ pub struct StorePgpKey {
 pub struct GeneratedPgpKey {
     #[serde(flatten)]
     pub key: PgpKey,
-    /// ASCII-armored private key — returned only on generation.
-    pub private_key_armored: String,
+    /// ASCII-armored private key — returned only on generation for `Export` keys.
+    /// For `AuditSigning` keys this is `None` (private key is server-side only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key_armored: Option<String>,
 }
 
 /// A signed batch of audit log entries.
@@ -92,7 +94,7 @@ pub struct SignedAuditBatch {
     pub tenant_id: Uuid,
     pub signing_key_id: Uuid,
     pub entry_ids: Vec<Uuid>,
-    /// Detached ASCII-armored PGP signature.
+    /// ASCII-armored PGP signed message containing the audit batch payload.
     pub signature_armored: String,
     pub signed_at: DateTime<Utc>,
 }

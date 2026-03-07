@@ -125,6 +125,7 @@ pub async fn bind<C: Connection>(
     user: AuthenticatedUser,
     path: web::Path<Uuid>,
     cert_repo: web::Data<SurrealCertificateRepository<C>>,
+    sa_repo: web::Data<axiam_db::SurrealServiceAccountRepository<C>>,
     body: web::Json<BindCertificate>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let sa_id = path.into_inner();
@@ -134,6 +135,10 @@ pub async fn bind<C: Connection>(
     let cert = cert_repo
         .get_by_id(user.tenant_id, input.certificate_id)
         .await?;
+
+    // Verify the service account belongs to the same tenant.
+    use axiam_core::repository::ServiceAccountRepository;
+    sa_repo.get_by_id(user.tenant_id, sa_id).await?;
 
     cert_repo
         .bind_to_service_account(user.tenant_id, cert.id, sa_id)

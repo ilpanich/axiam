@@ -162,6 +162,37 @@ pub struct StoreCertificate {
     pub metadata: serde_json::Value,
 }
 
+/// Request to bind a certificate to a service account.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BindCertificate {
+    pub certificate_id: Uuid,
+}
+
+/// A certificate-to-service-account binding record.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CertificateBinding {
+    pub certificate_id: Uuid,
+    pub service_account_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Identity resolved from a device certificate during mTLS authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceIdentity {
+    pub service_account_id: Uuid,
+    pub tenant_id: Uuid,
+    pub org_id: Uuid,
+    pub certificate_id: Uuid,
+}
+
+/// Response returned when a device authenticates via certificate.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceAuthResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: u64,
+}
+
 /// Response returned when a tenant certificate is generated.
 ///
 /// Includes the private key PEM, returned **once** and never stored.

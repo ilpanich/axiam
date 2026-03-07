@@ -48,7 +48,8 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .route(
                 "/mfa/verify",
                 web::post().to(handlers::auth::verify_mfa::<C>),
-            ),
+            )
+            .route("/device", web::post().to(handlers::auth::device_auth::<C>)),
     );
     cfg.service(
         web::scope("/api/v1")
@@ -240,6 +241,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .service(
                 web::resource("/service-accounts/{sa_id}/rotate-secret")
                     .route(web::post().to(handlers::service_accounts::rotate_secret::<C>)),
+            )
+            .service(
+                web::resource("/service-accounts/{sa_id}/bind-certificate")
+                    .route(web::post().to(handlers::certificates::bind::<C>)),
             ),
     );
 }

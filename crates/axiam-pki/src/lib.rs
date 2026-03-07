@@ -7,6 +7,8 @@
 
 pub mod ca;
 pub mod cert;
+pub mod mtls;
 
 pub use ca::{CaService, PkiConfig};
 pub use cert::CertService;
+pub use mtls::DeviceAuthService;

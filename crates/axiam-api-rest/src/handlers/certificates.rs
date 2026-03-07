@@ -1,8 +1,10 @@
 //! Tenant certificate management endpoints.
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::certificate::{Certificate, CreateCertificate, GeneratedCertificate};
-use axiam_core::repository::{PaginatedResult, Pagination};
+use axiam_core::models::certificate::{
+    BindCertificate, Certificate, CreateCertificate, GeneratedCertificate,
+};
+use axiam_core::repository::{CertificateRepository, PaginatedResult, Pagination};
 use axiam_db::{SurrealCaCertificateRepository, SurrealCertificateRepository};
 use axiam_pki::CertService;
 use surrealdb::Connection;
@@ -105,4 +107,41 @@ pub async fn revoke<C: Connection>(
     let id = path.into_inner();
     service.revoke(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
+}
+
+/// `POST /api/v1/service-accounts/{sa_id}/bind-certificate`
+#[utoipa::path(
+    post,
+    path = "/api/v1/service-accounts/{sa_id}/bind-certificate",
+    tag = "certificates",
+    request_body = BindCertificate,
+    params(("sa_id" = Uuid, Path, description = "Service account ID")),
+    responses(
+        (status = 200, description = "Certificate bound to service account"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn bind<C: Connection>(
+    user: AuthenticatedUser,
+    path: web::Path<Uuid>,
+    cert_repo: web::Data<SurrealCertificateRepository<C>>,
+    body: web::Json<BindCertificate>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let sa_id = path.into_inner();
+    let input = body.into_inner();
+
+    // Verify the certificate belongs to the same tenant.
+    let cert = cert_repo
+        .get_by_id(user.tenant_id, input.certificate_id)
+        .await?;
+
+    cert_repo
+        .bind_to_service_account(user.tenant_id, cert.id, sa_id)
+        .await?;
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "certificate_id": cert.id,
+        "service_account_id": sa_id,
+        "status": "bound"
+    })))
 }

@@ -580,12 +580,26 @@ pub trait CertificateRepository: Send + Sync {
         tenant_id: Uuid,
         fingerprint: &str,
     ) -> impl Future<Output = AxiamResult<Certificate>> + Send;
+    fn get_by_fingerprint_global(
+        &self,
+        fingerprint: &str,
+    ) -> impl Future<Output = AxiamResult<Certificate>> + Send;
     fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<Certificate>>> + Send;
+    fn bind_to_service_account(
+        &self,
+        tenant_id: Uuid,
+        cert_id: Uuid,
+        sa_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    fn get_bound_service_account(
+        &self,
+        cert_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<Uuid>>> + Send;
 }
 
 // ---------------------------------------------------------------------------

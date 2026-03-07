@@ -37,11 +37,18 @@ struct Migration {
     sql: &'static str,
 }
 
-static MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial_schema",
-    sql: SCHEMA_V1,
-}];
+static MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial_schema",
+        sql: SCHEMA_V1,
+    },
+    Migration {
+        version: 2,
+        name: "cert_binding",
+        sql: SCHEMA_V2,
+    },
+];
 
 // -----------------------------------------------------------------------
 // Schema v1 — initial table definitions
@@ -374,6 +381,21 @@ DEFINE TABLE child_of TYPE RELATION SCHEMAFULL;
 
 -- Certificate -> CA Certificate signing chain
 DEFINE TABLE signed_by TYPE RELATION SCHEMAFULL;
+";
+
+// -----------------------------------------------------------------------
+// Schema v2 — certificate binding
+// -----------------------------------------------------------------------
+
+const SCHEMA_V2: &str = "\
+-- Certificate -> ServiceAccount binding for mTLS device auth
+DEFINE TABLE cert_bound_to TYPE RELATION SCHEMAFULL;
+DEFINE FIELD created_at ON TABLE cert_bound_to TYPE datetime \
+    DEFAULT time::now();
+
+-- Global fingerprint index for cross-tenant cert lookup
+DEFINE INDEX idx_cert_fingerprint_global ON TABLE certificate \
+    COLUMNS fingerprint UNIQUE;
 ";
 
 // -----------------------------------------------------------------------

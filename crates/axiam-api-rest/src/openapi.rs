@@ -93,6 +93,8 @@ use crate::handlers;
         handlers::certificates::list,
         handlers::certificates::get,
         handlers::certificates::revoke,
+        handlers::certificates::bind,
+        handlers::auth::device_auth,
         // Audit Logs
         handlers::audit::list,
         handlers::audit::list_system,
@@ -185,6 +187,9 @@ use crate::handlers;
         axiam_core::models::certificate::CreateCertificate,
         axiam_core::models::certificate::GeneratedCertificate,
         axiam_core::models::certificate::CertificateType,
+        axiam_core::models::certificate::BindCertificate,
+        axiam_core::models::certificate::CertificateBinding,
+        axiam_core::models::certificate::DeviceAuthResponse,
         // Audit
         axiam_core::models::audit::AuditLogEntry,
         axiam_core::models::audit::ActorType,

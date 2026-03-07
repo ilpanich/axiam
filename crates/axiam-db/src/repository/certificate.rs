@@ -54,6 +54,11 @@ struct CountRow {
     total: u64,
 }
 
+#[derive(Debug, SurrealValue)]
+struct BoundTargetRow {
+    sa_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Enum helpers
 // ---------------------------------------------------------------------------
@@ -367,5 +372,69 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             offset: pagination.offset,
             limit: pagination.limit,
         })
+    }
+
+    async fn get_by_fingerprint_global(&self, fingerprint: &str) -> AxiamResult<Certificate> {
+        let result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM certificate \
+                 WHERE fingerprint = $fingerprint",
+            )
+            .bind(("fingerprint", fingerprint.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CertificateRowWithId> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "certificate".into(),
+            id: fingerprint.to_string(),
+        })?;
+
+        row.try_into_entry().map_err(Into::into)
+    }
+
+    async fn bind_to_service_account(
+        &self,
+        _tenant_id: Uuid,
+        cert_id: Uuid,
+        sa_id: Uuid,
+    ) -> AxiamResult<()> {
+        let relate_sql = format!(
+            "RELATE certificate:`{}`->cert_bound_to->service_account:`{}`",
+            cert_id, sa_id,
+        );
+        self.db
+            .query(&relate_sql)
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_bound_service_account(&self, cert_id: Uuid) -> AxiamResult<Option<Uuid>> {
+        // Use a subquery to extract the service_account ID as a string
+        let sql = format!(
+            "SELECT meta::id(out) AS sa_id FROM cert_bound_to \
+             WHERE in = certificate:`{}`",
+            cert_id,
+        );
+        let result = self.db.query(&sql).await.map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<BoundTargetRow> = result.take(0).map_err(DbError::from)?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+
+        let sa_id = Uuid::parse_str(&row.sa_id)
+            .map_err(|e| DbError::Migration(format!("invalid service account UUID: {e}")))?;
+        Ok(Some(sa_id))
     }
 }

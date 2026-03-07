@@ -48,6 +48,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "cert_binding",
         sql: SCHEMA_V2,
     },
+    Migration {
+        version: 3,
+        name: "pgp_keys",
+        sql: SCHEMA_V3,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -396,6 +401,52 @@ DEFINE FIELD created_at ON TABLE cert_bound_to TYPE datetime \
 -- Global fingerprint index for cross-tenant cert lookup
 DEFINE INDEX idx_cert_fingerprint_global ON TABLE certificate \
     COLUMNS fingerprint UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v3 — PGP keys and audit signatures
+// -----------------------------------------------------------------------
+
+const SCHEMA_V3: &str = "\
+-- =======================================================================
+-- PGP Keys (tenant scope)
+-- =======================================================================
+DEFINE TABLE pgp_key SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE pgp_key TYPE string;
+DEFINE FIELD name ON TABLE pgp_key TYPE string;
+DEFINE FIELD purpose ON TABLE pgp_key TYPE string \
+    ASSERT $value IN ['AuditSigning', 'Export'];
+DEFINE FIELD public_key_armored ON TABLE pgp_key TYPE string;
+DEFINE FIELD fingerprint ON TABLE pgp_key TYPE string;
+DEFINE FIELD algorithm ON TABLE pgp_key TYPE string \
+    ASSERT $value IN ['Rsa4096', 'Ed25519'];
+DEFINE FIELD status ON TABLE pgp_key TYPE string \
+    ASSERT $value IN ['Active', 'Revoked'];
+DEFINE FIELD encrypted_private_key ON TABLE pgp_key \
+    TYPE option<bytes>;
+DEFINE FIELD created_at ON TABLE pgp_key TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_pgp_key_tenant_fingerprint ON TABLE pgp_key \
+    COLUMNS tenant_id, fingerprint UNIQUE;
+
+-- =======================================================================
+-- Audit Signatures (tenant scope, append-only)
+-- =======================================================================
+DEFINE TABLE audit_signature SCHEMAFULL \
+    PERMISSIONS \
+        FOR create FULL \
+        FOR select FULL \
+        FOR update NONE \
+        FOR delete NONE;
+DEFINE FIELD tenant_id ON TABLE audit_signature TYPE string;
+DEFINE FIELD signing_key_id ON TABLE audit_signature TYPE string;
+DEFINE FIELD entry_ids ON TABLE audit_signature TYPE array;
+DEFINE FIELD entry_ids.* ON TABLE audit_signature TYPE string;
+DEFINE FIELD signature_armored ON TABLE audit_signature TYPE string;
+DEFINE FIELD signed_at ON TABLE audit_signature TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_audit_sig_tenant ON TABLE audit_signature \
+    COLUMNS tenant_id, signed_at;
 ";
 
 // -----------------------------------------------------------------------

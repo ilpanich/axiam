@@ -14,11 +14,11 @@ use axiam_auth::config::AuthConfig;
 use axiam_db::{
     DbConfig, DbManager, SurrealAuditLogRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealGroupRepository, SurrealOrganizationRepository,
-    SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
 };
-use axiam_pki::{CaService, CertService, DeviceAuthService, PkiConfig};
+use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
 use tracing_subscriber::EnvFilter;
@@ -122,6 +122,8 @@ async fn main() -> std::io::Result<()> {
     };
     let cert_repo = SurrealCertificateRepository::new(db.client().clone());
     let ca_service = CaService::new(ca_cert_repo.clone(), pki_config.clone());
+    let pgp_repo = SurrealPgpKeyRepository::new(db.client().clone());
+    let pgp_service = PgpService::new(pgp_repo, pki_config.clone());
     let cert_service = CertService::new(ca_cert_repo, cert_repo.clone(), pki_config);
     let device_auth_service = DeviceAuthService::new(cert_repo.clone());
 
@@ -215,6 +217,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(cert_service.clone()))
             .app_data(web::Data::new(cert_repo.clone()))
             .app_data(web::Data::new(device_auth_service.clone()))
+            .app_data(web::Data::new(pgp_service.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
             .configure(openapi_routes)

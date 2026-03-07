@@ -5,6 +5,7 @@ pub mod certificates;
 pub mod groups;
 pub mod organizations;
 pub mod permissions;
+pub mod pgp_keys;
 pub mod resources;
 pub mod roles;
 pub mod scopes;

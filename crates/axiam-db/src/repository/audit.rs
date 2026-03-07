@@ -337,4 +337,24 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         // System/unauthenticated entries are stored with nil tenant_id.
         self.list(Uuid::nil(), filter, pagination).await
     }
+
+    async fn get_by_ids(&self, tenant_id: Uuid, ids: &[Uuid]) -> AxiamResult<Vec<AuditLogEntry>> {
+        let id_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        let r = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM audit_log \
+                 WHERE tenant_id = $tenant_id \
+                 AND meta::id(id) IN $ids",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("ids", id_strings))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = r.check().map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<AuditLogRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|r| r.try_into_entry().map_err(Into::into))
+            .collect()
+    }
 }

@@ -15,6 +15,7 @@ use crate::models::{
     oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client},
     organization::{CreateOrganization, Organization, UpdateOrganization},
     permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
+    pgp_key::{PgpKey, StorePgpKey},
     resource::{CreateResource, Resource, UpdateResource},
     role::{CreateRole, Role, RoleAssignment, UpdateRole},
     scope::{CreateScope, Scope, UpdateScope},
@@ -480,6 +481,12 @@ pub trait AuditLogRepository: Send + Sync {
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;
+    /// Fetch multiple audit log entries by their IDs.
+    fn get_by_ids(
+        &self,
+        tenant_id: Uuid,
+        ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<Vec<AuditLogEntry>>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -631,4 +638,25 @@ pub trait WebhookRepository: Send + Sync {
         tenant_id: Uuid,
         event_type: &str,
     ) -> impl Future<Output = AxiamResult<Vec<Webhook>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// PGP Keys (tenant-scoped)
+// ---------------------------------------------------------------------------
+
+pub trait PgpKeyRepository: Send + Sync {
+    fn create(&self, input: StorePgpKey) -> impl Future<Output = AxiamResult<PgpKey>> + Send;
+    fn get_by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<PgpKey>> + Send;
+    /// Returns the active AuditSigning key for a tenant.
+    fn get_signing_key(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<PgpKey>> + Send;
+    fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+    fn list(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<PgpKey>>> + Send;
 }

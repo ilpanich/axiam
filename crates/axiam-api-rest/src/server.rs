@@ -245,6 +245,28 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .service(
                 web::resource("/service-accounts/{sa_id}/bind-certificate")
                     .route(web::post().to(handlers::certificates::bind::<C>)),
+            )
+            // --- PGP Keys ---
+            .service(
+                web::resource("/pgp-keys/sign-audit-batch")
+                    .route(web::post().to(handlers::pgp_keys::sign_audit_batch::<C>)),
+            )
+            .service(
+                web::resource("/pgp-keys")
+                    .route(web::post().to(handlers::pgp_keys::generate::<C>))
+                    .route(web::get().to(handlers::pgp_keys::list::<C>)),
+            )
+            .service(
+                web::resource("/pgp-keys/{id}")
+                    .route(web::get().to(handlers::pgp_keys::get::<C>)),
+            )
+            .service(
+                web::resource("/pgp-keys/{id}/revoke")
+                    .route(web::post().to(handlers::pgp_keys::revoke::<C>)),
+            )
+            .service(
+                web::resource("/pgp-keys/{id}/encrypt")
+                    .route(web::post().to(handlers::pgp_keys::encrypt::<C>)),
             ),
     );
 }

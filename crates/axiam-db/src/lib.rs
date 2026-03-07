@@ -17,9 +17,9 @@ pub use error::DbError;
 pub use repository::{
     SurrealAuditLogRepository, SurrealCaCertificateRepository, SurrealCertificateRepository,
     SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealServiceAccountRepository, SurrealSessionRepository, SurrealTenantRepository,
-    SurrealUserRepository, hash_client_secret, verify_password,
+    SurrealPgpKeyRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
+    SurrealTenantRepository, SurrealUserRepository, hash_client_secret, verify_password,
 };
 pub use schema::{run_migrations, schema_v1};
 /// Re-export SurrealDB connection types for use in repository type aliases.

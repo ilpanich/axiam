@@ -22,5 +22,8 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 aes-gcm = { workspace = true }
 rand = { workspace = true }
+rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = { workspace = true }
+pgp = { workspace = true }
+smallvec = "1"
 time = "0.3"

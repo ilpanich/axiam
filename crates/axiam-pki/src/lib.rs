@@ -8,7 +8,9 @@
 pub mod ca;
 pub mod cert;
 pub mod mtls;
+pub mod pgp;
 
 pub use ca::{CaService, PkiConfig};
 pub use cert::CertService;
 pub use mtls::DeviceAuthService;
+pub use pgp::PgpService;

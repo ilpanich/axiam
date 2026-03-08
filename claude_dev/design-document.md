@@ -493,6 +493,175 @@ AXIAM supports webhook delivery for real-time event notifications to external sy
 
 ---
 
+## 8a. Hierarchical Settings & Policy Engine
+
+AXIAM supports configurable security settings at both organization and tenant levels with a hierarchical inheritance model.
+
+### 8a.1 Hierarchical Inheritance Model
+
+Settings follow a strict inheritance rule: **tenants can only override organization-level settings with more restrictive values**. This applies recursively along the hierarchy.
+
+```
+Organization Settings (baseline)
+├── Tenant A Settings (can only be MORE restrictive)
+├── Tenant B Settings (can only be MORE restrictive)
+└── Tenant C (inherits org defaults — no overrides)
+```
+
+Examples:
+- If the org requires minimum password length 10, a tenant can set 12 but not 8
+- If the org requires MFA, a tenant cannot disable it
+- If the org sets password history to 5, a tenant can set 10 but not 3
+
+### 8a.2 Configurable Settings
+
+| Setting | Type | Scope | Default |
+|---------|------|-------|---------|
+| `password_min_length` | u32 | Org/Tenant | 12 |
+| `password_require_uppercase` | bool | Org/Tenant | true |
+| `password_require_lowercase` | bool | Org/Tenant | true |
+| `password_require_digits` | bool | Org/Tenant | true |
+| `password_require_symbols` | bool | Org/Tenant | false |
+| `password_history_count` | u32 | Org/Tenant | 5 |
+| `password_hibp_check` | bool | Org/Tenant | false |
+| `mfa_required` | bool | Org/Tenant | false |
+| `email_verification_required` | bool | Org/Tenant | false |
+| `email_verification_grace_hours` | u32 | Org/Tenant | 24 |
+| `max_certificate_validity_days` | u32 | Org/Tenant | 365 |
+| `admin_notifications_enabled` | bool | Org/Tenant | false |
+
+### 8a.3 Password Policy
+
+Password policies are enforced at org/tenant level and are **not applicable** for federated or social login users.
+
+- **Complexity rules**: Configurable requirements for uppercase, lowercase, digits, and symbols
+- **Password history**: New passwords must differ from the last N passwords (configurable)
+- **Breach detection**: Optional integration with the Have I Been Pwned (HIBP) API to reject passwords found in known breaches (k-Anonymity model — only a 5-character SHA-1 prefix is sent, preserving privacy)
+- **Minimum length**: OWASP ASVS recommends minimum 8, NIST SP 800-63B recommends minimum 8 with no maximum; AXIAM defaults to 12
+
+---
+
+## 8b. Email Service
+
+AXIAM provides a pluggable email delivery service for transactional emails (verification, password reset, admin notifications).
+
+### 8b.1 Supported Providers
+
+| Provider | Protocol | Notes |
+|----------|----------|-------|
+| **SMTP** | SMTP over TLS | Private SMTP server, TLS required |
+| **SendGrid** | REST API | API key authentication |
+| **Postmark** | REST API | Server token authentication |
+| **Resend** | REST API | API key authentication |
+| **Brevo** | REST API | API key authentication |
+
+Provider configuration is set at org level; tenants inherit but can override with their own provider.
+
+### 8b.2 Email Templates
+
+- Templates are customizable at organization or tenant level
+- Standard placeholders available: `{{username}}`, `{{email}}`, `{{tenant_name}}`, `{{org_name}}`, `{{action_url}}`, `{{expiry_time}}`
+- Default templates provided for: activation, password reset, MFA setup reminder, admin notification
+- Templates support HTML and plaintext variants
+
+### 8b.3 Mail Verification Flow
+
+When email verification is enforced (org/tenant setting), the following flow applies:
+
+```
+User Registration
+  │
+  ├── Send activation email with confirmation token (24h expiry)
+  │
+  ├── Grace period: 24 hours to confirm
+  │   └── User can log in during grace period
+  │
+  ├── After 24h without confirmation:
+  │   └── Account is LOCKED
+  │       └── Locked user can request new confirmation email (max 2/day)
+  │
+  └── On confirmation:
+      └── Account status set to ACTIVE
+```
+
+**Not applicable** for federated or social login users.
+
+### 8b.4 Password Reset Flow
+
+```
+User                      AXIAM                    Email Provider
+  │                         │                           │
+  │── POST /auth/reset ───▶│                           │
+  │   {email}               │── Generate reset token    │
+  │                         │── Send reset email ─────▶│
+  │◀── 200 OK               │                           │
+  │                         │                           │
+  │── (click link) ────────▶│                           │
+  │── POST /auth/reset/     │                           │
+  │   confirm               │                           │
+  │   {token, new_password} │── Validate token          │
+  │                         │── Apply password policy   │
+  │                         │── Reset fail2ban counter  │
+  │                         │── Update password hash    │
+  │◀── 200 OK               │                           │
+```
+
+Password reset **resets the fail2ban login counter**, allowing the user to log in again. **Not applicable** for federated or social login users.
+
+---
+
+## 8c. Advanced MFA
+
+AXIAM extends its MFA capabilities with organizational enforcement, WebAuthn/FIDO2 support, and multi-method management.
+
+### 8c.1 MFA Enforcement
+
+When MFA is enforced at org/tenant level:
+- On first login, the user is redirected to MFA setup (TOTP, passkey, or hardware key)
+- The user cannot access any resource until MFA is configured
+- If MFA setup fails (e.g., device issue), only org/tenant admins can reset the user's MFA state, allowing them to retry the first-login MFA registration
+- **Not applicable** for federated or social login users
+
+### 8c.2 WebAuthn / FIDO2
+
+AXIAM supports passkeys and hardware security keys via the WebAuthn standard:
+
+| Type | Examples | Use Case |
+|------|----------|----------|
+| **Passkeys** | 1Password, Bitwarden, Android device, iCloud Keychain | Passwordless or second-factor authentication from any synced device |
+| **Hardware Keys** | YubiKey, NitroKey, SoloKeys | Physical second-factor for high-security environments |
+
+WebAuthn registration and authentication flow:
+```
+Registration:
+  Client ──▶ navigator.credentials.create() ──▶ AXIAM verifies attestation ──▶ Store credential
+
+Authentication:
+  Client ──▶ navigator.credentials.get() ──▶ AXIAM verifies assertion ──▶ Login success
+```
+
+### 8c.3 Multi-MFA Management
+
+- A user can register **multiple MFA methods** (e.g., TOTP + YubiKey + passkey)
+- Any registered method can be used for authentication
+- Admins can view which methods a user has configured (but not secrets)
+- Users manage their MFA methods via the user identity page
+
+### 8c.4 Admin Notifications
+
+Organizations and tenant admins can subscribe to email notifications for critical or suspicious events:
+
+| Event Category | Examples |
+|---------------|----------|
+| **Security** | Repeated login failures, account lockouts, brute-force attempts |
+| **Access** | Privilege escalation, role changes on sensitive resources |
+| **Compliance** | Certificate expiry warnings, audit log signing failures |
+| **User Lifecycle** | User creation/deletion, MFA enrollment/reset, password changes |
+
+Notification rules are configurable per org/tenant. Notifications are delivered via the email service (Section 8b).
+
+---
+
 ## 9. API Design
 
 ### 9.1 REST API Endpoints (Summary)
@@ -517,6 +686,12 @@ All tenant-scoped endpoints are prefixed with `/api/v1/tenants/:tenant_id/` or u
 | **OIDC** | `/.well-known/openid-configuration`, `/oauth2/userinfo`, `/oauth2/jwks` | OpenID Connect discovery and endpoints |
 | **Federation** | `GET/POST/PUT/DELETE /api/v1/federation` | IdP configuration management |
 | **Audit** | `GET /api/v1/audit-logs` | Audit log query (read-only) |
+| **Settings** | `GET/PUT /api/v1/organizations/:org_id/settings`, `GET/PUT /api/v1/settings` | Org/tenant security settings |
+| **Password Reset** | `POST /auth/reset`, `POST /auth/reset/confirm` | Email-based password reset flow |
+| **Mail Verification** | `POST /auth/verify-email`, `POST /auth/resend-verification` | Email confirmation flow |
+| **WebAuthn** | `POST /auth/webauthn/register`, `POST /auth/webauthn/authenticate` | Passkey and hardware key flows |
+| **MFA Management** | `GET/DELETE /api/v1/users/:id/mfa-methods` | Multi-MFA method management |
+| **Admin Notifications** | `GET/POST/PUT/DELETE /api/v1/notification-rules` | Admin notification subscriptions |
 | **Health** | `GET /health`, `GET /ready` | Health and readiness probes |
 
 ### 9.2 gRPC Services
@@ -566,6 +741,11 @@ All tenant-scoped endpoints are prefixed with `/api/v1/tenants/:tenant_id/` or u
 - **Brute force protection**: Account lockout after N failed attempts, with exponential backoff
 - **Session security**: Secure, HttpOnly, SameSite cookies; session invalidation on password change
 - **Audit immutability**: Audit log table has no UPDATE/DELETE permissions
+- **Password policy**: Configurable complexity, history, and breach detection (HIBP) at org/tenant level
+- **MFA enforcement**: Org/tenant-level mandatory MFA with first-login setup flow
+- **WebAuthn/FIDO2**: Passkeys and hardware security keys for phishing-resistant authentication
+- **Email verification**: Confirmation tokens with 24h grace period and resend limits
+- **Hierarchical settings**: Tenant settings can only be more restrictive than organization settings
 
 ### 10.3 Compliance Mapping
 
@@ -642,7 +822,10 @@ All tenant-scoped endpoints are prefixed with `/api/v1/tenants/:tenant_id/` or u
 | `rcgen` | X.509 certificate generation |
 | `x509-parser` | X.509 certificate parsing and validation |
 | `pgp` / `sequoia-openpgp` | GnuPG/OpenPGP key management and signing |
-| `reqwest` | HTTP client for webhook delivery |
+| `reqwest` | HTTP client for webhook delivery and HIBP API |
+| `webauthn-rs` | WebAuthn/FIDO2 server implementation |
+| `lettre` | SMTP email sending |
+| `tera` / `handlebars` | Email template rendering |
 
 ---
 
@@ -665,4 +848,6 @@ Key configuration sections:
 - `pki` — CA key encryption settings, certificate defaults (validity, key size), CRL configuration
 - `webhooks` — delivery timeout, retry policy, max concurrent deliveries
 - `gnupg` — key storage settings, signing algorithm preferences
+- `email` — provider (smtp/sendgrid/postmark/resend/brevo), SMTP host/port/TLS, API keys, from address
+- `notifications` — admin notification defaults, delivery batch size
 - `logging` — log level, format, output targets

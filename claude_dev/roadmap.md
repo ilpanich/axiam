@@ -272,147 +272,219 @@ Implement SAML SP: metadata generation, AuthnRequest creation, SAML Response par
 
 ---
 
-## Phase 12: Admin Frontend
+## Phase 12: Hierarchical Settings & Password Policy
 
-### T12.1 — React Project Scaffold
-Initialize React project (`frontend/`) with TypeScript, Vite, React Router, and a component library (e.g., Mantine or Ant Design). Set up API client (axios/fetch with auth interceptors). Add login page with tenant selection.
+### T12.1 — Org/Tenant Settings Model & Inheritance Engine
+Define the `SecuritySettings` domain model with all configurable fields (password policy, MFA enforcement, email verification, certificate validity, notifications). Implement the inheritance engine: org settings are the baseline; tenant overrides are validated to be **more restrictive only** (higher minimums, enabled-only booleans, lower maximums). Add `settings` table to DB schema with migration v4. Implement `SettingsRepository` trait and SurrealDB implementation. Add unit tests for inheritance validation logic.
 
-**Commit**: `feat(frontend): React project scaffold with login page`
+**Commit**: `feat(core): hierarchical org/tenant security settings with inheritance engine`
 
-### T12.2 — Organization & Tenant Management UI
-Implement organization list/detail pages, tenant list/creation/edit within organizations. CA certificate upload/generation UI.
+### T12.2 — Password Policy Engine
+Implement password policy evaluation: minimum length, complexity rules (uppercase, lowercase, digits, symbols), password history check (reject reuse of last N passwords), and optional Have I Been Pwned (HIBP) breach detection via k-Anonymity API (only 5-char SHA-1 prefix sent). Add `password_history` table to DB schema. Policy is resolved from effective settings (org + tenant override). Not applicable for federated/social login users. Add unit tests.
+
+**Commit**: `feat(auth): password policy engine with complexity rules and HIBP breach check`
+
+### T12.3 — Settings REST API
+Implement `GET/PUT /api/v1/organizations/:org_id/settings` (org-level) and `GET/PUT /api/v1/settings` (tenant-level, from JWT context). PUT validates inheritance constraints (tenant can only be more restrictive). Add OpenAPI annotations. Add integration tests.
+
+**Commit**: `feat(api-rest): org/tenant security settings endpoints`
+
+---
+
+## Phase 13: Email Service & Account Flows
+
+### T13.1 — Email Service Abstraction
+Implement a pluggable email service with provider trait (`EmailProvider`): SMTP/TLS (via `lettre`), SendGrid, Postmark, Resend, Brevo (via `reqwest` REST calls). Provider is configured at org level; tenants can override. Add email configuration section. Add unit tests with mock provider.
+
+**Commit**: `feat(email): pluggable email service with SMTP and REST provider support`
+
+### T13.2 — Email Templates Engine
+Implement an email template engine with standard placeholders (`{{username}}`, `{{email}}`, `{{tenant_name}}`, `{{org_name}}`, `{{action_url}}`, `{{expiry_time}}`). Default templates for: activation, password reset, MFA setup reminder, admin notification. Templates customizable at org/tenant level and stored in DB. HTML + plaintext variants. Add tests.
+
+**Commit**: `feat(email): customizable email templates with org/tenant overrides`
+
+### T13.3 — Mail Verification Flow
+Implement email verification: on user creation (when enforced), send activation email with confirmation token (24h expiry). Grace period allows login for 24h. After grace period, account is locked until confirmed. Locked users can request new confirmation email (max 2/day). Add `email_verification_token` table, `POST /auth/verify-email`, `POST /auth/resend-verification` endpoints. Not applicable for federated/social login. Add integration tests.
+
+**Commit**: `feat(auth): email verification flow with grace period and resend limits`
+
+### T13.4 — Password Reset Flow
+Implement email-based password reset: `POST /auth/reset` generates a time-limited token and sends reset email. `POST /auth/reset/confirm` validates token, applies password policy on new password, resets fail2ban counter (allowing immediate login). Not applicable for federated/social login. Add integration tests.
+
+**Commit**: `feat(auth): email-based password reset with fail2ban counter reset`
+
+### T13.5 — Admin Notification Service
+Implement admin notification subscriptions: org/tenant admins configure rules for critical events (security incidents, privilege changes, certificate expiry, user lifecycle events). Notifications are delivered via the email service. Add `notification_rule` table, `GET/POST/PUT/DELETE /api/v1/notification-rules` endpoints. Wire into audit event pipeline. Add integration tests.
+
+**Commit**: `feat(notifications): admin email notifications for critical events`
+
+---
+
+## Phase 14: Advanced MFA
+
+### T14.1 — MFA Enforcement & First-Login Flow
+Implement org/tenant-level MFA enforcement via settings. When enforced: on first login, redirect user to MFA setup (choose TOTP, passkey, or hardware key). User cannot access any resource until MFA is configured. On setup failure, only org/tenant admins can reset MFA state (via `POST /api/v1/users/:id/reset-mfa`), allowing the user to retry. Not applicable for federated/social login. Add integration tests.
+
+**Commit**: `feat(auth): MFA enforcement with first-login setup and admin unlock`
+
+### T14.2 — WebAuthn / FIDO2 Support
+Implement WebAuthn registration and authentication using `webauthn-rs`. Support passkeys (1Password, Bitwarden, Android, iCloud Keychain) and hardware security keys (YubiKey, NitroKey). Add `webauthn_credential` table to DB schema. Implement `POST /auth/webauthn/register/start`, `POST /auth/webauthn/register/finish`, `POST /auth/webauthn/authenticate/start`, `POST /auth/webauthn/authenticate/finish` endpoints. Add integration tests.
+
+**Commit**: `feat(auth): WebAuthn/FIDO2 support for passkeys and hardware security keys`
+
+### T14.3 — Multi-MFA Method Management
+Allow users to register multiple MFA methods (TOTP + passkey + hardware key). Any registered method can be used for login verification. Add `GET /api/v1/users/:id/mfa-methods` (list methods, no secrets), `DELETE /api/v1/users/:id/mfa-methods/:method_id` (remove a method). Update login flow to present available method options. Add integration tests.
+
+**Commit**: `feat(auth): multi-MFA method registration and management`
+
+---
+
+## Phase 15: Admin Frontend
+
+### T15.1 — React Project Scaffold
+Initialize React project (`frontend/`) with TypeScript, Vite, React Router, and a component library (e.g., Mantine or Ant Design). Set up API client (axios/fetch with auth interceptors). Add login page with tenant selection. **Design must be fully responsive** for mobile and desktop usage.
+
+**Commit**: `feat(frontend): React project scaffold with responsive login page`
+
+### T15.2 — Organization & Tenant Management UI
+Implement organization list/detail pages, tenant list/creation/edit within organizations. CA certificate upload/generation UI. Organization and tenant security settings management UI.
 
 **Commit**: `feat(frontend): organization and tenant management pages`
 
-### T12.3 — User & Group Management UI
-Implement user list (paginated, searchable), user detail/edit page, user creation form, role assignment UI. Implement group list, group detail with member management. Connect to REST API.
+### T15.3 — User & Group Management UI
+Implement user list (paginated, searchable), user detail/edit page, user creation form, role assignment UI. Implement group list, group detail with member management. MFA method viewer for admins. Connect to REST API.
 
 **Commit**: `feat(frontend): user and group management pages`
 
-### T12.4 — Role & Permission Management UI
+### T15.4 — Role & Permission Management UI
 Implement role list, role editor (permission assignment), permission list. Implement resource hierarchy viewer/editor. Support role assignment to both users and groups.
 
 **Commit**: `feat(frontend): role, permission, and resource management pages`
 
-### T12.5 — Certificate & Webhook Management UI
-Implement certificate list, generation/upload forms, revocation. Webhook endpoint management with delivery status.
+### T15.5 — Certificate & Webhook Management UI
+Implement certificate list, generation/upload forms, revocation. Webhook endpoint management with delivery status. PGP key management UI.
 
 **Commit**: `feat(frontend): certificate and webhook management pages`
 
-### T12.6 — Dashboard & Audit Viewer
-Implement admin dashboard (user count, active sessions, recent activity, certificate expiry warnings). Implement audit log viewer with filters. Add OAuth2 client management page.
+### T15.6 — Dashboard & Audit Viewer
+Implement admin dashboard (user count, active sessions, recent activity, certificate expiry warnings). Implement audit log viewer with filters. Add OAuth2 client management page. Admin notification rules management.
 
 **Commit**: `feat(frontend): admin dashboard, audit viewer, and OAuth2 client management`
 
+### T15.7 — User Identity Pages
+Implement user-facing identity management pages: change password (with policy feedback), manage MFA methods (add/remove TOTP, passkeys, hardware keys), view profile, email verification status. These pages are accessible to social/federated login users in read-only mode. Add password reset page (public, no auth required).
+
+**Commit**: `feat(frontend): user identity management and password reset pages`
+
 ---
 
-## Phase 13: Deployment & Infrastructure
+## Phase 16: Deployment & Infrastructure
 
-### T13.1 — Dockerfile & Multi-Stage Build
+### T16.1 — Dockerfile & Multi-Stage Build
 Create optimized multi-stage Dockerfile for the AXIAM server binary. Create Dockerfile for the frontend (nginx-based). Add `.dockerignore`. Test images locally.
 
 **Commit**: `feat(docker): multi-stage Dockerfiles for server and frontend`
 
-### T13.2 — Kubernetes Manifests
+### T16.2 — Kubernetes Manifests
 Create K8s manifests: Deployment, Service, Ingress, ConfigMap, Secrets for AXIAM server. StatefulSet for SurrealDB and RabbitMQ. HPA configuration. Readiness/liveness probes.
 
 **Commit**: `feat(k8s): Kubernetes deployment manifests with HPA`
 
-### T13.3 — CD Pipeline (GitHub Actions)
+### T16.3 — CD Pipeline (GitHub Actions)
 Extend GitHub Actions: build and push Docker images on tag, deploy to K8s (or push Helm chart). Add release workflow with CHANGELOG generation.
 
 **Commit**: `ci: add CD pipeline for Docker build and release`
 
 ---
 
-## Phase 14: SDKs (Starters)
+## Phase 17: SDKs (Starters)
 
-### T14.1 — Rust SDK
+### T17.1 — Rust SDK
 Create `sdks/rust/` with a client library wrapping REST and gRPC APIs. Auth helper, token management, authorization check helper, tenant context. Add usage examples. Publish-ready with `Cargo.toml`.
 
 **Commit**: `feat(sdk): Rust SDK with REST and gRPC client`
 
-### T14.2 — TypeScript SDK
+### T17.2 — TypeScript SDK
 Create `sdks/typescript/` with a TypeScript/Node.js client library wrapping REST API. Auth flows, token refresh, tenant context, middleware helper for Express/Fastify. Add usage examples.
 
 **Commit**: `feat(sdk): TypeScript SDK with REST client`
 
-### T14.3 — Python SDK
+### T17.3 — Python SDK
 Create `sdks/python/` with a Python client library wrapping REST API. Auth flows, token management, tenant context, FastAPI/Django middleware helper. Add usage examples.
 
 **Commit**: `feat(sdk): Python SDK with REST client`
 
-### T14.4 — Java SDK
+### T17.4 — Java SDK
 Create `sdks/java/` with a Java client library wrapping REST API. Auth flows, token management, tenant context, Spring Security integration helper. Add usage examples.
 
 **Commit**: `feat(sdk): Java SDK with REST client`
 
-### T14.5 — C# SDK
+### T17.5 — C# SDK
 Create `sdks/csharp/` with a C# client library wrapping REST API. Auth flows, token management, tenant context, ASP.NET Core middleware helper. Add usage examples.
 
 **Commit**: `feat(sdk): C# SDK with REST client`
 
-### T14.6 — PHP SDK
+### T17.6 — PHP SDK
 Create `sdks/php/` with a PHP client library wrapping REST API. Auth flows, token management, tenant context, Laravel/Symfony middleware helper. Add usage examples.
 
 **Commit**: `feat(sdk): PHP SDK with REST client`
 
-### T14.7 — Go SDK
+### T17.7 — Go SDK
 Create `sdks/go/` with a Go client library wrapping REST and gRPC APIs. Auth flows, token management, tenant context, HTTP middleware helper. Add usage examples.
 
 **Commit**: `feat(sdk): Go SDK with REST and gRPC client`
 
 ---
 
-## Phase 15: Hardening & Compliance
+## Phase 18: Hardening & Compliance
 
-### T15.1 — Security Audit Checklist
+### T18.1 — Security Audit Checklist
 Create security audit checklist based on OWASP ASVS, ISO 27001, and CyberSecurity Act. Verify all authentication, session, access control, cryptography, and PKI requirements. Document findings and remediations in `claude_dev/security-audit.md`.
 
 **Commit**: `docs: security audit checklist and findings (OWASP ASVS, ISO 27001)`
 
-### T15.2 — GDPR Compliance Features
+### T18.2 — GDPR Compliance Features
 Implement user data export (`GET /api/v1/users/:id/export` with optional PGP encryption), account deletion (right to be forgotten), consent tracking. Document GDPR compliance measures.
 
 **Commit**: `feat: GDPR compliance features (data export, deletion, consent)`
 
-### T15.3 — Performance Testing & Optimization
+### T18.3 — Performance Testing & Optimization
 Set up load testing (e.g., using `k6` or `criterion` benchmarks). Profile and optimize critical paths (auth, authz checks, certificate validation). Document results in `claude_dev/performance-report.md`.
 
 **Commit**: `perf: load testing setup and critical path optimization`
 
-### T15.4 — Comprehensive Documentation
+### T18.4 — Comprehensive Documentation
 Write API documentation (REST, gRPC, AMQP), deployment guide, admin guide, PKI/certificate guide, SDK getting-started guides. Consolidate in `docs/` directory.
 
 **Commit**: `docs: comprehensive API, deployment, and admin documentation`
 
 ---
 
-## Phase 16: Deferred Improvements & Optimizations
+## Phase 19: Deferred Improvements & Optimizations
 
 Items identified during development and PR reviews (PRs #70, #71) that were intentionally deferred to keep each phase focused.
 
-### T16.1 — gRPC Integration Tests
+### T19.1 — gRPC Integration Tests
 Add integration tests for `axiam-api-grpc`: spin up a Tonic server with mock/in-memory repositories, use a generated gRPC client to test UUID parsing, error mapping, credential validation policy, token validation, and authorization checks. Ensure parity with existing REST integration tests.
 
 **Commit**: `test(api-grpc): integration tests for gRPC services`
 
-### T16.2 — Concurrent BatchCheckAccess
+### T19.2 — Concurrent BatchCheckAccess
 Refactor `BatchCheckAccess` to evaluate requests concurrently using `futures::stream::FuturesUnordered` or `buffer_unordered` with bounded concurrency. Preserve result order. Benchmark against sequential implementation to validate improvement.
 
 **Commit**: `perf(api-grpc): concurrent batch authorization checks`
 
-### T16.3 — REST Endpoint Authorization Enforcement
+### T19.3 — REST Endpoint Authorization Enforcement
 Wire the `RequirePermission` middleware and `AuthorizationEngine` to all REST CRUD endpoints (users, groups, roles, permissions, resources, scopes, service accounts, organizations, tenants). Define authorization policies and implement an admin bootstrap flow (initial super-admin creation). Currently only JWT authentication is enforced via `AuthenticatedUser`.
 
 **Commit**: `feat(api-rest): enforce per-endpoint authorization on all CRUD routes`
 
-### T16.4 — OpenAPI Login Response Schema
+### T19.4 — OpenAPI Login Response Schema
 Fix the OpenAPI annotation for `POST /auth/login` to accurately document both `LoginSuccessResponse` and `MfaRequiredResponse` as possible 200 response bodies (using `oneOf` or separate status codes). Ensures generated client SDKs correctly model the login response.
 
 **Commit**: `fix(api-rest): OpenAPI login response documents both success and MFA schemas`
 
-### T16.5 — ValidateCredentials Brute-Force Side Effects
+### T19.5 — ValidateCredentials Brute-Force Side Effects
 The gRPC `ValidateCredentials` RPC is intentionally side-effect-free (it checks lockout state but does not increment `failed_login_attempts` or set `locked_until` on failure). If this RPC is exposed to untrusted callers, add an option to record failed attempts — either by calling into `AuthService` failure-tracking logic or by factoring the lockout counter update into a shared helper used by both REST login and gRPC credential validation.
 
 **Commit**: `feat(api-grpc): track failed login attempts in ValidateCredentials`
@@ -435,12 +507,15 @@ The gRPC `ValidateCredentials` RPC is intentionally side-effect-free (it checks 
 | Phase 9 | 1 | Webhook system |
 | Phase 10 | 3 | OAuth2 & OIDC |
 | Phase 11 | 2 | Federation (OIDC + SAML) |
-| Phase 12 | 6 | Admin frontend (with org/tenant/group/cert/webhook UI) |
-| Phase 13 | 3 | Docker, K8s, CD pipeline |
-| Phase 14 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
-| Phase 15 | 4 | Security, compliance, performance, docs |
-| Phase 16 | 5 | Deferred improvements & optimizations from PR reviews |
+| Phase 12 | 3 | Hierarchical settings, password policy engine |
+| Phase 13 | 5 | Email service, mail verification, password reset, admin notifications |
+| Phase 14 | 3 | MFA enforcement, WebAuthn/FIDO2, multi-MFA management |
+| Phase 15 | 7 | Admin frontend (responsive, user identity pages) |
+| Phase 16 | 3 | Docker, K8s, CD pipeline |
+| Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
+| Phase 18 | 4 | Security, compliance, performance, docs |
+| Phase 19 | 5 | Deferred improvements & optimizations from PR reviews |
 
-**Total: 69 tasks across 17 phases**
+**Total: 80 tasks across 20 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

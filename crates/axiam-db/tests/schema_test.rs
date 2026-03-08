@@ -69,20 +69,21 @@ async fn migration_is_idempotent() {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
 
-    // Run twice — should not fail.
+    // Run once and capture migration count.
     axiam_db::run_migrations(&db).await.unwrap();
-    axiam_db::run_migrations(&db).await.unwrap();
-
-    // Verify that the same number of migration records exist after both runs
-    // (i.e. the second run did not duplicate any records).
     let mut result = db.query("SELECT * FROM _migration").await.unwrap();
-    let records: Vec<surrealdb_types::Value> = result.take(0).unwrap();
-    let expected = 3; // v1 initial_schema, v2 cert_binding, v3 pgp_keys
+    let first_run: Vec<surrealdb_types::Value> = result.take(0).unwrap();
+    let count_after_first = first_run.len();
+    assert!(count_after_first > 0, "should have at least one migration");
+
+    // Run again — should not fail or add new records.
+    axiam_db::run_migrations(&db).await.unwrap();
+    let mut result = db.query("SELECT * FROM _migration").await.unwrap();
+    let second_run: Vec<surrealdb_types::Value> = result.take(0).unwrap();
     assert_eq!(
-        records.len(),
-        expected,
-        "expected {expected} migration records (one per version), got {}",
-        records.len()
+        second_run.len(),
+        count_after_first,
+        "second run should not create additional migration records"
     );
 }
 

@@ -1,6 +1,6 @@
 //! SurrealDB implementation of [`CertificateRepository`].
 
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{
     Certificate, CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
 };
@@ -413,13 +413,22 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
              }};\
              RELATE certificate:`{cert_id}`->cert_bound_to->service_account:`{sa_id}`",
         );
-        self.db
+        let result = self
+            .db
             .query(&verify_sql)
             .bind(("tid", tenant_id.to_string()))
             .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(DbError::from)?;
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cross-tenant binding denied") {
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "cross-tenant certificate-to-service-account binding denied".into(),
+                });
+            }
+            return Err(DbError::Migration(msg).into());
+        }
         Ok(())
     }
 

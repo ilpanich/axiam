@@ -49,7 +49,21 @@ impl CertificateAuthenticated {
             reason: "invalid URL encoding in X-Client-Certificate".into(),
         })?;
 
-        let identity: DeviceIdentity = service.authenticate(&pem).await?;
+        let identity: DeviceIdentity = service.authenticate(&pem).await.map_err(|e| match &e {
+            // Map certificate/NotFound errors to proper 401/403 status codes
+            AxiamError::Certificate(msg) if msg.contains("not bound to a service account") => {
+                AxiamError::AuthorizationDenied {
+                    reason: msg.clone(),
+                }
+            }
+            AxiamError::Certificate(msg) => AxiamError::AuthenticationFailed {
+                reason: msg.clone(),
+            },
+            AxiamError::NotFound { .. } => AxiamError::AuthenticationFailed {
+                reason: "unknown client certificate".into(),
+            },
+            _ => e,
+        })?;
 
         Ok(CertificateAuthenticated {
             service_account_id: identity.service_account_id,

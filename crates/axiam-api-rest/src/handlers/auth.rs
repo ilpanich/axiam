@@ -304,6 +304,9 @@ pub async fn device_auth<C: Connection>(
     // Resolve org_id from the tenant
     let tenant = tenant_repo.get_by_id(cert_auth.tenant_id).await?;
 
+    // TODO(T15): Introduce a dedicated service-account token with `sub_kind: "ServiceAccount"`
+    // so downstream handlers/audit can distinguish SA tokens from user tokens.
+    // For now, reuse the user token shape; `sub` contains the service_account_id.
     let access_token = issue_access_token(
         cert_auth.service_account_id,
         cert_auth.tenant_id,

@@ -6,7 +6,7 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::AuditLogEntry;
 use axiam_core::models::pgp_key::{
     CreatePgpKey, EncryptedExport, GeneratedPgpKey, PgpKey, PgpKeyAlgorithm, PgpKeyPurpose,
-    SignedAuditBatch, StorePgpKey,
+    PgpKeyStatus, SignedAuditBatch, StorePgpKey,
 };
 use axiam_core::repository::{PaginatedResult, Pagination, PgpKeyRepository};
 use chrono::Utc;
@@ -159,6 +159,22 @@ impl<R: PgpKeyRepository> PgpService<R> {
         plaintext: &[u8],
     ) -> AxiamResult<EncryptedExport> {
         let key = self.repo.get_by_id(tenant_id, key_id).await?;
+
+        if key.status != PgpKeyStatus::Active {
+            return Err(AxiamError::Validation {
+                message: "PGP key is not active".into(),
+            });
+        }
+        if key.purpose != PgpKeyPurpose::Export {
+            return Err(AxiamError::Validation {
+                message: "only Export keys can be used for encryption".into(),
+            });
+        }
+        if key.algorithm == PgpKeyAlgorithm::Ed25519 {
+            return Err(AxiamError::Validation {
+                message: "Ed25519 keys do not support encryption; use Rsa4096".into(),
+            });
+        }
 
         let (public_key, _) = SignedPublicKey::from_string(&key.public_key_armored)
             .map_err(|e| AxiamError::Crypto(format!("failed to parse public key: {e}")))?;

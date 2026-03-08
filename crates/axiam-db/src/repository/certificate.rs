@@ -237,7 +237,12 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             "RELATE certificate:`{}`->signed_by->ca_certificate:`{}`",
             id, input.issuer_ca_id,
         );
-        self.db.query(&relate_sql).await.map_err(DbError::from)?;
+        self.db
+            .query(&relate_sql)
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         Ok(row.into_entry(id)?)
     }

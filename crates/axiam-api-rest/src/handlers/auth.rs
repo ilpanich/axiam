@@ -2,14 +2,19 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::AuthService;
+use axiam_auth::config::AuthConfig;
 use axiam_auth::service::{LoginInput, RefreshInput, VerifyMfaInput};
-use axiam_db::{SurrealSessionRepository, SurrealUserRepository};
+use axiam_auth::token::issue_access_token;
+use axiam_core::models::certificate::DeviceAuthResponse;
+use axiam_core::repository::TenantRepository;
+use axiam_db::{SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::cert_auth::CertificateAuthenticated;
 
 type AuthSvc<C> = AuthService<SurrealUserRepository<C>, SurrealSessionRepository<C>>;
 
@@ -272,5 +277,47 @@ pub async fn verify_mfa<C: Connection>(
         refresh_token: out.refresh_token,
         session_id: out.session_id,
         expires_in: out.expires_in,
+    }))
+}
+
+/// `POST /auth/device`
+///
+/// Authenticate a device via its client certificate (mTLS).
+/// The certificate must be bound to a service account.
+#[utoipa::path(
+    post,
+    path = "/auth/device",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Device authenticated", body = DeviceAuthResponse),
+        (status = 401, description = "Invalid or missing certificate"),
+        (status = 403, description = "Certificate not bound to a service account"),
+    )
+)]
+pub async fn device_auth<C: Connection>(
+    req: HttpRequest,
+    tenant_repo: web::Data<SurrealTenantRepository<C>>,
+    auth_config: web::Data<AuthConfig>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let cert_auth = CertificateAuthenticated::extract::<C>(&req).await?;
+
+    // Resolve org_id from the tenant
+    let tenant = tenant_repo.get_by_id(cert_auth.tenant_id).await?;
+
+    // TODO(T15): Introduce a dedicated service-account token with `sub_kind: "ServiceAccount"`
+    // so downstream handlers/audit can distinguish SA tokens from user tokens.
+    // For now, reuse the user token shape; `sub` contains the service_account_id.
+    let access_token = issue_access_token(
+        cert_auth.service_account_id,
+        cert_auth.tenant_id,
+        tenant.organization_id,
+        &auth_config,
+    )
+    .map_err(axiam_core::error::AxiamError::from)?;
+
+    Ok(HttpResponse::Ok().json(DeviceAuthResponse {
+        access_token,
+        token_type: "Bearer".into(),
+        expires_in: auth_config.access_token_lifetime_secs,
     }))
 }

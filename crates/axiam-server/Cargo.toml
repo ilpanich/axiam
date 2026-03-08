@@ -18,6 +18,7 @@ axiam-amqp = { workspace = true }
 axiam-oauth2 = { workspace = true }
 axiam-federation = { workspace = true }
 axiam-audit = { workspace = true }
+axiam-pki = { workspace = true }
 actix-web = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }

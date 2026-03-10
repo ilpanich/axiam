@@ -480,3 +480,102 @@ async fn webhook_tenant_isolation() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["total"], 0);
 }
+
+#[actix_rt::test]
+async fn create_webhook_rejects_http_url() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/webhooks")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "url": "http://example.com/hook",
+            "events": ["user.created"],
+            "secret": "my-secret"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn create_webhook_rejects_private_ip() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    for url in [
+        "https://127.0.0.1/hook",
+        "https://10.0.0.1/hook",
+        "https://192.168.1.1/hook",
+        "https://169.254.169.254/metadata",
+        "https://localhost/hook",
+    ] {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/webhooks")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({
+                "url": url,
+                "events": ["user.created"],
+                "secret": "my-secret"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400, "expected 400 for URL: {url}");
+    }
+}
+
+#[actix_rt::test]
+async fn update_webhook_rejects_invalid_url() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // Create a valid webhook first
+    let req = test::TestRequest::post()
+        .uri("/api/v1/webhooks")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["user.created"],
+            "secret": "my-secret"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    let id = created["id"].as_str().unwrap();
+
+    // Update with HTTP URL should fail
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/webhooks/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "url": "http://example.com/hook"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // Update with empty events should fail
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/webhooks/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "events": []
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}

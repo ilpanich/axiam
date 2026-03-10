@@ -55,7 +55,7 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
                     let delivery_id = Uuid::new_v4();
                     let body = serde_json::to_string(&payload).unwrap_or_default();
 
-                    let signature = compute_signature(&webhook.secret_hash, &body);
+                    let signature = compute_signature(&webhook.secret, &body);
 
                     let max_retries = webhook.retry_policy.max_retries;
                     let initial_delay = webhook.retry_policy.initial_delay_secs;

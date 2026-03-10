@@ -1,5 +1,7 @@
 //! Webhook management endpoints.
 
+use std::net::IpAddr;
+
 use actix_web::{HttpResponse, web};
 use axiam_core::models::webhook::{CreateWebhook, RetryPolicy, UpdateWebhook, Webhook};
 use axiam_core::repository::{PaginatedResult, Pagination, WebhookRepository};
@@ -87,18 +89,8 @@ pub async fn create<C: Connection>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
 
-    if req.url.is_empty() {
-        return Err(axiam_core::error::AxiamError::Validation {
-            message: "url must not be empty".into(),
-        }
-        .into());
-    }
-    if req.events.is_empty() {
-        return Err(axiam_core::error::AxiamError::Validation {
-            message: "events must not be empty".into(),
-        }
-        .into());
-    }
+    validate_webhook_url(&req.url)?;
+    validate_webhook_events(&req.events)?;
     if req.secret.is_empty() {
         return Err(axiam_core::error::AxiamError::Validation {
             message: "secret must not be empty".into(),
@@ -192,6 +184,12 @@ pub async fn update<C: Connection>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let id = path.into_inner();
     let req = body.into_inner();
+    if let Some(ref url) = req.url {
+        validate_webhook_url(url)?;
+    }
+    if let Some(ref events) = req.events {
+        validate_webhook_events(events)?;
+    }
     let webhook = repo
         .update(
             user.tenant_id,
@@ -226,4 +224,81 @@ pub async fn delete<C: Connection>(
     let id = path.into_inner();
     repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+fn validation_err(msg: impl Into<String>) -> AxiamApiError {
+    axiam_core::error::AxiamError::Validation {
+        message: msg.into(),
+    }
+    .into()
+}
+
+/// Validate a webhook URL: must be a valid HTTPS URL pointing to a public host.
+fn validate_webhook_url(url: &str) -> Result<(), AxiamApiError> {
+    let parsed: url::Url = url
+        .parse()
+        .map_err(|_| validation_err("url is not a valid URL"))?;
+
+    if parsed.scheme() != "https" {
+        return Err(validation_err("url must use the https scheme"));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| validation_err("url must contain a host"))?;
+
+    // Block private/internal IP ranges (SSRF protection).
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && !is_global_ip(ip)
+    {
+        return Err(validation_err(
+            "url must not point to a private or loopback address",
+        ));
+    }
+
+    // Block common internal hostnames.
+    let lower = host.to_lowercase();
+    if lower == "localhost" || lower.ends_with(".local") || lower.ends_with(".internal") {
+        return Err(validation_err(
+            "url must not point to a local or internal host",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate that the events list is non-empty.
+fn validate_webhook_events(events: &[String]) -> Result<(), AxiamApiError> {
+    if events.is_empty() {
+        return Err(validation_err("events must not be empty"));
+    }
+    Ok(())
+}
+
+/// Returns `true` if the IP address is globally routable (not private,
+/// loopback, link-local, or other reserved range).
+fn is_global_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                // 100.64.0.0/10 (Carrier-grade NAT)
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64))
+        }
+        IpAddr::V6(v6) => {
+            !v6.is_loopback()
+                && !v6.is_unspecified()
+                // Unique local (fc00::/7)
+                && (v6.segments()[0] & 0xFE00) != 0xFC00
+                // Link-local (fe80::/10)
+                && (v6.segments()[0] & 0xFFC0) != 0xFE80
+        }
+    }
 }

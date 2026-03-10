@@ -60,7 +60,7 @@ impl WebhookRow {
                 .map_err(|e| DbError::Migration(e.to_string()))?,
             url: self.url,
             events: self.events,
-            secret_hash: self.secret,
+            secret: self.secret,
             enabled: self.enabled,
             retry_policy: RetryPolicy {
                 max_retries: self.max_retries as u32,
@@ -82,7 +82,7 @@ impl WebhookRowWithId {
                 .map_err(|e| DbError::Migration(e.to_string()))?,
             url: self.url,
             events: self.events,
-            secret_hash: self.secret,
+            secret: self.secret,
             enabled: self.enabled,
             retry_policy: RetryPolicy {
                 max_retries: self.max_retries as u32,

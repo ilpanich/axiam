@@ -66,6 +66,8 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
                         if attempt > 0 {
                             let delay_secs =
                                 (initial_delay as f64) * multiplier.powi((attempt - 1) as i32);
+                            // Clamp to avoid panic on negative/infinite/NaN values.
+                            let delay_secs = delay_secs.clamp(0.0, 3600.0);
                             tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs))
                                 .await;
                         }

@@ -12,3 +12,4 @@ pub mod scopes;
 pub mod service_accounts;
 pub mod tenants;
 pub mod users;
+pub mod webhooks;

@@ -346,15 +346,11 @@ DEFINE FIELD tenant_id ON TABLE webhook TYPE string;
 DEFINE FIELD url ON TABLE webhook TYPE string;
 DEFINE FIELD events ON TABLE webhook TYPE array;
 DEFINE FIELD events.* ON TABLE webhook TYPE string;
-DEFINE FIELD secret_hash ON TABLE webhook TYPE string;
+DEFINE FIELD secret ON TABLE webhook TYPE string;
 DEFINE FIELD enabled ON TABLE webhook TYPE bool DEFAULT true;
-DEFINE FIELD retry_policy ON TABLE webhook TYPE object;
-DEFINE FIELD retry_policy.max_retries ON TABLE webhook TYPE int \
-    DEFAULT 5;
-DEFINE FIELD retry_policy.initial_delay_secs ON TABLE webhook \
-    TYPE int DEFAULT 10;
-DEFINE FIELD retry_policy.backoff_multiplier ON TABLE webhook \
-    TYPE float DEFAULT 2.0;
+DEFINE FIELD max_retries ON TABLE webhook TYPE int DEFAULT 5;
+DEFINE FIELD initial_delay_secs ON TABLE webhook TYPE int DEFAULT 10;
+DEFINE FIELD backoff_multiplier ON TABLE webhook TYPE float DEFAULT 2.0;
 DEFINE FIELD created_at ON TABLE webhook TYPE datetime \
     DEFAULT time::now();
 DEFINE FIELD updated_at ON TABLE webhook TYPE datetime \

@@ -267,6 +267,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .service(
                 web::resource("/pgp-keys/{id}/encrypt")
                     .route(web::post().to(handlers::pgp_keys::encrypt::<C>)),
+            )
+            // --- Webhooks ---
+            .service(
+                web::resource("/webhooks")
+                    .route(web::post().to(handlers::webhooks::create::<C>))
+                    .route(web::get().to(handlers::webhooks::list::<C>)),
+            )
+            .service(
+                web::resource("/webhooks/{id}")
+                    .route(web::get().to(handlers::webhooks::get::<C>))
+                    .route(web::put().to(handlers::webhooks::update::<C>))
+                    .route(
+                        web::delete().to(handlers::webhooks::delete::<C>),
+                    ),
             ),
     );
 }

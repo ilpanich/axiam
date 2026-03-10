@@ -17,6 +17,7 @@ use axiam_db::{
     SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealResourceRepository,
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
     SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebhookRepository,
 };
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use serde::Deserialize;
@@ -126,6 +127,9 @@ async fn main() -> std::io::Result<()> {
     let pgp_service = PgpService::new(pgp_repo, pki_config.clone());
     let cert_service = CertService::new(ca_cert_repo, cert_repo.clone(), pki_config);
     let device_auth_service = DeviceAuthService::new(cert_repo.clone());
+    let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
+    let webhook_delivery =
+        axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone());
 
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
@@ -218,6 +222,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(cert_repo.clone()))
             .app_data(web::Data::new(device_auth_service.clone()))
             .app_data(web::Data::new(pgp_service.clone()))
+            .app_data(web::Data::new(webhook_repo.clone()))
+            .app_data(web::Data::new(webhook_delivery.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
             .configure(openapi_routes)

@@ -9,6 +9,7 @@ pub mod handlers;
 pub mod health;
 pub mod openapi;
 pub mod server;
+pub mod webhook;
 
 pub use authz::{AuthzChecker, AuthzData, RequirePermission};
 pub use config::ServerConfig;

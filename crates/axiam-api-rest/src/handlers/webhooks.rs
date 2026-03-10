@@ -94,6 +94,9 @@ pub async fn create<C: Connection>(
     if req.secret.is_empty() {
         return Err(validation_err("secret must not be empty"));
     }
+    if let Some(ref rp) = req.retry_policy {
+        validate_retry_policy(rp)?;
+    }
 
     let webhook = repo
         .create(CreateWebhook {
@@ -187,6 +190,9 @@ pub async fn update<C: Connection>(
     if let Some(ref events) = req.events {
         validate_webhook_events(events)?;
     }
+    if let Some(ref rp) = req.retry_policy {
+        validate_retry_policy(rp)?;
+    }
     let webhook = repo
         .update(
             user.tenant_id,
@@ -272,6 +278,24 @@ fn validate_webhook_url(url: &str) -> Result<(), AxiamApiError> {
 fn validate_webhook_events(events: &[String]) -> Result<(), AxiamApiError> {
     if events.is_empty() {
         return Err(validation_err("events must not be empty"));
+    }
+    Ok(())
+}
+
+/// Validate retry policy bounds to prevent panics and abuse.
+fn validate_retry_policy(rp: &RetryPolicy) -> Result<(), AxiamApiError> {
+    if rp.max_retries > 10 {
+        return Err(validation_err("max_retries must be at most 10"));
+    }
+    if rp.initial_delay_secs < 1 || rp.initial_delay_secs > 3600 {
+        return Err(validation_err(
+            "initial_delay_secs must be between 1 and 3600",
+        ));
+    }
+    if !(0.0..=10.0).contains(&rp.backoff_multiplier) {
+        return Err(validation_err(
+            "backoff_multiplier must be between 0.0 and 10.0",
+        ));
     }
     Ok(())
 }

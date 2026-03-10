@@ -579,3 +579,66 @@ async fn update_webhook_rejects_invalid_url() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 400);
 }
+
+#[actix_rt::test]
+async fn create_webhook_rejects_invalid_retry_policy() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // max_retries too large
+    let req = test::TestRequest::post()
+        .uri("/api/v1/webhooks")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["user.created"],
+            "secret": "my-secret",
+            "retry_policy": {
+                "max_retries": 100,
+                "initial_delay_secs": 10,
+                "backoff_multiplier": 2.0
+            }
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // negative backoff_multiplier
+    let req = test::TestRequest::post()
+        .uri("/api/v1/webhooks")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["user.created"],
+            "secret": "my-secret",
+            "retry_policy": {
+                "max_retries": 3,
+                "initial_delay_secs": 10,
+                "backoff_multiplier": -1.0
+            }
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // initial_delay_secs = 0
+    let req = test::TestRequest::post()
+        .uri("/api/v1/webhooks")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["user.created"],
+            "secret": "my-secret",
+            "retry_policy": {
+                "max_retries": 3,
+                "initial_delay_secs": 0,
+                "backoff_multiplier": 2.0
+            }
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}

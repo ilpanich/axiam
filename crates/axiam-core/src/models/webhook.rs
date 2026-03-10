@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Retry policy for failed webhook deliveries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RetryPolicy {
     /// Maximum number of retry attempts.
     pub max_retries: u32,
@@ -38,8 +38,9 @@ pub struct Webhook {
     pub url: String,
     /// Event types this webhook is subscribed to (e.g., `["user.created", "auth.login"]`).
     pub events: Vec<String>,
-    /// HMAC-SHA256 shared secret for signing payloads.
-    pub secret_hash: String,
+    /// HMAC-SHA256 shared secret for signing payloads (stored server-side,
+    /// never returned in API responses).
+    pub secret: String,
     pub enabled: bool,
     pub retry_policy: RetryPolicy,
     pub created_at: DateTime<Utc>,
@@ -52,7 +53,7 @@ pub struct CreateWebhook {
     pub tenant_id: Uuid,
     pub url: String,
     pub events: Vec<String>,
-    /// The raw secret (will be hashed before storage).
+    /// HMAC-SHA256 shared secret for signing payloads.
     pub secret: String,
     pub retry_policy: Option<RetryPolicy>,
 }

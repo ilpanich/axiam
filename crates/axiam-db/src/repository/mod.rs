@@ -14,6 +14,7 @@ mod service_account;
 mod session;
 mod tenant;
 mod user;
+mod webhook;
 
 pub use audit::SurrealAuditLogRepository;
 pub use ca_certificate::SurrealCaCertificateRepository;
@@ -29,3 +30,4 @@ pub use service_account::{SurrealServiceAccountRepository, hash_client_secret};
 pub use session::SurrealSessionRepository;
 pub use tenant::SurrealTenantRepository;
 pub use user::{SurrealUserRepository, verify_password};
+pub use webhook::SurrealWebhookRepository;

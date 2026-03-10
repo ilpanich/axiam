@@ -102,6 +102,12 @@ use crate::handlers;
         handlers::pgp_keys::revoke,
         handlers::pgp_keys::sign_audit_batch,
         handlers::pgp_keys::encrypt,
+        // Webhooks
+        handlers::webhooks::create,
+        handlers::webhooks::list,
+        handlers::webhooks::get,
+        handlers::webhooks::update,
+        handlers::webhooks::delete,
         // Audit Logs
         handlers::audit::list,
         handlers::audit::list_system,
@@ -212,6 +218,11 @@ use crate::handlers;
         axiam_core::models::audit::AuditLogEntry,
         axiam_core::models::audit::ActorType,
         axiam_core::models::audit::AuditOutcome,
+        // Webhooks
+        axiam_core::models::webhook::RetryPolicy,
+        handlers::webhooks::CreateWebhookRequest,
+        handlers::webhooks::UpdateWebhookRequest,
+        handlers::webhooks::WebhookResponse,
         // Pagination
         axiam_core::repository::Pagination,
     )),
@@ -230,6 +241,7 @@ use crate::handlers;
         (name = "certificates", description = "Tenant certificate lifecycle"),
         (name = "pgp-keys", description = "OpenPGP key management and audit signing"),
         (name = "audit", description = "Audit log queries"),
+        (name = "webhooks", description = "Webhook registration and management"),
         (name = "service-accounts", description = "Service account management"),
     ),
     modifiers(&SecurityAddon),

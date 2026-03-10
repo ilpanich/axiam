@@ -92,10 +92,7 @@ pub async fn create<C: Connection>(
     validate_webhook_url(&req.url)?;
     validate_webhook_events(&req.events)?;
     if req.secret.is_empty() {
-        return Err(axiam_core::error::AxiamError::Validation {
-            message: "secret must not be empty".into(),
-        }
-        .into());
+        return Err(validation_err("secret must not be empty"));
     }
 
     let webhook = repo
@@ -293,6 +290,10 @@ fn is_global_ip(ip: IpAddr) -> bool {
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64))
         }
         IpAddr::V6(v6) => {
+            // Check IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_global_ip(IpAddr::V4(mapped));
+            }
             !v6.is_loopback()
                 && !v6.is_unspecified()
                 // Unique local (fc00::/7)

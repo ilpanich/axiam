@@ -22,6 +22,7 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
     pub fn new(repo: W) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build reqwest client");
         Self { repo, client }

@@ -53,6 +53,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "pgp_keys",
         sql: SCHEMA_V3,
     },
+    Migration {
+        version: 4,
+        name: "oauth2_auth_codes",
+        sql: SCHEMA_V4,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -447,6 +452,32 @@ DEFINE FIELD signed_at ON TABLE audit_signature TYPE datetime \
     DEFAULT time::now();
 DEFINE INDEX idx_audit_sig_tenant ON TABLE audit_signature \
     COLUMNS tenant_id, signed_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v4 — OAuth2 authorization codes
+// -----------------------------------------------------------------------
+
+const SCHEMA_V4: &str = "\
+-- =======================================================================
+-- OAuth2 Authorization Codes (tenant scope, short-lived)
+-- =======================================================================
+DEFINE TABLE oauth2_auth_code SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD client_id ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD user_id ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD code_hash ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD redirect_uri ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD scopes ON TABLE oauth2_auth_code TYPE array;
+DEFINE FIELD scopes.* ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD code_challenge ON TABLE oauth2_auth_code TYPE option<string>;
+DEFINE FIELD code_challenge_method ON TABLE oauth2_auth_code TYPE option<string>;
+DEFINE FIELD expires_at ON TABLE oauth2_auth_code TYPE datetime;
+DEFINE FIELD used ON TABLE oauth2_auth_code TYPE bool DEFAULT false;
+DEFINE FIELD created_at ON TABLE oauth2_auth_code TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_auth_code_hash ON TABLE oauth2_auth_code \
+    COLUMNS tenant_id, code_hash UNIQUE;
 ";
 
 // -----------------------------------------------------------------------

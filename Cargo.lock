@@ -723,6 +723,7 @@ name = "axiam-api-rest"
 version = "0.1.0"
 dependencies = [
  "actix-cors",
+ "actix-http",
  "actix-rt",
  "actix-web",
  "axiam-audit",
@@ -730,6 +731,7 @@ dependencies = [
  "axiam-authz",
  "axiam-core",
  "axiam-db",
+ "axiam-oauth2",
  "axiam-pki",
  "base64",
  "chrono",
@@ -861,14 +863,18 @@ dependencies = [
  "axiam-auth",
  "axiam-core",
  "axiam-db",
+ "base64",
  "chrono",
+ "hex",
  "jsonwebtoken",
  "rand 0.9.2",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 

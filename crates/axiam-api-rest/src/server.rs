@@ -52,6 +52,14 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .route("/device", web::post().to(handlers::auth::device_auth::<C>)),
     );
     cfg.service(
+        web::scope("/oauth2")
+            .route(
+                "/authorize",
+                web::get().to(handlers::oauth2::authorize::<C>),
+            )
+            .route("/token", web::post().to(handlers::oauth2::token::<C>)),
+    );
+    cfg.service(
         web::scope("/api/v1")
             .service(
                 web::resource("/organizations")
@@ -280,6 +288,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::put().to(handlers::webhooks::update::<C>))
                     .route(
                         web::delete().to(handlers::webhooks::delete::<C>),
+                    ),
+            )
+            // --- OAuth2 Clients ---
+            .service(
+                web::resource("/oauth2-clients")
+                    .route(web::post().to(handlers::oauth2_clients::create::<C>))
+                    .route(web::get().to(handlers::oauth2_clients::list::<C>)),
+            )
+            .service(
+                web::resource("/oauth2-clients/{id}")
+                    .route(web::get().to(handlers::oauth2_clients::get::<C>))
+                    .route(web::put().to(handlers::oauth2_clients::update::<C>))
+                    .route(
+                        web::delete().to(handlers::oauth2_clients::delete::<C>),
                     ),
             ),
     );

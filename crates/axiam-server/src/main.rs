@@ -12,13 +12,15 @@ use axiam_audit::AuditMiddleware;
 use axiam_auth::AuthService;
 use axiam_auth::config::AuthConfig;
 use axiam_db::{
-    DbConfig, DbManager, SurrealAuditLogRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealGroupRepository, SurrealOrganizationRepository,
-    SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebhookRepository,
+    DbConfig, DbManager, SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
+    SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealGroupRepository,
+    SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
+    SurrealPgpKeyRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebhookRepository,
 };
+use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
@@ -130,6 +132,22 @@ async fn main() -> std::io::Result<()> {
     let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone());
+    let oauth2_client_repo = SurrealOAuth2ClientRepository::new(db.client().clone());
+    let auth_code_repo = SurrealAuthorizationCodeRepository::new(db.client().clone());
+
+    // OAuth2 authorization code grant services.
+    // Authorization codes expire after 60 seconds (short-lived per RFC 6749).
+    let authorize_service = AuthorizeService::new(
+        oauth2_client_repo.clone(),
+        auth_code_repo.clone(),
+        60,
+    );
+    let token_service = TokenService::new(
+        oauth2_client_repo.clone(),
+        auth_code_repo,
+        tenant_repo.clone(),
+        config.auth.clone(),
+    );
 
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
@@ -224,6 +242,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(pgp_service.clone()))
             .app_data(web::Data::new(webhook_repo.clone()))
             .app_data(web::Data::new(webhook_delivery.clone()))
+            .app_data(web::Data::new(oauth2_client_repo.clone()))
+            .app_data(web::Data::new(authorize_service.clone()))
+            .app_data(web::Data::new(token_service.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
             .configure(openapi_routes)

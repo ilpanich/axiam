@@ -12,7 +12,10 @@ use crate::models::{
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
     federation::{CreateFederationConfig, FederationConfig, UpdateFederationConfig},
     group::{CreateGroup, Group, UpdateGroup},
-    oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client},
+    oauth2_client::{
+        AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, OAuth2Client,
+        UpdateOAuth2Client,
+    },
     organization::{CreateOrganization, Organization, UpdateOrganization},
     permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
     pgp_key::{PgpKey, StorePgpKey},
@@ -520,6 +523,25 @@ pub trait OAuth2ClientRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<OAuth2Client>>> + Send;
+}
+
+pub trait AuthorizationCodeRepository: Send + Sync {
+    /// Store a new authorization code.
+    fn create(
+        &self,
+        input: CreateAuthorizationCode,
+    ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
+
+    /// Atomically consume a code (mark as used). Returns the code if it
+    /// was valid, unused, and not expired; otherwise returns NotFound.
+    fn consume(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+    ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
+
+    /// Delete expired and already-used codes (garbage collection).
+    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait FederationConfigRepository: Send + Sync {

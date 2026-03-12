@@ -13,6 +13,7 @@ axiam-auth = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-db = { workspace = true }
 axiam-audit = { workspace = true }
+axiam-oauth2 = { workspace = true }
 axiam-pki = { workspace = true }
 actix-web = { workspace = true }
 serde = { workspace = true }
@@ -37,5 +38,6 @@ surrealdb = { workspace = true }
 
 [dev-dependencies]
 actix-rt = { workspace = true }
+actix-http = "3"
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }

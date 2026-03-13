@@ -107,18 +107,30 @@ pub async fn authorize<C: Connection>(
 
     match authz_service.authorize(req).await {
         Ok(resp) => {
-            let mut redirect_url = resp.redirect_uri;
-            redirect_url.push_str("?code=");
-            redirect_url.push_str(&resp.code);
+            // Use url::Url for proper encoding and query handling
+            let mut url = url::Url::parse(&resp.redirect_uri)
+                .unwrap_or_else(|_| url::Url::parse("https://error").unwrap());
+            url.query_pairs_mut().append_pair("code", &resp.code);
             if let Some(ref state) = resp.state {
-                redirect_url.push_str("&state=");
-                redirect_url.push_str(state);
+                url.query_pairs_mut().append_pair("state", state);
             }
             HttpResponse::Found()
-                .append_header(("Location", redirect_url))
+                .append_header(("Location", url.to_string()))
                 .finish()
         }
-        Err(e) => build_error_redirect(&q.redirect_uri, &e, q.state.as_deref()),
+        Err(e) => {
+            // Per RFC 6749: only redirect when the redirect_uri has
+            // been validated. For InvalidClient / redirect_uri
+            // errors, return a direct HTTP error instead.
+            match &e {
+                OAuth2Error::InvalidClient(_) => build_oauth2_error_response(&e),
+                _ => {
+                    // These errors occur after client+redirect_uri
+                    // were validated — safe to redirect.
+                    build_error_redirect(&q.redirect_uri, &e, q.state.as_deref())
+                }
+            }
+        }
     }
 }
 
@@ -350,18 +362,24 @@ fn build_error_redirect(
     error: &OAuth2Error,
     state: Option<&str>,
 ) -> HttpResponse {
-    let mut url = format!(
-        "{}?error={}&error_description={}",
-        redirect_uri,
-        error.error_code(),
-        urlencoded(&error.error_description()),
-    );
+    let mut url = match url::Url::parse(redirect_uri) {
+        Ok(u) => u,
+        Err(_) => {
+            // Unparseable redirect_uri — return direct error
+            return HttpResponse::BadRequest().json(OAuth2ErrorResponse {
+                error: error.error_code().to_string(),
+                error_description: error.error_description(),
+            });
+        }
+    };
+    url.query_pairs_mut()
+        .append_pair("error", error.error_code())
+        .append_pair("error_description", &error.error_description());
     if let Some(state) = state {
-        url.push_str("&state=");
-        url.push_str(state);
+        url.query_pairs_mut().append_pair("state", state);
     }
     HttpResponse::Found()
-        .append_header(("Location", url))
+        .append_header(("Location", url.to_string()))
         .finish()
 }
 
@@ -376,12 +394,4 @@ fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
         error: e.error_code().to_string(),
         error_description: e.error_description(),
     })
-}
-
-/// Minimal percent-encoding for query string values.
-fn urlencoded(s: &str) -> String {
-    s.replace(' ', "%20")
-        .replace(':', "%3A")
-        .replace('&', "%26")
-        .replace('=', "%3D")
 }

@@ -172,13 +172,16 @@ where
             .await
             .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
-        if let Some(ref secret) = req.client_secret {
-            let provided_hash = hash_client_secret(secret);
-            if provided_hash != client.client_secret_hash {
-                return Err(OAuth2Error::InvalidClient(
-                    "invalid client credentials".into(),
-                ));
-            }
+        // Require client_secret for confidential clients
+        let client_secret = req
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("client_secret is required".into()))?;
+        let provided_hash = hash_client_secret(client_secret);
+        if provided_hash != client.client_secret_hash {
+            return Err(OAuth2Error::InvalidClient(
+                "invalid client credentials".into(),
+            ));
         }
 
         // Consume the authorization code (atomic single-use)
@@ -330,9 +333,25 @@ where
             ));
         }
 
-        // Resolve scopes: use requested scope if provided, else client's
+        // Resolve scopes: use requested scope if provided, else client's.
+        // Validate requested scopes are a subset of the client's allowed
+        // scopes to prevent minting tokens with arbitrary privileges.
         let scopes = match req.scope.as_deref() {
-            Some(s) => s.split_whitespace().map(String::from).collect::<Vec<_>>(),
+            Some(s) => {
+                let requested: Vec<String> = s.split_whitespace().map(String::from).collect();
+                let invalid: Vec<&str> = requested
+                    .iter()
+                    .filter(|sc| !client.scopes.contains(sc))
+                    .map(String::as_str)
+                    .collect();
+                if !invalid.is_empty() {
+                    return Err(OAuth2Error::InvalidScope(format!(
+                        "unregistered scopes: {}",
+                        invalid.join(", ")
+                    )));
+                }
+                requested
+            }
             None => client.scopes.clone(),
         };
 
@@ -404,6 +423,12 @@ where
             ));
         }
 
+        // Require client_secret for confidential clients
+        let client_secret_val = req
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("client_secret is required".into()))?;
+
         // Authenticate client
         let client = self
             .client_repo
@@ -411,20 +436,27 @@ where
             .await
             .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
-        if let Some(ref secret) = req.client_secret {
-            let provided_hash = hash_client_secret(secret);
-            if provided_hash != client.client_secret_hash {
-                return Err(OAuth2Error::InvalidClient(
-                    "invalid client credentials".into(),
-                ));
-            }
+        let provided_hash = hash_client_secret(client_secret_val);
+        if provided_hash != client.client_secret_hash {
+            return Err(OAuth2Error::InvalidClient(
+                "invalid client credentials".into(),
+            ));
         }
 
-        // Revoke old refresh token (single-use rotation)
+        // Verify client is authorized for refresh_token grant
+        if !client.grant_types.contains(&"refresh_token".to_string()) {
+            return Err(OAuth2Error::UnauthorizedClient(
+                "client not authorized for refresh_token grant".into(),
+            ));
+        }
+
+        // Revoke old refresh token (single-use rotation, atomic).
+        // The repo returns NotFound if the token was already revoked
+        // by a concurrent request — treat that as invalid_grant.
         self.refresh_token_repo
             .revoke(tenant_id, &token_hash)
             .await
-            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            .map_err(|_| OAuth2Error::InvalidGrant("refresh token already consumed".into()))?;
 
         // Resolve org_id from tenant
         let tenant = self
@@ -535,7 +567,21 @@ where
         // For access tokens (short-lived JWTs), revocation is a no-op —
         // they expire naturally within minutes.
         let token_hash = hash_refresh_token(&req.token);
-        let _ = self.refresh_token_repo.revoke(tenant_id, &token_hash).await;
+
+        // Look up the token first to verify client ownership.
+        // Only revoke if found and belongs to the requesting client;
+        // otherwise treat as unknown per RFC 7009.
+        if let Ok(stored) = self
+            .refresh_token_repo
+            .get_by_token_hash(tenant_id, &token_hash)
+            .await
+            && stored.client_id == req.client_id
+        {
+            self.refresh_token_repo
+                .revoke(tenant_id, &token_hash)
+                .await
+                .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        }
 
         Ok(())
     }
@@ -553,10 +599,24 @@ where
         // First try: decode as JWT access token
         if let Ok(validated) = validate_access_token(&req.token, &self.auth_config) {
             let claims = &validated.0;
+
+            // Verify the token belongs to this tenant to prevent
+            // cross-tenant introspection / metadata leaks.
+            let token_tenant = claims.tenant_id.parse::<Uuid>().unwrap_or(Uuid::nil());
+            if token_tenant != tenant_id {
+                return Ok(IntrospectionResponse {
+                    active: false,
+                    ..Default::default()
+                });
+            }
+
             return Ok(IntrospectionResponse {
                 active: true,
                 scope: claims.scope.clone(),
-                client_id: Some(claims.sub.clone()),
+                // Access tokens don't carry an explicit client_id
+                // claim; omit it to avoid confusing sub (user ID)
+                // with client_id.
+                client_id: None,
                 sub: Some(claims.sub.clone()),
                 exp: Some(claims.exp),
                 iat: Some(claims.iat),
@@ -571,6 +631,15 @@ where
             .get_by_token_hash(tenant_id, &token_hash)
             .await
         {
+            // Only introspect tokens belonging to the requesting
+            // client — prevent cross-client information leaks.
+            if stored.client_id != req.client_id {
+                return Ok(IntrospectionResponse {
+                    active: false,
+                    ..Default::default()
+                });
+            }
+
             let scope = if stored.scopes.is_empty() {
                 None
             } else {

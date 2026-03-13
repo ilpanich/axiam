@@ -87,21 +87,43 @@ where
             ));
         }
 
-        // 5. Resolve scopes
+        // 5. Resolve scopes and validate against client's registered scopes
         let scopes = parse_scopes(req.scope.as_deref(), &client);
+        if req.scope.is_some() {
+            let invalid: Vec<&str> = scopes
+                .iter()
+                .filter(|s| !client.scopes.contains(s))
+                .map(String::as_str)
+                .collect();
+            if !invalid.is_empty() {
+                return Err(OAuth2Error::InvalidScope(format!(
+                    "unregistered scopes: {}",
+                    invalid.join(", ")
+                )));
+            }
+        }
 
         // 6. Validate PKCE parameters
-        if let Some(ref method) = req.code_challenge_method {
-            if method != "S256" {
-                return Err(OAuth2Error::InvalidRequest(
-                    "only S256 code_challenge_method is supported".into(),
-                ));
+        if req.code_challenge.is_some() {
+            match req.code_challenge_method.as_deref() {
+                None => {
+                    return Err(OAuth2Error::InvalidRequest(
+                        "code_challenge_method required when \
+                         code_challenge is present"
+                            .into(),
+                    ));
+                }
+                Some("S256") => {}
+                Some(_) => {
+                    return Err(OAuth2Error::InvalidRequest(
+                        "only S256 code_challenge_method is supported".into(),
+                    ));
+                }
             }
-            if req.code_challenge.is_none() {
-                return Err(OAuth2Error::InvalidRequest(
-                    "code_challenge required with code_challenge_method".into(),
-                ));
-            }
+        } else if req.code_challenge_method.is_some() {
+            return Err(OAuth2Error::InvalidRequest(
+                "code_challenge required with code_challenge_method".into(),
+            ));
         }
 
         // 7. Generate random authorization code

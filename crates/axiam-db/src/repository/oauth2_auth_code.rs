@@ -157,42 +157,33 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
         let code_hash_owned = code_hash.to_string();
         let tenant_id_str = tenant_id.to_string();
 
-        // Select the code first to get its ID for the atomic update.
-        let mut result = self
+        // Single atomic UPDATE with WHERE guards: only one concurrent
+        // caller can match `used = false`, eliminating the race
+        // condition of a separate SELECT + UPDATE.
+        let result = self
             .db
             .query(
-                "SELECT meta::id(id) AS record_id, * FROM oauth2_auth_code \
-                 WHERE tenant_id = $tenant_id \
-                   AND code_hash = $code_hash \
-                   AND used = false \
-                   AND expires_at > time::now()",
+                "SELECT meta::id(id) AS record_id, * FROM \
+                 (UPDATE oauth2_auth_code SET used = true \
+                  WHERE tenant_id = $tenant_id \
+                    AND code_hash = $code_hash \
+                    AND used = false \
+                    AND expires_at > time::now())",
             )
-            .bind(("tenant_id", tenant_id_str.clone()))
+            .bind(("tenant_id", tenant_id_str))
             .bind(("code_hash", code_hash_owned.clone()))
             .await
             .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<AuthCodeRowWithId> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
             entity: "oauth2_auth_code".into(),
             id: format!("code_hash={code_hash_owned}"),
         })?;
-
-        // Mark as used atomically.
-        let update_result = self
-            .db
-            .query(
-                "UPDATE type::record('oauth2_auth_code', $id) SET used = true \
-                 WHERE tenant_id = $tenant_id AND used = false",
-            )
-            .bind(("id", row.record_id.clone()))
-            .bind(("tenant_id", tenant_id_str))
-            .await
-            .map_err(DbError::from)?;
-
-        update_result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         row.try_into_auth_code().map_err(Into::into)
     }

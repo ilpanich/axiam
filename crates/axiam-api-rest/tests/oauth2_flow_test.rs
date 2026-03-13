@@ -172,7 +172,7 @@ async fn create_client(
         .set_json(serde_json::json!({
             "name": "Flow Test Client",
             "redirect_uris": [redirect_uri],
-            "grant_types": ["authorization_code"],
+            "grant_types": ["authorization_code", "refresh_token"],
             "scopes": ["openid", "profile"]
         }))
         .to_request();

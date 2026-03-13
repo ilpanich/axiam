@@ -29,8 +29,9 @@ pub struct AccessTokenClaims {
     pub exp: i64,
     /// Unique token ID (UUID string).
     pub jti: String,
-    /// OAuth2 scopes (space-separated string). Present only for tokens
-    /// issued via the Client Credentials grant.
+    /// OAuth2 scopes (space-separated string). Present when non-empty
+    /// scopes are granted — both Client Credentials and Authorization
+    /// Code flows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 }

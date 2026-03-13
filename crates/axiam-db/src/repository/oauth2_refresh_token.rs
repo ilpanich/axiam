@@ -179,21 +179,33 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         let token_hash_owned = token_hash.to_string();
         let tenant_id_str = tenant_id.to_string();
 
-        let result = self
+        // Only revoke tokens that are not already revoked — this
+        // provides atomic single-use semantics for refresh token
+        // rotation.  If no rows are updated (token already revoked or
+        // not found) we return NotFound so callers can detect
+        // concurrent use.
+        let mut result = self
             .db
             .query(
                 "UPDATE oauth2_refresh_token SET revoked = true \
                  WHERE tenant_id = $tenant_id \
-                   AND token_hash = $token_hash",
+                   AND token_hash = $token_hash \
+                   AND revoked = false \
+                 RETURN AFTER",
             )
             .bind(("tenant_id", tenant_id_str))
-            .bind(("token_hash", token_hash_owned))
+            .bind(("token_hash", token_hash_owned.clone()))
             .await
             .map_err(DbError::from)?;
 
-        result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        if rows.is_empty() {
+            return Err(DbError::NotFound {
+                entity: "oauth2_refresh_token".into(),
+                id: format!("token_hash={token_hash_owned}"),
+            }
+            .into());
+        }
 
         Ok(())
     }

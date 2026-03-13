@@ -112,6 +112,12 @@ fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiError> {
                 "redirect_uri must use https (except http://localhost): {uri}"
             )));
         }
+        // RFC 6749 §3.1.2: redirect URIs must not include a fragment
+        if parsed.fragment().is_some() {
+            return Err(validation_err(format!(
+                "redirect_uri must not contain a fragment: {uri}"
+            )));
+        }
     }
     Ok(())
 }

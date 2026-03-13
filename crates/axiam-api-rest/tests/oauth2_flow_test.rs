@@ -13,7 +13,8 @@ use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
     SurrealAuthorizationCodeRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealRefreshTokenRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
@@ -106,6 +107,7 @@ macro_rules! test_app {
         let client_repo = SurrealOAuth2ClientRepository::new($db.clone());
         let code_repo = SurrealAuthorizationCodeRepository::new($db.clone());
         let tenant_repo = SurrealTenantRepository::new($db.clone());
+        let refresh_repo = SurrealRefreshTokenRepository::new($db.clone());
 
         let authz_service = AuthorizeService::new(
             client_repo.clone(),
@@ -116,7 +118,9 @@ macro_rules! test_app {
             client_repo.clone(),
             code_repo.clone(),
             tenant_repo.clone(),
+            refresh_repo,
             $auth.clone(),
+            2_592_000, // 30-day refresh token lifetime
         );
 
         test::init_service(
@@ -599,7 +603,7 @@ async fn unsupported_grant_type_returns_error() {
     let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
 
     let form = format!(
-        "grant_type=client_credentials&code=fakecode&redirect_uri={redirect_uri}\
+        "grant_type=implicit&code=fakecode&redirect_uri={redirect_uri}\
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
@@ -726,4 +730,563 @@ async fn pkce_required_when_challenge_registered() {
     assert_eq!(resp.status().as_u16(), 400);
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["error"], "invalid_grant");
+}
+
+// ===========================================================================
+// T10.2 — Client Credentials Grant
+// ===========================================================================
+
+/// Helper: create an OAuth2 client with `client_credentials` grant type.
+async fn create_cc_client(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+) -> (String, String) {
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "name": "M2M Client",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["client_credentials"],
+            "scopes": ["read:data", "write:data"]
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    (
+        body["client_id"].as_str().unwrap().to_string(),
+        body["client_secret"].as_str().unwrap().to_string(),
+    )
+}
+
+#[actix_rt::test]
+async fn client_credentials_grant() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret) =
+        create_cc_client(&app, &user_jwt).await;
+
+    let form = format!(
+        "grant_type=client_credentials\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body["access_token"].is_string());
+    assert_eq!(body["token_type"], "Bearer");
+    // Client credentials should NOT return a refresh token
+    assert!(
+        body.get("refresh_token").is_none()
+            || body["refresh_token"].is_null(),
+        "client_credentials must not return refresh_token"
+    );
+    assert_eq!(body["scope"], "read:data write:data");
+}
+
+#[actix_rt::test]
+async fn client_credentials_wrong_secret() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, _) = create_cc_client(&app, &user_jwt).await;
+
+    let form = format!(
+        "grant_type=client_credentials\
+         &client_id={client_id}&client_secret=wrong-secret"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_client");
+}
+
+#[actix_rt::test]
+async fn client_credentials_unauthorized_grant() {
+    // Client registered for authorization_code only — client_credentials
+    // must be rejected with unauthorized_client.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // create_client registers with grant_types: ["authorization_code"]
+    let (client_id, client_secret, _) =
+        create_client(&app, &user_jwt).await;
+
+    let form = format!(
+        "grant_type=client_credentials\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "unauthorized_client");
+}
+
+// ===========================================================================
+// T10.2 — Refresh Token Grant
+// ===========================================================================
+
+#[actix_rt::test]
+async fn refresh_token_grant() {
+    // Full flow: auth_code → tokens → use refresh_token → new tokens
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) =
+        create_client(&app, &user_jwt).await;
+
+    // Step 1: authorize + exchange code
+    let code = do_authorize(
+        &app,
+        &user_jwt,
+        &client_id,
+        &redirect_uri,
+        None,
+        None,
+    )
+    .await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let refresh_token = body["refresh_token"].as_str().unwrap();
+
+    // Step 2: use refresh token to get new tokens
+    let form = format!(
+        "grant_type=refresh_token&refresh_token={refresh_token}\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body["access_token"].is_string());
+    assert!(body["refresh_token"].is_string());
+    // New refresh token must differ from the old one (rotation)
+    assert_ne!(
+        body["refresh_token"].as_str().unwrap(),
+        refresh_token,
+        "refresh token must be rotated"
+    );
+}
+
+#[actix_rt::test]
+async fn refresh_token_rotation_invalidates_old() {
+    // After rotation, the old refresh token must be rejected.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) =
+        create_client(&app, &user_jwt).await;
+
+    let code = do_authorize(
+        &app,
+        &user_jwt,
+        &client_id,
+        &redirect_uri,
+        None,
+        None,
+    )
+    .await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let old_refresh = body["refresh_token"].as_str().unwrap().to_string();
+
+    // Use old refresh token (succeeds, rotates)
+    let form = format!(
+        "grant_type=refresh_token&refresh_token={old_refresh}\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Try the old refresh token again — must fail
+    let form = format!(
+        "grant_type=refresh_token&refresh_token={old_refresh}\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_grant");
+}
+
+// ===========================================================================
+// T10.2 — Token Revocation (RFC 7009)
+// ===========================================================================
+
+#[actix_rt::test]
+async fn revoke_refresh_token() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) =
+        create_client(&app, &user_jwt).await;
+
+    // Get a refresh token via auth_code flow
+    let code = do_authorize(
+        &app,
+        &user_jwt,
+        &client_id,
+        &redirect_uri,
+        None,
+        None,
+    )
+    .await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let refresh_token = body["refresh_token"].as_str().unwrap();
+
+    // Revoke it
+    let form = format!(
+        "token={refresh_token}&token_type_hint=refresh_token\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/revoke?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Try using the revoked refresh token
+    let form = format!(
+        "grant_type=refresh_token&refresh_token={refresh_token}\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_grant");
+}
+
+#[actix_rt::test]
+async fn revoke_unknown_token_returns_200() {
+    // Per RFC 7009, revoking an unknown token must still return 200.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, _) =
+        create_client(&app, &user_jwt).await;
+
+    let form = format!(
+        "token=nonexistent-token-value\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/revoke?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+// ===========================================================================
+// T10.2 — Token Introspection (RFC 7662)
+// ===========================================================================
+
+#[actix_rt::test]
+async fn introspect_active_access_token() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) =
+        create_client(&app, &user_jwt).await;
+
+    // Get an access token via auth_code flow
+    let code = do_authorize(
+        &app,
+        &user_jwt,
+        &client_id,
+        &redirect_uri,
+        None,
+        None,
+    )
+    .await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let access_token = body["access_token"].as_str().unwrap();
+
+    // Introspect it
+    let form = format!(
+        "token={access_token}&token_type_hint=access_token\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["active"], true);
+    assert_eq!(body["token_type"], "Bearer");
+    assert!(body["sub"].is_string());
+    assert!(body["exp"].is_number());
+    assert!(body["iat"].is_number());
+}
+
+#[actix_rt::test]
+async fn introspect_unknown_token_returns_inactive() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, _) =
+        create_client(&app, &user_jwt).await;
+
+    let form = format!(
+        "token=totally-bogus-token-value\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["active"], false);
+}
+
+#[actix_rt::test]
+async fn introspect_requires_client_auth() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, _, _) = create_client(&app, &user_jwt).await;
+
+    let form = format!(
+        "token=some-token\
+         &client_id={client_id}&client_secret=wrong-secret"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_client");
+}
+
+#[actix_rt::test]
+async fn introspect_revoked_refresh_token() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) =
+        create_client(&app, &user_jwt).await;
+
+    // Get refresh token
+    let code = do_authorize(
+        &app,
+        &user_jwt,
+        &client_id,
+        &redirect_uri,
+        None,
+        None,
+    )
+    .await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let refresh_token = body["refresh_token"].as_str().unwrap();
+
+    // Revoke it
+    let form = format!(
+        "token={refresh_token}\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/revoke?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    test::call_service(&app, req).await;
+
+    // Introspect the revoked token — must be inactive
+    let form = format!(
+        "token={refresh_token}\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
+        .insert_header((
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["active"], false);
 }

@@ -127,6 +127,8 @@ use crate::handlers;
         // OAuth2 Flow
         handlers::oauth2::authorize,
         handlers::oauth2::token,
+        handlers::oauth2::revoke,
+        handlers::oauth2::introspect,
     ),
     components(schemas(
         // Health
@@ -240,6 +242,9 @@ use crate::handlers;
         // OAuth2 Flow
         handlers::oauth2::OAuth2ErrorResponse,
         axiam_oauth2::token::TokenResponse,
+        axiam_oauth2::token::RevokeRequest,
+        axiam_oauth2::token::IntrospectRequest,
+        axiam_oauth2::token::IntrospectionResponse,
         // Pagination
         axiam_core::repository::Pagination,
     )),

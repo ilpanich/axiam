@@ -58,6 +58,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "oauth2_auth_codes",
         sql: SCHEMA_V4,
     },
+    Migration {
+        version: 5,
+        name: "oauth2_refresh_tokens",
+        sql: SCHEMA_V5,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -478,6 +483,31 @@ DEFINE FIELD created_at ON TABLE oauth2_auth_code TYPE datetime \
     DEFAULT time::now();
 DEFINE INDEX idx_auth_code_hash ON TABLE oauth2_auth_code \
     COLUMNS tenant_id, code_hash UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v5 — OAuth2 refresh tokens
+// -----------------------------------------------------------------------
+
+const SCHEMA_V5: &str = "\
+-- =======================================================================
+-- OAuth2 Refresh Tokens (tenant scope)
+-- =======================================================================
+DEFINE TABLE oauth2_refresh_token SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE oauth2_refresh_token TYPE string;
+DEFINE FIELD token_hash ON TABLE oauth2_refresh_token TYPE string;
+DEFINE FIELD client_id ON TABLE oauth2_refresh_token TYPE string;
+DEFINE FIELD user_id ON TABLE oauth2_refresh_token TYPE option<string>;
+DEFINE FIELD scopes ON TABLE oauth2_refresh_token TYPE array;
+DEFINE FIELD scopes.* ON TABLE oauth2_refresh_token TYPE string;
+DEFINE FIELD expires_at ON TABLE oauth2_refresh_token TYPE datetime;
+DEFINE FIELD revoked ON TABLE oauth2_refresh_token TYPE bool DEFAULT false;
+DEFINE FIELD created_at ON TABLE oauth2_refresh_token TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_refresh_token_hash ON TABLE oauth2_refresh_token \
+    COLUMNS tenant_id, token_hash UNIQUE;
+DEFINE INDEX idx_refresh_token_client ON TABLE oauth2_refresh_token \
+    COLUMNS tenant_id, client_id;
 ";
 
 // -----------------------------------------------------------------------

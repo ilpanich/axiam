@@ -13,8 +13,8 @@ use crate::models::{
     federation::{CreateFederationConfig, FederationConfig, UpdateFederationConfig},
     group::{CreateGroup, Group, UpdateGroup},
     oauth2_client::{
-        AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, OAuth2Client,
-        UpdateOAuth2Client,
+        AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, CreateRefreshToken,
+        OAuth2Client, RefreshToken, UpdateOAuth2Client,
     },
     organization::{CreateOrganization, Organization, UpdateOrganization},
     permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
@@ -541,6 +541,38 @@ pub trait AuthorizationCodeRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
 
     /// Delete expired and already-used codes (garbage collection).
+    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+pub trait RefreshTokenRepository: Send + Sync {
+    /// Store a new refresh token.
+    fn create(
+        &self,
+        input: CreateRefreshToken,
+    ) -> impl Future<Output = AxiamResult<RefreshToken>> + Send;
+
+    /// Look up a non-revoked, non-expired refresh token by its hash.
+    fn get_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<RefreshToken>> + Send;
+
+    /// Revoke a single refresh token by hash.
+    fn revoke(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Revoke all refresh tokens for a given client within a tenant.
+    fn revoke_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired and revoked refresh tokens (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 

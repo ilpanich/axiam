@@ -12,7 +12,8 @@ use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
     SurrealAuthorizationCodeRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealRefreshTokenRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
@@ -99,6 +100,7 @@ macro_rules! test_app {
         let client_repo = SurrealOAuth2ClientRepository::new($db.clone());
         let code_repo = SurrealAuthorizationCodeRepository::new($db.clone());
         let tenant_repo = SurrealTenantRepository::new($db.clone());
+        let refresh_repo = SurrealRefreshTokenRepository::new($db.clone());
 
         let authz_service = AuthorizeService::new(
             client_repo.clone(),
@@ -109,7 +111,9 @@ macro_rules! test_app {
             client_repo.clone(),
             code_repo.clone(),
             tenant_repo.clone(),
+            refresh_repo,
             $auth.clone(),
+            2_592_000, // 30-day refresh token lifetime
         );
 
         test::init_service(

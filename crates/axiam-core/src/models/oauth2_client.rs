@@ -66,3 +66,28 @@ pub struct CreateAuthorizationCode {
     pub code_challenge_method: Option<String>,
     pub expires_at: DateTime<Utc>,
 }
+
+/// Persisted refresh token (OAuth2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshToken {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub token_hash: String,
+    pub client_id: String,
+    pub user_id: Option<Uuid>,
+    pub scopes: Vec<String>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for creating a new refresh token.
+#[derive(Debug, Clone)]
+pub struct CreateRefreshToken {
+    pub tenant_id: Uuid,
+    pub token_hash: String,
+    pub client_id: String,
+    pub user_id: Option<Uuid>,
+    pub scopes: Vec<String>,
+    pub expires_at: DateTime<Utc>,
+}

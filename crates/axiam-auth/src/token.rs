@@ -29,6 +29,10 @@ pub struct AccessTokenClaims {
     pub exp: i64,
     /// Unique token ID (UUID string).
     pub jti: String,
+    /// OAuth2 scopes (space-separated string). Present only for tokens
+    /// issued via the Client Credentials grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// Issue a signed EdDSA (Ed25519) JWT access token.
@@ -47,10 +51,52 @@ pub fn issue_access_token(
         iat: now,
         exp: now + config.access_token_lifetime_secs as i64,
         jti: Uuid::new_v4().to_string(),
+        scope: None,
     };
 
     let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
         .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+
+    let header = Header::new(Algorithm::EdDSA);
+    jsonwebtoken::encode(&header, &claims, &key)
+        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+}
+
+/// Issue a JWT access token for OAuth2 Client Credentials grant (M2M).
+///
+/// The `sub` claim is the OAuth2 `client_id` (not a user UUID).
+/// If `scopes` is non-empty, a space-separated `scope` claim is
+/// included in the token.
+pub fn issue_client_credentials_token(
+    client_id: &str,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    let now = Utc::now().timestamp();
+    let scope = if scopes.is_empty() {
+        None
+    } else {
+        Some(scopes.join(" "))
+    };
+
+    let claims = AccessTokenClaims {
+        sub: client_id.to_owned(),
+        tenant_id: tenant_id.to_string(),
+        org_id: org_id.to_string(),
+        iss: config.jwt_issuer.clone(),
+        iat: now,
+        exp: now + config.access_token_lifetime_secs as i64,
+        jti: Uuid::new_v4().to_string(),
+        scope,
+    };
+
+    let key =
+        EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| {
+                AuthError::Crypto(format!("bad private key: {e}"))
+            })?;
 
     let header = Header::new(Algorithm::EdDSA);
     jsonwebtoken::encode(&header, &claims, &key)
@@ -223,5 +269,62 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let h1 = hash_refresh_token("token-a");
         let h2 = hash_refresh_token("token-b");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn client_credentials_token_roundtrip() {
+        let config = test_config();
+        let client_id = "my-service-client";
+        let tenant_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let scopes =
+            vec!["read:data".to_owned(), "write:data".to_owned()];
+
+        let token = issue_client_credentials_token(
+            client_id, tenant_id, org_id, &scopes, &config,
+        )
+        .unwrap();
+
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert_eq!(claims.sub, client_id);
+        assert_eq!(claims.tenant_id, tenant_id.to_string());
+        assert_eq!(claims.org_id, org_id.to_string());
+        assert_eq!(claims.iss, "axiam-test");
+        assert_eq!(
+            claims.scope.as_deref(),
+            Some("read:data write:data")
+        );
+    }
+
+    #[test]
+    fn client_credentials_token_no_scopes() {
+        let config = test_config();
+        let token = issue_client_credentials_token(
+            "svc-client",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+        )
+        .unwrap();
+
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert_eq!(claims.sub, "svc-client");
+        assert!(claims.scope.is_none());
+    }
+
+    #[test]
+    fn user_token_has_no_scope_claim() {
+        let config = test_config();
+        let token = issue_access_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &config,
+        )
+        .unwrap();
+
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert!(claims.scope.is_none());
     }
 }

@@ -57,7 +57,12 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 "/authorize",
                 web::get().to(handlers::oauth2::authorize::<C>),
             )
-            .route("/token", web::post().to(handlers::oauth2::token::<C>)),
+            .route("/token", web::post().to(handlers::oauth2::token::<C>))
+            .route("/revoke", web::post().to(handlers::oauth2::revoke::<C>))
+            .route(
+                "/introspect",
+                web::post().to(handlers::oauth2::introspect::<C>),
+            ),
     );
     cfg.service(
         web::scope("/api/v1")

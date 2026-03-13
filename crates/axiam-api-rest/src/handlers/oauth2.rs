@@ -2,11 +2,15 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_db::{
-    SurrealAuthorizationCodeRepository, SurrealOAuth2ClientRepository, SurrealTenantRepository,
+    SurrealAuthorizationCodeRepository, SurrealOAuth2ClientRepository,
+    SurrealRefreshTokenRepository, SurrealTenantRepository,
 };
 use axiam_oauth2::authorize::{AuthorizeRequest, AuthorizeService};
 use axiam_oauth2::error::OAuth2Error;
-use axiam_oauth2::token::{TokenRequest, TokenResponse, TokenService};
+use axiam_oauth2::token::{
+    IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest,
+    TokenResponse, TokenService,
+};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -41,6 +45,17 @@ pub struct OAuth2ErrorResponse {
     pub error: String,
     pub error_description: String,
 }
+
+// ---------------------------------------------------------------------------
+// Type alias for the concrete TokenService used in handlers
+// ---------------------------------------------------------------------------
+
+type ConcreteTokenService<C> = TokenService<
+    SurrealOAuth2ClientRepository<C>,
+    SurrealAuthorizationCodeRepository<C>,
+    SurrealTenantRepository<C>,
+    SurrealRefreshTokenRepository<C>,
+>;
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -98,15 +113,20 @@ pub async fn authorize<C: Connection>(
                 .append_header(("Location", redirect_url))
                 .finish()
         }
-        Err(e) => build_error_redirect(&q.redirect_uri, &e, q.state.as_deref()),
+        Err(e) => build_error_redirect(
+            &q.redirect_uri,
+            &e,
+            q.state.as_deref(),
+        ),
     }
 }
 
 /// `POST /oauth2/token` -- OAuth2 token endpoint.
 ///
-/// Accepts form-encoded body per RFC 6749. The `tenant_id` is passed as a
-/// query parameter since the token endpoint is unauthenticated (the client
-/// is authenticating itself here).
+/// Accepts form-encoded body per RFC 6749. Supports authorization_code,
+/// client_credentials, and refresh_token grant types. The `tenant_id` is
+/// passed as a query parameter since the token endpoint is unauthenticated
+/// (the client is authenticating itself here).
 #[utoipa::path(
     post,
     path = "/oauth2/token",
@@ -126,36 +146,87 @@ pub async fn authorize<C: Connection>(
 pub async fn token<C: Connection>(
     tenant_query: web::Query<TenantQuery>,
     form: web::Form<TokenRequest>,
-    token_service: web::Data<
-        TokenService<
-            SurrealOAuth2ClientRepository<C>,
-            SurrealAuthorizationCodeRepository<C>,
-            SurrealTenantRepository<C>,
-        >,
-    >,
+    token_service: web::Data<ConcreteTokenService<C>>,
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
-    match token_service.exchange_code(tenant_id, form.into_inner()).await {
+    match token_service.exchange(tenant_id, form.into_inner()).await {
         Ok(resp) => HttpResponse::Ok()
             .append_header(("Cache-Control", "no-store"))
             .append_header(("Pragma", "no-cache"))
             .json(resp),
-        Err(e) => {
-            let status = match &e {
-                OAuth2Error::InvalidClient(_) => {
-                    actix_web::http::StatusCode::UNAUTHORIZED
-                }
-                OAuth2Error::ServerError(_) => {
-                    actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
-                }
-                _ => actix_web::http::StatusCode::BAD_REQUEST,
-            };
-            HttpResponse::build(status).json(OAuth2ErrorResponse {
-                error: e.error_code().to_string(),
-                error_description: e.error_description(),
-            })
-        }
+        Err(e) => build_oauth2_error_response(&e),
+    }
+}
+
+/// `POST /oauth2/revoke` -- Token revocation endpoint (RFC 7009).
+///
+/// Accepts form-encoded body. Always returns 200 per the spec — invalid
+/// tokens are silently ignored.
+#[utoipa::path(
+    post,
+    path = "/oauth2/revoke",
+    tag = "oauth2",
+    params(TenantQuery),
+    request_body(
+        content_type = "application/x-www-form-urlencoded",
+        content = RevokeRequest,
+    ),
+    responses(
+        (status = 200, description = "Token revoked (or was already invalid)"),
+        (status = 401, description = "Client authentication failed",
+         body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn revoke<C: Connection>(
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<RevokeRequest>,
+    token_service: web::Data<ConcreteTokenService<C>>,
+) -> HttpResponse {
+    let tenant_id = tenant_query.into_inner().tenant_id;
+
+    match token_service
+        .revoke_token(tenant_id, form.into_inner())
+        .await
+    {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(e) => build_oauth2_error_response(&e),
+    }
+}
+
+/// `POST /oauth2/introspect` -- Token introspection endpoint (RFC 7662).
+///
+/// Accepts form-encoded body. Returns an `IntrospectionResponse` with
+/// `active: true/false` and optional metadata.
+#[utoipa::path(
+    post,
+    path = "/oauth2/introspect",
+    tag = "oauth2",
+    params(TenantQuery),
+    request_body(
+        content_type = "application/x-www-form-urlencoded",
+        content = IntrospectRequest,
+    ),
+    responses(
+        (status = 200, description = "Token introspection result",
+         body = IntrospectionResponse),
+        (status = 401, description = "Client authentication failed",
+         body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn introspect<C: Connection>(
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<IntrospectRequest>,
+    token_service: web::Data<ConcreteTokenService<C>>,
+) -> HttpResponse {
+    let tenant_id = tenant_query.into_inner().tenant_id;
+
+    match token_service
+        .introspect_token(tenant_id, form.into_inner())
+        .await
+    {
+        Ok(resp) => HttpResponse::Ok().json(resp),
+        Err(e) => build_oauth2_error_response(&e),
     }
 }
 
@@ -163,7 +234,8 @@ pub async fn token<C: Connection>(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build a redirect response with error parameters per RFC 6749 section 4.1.2.1.
+/// Build a redirect response with error parameters per RFC 6749
+/// section 4.1.2.1.
 fn build_error_redirect(
     redirect_uri: &str,
     error: &OAuth2Error,
@@ -182,6 +254,23 @@ fn build_error_redirect(
     HttpResponse::Found()
         .append_header(("Location", url))
         .finish()
+}
+
+/// Build an OAuth2 JSON error response with the appropriate HTTP status.
+fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
+    let status = match e {
+        OAuth2Error::InvalidClient(_) => {
+            actix_web::http::StatusCode::UNAUTHORIZED
+        }
+        OAuth2Error::ServerError(_) => {
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        }
+        _ => actix_web::http::StatusCode::BAD_REQUEST,
+    };
+    HttpResponse::build(status).json(OAuth2ErrorResponse {
+        error: e.error_code().to_string(),
+        error_description: e.error_description(),
+    })
 }
 
 /// Minimal percent-encoding for query string values.

@@ -172,6 +172,16 @@ where
             .await
             .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
+        // Verify client is authorized for authorization_code grant
+        if !client
+            .grant_types
+            .contains(&"authorization_code".to_string())
+        {
+            return Err(OAuth2Error::UnauthorizedClient(
+                "client not authorized for authorization_code grant".into(),
+            ));
+        }
+
         // Require client_secret for confidential clients
         let client_secret = req
             .client_secret

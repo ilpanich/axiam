@@ -58,23 +58,25 @@ where
 
     /// Process an authorization request, returning a code on success.
     pub async fn authorize(&self, req: AuthorizeRequest) -> Result<AuthorizeResponse, OAuth2Error> {
-        // 1. Validate response_type
-        if req.response_type != "code" {
-            return Err(OAuth2Error::UnsupportedResponseType);
-        }
-
-        // 2. Look up client
+        // 1. Look up client — must happen BEFORE any redirectable
+        //    errors to avoid open-redirect to unvalidated URIs.
         let client = self
             .client_repo
             .get_by_client_id(req.tenant_id, &req.client_id)
             .await
             .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
-        // 3. Validate redirect_uri
+        // 2. Validate redirect_uri — also before any redirectable
+        //    errors per RFC 6749 §4.1.2.1.
         if !client.redirect_uris.contains(&req.redirect_uri) {
             return Err(OAuth2Error::InvalidRedirectUri(
                 "redirect_uri not registered".into(),
             ));
+        }
+
+        // 3. Validate response_type (now safe to redirect errors)
+        if req.response_type != "code" {
+            return Err(OAuth2Error::UnsupportedResponseType);
         }
 
         // 4. Validate grant type

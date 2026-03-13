@@ -30,6 +30,7 @@ pub struct OidcDiscoveryDocument {
 
 /// Build a fully-populated OIDC discovery document for the given issuer URL.
 pub fn build_discovery_document(issuer: &str) -> OidcDiscoveryDocument {
+    let issuer = issuer.trim_end_matches('/');
     OidcDiscoveryDocument {
         issuer: issuer.to_string(),
         authorization_endpoint: format!("{issuer}/oauth2/authorize"),
@@ -111,11 +112,11 @@ pub fn build_jwks(public_key_pem: &str) -> Result<JwksDocument, String> {
     // Base64url-encode the raw key bytes for the JWK `x` parameter.
     let x = URL_SAFE_NO_PAD.encode(raw_key);
 
-    // Deterministic kid: first 8 hex chars of SHA-256(raw_key).
+    // Deterministic kid: first 16 hex chars of SHA-256(raw_key).
     let kid = {
         let mut h = Sha256::new();
         h.update(raw_key);
-        hex::encode(h.finalize())[..8].to_string()
+        hex::encode(h.finalize())[..16].to_string()
     };
 
     Ok(JwksDocument {

@@ -267,6 +267,11 @@ pub async fn update<C: Connection>(
     let id = path.into_inner();
     let req = body.into_inner();
 
+    if let Some(ref name) = req.name
+        && name.is_empty()
+    {
+        return Err(validation_err("name must not be empty"));
+    }
     if let Some(ref uris) = req.redirect_uris {
         validate_redirect_uris(uris)?;
     }

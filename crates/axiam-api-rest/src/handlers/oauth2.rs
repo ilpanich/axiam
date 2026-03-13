@@ -1,15 +1,20 @@
 //! OAuth2 authorization and token endpoints.
 
 use actix_web::{HttpResponse, web};
+use axiam_auth::config::AuthConfig;
+use axiam_core::repository::UserRepository;
 use axiam_db::{
     SurrealAuthorizationCodeRepository, SurrealOAuth2ClientRepository,
-    SurrealRefreshTokenRepository, SurrealTenantRepository,
+    SurrealRefreshTokenRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use axiam_oauth2::authorize::{AuthorizeRequest, AuthorizeService};
 use axiam_oauth2::error::OAuth2Error;
+use axiam_oauth2::oidc::{
+    JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document, build_jwks,
+};
 use axiam_oauth2::token::{
-    IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest,
-    TokenResponse, TokenService,
+    IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,
+    TokenService,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -31,6 +36,7 @@ pub struct AuthorizeQuery {
     pub state: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -55,6 +61,7 @@ type ConcreteTokenService<C> = TokenService<
     SurrealAuthorizationCodeRepository<C>,
     SurrealTenantRepository<C>,
     SurrealRefreshTokenRepository<C>,
+    SurrealUserRepository<C>,
 >;
 
 // ---------------------------------------------------------------------------
@@ -80,10 +87,7 @@ pub async fn authorize<C: Connection>(
     user: AuthenticatedUser,
     query: web::Query<AuthorizeQuery>,
     authz_service: web::Data<
-        AuthorizeService<
-            SurrealOAuth2ClientRepository<C>,
-            SurrealAuthorizationCodeRepository<C>,
-        >,
+        AuthorizeService<SurrealOAuth2ClientRepository<C>, SurrealAuthorizationCodeRepository<C>>,
     >,
 ) -> HttpResponse {
     let q = query.into_inner();
@@ -98,6 +102,7 @@ pub async fn authorize<C: Connection>(
         state: q.state.clone(),
         code_challenge: q.code_challenge,
         code_challenge_method: q.code_challenge_method,
+        nonce: q.nonce,
     };
 
     match authz_service.authorize(req).await {
@@ -113,11 +118,7 @@ pub async fn authorize<C: Connection>(
                 .append_header(("Location", redirect_url))
                 .finish()
         }
-        Err(e) => build_error_redirect(
-            &q.redirect_uri,
-            &e,
-            q.state.as_deref(),
-        ),
+        Err(e) => build_error_redirect(&q.redirect_uri, &e, q.state.as_deref()),
     }
 }
 
@@ -231,6 +232,114 @@ pub async fn introspect<C: Connection>(
 }
 
 // ---------------------------------------------------------------------------
+// OIDC endpoints
+// ---------------------------------------------------------------------------
+
+/// `GET /.well-known/openid-configuration` -- OIDC Discovery document.
+///
+/// Returns the OpenID Provider metadata per OpenID Connect Discovery 1.0.
+/// The issuer URL is taken from the `AuthConfig::jwt_issuer` setting.
+#[utoipa::path(
+    get,
+    path = "/.well-known/openid-configuration",
+    tag = "oidc",
+    responses(
+        (status = 200, description = "OpenID Connect Discovery document",
+         body = OidcDiscoveryDocument),
+    ),
+)]
+pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
+    let doc = build_discovery_document(&auth_config.jwt_issuer);
+    HttpResponse::Ok().json(doc)
+}
+
+/// `GET /oauth2/jwks` -- JSON Web Key Set.
+///
+/// Returns the public signing keys used by the authorization server
+/// so that relying parties can verify JWTs without sharing a secret.
+#[utoipa::path(
+    get,
+    path = "/oauth2/jwks",
+    tag = "oidc",
+    responses(
+        (status = 200, description = "JWKS document", body = JwksDocument),
+        (status = 500, description = "Key parsing error"),
+    ),
+)]
+pub async fn jwks(auth_config: web::Data<AuthConfig>) -> HttpResponse {
+    match build_jwks(&auth_config.jwt_public_key_pem) {
+        Ok(doc) => HttpResponse::Ok().json(doc),
+        Err(e) => HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
+            error: "server_error".into(),
+            error_description: e,
+        }),
+    }
+}
+
+/// `GET /oauth2/userinfo` -- OIDC UserInfo endpoint.
+///
+/// Returns claims about the authenticated user. Requires a valid
+/// Bearer access token. Email and username are included based on
+/// the scopes present in the access token.
+#[utoipa::path(
+    get,
+    path = "/oauth2/userinfo",
+    tag = "oidc",
+    responses(
+        (status = 200, description = "UserInfo response",
+         body = UserInfoResponse),
+        (status = 401, description = "Invalid or missing access token"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn userinfo<C: Connection>(
+    user: AuthenticatedUser,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+) -> HttpResponse {
+    let scopes: Vec<String> = user
+        .claims
+        .0
+        .scope
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+
+    let has_scope = |s: &str| scopes.iter().any(|sc| sc == s);
+
+    // Fetch user details for email/username when the relevant
+    // scopes are present.
+    let (email, preferred_username) = if has_scope("email") || has_scope("profile") {
+        match user_repo.get_by_id(user.tenant_id, user.user_id).await {
+            Ok(u) => (
+                if has_scope("email") {
+                    Some(u.email)
+                } else {
+                    None
+                },
+                if has_scope("profile") {
+                    Some(u.username)
+                } else {
+                    None
+                },
+            ),
+            Err(_) => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    HttpResponse::Ok().json(UserInfoResponse {
+        sub: user.user_id.to_string(),
+        email,
+        preferred_username,
+        tenant_id: user.tenant_id.to_string(),
+        org_id: user.org_id.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -259,12 +368,8 @@ fn build_error_redirect(
 /// Build an OAuth2 JSON error response with the appropriate HTTP status.
 fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
     let status = match e {
-        OAuth2Error::InvalidClient(_) => {
-            actix_web::http::StatusCode::UNAUTHORIZED
-        }
-        OAuth2Error::ServerError(_) => {
-            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
-        }
+        OAuth2Error::InvalidClient(_) => actix_web::http::StatusCode::UNAUTHORIZED,
+        OAuth2Error::ServerError(_) => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
         _ => actix_web::http::StatusCode::BAD_REQUEST,
     };
     HttpResponse::build(status).json(OAuth2ErrorResponse {

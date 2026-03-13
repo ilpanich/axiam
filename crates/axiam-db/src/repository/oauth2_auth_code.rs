@@ -20,6 +20,7 @@ struct AuthCodeRow {
     scopes: Vec<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
+    nonce: Option<String>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -36,6 +37,7 @@ struct AuthCodeRowWithId {
     scopes: Vec<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
+    nonce: Option<String>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -59,6 +61,7 @@ impl AuthCodeRowWithId {
             scopes: self.scopes,
             code_challenge: self.code_challenge,
             code_challenge_method: self.code_challenge_method,
+            nonce: self.nonce,
             expires_at: self.expires_at,
             used: self.used,
             created_at: self.created_at,
@@ -100,6 +103,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                  scopes = $scopes, \
                  code_challenge = $code_challenge, \
                  code_challenge_method = $code_challenge_method, \
+                 nonce = $nonce, \
                  expires_at = $expires_at, \
                  used = false",
             )
@@ -112,6 +116,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             .bind(("scopes", input.scopes))
             .bind(("code_challenge", input.code_challenge))
             .bind(("code_challenge_method", input.code_challenge_method))
+            .bind(("nonce", input.nonce))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -141,17 +146,14 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             scopes: row.scopes,
             code_challenge: row.code_challenge,
             code_challenge_method: row.code_challenge_method,
+            nonce: row.nonce,
             expires_at: row.expires_at,
             used: row.used,
             created_at: row.created_at,
         })
     }
 
-    async fn consume(
-        &self,
-        tenant_id: Uuid,
-        code_hash: &str,
-    ) -> AxiamResult<AuthorizationCode> {
+    async fn consume(&self, tenant_id: Uuid, code_hash: &str) -> AxiamResult<AuthorizationCode> {
         let code_hash_owned = code_hash.to_string();
         let tenant_id_str = tenant_id.to_string();
 

@@ -13,8 +13,8 @@ use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
     SurrealAuthorizationCodeRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealRefreshTokenRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealRefreshTokenRepository, SurrealTenantRepository,
+    SurrealUserRepository,
 };
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
@@ -99,7 +99,7 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, auth).unwrap()
+    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
 }
 
 macro_rules! test_app {
@@ -108,6 +108,7 @@ macro_rules! test_app {
         let code_repo = SurrealAuthorizationCodeRepository::new($db.clone());
         let tenant_repo = SurrealTenantRepository::new($db.clone());
         let refresh_repo = SurrealRefreshTokenRepository::new($db.clone());
+        let user_repo = SurrealUserRepository::new($db.clone());
 
         let authz_service = AuthorizeService::new(
             client_repo.clone(),
@@ -119,6 +120,7 @@ macro_rules! test_app {
             code_repo.clone(),
             tenant_repo.clone(),
             refresh_repo,
+            user_repo.clone(),
             $auth.clone(),
             2_592_000, // 30-day refresh token lifetime
         );
@@ -129,6 +131,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(client_repo))
                 .app_data(web::Data::new(code_repo))
                 .app_data(web::Data::new(tenant_repo))
+                .app_data(web::Data::new(user_repo))
                 .app_data(web::Data::new(authz_service))
                 .app_data(web::Data::new(token_service))
                 .configure(register_api_v1_routes::<TestDb>),
@@ -485,12 +488,7 @@ async fn invalid_redirect_uri_rejected_at_authorize() {
     let resp = test::call_service(&app, req).await;
     // The spec redirects with an error; we still get a 302 but with error params
     assert_eq!(resp.status().as_u16(), 302);
-    let location = resp
-        .headers()
-        .get("Location")
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let location = resp.headers().get("Location").unwrap().to_str().unwrap();
     // The Location must point to the bad redirect with an error parameter
     assert!(
         location.contains("error="),
@@ -551,12 +549,7 @@ async fn unsupported_response_type_rejected() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 302);
-    let location = resp
-        .headers()
-        .get("Location")
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let location = resp.headers().get("Location").unwrap().to_str().unwrap();
     assert!(
         location.contains("error=unsupported_response_type"),
         "expected unsupported_response_type error, got: {location}"
@@ -673,12 +666,7 @@ async fn state_parameter_echoed_in_redirect() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 302);
 
-    let location = resp
-        .headers()
-        .get("Location")
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let location = resp.headers().get("Location").unwrap().to_str().unwrap();
 
     let url = url::Url::parse(location).unwrap();
     let returned_state = url
@@ -772,8 +760,7 @@ async fn client_credentials_grant() {
     let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let (client_id, client_secret) =
-        create_cc_client(&app, &user_jwt).await;
+    let (client_id, client_secret) = create_cc_client(&app, &user_jwt).await;
 
     let form = format!(
         "grant_type=client_credentials\
@@ -781,10 +768,7 @@ async fn client_credentials_grant() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
 
@@ -796,8 +780,7 @@ async fn client_credentials_grant() {
     assert_eq!(body["token_type"], "Bearer");
     // Client credentials should NOT return a refresh token
     assert!(
-        body.get("refresh_token").is_none()
-            || body["refresh_token"].is_null(),
+        body.get("refresh_token").is_none() || body["refresh_token"].is_null(),
         "client_credentials must not return refresh_token"
     );
     assert_eq!(body["scope"], "read:data write:data");
@@ -819,10 +802,7 @@ async fn client_credentials_wrong_secret() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
 
@@ -843,8 +823,7 @@ async fn client_credentials_unauthorized_grant() {
     let app = test_app!(db, auth);
 
     // create_client registers with grant_types: ["authorization_code"]
-    let (client_id, client_secret, _) =
-        create_client(&app, &user_jwt).await;
+    let (client_id, client_secret, _) = create_client(&app, &user_jwt).await;
 
     let form = format!(
         "grant_type=client_credentials\
@@ -852,10 +831,7 @@ async fn client_credentials_unauthorized_grant() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
 
@@ -878,19 +854,10 @@ async fn refresh_token_grant() {
     let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let (client_id, client_secret, redirect_uri) =
-        create_client(&app, &user_jwt).await;
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
 
     // Step 1: authorize + exchange code
-    let code = do_authorize(
-        &app,
-        &user_jwt,
-        &client_id,
-        &redirect_uri,
-        None,
-        None,
-    )
-    .await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
     let resp = do_token_exchange(
         &app,
         tenant_id,
@@ -912,10 +879,7 @@ async fn refresh_token_grant() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
 
@@ -941,18 +905,9 @@ async fn refresh_token_rotation_invalidates_old() {
     let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let (client_id, client_secret, redirect_uri) =
-        create_client(&app, &user_jwt).await;
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
 
-    let code = do_authorize(
-        &app,
-        &user_jwt,
-        &client_id,
-        &redirect_uri,
-        None,
-        None,
-    )
-    .await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
     let resp = do_token_exchange(
         &app,
         tenant_id,
@@ -973,10 +928,7 @@ async fn refresh_token_rotation_invalidates_old() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -989,10 +941,7 @@ async fn refresh_token_rotation_invalidates_old() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1013,19 +962,10 @@ async fn revoke_refresh_token() {
     let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let (client_id, client_secret, redirect_uri) =
-        create_client(&app, &user_jwt).await;
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
 
     // Get a refresh token via auth_code flow
-    let code = do_authorize(
-        &app,
-        &user_jwt,
-        &client_id,
-        &redirect_uri,
-        None,
-        None,
-    )
-    .await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
     let resp = do_token_exchange(
         &app,
         tenant_id,
@@ -1046,10 +986,7 @@ async fn revoke_refresh_token() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/revoke?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1062,10 +999,7 @@ async fn revoke_refresh_token() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1083,8 +1017,7 @@ async fn revoke_unknown_token_returns_200() {
     let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let (client_id, client_secret, _) =
-        create_client(&app, &user_jwt).await;
+    let (client_id, client_secret, _) = create_client(&app, &user_jwt).await;
 
     let form = format!(
         "token=nonexistent-token-value\
@@ -1092,10 +1025,7 @@ async fn revoke_unknown_token_returns_200() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/revoke?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1114,19 +1044,10 @@ async fn introspect_active_access_token() {
     let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let (client_id, client_secret, redirect_uri) =
-        create_client(&app, &user_jwt).await;
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
 
     // Get an access token via auth_code flow
-    let code = do_authorize(
-        &app,
-        &user_jwt,
-        &client_id,
-        &redirect_uri,
-        None,
-        None,
-    )
-    .await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
     let resp = do_token_exchange(
         &app,
         tenant_id,
@@ -1147,10 +1068,7 @@ async fn introspect_active_access_token() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1172,8 +1090,7 @@ async fn introspect_unknown_token_returns_inactive() {
     let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let (client_id, client_secret, _) =
-        create_client(&app, &user_jwt).await;
+    let (client_id, client_secret, _) = create_client(&app, &user_jwt).await;
 
     let form = format!(
         "token=totally-bogus-token-value\
@@ -1181,10 +1098,7 @@ async fn introspect_unknown_token_returns_inactive() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1210,10 +1124,7 @@ async fn introspect_requires_client_auth() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1230,19 +1141,10 @@ async fn introspect_revoked_refresh_token() {
     let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let (client_id, client_secret, redirect_uri) =
-        create_client(&app, &user_jwt).await;
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
 
     // Get refresh token
-    let code = do_authorize(
-        &app,
-        &user_jwt,
-        &client_id,
-        &redirect_uri,
-        None,
-        None,
-    )
-    .await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
     let resp = do_token_exchange(
         &app,
         tenant_id,
@@ -1263,10 +1165,7 @@ async fn introspect_revoked_refresh_token() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/revoke?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     test::call_service(&app, req).await;
@@ -1278,10 +1177,7 @@ async fn introspect_revoked_refresh_token() {
     );
     let req = test::TestRequest::post()
         .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
-        .insert_header((
-            "Content-Type",
-            "application/x-www-form-urlencoded",
-        ))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1289,4 +1185,267 @@ async fn introspect_revoked_refresh_token() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["active"], false);
+}
+
+// ===========================================================================
+// T10.3 — OpenID Connect
+// ===========================================================================
+
+#[actix_rt::test]
+async fn oidc_discovery_document() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let _user_id = create_admin_user(&db, tenant_id).await;
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri("/.well-known/openid-configuration")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["issuer"], "axiam-test");
+    assert!(body["authorization_endpoint"].is_string());
+    assert!(body["token_endpoint"].is_string());
+    assert!(body["userinfo_endpoint"].is_string());
+    assert!(body["jwks_uri"].is_string());
+    let scopes = body["scopes_supported"].as_array().unwrap();
+    assert!(
+        scopes.iter().any(|s| s == "openid"),
+        "scopes_supported must include openid"
+    );
+    let algs = body["id_token_signing_alg_values_supported"]
+        .as_array()
+        .unwrap();
+    assert!(
+        algs.iter().any(|a| a == "EdDSA"),
+        "must advertise EdDSA signing"
+    );
+}
+
+#[actix_rt::test]
+async fn oidc_jwks_endpoint() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let _user_id = create_admin_user(&db, tenant_id).await;
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get().uri("/oauth2/jwks").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let keys = body["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["kty"], "OKP");
+    assert_eq!(keys[0]["crv"], "Ed25519");
+    assert_eq!(keys[0]["alg"], "EdDSA");
+    assert_eq!(keys[0]["use"], "sig");
+    assert!(keys[0]["x"].is_string());
+    assert!(keys[0]["kid"].is_string());
+}
+
+#[actix_rt::test]
+async fn oidc_userinfo_returns_sub() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri("/oauth2/userinfo")
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["sub"], user_id.to_string());
+    assert_eq!(body["tenant_id"], tenant_id.to_string());
+    assert_eq!(body["org_id"], org_id.to_string());
+}
+
+#[actix_rt::test]
+async fn oidc_userinfo_requires_auth() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let _user_id = create_admin_user(&db, tenant_id).await;
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri("/oauth2/userinfo")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn oidc_userinfo_with_email_scope() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let scopes = vec!["openid".to_owned(), "email".to_owned()];
+    let user_jwt = issue_access_token(user_id, tenant_id, org_id, &scopes, &auth).unwrap();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri("/oauth2/userinfo")
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["sub"], user_id.to_string());
+    assert_eq!(body["email"], "admin@example.com");
+}
+
+#[actix_rt::test]
+async fn oidc_userinfo_with_profile_scope() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let scopes = vec!["openid".to_owned(), "profile".to_owned()];
+    let user_jwt = issue_access_token(user_id, tenant_id, org_id, &scopes, &auth).unwrap();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri("/oauth2/userinfo")
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["sub"], user_id.to_string());
+    assert_eq!(body["preferred_username"], "admin");
+}
+
+#[actix_rt::test]
+async fn oidc_id_token_in_auth_code_flow() {
+    // When `openid` scope is requested, the token response must
+    // include an id_token JWT with the expected claims.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
+
+    // Authorize with openid scope and a nonce
+    let uri = format!(
+        "/oauth2/authorize?response_type=code&client_id={client_id}\
+         &redirect_uri={redirect_uri}&scope=openid%20profile\
+         &nonce=test-nonce-123"
+    );
+    let req = test::TestRequest::get()
+        .uri(&uri)
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 302);
+
+    let location = resp
+        .headers()
+        .get("Location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let url = url::Url::parse(&location).unwrap();
+    let code = url
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.into_owned())
+        .unwrap();
+
+    // Exchange for tokens
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body["access_token"].is_string());
+    assert!(body["refresh_token"].is_string());
+    assert!(
+        body["id_token"].is_string(),
+        "id_token must be present when openid scope is requested"
+    );
+
+    // Verify the id_token is a valid JWT
+    let id_token = body["id_token"].as_str().unwrap();
+    let parts: Vec<&str> = id_token.split('.').collect();
+    assert_eq!(parts.len(), 3, "id_token must be a valid JWT");
+
+    // Decode and inspect claims
+    let payload = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+    let claims: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(claims["sub"], user_id.to_string());
+    assert_eq!(claims["aud"], client_id);
+    assert_eq!(claims["iss"], "axiam-test");
+    assert_eq!(claims["nonce"], "test-nonce-123");
+    assert!(claims["iat"].is_number());
+    assert!(claims["exp"].is_number());
+}
+
+#[actix_rt::test]
+async fn oidc_no_id_token_without_openid_scope() {
+    // When `openid` is NOT in the requested scopes, no id_token
+    // should be returned.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // Create a client registered with only "read:data" scope (no openid)
+    let redirect_uri = "https://app.example.com/callback";
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .set_json(serde_json::json!({
+            "name": "No OpenID Client",
+            "redirect_uris": [redirect_uri],
+            "grant_types": ["authorization_code"],
+            "scopes": ["read:data"]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let client_id = body["client_id"].as_str().unwrap().to_string();
+    let client_secret = body["client_secret"].as_str().unwrap().to_string();
+
+    // Authorize WITHOUT openid scope
+    let code = do_authorize(&app, &user_jwt, &client_id, redirect_uri, None, None).await;
+
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body["access_token"].is_string());
+    assert!(
+        body.get("id_token").is_none() || body["id_token"].is_null(),
+        "id_token must not be present without openid scope"
+    );
 }

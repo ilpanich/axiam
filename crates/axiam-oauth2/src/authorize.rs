@@ -22,6 +22,9 @@ pub struct AuthorizeRequest {
     pub state: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    /// OIDC nonce — passed through to the authorization code for
+    /// inclusion in the ID token.
+    pub nonce: Option<String>,
 }
 
 /// Authorization response -- contains the code to return to the client.
@@ -45,11 +48,7 @@ where
     OC: OAuth2ClientRepository,
     AC: AuthorizationCodeRepository,
 {
-    pub fn new(
-        client_repo: OC,
-        code_repo: AC,
-        code_lifetime_secs: i64,
-    ) -> Self {
+    pub fn new(client_repo: OC, code_repo: AC, code_lifetime_secs: i64) -> Self {
         Self {
             client_repo,
             code_repo,
@@ -58,10 +57,7 @@ where
     }
 
     /// Process an authorization request, returning a code on success.
-    pub async fn authorize(
-        &self,
-        req: AuthorizeRequest,
-    ) -> Result<AuthorizeResponse, OAuth2Error> {
+    pub async fn authorize(&self, req: AuthorizeRequest) -> Result<AuthorizeResponse, OAuth2Error> {
         // 1. Validate response_type
         if req.response_type != "code" {
             return Err(OAuth2Error::UnsupportedResponseType);
@@ -72,9 +68,7 @@ where
             .client_repo
             .get_by_client_id(req.tenant_id, &req.client_id)
             .await
-            .map_err(|_| {
-                OAuth2Error::InvalidClient("client not found".into())
-            })?;
+            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
         // 3. Validate redirect_uri
         if !client.redirect_uris.contains(&req.redirect_uri) {
@@ -89,8 +83,7 @@ where
             .contains(&"authorization_code".to_string())
         {
             return Err(OAuth2Error::UnauthorizedClient(
-                "client not authorized for authorization_code grant"
-                    .into(),
+                "client not authorized for authorization_code grant".into(),
             ));
         }
 
@@ -106,8 +99,7 @@ where
             }
             if req.code_challenge.is_none() {
                 return Err(OAuth2Error::InvalidRequest(
-                    "code_challenge required with code_challenge_method"
-                        .into(),
+                    "code_challenge required with code_challenge_method".into(),
                 ));
             }
         }
@@ -117,8 +109,7 @@ where
         let code_hash = hash_code(&raw_code);
 
         // 8. Store authorization code
-        let expires_at =
-            Utc::now() + chrono::Duration::seconds(self.code_lifetime_secs);
+        let expires_at = Utc::now() + chrono::Duration::seconds(self.code_lifetime_secs);
         let _stored = self
             .code_repo
             .create(CreateAuthorizationCode {
@@ -130,6 +121,7 @@ where
                 scopes,
                 code_challenge: req.code_challenge,
                 code_challenge_method: req.code_challenge_method,
+                nonce: req.nonce,
                 expires_at,
             })
             .await

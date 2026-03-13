@@ -4,13 +4,13 @@
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    generate_refresh_token, hash_refresh_token, issue_access_token,
-    issue_client_credentials_token, validate_access_token,
+    generate_refresh_token, hash_refresh_token, issue_access_token, issue_client_credentials_token,
+    issue_id_token, validate_access_token,
 };
 use axiam_core::models::oauth2_client::CreateRefreshToken;
 use axiam_core::repository::{
-    AuthorizationCodeRepository, OAuth2ClientRepository,
-    RefreshTokenRepository, TenantRepository,
+    AuthorizationCodeRepository, OAuth2ClientRepository, RefreshTokenRepository, TenantRepository,
+    UserRepository,
 };
 use axiam_db::hash_client_secret;
 use chrono::Utc;
@@ -47,6 +47,8 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
 }
 
 /// RFC 7009 token revocation request.
@@ -92,27 +94,30 @@ pub struct IntrospectionResponse {
 /// OAuth2 token service — handles token exchange, revocation, and
 /// introspection.
 #[derive(Clone)]
-pub struct TokenService<OC, AC, TR, RT> {
+pub struct TokenService<OC, AC, TR, RT, UR> {
     client_repo: OC,
     code_repo: AC,
     tenant_repo: TR,
     refresh_token_repo: RT,
+    user_repo: UR,
     auth_config: AuthConfig,
     refresh_token_lifetime_secs: i64,
 }
 
-impl<OC, AC, TR, RT> TokenService<OC, AC, TR, RT>
+impl<OC, AC, TR, RT, UR> TokenService<OC, AC, TR, RT, UR>
 where
     OC: OAuth2ClientRepository,
     AC: AuthorizationCodeRepository,
     TR: TenantRepository,
     RT: RefreshTokenRepository,
+    UR: UserRepository,
 {
     pub fn new(
         client_repo: OC,
         code_repo: AC,
         tenant_repo: TR,
         refresh_token_repo: RT,
+        user_repo: UR,
         auth_config: AuthConfig,
         refresh_token_lifetime_secs: i64,
     ) -> Self {
@@ -121,6 +126,7 @@ where
             code_repo,
             tenant_repo,
             refresh_token_repo,
+            user_repo,
             auth_config,
             refresh_token_lifetime_secs,
         }
@@ -133,15 +139,9 @@ where
         req: TokenRequest,
     ) -> Result<TokenResponse, OAuth2Error> {
         match req.grant_type.as_str() {
-            "authorization_code" => {
-                self.handle_authorization_code(tenant_id, req).await
-            }
-            "client_credentials" => {
-                self.handle_client_credentials(tenant_id, req).await
-            }
-            "refresh_token" => {
-                self.handle_refresh_token(tenant_id, req).await
-            }
+            "authorization_code" => self.handle_authorization_code(tenant_id, req).await,
+            "client_credentials" => self.handle_client_credentials(tenant_id, req).await,
+            "refresh_token" => self.handle_refresh_token(tenant_id, req).await,
             _ => Err(OAuth2Error::UnsupportedGrantType),
         }
     }
@@ -152,24 +152,25 @@ where
         tenant_id: Uuid,
         req: TokenRequest,
     ) -> Result<TokenResponse, OAuth2Error> {
-        let code = req.code.as_deref().ok_or_else(|| {
-            OAuth2Error::InvalidRequest("code is required".into())
-        })?;
-        let redirect_uri = req.redirect_uri.as_deref().ok_or_else(|| {
-            OAuth2Error::InvalidRequest("redirect_uri is required".into())
-        })?;
-        let client_id = req.client_id.as_deref().ok_or_else(|| {
-            OAuth2Error::InvalidRequest("client_id is required".into())
-        })?;
+        let code = req
+            .code
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("code is required".into()))?;
+        let redirect_uri = req
+            .redirect_uri
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("redirect_uri is required".into()))?;
+        let client_id = req
+            .client_id
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into()))?;
 
         // Authenticate client
         let client = self
             .client_repo
             .get_by_client_id(tenant_id, client_id)
             .await
-            .map_err(|_| {
-                OAuth2Error::InvalidClient("client not found".into())
-            })?;
+            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
         if let Some(ref secret) = req.client_secret {
             let provided_hash = hash_client_secret(secret);
@@ -188,37 +189,27 @@ where
             .await
             .map_err(|_| {
                 OAuth2Error::InvalidGrant(
-                    "authorization code is invalid, expired, or already used"
-                        .into(),
+                    "authorization code is invalid, expired, or already used".into(),
                 )
             })?;
 
         // Verify redirect_uri matches
         if auth_code.redirect_uri != redirect_uri {
-            return Err(OAuth2Error::InvalidGrant(
-                "redirect_uri mismatch".into(),
-            ));
+            return Err(OAuth2Error::InvalidGrant("redirect_uri mismatch".into()));
         }
 
         // Verify client_id matches
         if auth_code.client_id != client_id {
-            return Err(OAuth2Error::InvalidGrant(
-                "client_id mismatch".into(),
-            ));
+            return Err(OAuth2Error::InvalidGrant("client_id mismatch".into()));
         }
 
         // Verify PKCE if code_challenge was used
         if let Some(ref challenge) = auth_code.code_challenge {
-            let verifier =
-                req.code_verifier.as_deref().ok_or_else(|| {
-                    OAuth2Error::InvalidGrant(
-                        "code_verifier required for PKCE".into(),
-                    )
-                })?;
+            let verifier = req.code_verifier.as_deref().ok_or_else(|| {
+                OAuth2Error::InvalidGrant("code_verifier required for PKCE".into())
+            })?;
             if !pkce::verify_pkce(verifier, challenge) {
-                return Err(OAuth2Error::InvalidGrant(
-                    "PKCE verification failed".into(),
-                ));
+                return Err(OAuth2Error::InvalidGrant("PKCE verification failed".into()));
             }
         }
 
@@ -229,11 +220,12 @@ where
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
-        // Issue access token
+        // Issue access token (include scopes from the authorization code)
         let access_token = issue_access_token(
             auth_code.user_id,
             tenant_id,
             tenant.organization_id,
+            &auth_code.scopes,
             &self.auth_config,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
@@ -241,8 +233,8 @@ where
         // Generate and persist refresh token
         let raw_refresh = generate_refresh_token();
         let refresh_hash = hash_refresh_token(&raw_refresh);
-        let refresh_expires = Utc::now()
-            + chrono::Duration::seconds(self.refresh_token_lifetime_secs);
+        let refresh_expires =
+            Utc::now() + chrono::Duration::seconds(self.refresh_token_lifetime_secs);
 
         self.refresh_token_repo
             .create(CreateRefreshToken {
@@ -256,6 +248,31 @@ where
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
+        // Issue an ID token when the `openid` scope was requested.
+        let id_token = if auth_code.scopes.contains(&"openid".to_string()) {
+            let user = self
+                .user_repo
+                .get_by_id(tenant_id, auth_code.user_id)
+                .await
+                .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            Some(
+                issue_id_token(
+                    auth_code.user_id,
+                    tenant_id,
+                    tenant.organization_id,
+                    client_id,
+                    auth_code.nonce.as_deref(),
+                    Some(&user.email),
+                    Some(&user.username),
+                    &auth_code.scopes,
+                    &self.auth_config,
+                )
+                .map_err(|e| OAuth2Error::ServerError(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
         let scope = if auth_code.scopes.is_empty() {
             None
         } else {
@@ -268,6 +285,7 @@ where
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token: Some(raw_refresh),
             scope,
+            id_token,
         })
     }
 
@@ -279,21 +297,21 @@ where
         tenant_id: Uuid,
         req: TokenRequest,
     ) -> Result<TokenResponse, OAuth2Error> {
-        let client_id = req.client_id.as_deref().ok_or_else(|| {
-            OAuth2Error::InvalidRequest("client_id is required".into())
-        })?;
-        let client_secret = req.client_secret.as_deref().ok_or_else(|| {
-            OAuth2Error::InvalidRequest("client_secret is required".into())
-        })?;
+        let client_id = req
+            .client_id
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into()))?;
+        let client_secret = req
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("client_secret is required".into()))?;
 
         // Authenticate client
         let client = self
             .client_repo
             .get_by_client_id(tenant_id, client_id)
             .await
-            .map_err(|_| {
-                OAuth2Error::InvalidClient("client not found".into())
-            })?;
+            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
         let provided_hash = hash_client_secret(client_secret);
         if provided_hash != client.client_secret_hash {
@@ -314,9 +332,7 @@ where
 
         // Resolve scopes: use requested scope if provided, else client's
         let scopes = match req.scope.as_deref() {
-            Some(s) => {
-                s.split_whitespace().map(String::from).collect::<Vec<_>>()
-            }
+            Some(s) => s.split_whitespace().map(String::from).collect::<Vec<_>>(),
             None => client.scopes.clone(),
         };
 
@@ -349,6 +365,7 @@ where
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token: None,
             scope,
+            id_token: None,
         })
     }
 
@@ -361,12 +378,14 @@ where
         tenant_id: Uuid,
         req: TokenRequest,
     ) -> Result<TokenResponse, OAuth2Error> {
-        let raw_token = req.refresh_token.as_deref().ok_or_else(|| {
-            OAuth2Error::InvalidRequest("refresh_token is required".into())
-        })?;
-        let client_id = req.client_id.as_deref().ok_or_else(|| {
-            OAuth2Error::InvalidRequest("client_id is required".into())
-        })?;
+        let raw_token = req
+            .refresh_token
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("refresh_token is required".into()))?;
+        let client_id = req
+            .client_id
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into()))?;
 
         // Look up the refresh token by hash
         let token_hash = hash_refresh_token(raw_token);
@@ -375,9 +394,7 @@ where
             .get_by_token_hash(tenant_id, &token_hash)
             .await
             .map_err(|_| {
-                OAuth2Error::InvalidGrant(
-                    "refresh token is invalid, expired, or revoked".into(),
-                )
+                OAuth2Error::InvalidGrant("refresh token is invalid, expired, or revoked".into())
             })?;
 
         // Verify client ownership
@@ -392,9 +409,7 @@ where
             .client_repo
             .get_by_client_id(tenant_id, client_id)
             .await
-            .map_err(|_| {
-                OAuth2Error::InvalidClient("client not found".into())
-            })?;
+            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
         if let Some(ref secret) = req.client_secret {
             let provided_hash = hash_client_secret(secret);
@@ -424,6 +439,7 @@ where
                 user_id,
                 tenant_id,
                 tenant.organization_id,
+                &stored.scopes,
                 &self.auth_config,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
@@ -443,8 +459,8 @@ where
         // Create and store new refresh token
         let new_raw_refresh = generate_refresh_token();
         let new_refresh_hash = hash_refresh_token(&new_raw_refresh);
-        let refresh_expires = Utc::now()
-            + chrono::Duration::seconds(self.refresh_token_lifetime_secs);
+        let refresh_expires =
+            Utc::now() + chrono::Duration::seconds(self.refresh_token_lifetime_secs);
 
         self.refresh_token_repo
             .create(CreateRefreshToken {
@@ -458,6 +474,35 @@ where
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
+        // Re-issue an ID token when the original grant included `openid`.
+        let id_token = if stored.scopes.contains(&"openid".to_string()) {
+            if let Some(uid) = stored.user_id {
+                let user = self
+                    .user_repo
+                    .get_by_id(tenant_id, uid)
+                    .await
+                    .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+                Some(
+                    issue_id_token(
+                        uid,
+                        tenant_id,
+                        tenant.organization_id,
+                        client_id,
+                        None, // no nonce for refresh
+                        Some(&user.email),
+                        Some(&user.username),
+                        &stored.scopes,
+                        &self.auth_config,
+                    )
+                    .map_err(|e| OAuth2Error::ServerError(e.to_string()))?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let scope = if stored.scopes.is_empty() {
             None
         } else {
@@ -470,6 +515,7 @@ where
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token: Some(new_raw_refresh),
             scope,
+            id_token,
         })
     }
 
@@ -482,21 +528,14 @@ where
         req: RevokeRequest,
     ) -> Result<(), OAuth2Error> {
         // Authenticate the client making the revocation request
-        self.authenticate_client(
-            tenant_id,
-            &req.client_id,
-            &req.client_secret,
-        )
-        .await?;
+        self.authenticate_client(tenant_id, &req.client_id, &req.client_secret)
+            .await?;
 
         // Try revoking as a refresh token (hash-based lookup).
         // For access tokens (short-lived JWTs), revocation is a no-op —
         // they expire naturally within minutes.
         let token_hash = hash_refresh_token(&req.token);
-        let _ = self
-            .refresh_token_repo
-            .revoke(tenant_id, &token_hash)
-            .await;
+        let _ = self.refresh_token_repo.revoke(tenant_id, &token_hash).await;
 
         Ok(())
     }
@@ -508,17 +547,11 @@ where
         req: IntrospectRequest,
     ) -> Result<IntrospectionResponse, OAuth2Error> {
         // Authenticate the client making the introspection request
-        self.authenticate_client(
-            tenant_id,
-            &req.client_id,
-            &req.client_secret,
-        )
-        .await?;
+        self.authenticate_client(tenant_id, &req.client_id, &req.client_secret)
+            .await?;
 
         // First try: decode as JWT access token
-        if let Ok(validated) =
-            validate_access_token(&req.token, &self.auth_config)
-        {
+        if let Ok(validated) = validate_access_token(&req.token, &self.auth_config) {
             let claims = &validated.0;
             return Ok(IntrospectionResponse {
                 active: true,
@@ -572,9 +605,7 @@ where
             .client_repo
             .get_by_client_id(tenant_id, client_id)
             .await
-            .map_err(|_| {
-                OAuth2Error::InvalidClient("client not found".into())
-            })?;
+            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
         let provided_hash = hash_client_secret(client_secret);
         if provided_hash != client.client_secret_hash {

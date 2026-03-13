@@ -12,8 +12,8 @@ use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
     SurrealAuthorizationCodeRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealRefreshTokenRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealRefreshTokenRepository, SurrealTenantRepository,
+    SurrealUserRepository,
 };
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
@@ -91,7 +91,7 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, auth).unwrap()
+    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
 }
 
 /// Build a test app with all services needed for OAuth2 client + flow tests.
@@ -101,6 +101,7 @@ macro_rules! test_app {
         let code_repo = SurrealAuthorizationCodeRepository::new($db.clone());
         let tenant_repo = SurrealTenantRepository::new($db.clone());
         let refresh_repo = SurrealRefreshTokenRepository::new($db.clone());
+        let user_repo = SurrealUserRepository::new($db.clone());
 
         let authz_service = AuthorizeService::new(
             client_repo.clone(),
@@ -112,6 +113,7 @@ macro_rules! test_app {
             code_repo.clone(),
             tenant_repo.clone(),
             refresh_repo,
+            user_repo.clone(),
             $auth.clone(),
             2_592_000, // 30-day refresh token lifetime
         );
@@ -122,6 +124,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(client_repo))
                 .app_data(web::Data::new(code_repo))
                 .app_data(web::Data::new(tenant_repo))
+                .app_data(web::Data::new(user_repo))
                 .app_data(web::Data::new(authz_service))
                 .app_data(web::Data::new(token_service))
                 .configure(register_api_v1_routes::<TestDb>),
@@ -186,9 +189,18 @@ async fn create_oauth2_client_returns_201() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["name"], "My App");
     assert!(body["id"].is_string(), "response must include id");
-    assert!(body["client_id"].is_string(), "response must include client_id");
-    assert!(body["client_secret"].is_string(), "response must include one-time client_secret");
-    assert_eq!(body["redirect_uris"][0], "https://myapp.example.com/callback");
+    assert!(
+        body["client_id"].is_string(),
+        "response must include client_id"
+    );
+    assert!(
+        body["client_secret"].is_string(),
+        "response must include one-time client_secret"
+    );
+    assert_eq!(
+        body["redirect_uris"][0],
+        "https://myapp.example.com/callback"
+    );
     assert_eq!(body["grant_types"][0], "authorization_code");
     assert_eq!(body["tenant_id"], tenant_id.to_string());
 }

@@ -249,7 +249,7 @@ async fn valid_token_extracts_user() {
     let tenant_id = Uuid::new_v4();
     let org_id = Uuid::new_v4();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &config).unwrap();
+    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
 
     let app = actix_web::test::init_service(
         App::new()
@@ -278,7 +278,7 @@ async fn tenant_context_matches_jwt() {
     let tenant_id = Uuid::new_v4();
     let org_id = Uuid::new_v4();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &config).unwrap();
+    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
 
     let app = actix_web::test::init_service(
         App::new()
@@ -349,7 +349,7 @@ async fn authorized_request_returns_200() {
         .await
         .unwrap();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &config).unwrap();
+    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
 
     let app = actix_web::test::init_service(
         App::new()
@@ -386,7 +386,7 @@ async fn unauthorized_request_returns_403() {
         .await
         .unwrap();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &config).unwrap();
+    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
 
     let app = actix_web::test::init_service(
         App::new()
@@ -466,7 +466,7 @@ async fn scope_authorization_check() {
         .await
         .unwrap();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &config).unwrap();
+    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
 
     let app = actix_web::test::init_service(
         App::new()

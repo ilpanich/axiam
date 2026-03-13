@@ -63,6 +63,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "oauth2_refresh_tokens",
         sql: SCHEMA_V5,
     },
+    Migration {
+        version: 6,
+        name: "oauth2_auth_code_nonce",
+        sql: SCHEMA_V6,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -508,6 +513,14 @@ DEFINE INDEX idx_refresh_token_hash ON TABLE oauth2_refresh_token \
     COLUMNS tenant_id, token_hash UNIQUE;
 DEFINE INDEX idx_refresh_token_client ON TABLE oauth2_refresh_token \
     COLUMNS tenant_id, client_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v6 — OIDC nonce on authorization codes
+// -----------------------------------------------------------------------
+
+const SCHEMA_V6: &str = "\
+DEFINE FIELD nonce ON TABLE oauth2_auth_code TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

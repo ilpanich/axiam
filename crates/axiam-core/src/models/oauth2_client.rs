@@ -48,6 +48,8 @@ pub struct AuthorizationCode {
     pub scopes: Vec<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    /// OIDC nonce — echoed back in the ID token.
+    pub nonce: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub used: bool,
     pub created_at: DateTime<Utc>,
@@ -64,6 +66,8 @@ pub struct CreateAuthorizationCode {
     pub scopes: Vec<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    /// OIDC nonce — stored with the code so it can be echoed in the ID token.
+    pub nonce: Option<String>,
     pub expires_at: DateTime<Utc>,
 }
 

@@ -36,13 +36,23 @@ pub struct AccessTokenClaims {
 }
 
 /// Issue a signed EdDSA (Ed25519) JWT access token.
+///
+/// When `scopes` is non-empty a space-separated `scope` claim is
+/// included in the token; otherwise the claim is omitted.
 pub fn issue_access_token(
     user_id: Uuid,
     tenant_id: Uuid,
     org_id: Uuid,
+    scopes: &[String],
     config: &AuthConfig,
 ) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
+    let scope = if scopes.is_empty() {
+        None
+    } else {
+        Some(scopes.join(" "))
+    };
+
     let claims = AccessTokenClaims {
         sub: user_id.to_string(),
         tenant_id: tenant_id.to_string(),
@@ -51,7 +61,7 @@ pub fn issue_access_token(
         iat: now,
         exp: now + config.access_token_lifetime_secs as i64,
         jti: Uuid::new_v4().to_string(),
-        scope: None,
+        scope,
     };
 
     let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
@@ -92,11 +102,85 @@ pub fn issue_client_credentials_token(
         scope,
     };
 
-    let key =
-        EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| {
-                AuthError::Crypto(format!("bad private key: {e}"))
-            })?;
+    let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+        .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+
+    let header = Header::new(Algorithm::EdDSA);
+    jsonwebtoken::encode(&header, &claims, &key)
+        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+}
+
+/// OIDC ID Token claims per OpenID Connect Core 1.0 section 2.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdTokenClaims {
+    /// Issuer identifier.
+    pub iss: String,
+    /// Subject — user ID (UUID string).
+    pub sub: String,
+    /// Audience — the OAuth2 `client_id`.
+    pub aud: String,
+    /// Expiration (Unix timestamp).
+    pub exp: i64,
+    /// Issued-at (Unix timestamp).
+    pub iat: i64,
+    /// Nonce echoed from the authorization request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    /// Tenant ID (UUID string).
+    pub tenant_id: String,
+    /// Organization ID (UUID string).
+    pub org_id: String,
+    /// User email — included only when `email` scope is requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Preferred username — included only when `profile` scope is requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_username: Option<String>,
+}
+
+/// Issue a signed OIDC ID token (EdDSA / Ed25519).
+///
+/// The token includes standard OIDC claims plus AXIAM-specific
+/// `tenant_id` and `org_id`. Profile/email claims are gated behind
+/// the corresponding scopes.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_id_token(
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    client_id: &str,
+    nonce: Option<&str>,
+    email: Option<&str>,
+    username: Option<&str>,
+    scopes: &[String],
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    let now = Utc::now().timestamp();
+    let has_scope = |s: &str| scopes.iter().any(|sc| sc == s);
+
+    let claims = IdTokenClaims {
+        iss: config.jwt_issuer.clone(),
+        sub: user_id.to_string(),
+        aud: client_id.to_owned(),
+        exp: now + config.access_token_lifetime_secs as i64,
+        iat: now,
+        nonce: nonce.map(str::to_owned),
+        tenant_id: tenant_id.to_string(),
+        org_id: org_id.to_string(),
+        email: if has_scope("email") {
+            email.map(str::to_owned)
+        } else {
+            None
+        },
+        preferred_username: if has_scope("profile") {
+            username.map(str::to_owned)
+        } else {
+            None
+        },
+    };
+
+    let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+        .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
 
     let header = Header::new(Algorithm::EdDSA);
     jsonwebtoken::encode(&header, &claims, &key)
@@ -221,7 +305,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let tenant_id = Uuid::new_v4();
         let org_id = Uuid::new_v4();
 
-        let token = issue_access_token(user_id, tenant_id, org_id, &config).unwrap();
+        let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
         let claims = decode_access_token(&token, &config).unwrap();
 
         assert_eq!(claims.sub, user_id.to_string());
@@ -237,8 +321,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let tid = Uuid::new_v4();
         let oid = Uuid::new_v4();
 
-        let t1 = issue_access_token(uid, tid, oid, &config).unwrap();
-        let t2 = issue_access_token(uid, tid, oid, &config).unwrap();
+        let t1 = issue_access_token(uid, tid, oid, &[], &config).unwrap();
+        let t2 = issue_access_token(uid, tid, oid, &[], &config).unwrap();
 
         let c1 = decode_access_token(&t1, &config).unwrap();
         let c2 = decode_access_token(&t2, &config).unwrap();
@@ -277,23 +361,17 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let client_id = "my-service-client";
         let tenant_id = Uuid::new_v4();
         let org_id = Uuid::new_v4();
-        let scopes =
-            vec!["read:data".to_owned(), "write:data".to_owned()];
+        let scopes = vec!["read:data".to_owned(), "write:data".to_owned()];
 
-        let token = issue_client_credentials_token(
-            client_id, tenant_id, org_id, &scopes, &config,
-        )
-        .unwrap();
+        let token =
+            issue_client_credentials_token(client_id, tenant_id, org_id, &scopes, &config).unwrap();
 
         let claims = decode_access_token(&token, &config).unwrap();
         assert_eq!(claims.sub, client_id);
         assert_eq!(claims.tenant_id, tenant_id.to_string());
         assert_eq!(claims.org_id, org_id.to_string());
         assert_eq!(claims.iss, "axiam-test");
-        assert_eq!(
-            claims.scope.as_deref(),
-            Some("read:data write:data")
-        );
+        assert_eq!(claims.scope.as_deref(), Some("read:data write:data"));
     }
 
     #[test]
@@ -316,15 +394,200 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     #[test]
     fn user_token_has_no_scope_claim() {
         let config = test_config();
+        let token =
+            issue_access_token(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), &[], &config)
+                .unwrap();
+
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert!(claims.scope.is_none());
+    }
+
+    #[test]
+    fn user_token_includes_scopes() {
+        let config = test_config();
+        let scopes = vec!["openid".to_owned(), "email".to_owned()];
         let token = issue_access_token(
             Uuid::new_v4(),
             Uuid::new_v4(),
             Uuid::new_v4(),
+            &scopes,
             &config,
         )
         .unwrap();
 
         let claims = decode_access_token(&token, &config).unwrap();
-        assert!(claims.scope.is_none());
+        assert_eq!(claims.scope.as_deref(), Some("openid email"),);
+    }
+
+    // ------------------------------------------------------------------
+    // ID token tests
+    // ------------------------------------------------------------------
+
+    /// Helper to decode an ID token with the test public key.
+    fn decode_id_token(token: &str, config: &AuthConfig) -> IdTokenClaims {
+        let key = DecodingKey::from_ed_pem(config.jwt_public_key_pem.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+        // ID token `aud` is the client_id, not the issuer.
+        validation.set_audience(&["test-client"]);
+        jsonwebtoken::decode::<IdTokenClaims>(token, &key, &validation)
+            .unwrap()
+            .claims
+    }
+
+    #[test]
+    fn id_token_roundtrip() {
+        let config = test_config();
+        let user_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let scopes = vec![
+            "openid".to_owned(),
+            "email".to_owned(),
+            "profile".to_owned(),
+        ];
+
+        let token = issue_id_token(
+            user_id,
+            tenant_id,
+            org_id,
+            "test-client",
+            Some("abc123"),
+            Some("user@example.com"),
+            Some("jdoe"),
+            &scopes,
+            &config,
+        )
+        .unwrap();
+
+        let claims = decode_id_token(&token, &config);
+
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.aud, "test-client");
+        assert_eq!(claims.iss, "axiam-test");
+        assert_eq!(claims.tenant_id, tenant_id.to_string());
+        assert_eq!(claims.org_id, org_id.to_string());
+        assert_eq!(claims.nonce.as_deref(), Some("abc123"));
+        assert_eq!(claims.email.as_deref(), Some("user@example.com"),);
+        assert_eq!(claims.preferred_username.as_deref(), Some("jdoe"),);
+    }
+
+    #[test]
+    fn id_token_includes_nonce() {
+        let config = test_config();
+        let scopes = vec!["openid".to_owned()];
+
+        let with_nonce = issue_id_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "test-client",
+            Some("my-nonce"),
+            None,
+            None,
+            &scopes,
+            &config,
+        )
+        .unwrap();
+
+        let without_nonce = issue_id_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "test-client",
+            None,
+            None,
+            None,
+            &scopes,
+            &config,
+        )
+        .unwrap();
+
+        let c1 = decode_id_token(&with_nonce, &config);
+        assert_eq!(c1.nonce.as_deref(), Some("my-nonce"));
+
+        let c2 = decode_id_token(&without_nonce, &config);
+        assert!(c2.nonce.is_none());
+    }
+
+    #[test]
+    fn id_token_email_scope() {
+        let config = test_config();
+        let uid = Uuid::new_v4();
+        let tid = Uuid::new_v4();
+        let oid = Uuid::new_v4();
+
+        // With email scope
+        let token_with = issue_id_token(
+            uid,
+            tid,
+            oid,
+            "test-client",
+            None,
+            Some("user@example.com"),
+            None,
+            &["openid".to_owned(), "email".to_owned()],
+            &config,
+        )
+        .unwrap();
+        let c = decode_id_token(&token_with, &config);
+        assert_eq!(c.email.as_deref(), Some("user@example.com"),);
+
+        // Without email scope
+        let token_without = issue_id_token(
+            uid,
+            tid,
+            oid,
+            "test-client",
+            None,
+            Some("user@example.com"),
+            None,
+            &["openid".to_owned()],
+            &config,
+        )
+        .unwrap();
+        let c = decode_id_token(&token_without, &config);
+        assert!(c.email.is_none());
+    }
+
+    #[test]
+    fn id_token_profile_scope() {
+        let config = test_config();
+        let uid = Uuid::new_v4();
+        let tid = Uuid::new_v4();
+        let oid = Uuid::new_v4();
+
+        // With profile scope
+        let token_with = issue_id_token(
+            uid,
+            tid,
+            oid,
+            "test-client",
+            None,
+            None,
+            Some("jdoe"),
+            &["openid".to_owned(), "profile".to_owned()],
+            &config,
+        )
+        .unwrap();
+        let c = decode_id_token(&token_with, &config);
+        assert_eq!(c.preferred_username.as_deref(), Some("jdoe"),);
+
+        // Without profile scope
+        let token_without = issue_id_token(
+            uid,
+            tid,
+            oid,
+            "test-client",
+            None,
+            None,
+            Some("jdoe"),
+            &["openid".to_owned()],
+            &config,
+        )
+        .unwrap();
+        let c = decode_id_token(&token_without, &config);
+        assert!(c.preferred_username.is_none());
     }
 }

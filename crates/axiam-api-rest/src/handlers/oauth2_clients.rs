@@ -85,11 +85,7 @@ pub struct OAuth2ClientCreatedResponse {
 // Validation
 // ---------------------------------------------------------------------------
 
-const KNOWN_GRANT_TYPES: &[&str] = &[
-    "authorization_code",
-    "client_credentials",
-    "refresh_token",
-];
+const KNOWN_GRANT_TYPES: &[&str] = &["authorization_code", "client_credentials", "refresh_token"];
 
 fn validation_err(msg: impl Into<String>) -> AxiamApiError {
     axiam_core::error::AxiamError::Validation {

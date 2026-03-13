@@ -311,6 +311,7 @@ pub async fn device_auth<C: Connection>(
         cert_auth.service_account_id,
         cert_auth.tenant_id,
         tenant.organization_id,
+        &[],
         &auth_config,
     )
     .map_err(axiam_core::error::AxiamError::from)?;

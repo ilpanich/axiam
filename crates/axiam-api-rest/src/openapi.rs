@@ -129,6 +129,10 @@ use crate::handlers;
         handlers::oauth2::token,
         handlers::oauth2::revoke,
         handlers::oauth2::introspect,
+        // OIDC
+        handlers::oauth2::discovery,
+        handlers::oauth2::jwks,
+        handlers::oauth2::userinfo,
     ),
     components(schemas(
         // Health
@@ -245,6 +249,11 @@ use crate::handlers;
         axiam_oauth2::token::RevokeRequest,
         axiam_oauth2::token::IntrospectRequest,
         axiam_oauth2::token::IntrospectionResponse,
+        // OIDC
+        axiam_oauth2::oidc::OidcDiscoveryDocument,
+        axiam_oauth2::oidc::JwksDocument,
+        axiam_oauth2::oidc::Jwk,
+        axiam_oauth2::oidc::UserInfoResponse,
         // Pagination
         axiam_core::repository::Pagination,
     )),
@@ -267,6 +276,7 @@ use crate::handlers;
         (name = "service-accounts", description = "Service account management"),
         (name = "oauth2-clients", description = "OAuth2 client registration and management"),
         (name = "oauth2", description = "OAuth2 authorization and token endpoints"),
+        (name = "oidc", description = "OpenID Connect discovery, JWKS, and UserInfo"),
     ),
     modifiers(&SecurityAddon),
 )]

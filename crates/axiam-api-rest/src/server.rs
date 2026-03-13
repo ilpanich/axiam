@@ -51,6 +51,11 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             )
             .route("/device", web::post().to(handlers::auth::device_auth::<C>)),
     );
+    // OIDC Discovery (must be outside /oauth2 scope per spec)
+    cfg.route(
+        "/.well-known/openid-configuration",
+        web::get().to(handlers::oauth2::discovery),
+    );
     cfg.service(
         web::scope("/oauth2")
             .route(
@@ -62,7 +67,9 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .route(
                 "/introspect",
                 web::post().to(handlers::oauth2::introspect::<C>),
-            ),
+            )
+            .route("/jwks", web::get().to(handlers::oauth2::jwks))
+            .route("/userinfo", web::get().to(handlers::oauth2::userinfo::<C>)),
     );
     cfg.service(
         web::scope("/api/v1")

@@ -40,15 +40,12 @@ impl RefreshTokenRowWithId {
         let id = Uuid::parse_str(&self.record_id)
             .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
         let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| {
-                DbError::Migration(format!("invalid tenant UUID: {e}"))
-            })?;
+            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
         let user_id = self
             .user_id
             .map(|uid| {
-                Uuid::parse_str(&uid).map_err(|e| {
-                    DbError::Migration(format!("invalid user UUID: {e}"))
-                })
+                Uuid::parse_str(&uid)
+                    .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))
             })
             .transpose()?;
 
@@ -83,13 +80,8 @@ impl<C: Connection> SurrealRefreshTokenRepository<C> {
     }
 }
 
-impl<C: Connection> RefreshTokenRepository
-    for SurrealRefreshTokenRepository<C>
-{
-    async fn create(
-        &self,
-        input: CreateRefreshToken,
-    ) -> AxiamResult<RefreshToken> {
+impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> {
+    async fn create(&self, input: CreateRefreshToken) -> AxiamResult<RefreshToken> {
         let id = Uuid::new_v4();
         let id_str = id.to_string();
 
@@ -121,24 +113,19 @@ impl<C: Connection> RefreshTokenRepository
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        let rows: Vec<RefreshTokenRow> =
-            result.take(0).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-                entity: "oauth2_refresh_token".into(),
-                id: id_str,
-            })?;
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "oauth2_refresh_token".into(),
+            id: id_str,
+        })?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
-            .map_err(|e| {
-                DbError::Migration(format!("invalid tenant UUID: {e}"))
-            })?;
+            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
         let user_id = row
             .user_id
             .map(|uid| {
-                Uuid::parse_str(&uid).map_err(|e| {
-                    DbError::Migration(format!("invalid user UUID: {e}"))
-                })
+                Uuid::parse_str(&uid)
+                    .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))
             })
             .transpose()?;
 
@@ -179,22 +166,16 @@ impl<C: Connection> RefreshTokenRepository
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<RefreshTokenRowWithId> =
-            result.take(0).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-                entity: "oauth2_refresh_token".into(),
-                id: format!("token_hash={token_hash_owned}"),
-            })?;
+        let rows: Vec<RefreshTokenRowWithId> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "oauth2_refresh_token".into(),
+            id: format!("token_hash={token_hash_owned}"),
+        })?;
 
         row.try_into_refresh_token().map_err(Into::into)
     }
 
-    async fn revoke(
-        &self,
-        tenant_id: Uuid,
-        token_hash: &str,
-    ) -> AxiamResult<()> {
+    async fn revoke(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<()> {
         let token_hash_owned = token_hash.to_string();
         let tenant_id_str = tenant_id.to_string();
 
@@ -217,11 +198,7 @@ impl<C: Connection> RefreshTokenRepository
         Ok(())
     }
 
-    async fn revoke_all_for_client(
-        &self,
-        tenant_id: Uuid,
-        client_id: &str,
-    ) -> AxiamResult<()> {
+    async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<()> {
         let client_id_owned = client_id.to_string();
         let tenant_id_str = tenant_id.to_string();
 
@@ -255,8 +232,7 @@ impl<C: Connection> RefreshTokenRepository
             .await
             .map_err(DbError::from)?;
 
-        let count_rows: Vec<CountRow> =
-            result.take(0).map_err(DbError::from)?;
+        let count_rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         let count = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         self.db

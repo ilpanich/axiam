@@ -176,7 +176,7 @@ where
         let client_secret = req
             .client_secret
             .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidRequest("client_secret is required".into()))?;
+            .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
         let provided_hash = hash_client_secret(client_secret);
         if provided_hash != client.client_secret_hash {
             return Err(OAuth2Error::InvalidClient(
@@ -184,27 +184,19 @@ where
             ));
         }
 
-        // Consume the authorization code (atomic single-use)
+        // Consume the authorization code (atomic single-use).
+        // client_id and redirect_uri are verified atomically in the
+        // WHERE clause to prevent code-burning attacks.
         let code_hash = crate::authorize::hash_code(code);
         let auth_code = self
             .code_repo
-            .consume(tenant_id, &code_hash)
+            .consume(tenant_id, &code_hash, client_id, redirect_uri)
             .await
             .map_err(|_| {
                 OAuth2Error::InvalidGrant(
                     "authorization code is invalid, expired, or already used".into(),
                 )
             })?;
-
-        // Verify redirect_uri matches
-        if auth_code.redirect_uri != redirect_uri {
-            return Err(OAuth2Error::InvalidGrant("redirect_uri mismatch".into()));
-        }
-
-        // Verify client_id matches
-        if auth_code.client_id != client_id {
-            return Err(OAuth2Error::InvalidGrant("client_id mismatch".into()));
-        }
 
         // Verify PKCE if code_challenge was used
         if let Some(ref challenge) = auth_code.code_challenge {
@@ -233,23 +225,29 @@ where
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
-        // Generate and persist refresh token
-        let raw_refresh = generate_refresh_token();
-        let refresh_hash = hash_refresh_token(&raw_refresh);
-        let refresh_expires =
-            Utc::now() + chrono::Duration::seconds(self.refresh_token_lifetime_secs);
+        // Only issue a refresh token when the client is authorized
+        // for the refresh_token grant type.
+        let refresh_token = if client.grant_types.contains(&"refresh_token".to_string()) {
+            let raw_refresh = generate_refresh_token();
+            let refresh_hash = hash_refresh_token(&raw_refresh);
+            let refresh_expires =
+                Utc::now() + chrono::Duration::seconds(self.refresh_token_lifetime_secs);
 
-        self.refresh_token_repo
-            .create(CreateRefreshToken {
-                tenant_id,
-                token_hash: refresh_hash,
-                client_id: client_id.to_string(),
-                user_id: Some(auth_code.user_id),
-                scopes: auth_code.scopes.clone(),
-                expires_at: refresh_expires,
-            })
-            .await
-            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            self.refresh_token_repo
+                .create(CreateRefreshToken {
+                    tenant_id,
+                    token_hash: refresh_hash,
+                    client_id: client_id.to_string(),
+                    user_id: Some(auth_code.user_id),
+                    scopes: auth_code.scopes.clone(),
+                    expires_at: refresh_expires,
+                })
+                .await
+                .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            Some(raw_refresh)
+        } else {
+            None
+        };
 
         // Issue an ID token when the `openid` scope was requested.
         let id_token = if auth_code.scopes.contains(&"openid".to_string()) {
@@ -286,7 +284,7 @@ where
             access_token,
             token_type: "Bearer".into(),
             expires_in: self.auth_config.access_token_lifetime_secs,
-            refresh_token: Some(raw_refresh),
+            refresh_token,
             scope,
             id_token,
         })
@@ -307,7 +305,7 @@ where
         let client_secret = req
             .client_secret
             .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidRequest("client_secret is required".into()))?;
+            .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
 
         // Authenticate client
         let client = self
@@ -427,7 +425,7 @@ where
         let client_secret_val = req
             .client_secret
             .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidRequest("client_secret is required".into()))?;
+            .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
 
         // Authenticate client
         let client = self

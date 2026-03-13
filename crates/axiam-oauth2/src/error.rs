@@ -19,6 +19,8 @@ pub enum OAuth2Error {
     InvalidGrant(String),
     #[error("invalid_client: {0}")]
     InvalidClient(String),
+    #[error("invalid_request: {0}")]
+    InvalidRedirectUri(String),
     #[error("unsupported_grant_type")]
     UnsupportedGrantType,
     #[error("server_error: {0}")]
@@ -36,6 +38,7 @@ impl OAuth2Error {
             Self::InvalidScope(_) => "invalid_scope",
             Self::InvalidGrant(_) => "invalid_grant",
             Self::InvalidClient(_) => "invalid_client",
+            Self::InvalidRedirectUri(_) => "invalid_request",
             Self::UnsupportedGrantType => "unsupported_grant_type",
             Self::ServerError(_) => "server_error",
         }

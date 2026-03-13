@@ -486,17 +486,18 @@ async fn invalid_redirect_uri_rejected_at_authorize() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    // The spec redirects with an error; we still get a 302 but with error params
-    assert_eq!(resp.status().as_u16(), 302);
-    let location = resp.headers().get("Location").unwrap().to_str().unwrap();
-    // The Location must point to the bad redirect with an error parameter
+    // Per RFC 6749 section 3.1.2.4: if the redirect_uri is invalid or
+    // unregistered, the authorization server MUST NOT redirect and
+    // SHOULD inform the resource owner of the error.
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_request");
     assert!(
-        location.contains("error="),
-        "expected error param in Location, got: {location}"
-    );
-    assert!(
-        !location.contains("code="),
-        "code must not be issued for unregistered redirect_uri"
+        body["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("redirect_uri"),
+        "error_description should mention redirect_uri"
     );
 }
 

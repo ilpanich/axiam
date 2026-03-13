@@ -153,13 +153,21 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
         })
     }
 
-    async fn consume(&self, tenant_id: Uuid, code_hash: &str) -> AxiamResult<AuthorizationCode> {
+    async fn consume(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> AxiamResult<AuthorizationCode> {
         let code_hash_owned = code_hash.to_string();
         let tenant_id_str = tenant_id.to_string();
 
         // Single atomic UPDATE with WHERE guards: only one concurrent
         // caller can match `used = false`, eliminating the race
-        // condition of a separate SELECT + UPDATE.
+        // condition of a separate SELECT + UPDATE. client_id and
+        // redirect_uri are verified atomically to prevent
+        // code-burning attacks.
         let result = self
             .db
             .query(
@@ -167,11 +175,15 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                  (UPDATE oauth2_auth_code SET used = true \
                   WHERE tenant_id = $tenant_id \
                     AND code_hash = $code_hash \
+                    AND client_id = $client_id \
+                    AND redirect_uri = $redirect_uri \
                     AND used = false \
                     AND expires_at > time::now())",
             )
             .bind(("tenant_id", tenant_id_str))
             .bind(("code_hash", code_hash_owned.clone()))
+            .bind(("client_id", client_id.to_string()))
+            .bind(("redirect_uri", redirect_uri.to_string()))
             .await
             .map_err(DbError::from)?;
 

@@ -107,23 +107,36 @@ pub async fn authorize<C: Connection>(
 
     match authz_service.authorize(req).await {
         Ok(resp) => {
-            // Use url::Url for proper encoding and query handling
-            let mut url = url::Url::parse(&resp.redirect_uri)
-                .unwrap_or_else(|_| url::Url::parse("https://error").unwrap());
-            url.query_pairs_mut().append_pair("code", &resp.code);
-            if let Some(ref state) = resp.state {
-                url.query_pairs_mut().append_pair("state", state);
+            match url::Url::parse(&resp.redirect_uri) {
+                Ok(mut url) => {
+                    url.query_pairs_mut().append_pair("code", &resp.code);
+                    if let Some(ref state) = resp.state {
+                        url.query_pairs_mut().append_pair("state", state);
+                    }
+                    HttpResponse::Found()
+                        .append_header(("Location", url.to_string()))
+                        .finish()
+                }
+                Err(_) => {
+                    // Never leak the authorization code to an
+                    // unknown host.
+                    HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
+                        error: "server_error".into(),
+                        error_description: "invalid redirect_uri in \
+                                 authorization response"
+                            .into(),
+                    })
+                }
             }
-            HttpResponse::Found()
-                .append_header(("Location", url.to_string()))
-                .finish()
         }
         Err(e) => {
             // Per RFC 6749: only redirect when the redirect_uri has
             // been validated. For InvalidClient / redirect_uri
             // errors, return a direct HTTP error instead.
             match &e {
-                OAuth2Error::InvalidClient(_) => build_oauth2_error_response(&e),
+                OAuth2Error::InvalidClient(_) | OAuth2Error::InvalidRedirectUri(_) => {
+                    build_oauth2_error_response(&e)
+                }
                 _ => {
                     // These errors occur after client+redirect_uri
                     // were validated — safe to redirect.
@@ -261,7 +274,12 @@ pub async fn introspect<C: Connection>(
     ),
 )]
 pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
-    let doc = build_discovery_document(&auth_config.jwt_issuer);
+    let issuer = if auth_config.oauth2_issuer_url.is_empty() {
+        &auth_config.jwt_issuer
+    } else {
+        &auth_config.oauth2_issuer_url
+    };
+    let doc = build_discovery_document(issuer);
     HttpResponse::Ok().json(doc)
 }
 

@@ -72,7 +72,7 @@ where
 
         // 3. Validate redirect_uri
         if !client.redirect_uris.contains(&req.redirect_uri) {
-            return Err(OAuth2Error::InvalidRequest(
+            return Err(OAuth2Error::InvalidRedirectUri(
                 "redirect_uri not registered".into(),
             ));
         }

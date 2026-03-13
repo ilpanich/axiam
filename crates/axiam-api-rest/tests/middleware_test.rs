@@ -67,6 +67,8 @@ fn test_auth_config(lifetime: u64) -> AuthConfig {
         max_failed_login_attempts: 5,
         lockout_duration_secs: 300,
         lockout_backoff_multiplier: 2.0,
+        auth_code_lifetime_secs: 600,
+        oauth2_issuer_url: String::new(),
         max_lockout_duration_secs: 3600,
     }
 }

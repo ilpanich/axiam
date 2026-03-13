@@ -534,10 +534,14 @@ pub trait AuthorizationCodeRepository: Send + Sync {
 
     /// Atomically consume a code (mark as used). Returns the code if it
     /// was valid, unused, and not expired; otherwise returns NotFound.
+    /// `client_id` and `redirect_uri` are verified atomically in the
+    /// WHERE clause to prevent code-burning attacks.
     fn consume(
         &self,
         tenant_id: Uuid,
         code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
     ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
 
     /// Delete expired and already-used codes (garbage collection).

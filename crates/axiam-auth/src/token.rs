@@ -296,6 +296,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             lockout_duration_secs: 300,
             lockout_backoff_multiplier: 2.0,
             max_lockout_duration_secs: 3600,
+            auth_code_lifetime_secs: 600,
+            oauth2_issuer_url: String::new(),
         }
     }
 

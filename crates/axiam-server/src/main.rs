@@ -138,10 +138,11 @@ async fn main() -> std::io::Result<()> {
     let refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
 
     // OAuth2 authorization code grant services.
-    // Authorization codes expire after 60 seconds (short-lived per RFC 6749).
-    let authorize_service =
-        AuthorizeService::new(oauth2_client_repo.clone(), auth_code_repo.clone(), 60);
-    // Refresh tokens expire after 30 days (2_592_000 seconds).
+    let authorize_service = AuthorizeService::new(
+        oauth2_client_repo.clone(),
+        auth_code_repo.clone(),
+        config.auth.auth_code_lifetime_secs,
+    );
     let token_service = TokenService::new(
         oauth2_client_repo.clone(),
         auth_code_repo,
@@ -149,7 +150,7 @@ async fn main() -> std::io::Result<()> {
         refresh_token_repo,
         user_repo.clone(),
         config.auth.clone(),
-        2_592_000,
+        config.auth.refresh_token_lifetime_secs as i64,
     );
 
     let bind_addr = config.server.bind_address();
@@ -276,6 +277,13 @@ fn load_config() -> AppConfig {
         !config.auth.jwt_public_key_pem.is_empty(),
         "AXIAM__AUTH__JWT_PUBLIC_KEY_PEM must be set (Ed25519 PEM)"
     );
+
+    if config.auth.oauth2_issuer_url.is_empty() {
+        tracing::warn!(
+            "AXIAM__AUTH__OAUTH2_ISSUER_URL not set — \
+             OIDC discovery will use jwt_issuer as base URL"
+        );
+    }
 
     config
 }

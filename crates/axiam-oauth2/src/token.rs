@@ -16,6 +16,7 @@ use axiam_core::repository::{
 use axiam_db::hash_client_secret;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::error::OAuth2Error;
@@ -187,7 +188,11 @@ where
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
         let provided_hash = hash_client_secret(client_secret);
-        if provided_hash != client.client_secret_hash {
+        if !bool::from(
+            provided_hash
+                .as_bytes()
+                .ct_eq(client.client_secret_hash.as_bytes()),
+        ) {
             return Err(OAuth2Error::InvalidClient(
                 "invalid client credentials".into(),
             ));
@@ -338,7 +343,11 @@ where
             .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
         let provided_hash = hash_client_secret(client_secret);
-        if provided_hash != client.client_secret_hash {
+        if !bool::from(
+            provided_hash
+                .as_bytes()
+                .ct_eq(client.client_secret_hash.as_bytes()),
+        ) {
             return Err(OAuth2Error::InvalidClient(
                 "invalid client credentials".into(),
             ));
@@ -442,7 +451,11 @@ where
             .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
         let provided_hash = hash_client_secret(client_secret_val);
-        if provided_hash != client.client_secret_hash {
+        if !bool::from(
+            provided_hash
+                .as_bytes()
+                .ct_eq(client.client_secret_hash.as_bytes()),
+        ) {
             return Err(OAuth2Error::InvalidClient(
                 "invalid client credentials".into(),
             ));
@@ -720,7 +733,11 @@ where
             .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
         let provided_hash = hash_client_secret(client_secret);
-        if provided_hash != client.client_secret_hash {
+        if !bool::from(
+            provided_hash
+                .as_bytes()
+                .ct_eq(client.client_secret_hash.as_bytes()),
+        ) {
             return Err(OAuth2Error::InvalidClient(
                 "invalid client credentials".into(),
             ));

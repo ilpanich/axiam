@@ -279,49 +279,58 @@ fn load_config() -> AppConfig {
         "AXIAM__AUTH__JWT_PUBLIC_KEY_PEM must be set (Ed25519 PEM)"
     );
 
-    // Validate the effective OIDC issuer URL.  The same rules apply
-    // regardless of whether it comes from oauth2_issuer_url or the
-    // jwt_issuer fallback.
-    let issuer_source = if config.auth.oauth2_issuer_url.is_empty() {
-        &config.auth.jwt_issuer
+    // Validate oauth2_issuer_url when explicitly configured.
+    // jwt_issuer is intentionally unconstrained — it is used as the
+    // JWT `iss` claim and may be a non-URL string.  OIDC discovery
+    // compliance requires oauth2_issuer_url to be set.
+    if !config.auth.oauth2_issuer_url.is_empty() {
+        let issuer = &config.auth.oauth2_issuer_url;
+        let url = url::Url::parse(issuer).unwrap_or_else(|e| {
+            panic!(
+                "AXIAM__AUTH__OAUTH2_ISSUER_URL is not a valid URL: \
+                 {e} (got: {issuer})"
+            )
+        });
+        let is_localhost = url
+            .host_str()
+            .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
+        assert!(
+            url.scheme() == "https" || (url.scheme() == "http" && is_localhost),
+            "OIDC issuer must use https (http is only allowed for \
+             localhost); got: {issuer}",
+        );
+        assert!(
+            url.host().is_some(),
+            "OIDC issuer URL must have a host: {issuer}",
+        );
+        // AXIAM limitation: path-based issuers are not currently
+        // supported.  While OIDC allows path segments in issuers
+        // (e.g. for reverse-proxy or multi-tenant deployments),
+        // AXIAM serves discovery at a fixed `/.well-known/` route
+        // and builds endpoint URLs as `{issuer}/oauth2/...`, which
+        // would break with a non-root path.
+        assert!(
+            url.path() == "/" || url.path().is_empty(),
+            "AXIAM does not support path-based issuer URLs \
+             (path-based issuers require route changes not yet \
+             implemented): {issuer}",
+        );
+        assert!(
+            url.query().is_none(),
+            "OIDC issuer URL must not contain a query string: \
+             {issuer}",
+        );
+        assert!(
+            url.fragment().is_none(),
+            "OIDC issuer URL must not contain a fragment: {issuer}",
+        );
     } else {
-        &config.auth.oauth2_issuer_url
-    };
-    let url = url::Url::parse(issuer_source)
-        .unwrap_or_else(|e| panic!("OIDC issuer is not a valid URL: {e} (got: {issuer_source})"));
-    let is_localhost = url
-        .host_str()
-        .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
-    assert!(
-        url.scheme() == "https" || (url.scheme() == "http" && is_localhost),
-        "OIDC issuer must use https (http is only allowed for \
-         localhost); got: {issuer_source}",
-    );
-    assert!(
-        url.host().is_some(),
-        "OIDC issuer URL must have a host: {issuer_source}",
-    );
-    // AXIAM limitation: path-based issuers are not currently
-    // supported.  While OIDC allows path segments in issuers
-    // (e.g. for reverse-proxy or multi-tenant deployments),
-    // AXIAM serves discovery at a fixed `/.well-known/` route and
-    // builds endpoint URLs as `{issuer}/oauth2/...`, which would
-    // break with a non-root path.
-    assert!(
-        url.path() == "/" || url.path().is_empty(),
-        "AXIAM does not support path-based issuer URLs \
-         (path-based issuers require route changes not yet \
-         implemented): {issuer_source}",
-    );
-    assert!(
-        url.query().is_none(),
-        "OIDC issuer URL must not contain a query string: \
-         {issuer_source}",
-    );
-    assert!(
-        url.fragment().is_none(),
-        "OIDC issuer URL must not contain a fragment: {issuer_source}",
-    );
+        tracing::warn!(
+            "AXIAM__AUTH__OAUTH2_ISSUER_URL not set — OIDC discovery \
+             will use jwt_issuer as a non-URL issuer identifier; \
+             set oauth2_issuer_url for compliant discovery documents"
+        );
+    }
 
     config
 }

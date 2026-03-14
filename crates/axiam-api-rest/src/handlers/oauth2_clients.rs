@@ -284,13 +284,7 @@ pub async fn update<C: Connection>(
     if let Some(ref gts) = req.grant_types {
         validate_grant_types(gts)?;
     }
-    // Apply the same conditional redirect_uris rule as create:
-    // only require/validate them when the effective grant_types
-    // include authorization_code.
     if let Some(ref uris) = req.redirect_uris {
-        // If grant_types are being updated, use them; otherwise we
-        // can't determine the effective grant_types without a DB
-        // fetch, so validate the URIs unconditionally (safe default).
         let needs_redirects = req
             .grant_types
             .as_ref()
@@ -299,6 +293,24 @@ pub async fn update<C: Connection>(
         if needs_redirects {
             validate_redirect_uris(uris)?;
         }
+    }
+
+    // When adding authorization_code to grant_types, ensure the
+    // client will have valid redirect_uris (either supplied in this
+    // request or already stored).
+    let adding_auth_code = req
+        .grant_types
+        .as_ref()
+        .is_some_and(|gts| gts.iter().any(|g| g == "authorization_code"));
+    if adding_auth_code && req.redirect_uris.is_none() {
+        let existing = repo.get_by_id(user.tenant_id, id).await?;
+        if existing.redirect_uris.is_empty() {
+            return Err(validation_err(
+                "redirect_uris are required when enabling \
+                 authorization_code grant",
+            ));
+        }
+        validate_redirect_uris(&existing.redirect_uris)?;
     }
 
     let client = repo

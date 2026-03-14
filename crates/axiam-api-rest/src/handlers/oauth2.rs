@@ -251,7 +251,10 @@ pub async fn introspect<C: Connection>(
         .introspect_token(tenant_id, form.into_inner())
         .await
     {
-        Ok(resp) => HttpResponse::Ok().json(resp),
+        Ok(resp) => HttpResponse::Ok()
+            .append_header(("Cache-Control", "no-store"))
+            .append_header(("Pragma", "no-cache"))
+            .json(resp),
         Err(e) => build_oauth2_error_response(&e),
     }
 }
@@ -431,8 +434,11 @@ fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
         OAuth2Error::ServerError(_) => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
         _ => actix_web::http::StatusCode::BAD_REQUEST,
     };
-    HttpResponse::build(status).json(OAuth2ErrorResponse {
-        error: e.error_code().to_string(),
-        error_description: e.error_description(),
-    })
+    HttpResponse::build(status)
+        .append_header(("Cache-Control", "no-store"))
+        .append_header(("Pragma", "no-cache"))
+        .json(OAuth2ErrorResponse {
+            error: e.error_code().to_string(),
+            error_description: e.error_description(),
+        })
 }

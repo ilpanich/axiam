@@ -296,10 +296,14 @@ fn load_config() -> AppConfig {
                 config.auth.oauth2_issuer_url
             )
         });
+        let is_localhost = url
+            .host_str()
+            .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
         assert!(
-            url.scheme() == "https" || url.scheme() == "http",
-            "OIDC issuer must use http or https scheme, got: {}",
-            url.scheme()
+            url.scheme() == "https" || (url.scheme() == "http" && is_localhost),
+            "OIDC issuer must use https (http is only allowed for \
+             localhost); got: {}",
+            config.auth.oauth2_issuer_url
         );
         assert!(
             url.host().is_some(),

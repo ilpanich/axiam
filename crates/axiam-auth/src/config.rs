@@ -43,6 +43,21 @@ pub struct AuthConfig {
     pub max_lockout_duration_secs: u64,
 }
 
+impl AuthConfig {
+    /// Effective issuer for JWT `iss` claims and OIDC discovery.
+    ///
+    /// Returns `oauth2_issuer_url` when set, falling back to
+    /// `jwt_issuer`. This ensures OIDC discovery `issuer` always
+    /// matches the `iss` claim in issued tokens (OIDC Core §2).
+    pub fn effective_issuer(&self) -> &str {
+        if self.oauth2_issuer_url.is_empty() {
+            &self.jwt_issuer
+        } else {
+            &self.oauth2_issuer_url
+        }
+    }
+}
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {

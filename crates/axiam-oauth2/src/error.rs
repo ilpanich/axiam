@@ -11,7 +11,7 @@ pub enum OAuth2Error {
     UnauthorizedClient(String),
     #[error("access_denied: {0}")]
     AccessDenied(String),
-    #[error("unsupported_response_type")]
+    #[error("unsupported_response_type: only 'code' response type is supported")]
     UnsupportedResponseType,
     #[error("invalid_scope: {0}")]
     InvalidScope(String),
@@ -21,7 +21,7 @@ pub enum OAuth2Error {
     InvalidClient(String),
     #[error("invalid_request: {0}")]
     InvalidRedirectUri(String),
-    #[error("unsupported_grant_type")]
+    #[error("unsupported_grant_type: grant type is not supported")]
     UnsupportedGrantType,
     #[error("server_error: {0}")]
     ServerError(String),

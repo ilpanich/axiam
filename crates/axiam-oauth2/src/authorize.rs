@@ -1,6 +1,6 @@
 //! OAuth2 authorization code grant — authorization endpoint logic.
 
-use axiam_core::models::oauth2_client::{CreateAuthorizationCode, OAuth2Client};
+use axiam_core::models::oauth2_client::CreateAuthorizationCode;
 use axiam_core::repository::{AuthorizationCodeRepository, OAuth2ClientRepository};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -80,17 +80,14 @@ where
         }
 
         // 4. Validate grant type
-        if !client
-            .grant_types
-            .contains(&"authorization_code".to_string())
-        {
+        if !client.grant_types.iter().any(|s| s == "authorization_code") {
             return Err(OAuth2Error::UnauthorizedClient(
                 "client not authorized for authorization_code grant".into(),
             ));
         }
 
         // 5. Resolve scopes and validate against client's registered scopes
-        let scopes = parse_scopes(req.scope.as_deref(), &client);
+        let scopes = parse_scopes(req.scope.as_deref());
         if req.scope.is_some() {
             let invalid: Vec<&str> = scopes
                 .iter()
@@ -173,10 +170,15 @@ pub fn hash_code(code: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Parse the `scope` parameter into a vec, defaulting to client's allowed scopes.
-fn parse_scopes(scope: Option<&str>, client: &OAuth2Client) -> Vec<String> {
+/// Parse the `scope` parameter into a vec.
+///
+/// When the request omits `scope`, an empty set is returned rather
+/// than the client's full registered scopes. This prevents implicit
+/// granting of `openid` (and the associated ID token issuance) when
+/// the client didn't explicitly request it.
+fn parse_scopes(scope: Option<&str>) -> Vec<String> {
     match scope {
         Some(s) => s.split_whitespace().map(String::from).collect(),
-        None => client.scopes.clone(),
+        None => Vec::new(),
     }
 }

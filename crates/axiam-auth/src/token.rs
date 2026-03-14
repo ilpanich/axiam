@@ -58,7 +58,7 @@ pub fn issue_access_token(
         sub: user_id.to_string(),
         tenant_id: tenant_id.to_string(),
         org_id: org_id.to_string(),
-        iss: config.jwt_issuer.clone(),
+        iss: config.effective_issuer().to_owned(),
         iat: now,
         exp: now + config.access_token_lifetime_secs as i64,
         jti: Uuid::new_v4().to_string(),
@@ -96,7 +96,7 @@ pub fn issue_client_credentials_token(
         sub: client_id.to_owned(),
         tenant_id: tenant_id.to_string(),
         org_id: org_id.to_string(),
-        iss: config.jwt_issuer.clone(),
+        iss: config.effective_issuer().to_owned(),
         iat: now,
         exp: now + config.access_token_lifetime_secs as i64,
         jti: Uuid::new_v4().to_string(),
@@ -160,7 +160,7 @@ pub fn issue_id_token(
     let has_scope = |s: &str| scopes.iter().any(|sc| sc == s);
 
     let claims = IdTokenClaims {
-        iss: config.jwt_issuer.clone(),
+        iss: config.effective_issuer().to_owned(),
         sub: user_id.to_string(),
         aud: client_id.to_owned(),
         exp: now + config.access_token_lifetime_secs as i64,

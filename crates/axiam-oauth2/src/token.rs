@@ -452,14 +452,6 @@ where
             ));
         }
 
-        // Revoke old refresh token (single-use rotation, atomic).
-        // The repo returns NotFound if the token was already revoked
-        // by a concurrent request — treat that as invalid_grant.
-        self.refresh_token_repo
-            .revoke(tenant_id, &token_hash)
-            .await
-            .map_err(|_| OAuth2Error::InvalidGrant("refresh token already consumed".into()))?;
-
         // Resolve org_id from tenant
         let tenant = self
             .tenant_repo
@@ -490,7 +482,11 @@ where
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         };
 
-        // Create and store new refresh token
+        // Refresh token rotation: create new token BEFORE revoking
+        // the old one. If `create` fails the old token remains valid
+        // and the client can retry; if `revoke` fails after `create`
+        // we have a brief window with two valid tokens (less harmful
+        // than zero tokens forcing a full re-auth).
         let new_raw_refresh = generate_refresh_token();
         let new_refresh_hash = hash_refresh_token(&new_raw_refresh);
         let refresh_expires =
@@ -507,6 +503,14 @@ where
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+
+        // Now revoke the old refresh token (single-use rotation).
+        // The repo returns NotFound if the token was already revoked
+        // by a concurrent request — treat that as invalid_grant.
+        self.refresh_token_repo
+            .revoke(tenant_id, &token_hash)
+            .await
+            .map_err(|_| OAuth2Error::InvalidGrant("refresh token already consumed".into()))?;
 
         // Re-issue an ID token when the original grant included `openid`.
         let id_token = if stored.scopes.iter().any(|s| s == "openid") {

@@ -275,12 +275,7 @@ pub async fn introspect<C: Connection>(
     ),
 )]
 pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
-    let issuer = if auth_config.oauth2_issuer_url.is_empty() {
-        &auth_config.jwt_issuer
-    } else {
-        &auth_config.oauth2_issuer_url
-    };
-    let doc = build_discovery_document(issuer);
+    let doc = build_discovery_document(auth_config.effective_issuer());
     HttpResponse::Ok().json(doc)
 }
 

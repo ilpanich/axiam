@@ -27,3 +27,4 @@ tracing-subscriber = { workspace = true }
 tracing-actix-web = { workspace = true }
 config = { workspace = true }
 hex = { workspace = true }
+url = { workspace = true }

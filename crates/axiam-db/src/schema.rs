@@ -53,6 +53,21 @@ static MIGRATIONS: &[Migration] = &[
         name: "pgp_keys",
         sql: SCHEMA_V3,
     },
+    Migration {
+        version: 4,
+        name: "oauth2_auth_codes",
+        sql: SCHEMA_V4,
+    },
+    Migration {
+        version: 5,
+        name: "oauth2_refresh_tokens",
+        sql: SCHEMA_V5,
+    },
+    Migration {
+        version: 6,
+        name: "oauth2_auth_code_nonce",
+        sql: SCHEMA_V6,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -447,6 +462,65 @@ DEFINE FIELD signed_at ON TABLE audit_signature TYPE datetime \
     DEFAULT time::now();
 DEFINE INDEX idx_audit_sig_tenant ON TABLE audit_signature \
     COLUMNS tenant_id, signed_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v4 — OAuth2 authorization codes
+// -----------------------------------------------------------------------
+
+const SCHEMA_V4: &str = "\
+-- =======================================================================
+-- OAuth2 Authorization Codes (tenant scope, short-lived)
+-- =======================================================================
+DEFINE TABLE oauth2_auth_code SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD client_id ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD user_id ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD code_hash ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD redirect_uri ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD scopes ON TABLE oauth2_auth_code TYPE array;
+DEFINE FIELD scopes.* ON TABLE oauth2_auth_code TYPE string;
+DEFINE FIELD code_challenge ON TABLE oauth2_auth_code TYPE option<string>;
+DEFINE FIELD code_challenge_method ON TABLE oauth2_auth_code TYPE option<string>;
+DEFINE FIELD expires_at ON TABLE oauth2_auth_code TYPE datetime;
+DEFINE FIELD used ON TABLE oauth2_auth_code TYPE bool DEFAULT false;
+DEFINE FIELD created_at ON TABLE oauth2_auth_code TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_auth_code_hash ON TABLE oauth2_auth_code \
+    COLUMNS tenant_id, code_hash UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v5 — OAuth2 refresh tokens
+// -----------------------------------------------------------------------
+
+const SCHEMA_V5: &str = "\
+-- =======================================================================
+-- OAuth2 Refresh Tokens (tenant scope)
+-- =======================================================================
+DEFINE TABLE oauth2_refresh_token SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE oauth2_refresh_token TYPE string;
+DEFINE FIELD token_hash ON TABLE oauth2_refresh_token TYPE string;
+DEFINE FIELD client_id ON TABLE oauth2_refresh_token TYPE string;
+DEFINE FIELD user_id ON TABLE oauth2_refresh_token TYPE option<string>;
+DEFINE FIELD scopes ON TABLE oauth2_refresh_token TYPE array;
+DEFINE FIELD scopes.* ON TABLE oauth2_refresh_token TYPE string;
+DEFINE FIELD expires_at ON TABLE oauth2_refresh_token TYPE datetime;
+DEFINE FIELD revoked ON TABLE oauth2_refresh_token TYPE bool DEFAULT false;
+DEFINE FIELD created_at ON TABLE oauth2_refresh_token TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_refresh_token_hash ON TABLE oauth2_refresh_token \
+    COLUMNS tenant_id, token_hash UNIQUE;
+DEFINE INDEX idx_refresh_token_client ON TABLE oauth2_refresh_token \
+    COLUMNS tenant_id, client_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v6 — OIDC nonce on authorization codes
+// -----------------------------------------------------------------------
+
+const SCHEMA_V6: &str = "\
+DEFINE FIELD nonce ON TABLE oauth2_auth_code TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

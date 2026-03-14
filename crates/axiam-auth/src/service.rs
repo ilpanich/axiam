@@ -402,7 +402,7 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
 
         // 6. Issue new access token.
         let access_token =
-            token::issue_access_token(user.id, input.tenant_id, input.org_id, &self.config)?;
+            token::issue_access_token(user.id, input.tenant_id, input.org_id, &[], &self.config)?;
 
         Ok(RefreshOutput {
             access_token,
@@ -462,7 +462,8 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
             })
             .await?;
 
-        let access_token = token::issue_access_token(user_id, tenant_id, org_id, &self.config)?;
+        let access_token =
+            token::issue_access_token(user_id, tenant_id, org_id, &[], &self.config)?;
 
         Ok(LoginOutput {
             access_token,

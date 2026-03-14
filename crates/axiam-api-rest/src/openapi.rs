@@ -118,6 +118,21 @@ use crate::handlers;
         handlers::service_accounts::update,
         handlers::service_accounts::delete,
         handlers::service_accounts::rotate_secret,
+        // OAuth2 Clients
+        handlers::oauth2_clients::create,
+        handlers::oauth2_clients::list,
+        handlers::oauth2_clients::get,
+        handlers::oauth2_clients::update,
+        handlers::oauth2_clients::delete,
+        // OAuth2 Flow
+        handlers::oauth2::authorize,
+        handlers::oauth2::token,
+        handlers::oauth2::revoke,
+        handlers::oauth2::introspect,
+        // OIDC
+        handlers::oauth2::discovery,
+        handlers::oauth2::jwks,
+        handlers::oauth2::userinfo,
     ),
     components(schemas(
         // Health
@@ -223,6 +238,22 @@ use crate::handlers;
         handlers::webhooks::CreateWebhookRequest,
         handlers::webhooks::UpdateWebhookRequest,
         handlers::webhooks::WebhookResponse,
+        // OAuth2 Clients
+        handlers::oauth2_clients::CreateOAuth2ClientRequest,
+        handlers::oauth2_clients::UpdateOAuth2ClientRequest,
+        handlers::oauth2_clients::OAuth2ClientResponse,
+        handlers::oauth2_clients::OAuth2ClientCreatedResponse,
+        // OAuth2 Flow
+        handlers::oauth2::OAuth2ErrorResponse,
+        axiam_oauth2::token::TokenResponse,
+        axiam_oauth2::token::RevokeRequest,
+        axiam_oauth2::token::IntrospectRequest,
+        axiam_oauth2::token::IntrospectionResponse,
+        // OIDC
+        axiam_oauth2::oidc::OidcDiscoveryDocument,
+        axiam_oauth2::oidc::JwksDocument,
+        axiam_oauth2::oidc::Jwk,
+        axiam_oauth2::oidc::UserInfoResponse,
         // Pagination
         axiam_core::repository::Pagination,
     )),
@@ -243,6 +274,9 @@ use crate::handlers;
         (name = "audit", description = "Audit log queries"),
         (name = "webhooks", description = "Webhook registration and management"),
         (name = "service-accounts", description = "Service account management"),
+        (name = "oauth2-clients", description = "OAuth2 client registration and management"),
+        (name = "oauth2", description = "OAuth2 authorization and token endpoints"),
+        (name = "oidc", description = "OpenID Connect discovery, JWKS, and UserInfo"),
     ),
     modifiers(&SecurityAddon),
 )]

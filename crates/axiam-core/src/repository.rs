@@ -12,7 +12,10 @@ use crate::models::{
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
     federation::{CreateFederationConfig, FederationConfig, UpdateFederationConfig},
     group::{CreateGroup, Group, UpdateGroup},
-    oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client},
+    oauth2_client::{
+        AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, CreateRefreshToken,
+        OAuth2Client, RefreshToken, UpdateOAuth2Client,
+    },
     organization::{CreateOrganization, Organization, UpdateOrganization},
     permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
     pgp_key::{PgpKey, StorePgpKey},
@@ -520,6 +523,73 @@ pub trait OAuth2ClientRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<OAuth2Client>>> + Send;
+}
+
+pub trait AuthorizationCodeRepository: Send + Sync {
+    /// Store a new authorization code.
+    fn create(
+        &self,
+        input: CreateAuthorizationCode,
+    ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
+
+    /// Look up a valid (unused, non-expired) authorization code by hash
+    /// without marking it as used.  Use this to validate PKCE before
+    /// calling [`consume`].  `client_id` and `redirect_uri` are checked
+    /// to prevent code-burning by unrelated clients.
+    fn get_by_hash(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
+
+    /// Atomically consume a code (mark as used). Returns the code if it
+    /// was valid, unused, and not expired; otherwise returns NotFound.
+    /// `client_id` and `redirect_uri` are verified atomically in the
+    /// WHERE clause to prevent code-burning attacks.
+    fn consume(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
+
+    /// Delete expired and already-used codes (garbage collection).
+    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+pub trait RefreshTokenRepository: Send + Sync {
+    /// Store a new refresh token.
+    fn create(
+        &self,
+        input: CreateRefreshToken,
+    ) -> impl Future<Output = AxiamResult<RefreshToken>> + Send;
+
+    /// Look up a non-revoked, non-expired refresh token by its hash.
+    fn get_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<RefreshToken>> + Send;
+
+    /// Revoke a single refresh token by hash.
+    fn revoke(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Revoke all refresh tokens for a given client within a tenant.
+    fn revoke_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired and revoked refresh tokens (garbage collection).
+    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait FederationConfigRepository: Send + Sync {

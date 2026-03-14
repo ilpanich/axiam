@@ -82,7 +82,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, auth).unwrap()
+    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
 }
 
 macro_rules! test_app {

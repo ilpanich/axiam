@@ -14,8 +14,13 @@ pub struct AuthConfig {
     pub access_token_lifetime_secs: u64,
     /// Refresh token lifetime in seconds (default: 2_592_000 = 30 days).
     pub refresh_token_lifetime_secs: u64,
+    /// Authorization code lifetime in seconds (default: 600 = 10 minutes).
+    pub auth_code_lifetime_secs: u64,
     /// JWT issuer (`iss` claim).
     pub jwt_issuer: String,
+    /// OIDC issuer base URL (e.g. "https://auth.example.com"). Used for
+    /// OIDC discovery endpoint URLs. Falls back to `jwt_issuer` if unset.
+    pub oauth2_issuer_url: String,
     /// Optional pepper prepended to passwords before Argon2id verification.
     pub pepper: Option<String>,
     /// Minimum password length for policy enforcement.
@@ -38,6 +43,22 @@ pub struct AuthConfig {
     pub max_lockout_duration_secs: u64,
 }
 
+impl AuthConfig {
+    /// Effective issuer for JWT `iss` claims and OIDC discovery.
+    ///
+    /// Returns `oauth2_issuer_url` when set, falling back to
+    /// `jwt_issuer`. Trailing slashes are stripped so that the
+    /// OIDC discovery `issuer` exactly matches token `iss` claims
+    /// (OIDC Core §2 requires an exact string match).
+    pub fn effective_issuer(&self) -> &str {
+        if self.oauth2_issuer_url.is_empty() {
+            self.jwt_issuer.trim_end_matches('/')
+        } else {
+            self.oauth2_issuer_url.trim_end_matches('/')
+        }
+    }
+}
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
@@ -45,7 +66,9 @@ impl Default for AuthConfig {
             jwt_public_key_pem: String::new(),
             access_token_lifetime_secs: 900,
             refresh_token_lifetime_secs: 2_592_000,
+            auth_code_lifetime_secs: 600,
             jwt_issuer: "axiam".into(),
+            oauth2_issuer_url: String::new(),
             pepper: None,
             min_password_length: 12,
             mfa_encryption_key: None,

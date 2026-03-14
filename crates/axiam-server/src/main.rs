@@ -12,13 +12,16 @@ use axiam_audit::AuditMiddleware;
 use axiam_auth::AuthService;
 use axiam_auth::config::AuthConfig;
 use axiam_db::{
-    DbConfig, DbManager, SurrealAuditLogRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealGroupRepository, SurrealOrganizationRepository,
-    SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealResourceRepository,
+    DbConfig, DbManager, SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
+    SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealGroupRepository,
+    SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
+    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
     SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
     SurrealWebhookRepository,
 };
+use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
@@ -130,6 +133,26 @@ async fn main() -> std::io::Result<()> {
     let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone());
+    let oauth2_client_repo = SurrealOAuth2ClientRepository::new(db.client().clone());
+    let auth_code_repo = SurrealAuthorizationCodeRepository::new(db.client().clone());
+    let refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
+
+    // OAuth2 authorization code grant services.
+    let authorize_service = AuthorizeService::new(
+        oauth2_client_repo.clone(),
+        auth_code_repo.clone(),
+        config.auth.auth_code_lifetime_secs,
+    );
+    let token_service = TokenService::new(
+        oauth2_client_repo.clone(),
+        auth_code_repo,
+        tenant_repo.clone(),
+        refresh_token_repo,
+        user_repo.clone(),
+        config.auth.clone(),
+        i64::try_from(config.auth.refresh_token_lifetime_secs)
+            .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
+    );
 
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
@@ -224,6 +247,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(pgp_service.clone()))
             .app_data(web::Data::new(webhook_repo.clone()))
             .app_data(web::Data::new(webhook_delivery.clone()))
+            .app_data(web::Data::new(oauth2_client_repo.clone()))
+            .app_data(web::Data::new(authorize_service.clone()))
+            .app_data(web::Data::new(token_service.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
             .configure(openapi_routes)
@@ -252,6 +278,59 @@ fn load_config() -> AppConfig {
         !config.auth.jwt_public_key_pem.is_empty(),
         "AXIAM__AUTH__JWT_PUBLIC_KEY_PEM must be set (Ed25519 PEM)"
     );
+
+    // Validate oauth2_issuer_url when explicitly configured.
+    // jwt_issuer is intentionally unconstrained — it is used as the
+    // JWT `iss` claim and may be a non-URL string.  OIDC discovery
+    // compliance requires oauth2_issuer_url to be set.
+    if !config.auth.oauth2_issuer_url.is_empty() {
+        let issuer = &config.auth.oauth2_issuer_url;
+        let url = url::Url::parse(issuer).unwrap_or_else(|e| {
+            panic!(
+                "AXIAM__AUTH__OAUTH2_ISSUER_URL is not a valid URL: \
+                 {e} (got: {issuer})"
+            )
+        });
+        let is_localhost = url
+            .host_str()
+            .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
+        assert!(
+            url.scheme() == "https" || (url.scheme() == "http" && is_localhost),
+            "OIDC issuer must use https (http is only allowed for \
+             localhost); got: {issuer}",
+        );
+        assert!(
+            url.host().is_some(),
+            "OIDC issuer URL must have a host: {issuer}",
+        );
+        // AXIAM limitation: path-based issuers are not currently
+        // supported.  While OIDC allows path segments in issuers
+        // (e.g. for reverse-proxy or multi-tenant deployments),
+        // AXIAM serves discovery at a fixed `/.well-known/` route
+        // and builds endpoint URLs as `{issuer}/oauth2/...`, which
+        // would break with a non-root path.
+        assert!(
+            url.path() == "/" || url.path().is_empty(),
+            "AXIAM does not support path-based issuer URLs \
+             (path-based issuers require route changes not yet \
+             implemented): {issuer}",
+        );
+        assert!(
+            url.query().is_none(),
+            "OIDC issuer URL must not contain a query string: \
+             {issuer}",
+        );
+        assert!(
+            url.fragment().is_none(),
+            "OIDC issuer URL must not contain a fragment: {issuer}",
+        );
+    } else {
+        tracing::warn!(
+            "AXIAM__AUTH__OAUTH2_ISSUER_URL not set — OIDC discovery \
+             will use jwt_issuer as a non-URL issuer identifier; \
+             set oauth2_issuer_url for compliant discovery documents"
+        );
+    }
 
     config
 }

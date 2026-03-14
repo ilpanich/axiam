@@ -263,7 +263,8 @@ pub async fn introspect<C: Connection>(
 /// `GET /.well-known/openid-configuration` -- OIDC Discovery document.
 ///
 /// Returns the OpenID Provider metadata per OpenID Connect Discovery 1.0.
-/// The issuer URL is taken from the `AuthConfig::jwt_issuer` setting.
+/// The issuer URL is taken from `AuthConfig::oauth2_issuer_url` when set,
+/// falling back to `AuthConfig::jwt_issuer` otherwise.
 #[utoipa::path(
     get,
     path = "/.well-known/openid-configuration",
@@ -354,7 +355,18 @@ pub async fn userinfo<C: Connection>(
                     None
                 },
             ),
-            Err(_) => (None, None),
+            Err(e) => {
+                tracing::error!(
+                    user_id = %user.user_id,
+                    tenant_id = %user.tenant_id,
+                    error = %e,
+                    "userinfo: failed to fetch user for scoped claims"
+                );
+                return HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
+                    error: "server_error".into(),
+                    error_description: "failed to retrieve user claims".into(),
+                });
+            }
         }
     } else {
         (None, None)

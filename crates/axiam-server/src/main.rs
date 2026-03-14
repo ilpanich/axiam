@@ -281,24 +281,32 @@ fn load_config() -> AppConfig {
     if config.auth.oauth2_issuer_url.is_empty() {
         tracing::warn!(
             "AXIAM__AUTH__OAUTH2_ISSUER_URL not set — \
-             OIDC discovery will use jwt_issuer as base URL"
+             OIDC discovery will use jwt_issuer as base URL; \
+             set it to an absolute HTTPS URL for correct \
+             discovery documents"
+        );
+    } else {
+        // Validate oauth2_issuer_url when explicitly configured.
+        // OIDC Discovery §3 requires `issuer` to be a URL with
+        // an https scheme (http allowed for localhost dev).
+        let url = url::Url::parse(&config.auth.oauth2_issuer_url).unwrap_or_else(|e| {
+            panic!(
+                "AXIAM__AUTH__OAUTH2_ISSUER_URL is not a valid URL: \
+                 {e} (got: {})",
+                config.auth.oauth2_issuer_url
+            )
+        });
+        assert!(
+            url.scheme() == "https" || url.scheme() == "http",
+            "OIDC issuer must use http or https scheme, got: {}",
+            url.scheme()
+        );
+        assert!(
+            url.host().is_some(),
+            "OIDC issuer URL must have a host: {}",
+            config.auth.oauth2_issuer_url
         );
     }
-
-    // Validate that the effective OIDC issuer is a valid URL.
-    // OIDC Discovery §3 requires `issuer` to be a URL; endpoint
-    // URLs are built by appending paths, so a non-URL would
-    // produce broken discovery documents.
-    let effective_issuer = if config.auth.oauth2_issuer_url.is_empty() {
-        &config.auth.jwt_issuer
-    } else {
-        &config.auth.oauth2_issuer_url
-    };
-    assert!(
-        effective_issuer.starts_with("http://") || effective_issuer.starts_with("https://"),
-        "OIDC issuer must be an absolute HTTP(S) URL, got: \
-         {effective_issuer}"
-    );
 
     config
 }

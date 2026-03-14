@@ -285,5 +285,20 @@ fn load_config() -> AppConfig {
         );
     }
 
+    // Validate that the effective OIDC issuer is a valid URL.
+    // OIDC Discovery §3 requires `issuer` to be a URL; endpoint
+    // URLs are built by appending paths, so a non-URL would
+    // produce broken discovery documents.
+    let effective_issuer = if config.auth.oauth2_issuer_url.is_empty() {
+        &config.auth.jwt_issuer
+    } else {
+        &config.auth.oauth2_issuer_url
+    };
+    assert!(
+        effective_issuer.starts_with("http://") || effective_issuer.starts_with("https://"),
+        "OIDC issuer must be an absolute HTTP(S) URL, got: \
+         {effective_issuer}"
+    );
+
     config
 }

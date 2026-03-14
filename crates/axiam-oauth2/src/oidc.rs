@@ -90,8 +90,8 @@ pub struct JwksDocument {
 ///
 /// The PEM must contain a SubjectPublicKeyInfo structure (44 bytes
 /// when DER-decoded: 12-byte OID header + 32-byte raw Ed25519 key).
-/// The `kid` is derived deterministically as the first 8 hex
-/// characters of the SHA-256 hash of the raw public key bytes.
+/// The `kid` is derived deterministically as the first 16 hex
+/// characters (64 bits) of the SHA-256 hash of the raw public key bytes.
 pub fn build_jwks(public_key_pem: &str) -> Result<JwksDocument, String> {
     // Strip PEM headers and decode base64.
     let b64: String = public_key_pem

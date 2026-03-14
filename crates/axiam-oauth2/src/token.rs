@@ -173,10 +173,7 @@ where
             .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
 
         // Verify client is authorized for authorization_code grant
-        if !client
-            .grant_types
-            .contains(&"authorization_code".to_string())
-        {
+        if !client.grant_types.iter().any(|s| s == "authorization_code") {
             return Err(OAuth2Error::UnauthorizedClient(
                 "client not authorized for authorization_code grant".into(),
             ));
@@ -237,7 +234,7 @@ where
 
         // Only issue a refresh token when the client is authorized
         // for the refresh_token grant type.
-        let refresh_token = if client.grant_types.contains(&"refresh_token".to_string()) {
+        let refresh_token = if client.grant_types.iter().any(|s| s == "refresh_token") {
             let raw_refresh = generate_refresh_token();
             let refresh_hash = hash_refresh_token(&raw_refresh);
             let refresh_expires =
@@ -260,7 +257,7 @@ where
         };
 
         // Issue an ID token when the `openid` scope was requested.
-        let id_token = if auth_code.scopes.contains(&"openid".to_string()) {
+        let id_token = if auth_code.scopes.iter().any(|s| s == "openid") {
             let user = self
                 .user_repo
                 .get_by_id(tenant_id, auth_code.user_id)
@@ -332,10 +329,7 @@ where
         }
 
         // Verify grant type is allowed
-        if !client
-            .grant_types
-            .contains(&"client_credentials".to_string())
-        {
+        if !client.grant_types.iter().any(|s| s == "client_credentials") {
             return Err(OAuth2Error::UnauthorizedClient(
                 "client not authorized for client_credentials grant".into(),
             ));
@@ -452,7 +446,7 @@ where
         }
 
         // Verify client is authorized for refresh_token grant
-        if !client.grant_types.contains(&"refresh_token".to_string()) {
+        if !client.grant_types.iter().any(|s| s == "refresh_token") {
             return Err(OAuth2Error::UnauthorizedClient(
                 "client not authorized for refresh_token grant".into(),
             ));
@@ -515,7 +509,7 @@ where
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         // Re-issue an ID token when the original grant included `openid`.
-        let id_token = if stored.scopes.contains(&"openid".to_string()) {
+        let id_token = if stored.scopes.iter().any(|s| s == "openid") {
             if let Some(uid) = stored.user_id {
                 let user = self
                     .user_repo

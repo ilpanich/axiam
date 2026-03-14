@@ -45,7 +45,16 @@ impl OAuth2Error {
     }
 
     /// Human-readable error description for the `error_description` field.
+    ///
+    /// Strips the RFC error-code prefix from the Display output so that
+    /// `error_description` contains only the message (the code goes in
+    /// the separate `error` field per RFC 6749 §5.2).
     pub fn error_description(&self) -> String {
-        self.to_string()
+        let full = self.to_string();
+        // Display format is "error_code: message"; extract the message part.
+        match full.split_once(": ") {
+            Some((_, msg)) => msg.to_string(),
+            None => full,
+        }
     }
 }

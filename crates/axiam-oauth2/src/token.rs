@@ -7,6 +7,7 @@ use axiam_auth::token::{
     generate_refresh_token, hash_refresh_token, issue_access_token, issue_client_credentials_token,
     issue_id_token, validate_access_token,
 };
+use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::CreateRefreshToken;
 use axiam_core::repository::{
     AuthorizationCodeRepository, OAuth2ClientRepository, RefreshTokenRepository, TenantRepository,
@@ -515,8 +516,7 @@ where
                 .revoke(tenant_id, &new_refresh_hash)
                 .await;
 
-            let err_msg = revoke_err.to_string();
-            return if err_msg.contains("not found") || err_msg.contains("NotFound") {
+            return if matches!(revoke_err, AxiamError::NotFound { .. }) {
                 Err(OAuth2Error::InvalidGrant(
                     "refresh token already consumed".into(),
                 ))

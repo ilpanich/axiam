@@ -346,7 +346,7 @@ async fn full_authorization_code_flow_with_pkce() {
 
     let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
 
-    let verifier = "my-pkce-code-verifier-for-test-1234567890";
+    let verifier = "my-pkce-code-verifier-for-test-1234567890ab";
     let challenge = pkce_challenge(verifier);
 
     let code = do_authorize(
@@ -433,7 +433,7 @@ async fn pkce_verification_failure() {
 
     let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
 
-    let correct_verifier = "correct-verifier-string-1234567890abcd";
+    let correct_verifier = "correct-verifier-string-1234567890abcdefghi";
     let challenge = pkce_challenge(correct_verifier);
 
     let code = do_authorize(
@@ -454,7 +454,7 @@ async fn pkce_verification_failure() {
         &client_secret,
         &code,
         &redirect_uri,
-        Some("wrong-verifier-that-does-not-match"),
+        Some("wrong-verifier-that-does-not-match-at-all99"),
     )
     .await;
 
@@ -691,7 +691,7 @@ async fn pkce_required_when_challenge_registered() {
 
     let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
 
-    let verifier = "a-valid-code-verifier-string-1234567890";
+    let verifier = "a-valid-code-verifier-string-1234567890abcd";
     let challenge = pkce_challenge(verifier);
 
     let code = do_authorize(

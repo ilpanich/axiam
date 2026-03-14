@@ -38,6 +38,6 @@ surrealdb = { workspace = true }
 
 [dev-dependencies]
 actix-rt = { workspace = true }
-actix-http = "3"
+actix-http = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }

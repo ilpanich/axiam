@@ -102,11 +102,14 @@ fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiError> {
         let parsed: url::Url = uri
             .parse()
             .map_err(|_| validation_err(format!("invalid redirect_uri: {uri}")))?;
+        // Redirect URIs must be absolute with an authority (host)
+        let host = parsed.host_str().ok_or_else(|| {
+            validation_err(format!(
+                "redirect_uri must be an absolute URL with a host: {uri}"
+            ))
+        })?;
         // Allow http for localhost/loopback only, require HTTPS otherwise
-        let is_localhost = parsed
-            .host_str()
-            .map(|h| h == "localhost" || h == "127.0.0.1" || h == "::1")
-            .unwrap_or(false);
+        let is_localhost = host == "localhost" || host == "127.0.0.1" || host == "::1";
         if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_localhost) {
             return Err(validation_err(format!(
                 "redirect_uri must use https (http is only allowed for localhost/127.0.0.1/::1): {uri}"

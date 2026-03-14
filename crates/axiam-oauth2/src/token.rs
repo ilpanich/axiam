@@ -233,7 +233,10 @@ where
             .tenant_repo
             .get_by_id(tenant_id)
             .await
-            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            .map_err(|e| match e {
+                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
 
         // Issue access token (include scopes from the authorization code)
         let access_token = issue_access_token(
@@ -375,7 +378,10 @@ where
             .tenant_repo
             .get_by_id(tenant_id)
             .await
-            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            .map_err(|e| match e {
+                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
 
         // Issue M2M access token (no refresh token for client_credentials)
         let access_token = issue_client_credentials_token(
@@ -471,7 +477,10 @@ where
             .tenant_repo
             .get_by_id(tenant_id)
             .await
-            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            .map_err(|e| match e {
+                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
 
         // Issue new access token
         let access_token = if let Some(user_id) = stored.user_id {

@@ -197,7 +197,7 @@ pub fn decode_access_token(
         .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
 
     let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&[&config.jwt_issuer]);
+    validation.set_issuer(&[config.effective_issuer()]);
     validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
 
     jsonwebtoken::decode::<AccessTokenClaims>(token, &key, &validation)
@@ -430,7 +430,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     fn decode_id_token(token: &str, config: &AuthConfig) -> IdTokenClaims {
         let key = DecodingKey::from_ed_pem(config.jwt_public_key_pem.as_bytes()).unwrap();
         let mut validation = Validation::new(Algorithm::EdDSA);
-        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_issuer(&[config.effective_issuer()]);
         validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
         // ID token `aud` is the client_id, not the issuer.
         validation.set_audience(&["test-client"]);

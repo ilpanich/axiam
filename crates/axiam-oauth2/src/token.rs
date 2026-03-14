@@ -495,7 +495,7 @@ where
         self.refresh_token_repo
             .create(CreateRefreshToken {
                 tenant_id,
-                token_hash: new_refresh_hash,
+                token_hash: new_refresh_hash.clone(),
                 client_id: client_id.to_string(),
                 user_id: stored.user_id,
                 scopes: stored.scopes.clone(),
@@ -505,12 +505,27 @@ where
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         // Now revoke the old refresh token (single-use rotation).
-        // The repo returns NotFound if the token was already revoked
-        // by a concurrent request — treat that as invalid_grant.
-        self.refresh_token_repo
-            .revoke(tenant_id, &token_hash)
-            .await
-            .map_err(|_| OAuth2Error::InvalidGrant("refresh token already consumed".into()))?;
+        // If revoke fails, best-effort cleanup of the new token to
+        // avoid orphaned entries; then surface the appropriate error.
+        if let Err(revoke_err) = self.refresh_token_repo.revoke(tenant_id, &token_hash).await {
+            // Best-effort: delete the newly-created token so it
+            // doesn't linger as an orphan. Ignore cleanup errors.
+            let _ = self
+                .refresh_token_repo
+                .revoke(tenant_id, &new_refresh_hash)
+                .await;
+
+            let err_msg = revoke_err.to_string();
+            return if err_msg.contains("not found") || err_msg.contains("NotFound") {
+                Err(OAuth2Error::InvalidGrant(
+                    "refresh token already consumed".into(),
+                ))
+            } else {
+                Err(OAuth2Error::ServerError(
+                    "failed to revoke old refresh token".into(),
+                ))
+            };
+        }
 
         // Re-issue an ID token when the original grant included `openid`.
         let id_token = if stored.scopes.iter().any(|s| s == "openid") {

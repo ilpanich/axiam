@@ -105,7 +105,7 @@ fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiError> {
         // Allow http://localhost for development, require HTTPS otherwise
         let is_localhost = parsed
             .host_str()
-            .map(|h| h == "localhost" || h == "127.0.0.1")
+            .map(|h| h == "localhost" || h == "127.0.0.1" || h == "::1")
             .unwrap_or(false);
         if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_localhost) {
             return Err(validation_err(format!(

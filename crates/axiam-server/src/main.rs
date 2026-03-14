@@ -310,6 +310,22 @@ fn load_config() -> AppConfig {
             "OIDC issuer URL must have a host: {}",
             config.auth.oauth2_issuer_url
         );
+        assert!(
+            url.path() == "/" || url.path().is_empty(),
+            "OIDC issuer URL must not contain a path \
+             (discovery is served at {{issuer}}/.well-known/...): {}",
+            config.auth.oauth2_issuer_url
+        );
+        assert!(
+            url.query().is_none(),
+            "OIDC issuer URL must not contain a query string: {}",
+            config.auth.oauth2_issuer_url
+        );
+        assert!(
+            url.fragment().is_none(),
+            "OIDC issuer URL must not contain a fragment: {}",
+            config.auth.oauth2_issuer_url
+        );
     }
 
     config

@@ -532,6 +532,18 @@ pub trait AuthorizationCodeRepository: Send + Sync {
         input: CreateAuthorizationCode,
     ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
 
+    /// Look up a valid (unused, non-expired) authorization code by hash
+    /// without marking it as used.  Use this to validate PKCE before
+    /// calling [`consume`].  `client_id` and `redirect_uri` are checked
+    /// to prevent code-burning by unrelated clients.
+    fn get_by_hash(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
+
     /// Atomically consume a code (mark as used). Returns the code if it
     /// was valid, unused, and not expired; otherwise returns NotFound.
     /// `client_id` and `redirect_uri` are verified atomically in the

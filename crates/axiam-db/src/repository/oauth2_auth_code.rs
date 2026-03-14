@@ -153,6 +153,48 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
         })
     }
 
+    async fn get_by_hash(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> AxiamResult<AuthorizationCode> {
+        let code_hash_owned = code_hash.to_string();
+        let tenant_id_str = tenant_id.to_string();
+
+        let result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * \
+                 FROM oauth2_auth_code \
+                 WHERE tenant_id = $tenant_id \
+                   AND code_hash = $code_hash \
+                   AND client_id = $client_id \
+                   AND redirect_uri = $redirect_uri \
+                   AND used = false \
+                   AND expires_at > time::now()",
+            )
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("code_hash", code_hash_owned.clone()))
+            .bind(("client_id", client_id.to_string()))
+            .bind(("redirect_uri", redirect_uri.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<AuthCodeRowWithId> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "oauth2_auth_code".into(),
+            id: format!("code_hash={code_hash_owned}"),
+        })?;
+
+        row.try_into_auth_code().map_err(Into::into)
+    }
+
     async fn consume(
         &self,
         tenant_id: Uuid,

@@ -180,7 +180,8 @@ where
             ));
         }
 
-        // Require client_secret for confidential clients
+        // Require client_secret — all clients are confidential
+        // (no public-client distinction exists yet).
         let client_secret = req
             .client_secret
             .as_deref()
@@ -192,13 +193,14 @@ where
             ));
         }
 
-        // Consume the authorization code (atomic single-use).
-        // client_id and redirect_uri are verified atomically in the
-        // WHERE clause to prevent code-burning attacks.
+        // Look up the authorization code without consuming it so we
+        // can verify PKCE *before* marking it as used.  This prevents
+        // an attacker from burning a valid code by intentionally
+        // failing PKCE verification.
         let code_hash = crate::authorize::hash_code(code);
         let auth_code = self
             .code_repo
-            .consume(tenant_id, &code_hash, client_id, redirect_uri)
+            .get_by_hash(tenant_id, &code_hash, client_id, redirect_uri)
             .await
             .map_err(|_| {
                 OAuth2Error::InvalidGrant(
@@ -206,7 +208,7 @@ where
                 )
             })?;
 
-        // Verify PKCE if code_challenge was used
+        // Verify PKCE before consuming the code
         if let Some(ref challenge) = auth_code.code_challenge {
             let verifier = req.code_verifier.as_deref().ok_or_else(|| {
                 OAuth2Error::InvalidGrant("code_verifier required for PKCE".into())
@@ -215,6 +217,16 @@ where
                 return Err(OAuth2Error::InvalidGrant("PKCE verification failed".into()));
             }
         }
+
+        // Now atomically consume (mark as used) the code.
+        self.code_repo
+            .consume(tenant_id, &code_hash, client_id, redirect_uri)
+            .await
+            .map_err(|_| {
+                OAuth2Error::InvalidGrant(
+                    "authorization code is invalid, expired, or already used".into(),
+                )
+            })?;
 
         // Resolve org_id from tenant
         let tenant = self
@@ -426,7 +438,8 @@ where
             ));
         }
 
-        // Require client_secret for confidential clients
+        // Require client_secret — all clients are confidential
+        // (no public-client distinction exists yet).
         let client_secret_val = req
             .client_secret
             .as_deref()

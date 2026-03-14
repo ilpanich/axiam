@@ -102,14 +102,14 @@ fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiError> {
         let parsed: url::Url = uri
             .parse()
             .map_err(|_| validation_err(format!("invalid redirect_uri: {uri}")))?;
-        // Allow http://localhost for development, require HTTPS otherwise
+        // Allow http for localhost/loopback only, require HTTPS otherwise
         let is_localhost = parsed
             .host_str()
             .map(|h| h == "localhost" || h == "127.0.0.1" || h == "::1")
             .unwrap_or(false);
         if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_localhost) {
             return Err(validation_err(format!(
-                "redirect_uri must use https (except http://localhost): {uri}"
+                "redirect_uri must use https (http is only allowed for localhost/127.0.0.1/::1): {uri}"
             )));
         }
         // RFC 6749 §3.1.2: redirect URIs must not include a fragment

@@ -427,31 +427,14 @@ where
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into()))?;
 
-        // Look up the refresh token by hash
-        let token_hash = hash_refresh_token(raw_token);
-        let stored = self
-            .refresh_token_repo
-            .get_by_token_hash(tenant_id, &token_hash)
-            .await
-            .map_err(|_| {
-                OAuth2Error::InvalidGrant("refresh token is invalid, expired, or revoked".into())
-            })?;
-
-        // Verify client ownership
-        if stored.client_id != client_id {
-            return Err(OAuth2Error::InvalidGrant(
-                "refresh token was not issued to this client".into(),
-            ));
-        }
-
-        // Require client_secret — all clients are confidential
-        // (no public-client distinction exists yet).
+        // Authenticate client BEFORE looking up the refresh token to
+        // avoid a token-validity oracle (different error for valid vs
+        // invalid tokens when client auth fails).
         let client_secret_val = req
             .client_secret
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidClient("client_secret is required".into()))?;
 
-        // Authenticate client
         let client = self
             .client_repo
             .get_by_client_id(tenant_id, client_id)
@@ -469,6 +452,23 @@ where
         if !client.grant_types.iter().any(|s| s == "refresh_token") {
             return Err(OAuth2Error::UnauthorizedClient(
                 "client not authorized for refresh_token grant".into(),
+            ));
+        }
+
+        // Look up the refresh token by hash (after client auth)
+        let token_hash = hash_refresh_token(raw_token);
+        let stored = self
+            .refresh_token_repo
+            .get_by_token_hash(tenant_id, &token_hash)
+            .await
+            .map_err(|_| {
+                OAuth2Error::InvalidGrant("refresh token is invalid, expired, or revoked".into())
+            })?;
+
+        // Verify client ownership
+        if stored.client_id != client_id {
+            return Err(OAuth2Error::InvalidGrant(
+                "refresh token was not issued to this client".into(),
             ));
         }
 

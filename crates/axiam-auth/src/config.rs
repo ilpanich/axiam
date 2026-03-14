@@ -15,7 +15,7 @@ pub struct AuthConfig {
     /// Refresh token lifetime in seconds (default: 2_592_000 = 30 days).
     pub refresh_token_lifetime_secs: u64,
     /// Authorization code lifetime in seconds (default: 600 = 10 minutes).
-    pub auth_code_lifetime_secs: i64,
+    pub auth_code_lifetime_secs: u64,
     /// JWT issuer (`iss` claim).
     pub jwt_issuer: String,
     /// OIDC issuer base URL (e.g. "https://auth.example.com"). Used for

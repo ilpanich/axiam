@@ -40,7 +40,7 @@ pub struct AuthorizeResponse {
 pub struct AuthorizeService<OC, AC> {
     client_repo: OC,
     code_repo: AC,
-    code_lifetime_secs: i64,
+    code_lifetime_secs: u64,
 }
 
 impl<OC, AC> AuthorizeService<OC, AC>
@@ -48,7 +48,7 @@ where
     OC: OAuth2ClientRepository,
     AC: AuthorizationCodeRepository,
 {
-    pub fn new(client_repo: OC, code_repo: AC, code_lifetime_secs: i64) -> Self {
+    pub fn new(client_repo: OC, code_repo: AC, code_lifetime_secs: u64) -> Self {
         Self {
             client_repo,
             code_repo,
@@ -130,7 +130,9 @@ where
         let code_hash = hash_code(&raw_code);
 
         // 8. Store authorization code
-        let expires_at = Utc::now() + chrono::Duration::seconds(self.code_lifetime_secs);
+        let lifetime =
+            i64::try_from(self.code_lifetime_secs).expect("code_lifetime_secs exceeds i64::MAX");
+        let expires_at = Utc::now() + chrono::Duration::seconds(lifetime);
         let _stored = self
             .code_repo
             .create(CreateAuthorizationCode {

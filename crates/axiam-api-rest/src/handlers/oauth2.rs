@@ -410,19 +410,16 @@ fn build_error_redirect(
 
 /// Build an OAuth2 JSON error response with the appropriate HTTP status.
 ///
-/// For `invalid_client` (401), includes `WWW-Authenticate: Bearer` per
-/// RFC 6749 §5.2.
+/// `invalid_client` returns 401.  No `WWW-Authenticate` header is sent
+/// because the token endpoint uses `client_secret_post` (credentials in
+/// the request body), not HTTP Basic authentication.
 fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
     let status = match e {
         OAuth2Error::InvalidClient(_) => actix_web::http::StatusCode::UNAUTHORIZED,
         OAuth2Error::ServerError(_) => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
         _ => actix_web::http::StatusCode::BAD_REQUEST,
     };
-    let mut resp = HttpResponse::build(status);
-    if matches!(e, OAuth2Error::InvalidClient(_)) {
-        resp.append_header(("WWW-Authenticate", "Bearer"));
-    }
-    resp.json(OAuth2ErrorResponse {
+    HttpResponse::build(status).json(OAuth2ErrorResponse {
         error: e.error_code().to_string(),
         error_description: e.error_description(),
     })

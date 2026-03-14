@@ -150,7 +150,8 @@ async fn main() -> std::io::Result<()> {
         refresh_token_repo,
         user_repo.clone(),
         config.auth.clone(),
-        config.auth.refresh_token_lifetime_secs as i64,
+        i64::try_from(config.auth.refresh_token_lifetime_secs)
+            .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
     );
 
     let bind_addr = config.server.bind_address();

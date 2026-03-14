@@ -47,13 +47,14 @@ impl AuthConfig {
     /// Effective issuer for JWT `iss` claims and OIDC discovery.
     ///
     /// Returns `oauth2_issuer_url` when set, falling back to
-    /// `jwt_issuer`. This ensures OIDC discovery `issuer` always
-    /// matches the `iss` claim in issued tokens (OIDC Core §2).
+    /// `jwt_issuer`. Trailing slashes are stripped so that the
+    /// OIDC discovery `issuer` exactly matches token `iss` claims
+    /// (OIDC Core §2 requires an exact string match).
     pub fn effective_issuer(&self) -> &str {
         if self.oauth2_issuer_url.is_empty() {
-            &self.jwt_issuer
+            self.jwt_issuer.trim_end_matches('/')
         } else {
-            &self.oauth2_issuer_url
+            self.oauth2_issuer_url.trim_end_matches('/')
         }
     }
 }

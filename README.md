@@ -96,14 +96,17 @@ The project follows a structured roadmap of **64 tasks across 16 phases**:
 | Phase 5 | gRPC API | Done |
 | Phase 6 | AMQP integration | Done |
 | Phase 7 | Audit logging | Done |
-| Phase 8 | PKI & certificates | Next |
-| Phase 9 | Webhook system | Planned |
-| Phase 10 | OAuth2 & OIDC | Planned |
-| Phase 11 | Federation (SAML + OIDC) | Planned |
-| Phase 12 | Admin frontend | Planned |
-| Phase 13 | Docker & Kubernetes | Planned |
-| Phase 14 | SDKs (Rust, TS, Python, Java, C#, PHP, Go) | Planned |
-| Phase 15 | Security audit, compliance, docs | Planned |
+| Phase 8 | PKI & certificates | Done |
+| Phase 9 | Webhook system | Done |
+| Phase 10 | OAuth2 & OIDC | Done |
+| Phase 11 | Federation (SAML + OIDC) | Next |
+| Phase 12 | Hierarchical Settings & Password Policy | Planned |
+| Phase 13 | Email Service & Account Flows | Planned |
+| Phase 14 | Advanced MFA | Planned |
+| Phase 15 | Admin frontend | Planned |
+| Phase 16 | Docker & Kubernetes | Planned |
+| Phase 17 | SDKs (Rust, TS, Python, Java, C#, PHP, Go) | Planned |
+| Phase 18 | Security audit, compliance, docs | Planned |
 
 ## Quick Start
 

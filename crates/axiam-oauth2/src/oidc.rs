@@ -93,9 +93,11 @@ pub struct JwksDocument {
 /// The `kid` is derived deterministically as the first 16 hex
 /// characters (64 bits) of the SHA-256 hash of the raw public key bytes.
 pub fn build_jwks(public_key_pem: &str) -> Result<JwksDocument, String> {
-    // Strip PEM headers and decode base64.
+    // Strip PEM headers, trim whitespace (handles CRLF / trailing
+    // spaces from env vars or Windows-formatted PEMs), and decode.
     let b64: String = public_key_pem
         .lines()
+        .map(str::trim)
         .filter(|l| !l.starts_with("-----"))
         .collect();
     let der = STANDARD

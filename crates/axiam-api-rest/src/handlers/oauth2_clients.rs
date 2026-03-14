@@ -281,11 +281,24 @@ pub async fn update<C: Connection>(
     {
         return Err(validation_err("name must not be empty"));
     }
-    if let Some(ref uris) = req.redirect_uris {
-        validate_redirect_uris(uris)?;
-    }
     if let Some(ref gts) = req.grant_types {
         validate_grant_types(gts)?;
+    }
+    // Apply the same conditional redirect_uris rule as create:
+    // only require/validate them when the effective grant_types
+    // include authorization_code.
+    if let Some(ref uris) = req.redirect_uris {
+        // If grant_types are being updated, use them; otherwise we
+        // can't determine the effective grant_types without a DB
+        // fetch, so validate the URIs unconditionally (safe default).
+        let needs_redirects = req
+            .grant_types
+            .as_ref()
+            .map(|gts| gts.iter().any(|g| g == "authorization_code"))
+            .unwrap_or(true);
+        if needs_redirects {
+            validate_redirect_uris(uris)?;
+        }
     }
 
     let client = repo

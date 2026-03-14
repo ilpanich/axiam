@@ -279,68 +279,49 @@ fn load_config() -> AppConfig {
         "AXIAM__AUTH__JWT_PUBLIC_KEY_PEM must be set (Ed25519 PEM)"
     );
 
-    if config.auth.oauth2_issuer_url.is_empty() {
-        // jwt_issuer is used as the OIDC discovery issuer fallback.
-        // Validate that it is at least a parseable absolute URL so the
-        // discovery document doesn't emit invalid endpoint URLs.
-        if url::Url::parse(&config.auth.jwt_issuer).is_err() {
-            panic!(
-                "AXIAM__AUTH__OAUTH2_ISSUER_URL is not set and \
-                 AXIAM__AUTH__JWT_ISSUER ({}) is not a valid absolute \
-                 URL — set oauth2_issuer_url to an absolute HTTPS URL \
-                 for a compliant OIDC discovery document",
-                config.auth.jwt_issuer
-            );
-        }
+    // Validate the effective OIDC issuer URL.  The same rules apply
+    // regardless of whether it comes from oauth2_issuer_url or the
+    // jwt_issuer fallback.
+    let issuer_source = if config.auth.oauth2_issuer_url.is_empty() {
+        &config.auth.jwt_issuer
     } else {
-        // Validate oauth2_issuer_url when explicitly configured.
-        // OIDC Discovery §3 requires `issuer` to be a URL with
-        // an https scheme (http allowed for localhost dev).
-        let url = url::Url::parse(&config.auth.oauth2_issuer_url).unwrap_or_else(|e| {
-            panic!(
-                "AXIAM__AUTH__OAUTH2_ISSUER_URL is not a valid URL: \
-                 {e} (got: {})",
-                config.auth.oauth2_issuer_url
-            )
-        });
-        let is_localhost = url
-            .host_str()
-            .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
-        assert!(
-            url.scheme() == "https" || (url.scheme() == "http" && is_localhost),
-            "OIDC issuer must use https (http is only allowed for \
-             localhost); got: {}",
-            config.auth.oauth2_issuer_url
-        );
-        assert!(
-            url.host().is_some(),
-            "OIDC issuer URL must have a host: {}",
-            config.auth.oauth2_issuer_url
-        );
-        // AXIAM limitation: path-based issuers are not currently
-        // supported.  While OIDC allows path segments in issuers
-        // (e.g. for reverse-proxy or multi-tenant deployments),
-        // AXIAM serves discovery at a fixed `/.well-known/` route and
-        // builds endpoint URLs as `{issuer}/oauth2/...`, which would
-        // break with a non-root path.
-        assert!(
-            url.path() == "/" || url.path().is_empty(),
-            "AXIAM does not support path-based issuer URLs \
-             (path-based issuers require route changes not yet \
-             implemented): {}",
-            config.auth.oauth2_issuer_url
-        );
-        assert!(
-            url.query().is_none(),
-            "OIDC issuer URL must not contain a query string: {}",
-            config.auth.oauth2_issuer_url
-        );
-        assert!(
-            url.fragment().is_none(),
-            "OIDC issuer URL must not contain a fragment: {}",
-            config.auth.oauth2_issuer_url
-        );
-    }
+        &config.auth.oauth2_issuer_url
+    };
+    let url = url::Url::parse(issuer_source)
+        .unwrap_or_else(|e| panic!("OIDC issuer is not a valid URL: {e} (got: {issuer_source})"));
+    let is_localhost = url
+        .host_str()
+        .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
+    assert!(
+        url.scheme() == "https" || (url.scheme() == "http" && is_localhost),
+        "OIDC issuer must use https (http is only allowed for \
+         localhost); got: {issuer_source}",
+    );
+    assert!(
+        url.host().is_some(),
+        "OIDC issuer URL must have a host: {issuer_source}",
+    );
+    // AXIAM limitation: path-based issuers are not currently
+    // supported.  While OIDC allows path segments in issuers
+    // (e.g. for reverse-proxy or multi-tenant deployments),
+    // AXIAM serves discovery at a fixed `/.well-known/` route and
+    // builds endpoint URLs as `{issuer}/oauth2/...`, which would
+    // break with a non-root path.
+    assert!(
+        url.path() == "/" || url.path().is_empty(),
+        "AXIAM does not support path-based issuer URLs \
+         (path-based issuers require route changes not yet \
+         implemented): {issuer_source}",
+    );
+    assert!(
+        url.query().is_none(),
+        "OIDC issuer URL must not contain a query string: \
+         {issuer_source}",
+    );
+    assert!(
+        url.fragment().is_none(),
+        "OIDC issuer URL must not contain a fragment: {issuer_source}",
+    );
 
     config
 }

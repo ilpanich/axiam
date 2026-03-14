@@ -166,8 +166,14 @@ pub async fn create<C: Connection>(
     if req.name.is_empty() {
         return Err(validation_err("name must not be empty"));
     }
-    validate_redirect_uris(&req.redirect_uris)?;
     validate_grant_types(&req.grant_types)?;
+    // redirect_uris are only required when the client uses
+    // authorization_code (which involves user-agent redirects).
+    // M2M clients (client_credentials only) don't need them.
+    let needs_redirects = req.grant_types.iter().any(|g| g == "authorization_code");
+    if needs_redirects {
+        validate_redirect_uris(&req.redirect_uris)?;
+    }
 
     let (client, raw_secret) = repo
         .create(CreateOAuth2Client {

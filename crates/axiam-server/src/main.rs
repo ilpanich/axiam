@@ -280,12 +280,18 @@ fn load_config() -> AppConfig {
     );
 
     if config.auth.oauth2_issuer_url.is_empty() {
-        tracing::warn!(
-            "AXIAM__AUTH__OAUTH2_ISSUER_URL not set — \
-             OIDC discovery will use jwt_issuer as base URL; \
-             set it to an absolute HTTPS URL for correct \
-             discovery documents"
-        );
+        // jwt_issuer is used as the OIDC discovery issuer fallback.
+        // Validate that it is at least a parseable absolute URL so the
+        // discovery document doesn't emit invalid endpoint URLs.
+        if url::Url::parse(&config.auth.jwt_issuer).is_err() {
+            panic!(
+                "AXIAM__AUTH__OAUTH2_ISSUER_URL is not set and \
+                 AXIAM__AUTH__JWT_ISSUER ({}) is not a valid absolute \
+                 URL — set oauth2_issuer_url to an absolute HTTPS URL \
+                 for a compliant OIDC discovery document",
+                config.auth.jwt_issuer
+            );
+        }
     } else {
         // Validate oauth2_issuer_url when explicitly configured.
         // OIDC Discovery §3 requires `issuer` to be a URL with
@@ -311,10 +317,17 @@ fn load_config() -> AppConfig {
             "OIDC issuer URL must have a host: {}",
             config.auth.oauth2_issuer_url
         );
+        // AXIAM limitation: path-based issuers are not currently
+        // supported.  While OIDC allows path segments in issuers
+        // (e.g. for reverse-proxy or multi-tenant deployments),
+        // AXIAM serves discovery at a fixed `/.well-known/` route and
+        // builds endpoint URLs as `{issuer}/oauth2/...`, which would
+        // break with a non-root path.
         assert!(
             url.path() == "/" || url.path().is_empty(),
-            "OIDC issuer URL must not contain a path \
-             (discovery is served at {{issuer}}/.well-known/...): {}",
+            "AXIAM does not support path-based issuer URLs \
+             (path-based issuers require route changes not yet \
+             implemented): {}",
             config.auth.oauth2_issuer_url
         );
         assert!(

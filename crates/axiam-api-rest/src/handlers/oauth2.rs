@@ -275,7 +275,19 @@ pub async fn introspect<C: Connection>(
     ),
 )]
 pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
-    let doc = build_discovery_document(auth_config.effective_issuer());
+    let issuer = auth_config.effective_issuer();
+    // Guard: effective_issuer must be a valid URL for a compliant
+    // discovery document.  Startup validation should catch this, but
+    // defend in depth at the endpoint level.
+    if url::Url::parse(issuer).is_err() {
+        return HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
+            error: "server_error".into(),
+            error_description: "OIDC issuer is not configured as a \
+                valid URL"
+                .into(),
+        });
+    }
+    let doc = build_discovery_document(issuer);
     HttpResponse::Ok().json(doc)
 }
 

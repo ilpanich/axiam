@@ -50,6 +50,7 @@ fn test_auth_config() -> AuthConfig {
         jwt_public_key_pem: pub_pem,
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
+        oauth2_issuer_url: "https://localhost".into(),
         ..AuthConfig::default()
     }
 }
@@ -1206,7 +1207,7 @@ async fn oidc_discovery_document() {
     assert_eq!(resp.status().as_u16(), 200);
 
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["issuer"], "axiam-test");
+    assert_eq!(body["issuer"], "https://localhost");
     assert!(body["authorization_endpoint"].is_string());
     assert!(body["token_endpoint"].is_string());
     assert!(body["userinfo_endpoint"].is_string());
@@ -1394,7 +1395,7 @@ async fn oidc_id_token_in_auth_code_flow() {
     let claims: serde_json::Value = serde_json::from_slice(&payload).unwrap();
     assert_eq!(claims["sub"], user_id.to_string());
     assert_eq!(claims["aud"], client_id);
-    assert_eq!(claims["iss"], "axiam-test");
+    assert_eq!(claims["iss"], "https://localhost");
     assert_eq!(claims["nonce"], "test-nonce-123");
     assert!(claims["iat"].is_number());
     assert!(claims["exp"].is_number());

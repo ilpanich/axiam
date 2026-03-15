@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum FederationProtocol {
     OidcConnect,
     Saml,
@@ -51,4 +51,32 @@ pub struct UpdateFederationConfig {
     pub client_secret: Option<String>,
     pub attribute_map: Option<serde_json::Value>,
     pub enabled: Option<bool>,
+}
+
+/// Tracks the link between an AXIAM user and their external IdP identity.
+///
+/// Each link binds a local user to an external subject identifier (the `sub`
+/// claim from the external OIDC provider), scoped to a specific federation
+/// configuration within a tenant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederationLink {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub federation_config_id: Uuid,
+    /// The `sub` claim from the external IdP's ID token.
+    pub external_subject: String,
+    /// The email claim from the external IdP, if available.
+    pub external_email: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateFederationLink {
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub federation_config_id: Uuid,
+    pub external_subject: String,
+    pub external_email: Option<String>,
 }

@@ -10,7 +10,10 @@ use crate::error::AxiamResult;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
-    federation::{CreateFederationConfig, FederationConfig, UpdateFederationConfig},
+    federation::{
+        CreateFederationConfig, CreateFederationLink, FederationConfig, FederationLink,
+        UpdateFederationConfig,
+    },
     group::{CreateGroup, Group, UpdateGroup},
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, CreateRefreshToken,
@@ -614,6 +617,32 @@ pub trait FederationConfigRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<FederationConfig>>> + Send;
+}
+
+pub trait FederationLinkRepository: Send + Sync {
+    /// Create a new federation link binding a local user to an external subject.
+    fn create(
+        &self,
+        input: CreateFederationLink,
+    ) -> impl Future<Output = AxiamResult<FederationLink>> + Send;
+
+    /// Find a federation link by the external subject identifier.
+    fn get_by_external_subject(
+        &self,
+        tenant_id: Uuid,
+        federation_config_id: Uuid,
+        external_subject: &str,
+    ) -> impl Future<Output = AxiamResult<FederationLink>> + Send;
+
+    /// Get all federation links for a given user.
+    fn get_by_user_id(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<FederationLink>>> + Send;
+
+    /// Delete a federation link.
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 // ---------------------------------------------------------------------------

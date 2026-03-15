@@ -14,6 +14,7 @@ axiam-authz = { workspace = true }
 axiam-db = { workspace = true }
 axiam-audit = { workspace = true }
 axiam-oauth2 = { workspace = true }
+axiam-federation = { workspace = true }
 axiam-pki = { workspace = true }
 actix-web = { workspace = true }
 serde = { workspace = true }

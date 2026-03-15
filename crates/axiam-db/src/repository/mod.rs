@@ -3,6 +3,8 @@
 mod audit;
 mod ca_certificate;
 mod certificate;
+mod federation_config;
+mod federation_link;
 mod group;
 mod oauth2_auth_code;
 mod oauth2_client;
@@ -22,6 +24,8 @@ mod webhook;
 pub use audit::SurrealAuditLogRepository;
 pub use ca_certificate::SurrealCaCertificateRepository;
 pub use certificate::SurrealCertificateRepository;
+pub use federation_config::SurrealFederationConfigRepository;
+pub use federation_link::SurrealFederationLinkRepository;
 pub use group::SurrealGroupRepository;
 pub use oauth2_auth_code::SurrealAuthorizationCodeRepository;
 pub use oauth2_client::SurrealOAuth2ClientRepository;

@@ -2,6 +2,7 @@ pub mod audit;
 pub mod auth;
 pub mod ca_certificates;
 pub mod certificates;
+pub mod federation;
 pub mod groups;
 pub mod oauth2;
 pub mod oauth2_clients;

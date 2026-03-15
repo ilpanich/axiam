@@ -315,6 +315,46 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(
                         web::delete().to(handlers::oauth2_clients::delete::<C>),
                     ),
+            )
+            // --- Federation Configs ---
+            .service(
+                web::resource("/federation-configs")
+                    .route(web::post().to(handlers::federation::create::<C>))
+                    .route(web::get().to(handlers::federation::list::<C>)),
+            )
+            .service(
+                web::resource("/federation-configs/{id}")
+                    .route(web::get().to(handlers::federation::get::<C>))
+                    .route(web::put().to(handlers::federation::update::<C>))
+                    .route(
+                        web::delete().to(handlers::federation::delete::<C>),
+                    ),
+            )
+            // --- Federation OIDC Flow ---
+            .service(
+                web::resource("/federation/oidc/authorize")
+                    .route(
+                        web::post().to(handlers::federation::oidc_authorize::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/federation/oidc/callback")
+                    .route(
+                        web::post().to(handlers::federation::oidc_callback::<C>),
+                    ),
+            )
+            // --- Federation Links ---
+            .service(
+                web::resource("/federation-links/user/{user_id}")
+                    .route(
+                        web::get().to(handlers::federation::list_user_links::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/federation-links/{id}")
+                    .route(
+                        web::delete().to(handlers::federation::delete_link::<C>),
+                    ),
             ),
     );
 }

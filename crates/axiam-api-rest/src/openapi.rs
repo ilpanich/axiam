@@ -133,6 +133,16 @@ use crate::handlers;
         handlers::oauth2::discovery,
         handlers::oauth2::jwks,
         handlers::oauth2::userinfo,
+        // Federation
+        handlers::federation::create,
+        handlers::federation::list,
+        handlers::federation::get,
+        handlers::federation::update,
+        handlers::federation::delete,
+        handlers::federation::oidc_authorize,
+        handlers::federation::oidc_callback,
+        handlers::federation::list_user_links,
+        handlers::federation::delete_link,
     ),
     components(schemas(
         // Health
@@ -243,6 +253,15 @@ use crate::handlers;
         handlers::oauth2_clients::UpdateOAuth2ClientRequest,
         handlers::oauth2_clients::OAuth2ClientResponse,
         handlers::oauth2_clients::OAuth2ClientCreatedResponse,
+        // Federation
+        handlers::federation::CreateFederationConfigRequest,
+        handlers::federation::UpdateFederationConfigRequest,
+        handlers::federation::FederationConfigResponse,
+        handlers::federation::OidcAuthorizeRequest,
+        handlers::federation::OidcCallbackRequest,
+        handlers::federation::OidcCallbackResponse,
+        handlers::federation::FederationLinkResponse,
+        axiam_core::models::federation::FederationProtocol,
         // OAuth2 Flow
         handlers::oauth2::OAuth2ErrorResponse,
         axiam_oauth2::token::TokenResponse,
@@ -277,6 +296,7 @@ use crate::handlers;
         (name = "oauth2-clients", description = "OAuth2 client registration and management"),
         (name = "oauth2", description = "OAuth2 authorization and token endpoints"),
         (name = "oidc", description = "OpenID Connect discovery, JWKS, and UserInfo"),
+        (name = "federation", description = "OIDC federation and external IdP integration"),
     ),
     modifiers(&SecurityAddon),
 )]

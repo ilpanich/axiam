@@ -731,6 +731,7 @@ dependencies = [
  "axiam-authz",
  "axiam-core",
  "axiam-db",
+ "axiam-federation",
  "axiam-oauth2",
  "axiam-pki",
  "base64",
@@ -848,11 +849,15 @@ version = "0.1.0"
 dependencies = [
  "axiam-core",
  "axiam-db",
+ "base64",
+ "chrono",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -922,6 +927,7 @@ dependencies = [
  "axiam-pki",
  "config",
  "hex",
+ "reqwest 0.12.28",
  "serde",
  "tokio",
  "tracing",

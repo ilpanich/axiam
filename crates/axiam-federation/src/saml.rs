@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use crate::error::FederationError;
 use crate::oidc::FederationCallbackResult;
+use crate::validate_metadata_url;
 
 /// SAML success status URI.
 const SAML_STATUS_SUCCESS: &str = "urn:oasis:names:tc:SAML:2.0:status:Success";
@@ -109,10 +110,14 @@ where
     }
 
     /// Fetch and parse the IdP SAML metadata from the given URL.
+    ///
+    /// Only HTTPS URLs are accepted to mitigate SSRF risks.
     pub async fn fetch_idp_metadata(
         &self,
         metadata_url: &str,
     ) -> Result<IdpMetadata, FederationError> {
+        validate_metadata_url(metadata_url)?;
+
         let response = self
             .http_client
             .get(metadata_url)
@@ -195,7 +200,7 @@ where
             .get_by_id(tenant_id, config_id)
             .await
             .map_err(|e| match e {
-                AxiamError::NotFound { .. } => FederationError::ConfigNotFound,
+                AxiamError::NotFound { id, .. } => FederationError::ConfigNotFound(id),
                 other => FederationError::Internal(other.to_string()),
             })?;
 
@@ -293,7 +298,7 @@ where
             .get_by_id(tenant_id, config_id)
             .await
             .map_err(|e| match e {
-                AxiamError::NotFound { .. } => FederationError::ConfigNotFound,
+                AxiamError::NotFound { id, .. } => FederationError::ConfigNotFound(id),
                 other => FederationError::Internal(other.to_string()),
             })?;
 
@@ -416,7 +421,7 @@ where
             .get_by_id(tenant_id, config_id)
             .await
             .map_err(|e| match e {
-                AxiamError::NotFound { .. } => FederationError::ConfigNotFound,
+                AxiamError::NotFound { id, .. } => FederationError::ConfigNotFound(id),
                 other => FederationError::Internal(other.to_string()),
             })?;
 
@@ -426,7 +431,8 @@ where
             ));
         }
 
-        let sp_entity_id = &config.client_id;
+        let sp_entity_id = xml_escape(&config.client_id);
+        let acs_escaped = xml_escape(acs_url);
 
         Ok(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -439,7 +445,7 @@ where
     <md:NameIDFormat>{NAMEID_FORMAT_PERSISTENT}</md:NameIDFormat>
     <md:AssertionConsumerService
         Binding="{HTTP_POST_BINDING}"
-        Location="{acs_url}"
+        Location="{acs_escaped}"
         index="0"
         isDefault="true"/>
   </md:SPSSODescriptor>
@@ -639,6 +645,16 @@ fn apply_attribute_map(
     let display_name = get_mapped("name").or_else(|| get_mapped("displayName"));
 
     (email, display_name)
+}
+
+/// Escape XML special characters in attribute values and text content.
+fn xml_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// DEFLATE-compress the input bytes (raw deflate, no zlib/gzip headers).

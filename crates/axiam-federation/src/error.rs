@@ -3,8 +3,8 @@
 /// Errors that can occur during federation operations.
 #[derive(Debug, thiserror::Error)]
 pub enum FederationError {
-    #[error("Federation config not found")]
-    ConfigNotFound,
+    #[error("Federation config not found: {0}")]
+    ConfigNotFound(String),
 
     #[error("Federation config is disabled")]
     ConfigDisabled,
@@ -34,9 +34,9 @@ pub enum FederationError {
 impl From<FederationError> for axiam_core::error::AxiamError {
     fn from(err: FederationError) -> Self {
         match err {
-            FederationError::ConfigNotFound => axiam_core::error::AxiamError::NotFound {
+            FederationError::ConfigNotFound(id) => axiam_core::error::AxiamError::NotFound {
                 entity: "federation_config".into(),
-                id: String::new(),
+                id,
             },
             FederationError::ConfigDisabled => axiam_core::error::AxiamError::Validation {
                 message: "Federation config is disabled".into(),

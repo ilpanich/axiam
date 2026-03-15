@@ -194,6 +194,11 @@ pub async fn create<C: Connection>(
     if req.client_secret.is_empty() {
         return Err(validation_err("client_secret must not be empty"));
     }
+    if let Some(ref url) = req.metadata_url
+        && url.is_empty()
+    {
+        return Err(validation_err("metadata_url must not be empty"));
+    }
 
     let protocol = match req.protocol.as_str() {
         "OidcConnect" => FederationProtocol::OidcConnect,
@@ -307,6 +312,11 @@ pub async fn update<C: Connection>(
         && client_secret.is_empty()
     {
         return Err(validation_err("client_secret must not be empty"));
+    }
+    if let Some(Some(ref url)) = req.metadata_url
+        && url.is_empty()
+    {
+        return Err(validation_err("metadata_url must not be empty"));
     }
 
     let config = repo
@@ -544,7 +554,8 @@ pub struct SamlAuthnRequestResponse {
     pub url: String,
     /// Base64-encoded AuthnRequest XML.
     pub saml_request: String,
-    /// Binding type: HTTP-Redirect or HTTP-POST.
+    /// SAML binding URI (e.g.,
+    /// `urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST`).
     pub binding: String,
     /// Relay state, if provided.
     pub relay_state: Option<String>,
@@ -566,6 +577,9 @@ pub struct SamlAcsRequest {
 pub struct SamlMetadataQuery {
     /// ID of the SAML federation config.
     pub config_id: Uuid,
+    /// Assertion Consumer Service URL for the generated metadata.
+    /// Must match the actual ACS endpoint URL for the deployment.
+    pub acs_url: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +700,7 @@ pub async fn saml_acs<C: Connection>(
     tag = "federation",
     params(
         ("config_id" = Uuid, Query, description = "SAML federation config ID"),
+        ("acs_url" = String, Query, description = "ACS URL for the SP metadata"),
     ),
     responses(
         (status = 200, description = "SP metadata XML",
@@ -708,14 +723,12 @@ pub async fn saml_metadata<C: Connection>(
         (**http_client).clone(),
     );
 
-    // Use a sensible default ACS URL based on the request context.
-    // In production this would be derived from configuration; for now
-    // we generate metadata with a placeholder that the admin can
-    // adjust.
-    let acs_url = "https://axiam.example.com/api/v1/federation/saml/acs".to_string();
+    if query.acs_url.is_empty() {
+        return Err(validation_err("acs_url must not be empty"));
+    }
 
     let xml = service
-        .generate_sp_metadata(user.tenant_id, query.config_id, &acs_url)
+        .generate_sp_metadata(user.tenant_id, query.config_id, &query.acs_url)
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 

@@ -533,7 +533,8 @@ async fn saml_metadata_returns_xml() {
 
     let req = test::TestRequest::get()
         .uri(&format!(
-            "/api/v1/federation/saml/metadata?config_id={config_id}"
+            "/api/v1/federation/saml/metadata?config_id={config_id}\
+             &acs_url=https%3A%2F%2Fexample.com%2Facs"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
@@ -566,6 +567,10 @@ async fn saml_metadata_returns_xml() {
         xml.contains("AssertionConsumerService"),
         "metadata must contain AssertionConsumerService"
     );
+    assert!(
+        xml.contains("https://example.com/acs"),
+        "metadata must contain the provided ACS URL"
+    );
 }
 
 #[actix_rt::test]
@@ -582,7 +587,8 @@ async fn saml_metadata_rejects_oidc_config() {
 
     let req = test::TestRequest::get()
         .uri(&format!(
-            "/api/v1/federation/saml/metadata?config_id={config_id}"
+            "/api/v1/federation/saml/metadata?config_id={config_id}\
+             &acs_url=https%3A%2F%2Fexample.com%2Facs"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();

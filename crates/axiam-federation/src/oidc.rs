@@ -16,6 +16,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::error::FederationError;
+use crate::validate_metadata_url;
 
 /// Minimal OIDC Discovery document fields we care about.
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +50,10 @@ struct TokenResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct IdTokenClaims {
     pub sub: String,
+    pub iss: Option<String>,
+    pub aud: Option<serde_json::Value>,
+    pub exp: Option<u64>,
+    pub iat: Option<u64>,
     pub email: Option<String>,
     pub name: Option<String>,
     pub nonce: Option<String>,
@@ -96,10 +101,15 @@ where
     }
 
     /// Fetch and parse the OIDC discovery document from the provider.
+    ///
+    /// Only HTTPS URLs are accepted to mitigate SSRF risks, since the
+    /// `metadata_url` originates from admin-provided configuration.
     pub async fn discover(
         &self,
         metadata_url: &str,
     ) -> Result<OidcDiscoveryDocument, FederationError> {
+        validate_metadata_url(metadata_url)?;
+
         let response = self
             .http_client
             .get(metadata_url)
@@ -137,7 +147,7 @@ where
             .get_by_id(tenant_id, config_id)
             .await
             .map_err(|e| match e {
-                AxiamError::NotFound { .. } => FederationError::ConfigNotFound,
+                AxiamError::NotFound { id, .. } => FederationError::ConfigNotFound(id),
                 other => FederationError::Internal(other.to_string()),
             })?;
 
@@ -201,7 +211,7 @@ where
             .get_by_id(tenant_id, config_id)
             .await
             .map_err(|e| match e {
-                AxiamError::NotFound { .. } => FederationError::ConfigNotFound,
+                AxiamError::NotFound { id, .. } => FederationError::ConfigNotFound(id),
                 other => FederationError::Internal(other.to_string()),
             })?;
 
@@ -252,6 +262,35 @@ where
             ));
         }
 
+        // Validate standard registered claims (iss, aud, exp).
+        // NOTE: Full issuer/audience matching against the discovery
+        // document will be enforced once JWT signature verification
+        // is added. For now we reject clearly invalid tokens.
+        if let Some(exp) = claims.exp {
+            let now = chrono::Utc::now().timestamp() as u64;
+            if now > exp {
+                return Err(FederationError::IdTokenValidationFailed(
+                    "ID token has expired".into(),
+                ));
+            }
+        }
+
+        if let Some(ref aud) = claims.aud {
+            let client_id = &config.client_id;
+            let aud_matches = match aud {
+                serde_json::Value::String(s) => s == client_id,
+                serde_json::Value::Array(arr) => {
+                    arr.iter().any(|v| v.as_str() == Some(client_id.as_str()))
+                }
+                _ => false,
+            };
+            if !aud_matches {
+                return Err(FederationError::IdTokenValidationFailed(
+                    "Audience does not match client_id".into(),
+                ));
+            }
+        }
+
         info!(
             tenant_id = %tenant_id,
             config_id = %config_id,
@@ -294,13 +333,15 @@ where
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            // Avoid logging the full body — it may contain sensitive data.
+            // Log truncated body server-side for debugging; never
+            // expose the raw IdP response to the API client.
             warn!(
                 status = %status,
+                body_preview = %body.chars().take(200).collect::<String>(),
                 "Token exchange failed with non-success status"
             );
             return Err(FederationError::TokenExchangeFailed(format!(
-                "HTTP {status}: {body}"
+                "IdP returned HTTP {status}"
             )));
         }
 

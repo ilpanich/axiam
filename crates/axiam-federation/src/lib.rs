@@ -10,8 +10,11 @@ pub mod saml;
 
 use error::FederationError;
 
-/// Validate that a metadata URL uses the HTTPS scheme to mitigate
-/// SSRF attacks via admin-configured URLs pointing at internal hosts.
+/// Validate that a metadata URL uses the HTTPS scheme.
+///
+/// This is a scheme-only check. Additional SSRF mitigations (private IP
+/// blocking, DNS rebinding) are handled at the HTTP client level via
+/// `redirect(Policy::none())` and network-layer controls.
 pub(crate) fn validate_metadata_url(url: &str) -> Result<(), FederationError> {
     let parsed =
         url::Url::parse(url).map_err(|e| FederationError::InvalidMetadataUrl(format!("{e}")))?;

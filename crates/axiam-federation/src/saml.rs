@@ -177,10 +177,12 @@ where
             })?;
 
         // Validate that the SSO endpoint uses HTTPS to prevent
-        // redirecting users to insecure origins.
-        if let Ok(parsed) = url::Url::parse(&sso_endpoint.location)
-            && parsed.scheme() != "https"
-        {
+        // redirecting users to insecure origins. Fail closed on
+        // parse errors — reject malformed URLs outright.
+        let sso_parsed = url::Url::parse(&sso_endpoint.location).map_err(|e| {
+            FederationError::SamlMetadataFailed(format!("IdP SSO endpoint is not a valid URL: {e}"))
+        })?;
+        if sso_parsed.scheme() != "https" {
             return Err(FederationError::SamlMetadataFailed(
                 "IdP SSO endpoint must use HTTPS".into(),
             ));
@@ -522,11 +524,14 @@ where
         email: Option<&str>,
         display_name: Option<&str>,
     ) -> Result<FederationCallbackResult, FederationError> {
-        let username = display_name.or(email).unwrap_or(name_id).to_string();
+        let username = display_name
+            .or(email)
+            .map(String::from)
+            .unwrap_or_else(|| format!("federated-{config_id}-{name_id}"));
 
         let user_email = email
             .map(String::from)
-            .unwrap_or_else(|| format!("{name_id}@federated.local"));
+            .unwrap_or_else(|| format!("{name_id}.{config_id}@federated.local"));
 
         // Federated users get a random non-usable password since they
         // authenticate through the external IdP.

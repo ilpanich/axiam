@@ -111,7 +111,13 @@ macro_rules! test_app {
                     $db.clone(),
                 )))
                 .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(reqwest::Client::new()))
+                .app_data(web::Data::new(
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()
+                        .unwrap(),
+                ))
                 .configure(register_api_v1_routes::<TestDb>),
         )
         .await

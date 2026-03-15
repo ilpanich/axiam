@@ -140,9 +140,10 @@ where
             ("token_endpoint", &doc.token_endpoint),
             ("jwks_uri", &doc.jwks_uri),
         ] {
-            if let Ok(parsed) = url::Url::parse(url)
-                && parsed.scheme() != "https"
-            {
+            let parsed = url::Url::parse(url).map_err(|e| {
+                FederationError::DiscoveryFailed(format!("{name} is not a valid URL: {e}"))
+            })?;
+            if parsed.scheme() != "https" {
                 return Err(FederationError::DiscoveryFailed(format!(
                     "{name} must use HTTPS, got: {url}"
                 )));
@@ -301,7 +302,7 @@ where
             FederationError::IdTokenValidationFailed("Missing required 'exp' claim".into())
         })?;
         let now = chrono::Utc::now().timestamp() as u64;
-        if now > exp {
+        if now >= exp {
             return Err(FederationError::IdTokenValidationFailed(
                 "ID token has expired".into(),
             ));
@@ -480,12 +481,12 @@ where
             .name
             .clone()
             .or_else(|| claims.email.clone())
-            .unwrap_or_else(|| format!("federated-{}", &claims.sub));
+            .unwrap_or_else(|| format!("federated-{}-{}", config_id, &claims.sub));
 
         let email = claims
             .email
             .clone()
-            .unwrap_or_else(|| format!("{}@federated.local", claims.sub));
+            .unwrap_or_else(|| format!("{}.{}@federated.local", claims.sub, config_id));
 
         // Generate a random password that cannot be used for direct
         // login. Federated users must always authenticate via their IdP.

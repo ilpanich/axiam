@@ -156,8 +156,8 @@ where
         }
 
         if config.protocol != FederationProtocol::OidcConnect {
-            return Err(FederationError::Internal(
-                "Federation config is not OIDC".into(),
+            return Err(FederationError::ProtocolMismatch(
+                "expected OidcConnect protocol".into(),
             ));
         }
 
@@ -217,6 +217,12 @@ where
 
         if !config.enabled {
             return Err(FederationError::ConfigDisabled);
+        }
+
+        if config.protocol != FederationProtocol::OidcConnect {
+            return Err(FederationError::ProtocolMismatch(
+                "expected OidcConnect protocol".into(),
+            ));
         }
 
         let metadata_url = config

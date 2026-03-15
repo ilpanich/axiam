@@ -9,6 +9,12 @@ pub enum FederationError {
     #[error("Federation config is disabled")]
     ConfigDisabled,
 
+    #[error("Protocol mismatch: {0}")]
+    ProtocolMismatch(String),
+
+    #[error("Invalid metadata URL: {0}")]
+    InvalidMetadataUrl(String),
+
     #[error("OIDC discovery failed: {0}")]
     DiscoveryFailed(String),
 
@@ -38,8 +44,10 @@ impl From<FederationError> for axiam_core::error::AxiamError {
                 entity: "federation_config".into(),
                 id,
             },
-            FederationError::ConfigDisabled => axiam_core::error::AxiamError::Validation {
-                message: "Federation config is disabled".into(),
+            FederationError::ConfigDisabled
+            | FederationError::ProtocolMismatch(_)
+            | FederationError::InvalidMetadataUrl(_) => axiam_core::error::AxiamError::Validation {
+                message: err.to_string(),
             },
             FederationError::IdTokenValidationFailed(reason)
             | FederationError::SamlResponseFailed(reason) => {

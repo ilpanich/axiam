@@ -209,8 +209,8 @@ where
         }
 
         if config.protocol != FederationProtocol::Saml {
-            return Err(FederationError::Internal(
-                "Federation config is not SAML".into(),
+            return Err(FederationError::ProtocolMismatch(
+                "expected Saml protocol".into(),
             ));
         }
 
@@ -307,8 +307,8 @@ where
         }
 
         if config.protocol != FederationProtocol::Saml {
-            return Err(FederationError::Internal(
-                "Federation config is not SAML".into(),
+            return Err(FederationError::ProtocolMismatch(
+                "expected Saml protocol".into(),
             ));
         }
 
@@ -426,8 +426,8 @@ where
             })?;
 
         if config.protocol != FederationProtocol::Saml {
-            return Err(FederationError::Internal(
-                "Federation config is not SAML".into(),
+            return Err(FederationError::ProtocolMismatch(
+                "expected Saml protocol".into(),
             ));
         }
 

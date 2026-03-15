@@ -176,6 +176,16 @@ where
                 )
             })?;
 
+        // Validate that the SSO endpoint uses HTTPS to prevent
+        // redirecting users to insecure origins.
+        if let Ok(parsed) = url::Url::parse(&sso_endpoint.location)
+            && parsed.scheme() != "https"
+        {
+            return Err(FederationError::SamlMetadataFailed(
+                "IdP SSO endpoint must use HTTPS".into(),
+            ));
+        }
+
         Ok(IdpMetadata {
             entity_id,
             sso_url: sso_endpoint.location.clone(),
@@ -325,11 +335,10 @@ where
             FederationError::SamlResponseFailed(format!("Failed to parse SAML Response XML: {e}"))
         })?;
 
-        // NOTE: XML signature verification is not yet implemented.
-        // This mirrors the OIDC module's deferred JWT signature
-        // verification. Full signature validation using the IdP's
-        // X.509 certificate from metadata should be added before
-        // production use.
+        // TODO(T19.7): Implement XML signature verification using the
+        // IdP's X.509 certificate from metadata and fail closed (reject
+        // unsigned/unverified assertions) unless an explicit
+        // insecure-federation dev/test flag is enabled.
         warn!(
             tenant_id = %tenant_id,
             config_id = %config_id,

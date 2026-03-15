@@ -489,6 +489,21 @@ The gRPC `ValidateCredentials` RPC is intentionally side-effect-free (it checks 
 
 **Commit**: `feat(api-grpc): track failed login attempts in ValidateCredentials`
 
+### T19.6 — OIDC ID Token JWKS Signature Verification
+Implement JWT signature verification for OIDC federation ID tokens using the JWKS endpoint from the discovery document. Integrate `jsonwebtoken` with JWK fetching and caching. Fail closed by default — reject unverified tokens unless an explicit `insecure_federation` dev/test flag is enabled in configuration.
+
+**Commit**: `feat(federation): JWKS-based JWT signature verification for OIDC ID tokens`
+
+### T19.7 — SAML Response XML Signature Verification
+Implement XML signature verification for SAML responses using the IdP's X.509 certificate from metadata. Fail closed by default — reject unsigned or unverified assertions unless an explicit `insecure_federation` dev/test flag is enabled. Also set `WantAssertionsSigned="true"` in SP metadata once verification is enforced.
+
+**Commit**: `feat(federation): XML signature verification for SAML responses`
+
+### T19.8 — Federation Client Secret Encryption at Rest
+Encrypt `client_secret` in the `federation_config` table using AES-256-GCM before storage, mirroring the pattern used for MFA secrets and CA private keys. Decrypt only at runtime when performing token exchange. Apply consistently on both `create()` and `update()` paths.
+
+**Commit**: `security(federation): encrypt client_secret at rest with AES-256-GCM`
+
 ---
 
 ## Summary
@@ -514,8 +529,8 @@ The gRPC `ValidateCredentials` RPC is intentionally side-effect-free (it checks 
 | Phase 16 | 3 | Docker, K8s, CD pipeline |
 | Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 18 | 4 | Security, compliance, performance, docs |
-| Phase 19 | 5 | Deferred improvements & optimizations from PR reviews |
+| Phase 19 | 8 | Deferred improvements & optimizations from PR reviews |
 
-**Total: 80 tasks across 20 phases**
+**Total: 83 tasks across 20 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

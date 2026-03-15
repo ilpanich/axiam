@@ -125,9 +125,31 @@ where
             )));
         }
 
-        response.json::<OidcDiscoveryDocument>().await.map_err(|e| {
-            FederationError::DiscoveryFailed(format!("Failed to parse discovery document: {e}"))
-        })
+        let doc = response
+            .json::<OidcDiscoveryDocument>()
+            .await
+            .map_err(|e| {
+                FederationError::DiscoveryFailed(format!("Failed to parse discovery document: {e}"))
+            })?;
+
+        // Validate that critical endpoints in the discovery document use
+        // HTTPS. A compromised/malicious discovery endpoint could return
+        // http:// URLs, leaking client_secret during token exchange.
+        for (name, url) in [
+            ("authorization_endpoint", &doc.authorization_endpoint),
+            ("token_endpoint", &doc.token_endpoint),
+            ("jwks_uri", &doc.jwks_uri),
+        ] {
+            if let Ok(parsed) = url::Url::parse(url)
+                && parsed.scheme() != "https"
+            {
+                return Err(FederationError::DiscoveryFailed(format!(
+                    "{name} must use HTTPS, got: {url}"
+                )));
+            }
+        }
+
+        Ok(doc)
     }
 
     /// Build the authorization URL to redirect the user to the external IdP.
@@ -248,11 +270,10 @@ where
         })?;
 
         // Decode and validate the ID token claims.
-        // NOTE: In production, this should validate the JWT signature
-        // against the JWKS from the discovery document. For now we
-        // decode the payload without cryptographic verification — full
-        // JWT signature validation using the JWKS endpoint will be added
-        // when we integrate `jsonwebtoken` with JWK fetching.
+        // TODO(T19.6): Implement JWKS-based JWT signature verification
+        // and fail closed (reject unverified tokens) unless an explicit
+        // insecure-federation dev/test flag is enabled. Until then,
+        // tokens are decoded without cryptographic verification.
         warn!(
             tenant_id = %tenant_id,
             config_id = %config_id,
@@ -274,33 +295,33 @@ where
             ));
         }
 
-        // Validate standard registered claims (iss, aud, exp).
-        // NOTE: Full issuer/audience matching against the discovery
-        // document will be enforced once JWT signature verification
-        // is added. For now we reject clearly invalid tokens.
-        if let Some(exp) = claims.exp {
-            let now = chrono::Utc::now().timestamp() as u64;
-            if now > exp {
-                return Err(FederationError::IdTokenValidationFailed(
-                    "ID token has expired".into(),
-                ));
-            }
+        // Validate standard registered claims (exp, aud).
+        // Per OIDC Core §2, exp and aud are REQUIRED claims.
+        let exp = claims.exp.ok_or_else(|| {
+            FederationError::IdTokenValidationFailed("Missing required 'exp' claim".into())
+        })?;
+        let now = chrono::Utc::now().timestamp() as u64;
+        if now > exp {
+            return Err(FederationError::IdTokenValidationFailed(
+                "ID token has expired".into(),
+            ));
         }
 
-        if let Some(ref aud) = claims.aud {
-            let client_id = &config.client_id;
-            let aud_matches = match aud {
-                serde_json::Value::String(s) => s == client_id,
-                serde_json::Value::Array(arr) => {
-                    arr.iter().any(|v| v.as_str() == Some(client_id.as_str()))
-                }
-                _ => false,
-            };
-            if !aud_matches {
-                return Err(FederationError::IdTokenValidationFailed(
-                    "Audience does not match client_id".into(),
-                ));
+        let aud = claims.aud.as_ref().ok_or_else(|| {
+            FederationError::IdTokenValidationFailed("Missing required 'aud' claim".into())
+        })?;
+        let client_id = &config.client_id;
+        let aud_matches = match aud {
+            serde_json::Value::String(s) => s == client_id,
+            serde_json::Value::Array(arr) => {
+                arr.iter().any(|v| v.as_str() == Some(client_id.as_str()))
             }
+            _ => false,
+        };
+        if !aud_matches {
+            return Err(FederationError::IdTokenValidationFailed(
+                "Audience does not match client_id".into(),
+            ));
         }
 
         info!(

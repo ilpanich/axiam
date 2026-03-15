@@ -125,12 +125,23 @@ where
             )));
         }
 
-        let doc = response
-            .json::<OidcDiscoveryDocument>()
-            .await
-            .map_err(|e| {
-                FederationError::DiscoveryFailed(format!("Failed to parse discovery document: {e}"))
-            })?;
+        // Enforce a maximum body size to prevent memory exhaustion from
+        // a malicious/misconfigured metadata endpoint.
+        const MAX_DISCOVERY_SIZE: usize = 256 * 1024; // 256 KiB
+        let bytes = response.bytes().await.map_err(|e| {
+            FederationError::DiscoveryFailed(format!("Failed to read response body: {e}"))
+        })?;
+        if bytes.len() > MAX_DISCOVERY_SIZE {
+            return Err(FederationError::DiscoveryFailed(format!(
+                "Discovery document too large: {} bytes (max {})",
+                bytes.len(),
+                MAX_DISCOVERY_SIZE
+            )));
+        }
+
+        let doc: OidcDiscoveryDocument = serde_json::from_slice(&bytes).map_err(|e| {
+            FederationError::DiscoveryFailed(format!("Failed to parse discovery document: {e}"))
+        })?;
 
         // Validate that critical endpoints in the discovery document use
         // HTTPS. A compromised/malicious discovery endpoint could return
@@ -474,13 +485,13 @@ where
         config_id: Uuid,
         claims: &IdTokenClaims,
     ) -> Result<FederationCallbackResult, FederationError> {
-        // Use the external subject as the username basis, and the email
-        // if available. Federated users get a random non-usable password
-        // since they authenticate through the external IdP.
+        // Derive a deterministic unique username: prefer email (likely
+        // unique per-tenant), otherwise use config_id + sub. Display
+        // names are neither stable nor unique across IdPs, so they are
+        // not used as usernames.
         let username = claims
-            .name
+            .email
             .clone()
-            .or_else(|| claims.email.clone())
             .unwrap_or_else(|| format!("federated-{}-{}", config_id, &claims.sub));
 
         let email = claims

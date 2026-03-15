@@ -303,7 +303,7 @@ use crate::handlers;
         (name = "oauth2-clients", description = "OAuth2 client registration and management"),
         (name = "oauth2", description = "OAuth2 authorization and token endpoints"),
         (name = "oidc", description = "OpenID Connect discovery, JWKS, and UserInfo"),
-        (name = "federation", description = "OIDC federation and external IdP integration"),
+        (name = "federation", description = "OIDC and SAML federation with external IdPs"),
     ),
     modifiers(&SecurityAddon),
 )]

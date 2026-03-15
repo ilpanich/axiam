@@ -135,8 +135,22 @@ where
             )));
         }
 
-        let text = response.text().await.map_err(|e| {
+        // Enforce a maximum body size to prevent memory exhaustion from
+        // a large metadata document.
+        const MAX_METADATA_SIZE: usize = 512 * 1024; // 512 KiB
+        let bytes = response.bytes().await.map_err(|e| {
             FederationError::SamlMetadataFailed(format!("Failed to read metadata body: {e}"))
+        })?;
+        if bytes.len() > MAX_METADATA_SIZE {
+            return Err(FederationError::SamlMetadataFailed(format!(
+                "Metadata document too large: {} bytes (max {})",
+                bytes.len(),
+                MAX_METADATA_SIZE
+            )));
+        }
+
+        let text = String::from_utf8(bytes.to_vec()).map_err(|e| {
+            FederationError::SamlMetadataFailed(format!("Invalid UTF-8 in metadata: {e}"))
         })?;
 
         let descriptor_type: EntityDescriptorType = text.parse().map_err(|e| {
@@ -522,10 +536,12 @@ where
         config_id: Uuid,
         name_id: &str,
         email: Option<&str>,
-        display_name: Option<&str>,
+        _display_name: Option<&str>,
     ) -> Result<FederationCallbackResult, FederationError> {
-        let username = display_name
-            .or(email)
+        // Derive a deterministic unique username: prefer email (likely
+        // unique per-tenant), otherwise use config_id + name_id. Display
+        // names are neither stable nor unique, so they are not used.
+        let username = email
             .map(String::from)
             .unwrap_or_else(|| format!("federated-{config_id}-{name_id}"));
 

@@ -504,6 +504,11 @@ Encrypt `client_secret` in the `federation_config` table using AES-256-GCM befor
 
 **Commit**: `security(federation): encrypt client_secret at rest with AES-256-GCM`
 
+### T19.9 — Unauthenticated Federation Login Endpoints
+Add separate unauthenticated federation login endpoints (`/auth/federation/oidc/login`, `/auth/federation/saml/login`) that complete the external OIDC/SAML flow and return AXIAM access/refresh tokens — enabling first-time login via federation without requiring an existing local account. The current authenticated endpoints remain for account-linking (linking an external identity to an already-authenticated user).
+
+**Commit**: `feat(federation): unauthenticated federation login endpoints for first-time SSO`
+
 ---
 
 ## Summary
@@ -529,8 +534,8 @@ Encrypt `client_secret` in the `federation_config` table using AES-256-GCM befor
 | Phase 16 | 3 | Docker, K8s, CD pipeline |
 | Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 18 | 4 | Security, compliance, performance, docs |
-| Phase 19 | 8 | Deferred improvements & optimizations from PR reviews |
+| Phase 19 | 9 | Deferred improvements & optimizations from PR reviews |
 
-**Total: 83 tasks across 20 phases**
+**Total: 84 tasks across 20 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

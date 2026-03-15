@@ -111,6 +111,12 @@ pub struct OidcCallbackRequest {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct OidcAuthorizeResponse {
+    /// The full authorization URL to redirect the user to.
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct OidcCallbackResponse {
     pub user_id: Uuid,
     pub federation_link_id: Uuid,
@@ -367,13 +373,19 @@ pub async fn delete<C: Connection>(
 /// Builds the authorization URL for the external OIDC provider. The caller
 /// is responsible for generating and storing `state` and `nonce` values
 /// for CSRF and replay protection.
+///
+/// TODO(T19.9): This endpoint currently requires authentication, making it
+/// usable only for account-linking (already-authenticated users). Add
+/// separate unauthenticated federation login endpoints that complete the
+/// external flow and return access/refresh tokens for first-time login.
 #[utoipa::path(
     post,
     path = "/api/v1/federation/oidc/authorize",
     tag = "federation",
     request_body = OidcAuthorizeRequest,
     responses(
-        (status = 200, description = "Authorization URL built successfully"),
+        (status = 200, description = "Authorization URL built successfully",
+         body = OidcAuthorizeResponse),
     ),
     security(("bearer" = []))
 )]
@@ -415,7 +427,7 @@ pub async fn oidc_authorize<C: Connection>(
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 
-    Ok(HttpResponse::Ok().json(auth_url))
+    Ok(HttpResponse::Ok().json(OidcAuthorizeResponse { url: auth_url.url }))
 }
 
 /// `POST /api/v1/federation/oidc/callback`

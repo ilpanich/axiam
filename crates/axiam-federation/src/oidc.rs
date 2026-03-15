@@ -253,6 +253,12 @@ where
         // decode the payload without cryptographic verification — full
         // JWT signature validation using the JWKS endpoint will be added
         // when we integrate `jsonwebtoken` with JWK fetching.
+        warn!(
+            tenant_id = %tenant_id,
+            config_id = %config_id,
+            "ID token decoded without JWT signature verification — \
+             JWKS validation not yet implemented"
+        );
         let claims = Self::decode_id_token_claims(&id_token_str)?;
 
         // Validate nonce to prevent replay attacks.

@@ -440,7 +440,7 @@ where
     entityID="{sp_entity_id}">
   <md:SPSSODescriptor
       AuthnRequestsSigned="false"
-      WantAssertionsSigned="true"
+      WantAssertionsSigned="false"
       protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
     <md:NameIDFormat>{NAMEID_FORMAT_PERSISTENT}</md:NameIDFormat>
     <md:AssertionConsumerService

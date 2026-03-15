@@ -159,6 +159,9 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .bind(("protocol", protocol.to_string()))
             .bind(("metadata_url", input.metadata_url))
             .bind(("client_id", input.client_id))
+            // TODO: encrypt client_secret with AES-256-GCM before storage
+            // (same pattern as MFA secrets and CA private keys). For now the
+            // value is stored in plaintext; tracked for follow-up.
             .bind(("client_secret", input.client_secret))
             .bind(("attribute_map", attribute_map))
             .await
@@ -222,6 +225,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             binds.push(("client_id".into(), serde_json::json!(client_id)));
         }
         if let Some(ref client_secret) = input.client_secret {
+            // TODO: encrypt client_secret before storage (see create()).
             set_clauses.push("client_secret = $client_secret".into());
             binds.push(("client_secret".into(), serde_json::json!(client_secret)));
         }

@@ -96,8 +96,9 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
 /// Build a test app registering only federation-related app_data.
 ///
 /// The OIDC authorize/callback handlers also need `SurrealUserRepository`
-/// and `reqwest::Client`, so we register those too. We only hit the
-/// federation config and link endpoints in these tests.
+/// and `reqwest::Client`, so we register those too. Tests exercise
+/// federation config CRUD, federation link queries, and SAML SP
+/// endpoints (authn-request, ACS, metadata).
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {
         test::init_service(
@@ -594,8 +595,8 @@ async fn saml_metadata_rejects_oidc_config() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    // The service returns FederationError::Internal for wrong protocol,
-    // which maps to a 500.
+    // The service returns FederationError::ProtocolMismatch for wrong
+    // protocol, which maps to AxiamError::Validation (400).
     assert!(
         resp.status().as_u16() >= 400,
         "using an OIDC config for SAML metadata must fail, got {}",

@@ -15,6 +15,7 @@ use axiam_db::{
     SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealUserRepository,
 };
 use axiam_federation::oidc::OidcFederationService;
+use axiam_federation::saml::SamlFederationService;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -518,4 +519,207 @@ pub async fn delete_link<C: Connection>(
     let id = path.into_inner();
     repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+// ---------------------------------------------------------------------------
+// SAML SP Flow — DTOs
+// ---------------------------------------------------------------------------
+
+/// Request to build a SAML AuthnRequest.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SamlAuthnRequestRequest {
+    /// ID of the SAML federation config.
+    pub config_id: Uuid,
+    /// Assertion Consumer Service URL where the IdP will POST the
+    /// response.
+    pub acs_url: String,
+    /// Optional relay state to pass through the SSO flow.
+    pub relay_state: Option<String>,
+}
+
+/// Response containing the SAML AuthnRequest details.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SamlAuthnRequestResponse {
+    /// Full redirect URL (HTTP-Redirect) or IdP SSO URL (HTTP-POST).
+    pub url: String,
+    /// Base64-encoded AuthnRequest XML.
+    pub saml_request: String,
+    /// Binding type: HTTP-Redirect or HTTP-POST.
+    pub binding: String,
+    /// Relay state, if provided.
+    pub relay_state: Option<String>,
+}
+
+/// Request to handle a SAML Response at the ACS endpoint.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SamlAcsRequest {
+    /// ID of the SAML federation config.
+    pub config_id: Uuid,
+    /// Base64-encoded SAML Response XML from the IdP.
+    pub saml_response: String,
+    /// Relay state returned by the IdP.
+    pub relay_state: Option<String>,
+}
+
+/// Query parameters for SP metadata generation.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SamlMetadataQuery {
+    /// ID of the SAML federation config.
+    pub config_id: Uuid,
+}
+
+// ---------------------------------------------------------------------------
+// SAML SP Flow — Handlers
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/federation/saml/authn-request`
+///
+/// Builds a SAML AuthnRequest for the specified federation config.
+/// Returns the SSO URL, encoded request, and binding type for the
+/// caller to initiate the redirect or POST to the IdP.
+#[utoipa::path(
+    post,
+    path = "/api/v1/federation/saml/authn-request",
+    tag = "federation",
+    request_body = SamlAuthnRequestRequest,
+    responses(
+        (status = 200, description = "SAML AuthnRequest built",
+         body = SamlAuthnRequestResponse),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn saml_authn_request<C: Connection>(
+    user: AuthenticatedUser,
+    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
+    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    http_client: web::Data<reqwest::Client>,
+    body: web::Json<SamlAuthnRequestRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let req = body.into_inner();
+
+    if req.acs_url.is_empty() {
+        return Err(validation_err("acs_url must not be empty"));
+    }
+
+    let service = SamlFederationService::new(
+        (**config_repo).clone(),
+        (**link_repo).clone(),
+        (**user_repo).clone(),
+        (**http_client).clone(),
+    );
+
+    let result = service
+        .build_authn_request(user.tenant_id, req.config_id, &req.acs_url, req.relay_state)
+        .await
+        .map_err(axiam_core::error::AxiamError::from)?;
+
+    Ok(HttpResponse::Ok().json(SamlAuthnRequestResponse {
+        url: result.url,
+        saml_request: result.saml_request,
+        binding: result.binding,
+        relay_state: result.relay_state,
+    }))
+}
+
+/// `POST /api/v1/federation/saml/acs`
+///
+/// Handles the SAML Response received from the external IdP after
+/// user authentication. Validates the assertion, extracts claims,
+/// and provisions or links the local user.
+#[utoipa::path(
+    post,
+    path = "/api/v1/federation/saml/acs",
+    tag = "federation",
+    request_body = SamlAcsRequest,
+    responses(
+        (status = 200, description = "SAML ACS processed",
+         body = OidcCallbackResponse),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn saml_acs<C: Connection>(
+    user: AuthenticatedUser,
+    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
+    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    http_client: web::Data<reqwest::Client>,
+    body: web::Json<SamlAcsRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let req = body.into_inner();
+
+    if req.saml_response.is_empty() {
+        return Err(validation_err("saml_response must not be empty"));
+    }
+
+    let service = SamlFederationService::new(
+        (**config_repo).clone(),
+        (**link_repo).clone(),
+        (**user_repo).clone(),
+        (**http_client).clone(),
+    );
+
+    let result = service
+        .handle_saml_response(
+            user.tenant_id,
+            req.config_id,
+            &req.saml_response,
+            req.relay_state.as_deref(),
+        )
+        .await
+        .map_err(axiam_core::error::AxiamError::from)?;
+
+    Ok(HttpResponse::Ok().json(OidcCallbackResponse {
+        user_id: result.user.id,
+        federation_link_id: result.federation_link.id,
+        newly_provisioned: result.newly_provisioned,
+    }))
+}
+
+/// `GET /api/v1/federation/saml/metadata`
+///
+/// Generates the SP metadata XML for the specified SAML federation
+/// config. Returns XML with content type `application/samlmetadata+xml`.
+#[utoipa::path(
+    get,
+    path = "/api/v1/federation/saml/metadata",
+    tag = "federation",
+    params(
+        ("config_id" = Uuid, Query, description = "SAML federation config ID"),
+    ),
+    responses(
+        (status = 200, description = "SP metadata XML",
+         content_type = "application/samlmetadata+xml"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn saml_metadata<C: Connection>(
+    user: AuthenticatedUser,
+    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
+    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    http_client: web::Data<reqwest::Client>,
+    query: web::Query<SamlMetadataQuery>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let service = SamlFederationService::new(
+        (**config_repo).clone(),
+        (**link_repo).clone(),
+        (**user_repo).clone(),
+        (**http_client).clone(),
+    );
+
+    // Use a sensible default ACS URL based on the request context.
+    // In production this would be derived from configuration; for now
+    // we generate metadata with a placeholder that the admin can
+    // adjust.
+    let acs_url = "https://axiam.example.com/api/v1/federation/saml/acs".to_string();
+
+    let xml = service
+        .generate_sp_metadata(user.tenant_id, query.config_id, &acs_url)
+        .await
+        .map_err(axiam_core::error::AxiamError::from)?;
+
+    Ok(HttpResponse::Ok()
+        .content_type("application/samlmetadata+xml")
+        .body(xml))
 }

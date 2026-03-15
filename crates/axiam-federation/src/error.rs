@@ -1,4 +1,4 @@
-//! Error types for OIDC federation operations.
+//! Error types for federation operations (OIDC and SAML).
 
 /// Errors that can occur during federation operations.
 #[derive(Debug, thiserror::Error)]
@@ -18,6 +18,12 @@ pub enum FederationError {
     #[error("ID token validation failed: {0}")]
     IdTokenValidationFailed(String),
 
+    #[error("SAML metadata fetch/parse failed: {0}")]
+    SamlMetadataFailed(String),
+
+    #[error("SAML response validation failed: {0}")]
+    SamlResponseFailed(String),
+
     #[error("User provisioning failed: {0}")]
     ProvisioningFailed(String),
 
@@ -35,7 +41,8 @@ impl From<FederationError> for axiam_core::error::AxiamError {
             FederationError::ConfigDisabled => axiam_core::error::AxiamError::Validation {
                 message: "Federation config is disabled".into(),
             },
-            FederationError::IdTokenValidationFailed(reason) => {
+            FederationError::IdTokenValidationFailed(reason)
+            | FederationError::SamlResponseFailed(reason) => {
                 axiam_core::error::AxiamError::AuthenticationFailed { reason }
             }
             other => axiam_core::error::AxiamError::Internal(other.to_string()),

@@ -1,7 +1,8 @@
-//! Integration tests for OIDC federation management endpoints.
+//! Integration tests for federation management endpoints.
 //!
-//! Covers CRUD for federation configs, federation link queries,
-//! input validation, auth enforcement, and client_secret omission.
+//! Covers CRUD for federation configs (OIDC and SAML), federation link
+//! queries, SAML SP flow validation, input validation, auth enforcement,
+//! and client_secret omission.
 
 use actix_web::{App, test, web};
 use axiam_api_rest::register_api_v1_routes;
@@ -413,4 +414,203 @@ async fn delete_nonexistent_federation_link_returns_404() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: create a SAML federation config via the API
+// ---------------------------------------------------------------------------
+
+async fn create_saml_config(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+) -> serde_json::Value {
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "provider": "Test SAML IdP",
+            "protocol": "Saml",
+            "metadata_url": "https://idp.example.com/metadata",
+            "client_id": "https://axiam.example.com/saml/sp",
+            "client_secret": "saml-dummy-secret",
+            "attribute_map": {
+                "email": "urn:oid:0.9.2342.19200300.100.1.3",
+                "name": "urn:oid:2.5.4.3"
+            }
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    test::read_body_json(resp).await
+}
+
+// ---------------------------------------------------------------------------
+// SAML-specific tests
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn create_saml_federation_config_returns_201() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let body = create_saml_config(&app, &token).await;
+    assert!(body["id"].is_string(), "response must include id");
+    assert_eq!(body["provider"], "Test SAML IdP");
+    assert_eq!(body["protocol"], "Saml");
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["tenant_id"], tenant_id.to_string());
+    assert!(
+        body.get("client_secret").is_none(),
+        "client_secret must be omitted from API responses"
+    );
+}
+
+#[actix_rt::test]
+async fn saml_authn_request_rejects_empty_acs_url() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let config = create_saml_config(&app, &token).await;
+    let config_id = config["id"].as_str().unwrap();
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/saml/authn-request")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "config_id": config_id,
+            "acs_url": ""
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_acs_rejects_empty_saml_response() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let config = create_saml_config(&app, &token).await;
+    let config_id = config["id"].as_str().unwrap();
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/saml/acs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "config_id": config_id,
+            "saml_response": ""
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_metadata_returns_xml() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let config = create_saml_config(&app, &token).await;
+    let config_id = config["id"].as_str().unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/api/v1/federation/saml/metadata?config_id={config_id}"
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .expect("response must have content-type header")
+        .to_str()
+        .unwrap();
+    assert!(
+        content_type.contains("xml"),
+        "content-type must indicate XML, got: {content_type}"
+    );
+
+    let body = test::read_body(resp).await;
+    let xml = std::str::from_utf8(&body).expect("body must be valid UTF-8");
+    assert!(
+        xml.contains("EntityDescriptor"),
+        "metadata must contain EntityDescriptor"
+    );
+    assert!(
+        xml.contains("SPSSODescriptor"),
+        "metadata must contain SPSSODescriptor"
+    );
+    assert!(
+        xml.contains("AssertionConsumerService"),
+        "metadata must contain AssertionConsumerService"
+    );
+}
+
+#[actix_rt::test]
+async fn saml_metadata_rejects_oidc_config() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // Create an OIDC config (not SAML)
+    let oidc_config = create_test_config(&app, &token).await;
+    let config_id = oidc_config["id"].as_str().unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/api/v1/federation/saml/metadata?config_id={config_id}"
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    // The service returns FederationError::Internal for wrong protocol,
+    // which maps to a 500.
+    assert!(
+        resp.status().as_u16() >= 400,
+        "using an OIDC config for SAML metadata must fail, got {}",
+        resp.status().as_u16()
+    );
+}
+
+#[actix_rt::test]
+async fn saml_authn_request_without_auth_returns_401() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/saml/authn-request")
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4().to_string(),
+            "acs_url": "https://example.com/acs"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
 }

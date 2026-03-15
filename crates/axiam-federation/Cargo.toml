@@ -20,3 +20,5 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+samael = { workspace = true }
+flate2 = { workspace = true }

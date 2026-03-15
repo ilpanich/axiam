@@ -343,6 +343,25 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                         web::post().to(handlers::federation::oidc_callback::<C>),
                     ),
             )
+            // --- Federation SAML Flow ---
+            .service(
+                web::resource("/federation/saml/authn-request")
+                    .route(
+                        web::post().to(handlers::federation::saml_authn_request::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/federation/saml/acs")
+                    .route(
+                        web::post().to(handlers::federation::saml_acs::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/federation/saml/metadata")
+                    .route(
+                        web::get().to(handlers::federation::saml_metadata::<C>),
+                    ),
+            )
             // --- Federation Links ---
             .service(
                 web::resource("/federation-links/user/{user_id}")

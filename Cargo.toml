@@ -90,6 +90,10 @@ rcgen = "0.13"
 x509-parser = "0.17"
 pgp = "0.19"
 
+# SAML
+samael = { version = "0.0.19", default-features = false }
+flate2 = "1"
+
 # TLS
 rustls = "0.23"
 

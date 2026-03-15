@@ -16,7 +16,8 @@ pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use repository::{
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
+    SurrealCertificateRepository, SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,

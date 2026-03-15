@@ -13,7 +13,8 @@ use axiam_auth::AuthService;
 use axiam_auth::config::AuthConfig;
 use axiam_db::{
     DbConfig, DbManager, SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
-    SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealGroupRepository,
+    SurrealCaCertificateRepository, SurrealCertificateRepository,
+    SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealGroupRepository,
     SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
     SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
@@ -133,6 +134,16 @@ async fn main() -> std::io::Result<()> {
     let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone());
+    let federation_config_repo = SurrealFederationConfigRepository::new(db.client().clone());
+    let federation_link_repo = SurrealFederationLinkRepository::new(db.client().clone());
+    // Disable automatic redirects to prevent SSRF bypass (an HTTPS URL
+    // could redirect to http:// or an internal host). Apply a global
+    // timeout for consistent outbound HTTP behaviour.
+    let http_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("failed to build reqwest client");
     let oauth2_client_repo = SurrealOAuth2ClientRepository::new(db.client().clone());
     let auth_code_repo = SurrealAuthorizationCodeRepository::new(db.client().clone());
     let refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
@@ -250,6 +261,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(oauth2_client_repo.clone()))
             .app_data(web::Data::new(authorize_service.clone()))
             .app_data(web::Data::new(token_service.clone()))
+            .app_data(web::Data::new(federation_config_repo.clone()))
+            .app_data(web::Data::new(federation_link_repo.clone()))
+            .app_data(web::Data::new(http_client.clone()))
             .configure(health_routes)
             .configure(api_v1_routes)
             .configure(openapi_routes)

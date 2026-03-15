@@ -155,11 +155,19 @@ fn hash_password(password: &str, pepper: Option<&str>) -> Result<String, DbError
 }
 
 /// SurrealDB implementation of the User repository.
-#[derive(Clone)]
 pub struct SurrealUserRepository<C: Connection> {
     db: Surreal<C>,
     /// Optional server-side pepper for password hashing.
     pepper: Option<String>,
+}
+
+impl<C: Connection> Clone for SurrealUserRepository<C> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            pepper: self.pepper.clone(),
+        }
+    }
 }
 
 impl<C: Connection> SurrealUserRepository<C> {

@@ -68,6 +68,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "oauth2_auth_code_nonce",
         sql: SCHEMA_V6,
     },
+    Migration {
+        version: 7,
+        name: "federation_links",
+        sql: SCHEMA_V7,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -521,6 +526,30 @@ DEFINE INDEX idx_refresh_token_client ON TABLE oauth2_refresh_token \
 
 const SCHEMA_V6: &str = "\
 DEFINE FIELD nonce ON TABLE oauth2_auth_code TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v7 — Federation links (external IdP user binding)
+// -----------------------------------------------------------------------
+
+const SCHEMA_V7: &str = "\
+-- =======================================================================
+-- Federation Links (tenant scope)
+-- =======================================================================
+DEFINE TABLE federation_link SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE federation_link TYPE string;
+DEFINE FIELD user_id ON TABLE federation_link TYPE string;
+DEFINE FIELD federation_config_id ON TABLE federation_link TYPE string;
+DEFINE FIELD external_subject ON TABLE federation_link TYPE string;
+DEFINE FIELD external_email ON TABLE federation_link TYPE option<string>;
+DEFINE FIELD created_at ON TABLE federation_link TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE federation_link TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_fed_link_subject ON TABLE federation_link \
+    COLUMNS tenant_id, federation_config_id, external_subject UNIQUE;
+DEFINE INDEX idx_fed_link_user ON TABLE federation_link \
+    COLUMNS tenant_id, user_id;
 ";
 
 // -----------------------------------------------------------------------

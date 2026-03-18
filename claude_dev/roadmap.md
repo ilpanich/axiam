@@ -294,7 +294,7 @@ Implement `GET/PUT /api/v1/organizations/:org_id/settings` (org-level) and `GET/
 ## Phase 13: Email Service & Account Flows
 
 ### T13.1 — Email Service Abstraction
-Implement a pluggable email service with provider trait (`EmailProvider`): SMTP/TLS (via `lettre`), SendGrid, Postmark, Resend, Brevo (via `reqwest` REST calls). Provider is configured at org level; tenants can override. Add email configuration section. Add unit tests with mock provider.
+Implement a pluggable email service with provider trait (`EmailProvider`): SMTP/TLS (via `lettre`), SendGrid, Postmark, Resend, Brevo (via `reqwest` REST calls if specific and maintained crates are not available). Provider is configured at org level; tenants can override. Add email configuration section. Add unit tests with mock provider.
 
 **Commit**: `feat(email): pluggable email service with SMTP and REST provider support`
 
@@ -391,7 +391,7 @@ Create K8s manifests: Deployment, Service, Ingress, ConfigMap, Secrets for AXIAM
 **Commit**: `feat(k8s): Kubernetes deployment manifests with HPA`
 
 ### T16.3 — CD Pipeline (GitHub Actions)
-Extend GitHub Actions: build and push Docker images on tag, deploy to K8s (or push Helm chart). Add release workflow with CHANGELOG generation.
+Extend GitHub Actions: build, sign (using ([sigstore](https://www.sigstore.dev/)) and push Docker images on tag, deploy to K8s (or push Helm chart). Add release workflow with CHANGELOG generation. Produce github attestation of the generated binary.
 
 **Commit**: `ci: add CD pipeline for Docker build and release`
 

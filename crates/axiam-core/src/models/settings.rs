@@ -243,6 +243,70 @@ pub fn system_defaults() -> SetOrgSettings {
 }
 
 // -----------------------------------------------------------------------
+// Org settings validation (internal invariants)
+// -----------------------------------------------------------------------
+
+/// Validate internal invariants of organization-level settings.
+///
+/// Checks relationships between fields (e.g., max >= min) and rejects
+/// obviously invalid values (zero lifetimes where required).
+pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
+    let mut violations = Vec::new();
+
+    if input.max_lockout_duration_secs < input.lockout_duration_secs {
+        violations.push(format!(
+            "max_lockout_duration_secs ({}) must be >= \
+             lockout_duration_secs ({})",
+            input.max_lockout_duration_secs, input.lockout_duration_secs,
+        ));
+    }
+
+    if input.max_cert_validity_days < input.default_cert_validity_days {
+        violations.push(format!(
+            "max_cert_validity_days ({}) must be >= \
+             default_cert_validity_days ({})",
+            input.max_cert_validity_days, input.default_cert_validity_days,
+        ));
+    }
+
+    if input.lockout_backoff_multiplier < 1.0 {
+        violations.push(format!(
+            "lockout_backoff_multiplier ({}) must be >= 1.0",
+            input.lockout_backoff_multiplier,
+        ));
+    }
+
+    if input.access_token_lifetime_secs == 0 {
+        violations.push(
+            "access_token_lifetime_secs must be > 0".into(),
+        );
+    }
+
+    if input.refresh_token_lifetime_secs == 0 {
+        violations.push(
+            "refresh_token_lifetime_secs must be > 0".into(),
+        );
+    }
+
+    if input.mfa_challenge_lifetime_secs == 0 {
+        violations.push(
+            "mfa_challenge_lifetime_secs must be > 0".into(),
+        );
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(AxiamError::Validation {
+            message: format!(
+                "Invalid org settings: {}",
+                violations.join("; "),
+            ),
+        })
+    }
+}
+
+// -----------------------------------------------------------------------
 // Inheritance engine — pure functions
 // -----------------------------------------------------------------------
 
@@ -332,7 +396,7 @@ pub fn effective_settings(
                 .admin_notifications_enabled
                 .unwrap_or(org.notification.admin_notifications_enabled),
         },
-        created_at: org.created_at,
+        created_at: Utc::now(),
         updated_at: Utc::now(),
     }
 }

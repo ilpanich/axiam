@@ -110,21 +110,19 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
         user_id: Uuid,
         count: u32,
     ) -> AxiamResult<Vec<PasswordHistoryEntry>> {
-        let query = format!(
-            "SELECT meta::id(id) AS record_id, * \
-             FROM password_history \
-             WHERE tenant_id = $tenant_id \
-             AND user_id = $user_id \
-             ORDER BY created_at DESC \
-             LIMIT {}",
-            count,
-        );
-
         let mut result = self
             .db
-            .query(&query)
+            .query(
+                "SELECT meta::id(id) AS record_id, * \
+                 FROM password_history \
+                 WHERE tenant_id = $tenant_id \
+                 AND user_id = $user_id \
+                 ORDER BY created_at DESC \
+                 LIMIT $limit",
+            )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
+            .bind(("limit", count))
             .await
             .map_err(DbError::from)?;
 
@@ -136,29 +134,50 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
     }
 
     async fn prune(&self, tenant_id: Uuid, user_id: Uuid, keep_count: u32) -> AxiamResult<u64> {
+        let tid = tenant_id.to_string();
+        let uid = user_id.to_string();
+
+        // When keep_count is 0, delete all entries for this user.
+        if keep_count == 0 {
+            let mut result = self
+                .db
+                .query(
+                    "DELETE password_history \
+                     WHERE tenant_id = $tenant_id \
+                     AND user_id = $user_id \
+                     RETURN BEFORE",
+                )
+                .bind(("tenant_id", tid))
+                .bind(("user_id", uid))
+                .await
+                .map_err(DbError::from)?;
+
+            let deleted: Vec<PasswordHistoryRow> =
+                result.take(0).map_err(DbError::from)?;
+            return Ok(deleted.len() as u64);
+        }
+
         // Get the IDs to keep (most recent N).
-        let keep_query = format!(
-            "SELECT meta::id(id) AS record_id \
-             FROM password_history \
-             WHERE tenant_id = $tenant_id \
-             AND user_id = $user_id \
-             ORDER BY created_at DESC \
-             LIMIT {}",
-            keep_count,
-        );
-
-        let mut result = self
-            .db
-            .query(&keep_query)
-            .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("user_id", user_id.to_string()))
-            .await
-            .map_err(DbError::from)?;
-
         #[derive(Debug, SurrealValue)]
         struct IdRow {
             record_id: String,
         }
+
+        let mut result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id \
+                 FROM password_history \
+                 WHERE tenant_id = $tenant_id \
+                 AND user_id = $user_id \
+                 ORDER BY created_at DESC \
+                 LIMIT $limit",
+            )
+            .bind(("tenant_id", tid.clone()))
+            .bind(("user_id", uid.clone()))
+            .bind(("limit", keep_count))
+            .await
+            .map_err(DbError::from)?;
 
         let keep_rows: Vec<IdRow> = result.take(0).map_err(DbError::from)?;
 
@@ -178,19 +197,21 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
             "DELETE password_history \
              WHERE tenant_id = $tenant_id \
              AND user_id = $user_id \
-             AND id NOT IN [{}]",
+             AND id NOT IN [{}] \
+             RETURN BEFORE",
             keep_list,
         );
 
-        self.db
+        let mut result = self
+            .db
             .query(&delete_query)
-            .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("user_id", user_id.to_string()))
+            .bind(("tenant_id", tid))
+            .bind(("user_id", uid))
             .await
             .map_err(DbError::from)?;
 
-        // SurrealDB DELETE doesn't return a count easily;
-        // return 0 as a placeholder (pruning is best-effort).
-        Ok(0)
+        let deleted: Vec<PasswordHistoryRow> =
+            result.take(0).map_err(DbError::from)?;
+        Ok(deleted.len() as u64)
     }
 }

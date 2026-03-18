@@ -93,10 +93,11 @@ impl PolicyCheckResult {
 pub fn check_complexity(password: &str, policy: &PasswordPolicy) -> Vec<PolicyViolation> {
     let mut violations = Vec::new();
 
-    if (password.len() as u32) < policy.min_length {
+    let char_count = password.chars().count();
+    if (char_count as u32) < policy.min_length {
         violations.push(PolicyViolation::TooShort {
             min: policy.min_length,
-            actual: password.len(),
+            actual: char_count,
         });
     }
 

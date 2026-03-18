@@ -281,6 +281,28 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         ]
     }
 
+    /// Look up the organization_id for a tenant from the tenant table.
+    async fn lookup_org_id(&self, tenant_id: Uuid) -> Result<Uuid, DbError> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT organization_id FROM tenant \
+                 WHERE meta::id(id) = $tenant_id",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<TenantOrgRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "tenant".into(),
+            id: tenant_id.to_string(),
+        })?;
+
+        Uuid::parse_str(&row.organization_id)
+            .map_err(|e| DbError::Migration(format!("invalid org UUID: {e}")))
+    }
+
     /// Fetch a settings row by scope and scope_id.
     async fn fetch_row(
         &self,
@@ -302,32 +324,37 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         }
     }
 
-    /// Upsert (DELETE + CREATE) a complete settings row.
+    /// Upsert a complete settings row. Reuses the existing record ID
+    /// and preserves `created_at` when a row already exists (UPDATE).
+    /// Creates a new row otherwise (CREATE).
     async fn upsert(
         &self,
-        id: Uuid,
         settings: &SecuritySettings,
     ) -> Result<SecuritySettings, DbError> {
-        let id_str = id.to_string();
         let scope_str = settings.scope.to_string();
         let scope_id_str = settings.scope_id.to_string();
 
-        // Delete any existing row for this scope+scope_id
-        self.db
-            .query(
-                "DELETE security_settings WHERE scope = $scope \
-                 AND scope_id = $scope_id",
-            )
-            .bind(("scope", scope_str))
-            .bind(("scope_id", scope_id_str))
-            .await
-            .map_err(DbError::from)?;
+        // Check for an existing row to reuse ID / created_at.
+        let existing = self.fetch_row(&scope_str, &scope_id_str).await?;
 
-        // Create the new row
-        let query = format!(
-            "CREATE type::record('security_settings', $id) SET {}",
-            SETTINGS_FIELDS,
-        );
+        let (id, is_update) = match &existing {
+            Some(row) => (row.id, true),
+            None => (Uuid::new_v4(), false),
+        };
+        let id_str = id.to_string();
+
+        let query = if is_update {
+            format!(
+                "UPDATE type::record('security_settings', $id) SET \
+                 {}, updated_at = time::now()",
+                SETTINGS_FIELDS,
+            )
+        } else {
+            format!(
+                "CREATE type::record('security_settings', $id) SET {}",
+                SETTINGS_FIELDS,
+            )
+        };
 
         let bindings = self.bind_settings(settings);
         let mut builder = self.db.query(&query).bind(("id", id_str));
@@ -352,7 +379,6 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             id: id.to_string(),
         })?;
 
-        // Re-read with meta::id — we already know the id
         Ok(SecuritySettings {
             id,
             scope: settings.scope,
@@ -406,6 +432,12 @@ enum BindValue {
     F64(f64),
 }
 
+/// Row for looking up a tenant's organization_id.
+#[derive(Debug, SurrealValue)]
+struct TenantOrgRow {
+    organization_id: String,
+}
+
 impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
     async fn get_org_settings(&self, org_id: Uuid) -> AxiamResult<SecuritySettings> {
         match self.fetch_row("org", &org_id.to_string()).await? {
@@ -423,9 +455,9 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         org_id: Uuid,
         input: SetOrgSettings,
     ) -> AxiamResult<SecuritySettings> {
-        let id = Uuid::new_v4();
-        let settings = settings_from_org_input(id, org_id, &input);
-        let result = self.upsert(id, &settings).await?;
+        // ID will be determined by upsert (reuses existing or generates new).
+        let settings = settings_from_org_input(Uuid::nil(), org_id, &input);
+        let result = self.upsert(&settings).await?;
         Ok(result)
     }
 
@@ -433,68 +465,16 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         &self,
         tenant_id: Uuid,
     ) -> AxiamResult<Option<TenantSettingsOverride>> {
-        let tenant_row = self.fetch_row("tenant", &tenant_id.to_string()).await?;
+        let tenant_row = self
+            .fetch_row("tenant", &tenant_id.to_string())
+            .await?;
         match tenant_row {
             None => Ok(None),
             Some(tenant_settings) => {
-                // We need the org settings to compute the diff.
-                // The tenant_settings.scope_id is the tenant_id, but
-                // we need the org_id. Since we store complete rows,
-                // we diff against the org row. However, the caller
-                // didn't provide org_id, so we return all fields as
-                // "overrides" (non-None) — this is the simplest
-                // correct behavior. The caller can use
-                // get_effective_settings if they need the merged view.
-                //
-                // Actually, the plan says to diff against org to
-                // produce TenantSettingsOverride. But without org_id
-                // in this method signature, we return a full override.
-                // This is still correct — "all fields overridden" is
-                // a valid TenantSettingsOverride.
-                Ok(Some(TenantSettingsOverride {
-                    min_length: Some(tenant_settings.password.min_length),
-                    require_uppercase: Some(tenant_settings.password.require_uppercase),
-                    require_lowercase: Some(tenant_settings.password.require_lowercase),
-                    require_digits: Some(tenant_settings.password.require_digits),
-                    require_symbols: Some(tenant_settings.password.require_symbols),
-                    password_history_count: Some(tenant_settings.password.password_history_count),
-                    hibp_check_enabled: Some(tenant_settings.password.hibp_check_enabled),
-                    mfa_enforced: Some(tenant_settings.mfa.mfa_enforced),
-                    mfa_challenge_lifetime_secs: Some(
-                        tenant_settings.mfa.mfa_challenge_lifetime_secs,
-                    ),
-                    max_failed_login_attempts: Some(
-                        tenant_settings.lockout.max_failed_login_attempts,
-                    ),
-                    lockout_duration_secs: Some(tenant_settings.lockout.lockout_duration_secs),
-                    lockout_backoff_multiplier: Some(
-                        tenant_settings.lockout.lockout_backoff_multiplier,
-                    ),
-                    max_lockout_duration_secs: Some(
-                        tenant_settings.lockout.max_lockout_duration_secs,
-                    ),
-                    access_token_lifetime_secs: Some(
-                        tenant_settings.token.access_token_lifetime_secs,
-                    ),
-                    refresh_token_lifetime_secs: Some(
-                        tenant_settings.token.refresh_token_lifetime_secs,
-                    ),
-                    email_verification_required: Some(
-                        tenant_settings.email.email_verification_required,
-                    ),
-                    email_verification_grace_period_hours: Some(
-                        tenant_settings.email.email_verification_grace_period_hours,
-                    ),
-                    default_cert_validity_days: Some(
-                        tenant_settings.certificate.default_cert_validity_days,
-                    ),
-                    max_cert_validity_days: Some(
-                        tenant_settings.certificate.max_cert_validity_days,
-                    ),
-                    admin_notifications_enabled: Some(
-                        tenant_settings.notification.admin_notifications_enabled,
-                    ),
-                }))
+                // Look up the tenant's org_id to compute a proper diff.
+                let org_id = self.lookup_org_id(tenant_id).await?;
+                let org = self.get_org_settings(org_id).await?;
+                Ok(Some(diff_against_org(&org, &tenant_settings)))
             }
         }
     }
@@ -506,13 +486,7 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
     ) -> AxiamResult<SecuritySettings> {
         settings.scope = SettingsScope::Tenant;
         settings.scope_id = tenant_id;
-        let id = if settings.id == Uuid::nil() {
-            Uuid::new_v4()
-        } else {
-            settings.id
-        };
-        settings.id = id;
-        let result = self.upsert(id, &settings).await?;
+        let result = self.upsert(&settings).await?;
         Ok(result)
     }
 
@@ -521,41 +495,18 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         tenant_id: Uuid,
         input: SetTenantOverride,
     ) -> AxiamResult<TenantSettingsOverride> {
-        // We need the org settings to merge. But our trait signature
-        // doesn't include org_id. We'll read any existing tenant row
-        // to preserve values, or fall back to fetching later.
-        // Actually, per the plan: "merge override with org settings →
-        // store complete row". But without org_id here, this method
-        // can't do the merge itself. The service layer should call
-        // get_org_settings + validate + merge before calling this.
-        //
-        // For now, we store what we can: if there's an existing
-        // tenant row, we patch it. If not, this is an error because
-        // we can't produce a complete row without org_id.
-        //
-        // The realistic usage: the service layer will call
-        // get_effective_settings(org_id, tenant_id) to get the base,
-        // apply the override, validate, then store the complete row
-        // directly. This method is a convenience that should be
-        // called by the service layer which has org context.
-        //
-        // Since the trait signature is defined without org_id, let's
-        // fetch any existing tenant row and patch it. If no existing
-        // row, the caller must use the full set_effective path.
-        let existing = self.fetch_row("tenant", &tenant_id.to_string()).await?;
+        // Look up the tenant's org_id to fetch the org baseline.
+        let org_id = self.lookup_org_id(tenant_id).await?;
+        let org = self.get_org_settings(org_id).await?;
 
-        let base = existing.ok_or_else(|| axiam_core::error::AxiamError::Validation {
-            message: "No existing tenant settings to patch; \
-                          use get_effective_settings + set with \
-                          org context first"
-                .into(),
-        })?;
+        // Merge org baseline + overrides into a complete tenant row.
+        let merged = effective_settings(&org, &input, tenant_id, Uuid::nil());
 
-        // Apply the override onto the existing base
-        let merged = effective_settings(&base, &input, tenant_id, base.id);
-
-        let result = self.upsert(merged.id, &merged).await?;
-        Ok(diff_against_org(&base, &result))
+        let result = self.upsert(&merged).await?;
+        // Diff the stored result against the org baseline (not the
+        // previous tenant row) so the returned override reflects
+        // actual deviations from org policy.
+        Ok(diff_against_org(&org, &result))
     }
 
     async fn delete_tenant_override(&self, tenant_id: Uuid) -> AxiamResult<()> {

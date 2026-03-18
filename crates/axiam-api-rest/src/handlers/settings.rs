@@ -3,7 +3,7 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::models::settings::{
     SecuritySettings, SetOrgSettings, TenantSettingsOverride, effective_settings,
-    validate_tenant_override,
+    validate_org_settings, validate_tenant_override,
 };
 use axiam_core::repository::SettingsRepository;
 use axiam_db::SurrealSettingsRepository;
@@ -57,8 +57,10 @@ pub async fn set_org_settings<C: Connection>(
     path: web::Path<Uuid>,
     body: web::Json<SetOrgSettings>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    let input = body.into_inner();
+    validate_org_settings(&input)?;
     let settings = repo
-        .set_org_settings(path.into_inner(), body.into_inner())
+        .set_org_settings(path.into_inner(), input)
         .await?;
     Ok(HttpResponse::Ok().json(settings))
 }
@@ -115,8 +117,10 @@ pub async fn set_tenant_settings<C: Connection>(
     // Validate: tenant can only be more restrictive than org
     validate_tenant_override(&org, &overrides)?;
 
-    // Merge org baseline + overrides into a complete settings row
-    let merged = effective_settings(&org, &overrides, user.tenant_id, Uuid::new_v4());
+    // Merge org baseline + overrides into a complete settings row.
+    // The ID is a placeholder — upsert will reuse the existing row's
+    // ID if one exists, or generate a new one.
+    let merged = effective_settings(&org, &overrides, user.tenant_id, Uuid::nil());
 
     let result = repo
         .store_effective_tenant_settings(user.tenant_id, merged)

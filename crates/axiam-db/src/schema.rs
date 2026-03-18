@@ -78,6 +78,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "security_settings",
         sql: SCHEMA_V8,
     },
+    Migration {
+        version: 9,
+        name: "password_history",
+        sql: SCHEMA_V9,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -604,6 +609,24 @@ DEFINE FIELD updated_at ON TABLE security_settings TYPE datetime \
 -- Unique index on (scope, scope_id) — one settings row per scope target
 DEFINE INDEX idx_settings_scope ON TABLE security_settings \
     COLUMNS scope, scope_id UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v9 — Password history for reuse prevention
+// -----------------------------------------------------------------------
+
+const SCHEMA_V9: &str = "\
+-- =======================================================================
+-- Password History (tenant scope, for reuse detection)
+-- =======================================================================
+DEFINE TABLE password_history SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE password_history TYPE string;
+DEFINE FIELD user_id ON TABLE password_history TYPE string;
+DEFINE FIELD password_hash ON TABLE password_history TYPE string;
+DEFINE FIELD created_at ON TABLE password_history TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_pw_history_user ON TABLE password_history \
+    COLUMNS tenant_id, user_id;
 ";
 
 // -----------------------------------------------------------------------

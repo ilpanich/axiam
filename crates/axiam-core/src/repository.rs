@@ -20,6 +20,7 @@ use crate::models::{
         OAuth2Client, RefreshToken, UpdateOAuth2Client,
     },
     organization::{CreateOrganization, Organization, UpdateOrganization},
+    password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry},
     permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
     pgp_key::{PgpKey, StorePgpKey},
     resource::{CreateResource, Resource, UpdateResource},
@@ -27,9 +28,7 @@ use crate::models::{
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
     session::{CreateSession, Session},
-    settings::{
-        SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride,
-    },
+    settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     user::{CreateUser, UpdateUser, User},
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
@@ -761,6 +760,34 @@ pub trait PgpKeyRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<PgpKey>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Password History (tenant-scoped)
+// ---------------------------------------------------------------------------
+
+pub trait PasswordHistoryRepository: Send + Sync {
+    /// Store a new password hash in history.
+    fn create(
+        &self,
+        input: CreatePasswordHistoryEntry,
+    ) -> impl Future<Output = AxiamResult<PasswordHistoryEntry>> + Send;
+
+    /// Get the last N password hashes for a user (most recent first).
+    fn get_recent(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        count: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<PasswordHistoryEntry>>> + Send;
+
+    /// Prune old history entries, keeping only the most recent `keep_count`.
+    fn prune(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        keep_count: u32,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 // ---------------------------------------------------------------------------

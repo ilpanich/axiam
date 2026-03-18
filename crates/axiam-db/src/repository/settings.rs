@@ -2,11 +2,10 @@
 
 use axiam_core::error::AxiamResult;
 use axiam_core::models::settings::{
-    CertificatePolicy, EmailVerificationPolicy, LockoutPolicy,
-    MfaPolicy, NotificationPolicy, PasswordPolicy, SecuritySettings,
-    SetOrgSettings, SetTenantOverride, SettingsScope,
-    TenantSettingsOverride, TokenPolicy, diff_against_org,
-    effective_settings, settings_from_org_input, system_defaults,
+    CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
+    PasswordPolicy, SecuritySettings, SetOrgSettings, SetTenantOverride, SettingsScope,
+    TenantSettingsOverride, TokenPolicy, diff_against_org, effective_settings,
+    settings_from_org_input, system_defaults,
 };
 use axiam_core::repository::SettingsRepository;
 use chrono::{DateTime, Utc};
@@ -96,9 +95,7 @@ struct SettingsRowWithId {
 }
 
 impl SettingsRowWithId {
-    fn try_into_security_settings(
-        self,
-    ) -> Result<SecuritySettings, DbError> {
+    fn try_into_security_settings(self) -> Result<SecuritySettings, DbError> {
         let id = Uuid::parse_str(&self.record_id)
             .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
         let scope_id = Uuid::parse_str(&self.scope_id)
@@ -123,8 +120,7 @@ impl SettingsRowWithId {
             },
             mfa: MfaPolicy {
                 mfa_enforced: self.mfa_enforced,
-                mfa_challenge_lifetime_secs: self
-                    .mfa_challenge_lifetime,
+                mfa_challenge_lifetime_secs: self.mfa_challenge_lifetime,
             },
             lockout: LockoutPolicy {
                 max_failed_login_attempts: self.lockout_max_attempts,
@@ -133,25 +129,19 @@ impl SettingsRowWithId {
                 max_lockout_duration_secs: self.lockout_max_duration,
             },
             token: TokenPolicy {
-                access_token_lifetime_secs: self
-                    .token_access_lifetime,
-                refresh_token_lifetime_secs: self
-                    .token_refresh_lifetime,
+                access_token_lifetime_secs: self.token_access_lifetime,
+                refresh_token_lifetime_secs: self.token_refresh_lifetime,
             },
             email: EmailVerificationPolicy {
-                email_verification_required: self
-                    .email_verification_required,
-                email_verification_grace_period_hours: self
-                    .email_grace_period_hours,
+                email_verification_required: self.email_verification_required,
+                email_verification_grace_period_hours: self.email_grace_period_hours,
             },
             certificate: CertificatePolicy {
-                default_cert_validity_days: self
-                    .cert_default_validity,
+                default_cert_validity_days: self.cert_default_validity,
                 max_cert_validity_days: self.cert_max_validity,
             },
             notification: NotificationPolicy {
-                admin_notifications_enabled: self
-                    .notif_admin_enabled,
+                admin_notifications_enabled: self.notif_admin_enabled,
             },
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -207,14 +197,14 @@ impl<C: Connection> SurrealSettingsRepository<C> {
     }
 
     /// Bind all settings fields from a SecuritySettings onto a query.
-    fn bind_settings(
-        &self,
-        settings: &SecuritySettings,
-    ) -> Vec<(&'static str, BindValue)> {
+    fn bind_settings(&self, settings: &SecuritySettings) -> Vec<(&'static str, BindValue)> {
         vec![
             ("scope", BindValue::Str(settings.scope.to_string())),
             ("scope_id", BindValue::Str(settings.scope_id.to_string())),
-            ("pw_min_length", BindValue::U32(settings.password.min_length)),
+            (
+                "pw_min_length",
+                BindValue::U32(settings.password.min_length),
+            ),
             (
                 "pw_require_uppercase",
                 BindValue::Bool(settings.password.require_uppercase),
@@ -239,10 +229,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                 "pw_hibp_check",
                 BindValue::Bool(settings.password.hibp_check_enabled),
             ),
-            (
-                "mfa_enforced",
-                BindValue::Bool(settings.mfa.mfa_enforced),
-            ),
+            ("mfa_enforced", BindValue::Bool(settings.mfa.mfa_enforced)),
             (
                 "mfa_challenge_lifetime",
                 BindValue::U64(settings.mfa.mfa_challenge_lifetime_secs),
@@ -273,35 +260,23 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             ),
             (
                 "email_verification_required",
-                BindValue::Bool(
-                    settings.email.email_verification_required,
-                ),
+                BindValue::Bool(settings.email.email_verification_required),
             ),
             (
                 "email_grace_period_hours",
-                BindValue::U32(
-                    settings
-                        .email
-                        .email_verification_grace_period_hours,
-                ),
+                BindValue::U32(settings.email.email_verification_grace_period_hours),
             ),
             (
                 "cert_default_validity",
-                BindValue::U32(
-                    settings.certificate.default_cert_validity_days,
-                ),
+                BindValue::U32(settings.certificate.default_cert_validity_days),
             ),
             (
                 "cert_max_validity",
-                BindValue::U32(
-                    settings.certificate.max_cert_validity_days,
-                ),
+                BindValue::U32(settings.certificate.max_cert_validity_days),
             ),
             (
                 "notif_admin_enabled",
-                BindValue::Bool(
-                    settings.notification.admin_notifications_enabled,
-                ),
+                BindValue::Bool(settings.notification.admin_notifications_enabled),
             ),
         ]
     }
@@ -320,8 +295,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<SettingsRowWithId> =
-            result.take(0).map_err(DbError::from)?;
+        let rows: Vec<SettingsRowWithId> = result.take(0).map_err(DbError::from)?;
         match rows.into_iter().next() {
             Some(row) => Ok(Some(row.try_into_security_settings()?)),
             None => Ok(None),
@@ -372,13 +346,10 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        let rows: Vec<SettingsRow> =
-            result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| {
-            DbError::NotFound {
-                entity: "security_settings".into(),
-                id: id.to_string(),
-            }
+        let rows: Vec<SettingsRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "security_settings".into(),
+            id: id.to_string(),
         })?;
 
         // Re-read with meta::id — we already know the id
@@ -397,8 +368,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             },
             mfa: MfaPolicy {
                 mfa_enforced: row.mfa_enforced,
-                mfa_challenge_lifetime_secs: row
-                    .mfa_challenge_lifetime,
+                mfa_challenge_lifetime_secs: row.mfa_challenge_lifetime,
             },
             lockout: LockoutPolicy {
                 max_failed_login_attempts: row.lockout_max_attempts,
@@ -407,25 +377,19 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                 max_lockout_duration_secs: row.lockout_max_duration,
             },
             token: TokenPolicy {
-                access_token_lifetime_secs: row
-                    .token_access_lifetime,
-                refresh_token_lifetime_secs: row
-                    .token_refresh_lifetime,
+                access_token_lifetime_secs: row.token_access_lifetime,
+                refresh_token_lifetime_secs: row.token_refresh_lifetime,
             },
             email: EmailVerificationPolicy {
-                email_verification_required: row
-                    .email_verification_required,
-                email_verification_grace_period_hours: row
-                    .email_grace_period_hours,
+                email_verification_required: row.email_verification_required,
+                email_verification_grace_period_hours: row.email_grace_period_hours,
             },
             certificate: CertificatePolicy {
-                default_cert_validity_days: row
-                    .cert_default_validity,
+                default_cert_validity_days: row.cert_default_validity,
                 max_cert_validity_days: row.cert_max_validity,
             },
             notification: NotificationPolicy {
-                admin_notifications_enabled: row
-                    .notif_admin_enabled,
+                admin_notifications_enabled: row.notif_admin_enabled,
             },
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -442,23 +406,14 @@ enum BindValue {
     F64(f64),
 }
 
-impl<C: Connection> SettingsRepository
-    for SurrealSettingsRepository<C>
-{
-    async fn get_org_settings(
-        &self,
-        org_id: Uuid,
-    ) -> AxiamResult<SecuritySettings> {
+impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
+    async fn get_org_settings(&self, org_id: Uuid) -> AxiamResult<SecuritySettings> {
         match self.fetch_row("org", &org_id.to_string()).await? {
             Some(s) => Ok(s),
             None => {
                 // Return system defaults as a synthetic settings
                 let defaults = system_defaults();
-                Ok(settings_from_org_input(
-                    Uuid::nil(),
-                    org_id,
-                    &defaults,
-                ))
+                Ok(settings_from_org_input(Uuid::nil(), org_id, &defaults))
             }
         }
     }
@@ -478,9 +433,7 @@ impl<C: Connection> SettingsRepository
         &self,
         tenant_id: Uuid,
     ) -> AxiamResult<Option<TenantSettingsOverride>> {
-        let tenant_row = self
-            .fetch_row("tenant", &tenant_id.to_string())
-            .await?;
+        let tenant_row = self.fetch_row("tenant", &tenant_id.to_string()).await?;
         match tenant_row {
             None => Ok(None),
             Some(tenant_settings) => {
@@ -499,91 +452,47 @@ impl<C: Connection> SettingsRepository
                 // This is still correct — "all fields overridden" is
                 // a valid TenantSettingsOverride.
                 Ok(Some(TenantSettingsOverride {
-                    min_length: Some(
-                        tenant_settings.password.min_length,
-                    ),
-                    require_uppercase: Some(
-                        tenant_settings.password.require_uppercase,
-                    ),
-                    require_lowercase: Some(
-                        tenant_settings.password.require_lowercase,
-                    ),
-                    require_digits: Some(
-                        tenant_settings.password.require_digits,
-                    ),
-                    require_symbols: Some(
-                        tenant_settings.password.require_symbols,
-                    ),
-                    password_history_count: Some(
-                        tenant_settings
-                            .password
-                            .password_history_count,
-                    ),
-                    hibp_check_enabled: Some(
-                        tenant_settings.password.hibp_check_enabled,
-                    ),
-                    mfa_enforced: Some(
-                        tenant_settings.mfa.mfa_enforced,
-                    ),
+                    min_length: Some(tenant_settings.password.min_length),
+                    require_uppercase: Some(tenant_settings.password.require_uppercase),
+                    require_lowercase: Some(tenant_settings.password.require_lowercase),
+                    require_digits: Some(tenant_settings.password.require_digits),
+                    require_symbols: Some(tenant_settings.password.require_symbols),
+                    password_history_count: Some(tenant_settings.password.password_history_count),
+                    hibp_check_enabled: Some(tenant_settings.password.hibp_check_enabled),
+                    mfa_enforced: Some(tenant_settings.mfa.mfa_enforced),
                     mfa_challenge_lifetime_secs: Some(
-                        tenant_settings
-                            .mfa
-                            .mfa_challenge_lifetime_secs,
+                        tenant_settings.mfa.mfa_challenge_lifetime_secs,
                     ),
                     max_failed_login_attempts: Some(
-                        tenant_settings
-                            .lockout
-                            .max_failed_login_attempts,
+                        tenant_settings.lockout.max_failed_login_attempts,
                     ),
-                    lockout_duration_secs: Some(
-                        tenant_settings
-                            .lockout
-                            .lockout_duration_secs,
-                    ),
+                    lockout_duration_secs: Some(tenant_settings.lockout.lockout_duration_secs),
                     lockout_backoff_multiplier: Some(
-                        tenant_settings
-                            .lockout
-                            .lockout_backoff_multiplier,
+                        tenant_settings.lockout.lockout_backoff_multiplier,
                     ),
                     max_lockout_duration_secs: Some(
-                        tenant_settings
-                            .lockout
-                            .max_lockout_duration_secs,
+                        tenant_settings.lockout.max_lockout_duration_secs,
                     ),
                     access_token_lifetime_secs: Some(
-                        tenant_settings
-                            .token
-                            .access_token_lifetime_secs,
+                        tenant_settings.token.access_token_lifetime_secs,
                     ),
                     refresh_token_lifetime_secs: Some(
-                        tenant_settings
-                            .token
-                            .refresh_token_lifetime_secs,
+                        tenant_settings.token.refresh_token_lifetime_secs,
                     ),
                     email_verification_required: Some(
-                        tenant_settings
-                            .email
-                            .email_verification_required,
+                        tenant_settings.email.email_verification_required,
                     ),
                     email_verification_grace_period_hours: Some(
-                        tenant_settings
-                            .email
-                            .email_verification_grace_period_hours,
+                        tenant_settings.email.email_verification_grace_period_hours,
                     ),
                     default_cert_validity_days: Some(
-                        tenant_settings
-                            .certificate
-                            .default_cert_validity_days,
+                        tenant_settings.certificate.default_cert_validity_days,
                     ),
                     max_cert_validity_days: Some(
-                        tenant_settings
-                            .certificate
-                            .max_cert_validity_days,
+                        tenant_settings.certificate.max_cert_validity_days,
                     ),
                     admin_notifications_enabled: Some(
-                        tenant_settings
-                            .notification
-                            .admin_notifications_enabled,
+                        tenant_settings.notification.admin_notifications_enabled,
                     ),
                 }))
             }
@@ -616,35 +525,23 @@ impl<C: Connection> SettingsRepository
         // Since the trait signature is defined without org_id, let's
         // fetch any existing tenant row and patch it. If no existing
         // row, the caller must use the full set_effective path.
-        let existing = self
-            .fetch_row("tenant", &tenant_id.to_string())
-            .await?;
+        let existing = self.fetch_row("tenant", &tenant_id.to_string()).await?;
 
-        let base = existing.ok_or_else(|| {
-            axiam_core::error::AxiamError::Validation {
-                message: "No existing tenant settings to patch; \
+        let base = existing.ok_or_else(|| axiam_core::error::AxiamError::Validation {
+            message: "No existing tenant settings to patch; \
                           use get_effective_settings + set with \
                           org context first"
-                    .into(),
-            }
+                .into(),
         })?;
 
         // Apply the override onto the existing base
-        let merged = effective_settings(
-            &base,
-            &input,
-            tenant_id,
-            base.id,
-        );
+        let merged = effective_settings(&base, &input, tenant_id, base.id);
 
         let result = self.upsert(merged.id, &merged).await?;
         Ok(diff_against_org(&base, &result))
     }
 
-    async fn delete_tenant_override(
-        &self,
-        tenant_id: Uuid,
-    ) -> AxiamResult<()> {
+    async fn delete_tenant_override(&self, tenant_id: Uuid) -> AxiamResult<()> {
         self.db
             .query(
                 "DELETE security_settings WHERE scope = 'tenant' \
@@ -662,10 +559,7 @@ impl<C: Connection> SettingsRepository
         tenant_id: Uuid,
     ) -> AxiamResult<SecuritySettings> {
         // Try tenant row first (already a complete merged row)
-        if let Some(tenant_settings) = self
-            .fetch_row("tenant", &tenant_id.to_string())
-            .await?
-        {
+        if let Some(tenant_settings) = self.fetch_row("tenant", &tenant_id.to_string()).await? {
             return Ok(tenant_settings);
         }
         // Fall back to org settings (or system defaults)

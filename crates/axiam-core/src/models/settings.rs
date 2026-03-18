@@ -284,9 +284,7 @@ pub fn effective_settings(
                 .unwrap_or(org.password.hibp_check_enabled),
         },
         mfa: MfaPolicy {
-            mfa_enforced: tenant_override
-                .mfa_enforced
-                .unwrap_or(org.mfa.mfa_enforced),
+            mfa_enforced: tenant_override.mfa_enforced.unwrap_or(org.mfa.mfa_enforced),
             mfa_challenge_lifetime_secs: tenant_override
                 .mfa_challenge_lifetime_secs
                 .unwrap_or(org.mfa.mfa_challenge_lifetime_secs),
@@ -319,9 +317,7 @@ pub fn effective_settings(
                 .unwrap_or(org.email.email_verification_required),
             email_verification_grace_period_hours: tenant_override
                 .email_verification_grace_period_hours
-                .unwrap_or(
-                    org.email.email_verification_grace_period_hours,
-                ),
+                .unwrap_or(org.email.email_verification_grace_period_hours),
         },
         certificate: CertificatePolicy {
             default_cert_validity_days: tenant_override
@@ -334,9 +330,7 @@ pub fn effective_settings(
         notification: NotificationPolicy {
             admin_notifications_enabled: tenant_override
                 .admin_notifications_enabled
-                .unwrap_or(
-                    org.notification.admin_notifications_enabled,
-                ),
+                .unwrap_or(org.notification.admin_notifications_enabled),
         },
         created_at: org.created_at,
         updated_at: Utc::now(),
@@ -493,11 +487,7 @@ pub fn validate_tenant_override(
         org.password.require_symbols,
         "require_symbols"
     );
-    check_enable_only!(
-        mfa_enforced,
-        org.mfa.mfa_enforced,
-        "mfa_enforced"
-    );
+    check_enable_only!(mfa_enforced, org.mfa.mfa_enforced, "mfa_enforced");
     check_enable_only!(
         hibp_check_enabled,
         org.password.hibp_check_enabled,
@@ -579,11 +569,7 @@ pub fn diff_against_org(
             org.password.hibp_check_enabled,
             tenant.password.hibp_check_enabled
         ),
-        mfa_enforced: diff!(
-            mfa_enforced,
-            org.mfa.mfa_enforced,
-            tenant.mfa.mfa_enforced
-        ),
+        mfa_enforced: diff!(mfa_enforced, org.mfa.mfa_enforced, tenant.mfa.mfa_enforced),
         mfa_challenge_lifetime_secs: diff!(
             mfa_challenge_lifetime_secs,
             org.mfa.mfa_challenge_lifetime_secs,
@@ -648,11 +634,7 @@ pub fn diff_against_org(
 }
 
 /// Build a `SecuritySettings` from a `SetOrgSettings` input.
-pub fn settings_from_org_input(
-    id: Uuid,
-    org_id: Uuid,
-    input: &SetOrgSettings,
-) -> SecuritySettings {
+pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -> SecuritySettings {
     let now = Utc::now();
     SecuritySettings {
         id,
@@ -669,38 +651,28 @@ pub fn settings_from_org_input(
         },
         mfa: MfaPolicy {
             mfa_enforced: input.mfa_enforced,
-            mfa_challenge_lifetime_secs: input
-                .mfa_challenge_lifetime_secs,
+            mfa_challenge_lifetime_secs: input.mfa_challenge_lifetime_secs,
         },
         lockout: LockoutPolicy {
-            max_failed_login_attempts: input
-                .max_failed_login_attempts,
+            max_failed_login_attempts: input.max_failed_login_attempts,
             lockout_duration_secs: input.lockout_duration_secs,
-            lockout_backoff_multiplier: input
-                .lockout_backoff_multiplier,
-            max_lockout_duration_secs: input
-                .max_lockout_duration_secs,
+            lockout_backoff_multiplier: input.lockout_backoff_multiplier,
+            max_lockout_duration_secs: input.max_lockout_duration_secs,
         },
         token: TokenPolicy {
-            access_token_lifetime_secs: input
-                .access_token_lifetime_secs,
-            refresh_token_lifetime_secs: input
-                .refresh_token_lifetime_secs,
+            access_token_lifetime_secs: input.access_token_lifetime_secs,
+            refresh_token_lifetime_secs: input.refresh_token_lifetime_secs,
         },
         email: EmailVerificationPolicy {
-            email_verification_required: input
-                .email_verification_required,
-            email_verification_grace_period_hours: input
-                .email_verification_grace_period_hours,
+            email_verification_required: input.email_verification_required,
+            email_verification_grace_period_hours: input.email_verification_grace_period_hours,
         },
         certificate: CertificatePolicy {
-            default_cert_validity_days: input
-                .default_cert_validity_days,
+            default_cert_validity_days: input.default_cert_validity_days,
             max_cert_validity_days: input.max_cert_validity_days,
         },
         notification: NotificationPolicy {
-            admin_notifications_enabled: input
-                .admin_notifications_enabled,
+            admin_notifications_enabled: input.admin_notifications_enabled,
         },
         created_at: now,
         updated_at: now,
@@ -718,11 +690,7 @@ mod tests {
     /// Helper: build an org `SecuritySettings` from system defaults.
     fn org_settings() -> SecuritySettings {
         let defaults = system_defaults();
-        settings_from_org_input(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            &defaults,
-        )
+        settings_from_org_input(Uuid::new_v4(), Uuid::new_v4(), &defaults)
     }
 
     // --- system_defaults sanity ---
@@ -739,9 +707,7 @@ mod tests {
         assert!(d.max_lockout_duration_secs >= d.lockout_duration_secs);
         assert!(d.mfa_challenge_lifetime_secs > 0);
         assert!(d.default_cert_validity_days > 0);
-        assert!(
-            d.max_cert_validity_days >= d.default_cert_validity_days
-        );
+        assert!(d.max_cert_validity_days >= d.default_cert_validity_days);
     }
 
     // --- validate_tenant_override: valid cases ---
@@ -757,18 +723,18 @@ mod tests {
     fn more_restrictive_values_are_valid() {
         let org = org_settings();
         let overrides = TenantSettingsOverride {
-            min_length: Some(16), // higher min
-            max_failed_login_attempts: Some(3), // lower max
-            access_token_lifetime_secs: Some(600), // shorter
-            refresh_token_lifetime_secs: Some(86_400), // shorter
-            lockout_duration_secs: Some(600), // longer lockout
-            max_lockout_duration_secs: Some(7200), // longer
-            mfa_challenge_lifetime_secs: Some(120), // shorter
-            default_cert_validity_days: Some(180), // shorter
-            max_cert_validity_days: Some(365), // shorter
+            min_length: Some(16),                            // higher min
+            max_failed_login_attempts: Some(3),              // lower max
+            access_token_lifetime_secs: Some(600),           // shorter
+            refresh_token_lifetime_secs: Some(86_400),       // shorter
+            lockout_duration_secs: Some(600),                // longer lockout
+            max_lockout_duration_secs: Some(7200),           // longer
+            mfa_challenge_lifetime_secs: Some(120),          // shorter
+            default_cert_validity_days: Some(180),           // shorter
+            max_cert_validity_days: Some(365),               // shorter
             email_verification_grace_period_hours: Some(12), // shorter
-            password_history_count: Some(10), // higher
-            lockout_backoff_multiplier: Some(3.0), // higher
+            password_history_count: Some(10),                // higher
+            lockout_backoff_multiplier: Some(3.0),           // higher
             ..Default::default()
         };
         assert!(validate_tenant_override(&org, &overrides).is_ok());
@@ -791,12 +757,8 @@ mod tests {
         let org = org_settings();
         let overrides = TenantSettingsOverride {
             min_length: Some(org.password.min_length),
-            max_failed_login_attempts: Some(
-                org.lockout.max_failed_login_attempts,
-            ),
-            access_token_lifetime_secs: Some(
-                org.token.access_token_lifetime_secs,
-            ),
+            max_failed_login_attempts: Some(org.lockout.max_failed_login_attempts),
+            access_token_lifetime_secs: Some(org.token.access_token_lifetime_secs),
             ..Default::default()
         };
         assert!(validate_tenant_override(&org, &overrides).is_ok());
@@ -811,8 +773,7 @@ mod tests {
             min_length: Some(6), // weaker
             ..Default::default()
         };
-        let err = validate_tenant_override(&org, &overrides)
-            .unwrap_err();
+        let err = validate_tenant_override(&org, &overrides).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("min_length"), "got: {msg}");
     }
@@ -825,8 +786,7 @@ mod tests {
             mfa_enforced: Some(false), // tenant tries to disable
             ..Default::default()
         };
-        let err = validate_tenant_override(&org, &overrides)
-            .unwrap_err();
+        let err = validate_tenant_override(&org, &overrides).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("mfa_enforced"), "got: {msg}");
     }
@@ -838,13 +798,9 @@ mod tests {
             access_token_lifetime_secs: Some(7200), // longer than 900
             ..Default::default()
         };
-        let err = validate_tenant_override(&org, &overrides)
-            .unwrap_err();
+        let err = validate_tenant_override(&org, &overrides).unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("access_token_lifetime_secs"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("access_token_lifetime_secs"), "got: {msg}");
     }
 
     #[test]
@@ -854,13 +810,9 @@ mod tests {
             max_cert_validity_days: Some(1000), // > 730
             ..Default::default()
         };
-        let err = validate_tenant_override(&org, &overrides)
-            .unwrap_err();
+        let err = validate_tenant_override(&org, &overrides).unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("max_cert_validity_days"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("max_cert_validity_days"), "got: {msg}");
     }
 
     #[test]
@@ -868,20 +820,16 @@ mod tests {
         let mut org = org_settings();
         org.mfa.mfa_enforced = true;
         let overrides = TenantSettingsOverride {
-            min_length: Some(4),        // weaker
-            mfa_enforced: Some(false),   // disabling
+            min_length: Some(4),                    // weaker
+            mfa_enforced: Some(false),              // disabling
             access_token_lifetime_secs: Some(9999), // longer
             ..Default::default()
         };
-        let err = validate_tenant_override(&org, &overrides)
-            .unwrap_err();
+        let err = validate_tenant_override(&org, &overrides).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("min_length"), "got: {msg}");
         assert!(msg.contains("mfa_enforced"), "got: {msg}");
-        assert!(
-            msg.contains("access_token_lifetime_secs"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("access_token_lifetime_secs"), "got: {msg}");
     }
 
     // --- effective_settings merging ---
@@ -892,8 +840,7 @@ mod tests {
         let overrides = TenantSettingsOverride::default();
         let tenant_id = Uuid::new_v4();
         let result_id = Uuid::new_v4();
-        let eff =
-            effective_settings(&org, &overrides, tenant_id, result_id);
+        let eff = effective_settings(&org, &overrides, tenant_id, result_id);
         assert_eq!(eff.password.min_length, org.password.min_length);
         assert_eq!(
             eff.token.access_token_lifetime_secs,
@@ -914,8 +861,7 @@ mod tests {
         };
         let tenant_id = Uuid::new_v4();
         let result_id = Uuid::new_v4();
-        let eff =
-            effective_settings(&org, &overrides, tenant_id, result_id);
+        let eff = effective_settings(&org, &overrides, tenant_id, result_id);
         assert_eq!(eff.password.min_length, 20);
         assert_eq!(eff.token.access_token_lifetime_secs, 300);
         assert!(eff.mfa.mfa_enforced);

@@ -150,15 +150,15 @@ pub fn sha1_prefix_suffix(password: &str) -> (String, String) {
 pub fn parse_hibp_response(body: &str, suffix: &str) -> Option<u64> {
     for line in body.lines() {
         let line = line.trim();
-        if let Some((line_suffix, count_str)) = line.split_once(':') {
-            if line_suffix.eq_ignore_ascii_case(suffix) {
-                if let Ok(count) = count_str.trim().parse::<u64>() {
-                    if count > 0 {
-                        return Some(count);
-                    }
-                }
-                return None;
+        if let Some((line_suffix, count_str)) = line.split_once(':')
+            && line_suffix.eq_ignore_ascii_case(suffix)
+        {
+            if let Ok(count) = count_str.trim().parse::<u64>()
+                && count > 0
+            {
+                return Some(count);
             }
+            return None;
         }
     }
     None
@@ -299,12 +299,11 @@ pub async fn evaluate_password<R: PasswordHistoryRepository>(
     }
 
     // HIBP breach check
-    if policy.hibp_check_enabled {
-        if let Some(client) = http_client {
-            if let Ok(Some(violation)) = check_hibp(password, client).await {
-                violations.push(violation);
-            }
-        }
+    if policy.hibp_check_enabled
+        && let Some(client) = http_client
+        && let Ok(Some(violation)) = check_hibp(password, client).await
+    {
+        violations.push(violation);
     }
 
     Ok(PolicyCheckResult { violations })

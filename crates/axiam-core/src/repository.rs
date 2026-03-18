@@ -821,6 +821,17 @@ pub trait SettingsRepository: Send + Sync {
         input: SetTenantOverride,
     ) -> impl Future<Output = AxiamResult<TenantSettingsOverride>> + Send;
 
+    /// Store a fully merged, pre-validated tenant settings row.
+    ///
+    /// Used by the API layer after performing inheritance validation.
+    /// The caller is responsible for merging org baseline + overrides
+    /// and validating constraints before calling this method.
+    fn store_effective_tenant_settings(
+        &self,
+        tenant_id: Uuid,
+        settings: SecuritySettings,
+    ) -> impl Future<Output = AxiamResult<SecuritySettings>> + Send;
+
     /// Delete all tenant-level overrides (revert to org baseline).
     fn delete_tenant_override(
         &self,

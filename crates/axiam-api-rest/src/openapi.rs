@@ -133,6 +133,11 @@ use crate::handlers;
         handlers::oauth2::discovery,
         handlers::oauth2::jwks,
         handlers::oauth2::userinfo,
+        // Settings
+        handlers::settings::get_org_settings,
+        handlers::settings::set_org_settings,
+        handlers::settings::get_tenant_settings,
+        handlers::settings::set_tenant_settings,
         // Federation
         handlers::federation::create,
         handlers::federation::list,
@@ -280,6 +285,18 @@ use crate::handlers;
         axiam_oauth2::oidc::JwksDocument,
         axiam_oauth2::oidc::Jwk,
         axiam_oauth2::oidc::UserInfoResponse,
+        // Settings
+        axiam_core::models::settings::SecuritySettings,
+        axiam_core::models::settings::SetOrgSettings,
+        axiam_core::models::settings::TenantSettingsOverride,
+        axiam_core::models::settings::SettingsScope,
+        axiam_core::models::settings::PasswordPolicy,
+        axiam_core::models::settings::MfaPolicy,
+        axiam_core::models::settings::LockoutPolicy,
+        axiam_core::models::settings::TokenPolicy,
+        axiam_core::models::settings::EmailVerificationPolicy,
+        axiam_core::models::settings::CertificatePolicy,
+        axiam_core::models::settings::NotificationPolicy,
         // Pagination
         axiam_core::repository::Pagination,
     )),
@@ -303,6 +320,7 @@ use crate::handlers;
         (name = "oauth2-clients", description = "OAuth2 client registration and management"),
         (name = "oauth2", description = "OAuth2 authorization and token endpoints"),
         (name = "oidc", description = "OpenID Connect discovery, JWKS, and UserInfo"),
+        (name = "settings", description = "Organization and tenant security settings"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),
     ),
     modifiers(&SecurityAddon),

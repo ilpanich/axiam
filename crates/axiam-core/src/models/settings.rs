@@ -16,7 +16,7 @@ use crate::error::{AxiamError, AxiamResult};
 // -----------------------------------------------------------------------
 
 /// Password complexity and history requirements.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PasswordPolicy {
     pub min_length: u32,
     pub require_uppercase: bool,
@@ -28,14 +28,14 @@ pub struct PasswordPolicy {
 }
 
 /// Multi-factor authentication policy.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MfaPolicy {
     pub mfa_enforced: bool,
     pub mfa_challenge_lifetime_secs: u64,
 }
 
 /// Account lockout rules.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LockoutPolicy {
     pub max_failed_login_attempts: u32,
     pub lockout_duration_secs: u64,
@@ -44,28 +44,28 @@ pub struct LockoutPolicy {
 }
 
 /// Token lifetime configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TokenPolicy {
     pub access_token_lifetime_secs: u64,
     pub refresh_token_lifetime_secs: u64,
 }
 
 /// Email verification requirements.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EmailVerificationPolicy {
     pub email_verification_required: bool,
     pub email_verification_grace_period_hours: u32,
 }
 
 /// Certificate issuance constraints.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CertificatePolicy {
     pub default_cert_validity_days: u32,
     pub max_cert_validity_days: u32,
 }
 
 /// Admin notification preferences.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NotificationPolicy {
     pub admin_notifications_enabled: bool,
 }
@@ -75,7 +75,7 @@ pub struct NotificationPolicy {
 // -----------------------------------------------------------------------
 
 /// Whether a settings row belongs to an organization or a tenant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum SettingsScope {
     Org,
     Tenant,
@@ -107,7 +107,7 @@ impl std::str::FromStr for SettingsScope {
 // -----------------------------------------------------------------------
 
 /// Fully resolved security settings (all fields present).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SecuritySettings {
     pub id: Uuid,
     pub scope: SettingsScope,
@@ -128,7 +128,7 @@ pub struct SecuritySettings {
 // -----------------------------------------------------------------------
 
 /// Partial tenant overrides. `None` = inherit from org baseline.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TenantSettingsOverride {
     // Password
     pub min_length: Option<u32>,
@@ -171,7 +171,7 @@ impl TenantSettingsOverride {
 // -----------------------------------------------------------------------
 
 /// Input for setting organization-level security settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SetOrgSettings {
     // Password
     pub min_length: u32,
@@ -391,14 +391,14 @@ pub fn validate_tenant_override(
     );
 
     // lockout_backoff_multiplier (f64 — compare with partial_cmp)
-    if let Some(val) = overrides.lockout_backoff_multiplier {
-        if val < org.lockout.lockout_backoff_multiplier {
-            violations.push(format!(
-                "lockout_backoff_multiplier: tenant value {} is \
-                 less restrictive than org baseline {}",
-                val, org.lockout.lockout_backoff_multiplier,
-            ));
-        }
+    if let Some(val) = overrides.lockout_backoff_multiplier
+        && val < org.lockout.lockout_backoff_multiplier
+    {
+        violations.push(format!(
+            "lockout_backoff_multiplier: tenant value {} is \
+             less restrictive than org baseline {}",
+            val, org.lockout.lockout_backoff_multiplier,
+        ));
     }
 
     // --- tenant <= org (lower max / shorter lifetime is more restrictive) ---

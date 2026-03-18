@@ -84,6 +84,16 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::put().to(handlers::organizations::update::<C>))
                     .route(web::delete().to(handlers::organizations::delete::<C>)),
             )
+            // --- Organization Settings ---
+            .service(
+                web::resource("/organizations/{org_id}/settings")
+                    .route(web::get().to(
+                        handlers::settings::get_org_settings::<C>,
+                    ))
+                    .route(web::put().to(
+                        handlers::settings::set_org_settings::<C>,
+                    )),
+            )
             .service(
                 web::resource("/organizations/{org_id}/tenants")
                     .route(web::post().to(handlers::tenants::create::<C>))
@@ -361,6 +371,16 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(
                         web::get().to(handlers::federation::saml_metadata::<C>),
                     ),
+            )
+            // --- Tenant Settings (from JWT context) ---
+            .service(
+                web::resource("/settings")
+                    .route(web::get().to(
+                        handlers::settings::get_tenant_settings::<C>,
+                    ))
+                    .route(web::put().to(
+                        handlers::settings::set_tenant_settings::<C>,
+                    )),
             )
             // --- Federation Links ---
             .service(

@@ -499,6 +499,23 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         }
     }
 
+    async fn store_effective_tenant_settings(
+        &self,
+        tenant_id: Uuid,
+        mut settings: SecuritySettings,
+    ) -> AxiamResult<SecuritySettings> {
+        settings.scope = SettingsScope::Tenant;
+        settings.scope_id = tenant_id;
+        let id = if settings.id == Uuid::nil() {
+            Uuid::new_v4()
+        } else {
+            settings.id
+        };
+        settings.id = id;
+        let result = self.upsert(id, &settings).await?;
+        Ok(result)
+    }
+
     async fn set_tenant_override(
         &self,
         tenant_id: Uuid,

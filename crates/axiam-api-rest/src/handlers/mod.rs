@@ -13,6 +13,7 @@ pub mod resources;
 pub mod roles;
 pub mod scopes;
 pub mod service_accounts;
+pub mod settings;
 pub mod tenants;
 pub mod users;
 pub mod webhooks;

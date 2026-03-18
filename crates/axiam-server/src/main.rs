@@ -18,8 +18,8 @@ use axiam_db::{
     SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
     SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebhookRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebhookRepository,
 };
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
@@ -134,6 +134,7 @@ async fn main() -> std::io::Result<()> {
     let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone());
+    let settings_repo = SurrealSettingsRepository::new(db.client().clone());
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client().clone());
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client().clone());
     // Disable automatic redirects to prevent SSRF bypass (an HTTPS URL
@@ -261,6 +262,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(oauth2_client_repo.clone()))
             .app_data(web::Data::new(authorize_service.clone()))
             .app_data(web::Data::new(token_service.clone()))
+            .app_data(web::Data::new(settings_repo.clone()))
             .app_data(web::Data::new(federation_config_repo.clone()))
             .app_data(web::Data::new(federation_link_repo.clone()))
             .app_data(web::Data::new(http_client.clone()))

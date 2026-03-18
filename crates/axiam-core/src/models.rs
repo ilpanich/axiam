@@ -15,6 +15,7 @@ pub mod resource;
 pub mod role;
 pub mod scope;
 pub mod service_account;
+pub mod settings;
 pub mod session;
 pub mod tenant;
 pub mod user;

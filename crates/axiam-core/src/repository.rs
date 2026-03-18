@@ -27,6 +27,9 @@ use crate::models::{
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
     session::{CreateSession, Session},
+    settings::{
+        SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride,
+    },
     tenant::{CreateTenant, Tenant, UpdateTenant},
     user::{CreateUser, UpdateUser, User},
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
@@ -758,4 +761,49 @@ pub trait PgpKeyRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<PgpKey>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Security Settings (org/tenant scope)
+// ---------------------------------------------------------------------------
+
+pub trait SettingsRepository: Send + Sync {
+    /// Get organization-level settings (returns system defaults if none set).
+    fn get_org_settings(
+        &self,
+        org_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<SecuritySettings>> + Send;
+
+    /// Set (create or replace) organization-level settings.
+    fn set_org_settings(
+        &self,
+        org_id: Uuid,
+        input: SetOrgSettings,
+    ) -> impl Future<Output = AxiamResult<SecuritySettings>> + Send;
+
+    /// Get tenant-level overrides (only fields that differ from org).
+    fn get_tenant_override(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<TenantSettingsOverride>>> + Send;
+
+    /// Set tenant-level overrides.
+    fn set_tenant_override(
+        &self,
+        tenant_id: Uuid,
+        input: SetTenantOverride,
+    ) -> impl Future<Output = AxiamResult<TenantSettingsOverride>> + Send;
+
+    /// Delete all tenant-level overrides (revert to org baseline).
+    fn delete_tenant_override(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Get the effective (merged) settings for a tenant.
+    fn get_effective_settings(
+        &self,
+        org_id: Uuid,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<SecuritySettings>> + Send;
 }

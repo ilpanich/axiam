@@ -20,9 +20,9 @@ pub use repository::{
     SurrealFederationLinkRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebhookRepository, hash_client_secret,
-    verify_password,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSettingsRepository,
+    SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebhookRepository, hash_client_secret, verify_password,
 };
 pub use schema::{run_migrations, schema_v1};
 /// Re-export SurrealDB connection types for use in repository type aliases.

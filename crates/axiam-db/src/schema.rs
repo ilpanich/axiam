@@ -73,6 +73,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "federation_links",
         sql: SCHEMA_V7,
     },
+    Migration {
+        version: 8,
+        name: "security_settings",
+        sql: SCHEMA_V8,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -550,6 +555,55 @@ DEFINE INDEX idx_fed_link_subject ON TABLE federation_link \
     COLUMNS tenant_id, federation_config_id, external_subject UNIQUE;
 DEFINE INDEX idx_fed_link_user ON TABLE federation_link \
     COLUMNS tenant_id, user_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v8 — Security settings (org/tenant scope)
+// -----------------------------------------------------------------------
+
+const SCHEMA_V8: &str = "\
+-- =======================================================================
+-- Security Settings (org or tenant scope)
+-- =======================================================================
+DEFINE TABLE security_settings SCHEMAFULL;
+DEFINE FIELD scope ON TABLE security_settings TYPE string \
+    ASSERT $value IN ['org', 'tenant'];
+DEFINE FIELD scope_id ON TABLE security_settings TYPE string;
+-- Password policy (pw_ prefix)
+DEFINE FIELD pw_min_length ON TABLE security_settings TYPE int;
+DEFINE FIELD pw_require_uppercase ON TABLE security_settings TYPE bool;
+DEFINE FIELD pw_require_lowercase ON TABLE security_settings TYPE bool;
+DEFINE FIELD pw_require_digits ON TABLE security_settings TYPE bool;
+DEFINE FIELD pw_require_symbols ON TABLE security_settings TYPE bool;
+DEFINE FIELD pw_history_count ON TABLE security_settings TYPE int;
+DEFINE FIELD pw_hibp_check ON TABLE security_settings TYPE bool;
+-- MFA policy (mfa_ prefix)
+DEFINE FIELD mfa_enforced ON TABLE security_settings TYPE bool;
+DEFINE FIELD mfa_challenge_lifetime ON TABLE security_settings TYPE int;
+-- Lockout policy (lockout_ prefix)
+DEFINE FIELD lockout_max_attempts ON TABLE security_settings TYPE int;
+DEFINE FIELD lockout_duration ON TABLE security_settings TYPE int;
+DEFINE FIELD lockout_backoff ON TABLE security_settings TYPE float;
+DEFINE FIELD lockout_max_duration ON TABLE security_settings TYPE int;
+-- Token policy (token_ prefix)
+DEFINE FIELD token_access_lifetime ON TABLE security_settings TYPE int;
+DEFINE FIELD token_refresh_lifetime ON TABLE security_settings TYPE int;
+-- Email policy (email_ prefix)
+DEFINE FIELD email_verification_required ON TABLE security_settings TYPE bool;
+DEFINE FIELD email_grace_period_hours ON TABLE security_settings TYPE int;
+-- Certificate policy (cert_ prefix)
+DEFINE FIELD cert_default_validity ON TABLE security_settings TYPE int;
+DEFINE FIELD cert_max_validity ON TABLE security_settings TYPE int;
+-- Notification policy (notif_ prefix)
+DEFINE FIELD notif_admin_enabled ON TABLE security_settings TYPE bool;
+-- Timestamps
+DEFINE FIELD created_at ON TABLE security_settings TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE security_settings TYPE datetime \
+    DEFAULT time::now();
+-- Unique index on (scope, scope_id) — one settings row per scope target
+DEFINE INDEX idx_settings_scope ON TABLE security_settings \
+    COLUMNS scope, scope_id UNIQUE;
 ";
 
 // -----------------------------------------------------------------------

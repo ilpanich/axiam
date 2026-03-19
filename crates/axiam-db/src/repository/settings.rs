@@ -438,9 +438,12 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         match self.fetch_row("org", &org_id.to_string()).await? {
             Some(s) => Ok(s),
             None => {
-                // Return system defaults as a synthetic settings
+                // Return system defaults with a deterministic ID so
+                // clients see a stable identifier across reads/writes.
                 let defaults = system_defaults();
-                Ok(settings_from_org_input(Uuid::nil(), org_id, &defaults))
+                let deterministic_id =
+                    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("org:{org_id}").as_bytes());
+                Ok(settings_from_org_input(deterministic_id, org_id, &defaults))
             }
         }
     }
@@ -535,6 +538,17 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         }
 
         // No tenant row — org settings (or system defaults) apply.
-        Ok(org)
+        // Re-scope as tenant so callers always receive a tenant-scoped
+        // result with a stable deterministic ID.
+        let deterministic_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            format!("tenant:{tenant_id}").as_bytes(),
+        );
+        Ok(SecuritySettings {
+            id: deterministic_id,
+            scope: SettingsScope::Tenant,
+            scope_id: tenant_id,
+            ..org
+        })
     }
 }

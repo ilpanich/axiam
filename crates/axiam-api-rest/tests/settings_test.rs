@@ -197,6 +197,9 @@ async fn get_tenant_settings_inherits_from_org() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     // No tenant overrides → inherits org defaults
     assert_eq!(body["password"]["min_length"], 12);
+    // Must always be tenant-scoped even when inheriting from org
+    assert_eq!(body["scope"], "Tenant");
+    assert_eq!(body["scope_id"], tenant_id.to_string());
 }
 
 // -----------------------------------------------------------------------

@@ -28,11 +28,22 @@ use crate::extractors::auth::AuthenticatedUser;
     security(("bearer" = []))
 )]
 pub async fn get_org_settings<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     repo: web::Data<SurrealSettingsRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let settings = repo.get_org_settings(path.into_inner()).await?;
+    let org_id = path.into_inner();
+
+    // Authorization: only allow reads for the authenticated user's own org.
+    if org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot read settings for a different organization".into(),
+            },
+        ));
+    }
+
+    let settings = repo.get_org_settings(org_id).await?;
     Ok(HttpResponse::Ok().json(settings))
 }
 

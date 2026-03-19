@@ -327,18 +327,17 @@ impl<C: Connection> SurrealSettingsRepository<C> {
     /// Upsert a complete settings row. Reuses the existing record ID
     /// and preserves `created_at` when a row already exists (UPDATE).
     /// Creates a new row otherwise (CREATE).
-    async fn upsert(
-        &self,
-        settings: &SecuritySettings,
-    ) -> Result<SecuritySettings, DbError> {
+    async fn upsert(&self, settings: &SecuritySettings) -> Result<SecuritySettings, DbError> {
         // Use a deterministic record ID derived from (scope, scope_id) so
         // that concurrent requests for the same key converge on the same
         // row.  UPDATE on a deterministic ID is a single-statement upsert
         // that is safe under concurrency (no read-then-create race).
         let scope_str = settings.scope.to_string();
         let scope_id_str = settings.scope_id.to_string();
-        let deterministic_id =
-            Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{scope_str}:{scope_id_str}").as_bytes());
+        let deterministic_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            format!("{scope_str}:{scope_id_str}").as_bytes(),
+        );
         let id_str = deterministic_id.to_string();
 
         // UPSERT: single statement — creates the row if it doesn't
@@ -461,9 +460,7 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         &self,
         tenant_id: Uuid,
     ) -> AxiamResult<Option<TenantSettingsOverride>> {
-        let tenant_row = self
-            .fetch_row("tenant", &tenant_id.to_string())
-            .await?;
+        let tenant_row = self.fetch_row("tenant", &tenant_id.to_string()).await?;
         match tenant_row {
             None => Ok(None),
             Some(tenant_settings) => {
@@ -529,12 +526,7 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         // to fields the tenant has NOT explicitly overridden.
         if let Some(tenant_row) = self.fetch_row("tenant", &tenant_id.to_string()).await? {
             let overrides = diff_against_org(&org, &tenant_row);
-            let merged = effective_settings(
-                &org,
-                &overrides,
-                tenant_id,
-                tenant_row.id,
-            );
+            let merged = effective_settings(&org, &overrides, tenant_id, tenant_row.id);
             return Ok(merged);
         }
 

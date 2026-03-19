@@ -152,8 +152,7 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
                 .await
                 .map_err(DbError::from)?;
 
-            let deleted: Vec<PasswordHistoryRow> =
-                result.take(0).map_err(DbError::from)?;
+            let deleted: Vec<PasswordHistoryRow> = result.take(0).map_err(DbError::from)?;
             return Ok(deleted.len() as u64);
         }
 
@@ -210,8 +209,7 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
             .await
             .map_err(DbError::from)?;
 
-        let deleted: Vec<PasswordHistoryRow> =
-            result.take(0).map_err(DbError::from)?;
+        let deleted: Vec<PasswordHistoryRow> = result.take(0).map_err(DbError::from)?;
         Ok(deleted.len() as u64)
     }
 }

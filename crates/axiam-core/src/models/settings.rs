@@ -559,13 +559,43 @@ pub fn validate_tenant_override(
         "admin_notifications_enabled"
     );
 
-    if violations.is_empty() {
+    if !violations.is_empty() {
+        return Err(AxiamError::Validation {
+            message: format!(
+                "Tenant override violates org baseline: {}",
+                violations.join("; "),
+            ),
+        });
+    }
+
+    // Cross-field invariant check: merge org + overrides and verify
+    // the effective policy is internally consistent.
+    let merged = effective_settings(org, overrides, Uuid::nil(), Uuid::nil());
+    let mut cross = Vec::new();
+
+    if merged.lockout.max_lockout_duration_secs < merged.lockout.lockout_duration_secs {
+        cross.push(format!(
+            "effective max_lockout_duration_secs ({}) must be >= \
+             lockout_duration_secs ({})",
+            merged.lockout.max_lockout_duration_secs, merged.lockout.lockout_duration_secs,
+        ));
+    }
+    if merged.certificate.max_cert_validity_days < merged.certificate.default_cert_validity_days {
+        cross.push(format!(
+            "effective max_cert_validity_days ({}) must be >= \
+             default_cert_validity_days ({})",
+            merged.certificate.max_cert_validity_days,
+            merged.certificate.default_cert_validity_days,
+        ));
+    }
+
+    if cross.is_empty() {
         Ok(())
     } else {
         Err(AxiamError::Validation {
             message: format!(
-                "Tenant override violates org baseline: {}",
-                violations.join("; "),
+                "Tenant override produces inconsistent effective policy: {}",
+                cross.join("; "),
             ),
         })
     }

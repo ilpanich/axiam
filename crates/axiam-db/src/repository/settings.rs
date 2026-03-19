@@ -526,7 +526,11 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         // to fields the tenant has NOT explicitly overridden.
         if let Some(tenant_row) = self.fetch_row("tenant", &tenant_id.to_string()).await? {
             let overrides = diff_against_org(&org, &tenant_row);
-            let merged = effective_settings(&org, &overrides, tenant_id, tenant_row.id);
+            let mut merged = effective_settings(&org, &overrides, tenant_id, tenant_row.id);
+            // Preserve the persisted timestamps rather than using
+            // Utc::now() from the merge function.
+            merged.created_at = tenant_row.created_at;
+            merged.updated_at = tenant_row.updated_at;
             return Ok(merged);
         }
 

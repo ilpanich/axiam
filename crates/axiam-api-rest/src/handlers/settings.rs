@@ -52,14 +52,25 @@ pub async fn get_org_settings<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn set_org_settings<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     repo: web::Data<SurrealSettingsRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<SetOrgSettings>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    let org_id = path.into_inner();
+
+    // Authorization: only allow writes to the authenticated user's own org.
+    if org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot modify settings for a different organization".into(),
+            },
+        ));
+    }
+
     let input = body.into_inner();
     validate_org_settings(&input)?;
-    let settings = repo.set_org_settings(path.into_inner(), input).await?;
+    let settings = repo.set_org_settings(org_id, input).await?;
     Ok(HttpResponse::Ok().json(settings))
 }
 

@@ -156,56 +156,28 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
             return Ok(deleted.len() as u64);
         }
 
-        // Get the IDs to keep (most recent N).
-        #[derive(Debug, SurrealValue)]
-        struct IdRow {
-            record_id: String,
-        }
-
+        // Single-statement prune: delete entries whose created_at is
+        // older than the Nth most recent entry. This avoids the race
+        // between a separate SELECT and DELETE — any entry created
+        // concurrently will have a newer timestamp and be retained.
         let mut result = self
             .db
             .query(
-                "SELECT meta::id(id) AS record_id \
-                 FROM password_history \
+                "DELETE password_history \
                  WHERE tenant_id = $tenant_id \
                  AND user_id = $user_id \
-                 ORDER BY created_at DESC \
-                 LIMIT $limit",
+                 AND id NOT IN (\
+                     SELECT VALUE id FROM password_history \
+                     WHERE tenant_id = $tenant_id \
+                     AND user_id = $user_id \
+                     ORDER BY created_at DESC \
+                     LIMIT $limit\
+                 ) \
+                 RETURN BEFORE",
             )
-            .bind(("tenant_id", tid.clone()))
-            .bind(("user_id", uid.clone()))
-            .bind(("limit", keep_count))
-            .await
-            .map_err(DbError::from)?;
-
-        let keep_rows: Vec<IdRow> = result.take(0).map_err(DbError::from)?;
-
-        if keep_rows.is_empty() {
-            return Ok(0);
-        }
-
-        // Build a list of record IDs to keep as backtick-quoted refs.
-        let keep_ids: Vec<String> = keep_rows
-            .iter()
-            .map(|r| format!("password_history:`{}`", r.record_id))
-            .collect();
-        let keep_list = keep_ids.join(", ");
-
-        // Delete all entries for this user that are NOT in the keep set.
-        let delete_query = format!(
-            "DELETE password_history \
-             WHERE tenant_id = $tenant_id \
-             AND user_id = $user_id \
-             AND id NOT IN [{}] \
-             RETURN BEFORE",
-            keep_list,
-        );
-
-        let mut result = self
-            .db
-            .query(&delete_query)
             .bind(("tenant_id", tid))
             .bind(("user_id", uid))
+            .bind(("limit", keep_count))
             .await
             .map_err(DbError::from)?;
 

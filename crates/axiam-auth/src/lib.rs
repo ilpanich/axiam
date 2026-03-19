@@ -4,6 +4,7 @@
 pub mod config;
 pub mod error;
 pub mod password;
+pub mod policy;
 pub mod service;
 pub mod token;
 pub mod totp;

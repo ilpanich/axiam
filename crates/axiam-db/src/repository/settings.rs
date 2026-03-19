@@ -543,7 +543,8 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
 
         // No tenant row — org settings (or system defaults) apply.
         // Re-scope as tenant so callers always receive a tenant-scoped
-        // result with a stable deterministic ID.
+        // result with a stable deterministic ID and sentinel timestamps
+        // (epoch = "never explicitly configured").
         let deterministic_id = Uuid::new_v5(
             &Uuid::NAMESPACE_OID,
             format!("tenant:{tenant_id}").as_bytes(),
@@ -552,6 +553,8 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
             id: deterministic_id,
             scope: SettingsScope::Tenant,
             scope_id: tenant_id,
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+            updated_at: DateTime::<Utc>::UNIX_EPOCH,
             ..org
         })
     }

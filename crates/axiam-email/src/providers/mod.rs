@@ -13,25 +13,13 @@ use axiam_core::models::email::ProviderConfig;
 use crate::provider::EmailProvider;
 
 /// Construct a boxed `EmailProvider` from a `ProviderConfig`.
-pub fn build_provider(
-    config: &ProviderConfig,
-) -> AxiamResult<Box<dyn EmailProvider>> {
+pub fn build_provider(config: &ProviderConfig) -> AxiamResult<Box<dyn EmailProvider>> {
     match config {
-        ProviderConfig::Smtp(c) => {
-            Ok(Box::new(smtp::SmtpProvider::new(c)?))
-        }
-        ProviderConfig::SendGrid(c) => {
-            Ok(Box::new(sendgrid::SendGridProvider::new(c)))
-        }
-        ProviderConfig::Postmark(c) => {
-            Ok(Box::new(postmark::PostmarkProvider::new(c)))
-        }
-        ProviderConfig::Resend(c) => {
-            Ok(Box::new(resend::ResendProvider::new(c)))
-        }
-        ProviderConfig::Brevo(c) => {
-            Ok(Box::new(brevo::BrevoProvider::new(c)))
-        }
+        ProviderConfig::Smtp(c) => Ok(Box::new(smtp::SmtpProvider::new(c)?)),
+        ProviderConfig::SendGrid(c) => Ok(Box::new(sendgrid::SendGridProvider::new(c))),
+        ProviderConfig::Postmark(c) => Ok(Box::new(postmark::PostmarkProvider::new(c))),
+        ProviderConfig::Resend(c) => Ok(Box::new(resend::ResendProvider::new(c))),
+        ProviderConfig::Brevo(c) => Ok(Box::new(brevo::BrevoProvider::new(c))),
     }
 }
 

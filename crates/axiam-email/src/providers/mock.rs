@@ -65,8 +65,7 @@ impl EmailProvider for MockProvider {
         from_email: &str,
         reply_to: Option<&str>,
         message: &EmailMessage,
-    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>> {
         let from_name = from_name.to_string();
         let from_email = from_email.to_string();
         let reply_to = reply_to.map(str::to_string);

@@ -38,8 +38,7 @@ impl EmailProvider for BrevoProvider {
         from_email: &str,
         reply_to: Option<&str>,
         message: &EmailMessage,
-    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>> {
         let from_name = from_name.to_string();
         let from_email = from_email.to_string();
         let reply_to = reply_to.map(str::to_string);
@@ -56,12 +55,10 @@ impl EmailProvider for BrevoProvider {
             });
 
             if let Some(ref html) = message.html_body {
-                body["htmlContent"] =
-                    serde_json::Value::String(html.clone());
+                body["htmlContent"] = serde_json::Value::String(html.clone());
             }
             if let Some(ref text) = message.text_body {
-                body["textContent"] =
-                    serde_json::Value::String(text.clone());
+                body["textContent"] = serde_json::Value::String(text.clone());
             }
             if let Some(rt) = reply_to {
                 body["replyTo"] = serde_json::json!({"email": rt});
@@ -75,28 +72,18 @@ impl EmailProvider for BrevoProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| {
-                    AxiamError::EmailDelivery(format!(
-                        "Brevo request failed: {e}"
-                    ))
-                })?;
+                .map_err(|e| AxiamError::EmailDelivery(format!("Brevo request failed: {e}")))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let text = resp
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "unknown".into());
+                let text = resp.text().await.unwrap_or_else(|_| "unknown".into());
                 return Err(AxiamError::EmailDelivery(format!(
                     "Brevo returned {status}: {text}"
                 )));
             }
 
-            let resp_json: serde_json::Value =
-                resp.json().await.unwrap_or_default();
-            let message_id = resp_json["messageId"]
-                .as_str()
-                .map(str::to_string);
+            let resp_json: serde_json::Value = resp.json().await.unwrap_or_default();
+            let message_id = resp_json["messageId"].as_str().map(str::to_string);
 
             Ok(SendResult { message_id })
         })

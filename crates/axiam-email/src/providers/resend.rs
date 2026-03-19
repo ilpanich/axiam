@@ -38,8 +38,7 @@ impl EmailProvider for ResendProvider {
         from_email: &str,
         reply_to: Option<&str>,
         message: &EmailMessage,
-    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>> {
         let from = format!("{from_name} <{from_email}>");
         let reply_to = reply_to.map(str::to_string);
         let message = message.clone();
@@ -68,27 +67,18 @@ impl EmailProvider for ResendProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| {
-                    AxiamError::EmailDelivery(format!(
-                        "Resend request failed: {e}"
-                    ))
-                })?;
+                .map_err(|e| AxiamError::EmailDelivery(format!("Resend request failed: {e}")))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let text = resp
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "unknown".into());
+                let text = resp.text().await.unwrap_or_else(|_| "unknown".into());
                 return Err(AxiamError::EmailDelivery(format!(
                     "Resend returned {status}: {text}"
                 )));
             }
 
-            let resp_json: serde_json::Value =
-                resp.json().await.unwrap_or_default();
-            let message_id =
-                resp_json["id"].as_str().map(str::to_string);
+            let resp_json: serde_json::Value = resp.json().await.unwrap_or_default();
+            let message_id = resp_json["id"].as_str().map(str::to_string);
 
             Ok(SendResult { message_id })
         })

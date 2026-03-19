@@ -38,8 +38,7 @@ impl EmailProvider for SendGridProvider {
         from_email: &str,
         reply_to: Option<&str>,
         message: &EmailMessage,
-    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>> {
         let from_name = from_name.to_string();
         let from_email = from_email.to_string();
         let reply_to = reply_to.map(str::to_string);
@@ -83,18 +82,11 @@ impl EmailProvider for SendGridProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| {
-                    AxiamError::EmailDelivery(format!(
-                        "SendGrid request failed: {e}"
-                    ))
-                })?;
+                .map_err(|e| AxiamError::EmailDelivery(format!("SendGrid request failed: {e}")))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let text = resp
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "unknown".into());
+                let text = resp.text().await.unwrap_or_else(|_| "unknown".into());
                 return Err(AxiamError::EmailDelivery(format!(
                     "SendGrid returned {status}: {text}"
                 )));

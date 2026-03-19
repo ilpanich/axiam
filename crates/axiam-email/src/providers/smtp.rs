@@ -19,30 +19,17 @@ pub struct SmtpProvider {
 
 impl SmtpProvider {
     pub fn new(config: &SmtpConfig) -> Result<Self, AxiamError> {
-        let creds = Credentials::new(
-            config.username.clone(),
-            config.password.clone(),
-        );
+        let creds = Credentials::new(config.username.clone(), config.password.clone());
 
         let transport = if config.starttls {
-            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(
-                &config.host,
-            )
-            .map_err(|e| {
-                AxiamError::EmailConfig(format!(
-                    "SMTP STARTTLS relay error: {e}"
-                ))
-            })?
-            .port(config.port)
-            .credentials(creds)
-            .build()
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
+                .map_err(|e| AxiamError::EmailConfig(format!("SMTP STARTTLS relay error: {e}")))?
+                .port(config.port)
+                .credentials(creds)
+                .build()
         } else {
             AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)
-                .map_err(|e| {
-                    AxiamError::EmailConfig(format!(
-                        "SMTP relay error: {e}"
-                    ))
-                })?
+                .map_err(|e| AxiamError::EmailConfig(format!("SMTP relay error: {e}")))?
                 .port(config.port)
                 .credentials(creds)
                 .build()
@@ -59,29 +46,21 @@ impl EmailProvider for SmtpProvider {
         from_email: &str,
         reply_to: Option<&str>,
         message: &EmailMessage,
-    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<SendResult>> + Send + '_>> {
         let from_name = from_name.to_string();
         let from_email = from_email.to_string();
         let reply_to = reply_to.map(str::to_string);
         let message = message.clone();
 
         Box::pin(async move {
-            let from_mailbox: Mailbox =
-                format!("{from_name} <{from_email}>")
-                    .parse()
-                    .map_err(|e| {
-                        AxiamError::EmailConfig(format!(
-                            "invalid from address: {e}"
-                        ))
-                    })?;
+            let from_mailbox: Mailbox = format!("{from_name} <{from_email}>")
+                .parse()
+                .map_err(|e| AxiamError::EmailConfig(format!("invalid from address: {e}")))?;
 
-            let to_mailbox: Mailbox =
-                message.to.parse().map_err(|e| {
-                    AxiamError::EmailConfig(format!(
-                        "invalid to address: {e}"
-                    ))
-                })?;
+            let to_mailbox: Mailbox = message
+                .to
+                .parse()
+                .map_err(|e| AxiamError::EmailConfig(format!("invalid to address: {e}")))?;
 
             let mut builder = MessageBuilder::new()
                 .from(from_mailbox)
@@ -90,9 +69,7 @@ impl EmailProvider for SmtpProvider {
 
             if let Some(ref rt) = reply_to {
                 let rt_mailbox: Mailbox = rt.parse().map_err(|e| {
-                    AxiamError::EmailConfig(format!(
-                        "invalid reply-to address: {e}"
-                    ))
+                    AxiamError::EmailConfig(format!("invalid reply-to address: {e}"))
                 })?;
                 builder = builder.reply_to(rt_mailbox);
             }
@@ -117,37 +94,23 @@ impl EmailProvider for SmtpProvider {
                         .header(ContentType::TEXT_HTML)
                         .body(html.clone())
                         .map_err(|e| {
-                            AxiamError::EmailDelivery(format!(
-                                "failed to build HTML email: {e}"
-                            ))
+                            AxiamError::EmailDelivery(format!("failed to build HTML email: {e}"))
                         })?
                 }
-                (None, Some(text)) => builder.body(text.clone()).map_err(
-                    |e| {
-                        AxiamError::EmailDelivery(format!(
-                            "failed to build text email: {e}"
-                        ))
-                    },
-                )?,
-                (None, None) => {
-                    return Err(AxiamError::EmailDelivery(
-                        "email has no body".into(),
-                    ))
-                }
+                (None, Some(text)) => builder.body(text.clone()).map_err(|e| {
+                    AxiamError::EmailDelivery(format!("failed to build text email: {e}"))
+                })?,
+                (None, None) => return Err(AxiamError::EmailDelivery("email has no body".into())),
             };
 
-            let response =
-                self.transport.send(email).await.map_err(|e| {
-                    AxiamError::EmailDelivery(format!(
-                        "SMTP send failed: {e}"
-                    ))
-                })?;
+            let response = self
+                .transport
+                .send(email)
+                .await
+                .map_err(|e| AxiamError::EmailDelivery(format!("SMTP send failed: {e}")))?;
 
             Ok(SendResult {
-                message_id: response
-                    .message()
-                    .next()
-                    .map(str::to_string),
+                message_id: response.message().next().map(str::to_string),
             })
         })
     }

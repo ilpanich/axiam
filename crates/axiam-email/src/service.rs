@@ -68,10 +68,7 @@ impl EmailService {
     }
 
     /// Send an email using the configured provider.
-    pub async fn send(
-        &self,
-        message: &EmailMessage,
-    ) -> AxiamResult<SendResult> {
+    pub async fn send(&self, message: &EmailMessage) -> AxiamResult<SendResult> {
         if !message.has_body() {
             return Err(AxiamError::EmailDelivery(
                 "email has no body (html or text)".into(),

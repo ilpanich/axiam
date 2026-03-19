@@ -138,8 +138,9 @@ pub async fn set_tenant_settings<C: Connection>(
     validate_tenant_override(&org, &overrides)?;
 
     // Merge org baseline + overrides into a complete settings row.
-    // The ID is a placeholder — upsert will reuse the existing row's
-    // ID if one exists, or generate a new one.
+    // The ID passed here is just a placeholder; the underlying
+    // SurrealSettingsRepository derives a deterministic UUID (v5)
+    // from (scope, scope_id) and uses that as the canonical ID.
     let merged = effective_settings(&org, &overrides, user.tenant_id, Uuid::nil());
 
     let result = repo

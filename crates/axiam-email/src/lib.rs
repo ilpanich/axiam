@@ -8,17 +8,17 @@ pub mod message;
 pub mod provider;
 pub mod providers;
 pub mod service;
+pub mod template;
 
 // Re-exports for convenience.
 pub use message::EmailMessage;
 pub use provider::{EmailProvider, SendResult};
 pub use service::EmailService;
+pub use template::{TemplateContext, render_email, resolve_template};
 
 #[cfg(test)]
 mod tests {
-    use axiam_core::models::email::{
-        ApiProviderConfig, EmailConfig, ProviderConfig, SmtpConfig,
-    };
+    use axiam_core::models::email::{ApiProviderConfig, EmailConfig, ProviderConfig, SmtpConfig};
     use axiam_core::models::settings::SettingsScope;
     use chrono::Utc;
     use uuid::Uuid;
@@ -37,9 +37,7 @@ mod tests {
         }
     }
 
-    fn sample_email_config(
-        provider: ProviderConfig,
-    ) -> EmailConfig {
+    fn sample_email_config(provider: ProviderConfig) -> EmailConfig {
         EmailConfig {
             id: Uuid::new_v4(),
             scope: SettingsScope::Org,
@@ -60,12 +58,7 @@ mod tests {
     async fn mock_provider_records_sent_messages() {
         let mock = MockProvider::new();
         let result = mock
-            .send(
-                "Test",
-                "test@example.com",
-                None,
-                &sample_message(),
-            )
+            .send("Test", "test@example.com", None, &sample_message())
             .await;
         assert!(result.is_ok());
         assert_eq!(mock.sent_count(), 1);
@@ -82,12 +75,7 @@ mod tests {
     async fn mock_provider_failing_returns_error() {
         let mock = MockProvider::failing();
         let result = mock
-            .send(
-                "Test",
-                "test@example.com",
-                None,
-                &sample_message(),
-            )
+            .send("Test", "test@example.com", None, &sample_message())
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -107,10 +95,7 @@ mod tests {
             )
             .await;
         let sent = mock.sent_messages();
-        assert_eq!(
-            sent[0].reply_to.as_deref(),
-            Some("reply@example.com")
-        );
+        assert_eq!(sent[0].reply_to.as_deref(), Some("reply@example.com"));
     }
 
     // --- EmailService tests ---
@@ -156,12 +141,10 @@ mod tests {
 
     #[tokio::test]
     async fn service_from_disabled_config_errors() {
-        let mut config = sample_email_config(
-            ProviderConfig::SendGrid(ApiProviderConfig {
-                api_key: "key".to_string(),
-                api_url: None,
-            }),
-        );
+        let mut config = sample_email_config(ProviderConfig::SendGrid(ApiProviderConfig {
+            api_key: "key".to_string(),
+            api_url: None,
+        }));
         config.enabled = false;
         let result = EmailService::from_config(&config);
         assert!(result.is_err());
@@ -223,12 +206,10 @@ mod tests {
             "smtp",
         );
         assert_eq!(
-            providers::provider_name(&ProviderConfig::SendGrid(
-                ApiProviderConfig {
-                    api_key: "k".into(),
-                    api_url: None,
-                }
-            )),
+            providers::provider_name(&ProviderConfig::SendGrid(ApiProviderConfig {
+                api_key: "k".into(),
+                api_url: None,
+            })),
             "sendgrid",
         );
     }

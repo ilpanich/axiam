@@ -11,6 +11,7 @@ use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
+    email_template::{EmailTemplate, SetEmailTemplate, TemplateKind},
     federation::{
         CreateFederationConfig, CreateFederationLink, FederationConfig, FederationLink,
         UpdateFederationConfig,
@@ -890,4 +891,64 @@ pub trait EmailConfigRepository: Send + Sync {
         org_id: Uuid,
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<EmailConfig>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Email Templates (org/tenant scope)
+// ---------------------------------------------------------------------------
+
+pub trait EmailTemplateRepository: Send + Sync {
+    /// Get a custom template by kind at org level.
+    fn get_org_template(
+        &self,
+        org_id: Uuid,
+        kind: TemplateKind,
+    ) -> impl Future<Output = AxiamResult<Option<EmailTemplate>>> + Send;
+
+    /// Set (create or replace) an org-level custom template.
+    fn set_org_template(
+        &self,
+        org_id: Uuid,
+        input: SetEmailTemplate,
+    ) -> impl Future<Output = AxiamResult<EmailTemplate>> + Send;
+
+    /// Delete an org-level custom template (revert to built-in).
+    fn delete_org_template(
+        &self,
+        org_id: Uuid,
+        kind: TemplateKind,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// List all custom templates for an org.
+    fn list_org_templates(
+        &self,
+        org_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<EmailTemplate>>> + Send;
+
+    /// Get a custom template by kind at tenant level.
+    fn get_tenant_template(
+        &self,
+        tenant_id: Uuid,
+        kind: TemplateKind,
+    ) -> impl Future<Output = AxiamResult<Option<EmailTemplate>>> + Send;
+
+    /// Set (create or replace) a tenant-level custom template.
+    fn set_tenant_template(
+        &self,
+        tenant_id: Uuid,
+        input: SetEmailTemplate,
+    ) -> impl Future<Output = AxiamResult<EmailTemplate>> + Send;
+
+    /// Delete a tenant-level custom template (revert to org/built-in).
+    fn delete_tenant_template(
+        &self,
+        tenant_id: Uuid,
+        kind: TemplateKind,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// List all custom templates for a tenant.
+    fn list_tenant_templates(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<EmailTemplate>>> + Send;
 }

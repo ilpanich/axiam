@@ -83,6 +83,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "password_history",
         sql: SCHEMA_V9,
     },
+    Migration {
+        version: 10,
+        name: "email_templates",
+        sql: SCHEMA_V10,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -627,6 +632,33 @@ DEFINE FIELD created_at ON TABLE password_history TYPE datetime \
     DEFAULT time::now();
 DEFINE INDEX idx_pw_history_user ON TABLE password_history \
     COLUMNS tenant_id, user_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v10 — Email templates (org/tenant scope)
+// -----------------------------------------------------------------------
+
+const SCHEMA_V10: &str = "\
+-- =======================================================================
+-- Email Templates (org or tenant scope)
+-- =======================================================================
+DEFINE TABLE email_template SCHEMAFULL;
+DEFINE FIELD scope ON TABLE email_template TYPE string \
+    ASSERT $value IN ['org', 'tenant'];
+DEFINE FIELD scope_id ON TABLE email_template TYPE string;
+DEFINE FIELD kind ON TABLE email_template TYPE string \
+    ASSERT $value IN ['activation', 'password_reset', \
+                       'mfa_setup_reminder', 'admin_notification'];
+DEFINE FIELD subject ON TABLE email_template TYPE string;
+DEFINE FIELD html_body ON TABLE email_template TYPE string;
+DEFINE FIELD text_body ON TABLE email_template TYPE string;
+DEFINE FIELD created_at ON TABLE email_template TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE email_template TYPE datetime \
+    DEFAULT time::now();
+-- One template per (scope, scope_id, kind)
+DEFINE INDEX idx_email_template_scope_kind ON TABLE email_template \
+    COLUMNS scope, scope_id, kind UNIQUE;
 ";
 
 // -----------------------------------------------------------------------

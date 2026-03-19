@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{AxiamError, AxiamResult};
 use super::settings::SettingsScope;
+use crate::error::{AxiamError, AxiamResult};
 
 // -----------------------------------------------------------------------
 // Provider configuration
@@ -96,9 +96,7 @@ pub struct EmailConfig {
 
 /// Partial tenant overrides for email configuration.
 /// `None` = inherit from org baseline.
-#[derive(
-    Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EmailConfigOverride {
     pub enabled: Option<bool>,
     pub from_name: Option<String>,
@@ -142,22 +140,17 @@ pub fn validate_email_config(input: &SetOrgEmailConfig) -> AxiamResult<()> {
     let mut violations = Vec::new();
 
     if input.from_email.is_empty() || !input.from_email.contains('@') {
-        violations.push(
-            "from_email must be a valid email address".to_string(),
-        );
+        violations.push("from_email must be a valid email address".to_string());
     }
 
     if input.from_name.is_empty() {
         violations.push("from_name must not be empty".to_string());
     }
 
-    if let Some(ref reply_to) = input.reply_to {
-        if reply_to.is_empty() || !reply_to.contains('@') {
-            violations.push(
-                "reply_to must be a valid email address if provided"
-                    .to_string(),
-            );
-        }
+    if let Some(ref reply_to) = input.reply_to
+        && (reply_to.is_empty() || !reply_to.contains('@'))
+    {
+        violations.push("reply_to must be a valid email address if provided".to_string());
     }
 
     match &input.provider {
@@ -183,10 +176,7 @@ pub fn validate_email_config(input: &SetOrgEmailConfig) -> AxiamResult<()> {
         Ok(())
     } else {
         Err(AxiamError::Validation {
-            message: format!(
-                "Invalid email config: {}",
-                violations.join("; ")
-            ),
+            message: format!("Invalid email config: {}", violations.join("; ")),
         })
     }
 }
@@ -279,11 +269,7 @@ mod tests {
     }
 
     fn sample_org_config() -> EmailConfig {
-        email_config_from_org_input(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            &sample_org_input(),
-        )
+        email_config_from_org_input(Uuid::new_v4(), Uuid::new_v4(), &sample_org_input())
     }
 
     // --- validation ---
@@ -393,8 +379,7 @@ mod tests {
         let overrides = EmailConfigOverride::default();
         let tenant_id = Uuid::new_v4();
         let result_id = Uuid::new_v4();
-        let eff =
-            effective_email_config(&org, &overrides, tenant_id, result_id);
+        let eff = effective_email_config(&org, &overrides, tenant_id, result_id);
         assert_eq!(eff.scope, SettingsScope::Tenant);
         assert_eq!(eff.scope_id, tenant_id);
         assert_eq!(eff.from_name, org.from_name);
@@ -411,12 +396,7 @@ mod tests {
             from_name: Some("Tenant Mail".to_string()),
             ..Default::default()
         };
-        let eff = effective_email_config(
-            &org,
-            &overrides,
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-        );
+        let eff = effective_email_config(&org, &overrides, Uuid::new_v4(), Uuid::new_v4());
         assert_eq!(eff.from_name, "Tenant Mail");
         assert_eq!(eff.from_email, org.from_email);
     }
@@ -429,33 +409,22 @@ mod tests {
             reply_to: Some(None),
             ..Default::default()
         };
-        let eff = effective_email_config(
-            &org,
-            &overrides,
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-        );
+        let eff = effective_email_config(&org, &overrides, Uuid::new_v4(), Uuid::new_v4());
         assert_eq!(eff.reply_to, None);
     }
 
     #[test]
     fn override_provider_replaces_entirely() {
         let org = sample_org_config();
-        let new_provider =
-            ProviderConfig::SendGrid(ApiProviderConfig {
-                api_key: "sg_key_123".to_string(),
-                api_url: None,
-            });
+        let new_provider = ProviderConfig::SendGrid(ApiProviderConfig {
+            api_key: "sg_key_123".to_string(),
+            api_url: None,
+        });
         let overrides = EmailConfigOverride {
             provider: Some(new_provider.clone()),
             ..Default::default()
         };
-        let eff = effective_email_config(
-            &org,
-            &overrides,
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-        );
+        let eff = effective_email_config(&org, &overrides, Uuid::new_v4(), Uuid::new_v4());
         assert_eq!(eff.provider, new_provider);
     }
 
@@ -467,12 +436,7 @@ mod tests {
             enabled: Some(false),
             ..Default::default()
         };
-        let eff = effective_email_config(
-            &org,
-            &overrides,
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-        );
+        let eff = effective_email_config(&org, &overrides, Uuid::new_v4(), Uuid::new_v4());
         assert!(!eff.enabled);
     }
 
@@ -482,8 +446,7 @@ mod tests {
     fn email_config_from_org_input_sets_scope() {
         let id = Uuid::new_v4();
         let org_id = Uuid::new_v4();
-        let config =
-            email_config_from_org_input(id, org_id, &sample_org_input());
+        let config = email_config_from_org_input(id, org_id, &sample_org_input());
         assert_eq!(config.id, id);
         assert_eq!(config.scope, SettingsScope::Org);
         assert_eq!(config.scope_id, org_id);
@@ -509,10 +472,7 @@ mod tests {
 
     #[test]
     fn provider_config_kind_matches() {
-        assert_eq!(
-            sample_smtp_provider().kind(),
-            EmailProviderKind::Smtp,
-        );
+        assert_eq!(sample_smtp_provider().kind(), EmailProviderKind::Smtp,);
         let sg = ProviderConfig::SendGrid(ApiProviderConfig {
             api_key: "k".into(),
             api_url: None,

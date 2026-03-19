@@ -6,6 +6,7 @@
 pub mod audit;
 pub mod certificate;
 pub mod email;
+pub mod email_template;
 pub mod federation;
 pub mod group;
 pub mod oauth2_client;

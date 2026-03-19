@@ -3,6 +3,7 @@
 mod audit;
 mod ca_certificate;
 mod certificate;
+mod email_template;
 mod federation_config;
 mod federation_link;
 mod group;
@@ -26,6 +27,7 @@ mod webhook;
 pub use audit::SurrealAuditLogRepository;
 pub use ca_certificate::SurrealCaCertificateRepository;
 pub use certificate::SurrealCertificateRepository;
+pub use email_template::SurrealEmailTemplateRepository;
 pub use federation_config::SurrealFederationConfigRepository;
 pub use federation_link::SurrealFederationLinkRepository;
 pub use group::SurrealGroupRepository;

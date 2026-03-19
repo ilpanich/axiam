@@ -331,33 +331,29 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         &self,
         settings: &SecuritySettings,
     ) -> Result<SecuritySettings, DbError> {
+        // Use a deterministic record ID derived from (scope, scope_id) so
+        // that concurrent requests for the same key converge on the same
+        // row.  UPDATE on a deterministic ID is a single-statement upsert
+        // that is safe under concurrency (no read-then-create race).
         let scope_str = settings.scope.to_string();
         let scope_id_str = settings.scope_id.to_string();
+        let deterministic_id =
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{scope_str}:{scope_id_str}").as_bytes());
+        let id_str = deterministic_id.to_string();
 
-        // Check for an existing row to reuse ID / created_at.
-        let existing = self.fetch_row(&scope_str, &scope_id_str).await?;
-
-        let (id, is_update) = match &existing {
-            Some(row) => (row.id, true),
-            None => (Uuid::new_v4(), false),
-        };
-        let id_str = id.to_string();
-
-        let query = if is_update {
-            format!(
-                "UPDATE type::record('security_settings', $id) SET \
-                 {}, updated_at = time::now()",
-                SETTINGS_FIELDS,
-            )
-        } else {
-            format!(
-                "CREATE type::record('security_settings', $id) SET {}",
-                SETTINGS_FIELDS,
-            )
-        };
+        // UPSERT: single statement — creates the row if it doesn't
+        // exist, updates it otherwise. Timestamps are handled inline:
+        // `created_at` is only set on initial creation via
+        // `time::now()` default, and `updated_at` is always refreshed.
+        let query = format!(
+            "UPSERT type::record('security_settings', $id) SET \
+             {SETTINGS_FIELDS}, \
+             created_at = created_at OR time::now(), \
+             updated_at = time::now()",
+        );
 
         let bindings = self.bind_settings(settings);
-        let mut builder = self.db.query(&query).bind(("id", id_str));
+        let mut builder = self.db.query(&query).bind(("id", id_str.clone()));
         for (name, value) in bindings {
             builder = match value {
                 BindValue::Str(v) => builder.bind((name, v)),
@@ -376,11 +372,11 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         let rows: Vec<SettingsRow> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
             entity: "security_settings".into(),
-            id: id.to_string(),
+            id: id_str,
         })?;
 
         Ok(SecuritySettings {
-            id,
+            id: deterministic_id,
             scope: settings.scope,
             scope_id: settings.scope_id,
             password: PasswordPolicy {
@@ -526,11 +522,23 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         org_id: Uuid,
         tenant_id: Uuid,
     ) -> AxiamResult<SecuritySettings> {
-        // Try tenant row first (already a complete merged row)
-        if let Some(tenant_settings) = self.fetch_row("tenant", &tenant_id.to_string()).await? {
-            return Ok(tenant_settings);
+        let org = self.get_org_settings(org_id).await?;
+
+        // If there is a stored tenant row, diff it against the current
+        // org baseline and re-merge so that any org-level changes propagate
+        // to fields the tenant has NOT explicitly overridden.
+        if let Some(tenant_row) = self.fetch_row("tenant", &tenant_id.to_string()).await? {
+            let overrides = diff_against_org(&org, &tenant_row);
+            let merged = effective_settings(
+                &org,
+                &overrides,
+                tenant_id,
+                tenant_row.id,
+            );
+            return Ok(merged);
         }
-        // Fall back to org settings (or system defaults)
-        self.get_org_settings(org_id).await
+
+        // No tenant row — org settings (or system defaults) apply.
+        Ok(org)
     }
 }

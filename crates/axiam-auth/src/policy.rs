@@ -285,6 +285,13 @@ pub async fn evaluate_password<R: PasswordHistoryRepository>(
 ) -> AxiamResult<PolicyCheckResult> {
     let mut violations = check_complexity(password, policy);
 
+    // Short-circuit: if complexity checks already failed, skip the
+    // expensive history (Argon2) and HIBP (network) checks to avoid
+    // unnecessary CPU/network cost and DoS potential.
+    if !violations.is_empty() {
+        return Ok(PolicyCheckResult { violations });
+    }
+
     // History check
     if policy.password_history_count > 0 {
         let history_violations = check_history(

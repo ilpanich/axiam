@@ -59,9 +59,7 @@ pub async fn set_org_settings<C: Connection>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let input = body.into_inner();
     validate_org_settings(&input)?;
-    let settings = repo
-        .set_org_settings(path.into_inner(), input)
-        .await?;
+    let settings = repo.set_org_settings(path.into_inner(), input).await?;
     Ok(HttpResponse::Ok().json(settings))
 }
 

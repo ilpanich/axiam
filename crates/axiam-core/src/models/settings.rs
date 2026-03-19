@@ -277,31 +277,22 @@ pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
     }
 
     if input.access_token_lifetime_secs == 0 {
-        violations.push(
-            "access_token_lifetime_secs must be > 0".into(),
-        );
+        violations.push("access_token_lifetime_secs must be > 0".into());
     }
 
     if input.refresh_token_lifetime_secs == 0 {
-        violations.push(
-            "refresh_token_lifetime_secs must be > 0".into(),
-        );
+        violations.push("refresh_token_lifetime_secs must be > 0".into());
     }
 
     if input.mfa_challenge_lifetime_secs == 0 {
-        violations.push(
-            "mfa_challenge_lifetime_secs must be > 0".into(),
-        );
+        violations.push("mfa_challenge_lifetime_secs must be > 0".into());
     }
 
     if violations.is_empty() {
         Ok(())
     } else {
         Err(AxiamError::Validation {
-            message: format!(
-                "Invalid org settings: {}",
-                violations.join("; "),
-            ),
+            message: format!("Invalid org settings: {}", violations.join("; "),),
         })
     }
 }

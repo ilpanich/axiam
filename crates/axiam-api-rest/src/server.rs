@@ -49,7 +49,19 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 "/mfa/verify",
                 web::post().to(handlers::auth::verify_mfa::<C>),
             )
-            .route("/device", web::post().to(handlers::auth::device_auth::<C>)),
+            .route("/device", web::post().to(handlers::auth::device_auth::<C>))
+            .route(
+                "/verify-email",
+                web::post().to(
+                    handlers::email_verification::verify_email::<C>,
+                ),
+            )
+            .route(
+                "/resend-verification",
+                web::post().to(
+                    handlers::email_verification::resend_verification::<C>,
+                ),
+            ),
     );
     // OIDC Discovery (must be outside /oauth2 scope per spec)
     cfg.route(

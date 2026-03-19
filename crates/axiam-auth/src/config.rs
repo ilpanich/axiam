@@ -41,6 +41,9 @@ pub struct AuthConfig {
     pub lockout_backoff_multiplier: f64,
     /// Maximum lockout duration in seconds (default: 3600 = 1 hour).
     pub max_lockout_duration_secs: u64,
+    /// Grace period in hours during which PendingVerification users
+    /// can still log in (default: 24). Set to 0 to disable.
+    pub email_verification_grace_period_hours: u32,
 }
 
 impl AuthConfig {
@@ -78,6 +81,7 @@ impl Default for AuthConfig {
             lockout_duration_secs: 300,
             lockout_backoff_multiplier: 2.0,
             max_lockout_duration_secs: 3600,
+            email_verification_grace_period_hours: 24,
         }
     }
 }

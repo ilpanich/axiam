@@ -32,6 +32,12 @@ pub enum AuthError {
     #[error("invalid token: {0}")]
     TokenInvalid(String),
 
+    #[error("email verification token expired or invalid")]
+    VerificationTokenInvalid,
+
+    #[error("email already verified")]
+    EmailAlreadyVerified,
+
     #[error("cryptography error: {0}")]
     Crypto(String),
 }
@@ -53,6 +59,10 @@ impl From<AuthError> for AxiamError {
                     reason: err.to_string(),
                 }
             }
+            AuthError::VerificationTokenInvalid
+            | AuthError::EmailAlreadyVerified => AxiamError::Validation {
+                message: err.to_string(),
+            },
             AuthError::Crypto(msg) => AxiamError::Crypto(msg),
         }
     }

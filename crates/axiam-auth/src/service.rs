@@ -175,7 +175,11 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
         }
 
         // 5. Check account status.
-        Self::check_user_status(&user.status)?;
+        Self::check_user_status(
+            &user.status,
+            user.created_at,
+            self.config.email_verification_grace_period_hours,
+        )?;
 
         // 6. Check MFA.
         if user.mfa_enabled && user.mfa_secret.is_some() {
@@ -219,7 +223,11 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
 
         // 2. Fetch user and verify TOTP.
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
-        Self::check_user_status(&user.status)?;
+        Self::check_user_status(
+            &user.status,
+            user.created_at,
+            self.config.email_verification_grace_period_hours,
+        )?;
 
         let encrypted_secret = user
             .mfa_secret
@@ -380,7 +388,11 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
             .user_repo
             .get_by_id(input.tenant_id, session.user_id)
             .await?;
-        Self::check_user_status(&user.status)?;
+        Self::check_user_status(
+            &user.status,
+            user.created_at,
+            self.config.email_verification_grace_period_hours,
+        )?;
 
         // 5. Create new session with rotated refresh token.
         let raw_refresh = token::generate_refresh_token();
@@ -428,12 +440,34 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
     // Private helpers
     // -------------------------------------------------------------------
 
-    fn check_user_status(status: &UserStatus) -> Result<(), AuthError> {
+    /// Check user account status, with grace period support for
+    /// pending verification.
+    ///
+    /// `created_at` and `grace_period_hours` are used to determine
+    /// if a `PendingVerification` user is still within the login
+    /// grace period. Pass `grace_period_hours = 0` to disable the
+    /// grace period (always reject pending users).
+    fn check_user_status(
+        status: &UserStatus,
+        created_at: chrono::DateTime<Utc>,
+        grace_period_hours: u32,
+    ) -> Result<(), AuthError> {
         match status {
             UserStatus::Active => Ok(()),
             UserStatus::Locked => Err(AuthError::AccountLocked),
             UserStatus::Inactive => Err(AuthError::AccountInactive),
-            UserStatus::PendingVerification => Err(AuthError::AccountPendingVerification),
+            UserStatus::PendingVerification => {
+                if grace_period_hours > 0 {
+                    let grace_end = created_at
+                        + Duration::hours(
+                            grace_period_hours as i64,
+                        );
+                    if Utc::now() <= grace_end {
+                        return Ok(());
+                    }
+                }
+                Err(AuthError::AccountPendingVerification)
+            }
         }
     }
 

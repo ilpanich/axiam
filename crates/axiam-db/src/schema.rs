@@ -88,6 +88,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "email_templates",
         sql: SCHEMA_V10,
     },
+    Migration {
+        version: 11,
+        name: "email_verification_tokens",
+        sql: SCHEMA_V11,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -659,6 +664,32 @@ DEFINE FIELD updated_at ON TABLE email_template TYPE datetime \
 -- One template per (scope, scope_id, kind)
 DEFINE INDEX idx_email_template_scope_kind ON TABLE email_template \
     COLUMNS scope, scope_id, kind UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v11 — Email verification tokens
+// -----------------------------------------------------------------------
+
+const SCHEMA_V11: &str = "\
+-- =======================================================================
+-- Email Verification Tokens (tenant scope)
+-- =======================================================================
+DEFINE TABLE email_verification_token SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE email_verification_token TYPE string;
+DEFINE FIELD user_id ON TABLE email_verification_token TYPE string;
+DEFINE FIELD token_hash ON TABLE email_verification_token TYPE string;
+DEFINE FIELD expires_at ON TABLE email_verification_token TYPE datetime;
+DEFINE FIELD consumed_at ON TABLE email_verification_token \
+    TYPE option<datetime>;
+DEFINE FIELD created_at ON TABLE email_verification_token TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_evtoken_hash ON TABLE email_verification_token \
+    COLUMNS tenant_id, token_hash UNIQUE;
+DEFINE INDEX idx_evtoken_user ON TABLE email_verification_token \
+    COLUMNS tenant_id, user_id;
+
+-- Add email_verified_at to user table
+DEFINE FIELD email_verified_at ON TABLE user TYPE option<datetime>;
 ";
 
 // -----------------------------------------------------------------------

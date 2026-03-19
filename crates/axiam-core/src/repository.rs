@@ -12,6 +12,7 @@ use crate::models::{
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
     email_template::{EmailTemplate, SetEmailTemplate, TemplateKind},
+    email_verification::{CreateEmailVerificationToken, EmailVerificationToken},
     federation::{
         CreateFederationConfig, CreateFederationLink, FederationConfig, FederationLink,
         UpdateFederationConfig,
@@ -951,4 +952,41 @@ pub trait EmailTemplateRepository: Send + Sync {
         &self,
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<EmailTemplate>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Email Verification Tokens (tenant-scoped)
+// ---------------------------------------------------------------------------
+
+pub trait EmailVerificationTokenRepository: Send + Sync {
+    /// Store a new verification token.
+    fn create(
+        &self,
+        input: CreateEmailVerificationToken,
+    ) -> impl Future<Output = AxiamResult<EmailVerificationToken>> + Send;
+
+    /// Look up a valid (unconsumed, non-expired) token by hash.
+    fn get_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<EmailVerificationToken>> + Send;
+
+    /// Atomically consume a token (set consumed_at). Returns error if
+    /// already consumed or expired.
+    fn consume(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<EmailVerificationToken>> + Send;
+
+    /// Count tokens created for a user today (for resend rate limiting).
+    fn count_today(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete expired and consumed tokens (garbage collection).
+    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }

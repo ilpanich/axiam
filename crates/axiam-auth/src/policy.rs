@@ -56,7 +56,7 @@ impl std::fmt::Display for PolicyViolation {
                 "password was used recently (position {position} in history)"
             ),
             Self::BreachedPassword { occurrences } => {
-                write!(f, "password found in {occurrences} data breach(es)")
+                write!(f, "password seen {occurrences} time(s) in known breaches")
             }
         }
     }

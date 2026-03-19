@@ -10,6 +10,7 @@ use crate::error::AxiamResult;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
+    email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
     federation::{
         CreateFederationConfig, CreateFederationLink, FederationConfig, FederationLink,
         UpdateFederationConfig,
@@ -844,4 +845,49 @@ pub trait SettingsRepository: Send + Sync {
         org_id: Uuid,
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<SecuritySettings>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Email Configuration (org/tenant scope)
+// ---------------------------------------------------------------------------
+
+pub trait EmailConfigRepository: Send + Sync {
+    /// Get org-level email config (returns None if not configured).
+    fn get_org_config(
+        &self,
+        org_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<EmailConfig>>> + Send;
+
+    /// Set (create or replace) org-level email config.
+    fn set_org_config(
+        &self,
+        org_id: Uuid,
+        input: SetOrgEmailConfig,
+    ) -> impl Future<Output = AxiamResult<EmailConfig>> + Send;
+
+    /// Get tenant-level overrides.
+    fn get_tenant_override(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<EmailConfigOverride>>> + Send;
+
+    /// Set tenant-level overrides.
+    fn set_tenant_override(
+        &self,
+        tenant_id: Uuid,
+        input: SetTenantEmailOverride,
+    ) -> impl Future<Output = AxiamResult<EmailConfigOverride>> + Send;
+
+    /// Delete all tenant-level overrides (revert to org config).
+    fn delete_tenant_override(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Get the effective (merged) email config for a tenant.
+    fn get_effective_config(
+        &self,
+        org_id: Uuid,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<EmailConfig>>> + Send;
 }

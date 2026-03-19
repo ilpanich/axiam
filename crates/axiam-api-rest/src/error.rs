@@ -40,9 +40,11 @@ impl actix_web::ResponseError for AxiamApiError {
             AxiamError::AuthorizationDenied { .. } => StatusCode::FORBIDDEN,
             AxiamError::Validation { .. } | AxiamError::TenantContext => StatusCode::BAD_REQUEST,
             AxiamError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            AxiamError::EmailConfig(_) => StatusCode::BAD_REQUEST,
             AxiamError::Database(_)
             | AxiamError::Certificate(_)
             | AxiamError::Crypto(_)
+            | AxiamError::EmailDelivery(_)
             | AxiamError::WebhookDelivery(_)
             | AxiamError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }

@@ -1,0 +1,23 @@
+[package]
+name = "axiam-email"
+description = "AXIAM pluggable email delivery service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axiam-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+lettre = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

@@ -438,12 +438,16 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         match self.fetch_row("org", &org_id.to_string()).await? {
             Some(s) => Ok(s),
             None => {
-                // Return system defaults with a deterministic ID so
-                // clients see a stable identifier across reads/writes.
+                // Return system defaults with a deterministic ID and
+                // stable timestamps so clients see consistent values
+                // across reads (no row persisted yet).
                 let defaults = system_defaults();
                 let deterministic_id =
                     Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("org:{org_id}").as_bytes());
-                Ok(settings_from_org_input(deterministic_id, org_id, &defaults))
+                let mut settings = settings_from_org_input(deterministic_id, org_id, &defaults);
+                settings.created_at = DateTime::<Utc>::UNIX_EPOCH;
+                settings.updated_at = DateTime::<Utc>::UNIX_EPOCH;
+                Ok(settings)
             }
         }
     }

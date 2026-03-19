@@ -573,6 +573,18 @@ pub fn validate_tenant_override(
     let merged = effective_settings(org, overrides, Uuid::nil(), Uuid::nil());
     let mut cross = Vec::new();
 
+    // Non-zero lifetime invariants (0 passes "more restrictive" checks
+    // but produces an unusable policy).
+    if merged.token.access_token_lifetime_secs == 0 {
+        cross.push("effective access_token_lifetime_secs must be > 0".into());
+    }
+    if merged.token.refresh_token_lifetime_secs == 0 {
+        cross.push("effective refresh_token_lifetime_secs must be > 0".into());
+    }
+    if merged.mfa.mfa_challenge_lifetime_secs == 0 {
+        cross.push("effective mfa_challenge_lifetime_secs must be > 0".into());
+    }
+
     if merged.lockout.max_lockout_duration_secs < merged.lockout.lockout_duration_secs {
         cross.push(format!(
             "effective max_lockout_duration_secs ({}) must be >= \
@@ -915,6 +927,38 @@ mod tests {
         assert!(msg.contains("min_length"), "got: {msg}");
         assert!(msg.contains("mfa_enforced"), "got: {msg}");
         assert!(msg.contains("access_token_lifetime_secs"), "got: {msg}");
+    }
+
+    // --- cross-field invariant: zero lifetimes rejected ---
+
+    #[test]
+    fn zero_access_token_lifetime_is_rejected() {
+        let org = org_settings();
+        let overrides = TenantSettingsOverride {
+            access_token_lifetime_secs: Some(0),
+            ..Default::default()
+        };
+        let err = validate_tenant_override(&org, &overrides).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("access_token_lifetime_secs must be > 0"),
+            "got: {msg}",
+        );
+    }
+
+    #[test]
+    fn zero_mfa_challenge_lifetime_is_rejected() {
+        let org = org_settings();
+        let overrides = TenantSettingsOverride {
+            mfa_challenge_lifetime_secs: Some(0),
+            ..Default::default()
+        };
+        let err = validate_tenant_override(&org, &overrides).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mfa_challenge_lifetime_secs must be > 0"),
+            "got: {msg}",
+        );
     }
 
     // --- effective_settings merging ---

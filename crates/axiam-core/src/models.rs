@@ -24,4 +24,5 @@ pub mod session;
 pub mod settings;
 pub mod tenant;
 pub mod user;
+pub mod notification_rule;
 pub mod webhook;

@@ -5,6 +5,7 @@ pub mod certificates;
 pub mod email_verification;
 pub mod federation;
 pub mod groups;
+pub mod notification_rules;
 pub mod oauth2;
 pub mod oauth2_clients;
 pub mod organizations;

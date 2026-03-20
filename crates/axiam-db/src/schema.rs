@@ -98,6 +98,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "password_reset_tokens",
         sql: SCHEMA_V12,
     },
+    Migration {
+        version: 13,
+        name: "notification_rules",
+        sql: SCHEMA_V13,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -718,6 +723,31 @@ DEFINE INDEX idx_prtoken_hash ON TABLE password_reset_token \
     COLUMNS tenant_id, token_hash UNIQUE;
 DEFINE INDEX idx_prtoken_user ON TABLE password_reset_token \
     COLUMNS tenant_id, user_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v13 — Notification rules (tenant scope)
+// -----------------------------------------------------------------------
+
+const SCHEMA_V13: &str = "\
+-- =======================================================================
+-- Notification Rules (tenant scope)
+-- =======================================================================
+DEFINE TABLE notification_rule SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE notification_rule TYPE string;
+DEFINE FIELD name ON TABLE notification_rule TYPE string;
+DEFINE FIELD description ON TABLE notification_rule TYPE string;
+DEFINE FIELD events ON TABLE notification_rule TYPE array;
+DEFINE FIELD events.* ON TABLE notification_rule TYPE string;
+DEFINE FIELD recipient_emails ON TABLE notification_rule TYPE array;
+DEFINE FIELD recipient_emails.* ON TABLE notification_rule TYPE string;
+DEFINE FIELD enabled ON TABLE notification_rule TYPE bool DEFAULT true;
+DEFINE FIELD created_at ON TABLE notification_rule TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE notification_rule TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_notification_rule_tenant ON TABLE notification_rule \
+    COLUMNS tenant_id;
 ";
 
 // -----------------------------------------------------------------------

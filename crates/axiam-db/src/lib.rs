@@ -15,16 +15,21 @@ mod schema;
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use repository::{
-    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealEmailTemplateRepository,
-    SurrealEmailVerificationTokenRepository, SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
+    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
+    SurrealCaCertificateRepository, SurrealCertificateRepository,
+    SurrealEmailTemplateRepository,
+    SurrealEmailVerificationTokenRepository,
+    SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealGroupRepository,
+    SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository,
-    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebhookRepository, hash_client_secret, verify_password,
+    SurrealPgpKeyRepository, SurrealRefreshTokenRepository,
+    SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebhookRepository, hash_client_secret, verify_password,
 };
 pub use schema::{run_migrations, schema_v1};
 /// Re-export SurrealDB connection types for use in repository type aliases.

@@ -322,6 +322,38 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 web::resource("/pgp-keys/{id}/encrypt")
                     .route(web::post().to(handlers::pgp_keys::encrypt::<C>)),
             )
+            // --- Notification Rules ---
+            .service(
+                web::resource("/notification-rules")
+                    .route(
+                        web::post().to(
+                            handlers::notification_rules::create::<C>,
+                        ),
+                    )
+                    .route(
+                        web::get().to(
+                            handlers::notification_rules::list::<C>,
+                        ),
+                    ),
+            )
+            .service(
+                web::resource("/notification-rules/{id}")
+                    .route(
+                        web::get().to(
+                            handlers::notification_rules::get::<C>,
+                        ),
+                    )
+                    .route(
+                        web::put().to(
+                            handlers::notification_rules::update::<C>,
+                        ),
+                    )
+                    .route(
+                        web::delete().to(
+                            handlers::notification_rules::delete::<C>,
+                        ),
+                    ),
+            )
             // --- Webhooks ---
             .service(
                 web::resource("/webhooks")

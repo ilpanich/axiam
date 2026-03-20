@@ -35,6 +35,10 @@ use crate::models::{
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     user::{CreateUser, UpdateUser, User},
+    notification_rule::{
+        CreateNotificationRule, NotificationRule,
+        UpdateNotificationRule,
+    },
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
 };
 
@@ -743,6 +747,47 @@ pub trait WebhookRepository: Send + Sync {
         tenant_id: Uuid,
         event_type: &str,
     ) -> impl Future<Output = AxiamResult<Vec<Webhook>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Notification Rules (tenant-scoped)
+// ---------------------------------------------------------------------------
+
+pub trait NotificationRuleRepository: Send + Sync {
+    fn create(
+        &self,
+        input: CreateNotificationRule,
+    ) -> impl Future<Output = AxiamResult<NotificationRule>> + Send;
+    fn get_by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<NotificationRule>> + Send;
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        input: UpdateNotificationRule,
+    ) -> impl Future<Output = AxiamResult<NotificationRule>> + Send;
+    fn delete(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    fn list(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<
+        Output = AxiamResult<PaginatedResult<NotificationRule>>,
+    > + Send;
+    /// Get all enabled rules subscribed to a given event type.
+    fn get_by_event(
+        &self,
+        tenant_id: Uuid,
+        event_type: &str,
+    ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>>
+    + Send;
 }
 
 // ---------------------------------------------------------------------------

@@ -519,6 +519,11 @@ Connect the `EmailService` to the `/auth/reset` and `/auth/resend-verification` 
 
 **Commit**: `feat(email): wire email delivery for password reset and verification endpoints`
 
+### T19.12 — Wire NotificationDispatcher Email Delivery
+Connect `NotificationDispatcher` to `EmailService` with template resolution and org_id lookup so that matched notification rules actually send emails. Currently the dispatcher returns matched rules/recipients but does not send (marked with `TODO(T19)` in `crates/axiam-audit/src/notification.rs`).
+
+**Commit**: `feat(notifications): wire email delivery for admin notification dispatch`
+
 ---
 
 ## Summary
@@ -544,8 +549,8 @@ Connect the `EmailService` to the `/auth/reset` and `/auth/resend-verification` 
 | Phase 16 | 3 | Docker, K8s, CD pipeline |
 | Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 18 | 4 | Security, compliance, performance, docs |
-| Phase 19 | 11 | Deferred improvements & optimizations from PR reviews |
+| Phase 19 | 12 | Deferred improvements & optimizations from PR reviews |
 
-**Total: 86 tasks across 20 phases**
+**Total: 87 tasks across 20 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

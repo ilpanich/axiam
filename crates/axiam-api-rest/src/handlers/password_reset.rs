@@ -8,8 +8,8 @@ use axiam_auth::PasswordResetService;
 use axiam_core::error::AxiamError;
 use axiam_db::{
     SurrealFederationLinkRepository, SurrealPasswordHistoryRepository,
-    SurrealPasswordResetTokenRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealPasswordResetTokenRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository,
 };
 use serde::Deserialize;
 use surrealdb::Connection;
@@ -63,31 +63,28 @@ pub async fn request_reset<C: Connection>(
         history_repo.as_ref().clone(),
     );
 
-    let expiry_hours =
-        auth_config.password_reset_token_expiry_hours;
+    let expiry_hours = auth_config.password_reset_token_expiry_hours;
 
-    match svc.initiate_reset(req.tenant_id, &req.email, expiry_hours).await
+    match svc
+        .initiate_reset(req.tenant_id, &req.email, expiry_hours)
+        .await
     {
         Ok(Some((_raw_token, _user_id, _expires_at))) => {
             // TODO(T19): wire up actual email sending via EmailService
             // with the password-reset template.
-            Ok(HttpResponse::Ok()
-                .json(serde_json::json!({ "sent": true })))
+            Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
         }
         Ok(None) => {
             // User not found or federated — identical response to
             // prevent email enumeration.
-            Ok(HttpResponse::Ok()
-                .json(serde_json::json!({ "sent": true })))
+            Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
         }
         Err(AxiamError::RateLimited) => {
-            Ok(HttpResponse::TooManyRequests().json(
-                serde_json::json!({
-                    "error": "rate_limited",
-                    "message":
-                        "too many password reset requests today"
-                }),
-            ))
+            Ok(HttpResponse::TooManyRequests().json(serde_json::json!({
+                "error": "rate_limited",
+                "message":
+                    "too many password reset requests today"
+            })))
         }
         Err(e) => Err(e.into()),
     }
@@ -115,15 +112,11 @@ pub async fn confirm_reset<C: Connection>(
     let req = body.into_inner();
 
     // Resolve the tenant to get its org_id for settings.
-    let tenant =
-        tenant_repo.get_by_id(req.tenant_id).await?;
+    let tenant = tenant_repo.get_by_id(req.tenant_id).await?;
 
     // Resolve effective password policy.
     let settings = settings_repo
-        .get_effective_settings(
-            tenant.organization_id,
-            req.tenant_id,
-        )
+        .get_effective_settings(tenant.organization_id, req.tenant_id)
         .await?;
 
     let svc = PasswordResetService::new(
@@ -142,6 +135,5 @@ pub async fn confirm_reset<C: Connection>(
     )
     .await?;
 
-    Ok(HttpResponse::Ok()
-        .json(serde_json::json!({ "reset": true })))
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "reset": true })))
 }

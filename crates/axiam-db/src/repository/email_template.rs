@@ -137,7 +137,7 @@ impl<C: Connection> SurrealEmailTemplateRepository<C> {
             &row.scope_id,
             &row.kind,
         ))
-        .unwrap();
+        .map_err(|e| DbError::Migration(format!("bad UUID: {e}")))?;
 
         Ok(EmailTemplate {
             id: det_id,

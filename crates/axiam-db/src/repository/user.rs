@@ -391,8 +391,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             builder = builder.bind(("locked_until", locked_until));
         }
         if let Some(email_verified_at) = input.email_verified_at {
-            builder =
-                builder.bind(("email_verified_at", email_verified_at));
+            builder = builder.bind(("email_verified_at", email_verified_at));
         }
 
         let result = builder.await.map_err(DbError::from)?;

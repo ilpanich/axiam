@@ -8,8 +8,7 @@ use actix_web::{HttpResponse, web};
 use axiam_auth::EmailVerificationService;
 use axiam_core::error::AxiamError;
 use axiam_db::{
-    SurrealEmailVerificationTokenRepository, SurrealFederationLinkRepository,
-    SurrealUserRepository,
+    SurrealEmailVerificationTokenRepository, SurrealFederationLinkRepository, SurrealUserRepository,
 };
 use serde::Deserialize;
 use surrealdb::Connection;
@@ -87,25 +86,19 @@ pub async fn resend_verification<C: Connection>(
             // with the activation template. The token is generated and
             // stored; email delivery will be integrated when the server
             // composition layer wires EmailService.
-            Ok(HttpResponse::Ok().json(
-                serde_json::json!({ "sent": true }),
-            ))
+            Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
         }
         Ok(None) => {
             // User not found or already verified — return identical
             // response to prevent email enumeration.
-            Ok(HttpResponse::Ok().json(
-                serde_json::json!({ "sent": true }),
-            ))
+            Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
         }
         Err(AxiamError::RateLimited) => {
-            Ok(HttpResponse::TooManyRequests().json(
-                serde_json::json!({
-                    "error": "rate_limited",
-                    "message":
-                        "too many verification emails requested today"
-                }),
-            ))
+            Ok(HttpResponse::TooManyRequests().json(serde_json::json!({
+                "error": "rate_limited",
+                "message":
+                    "too many verification emails requested today"
+            })))
         }
         Err(e) => Err(e.into()),
     }

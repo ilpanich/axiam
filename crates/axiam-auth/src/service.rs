@@ -458,10 +458,7 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
             UserStatus::Inactive => Err(AuthError::AccountInactive),
             UserStatus::PendingVerification => {
                 if grace_period_hours > 0 {
-                    let grace_end = created_at
-                        + Duration::hours(
-                            grace_period_hours as i64,
-                        );
+                    let grace_end = created_at + Duration::hours(grace_period_hours as i64);
                     if Utc::now() <= grace_end {
                         return Ok(());
                     }

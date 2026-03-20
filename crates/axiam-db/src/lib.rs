@@ -15,20 +15,15 @@ mod schema;
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use repository::{
-    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
-    SurrealCaCertificateRepository, SurrealCertificateRepository,
-    SurrealEmailTemplateRepository,
-    SurrealEmailVerificationTokenRepository,
-    SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealGroupRepository,
-    SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
-    SurrealPasswordResetTokenRepository, SurrealPermissionRepository,
-    SurrealPgpKeyRepository, SurrealRefreshTokenRepository,
-    SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    SurrealCertificateRepository, SurrealEmailTemplateRepository,
+    SurrealEmailVerificationTokenRepository, SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealGroupRepository, SurrealNotificationRuleRepository,
+    SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
+    SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
+    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
     SurrealWebhookRepository, hash_client_secret, verify_password,
 };
 pub use schema::{run_migrations, schema_v1};

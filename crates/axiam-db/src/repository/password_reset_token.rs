@@ -1,9 +1,7 @@
 //! SurrealDB implementation of [`PasswordResetTokenRepository`].
 
 use axiam_core::error::AxiamResult;
-use axiam_core::models::password_reset::{
-    CreatePasswordResetToken, PasswordResetToken,
-};
+use axiam_core::models::password_reset::{CreatePasswordResetToken, PasswordResetToken};
 use axiam_core::repository::PasswordResetTokenRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::{Connection, Surreal};
@@ -39,18 +37,11 @@ struct CountRow {
 }
 
 impl TokenRow {
-    fn into_token(
-        self,
-        id: Uuid,
-    ) -> Result<PasswordResetToken, DbError> {
+    fn into_token(self, id: Uuid) -> Result<PasswordResetToken, DbError> {
         let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| {
-                DbError::Migration(format!("invalid tenant UUID: {e}"))
-            })?;
+            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
         let user_id = Uuid::parse_str(&self.user_id)
-            .map_err(|e| {
-                DbError::Migration(format!("invalid user UUID: {e}"))
-            })?;
+            .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
         Ok(PasswordResetToken {
             id,
             tenant_id,
@@ -66,17 +57,11 @@ impl TokenRow {
 impl TokenRowWithId {
     fn try_into_token(self) -> Result<PasswordResetToken, DbError> {
         let id = Uuid::parse_str(&self.record_id)
-            .map_err(|e| {
-                DbError::Migration(format!("invalid UUID: {e}"))
-            })?;
+            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
         let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| {
-                DbError::Migration(format!("invalid tenant UUID: {e}"))
-            })?;
+            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
         let user_id = Uuid::parse_str(&self.user_id)
-            .map_err(|e| {
-                DbError::Migration(format!("invalid user UUID: {e}"))
-            })?;
+            .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
         Ok(PasswordResetToken {
             id,
             tenant_id,
@@ -108,13 +93,8 @@ impl<C: Connection> SurrealPasswordResetTokenRepository<C> {
     }
 }
 
-impl<C: Connection> PasswordResetTokenRepository
-    for SurrealPasswordResetTokenRepository<C>
-{
-    async fn create(
-        &self,
-        input: CreatePasswordResetToken,
-    ) -> AxiamResult<PasswordResetToken> {
+impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRepository<C> {
+    async fn create(&self, input: CreatePasswordResetToken) -> AxiamResult<PasswordResetToken> {
         let id = Uuid::new_v4();
         let id_str = id.to_string();
 
@@ -140,13 +120,11 @@ impl<C: Connection> PasswordResetTokenRepository
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        let rows: Vec<TokenRow> =
-            result.take(0).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-                entity: "password_reset_token".into(),
-                id: id_str,
-            })?;
+        let rows: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "password_reset_token".into(),
+            id: id_str,
+        })?;
 
         Ok(row.into_token(id)?)
     }
@@ -171,22 +149,16 @@ impl<C: Connection> PasswordResetTokenRepository
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<TokenRowWithId> =
-            result.take(0).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-                entity: "password_reset_token".into(),
-                id: format!("token_hash={token_hash}"),
-            })?;
+        let rows: Vec<TokenRowWithId> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "password_reset_token".into(),
+            id: format!("token_hash={token_hash}"),
+        })?;
 
         Ok(row.try_into_token()?)
     }
 
-    async fn consume(
-        &self,
-        tenant_id: Uuid,
-        token_hash: &str,
-    ) -> AxiamResult<PasswordResetToken> {
+    async fn consume(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<PasswordResetToken> {
         let mut result = self
             .db
             .query(
@@ -207,23 +179,28 @@ impl<C: Connection> PasswordResetTokenRepository
             .await
             .map_err(DbError::from)?;
 
-        // Statement 0 is the UPDATE; statement 1 is the SELECT.
-        let rows: Vec<TokenRowWithId> =
-            result.take(1).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+        // Statement 0 is the UPDATE — if no rows were affected, the
+        // token was already consumed, invalidated, or expired.
+        let updated: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
+        if updated.is_empty() {
+            return Err(DbError::NotFound {
                 entity: "password_reset_token".into(),
                 id: format!("token_hash={token_hash}"),
-            })?;
+            }
+            .into());
+        }
+
+        // Statement 1 is the SELECT with full record_id.
+        let rows: Vec<TokenRowWithId> = result.take(1).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "password_reset_token".into(),
+            id: format!("token_hash={token_hash}"),
+        })?;
 
         Ok(row.try_into_token()?)
     }
 
-    async fn count_today(
-        &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-    ) -> AxiamResult<u64> {
+    async fn count_today(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
         let today_start = Utc::now()
             .date_naive()
             .and_hms_opt(0, 0, 0)
@@ -246,8 +223,7 @@ impl<C: Connection> PasswordResetTokenRepository
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<CountRow> =
-            result.take(0).map_err(DbError::from)?;
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.first().map(|r| r.total).unwrap_or(0))
     }
 
@@ -263,32 +239,32 @@ impl<C: Connection> PasswordResetTokenRepository
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<TokenRow> =
-            result.take(0).map_err(DbError::from)?;
+        let rows: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.len() as u64)
     }
 
-    async fn delete_unconsumed_for_user(
-        &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-    ) -> AxiamResult<u64> {
-        let mut result = self
+    async fn delete_unconsumed_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
+        // Mark unconsumed tokens as consumed (invalidated) rather than
+        // deleting them so that count_today() still sees them for
+        // rate-limit enforcement.
+        let result = self
             .db
             .query(
-                "DELETE FROM password_reset_token \
+                "UPDATE password_reset_token \
+                 SET consumed_at = time::now() \
                  WHERE tenant_id = $tenant_id \
                    AND user_id = $user_id \
-                   AND consumed_at IS NONE \
-                 RETURN BEFORE",
+                   AND consumed_at IS NONE",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<TokenRow> =
-            result.take(0).map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.len() as u64)
     }
 }

@@ -128,11 +128,10 @@ impl<C: Connection> EmailVerificationTokenRepository
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-                entity: "email_verification_token".into(),
-                id: id_str,
-            })?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "email_verification_token".into(),
+            id: id_str,
+        })?;
 
         Ok(row.into_token(id)?)
     }
@@ -157,13 +156,11 @@ impl<C: Connection> EmailVerificationTokenRepository
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<TokenRowWithId> =
-            result.take(0).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-                entity: "email_verification_token".into(),
-                id: format!("token_hash={token_hash}"),
-            })?;
+        let rows: Vec<TokenRowWithId> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "email_verification_token".into(),
+            id: format!("token_hash={token_hash}"),
+        })?;
 
         Ok(row.try_into_token()?)
     }
@@ -196,22 +193,16 @@ impl<C: Connection> EmailVerificationTokenRepository
             .map_err(DbError::from)?;
 
         // Statement 0 is the UPDATE; statement 1 is the SELECT.
-        let rows: Vec<TokenRowWithId> =
-            result.take(1).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-                entity: "email_verification_token".into(),
-                id: format!("token_hash={token_hash}"),
-            })?;
+        let rows: Vec<TokenRowWithId> = result.take(1).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "email_verification_token".into(),
+            id: format!("token_hash={token_hash}"),
+        })?;
 
         Ok(row.try_into_token()?)
     }
 
-    async fn count_today(
-        &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-    ) -> AxiamResult<u64> {
+    async fn count_today(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
         let today_start = Utc::now()
             .date_naive()
             .and_hms_opt(0, 0, 0)

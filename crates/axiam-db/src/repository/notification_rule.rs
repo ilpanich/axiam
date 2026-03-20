@@ -54,7 +54,7 @@ fn parse_events(raw: Vec<String>) -> Result<Vec<NotificationEventType>, DbError>
     raw.into_iter()
         .map(|s| {
             s.parse::<NotificationEventType>()
-                .map_err(|e| DbError::Migration(e))
+                .map_err(DbError::Migration)
         })
         .collect()
 }

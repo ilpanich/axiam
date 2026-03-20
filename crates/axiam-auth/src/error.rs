@@ -68,11 +68,9 @@ impl From<AuthError> for AxiamError {
             AuthError::VerificationTokenInvalid
             | AuthError::EmailAlreadyVerified
             | AuthError::ResetTokenInvalid
-            | AuthError::FederatedUserPasswordReset => {
-                AxiamError::Validation {
-                    message: err.to_string(),
-                }
-            }
+            | AuthError::FederatedUserPasswordReset => AxiamError::Validation {
+                message: err.to_string(),
+            },
             AuthError::Crypto(msg) => AxiamError::Crypto(msg),
         }
     }

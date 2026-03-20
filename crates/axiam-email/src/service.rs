@@ -75,11 +75,13 @@ impl EmailService {
             ));
         }
 
-        tracing::info!(
-            provider = self.provider.provider_name(),
+        // Log at debug level to avoid exposing PII (recipient, subject)
+        // in production logs. Info level only shows the provider name.
+        tracing::info!(provider = self.provider.provider_name(), "sending email");
+        tracing::debug!(
             to = %message.to,
             subject = %message.subject,
-            "sending email"
+            "email details"
         );
 
         self.provider

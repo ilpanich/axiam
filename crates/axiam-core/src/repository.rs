@@ -18,6 +18,7 @@ use crate::models::{
         UpdateFederationConfig,
     },
     group::{CreateGroup, Group, UpdateGroup},
+    notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, CreateRefreshToken,
         OAuth2Client, RefreshToken, UpdateOAuth2Client,
@@ -35,10 +36,6 @@ use crate::models::{
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     user::{CreateUser, UpdateUser, User},
-    notification_rule::{
-        CreateNotificationRule, NotificationRule,
-        UpdateNotificationRule,
-    },
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
 };
 
@@ -769,25 +766,18 @@ pub trait NotificationRuleRepository: Send + Sync {
         id: Uuid,
         input: UpdateNotificationRule,
     ) -> impl Future<Output = AxiamResult<NotificationRule>> + Send;
-    fn delete(
-        &self,
-        tenant_id: Uuid,
-        id: Uuid,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,
         pagination: Pagination,
-    ) -> impl Future<
-        Output = AxiamResult<PaginatedResult<NotificationRule>>,
-    > + Send;
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<NotificationRule>>> + Send;
     /// Get all enabled rules subscribed to a given event type.
     fn get_by_event(
         &self,
         tenant_id: Uuid,
         event_type: &str,
-    ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>>
-    + Send;
+    ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,7 +1063,8 @@ pub trait PasswordResetTokenRepository: Send + Sync {
     /// Delete expired and consumed tokens (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 
-    /// Delete unconsumed tokens for a user (invalidate prior resets).
+    /// Invalidate unconsumed tokens for a user (mark as consumed so
+    /// they cannot be used, while preserving rate-limit counters).
     fn delete_unconsumed_for_user(
         &self,
         tenant_id: Uuid,

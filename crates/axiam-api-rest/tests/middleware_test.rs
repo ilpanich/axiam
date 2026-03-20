@@ -71,6 +71,7 @@ fn test_auth_config(lifetime: u64) -> AuthConfig {
         oauth2_issuer_url: String::new(),
         max_lockout_duration_secs: 3600,
         email_verification_grace_period_hours: 24,
+        password_reset_token_expiry_hours: 1,
     }
 }
 

@@ -318,6 +318,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         if input.email.is_some() {
             sets.push("email = $email");
         }
+        if input.password_hash.is_some() {
+            sets.push("password_hash = $password_hash");
+        }
         if input.status.is_some() {
             sets.push("status = $status");
         }
@@ -361,6 +364,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         }
         if let Some(email) = input.email {
             builder = builder.bind(("email", email));
+        }
+        if let Some(password_hash) = input.password_hash {
+            builder = builder.bind(("password_hash", password_hash));
         }
         if let Some(ref status) = input.status {
             builder = builder.bind(("status", status_to_string(status).to_string()));

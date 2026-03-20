@@ -46,6 +46,7 @@ pub struct CreateUser {
 pub struct UpdateUser {
     pub username: Option<String>,
     pub email: Option<String>,
+    pub password_hash: Option<String>,
     pub status: Option<UserStatus>,
     pub metadata: Option<serde_json::Value>,
     pub mfa_enabled: Option<bool>,

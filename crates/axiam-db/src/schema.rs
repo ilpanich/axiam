@@ -93,6 +93,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "email_verification_tokens",
         sql: SCHEMA_V11,
     },
+    Migration {
+        version: 12,
+        name: "password_reset_tokens",
+        sql: SCHEMA_V12,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -690,6 +695,29 @@ DEFINE INDEX idx_evtoken_user ON TABLE email_verification_token \
 
 -- Add email_verified_at to user table
 DEFINE FIELD email_verified_at ON TABLE user TYPE option<datetime>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v12 — Password reset tokens
+// -----------------------------------------------------------------------
+
+const SCHEMA_V12: &str = "\
+-- =======================================================================
+-- Password Reset Tokens (tenant scope)
+-- =======================================================================
+DEFINE TABLE password_reset_token SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE password_reset_token TYPE string;
+DEFINE FIELD user_id ON TABLE password_reset_token TYPE string;
+DEFINE FIELD token_hash ON TABLE password_reset_token TYPE string;
+DEFINE FIELD expires_at ON TABLE password_reset_token TYPE datetime;
+DEFINE FIELD consumed_at ON TABLE password_reset_token \
+    TYPE option<datetime>;
+DEFINE FIELD created_at ON TABLE password_reset_token TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_prtoken_hash ON TABLE password_reset_token \
+    COLUMNS tenant_id, token_hash UNIQUE;
+DEFINE INDEX idx_prtoken_user ON TABLE password_reset_token \
+    COLUMNS tenant_id, user_id;
 ";
 
 // -----------------------------------------------------------------------

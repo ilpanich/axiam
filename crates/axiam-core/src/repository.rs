@@ -24,6 +24,7 @@ use crate::models::{
     },
     organization::{CreateOrganization, Organization, UpdateOrganization},
     password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry},
+    password_reset::{CreatePasswordResetToken, PasswordResetToken},
     permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
     pgp_key::{PgpKey, StorePgpKey},
     resource::{CreateResource, Resource, UpdateResource},
@@ -989,4 +990,48 @@ pub trait EmailVerificationTokenRepository: Send + Sync {
 
     /// Delete expired and consumed tokens (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Password Reset Tokens (tenant-scoped)
+// ---------------------------------------------------------------------------
+
+pub trait PasswordResetTokenRepository: Send + Sync {
+    /// Store a new password reset token.
+    fn create(
+        &self,
+        input: CreatePasswordResetToken,
+    ) -> impl Future<Output = AxiamResult<PasswordResetToken>> + Send;
+
+    /// Look up a valid (unconsumed, non-expired) token by hash.
+    fn get_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<PasswordResetToken>> + Send;
+
+    /// Atomically consume a token (set consumed_at). Returns error if
+    /// already consumed or expired.
+    fn consume(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<PasswordResetToken>> + Send;
+
+    /// Count tokens created for a user today (for rate limiting).
+    fn count_today(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete expired and consumed tokens (garbage collection).
+    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete unconsumed tokens for a user (invalidate prior resets).
+    fn delete_unconsumed_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }

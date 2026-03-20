@@ -509,6 +509,16 @@ Add separate unauthenticated federation login endpoints (`/auth/federation/oidc/
 
 **Commit**: `feat(federation): unauthenticated federation login endpoints for first-time SSO`
 
+### T19.10 — Session Invalidation on Password Reset
+After a successful password reset (`confirm_reset`), invalidate all active sessions for the user. Currently deferred because it would expand the `PasswordResetService` signature to include a `SessionRepository` dependency.
+
+**Commit**: `security(auth): invalidate sessions on password reset`
+
+### T19.11 — Wire Email Sending for Password Reset and Verification
+Connect the `EmailService` to the `/auth/reset` and `/auth/resend-verification` handlers so that reset/verification emails are actually delivered. Currently the handlers generate and store tokens but do not send emails (marked with `TODO(T19)` comments).
+
+**Commit**: `feat(email): wire email delivery for password reset and verification endpoints`
+
 ---
 
 ## Summary
@@ -534,8 +544,8 @@ Add separate unauthenticated federation login endpoints (`/auth/federation/oidc/
 | Phase 16 | 3 | Docker, K8s, CD pipeline |
 | Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 18 | 4 | Security, compliance, performance, docs |
-| Phase 19 | 9 | Deferred improvements & optimizations from PR reviews |
+| Phase 19 | 11 | Deferred improvements & optimizations from PR reviews |
 
-**Total: 84 tasks across 20 phases**
+**Total: 86 tasks across 20 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

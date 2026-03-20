@@ -44,6 +44,8 @@ pub struct AuthConfig {
     /// Grace period in hours during which PendingVerification users
     /// can still log in (default: 24). Set to 0 to disable.
     pub email_verification_grace_period_hours: u32,
+    /// Password reset token expiry in hours (default: 1).
+    pub password_reset_token_expiry_hours: u32,
 }
 
 impl AuthConfig {
@@ -82,6 +84,7 @@ impl Default for AuthConfig {
             lockout_backoff_multiplier: 2.0,
             max_lockout_duration_secs: 3600,
             email_verification_grace_period_hours: 24,
+            password_reset_token_expiry_hours: 1,
         }
     }
 }

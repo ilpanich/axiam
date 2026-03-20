@@ -38,6 +38,12 @@ pub enum AuthError {
     #[error("email already verified")]
     EmailAlreadyVerified,
 
+    #[error("password reset token expired or invalid")]
+    ResetTokenInvalid,
+
+    #[error("federated users cannot reset passwords")]
+    FederatedUserPasswordReset,
+
     #[error("cryptography error: {0}")]
     Crypto(String),
 }
@@ -60,9 +66,13 @@ impl From<AuthError> for AxiamError {
                 }
             }
             AuthError::VerificationTokenInvalid
-            | AuthError::EmailAlreadyVerified => AxiamError::Validation {
-                message: err.to_string(),
-            },
+            | AuthError::EmailAlreadyVerified
+            | AuthError::ResetTokenInvalid
+            | AuthError::FederatedUserPasswordReset => {
+                AxiamError::Validation {
+                    message: err.to_string(),
+                }
+            }
             AuthError::Crypto(msg) => AxiamError::Crypto(msg),
         }
     }

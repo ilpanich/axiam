@@ -61,6 +61,18 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 web::post().to(
                     handlers::email_verification::resend_verification::<C>,
                 ),
+            )
+            .route(
+                "/reset",
+                web::post().to(
+                    handlers::password_reset::request_reset::<C>,
+                ),
+            )
+            .route(
+                "/reset/confirm",
+                web::post().to(
+                    handlers::password_reset::confirm_reset::<C>,
+                ),
             ),
     );
     // OIDC Discovery (must be outside /oauth2 scope per spec)

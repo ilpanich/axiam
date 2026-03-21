@@ -124,6 +124,7 @@ pub async fn request_reset<C: Connection>(
         (status = 400, description = "Invalid token or password policy violation"),
     )
 )]
+#[allow(clippy::too_many_arguments)] // Actix DI extractors
 pub async fn confirm_reset<C: Connection>(
     user_repo: web::Data<SurrealUserRepository<C>>,
     token_repo: web::Data<SurrealPasswordResetTokenRepository<C>>,

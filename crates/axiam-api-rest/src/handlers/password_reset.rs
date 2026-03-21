@@ -22,14 +22,14 @@ use crate::error::AxiamApiError;
 // ---------------------------------------------------------------------------
 
 /// Body for the request-reset endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RequestResetBody {
     pub tenant_id: Uuid,
     pub email: String,
 }
 
 /// Body for the confirm-reset endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ConfirmResetBody {
     pub tenant_id: Uuid,
     pub token: String,
@@ -47,6 +47,16 @@ pub struct ConfirmResetBody {
 /// the user is federated.
 ///
 /// Returns 429 if the daily reset rate limit is exceeded.
+#[utoipa::path(
+    post,
+    path = "/auth/reset",
+    tag = "auth",
+    request_body = RequestResetBody,
+    responses(
+        (status = 200, description = "Reset email sent (or silently ignored)"),
+        (status = 429, description = "Rate limit exceeded"),
+    )
+)]
 pub async fn request_reset<C: Connection>(
     user_repo: web::Data<SurrealUserRepository<C>>,
     token_repo: web::Data<SurrealPasswordResetTokenRepository<C>>,
@@ -97,6 +107,16 @@ pub async fn request_reset<C: Connection>(
 ///
 /// Returns `{"reset": true}` on success, or 400 with policy
 /// violations if the new password is too weak.
+#[utoipa::path(
+    post,
+    path = "/auth/reset/confirm",
+    tag = "auth",
+    request_body = ConfirmResetBody,
+    responses(
+        (status = 200, description = "Password reset successfully"),
+        (status = 400, description = "Invalid token or password policy violation"),
+    )
+)]
 pub async fn confirm_reset<C: Connection>(
     user_repo: web::Data<SurrealUserRepository<C>>,
     token_repo: web::Data<SurrealPasswordResetTokenRepository<C>>,

@@ -151,6 +151,12 @@ use crate::handlers;
         handlers::federation::saml_metadata,
         handlers::federation::list_user_links,
         handlers::federation::delete_link,
+        // Email Verification
+        handlers::email_verification::verify_email,
+        handlers::email_verification::resend_verification,
+        // Password Reset
+        handlers::password_reset::request_reset,
+        handlers::password_reset::confirm_reset,
     ),
     components(schemas(
         // Health
@@ -297,6 +303,12 @@ use crate::handlers;
         axiam_core::models::settings::EmailVerificationPolicy,
         axiam_core::models::settings::CertificatePolicy,
         axiam_core::models::settings::NotificationPolicy,
+        // Email Verification
+        handlers::email_verification::VerifyEmailRequest,
+        handlers::email_verification::ResendVerificationRequest,
+        // Password Reset
+        handlers::password_reset::RequestResetBody,
+        handlers::password_reset::ConfirmResetBody,
         // Pagination
         axiam_core::repository::Pagination,
     )),

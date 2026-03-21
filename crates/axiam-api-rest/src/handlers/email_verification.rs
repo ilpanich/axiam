@@ -21,14 +21,14 @@ use crate::error::AxiamApiError;
 // ---------------------------------------------------------------------------
 
 /// Body for the verify-email endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct VerifyEmailRequest {
     pub tenant_id: Uuid,
     pub token: String,
 }
 
 /// Body for the resend-verification endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ResendVerificationRequest {
     pub tenant_id: Uuid,
     pub email: String,
@@ -42,6 +42,16 @@ pub struct ResendVerificationRequest {
 ///
 /// Verifies a user's email using a one-time token. The token is
 /// consumed atomically — replaying the same token returns an error.
+#[utoipa::path(
+    post,
+    path = "/auth/verify-email",
+    tag = "auth",
+    request_body = VerifyEmailRequest,
+    responses(
+        (status = 200, description = "Email verified successfully"),
+        (status = 400, description = "Invalid or expired token"),
+    )
+)]
 pub async fn verify_email<C: Connection>(
     user_repo: web::Data<SurrealUserRepository<C>>,
     token_repo: web::Data<SurrealEmailVerificationTokenRepository<C>>,
@@ -67,6 +77,16 @@ pub async fn verify_email<C: Connection>(
 /// already verified.
 ///
 /// Returns 429 if the resend rate limit is exceeded.
+#[utoipa::path(
+    post,
+    path = "/auth/resend-verification",
+    tag = "auth",
+    request_body = ResendVerificationRequest,
+    responses(
+        (status = 200, description = "Verification email sent (or silently ignored)"),
+        (status = 429, description = "Rate limit exceeded"),
+    )
+)]
 pub async fn resend_verification<C: Connection>(
     user_repo: web::Data<SurrealUserRepository<C>>,
     token_repo: web::Data<SurrealEmailVerificationTokenRepository<C>>,

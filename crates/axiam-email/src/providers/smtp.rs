@@ -21,6 +21,11 @@ impl SmtpProvider {
     pub fn new(config: &SmtpConfig) -> Result<Self, AxiamError> {
         let creds = Credentials::new(config.username.clone(), config.password.clone());
 
+        // lettre's `relay()` opens an implicit-TLS (SMTPS) connection —
+        // the TLS handshake happens immediately on connect (typically
+        // port 465). `starttls_relay()` connects in plaintext first, then
+        // upgrades via the STARTTLS command (typically port 587).
+        // Neither falls back to cleartext; both enforce TLS.
         let transport = if config.starttls {
             AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
                 .map_err(|e| AxiamError::EmailConfig(format!("SMTP STARTTLS relay error: {e}")))?
@@ -28,8 +33,11 @@ impl SmtpProvider {
                 .credentials(creds)
                 .build()
         } else {
+            // Implicit TLS (SMTPS): TLS wrapper from the start.
             AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)
-                .map_err(|e| AxiamError::EmailConfig(format!("SMTP relay error: {e}")))?
+                .map_err(|e| {
+                    AxiamError::EmailConfig(format!("SMTP implicit-TLS relay error: {e}"))
+                })?
                 .port(config.port)
                 .credentials(creds)
                 .build()

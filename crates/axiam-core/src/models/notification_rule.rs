@@ -70,8 +70,14 @@ impl NotificationEventType {
     /// A single audit action may map to zero or more event types. For
     /// example, a login failure maps to `LoginFailure`, while a
     /// successful user creation maps to `UserCreated`.
+    ///
+    /// Audit middleware records actions with actual request paths (e.g.
+    /// `POST /api/v1/users/9d2f…`). This method normalises dynamic
+    /// path segments (UUIDs, hex IDs) to `{id}` before matching, so
+    /// both route templates and real paths are handled correctly.
     pub fn from_audit_action(action: &str, outcome: &str) -> Vec<Self> {
-        match (action, outcome) {
+        let normalised = normalise_audit_action(action);
+        match (normalised.as_str(), outcome) {
             // Security events
             ("POST /auth/login", "Failure") => {
                 vec![Self::LoginFailure]
@@ -82,7 +88,7 @@ impl NotificationEventType {
             ("POST /auth/mfa/enroll", "Success") | ("POST /auth/mfa/confirm", "Success") => {
                 vec![Self::MfaEnrollmentChanged]
             }
-            ("PUT /api/v1/users/{user_id}", "Success") if outcome == "Success" => {
+            ("PUT /api/v1/users/{id}", "Success") => {
                 // Password changes are tracked via a dedicated action
                 vec![Self::UserUpdated]
             }
@@ -93,16 +99,14 @@ impl NotificationEventType {
                 vec![Self::PasswordResetRequested]
             }
             // Privilege events
-            ("POST /api/v1/roles/{role_id}/users", "Success") => {
+            ("POST /api/v1/roles/{id}/users", "Success") => {
                 vec![Self::RoleAssigned]
             }
-            ("DELETE /api/v1/roles/{role_id}/users/{user_id}", "Success") => {
-                vec![Self::RoleUnassigned]
-            }
-            ("POST /api/v1/roles/{role_id}/permissions", "Success") => {
+            ("DELETE /api/v1/roles/{id}/users/{id}", "Success") => vec![Self::RoleUnassigned],
+            ("POST /api/v1/roles/{id}/permissions", "Success") => {
                 vec![Self::PermissionGranted]
             }
-            ("DELETE /api/v1/roles/{role_id}/permissions/{permission_id}", "Success") => {
+            ("DELETE /api/v1/roles/{id}/permissions/{id}", "Success") => {
                 vec![Self::PermissionRevoked]
             }
             // Certificate events
@@ -110,25 +114,66 @@ impl NotificationEventType {
                 vec![Self::CertificateIssued]
             }
             ("POST /api/v1/certificates/{id}/revoke", "Success") => vec![Self::CertificateRevoked],
-            ("POST /api/v1/organizations/{org_id}/ca-certificates/{id}/revoke", "Success") => {
+            ("POST /api/v1/organizations/{id}/ca-certificates/{id}/revoke", "Success") => {
                 vec![Self::CaCertificateRevoked]
             }
             // User lifecycle events
             ("POST /api/v1/users", "Success") => {
                 vec![Self::UserCreated]
             }
-            ("DELETE /api/v1/users/{user_id}", "Success") => {
+            ("DELETE /api/v1/users/{id}", "Success") => {
                 vec![Self::UserDeleted]
             }
             ("POST /api/v1/service-accounts", "Success") => {
                 vec![Self::ServiceAccountCreated]
             }
-            ("DELETE /api/v1/service-accounts/{sa_id}", "Success") => {
+            ("DELETE /api/v1/service-accounts/{id}", "Success") => {
                 vec![Self::ServiceAccountDeleted]
             }
             _ => vec![],
         }
     }
+}
+
+/// Normalise an audit action string by replacing dynamic path segments
+/// (UUIDs, hex strings of 8+ chars) with the placeholder `{id}`.
+///
+/// This lets the match table use a single canonical form regardless
+/// of whether the action was recorded with the route template
+/// (`/users/{user_id}`) or the real path (`/users/9d2f3a…`).
+fn normalise_audit_action(action: &str) -> String {
+    // Split on first space to separate method from path.
+    let (method, path) = match action.split_once(' ') {
+        Some(pair) => pair,
+        None => return action.to_string(),
+    };
+
+    let normalised_segments: Vec<&str> = path
+        .split('/')
+        .map(|seg| if is_dynamic_segment(seg) { "{id}" } else { seg })
+        .collect();
+
+    format!("{method} {}", normalised_segments.join("/"))
+}
+
+/// Returns `true` if a path segment looks like a dynamic ID:
+/// - a UUID (8-4-4-4-12 hex with dashes), or
+/// - a hex string of 8+ characters, or
+/// - any `{...}` route template placeholder.
+fn is_dynamic_segment(seg: &str) -> bool {
+    if seg.is_empty() {
+        return false;
+    }
+    // Route-template placeholders like `{user_id}`
+    if seg.starts_with('{') && seg.ends_with('}') {
+        return true;
+    }
+    // UUID: 32 hex + 4 dashes = 36 chars
+    if seg.len() == 36 && seg.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return true;
+    }
+    // Hex string of 8+ chars (covers short IDs, SurrealDB record IDs)
+    seg.len() >= 8 && seg.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 impl std::fmt::Display for NotificationEventType {
@@ -274,10 +319,61 @@ mod tests {
     }
 
     #[test]
+    fn from_audit_action_with_real_uuid_path() {
+        // Audit middleware records actual UUIDs — must still match.
+        let events = NotificationEventType::from_audit_action(
+            "DELETE /api/v1/users/9d2f3a7b-1c4e-4f8a-b2d6-5e9f1a3c7b8d",
+            "Success",
+        );
+        assert_eq!(events, vec![NotificationEventType::UserDeleted]);
+    }
+
+    #[test]
+    fn from_audit_action_with_real_uuid_nested_path() {
+        let events = NotificationEventType::from_audit_action(
+            "DELETE /api/v1/roles/aabbccdd-1122-3344-5566-778899aabbcc/users/11223344-5566-7788-99aa-bbccddeeff00",
+            "Success",
+        );
+        assert_eq!(events, vec![NotificationEventType::RoleUnassigned]);
+    }
+
+    #[test]
+    fn from_audit_action_with_route_template() {
+        // Route templates like `{user_id}` must also normalise.
+        let events =
+            NotificationEventType::from_audit_action("PUT /api/v1/users/{user_id}", "Success");
+        assert_eq!(events, vec![NotificationEventType::UserUpdated]);
+    }
+
+    #[test]
     fn from_audit_action_unknown() {
         let events =
             NotificationEventType::from_audit_action("GET /api/v1/something-random", "Success");
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn normalise_preserves_static_segments() {
+        assert_eq!(
+            normalise_audit_action("POST /api/v1/users"),
+            "POST /api/v1/users"
+        );
+    }
+
+    #[test]
+    fn normalise_replaces_uuid_segments() {
+        assert_eq!(
+            normalise_audit_action("DELETE /api/v1/users/9d2f3a7b-1c4e-4f8a-b2d6-5e9f1a3c7b8d"),
+            "DELETE /api/v1/users/{id}"
+        );
+    }
+
+    #[test]
+    fn normalise_replaces_template_placeholders() {
+        assert_eq!(
+            normalise_audit_action("PUT /api/v1/users/{user_id}"),
+            "PUT /api/v1/users/{id}"
+        );
     }
 
     #[test]

@@ -35,7 +35,21 @@ pub type TemplateContext = HashMap<String, String>;
 /// Uses single-pass rendering to prevent template injection: values
 /// inserted from the context are never re-processed for further
 /// placeholder expansion.  Unknown placeholders are left as-is.
+///
+/// When `html_escape` is `true`, context values are HTML-escaped
+/// (`<`, `>`, `&`, `"`, `'`) before insertion. This MUST be used
+/// for HTML body rendering to prevent XSS/injection from
+/// user-controlled values like usernames.
 pub fn render(template: &str, context: &TemplateContext) -> String {
+    render_inner(template, context, false)
+}
+
+/// Like [`render`], but HTML-escapes all substituted values.
+pub fn render_html(template: &str, context: &TemplateContext) -> String {
+    render_inner(template, context, true)
+}
+
+fn render_inner(template: &str, context: &TemplateContext, html_escape: bool) -> String {
     let mut output = String::with_capacity(template.len());
     let mut rest = template;
 
@@ -45,7 +59,11 @@ pub fn render(template: &str, context: &TemplateContext) -> String {
         if let Some(end) = after_open.find("}}") {
             let key = &after_open[..end];
             if let Some(value) = context.get(key) {
-                output.push_str(value);
+                if html_escape {
+                    output.push_str(&escape_html(value));
+                } else {
+                    output.push_str(value);
+                }
             } else {
                 // Unknown placeholder — preserve verbatim.
                 output.push_str("{{");
@@ -63,12 +81,32 @@ pub fn render(template: &str, context: &TemplateContext) -> String {
     output
 }
 
+/// Escape the five HTML-significant characters to their entity form.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Render a resolved template into an `EmailMessage` ready for delivery.
+///
+/// HTML body values are HTML-escaped to prevent injection from
+/// user-controlled context values. Text body and subject are
+/// rendered without escaping (plain-text has no injection risk).
 pub fn render_email(template: &EmailTemplate, to: &str, context: &TemplateContext) -> EmailMessage {
     EmailMessage {
         to: to.to_string(),
         subject: render(&template.subject, context),
-        html_body: Some(render(&template.html_body, context)),
+        html_body: Some(render_html(&template.html_body, context)),
         text_body: Some(render(&template.text_body, context)),
     }
 }
@@ -340,6 +378,34 @@ mod tests {
         assert!(text.contains("alice@example.com"));
     }
 
+    // --- render_html / escape_html ---
+
+    #[test]
+    fn render_html_escapes_angle_brackets() {
+        let mut ctx = TemplateContext::new();
+        ctx.insert("username".into(), "<script>alert(1)</script>".into());
+        let out = render_html("Hello {{username}}!", &ctx);
+        assert_eq!(out, "Hello &lt;script&gt;alert(1)&lt;/script&gt;!");
+        // Ensure the raw tag is NOT present.
+        assert!(!out.contains("<script>"));
+    }
+
+    #[test]
+    fn render_html_escapes_ampersand_and_quotes() {
+        let mut ctx = TemplateContext::new();
+        ctx.insert("val".into(), "a&b \"c\" 'd'".into());
+        let out = render_html("{{val}}", &ctx);
+        assert_eq!(out, "a&amp;b &quot;c&quot; &#x27;d&#x27;");
+    }
+
+    #[test]
+    fn render_plain_does_not_escape() {
+        let mut ctx = TemplateContext::new();
+        ctx.insert("username".into(), "<b>alice</b>".into());
+        let out = render("Hello {{username}}", &ctx);
+        assert_eq!(out, "Hello <b>alice</b>");
+    }
+
     // --- render_email ---
 
     #[test]
@@ -351,5 +417,20 @@ mod tests {
         assert!(msg.subject.contains("Acme Corp"));
         assert!(msg.html_body.unwrap().contains("alice"));
         assert!(msg.text_body.unwrap().contains("alice"));
+    }
+
+    #[test]
+    fn render_email_html_body_is_escaped() {
+        let t = builtin_template(TemplateKind::Activation);
+        let mut ctx = full_context();
+        ctx.insert(PH_USERNAME.into(), "<img src=x onerror=alert(1)>".into());
+        let msg = render_email(&t, "victim@test.com", &ctx);
+        let html = msg.html_body.unwrap();
+        // HTML body must not contain unescaped injection.
+        assert!(!html.contains("<img src=x"));
+        assert!(html.contains("&lt;img"));
+        // Text body must NOT be escaped — plain text is safe.
+        let text = msg.text_body.unwrap();
+        assert!(text.contains("<img src=x onerror=alert(1)>"));
     }
 }

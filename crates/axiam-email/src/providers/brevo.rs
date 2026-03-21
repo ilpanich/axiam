@@ -7,6 +7,7 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::email::ApiProviderConfig;
 use reqwest::Client;
 
+use super::build_http_client;
 use crate::message::EmailMessage;
 use crate::provider::{EmailProvider, SendResult};
 
@@ -21,7 +22,7 @@ pub struct BrevoProvider {
 impl BrevoProvider {
     pub fn new(config: &ApiProviderConfig) -> Self {
         Self {
-            client: Client::new(),
+            client: build_http_client(),
             api_key: config.api_key.clone(),
             api_url: config
                 .api_url

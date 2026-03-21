@@ -7,10 +7,29 @@ pub mod resend;
 pub mod sendgrid;
 pub mod smtp;
 
+use std::time::Duration;
+
 use axiam_core::error::AxiamResult;
 use axiam_core::models::email::ProviderConfig;
+use reqwest::redirect::Policy;
+use reqwest::Client;
 
 use crate::provider::EmailProvider;
+
+/// Default timeout for outbound email-provider HTTP requests.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Build a hardened HTTP client for email providers.
+///
+/// - 30-second timeout to prevent hanging tasks.
+/// - Redirects disabled to prevent credential leakage / SSRF bypass.
+pub(crate) fn build_http_client() -> Client {
+    Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .redirect(Policy::none())
+        .build()
+        .expect("failed to build HTTP client")
+}
 
 /// Construct a boxed `EmailProvider` from a `ProviderConfig`.
 pub fn build_provider(config: &ProviderConfig) -> AxiamResult<Box<dyn EmailProvider>> {

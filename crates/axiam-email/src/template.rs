@@ -31,12 +31,35 @@ pub type TemplateContext = HashMap<String, String>;
 // -----------------------------------------------------------------------
 
 /// Replace all `{{key}}` placeholders with values from the context.
-/// Unknown placeholders are left as-is.
+///
+/// Uses single-pass rendering to prevent template injection: values
+/// inserted from the context are never re-processed for further
+/// placeholder expansion.  Unknown placeholders are left as-is.
 pub fn render(template: &str, context: &TemplateContext) -> String {
-    let mut output = template.to_string();
-    for (key, value) in context {
-        output = output.replace(&format!("{{{{{key}}}}}"), value);
+    let mut output = String::with_capacity(template.len());
+    let mut rest = template;
+
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+        if let Some(end) = after_open.find("}}") {
+            let key = &after_open[..end];
+            if let Some(value) = context.get(key) {
+                output.push_str(value);
+            } else {
+                // Unknown placeholder — preserve verbatim.
+                output.push_str("{{");
+                output.push_str(key);
+                output.push_str("}}");
+            }
+            rest = &after_open[end + 2..];
+        } else {
+            // Unclosed `{{` — emit as literal text.
+            output.push_str("{{");
+            rest = after_open;
+        }
     }
+    output.push_str(rest);
     output
 }
 
@@ -215,6 +238,25 @@ mod tests {
         let tpl = "{{username}} and {{username}} again.";
         let out = render(tpl, &full_context());
         assert_eq!(out, "alice and alice again.");
+    }
+
+    #[test]
+    fn render_resists_template_injection() {
+        // A user-controlled value containing a placeholder must NOT be
+        // expanded — single-pass rendering prevents this.
+        let mut ctx = TemplateContext::new();
+        ctx.insert("username".into(), "{{action_url}}".into());
+        ctx.insert("action_url".into(), "https://evil.com".into());
+        let tpl = "Hello {{username}}!";
+        let out = render(tpl, &ctx);
+        assert_eq!(out, "Hello {{action_url}}!", "injected placeholder must not expand");
+    }
+
+    #[test]
+    fn render_handles_unclosed_braces() {
+        let tpl = "Hello {{ world";
+        let out = render(tpl, &TemplateContext::new());
+        assert_eq!(out, "Hello {{ world");
     }
 
     // --- resolve_template ---

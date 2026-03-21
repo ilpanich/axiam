@@ -192,7 +192,18 @@ impl<C: Connection> EmailVerificationTokenRepository
             .await
             .map_err(DbError::from)?;
 
-        // Statement 0 is the UPDATE; statement 1 is the SELECT.
+        // Statement 0 is the UPDATE — if no rows were affected, the
+        // token was already consumed, invalidated, or expired.
+        let updated: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
+        if updated.is_empty() {
+            return Err(DbError::NotFound {
+                entity: "email_verification_token".into(),
+                id: format!("token_hash={token_hash}"),
+            }
+            .into());
+        }
+
+        // Statement 1 is the SELECT with full record_id.
         let rows: Vec<TokenRowWithId> = result.take(1).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
             entity: "email_verification_token".into(),

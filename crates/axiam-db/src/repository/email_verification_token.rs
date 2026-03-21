@@ -141,7 +141,7 @@ impl<C: Connection> EmailVerificationTokenRepository
         tenant_id: Uuid,
         token_hash: &str,
     ) -> AxiamResult<EmailVerificationToken> {
-        let mut result = self
+        let result = self
             .db
             .query(
                 "SELECT meta::id(id) AS record_id, * \
@@ -155,6 +155,10 @@ impl<C: Connection> EmailVerificationTokenRepository
             .bind(("token_hash", token_hash.to_string()))
             .await
             .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<TokenRowWithId> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
@@ -172,7 +176,7 @@ impl<C: Connection> EmailVerificationTokenRepository
     ) -> AxiamResult<EmailVerificationToken> {
         // Use a single UPDATE + SELECT meta::id pattern to atomically
         // consume and return the full record with its ID.
-        let mut result = self
+        let result = self
             .db
             .query(
                 "UPDATE email_verification_token SET \
@@ -191,6 +195,10 @@ impl<C: Connection> EmailVerificationTokenRepository
             .bind(("token_hash", token_hash.to_string()))
             .await
             .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         // Statement 0 is the UPDATE — if no rows were affected, the
         // token was already consumed, invalidated, or expired.
@@ -220,7 +228,7 @@ impl<C: Connection> EmailVerificationTokenRepository
             .expect("midnight is always valid")
             .and_utc();
 
-        let mut result = self
+        let result = self
             .db
             .query(
                 "SELECT count() AS total \
@@ -236,12 +244,16 @@ impl<C: Connection> EmailVerificationTokenRepository
             .await
             .map_err(DbError::from)?;
 
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.first().map(|r| r.total).unwrap_or(0))
     }
 
     async fn delete_expired(&self) -> AxiamResult<u64> {
-        let mut result = self
+        let result = self
             .db
             .query(
                 "DELETE FROM email_verification_token \
@@ -251,6 +263,10 @@ impl<C: Connection> EmailVerificationTokenRepository
             )
             .await
             .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.len() as u64)

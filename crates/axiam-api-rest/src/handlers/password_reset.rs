@@ -42,16 +42,20 @@ pub struct ConfirmResetBody {
 
 /// `POST /auth/reset`
 ///
-/// Initiates a password reset. Always returns `{"sent": true}` to
-/// prevent email enumeration — regardless of whether the email
-/// exists, the user is federated, or the rate limit is exceeded.
+/// Initiates a password reset by creating a reset token. Always
+/// returns `{"sent": true}` to prevent email enumeration — regardless
+/// of whether the email exists, the user is federated, or the rate
+/// limit is exceeded.
+///
+/// **Note:** Token creation and storage is implemented. Actual email
+/// delivery will be wired in a future phase (T19) via `EmailService`.
 #[utoipa::path(
     post,
     path = "/auth/reset",
     tag = "auth",
     request_body = RequestResetBody,
     responses(
-        (status = 200, description = "Reset email sent (or silently ignored)"),
+        (status = 200, description = "Reset token created (email delivery pending T19)"),
     )
 )]
 pub async fn request_reset<C: Connection>(

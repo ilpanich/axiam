@@ -134,7 +134,7 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
         tenant_id: Uuid,
         token_hash: &str,
     ) -> AxiamResult<PasswordResetToken> {
-        let mut result = self
+        let result = self
             .db
             .query(
                 "SELECT meta::id(id) AS record_id, * \
@@ -149,6 +149,10 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
             .await
             .map_err(DbError::from)?;
 
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
         let rows: Vec<TokenRowWithId> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
             entity: "password_reset_token".into(),
@@ -159,7 +163,7 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
     }
 
     async fn consume(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<PasswordResetToken> {
-        let mut result = self
+        let result = self
             .db
             .query(
                 "UPDATE password_reset_token SET \
@@ -178,6 +182,10 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
             .bind(("token_hash", token_hash.to_string()))
             .await
             .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         // Statement 0 is the UPDATE — if no rows were affected, the
         // token was already consumed, invalidated, or expired.
@@ -207,7 +215,7 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
             .expect("midnight is always valid")
             .and_utc();
 
-        let mut result = self
+        let result = self
             .db
             .query(
                 "SELECT count() AS total \
@@ -223,12 +231,16 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
             .await
             .map_err(DbError::from)?;
 
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.first().map(|r| r.total).unwrap_or(0))
     }
 
     async fn delete_expired(&self) -> AxiamResult<u64> {
-        let mut result = self
+        let result = self
             .db
             .query(
                 "DELETE FROM password_reset_token \
@@ -238,6 +250,10 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
             )
             .await
             .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.len() as u64)

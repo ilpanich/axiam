@@ -158,7 +158,7 @@ impl<C: Connection> SurrealEmailTemplateRepository<C> {
         scope_id: &str,
         kind: &str,
     ) -> Result<Option<EmailTemplate>, DbError> {
-        let mut result = self
+        let result = self
             .db
             .query(
                 "SELECT meta::id(id) AS record_id, * \
@@ -173,6 +173,10 @@ impl<C: Connection> SurrealEmailTemplateRepository<C> {
             .await
             .map_err(DbError::from)?;
 
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
         let rows: Vec<TemplateRowWithId> = result.take(0).map_err(DbError::from)?;
         match rows.into_iter().next() {
             Some(row) => Ok(Some(row.try_into_domain()?)),
@@ -185,7 +189,7 @@ impl<C: Connection> SurrealEmailTemplateRepository<C> {
         scope: &str,
         scope_id: &str,
     ) -> Result<Vec<EmailTemplate>, DbError> {
-        let mut result = self
+        let result = self
             .db
             .query(
                 "SELECT meta::id(id) AS record_id, * \
@@ -197,6 +201,10 @@ impl<C: Connection> SurrealEmailTemplateRepository<C> {
             .bind(("scope_id", scope_id.to_string()))
             .await
             .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<TemplateRowWithId> = result.take(0).map_err(DbError::from)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()

@@ -72,16 +72,19 @@ pub async fn verify_email<C: Connection>(
 
 /// `POST /auth/resend-verification`
 ///
-/// Resends the verification email. Always returns 200 to prevent
-/// email enumeration — regardless of whether the email exists, is
-/// already verified, or has hit a rate limit.
+/// Creates a new email verification token for the given user. Always
+/// returns 200 to prevent email enumeration — regardless of whether
+/// the email exists, is already verified, or has hit a rate limit.
+///
+/// **Note:** Token creation and storage is implemented. Actual email
+/// delivery will be wired in a future phase (T19) via `EmailService`.
 #[utoipa::path(
     post,
     path = "/auth/resend-verification",
     tag = "auth",
     request_body = ResendVerificationRequest,
     responses(
-        (status = 200, description = "Verification email sent (or silently ignored)"),
+        (status = 200, description = "Verification token created (email delivery pending T19)"),
     )
 )]
 pub async fn resend_verification<C: Connection>(

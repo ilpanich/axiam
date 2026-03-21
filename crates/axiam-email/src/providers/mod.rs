@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use axiam_core::error::AxiamResult;
 use axiam_core::models::email::ProviderConfig;
-use reqwest::redirect::Policy;
 use reqwest::Client;
+use reqwest::redirect::Policy;
 
 use crate::provider::EmailProvider;
 

@@ -249,7 +249,10 @@ mod tests {
         ctx.insert("action_url".into(), "https://evil.com".into());
         let tpl = "Hello {{username}}!";
         let out = render(tpl, &ctx);
-        assert_eq!(out, "Hello {{action_url}}!", "injected placeholder must not expand");
+        assert_eq!(
+            out, "Hello {{action_url}}!",
+            "injected placeholder must not expand"
+        );
     }
 
     #[test]

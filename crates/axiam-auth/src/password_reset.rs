@@ -126,6 +126,7 @@ where
         new_password: &str,
         policy: &PasswordPolicy,
         pepper: Option<&str>,
+        http_client: Option<&reqwest::Client>,
     ) -> AxiamResult<()> {
         let token_hash = token::hash_refresh_token(raw_token);
 
@@ -154,7 +155,8 @@ where
             return Err(AuthError::FederatedUserPasswordReset.into());
         }
 
-        // Evaluate password policy.
+        // Evaluate password policy, including HIBP breach check
+        // when the policy has it enabled and a client is provided.
         let check: PolicyCheckResult = evaluate_password(
             new_password,
             pepper,
@@ -162,7 +164,7 @@ where
             tenant_id,
             user.id,
             &self.history_repo,
-            None, // Skip HIBP in reset flow (can be enabled later)
+            http_client,
         )
         .await?;
 
@@ -468,7 +470,7 @@ mod tests {
             .unwrap();
 
         let policy = relaxed_policy();
-        svc.confirm_reset(tid, &raw_token, "NewStr0ngPassword", &policy, None)
+        svc.confirm_reset(tid, &raw_token, "NewStr0ngPassword", &policy, None, None)
             .await
             .unwrap();
 
@@ -486,7 +488,7 @@ mod tests {
         let policy = relaxed_policy();
 
         let result = svc
-            .confirm_reset(tid, "bogus-token", "NewStr0ngPassword", &policy, None)
+            .confirm_reset(tid, "bogus-token", "NewStr0ngPassword", &policy, None, None)
             .await;
 
         assert!(result.is_err());
@@ -517,7 +519,7 @@ mod tests {
         let policy = relaxed_policy();
 
         let result = svc
-            .confirm_reset(tid, &raw_token, "NewStr0ngPassword", &policy, None)
+            .confirm_reset(tid, &raw_token, "NewStr0ngPassword", &policy, None, None)
             .await;
 
         assert!(result.is_err());
@@ -536,7 +538,7 @@ mod tests {
 
         let policy = relaxed_policy();
         let result = svc
-            .confirm_reset(tid, &raw_token, "weak", &policy, None)
+            .confirm_reset(tid, &raw_token, "weak", &policy, None, None)
             .await;
 
         assert!(
@@ -570,7 +572,7 @@ mod tests {
 
         let policy = relaxed_policy();
         let result = svc
-            .confirm_reset(tid, &raw_token, "ReusedPassw0rd", &policy, None)
+            .confirm_reset(tid, &raw_token, "ReusedPassw0rd", &policy, None, None)
             .await;
 
         assert!(

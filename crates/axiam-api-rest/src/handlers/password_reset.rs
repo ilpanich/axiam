@@ -128,6 +128,7 @@ pub async fn confirm_reset<C: Connection>(
     tenant_repo: web::Data<SurrealTenantRepository<C>>,
     settings_repo: web::Data<SurrealSettingsRepository<C>>,
     auth_config: web::Data<axiam_auth::AuthConfig>,
+    http_client: web::Data<reqwest::Client>,
     body: web::Json<ConfirmResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use axiam_core::repository::{SettingsRepository, TenantRepository};
@@ -155,6 +156,7 @@ pub async fn confirm_reset<C: Connection>(
         &req.new_password,
         &settings.password,
         auth_config.pepper.as_deref(),
+        Some(http_client.as_ref()),
     )
     .await?;
 

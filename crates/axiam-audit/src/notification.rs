@@ -38,15 +38,29 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
         _details: &str,
     ) -> AxiamResult<Vec<(String, Vec<String>)>> {
         let event_types = NotificationEventType::from_audit_action(action, outcome);
+        if event_types.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Collect all event type strings and query once (avoids N+1).
+        let event_strings: Vec<String> = event_types.iter().map(|e| e.to_db_string()).collect();
+        let rules = self
+            .rule_repo
+            .get_by_events(tenant_id, &event_strings)
+            .await?;
 
         let mut results = Vec::new();
-        for event_type in event_types {
-            let event_str = event_type.to_db_string();
-            let rules = self.rule_repo.get_by_event(tenant_id, &event_str).await?;
-
-            for rule in rules {
-                if !rule.recipient_emails.is_empty() {
-                    results.push((event_str.clone(), rule.recipient_emails));
+        for rule in rules {
+            if rule.recipient_emails.is_empty() {
+                continue;
+            }
+            // Each rule may match multiple event types; report the
+            // first matching event for the result tuple.
+            for event_type in &event_types {
+                let event_str = event_type.to_db_string();
+                if rule.events.contains(event_type) {
+                    results.push((event_str, rule.recipient_emails.clone()));
+                    break;
                 }
             }
         }

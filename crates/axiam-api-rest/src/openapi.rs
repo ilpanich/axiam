@@ -157,6 +157,12 @@ use crate::handlers;
         // Password Reset
         handlers::password_reset::request_reset,
         handlers::password_reset::confirm_reset,
+        // Notification Rules
+        handlers::notification_rules::create,
+        handlers::notification_rules::list,
+        handlers::notification_rules::get,
+        handlers::notification_rules::update,
+        handlers::notification_rules::delete,
     ),
     components(schemas(
         // Health
@@ -309,6 +315,12 @@ use crate::handlers;
         // Password Reset
         handlers::password_reset::RequestResetBody,
         handlers::password_reset::ConfirmResetBody,
+        // Notification Rules
+        handlers::notification_rules::CreateNotificationRuleRequest,
+        handlers::notification_rules::UpdateNotificationRuleRequest,
+        handlers::notification_rules::NotificationRuleResponse,
+        axiam_core::models::notification_rule::NotificationRule,
+        axiam_core::models::notification_rule::NotificationEventType,
         // Pagination
         axiam_core::repository::Pagination,
     )),
@@ -334,6 +346,7 @@ use crate::handlers;
         (name = "oidc", description = "OpenID Connect discovery, JWKS, and UserInfo"),
         (name = "settings", description = "Organization and tenant security settings"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),
+        (name = "notification_rules", description = "Notification rule management"),
     ),
     modifiers(&SecurityAddon),
 )]

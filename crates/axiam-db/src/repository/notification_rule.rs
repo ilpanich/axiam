@@ -347,4 +347,39 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
             .map(|r| r.try_into_entry().map_err(Into::into))
             .collect()
     }
+
+    async fn get_by_events(
+        &self,
+        tenant_id: Uuid,
+        event_types: &[String],
+    ) -> AxiamResult<Vec<NotificationRule>> {
+        if event_types.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Use SurrealQL CONTAINSANY to match rules whose `events`
+        // array shares at least one element with the supplied list.
+        let result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * \
+                 FROM notification_rule \
+                 WHERE tenant_id = $tenant_id \
+                 AND enabled = true \
+                 AND events CONTAINSANY $event_types",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("event_types", event_types.to_vec()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<NotificationRuleRowWithId> = result.take(0).map_err(DbError::from)?;
+
+        rows.into_iter()
+            .map(|r| r.try_into_entry().map_err(Into::into))
+            .collect()
+    }
 }

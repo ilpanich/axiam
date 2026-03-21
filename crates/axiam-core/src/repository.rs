@@ -778,6 +778,16 @@ pub trait NotificationRuleRepository: Send + Sync {
         tenant_id: Uuid,
         event_type: &str,
     ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>> + Send;
+
+    /// Get all enabled rules matching any of the given event types.
+    ///
+    /// This is the batched variant of [`get_by_event`] — it issues a
+    /// single query instead of one per event type, avoiding N+1.
+    fn get_by_events(
+        &self,
+        tenant_id: Uuid,
+        event_types: &[String],
+    ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>> + Send;
 }
 
 // ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ pub struct User {
     pub failed_login_attempts: u32,
     pub last_failed_login_at: Option<DateTime<Utc>>,
     pub locked_until: Option<DateTime<Utc>>,
+    pub email_verified_at: Option<DateTime<Utc>>,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -45,6 +46,11 @@ pub struct CreateUser {
 pub struct UpdateUser {
     pub username: Option<String>,
     pub email: Option<String>,
+    /// Internal-only field set programmatically after Argon2id hashing.
+    /// Never accepted from or exposed to API consumers.
+    #[serde(skip)]
+    #[schema(ignore = true)]
+    pub password_hash: Option<String>,
     pub status: Option<UserStatus>,
     pub metadata: Option<serde_json::Value>,
     pub mfa_enabled: Option<bool>,
@@ -53,4 +59,6 @@ pub struct UpdateUser {
     pub failed_login_attempts: Option<u32>,
     pub last_failed_login_at: Option<Option<DateTime<Utc>>>,
     pub locked_until: Option<Option<DateTime<Utc>>>,
+    /// `Some(Some(val))` = set, `Some(None)` = clear, `None` = no change.
+    pub email_verified_at: Option<Option<DateTime<Utc>>>,
 }

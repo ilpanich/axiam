@@ -49,6 +49,8 @@ fn test_config() -> AuthConfig {
         max_lockout_duration_secs: 3600,
         auth_code_lifetime_secs: 600,
         oauth2_issuer_url: String::new(),
+        email_verification_grace_period_hours: 24,
+        password_reset_token_expiry_hours: 1,
     }
 }
 

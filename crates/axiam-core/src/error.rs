@@ -28,6 +28,12 @@ pub enum AxiamError {
     #[error("Cryptography error: {0}")]
     Crypto(String),
 
+    #[error("Email delivery failed: {0}")]
+    EmailDelivery(String),
+
+    #[error("Email configuration error: {0}")]
+    EmailConfig(String),
+
     #[error("Webhook delivery failed: {0}")]
     WebhookDelivery(String),
 

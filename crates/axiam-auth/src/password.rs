@@ -1,8 +1,36 @@
-//! Password verification using Argon2id.
+//! Password verification and hashing using Argon2id.
 
-use argon2::{Argon2, PasswordVerifier};
+use argon2::password_hash::SaltString;
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 
 use crate::error::AuthError;
+
+/// Hash a password with Argon2id using OWASP-recommended parameters.
+///
+/// If `pepper` is provided it is prepended to the password before
+/// hashing. The salt is randomly generated for each call.
+pub fn hash_password(password: &str, pepper: Option<&str>) -> Result<String, AuthError> {
+    // OWASP ASVS recommended: m=19456 (19 MiB), t=2, p=1
+    let params = argon2::Params::new(19456, 2, 1, None)
+        .map_err(|e| AuthError::Crypto(format!("argon2 params: {e}")))?;
+    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+
+    let peppered: String;
+    let input = match pepper {
+        Some(p) => {
+            peppered = format!("{p}{password}");
+            peppered.as_bytes()
+        }
+        None => password.as_bytes(),
+    };
+
+    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+    let hash = argon2
+        .hash_password(input, &salt)
+        .map_err(|e| AuthError::Crypto(format!("hash error: {e}")))?;
+
+    Ok(hash.to_string())
+}
 
 /// Verify a plaintext password against an Argon2id PHC-format hash.
 ///

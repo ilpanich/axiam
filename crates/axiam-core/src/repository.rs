@@ -10,17 +10,22 @@ use crate::error::AxiamResult;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
+    email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
+    email_template::{EmailTemplate, SetEmailTemplate, TemplateKind},
+    email_verification::{CreateEmailVerificationToken, EmailVerificationToken},
     federation::{
         CreateFederationConfig, CreateFederationLink, FederationConfig, FederationLink,
         UpdateFederationConfig,
     },
     group::{CreateGroup, Group, UpdateGroup},
+    notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, CreateRefreshToken,
         OAuth2Client, RefreshToken, UpdateOAuth2Client,
     },
     organization::{CreateOrganization, Organization, UpdateOrganization},
     password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry},
+    password_reset::{CreatePasswordResetToken, PasswordResetToken},
     permission::{CreatePermission, Permission, PermissionGrant, UpdatePermission},
     pgp_key::{PgpKey, StorePgpKey},
     resource::{CreateResource, Resource, UpdateResource},
@@ -742,6 +747,50 @@ pub trait WebhookRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Notification Rules (tenant-scoped)
+// ---------------------------------------------------------------------------
+
+pub trait NotificationRuleRepository: Send + Sync {
+    fn create(
+        &self,
+        input: CreateNotificationRule,
+    ) -> impl Future<Output = AxiamResult<NotificationRule>> + Send;
+    fn get_by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<NotificationRule>> + Send;
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        input: UpdateNotificationRule,
+    ) -> impl Future<Output = AxiamResult<NotificationRule>> + Send;
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+    fn list(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<NotificationRule>>> + Send;
+    /// Get all enabled rules subscribed to a given event type.
+    fn get_by_event(
+        &self,
+        tenant_id: Uuid,
+        event_type: &str,
+    ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>> + Send;
+
+    /// Get all enabled rules matching any of the given event types.
+    ///
+    /// This is the batched variant of [`get_by_event`] — it issues a
+    /// single query instead of one per event type, avoiding N+1.
+    fn get_by_events(
+        &self,
+        tenant_id: Uuid,
+        event_types: &[String],
+    ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // PGP Keys (tenant-scoped)
 // ---------------------------------------------------------------------------
 
@@ -844,4 +893,191 @@ pub trait SettingsRepository: Send + Sync {
         org_id: Uuid,
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<SecuritySettings>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Email Configuration (org/tenant scope)
+// ---------------------------------------------------------------------------
+
+pub trait EmailConfigRepository: Send + Sync {
+    /// Get org-level email config (returns None if not configured).
+    fn get_org_config(
+        &self,
+        org_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<EmailConfig>>> + Send;
+
+    /// Set (create or replace) org-level email config.
+    fn set_org_config(
+        &self,
+        org_id: Uuid,
+        input: SetOrgEmailConfig,
+    ) -> impl Future<Output = AxiamResult<EmailConfig>> + Send;
+
+    /// Get tenant-level overrides.
+    fn get_tenant_override(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<EmailConfigOverride>>> + Send;
+
+    /// Set tenant-level overrides.
+    fn set_tenant_override(
+        &self,
+        tenant_id: Uuid,
+        input: SetTenantEmailOverride,
+    ) -> impl Future<Output = AxiamResult<EmailConfigOverride>> + Send;
+
+    /// Delete all tenant-level overrides (revert to org config).
+    fn delete_tenant_override(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Get the effective (merged) email config for a tenant.
+    fn get_effective_config(
+        &self,
+        org_id: Uuid,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<EmailConfig>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Email Templates (org/tenant scope)
+// ---------------------------------------------------------------------------
+
+pub trait EmailTemplateRepository: Send + Sync {
+    /// Get a custom template by kind at org level.
+    fn get_org_template(
+        &self,
+        org_id: Uuid,
+        kind: TemplateKind,
+    ) -> impl Future<Output = AxiamResult<Option<EmailTemplate>>> + Send;
+
+    /// Set (create or replace) an org-level custom template.
+    fn set_org_template(
+        &self,
+        org_id: Uuid,
+        input: SetEmailTemplate,
+    ) -> impl Future<Output = AxiamResult<EmailTemplate>> + Send;
+
+    /// Delete an org-level custom template (revert to built-in).
+    fn delete_org_template(
+        &self,
+        org_id: Uuid,
+        kind: TemplateKind,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// List all custom templates for an org.
+    fn list_org_templates(
+        &self,
+        org_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<EmailTemplate>>> + Send;
+
+    /// Get a custom template by kind at tenant level.
+    fn get_tenant_template(
+        &self,
+        tenant_id: Uuid,
+        kind: TemplateKind,
+    ) -> impl Future<Output = AxiamResult<Option<EmailTemplate>>> + Send;
+
+    /// Set (create or replace) a tenant-level custom template.
+    fn set_tenant_template(
+        &self,
+        tenant_id: Uuid,
+        input: SetEmailTemplate,
+    ) -> impl Future<Output = AxiamResult<EmailTemplate>> + Send;
+
+    /// Delete a tenant-level custom template (revert to org/built-in).
+    fn delete_tenant_template(
+        &self,
+        tenant_id: Uuid,
+        kind: TemplateKind,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// List all custom templates for a tenant.
+    fn list_tenant_templates(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<EmailTemplate>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Email Verification Tokens (tenant-scoped)
+// ---------------------------------------------------------------------------
+
+pub trait EmailVerificationTokenRepository: Send + Sync {
+    /// Store a new verification token.
+    fn create(
+        &self,
+        input: CreateEmailVerificationToken,
+    ) -> impl Future<Output = AxiamResult<EmailVerificationToken>> + Send;
+
+    /// Look up a valid (unconsumed, non-expired) token by hash.
+    fn get_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<EmailVerificationToken>> + Send;
+
+    /// Atomically consume a token (set consumed_at). Returns error if
+    /// already consumed or expired.
+    fn consume(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<EmailVerificationToken>> + Send;
+
+    /// Count tokens created for a user today (for resend rate limiting).
+    fn count_today(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete expired and consumed tokens (garbage collection).
+    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Password Reset Tokens (tenant-scoped)
+// ---------------------------------------------------------------------------
+
+pub trait PasswordResetTokenRepository: Send + Sync {
+    /// Store a new password reset token.
+    fn create(
+        &self,
+        input: CreatePasswordResetToken,
+    ) -> impl Future<Output = AxiamResult<PasswordResetToken>> + Send;
+
+    /// Look up a valid (unconsumed, non-expired) token by hash.
+    fn get_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<PasswordResetToken>> + Send;
+
+    /// Atomically consume a token (set consumed_at). Returns error if
+    /// already consumed or expired.
+    fn consume(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<PasswordResetToken>> + Send;
+
+    /// Count tokens created for a user today (for rate limiting).
+    fn count_today(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete expired and consumed tokens (garbage collection).
+    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Invalidate unconsumed tokens for a user (mark as consumed so
+    /// they cannot be used, while preserving rate-limit counters).
+    fn delete_unconsumed_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }

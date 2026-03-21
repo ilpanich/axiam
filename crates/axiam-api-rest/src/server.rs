@@ -49,7 +49,23 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 "/mfa/verify",
                 web::post().to(handlers::auth::verify_mfa::<C>),
             )
-            .route("/device", web::post().to(handlers::auth::device_auth::<C>)),
+            .route("/device", web::post().to(handlers::auth::device_auth::<C>))
+            .route(
+                "/verify-email",
+                web::post().to(handlers::email_verification::verify_email::<C>),
+            )
+            .route(
+                "/resend-verification",
+                web::post().to(handlers::email_verification::resend_verification::<C>),
+            )
+            .route(
+                "/reset",
+                web::post().to(handlers::password_reset::request_reset::<C>),
+            )
+            .route(
+                "/reset/confirm",
+                web::post().to(handlers::password_reset::confirm_reset::<C>),
+            ),
     );
     // OIDC Discovery (must be outside /oauth2 scope per spec)
     cfg.route(
@@ -297,6 +313,38 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             .service(
                 web::resource("/pgp-keys/{id}/encrypt")
                     .route(web::post().to(handlers::pgp_keys::encrypt::<C>)),
+            )
+            // --- Notification Rules ---
+            .service(
+                web::resource("/notification-rules")
+                    .route(
+                        web::post().to(
+                            handlers::notification_rules::create::<C>,
+                        ),
+                    )
+                    .route(
+                        web::get().to(
+                            handlers::notification_rules::list::<C>,
+                        ),
+                    ),
+            )
+            .service(
+                web::resource("/notification-rules/{id}")
+                    .route(
+                        web::get().to(
+                            handlers::notification_rules::get::<C>,
+                        ),
+                    )
+                    .route(
+                        web::put().to(
+                            handlers::notification_rules::update::<C>,
+                        ),
+                    )
+                    .route(
+                        web::delete().to(
+                            handlers::notification_rules::delete::<C>,
+                        ),
+                    ),
             )
             // --- Webhooks ---
             .service(

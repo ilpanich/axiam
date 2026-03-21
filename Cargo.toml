@@ -11,6 +11,7 @@ members = [
     "crates/axiam-federation",
     "crates/axiam-audit",
     "crates/axiam-pki",
+    "crates/axiam-email",
     "crates/axiam-server",
 ]
 resolver = "3"
@@ -95,6 +96,9 @@ pgp = "0.19"
 samael = { version = "0.0.19", default-features = false }
 flate2 = "1"
 
+# Email
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
 # TLS
 rustls = "0.23"
 
@@ -112,4 +116,5 @@ axiam-amqp = { path = "crates/axiam-amqp" }
 axiam-oauth2 = { path = "crates/axiam-oauth2" }
 axiam-federation = { path = "crates/axiam-federation" }
 axiam-audit = { path = "crates/axiam-audit" }
+axiam-email = { path = "crates/axiam-email" }
 axiam-pki = { path = "crates/axiam-pki" }

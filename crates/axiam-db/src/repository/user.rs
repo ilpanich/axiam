@@ -30,6 +30,7 @@ struct UserRow {
     failed_login_attempts: u32,
     last_failed_login_at: Option<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
+    email_verified_at: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -49,6 +50,7 @@ struct UserRowWithId {
     failed_login_attempts: u32,
     last_failed_login_at: Option<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
+    email_verified_at: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -89,6 +91,7 @@ impl UserRow {
             failed_login_attempts: self.failed_login_attempts,
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
+            email_verified_at: self.email_verified_at,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -114,6 +117,7 @@ impl UserRowWithId {
             failed_login_attempts: self.failed_login_attempts,
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
+            email_verified_at: self.email_verified_at,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -207,6 +211,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                  failed_login_attempts = 0, \
                  last_failed_login_at = NONE, \
                  locked_until = NONE, \
+                 email_verified_at = NONE, \
                  metadata = $metadata",
             )
             .bind(("id", id_str.clone()))
@@ -313,6 +318,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         if input.email.is_some() {
             sets.push("email = $email");
         }
+        if input.password_hash.is_some() {
+            sets.push("password_hash = $password_hash");
+        }
         if input.status.is_some() {
             sets.push("status = $status");
         }
@@ -334,6 +342,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         if input.locked_until.is_some() {
             sets.push("locked_until = $locked_until");
         }
+        if input.email_verified_at.is_some() {
+            sets.push("email_verified_at = $email_verified_at");
+        }
         sets.push("updated_at = time::now()");
 
         let query = format!(
@@ -353,6 +364,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         }
         if let Some(email) = input.email {
             builder = builder.bind(("email", email));
+        }
+        if let Some(password_hash) = input.password_hash {
+            builder = builder.bind(("password_hash", password_hash));
         }
         if let Some(ref status) = input.status {
             builder = builder.bind(("status", status_to_string(status).to_string()));
@@ -375,6 +389,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         }
         if let Some(locked_until) = input.locked_until {
             builder = builder.bind(("locked_until", locked_until));
+        }
+        if let Some(email_verified_at) = input.email_verified_at {
+            builder = builder.bind(("email_verified_at", email_verified_at));
         }
 
         let result = builder.await.map_err(DbError::from)?;

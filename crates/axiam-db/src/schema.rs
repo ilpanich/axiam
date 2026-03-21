@@ -83,6 +83,26 @@ static MIGRATIONS: &[Migration] = &[
         name: "password_history",
         sql: SCHEMA_V9,
     },
+    Migration {
+        version: 10,
+        name: "email_templates",
+        sql: SCHEMA_V10,
+    },
+    Migration {
+        version: 11,
+        name: "email_verification_tokens",
+        sql: SCHEMA_V11,
+    },
+    Migration {
+        version: 12,
+        name: "password_reset_tokens",
+        sql: SCHEMA_V12,
+    },
+    Migration {
+        version: 13,
+        name: "notification_rules",
+        sql: SCHEMA_V13,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -627,6 +647,107 @@ DEFINE FIELD created_at ON TABLE password_history TYPE datetime \
     DEFAULT time::now();
 DEFINE INDEX idx_pw_history_user ON TABLE password_history \
     COLUMNS tenant_id, user_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v10 — Email templates (org/tenant scope)
+// -----------------------------------------------------------------------
+
+const SCHEMA_V10: &str = "\
+-- =======================================================================
+-- Email Templates (org or tenant scope)
+-- =======================================================================
+DEFINE TABLE email_template SCHEMAFULL;
+DEFINE FIELD scope ON TABLE email_template TYPE string \
+    ASSERT $value IN ['org', 'tenant'];
+DEFINE FIELD scope_id ON TABLE email_template TYPE string;
+DEFINE FIELD kind ON TABLE email_template TYPE string \
+    ASSERT $value IN ['activation', 'password_reset', \
+                       'mfa_setup_reminder', 'admin_notification'];
+DEFINE FIELD subject ON TABLE email_template TYPE string;
+DEFINE FIELD html_body ON TABLE email_template TYPE string;
+DEFINE FIELD text_body ON TABLE email_template TYPE string;
+DEFINE FIELD created_at ON TABLE email_template TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE email_template TYPE datetime \
+    DEFAULT time::now();
+-- One template per (scope, scope_id, kind)
+DEFINE INDEX idx_email_template_scope_kind ON TABLE email_template \
+    COLUMNS scope, scope_id, kind UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v11 — Email verification tokens
+// -----------------------------------------------------------------------
+
+const SCHEMA_V11: &str = "\
+-- =======================================================================
+-- Email Verification Tokens (tenant scope)
+-- =======================================================================
+DEFINE TABLE email_verification_token SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE email_verification_token TYPE string;
+DEFINE FIELD user_id ON TABLE email_verification_token TYPE string;
+DEFINE FIELD token_hash ON TABLE email_verification_token TYPE string;
+DEFINE FIELD expires_at ON TABLE email_verification_token TYPE datetime;
+DEFINE FIELD consumed_at ON TABLE email_verification_token \
+    TYPE option<datetime>;
+DEFINE FIELD created_at ON TABLE email_verification_token TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_evtoken_hash ON TABLE email_verification_token \
+    COLUMNS tenant_id, token_hash UNIQUE;
+DEFINE INDEX idx_evtoken_user ON TABLE email_verification_token \
+    COLUMNS tenant_id, user_id;
+
+-- Add email_verified_at to user table
+DEFINE FIELD email_verified_at ON TABLE user TYPE option<datetime>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v12 — Password reset tokens
+// -----------------------------------------------------------------------
+
+const SCHEMA_V12: &str = "\
+-- =======================================================================
+-- Password Reset Tokens (tenant scope)
+-- =======================================================================
+DEFINE TABLE password_reset_token SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE password_reset_token TYPE string;
+DEFINE FIELD user_id ON TABLE password_reset_token TYPE string;
+DEFINE FIELD token_hash ON TABLE password_reset_token TYPE string;
+DEFINE FIELD expires_at ON TABLE password_reset_token TYPE datetime;
+DEFINE FIELD consumed_at ON TABLE password_reset_token \
+    TYPE option<datetime>;
+DEFINE FIELD created_at ON TABLE password_reset_token TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_prtoken_hash ON TABLE password_reset_token \
+    COLUMNS tenant_id, token_hash UNIQUE;
+DEFINE INDEX idx_prtoken_user ON TABLE password_reset_token \
+    COLUMNS tenant_id, user_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v13 — Notification rules (tenant scope)
+// -----------------------------------------------------------------------
+
+const SCHEMA_V13: &str = "\
+-- =======================================================================
+-- Notification Rules (tenant scope)
+-- =======================================================================
+DEFINE TABLE notification_rule SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE notification_rule TYPE string;
+DEFINE FIELD name ON TABLE notification_rule TYPE string;
+DEFINE FIELD description ON TABLE notification_rule TYPE string;
+DEFINE FIELD events ON TABLE notification_rule TYPE array;
+DEFINE FIELD events.* ON TABLE notification_rule TYPE string;
+DEFINE FIELD recipient_emails ON TABLE notification_rule TYPE array;
+DEFINE FIELD recipient_emails.* ON TABLE notification_rule TYPE string;
+DEFINE FIELD enabled ON TABLE notification_rule TYPE bool DEFAULT true;
+DEFINE FIELD created_at ON TABLE notification_rule TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE notification_rule TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX idx_notification_rule_tenant ON TABLE notification_rule \
+    COLUMNS tenant_id;
 ";
 
 // -----------------------------------------------------------------------

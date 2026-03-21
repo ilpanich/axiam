@@ -54,9 +54,16 @@ impl PasswordHistoryRowWithId {
 // Repository
 // -----------------------------------------------------------------------
 
-#[derive(Clone)]
 pub struct SurrealPasswordHistoryRepository<C: Connection> {
     db: Surreal<C>,
+}
+
+impl<C: Connection> Clone for SurrealPasswordHistoryRepository<C> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+        }
+    }
 }
 
 impl<C: Connection> SurrealPasswordHistoryRepository<C> {

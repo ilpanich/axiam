@@ -73,10 +73,8 @@ pub async fn verify_email<C: Connection>(
 /// `POST /auth/resend-verification`
 ///
 /// Resends the verification email. Always returns 200 to prevent
-/// email enumeration — even if the email does not exist or is
-/// already verified.
-///
-/// Returns 429 if the resend rate limit is exceeded.
+/// email enumeration — regardless of whether the email exists, is
+/// already verified, or has hit a rate limit.
 #[utoipa::path(
     post,
     path = "/auth/resend-verification",
@@ -84,7 +82,6 @@ pub async fn verify_email<C: Connection>(
     request_body = ResendVerificationRequest,
     responses(
         (status = 200, description = "Verification email sent (or silently ignored)"),
-        (status = 429, description = "Rate limit exceeded"),
     )
 )]
 pub async fn resend_verification<C: Connection>(
@@ -106,20 +103,26 @@ pub async fn resend_verification<C: Connection>(
             // with the activation template. The token is generated and
             // stored; email delivery will be integrated when the server
             // composition layer wires EmailService.
-            Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
+            tracing::debug!(email = %req.email, "verification email resent");
         }
         Ok(None) => {
-            // User not found or already verified — return identical
-            // response to prevent email enumeration.
-            Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
+            // User not found or already verified — silently ignore.
+            tracing::debug!(
+                email = %req.email,
+                "resend-verification: no action (unknown or verified)"
+            );
         }
         Err(AxiamError::RateLimited) => {
-            Ok(HttpResponse::TooManyRequests().json(serde_json::json!({
-                "error": "rate_limited",
-                "message":
-                    "too many verification emails requested today"
-            })))
+            // Swallow rate-limit to prevent user enumeration via
+            // differential 429 responses.
+            tracing::debug!(
+                email = %req.email,
+                "resend-verification: rate-limited (suppressed)"
+            );
         }
-        Err(e) => Err(e.into()),
+        Err(e) => return Err(e.into()),
     }
+
+    // Always return identical 200 regardless of outcome.
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
 }

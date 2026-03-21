@@ -43,10 +43,8 @@ pub struct ConfirmResetBody {
 /// `POST /auth/reset`
 ///
 /// Initiates a password reset. Always returns `{"sent": true}` to
-/// prevent email enumeration — even if the email does not exist or
-/// the user is federated.
-///
-/// Returns 429 if the daily reset rate limit is exceeded.
+/// prevent email enumeration — regardless of whether the email
+/// exists, the user is federated, or the rate limit is exceeded.
 #[utoipa::path(
     post,
     path = "/auth/reset",
@@ -54,7 +52,6 @@ pub struct ConfirmResetBody {
     request_body = RequestResetBody,
     responses(
         (status = 200, description = "Reset email sent (or silently ignored)"),
-        (status = 429, description = "Rate limit exceeded"),
     )
 )]
 pub async fn request_reset<C: Connection>(
@@ -82,22 +79,28 @@ pub async fn request_reset<C: Connection>(
         Ok(Some((_raw_token, _user_id, _expires_at))) => {
             // TODO(T19): wire up actual email sending via EmailService
             // with the password-reset template.
-            Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
+            tracing::debug!(email = %req.email, "password reset token created");
         }
         Ok(None) => {
-            // User not found or federated — identical response to
-            // prevent email enumeration.
-            Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
+            // User not found or federated — silently ignore.
+            tracing::debug!(
+                email = %req.email,
+                "password-reset: no action (unknown or federated)"
+            );
         }
         Err(AxiamError::RateLimited) => {
-            Ok(HttpResponse::TooManyRequests().json(serde_json::json!({
-                "error": "rate_limited",
-                "message":
-                    "too many password reset requests today"
-            })))
+            // Swallow rate-limit to prevent user enumeration via
+            // differential 429 responses.
+            tracing::debug!(
+                email = %req.email,
+                "password-reset: rate-limited (suppressed)"
+            );
         }
-        Err(e) => Err(e.into()),
+        Err(e) => return Err(e.into()),
     }
+
+    // Always return identical 200 regardless of outcome.
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
 }
 
 /// `POST /auth/reset/confirm`

@@ -20,15 +20,15 @@ pub struct SendGridProvider {
 }
 
 impl SendGridProvider {
-    pub fn new(config: &ApiProviderConfig) -> Self {
-        Self {
-            client: build_http_client(),
+    pub fn new(config: &ApiProviderConfig) -> AxiamResult<Self> {
+        Ok(Self {
+            client: build_http_client()?,
             api_key: config.api_key.clone(),
             api_url: config
                 .api_url
                 .clone()
                 .unwrap_or_else(|| DEFAULT_API_URL.to_string()),
-        }
+        })
     }
 }
 

@@ -9,7 +9,7 @@ pub mod smtp;
 
 use std::time::Duration;
 
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::email::ProviderConfig;
 use reqwest::Client;
 use reqwest::redirect::Policy;
@@ -23,22 +23,22 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// - 30-second timeout to prevent hanging tasks.
 /// - Redirects disabled to prevent credential leakage / SSRF bypass.
-pub(crate) fn build_http_client() -> Client {
+pub(crate) fn build_http_client() -> AxiamResult<Client> {
     Client::builder()
         .timeout(HTTP_TIMEOUT)
         .redirect(Policy::none())
         .build()
-        .expect("failed to build HTTP client")
+        .map_err(|e| AxiamError::EmailDelivery(format!("failed to build HTTP client: {e}")))
 }
 
 /// Construct a boxed `EmailProvider` from a `ProviderConfig`.
 pub fn build_provider(config: &ProviderConfig) -> AxiamResult<Box<dyn EmailProvider>> {
     match config {
         ProviderConfig::Smtp(c) => Ok(Box::new(smtp::SmtpProvider::new(c)?)),
-        ProviderConfig::SendGrid(c) => Ok(Box::new(sendgrid::SendGridProvider::new(c))),
-        ProviderConfig::Postmark(c) => Ok(Box::new(postmark::PostmarkProvider::new(c))),
-        ProviderConfig::Resend(c) => Ok(Box::new(resend::ResendProvider::new(c))),
-        ProviderConfig::Brevo(c) => Ok(Box::new(brevo::BrevoProvider::new(c))),
+        ProviderConfig::SendGrid(c) => Ok(Box::new(sendgrid::SendGridProvider::new(c)?)),
+        ProviderConfig::Postmark(c) => Ok(Box::new(postmark::PostmarkProvider::new(c)?)),
+        ProviderConfig::Resend(c) => Ok(Box::new(resend::ResendProvider::new(c)?)),
+        ProviderConfig::Brevo(c) => Ok(Box::new(brevo::BrevoProvider::new(c)?)),
     }
 }
 

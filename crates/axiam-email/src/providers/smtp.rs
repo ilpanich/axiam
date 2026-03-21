@@ -68,7 +68,7 @@ impl EmailProvider for SmtpProvider {
             let to_mailbox: Mailbox = message
                 .to
                 .parse()
-                .map_err(|e| AxiamError::EmailConfig(format!("invalid to address: {e}")))?;
+                .map_err(|e| AxiamError::EmailDelivery(format!("invalid to address: {e}")))?;
 
             let mut builder = MessageBuilder::new()
                 .from(from_mailbox)
@@ -77,7 +77,7 @@ impl EmailProvider for SmtpProvider {
 
             if let Some(ref rt) = reply_to {
                 let rt_mailbox: Mailbox = rt.parse().map_err(|e| {
-                    AxiamError::EmailConfig(format!("invalid reply-to address: {e}"))
+                    AxiamError::EmailDelivery(format!("invalid reply-to address: {e}"))
                 })?;
                 builder = builder.reply_to(rt_mailbox);
             }

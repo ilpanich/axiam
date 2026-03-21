@@ -97,15 +97,26 @@ fn escape_html(s: &str) -> String {
     out
 }
 
+/// Strip CR and LF characters from a rendered email header value.
+///
+/// Email headers are line-delimited; injecting `\r` or `\n` into a
+/// subject (or other single-line header) can cause header injection
+/// attacks.  This function removes those characters entirely.
+fn sanitize_header(value: &str) -> String {
+    value.chars().filter(|&c| c != '\r' && c != '\n').collect()
+}
+
 /// Render a resolved template into an `EmailMessage` ready for delivery.
 ///
 /// HTML body values are HTML-escaped to prevent injection from
 /// user-controlled context values. Text body and subject are
 /// rendered without escaping (plain-text has no injection risk).
+/// The subject is additionally sanitized to strip CR/LF characters,
+/// preventing email header injection via user-controlled values.
 pub fn render_email(template: &EmailTemplate, to: &str, context: &TemplateContext) -> EmailMessage {
     EmailMessage {
         to: to.to_string(),
-        subject: render(&template.subject, context),
+        subject: sanitize_header(&render(&template.subject, context)),
         html_body: Some(render_html(&template.html_body, context)),
         text_body: Some(render(&template.text_body, context)),
     }
@@ -417,6 +428,24 @@ mod tests {
         assert!(msg.subject.contains("Acme Corp"));
         assert!(msg.html_body.unwrap().contains("alice"));
         assert!(msg.text_body.unwrap().contains("alice"));
+    }
+
+    #[test]
+    fn render_email_strips_crlf_from_subject() {
+        let t = builtin_template(TemplateKind::Activation);
+        let mut ctx = full_context();
+        // Inject CR/LF into a user-controlled value that appears in the subject.
+        ctx.insert(
+            PH_TENANT_NAME.into(),
+            "Evil\r\nBcc: victim@example.com".into(),
+        );
+        let msg = render_email(&t, "user@test.com", &ctx);
+        assert!(!msg.subject.contains('\r'), "subject must not contain CR");
+        assert!(!msg.subject.contains('\n'), "subject must not contain LF");
+        assert!(
+            msg.subject.contains("EvilBcc: victim@example.com"),
+            "non-control characters should be preserved"
+        );
     }
 
     #[test]

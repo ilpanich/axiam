@@ -23,6 +23,9 @@ use crate::handlers;
         handlers::auth::enroll_mfa,
         handlers::auth::confirm_mfa,
         handlers::auth::verify_mfa,
+        handlers::auth::setup_enroll_mfa,
+        handlers::auth::setup_confirm_mfa,
+        handlers::auth::reset_mfa,
         // Organizations
         handlers::organizations::create,
         handlers::organizations::list,
@@ -178,6 +181,9 @@ use crate::handlers;
         handlers::auth::MfaVerifyRequest,
         handlers::auth::MfaEnrollResponse,
         handlers::auth::MfaConfirmResponse,
+        handlers::auth::MfaSetupRequiredResponse,
+        handlers::auth::MfaSetupEnrollRequest,
+        handlers::auth::MfaSetupConfirmRequest,
         // Organizations
         axiam_core::models::organization::Organization,
         axiam_core::models::organization::CreateOrganization,

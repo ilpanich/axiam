@@ -49,6 +49,14 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 "/mfa/verify",
                 web::post().to(handlers::auth::verify_mfa::<C>),
             )
+            .route(
+                "/mfa/setup/enroll",
+                web::post().to(handlers::auth::setup_enroll_mfa::<C>),
+            )
+            .route(
+                "/mfa/setup/confirm",
+                web::post().to(handlers::auth::setup_confirm_mfa::<C>),
+            )
             .route("/device", web::post().to(handlers::auth::device_auth::<C>))
             .route(
                 "/verify-email",
@@ -145,6 +153,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::get().to(handlers::users::get::<C>))
                     .route(web::put().to(handlers::users::update::<C>))
                     .route(web::delete().to(handlers::users::delete::<C>)),
+            )
+            .service(
+                web::resource("/users/{user_id}/reset-mfa")
+                    .route(web::post().to(handlers::auth::reset_mfa::<C>)),
             )
             .service(
                 web::resource("/groups")

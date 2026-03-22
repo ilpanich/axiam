@@ -16,7 +16,7 @@ pub use error::AuthError;
 pub use password_reset::PasswordResetService;
 pub use service::{
     AuthService, EnrollMfaOutput, LoginInput, LoginOutput, LoginResult, MfaChallengeOutput,
-    RefreshInput, RefreshOutput, VerifyMfaInput,
+    MfaSetupOutput, RefreshInput, RefreshOutput, VerifyMfaInput,
 };
 pub use token::{AccessTokenClaims, ValidatedClaims};
 pub use verification::EmailVerificationService;

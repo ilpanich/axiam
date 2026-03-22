@@ -44,6 +44,12 @@ pub enum AuthError {
     #[error("federated users cannot reset passwords")]
     FederatedUserPasswordReset,
 
+    #[error("MFA setup token expired or invalid")]
+    MfaSetupTokenInvalid,
+
+    #[error("MFA is already configured for this user")]
+    MfaAlreadyConfigured,
+
     #[error("cryptography error: {0}")]
     Crypto(String),
 }
@@ -68,8 +74,12 @@ impl From<AuthError> for AxiamError {
             AuthError::VerificationTokenInvalid
             | AuthError::EmailAlreadyVerified
             | AuthError::ResetTokenInvalid
-            | AuthError::FederatedUserPasswordReset => AxiamError::Validation {
+            | AuthError::FederatedUserPasswordReset
+            | AuthError::MfaAlreadyConfigured => AxiamError::Validation {
                 message: err.to_string(),
+            },
+            AuthError::MfaSetupTokenInvalid => AxiamError::AuthenticationFailed {
+                reason: err.to_string(),
             },
             AuthError::Crypto(msg) => AxiamError::Crypto(msg),
         }

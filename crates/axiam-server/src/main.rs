@@ -103,7 +103,14 @@ async fn main() -> std::io::Result<()> {
     let session_repo = SurrealSessionRepository::new(db.client().clone());
     let audit_repo = SurrealAuditLogRepository::new(db.client().clone());
     let ca_cert_repo = SurrealCaCertificateRepository::new(db.client().clone());
-    let auth_service = AuthService::new(user_repo.clone(), session_repo, config.auth.clone());
+    let federation_link_repo_for_auth =
+        SurrealFederationLinkRepository::new(db.client().clone());
+    let auth_service = AuthService::new(
+        user_repo.clone(),
+        session_repo,
+        federation_link_repo_for_auth,
+        config.auth.clone(),
+    );
 
     // PKI service — encryption key for CA private keys.
     let pki_config = {

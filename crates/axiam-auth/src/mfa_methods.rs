@@ -22,7 +22,10 @@ pub struct MfaMethodService<U: UserRepository, W: WebauthnCredentialRepository> 
 
 impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> {
     pub fn new(user_repo: U, credential_repo: W) -> Self {
-        Self { user_repo, credential_repo }
+        Self {
+            user_repo,
+            credential_repo,
+        }
     }
 
     /// List all MFA methods registered for a user.
@@ -49,14 +52,14 @@ impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> 
         }
 
         // WebAuthn credentials.
-        let credentials =
-            self.credential_repo.list_by_user(tenant_id, user_id).await?;
+        let credentials = self
+            .credential_repo
+            .list_by_user(tenant_id, user_id)
+            .await?;
         for cred in credentials {
             let method_type = match cred.credential_type {
                 WebauthnCredentialType::Passkey => MfaMethodType::Passkey,
-                WebauthnCredentialType::SecurityKey => {
-                    MfaMethodType::SecurityKey
-                }
+                WebauthnCredentialType::SecurityKey => MfaMethodType::SecurityKey,
             };
             methods.push(MfaMethod {
                 method_id: cred.id.to_string(),
@@ -83,8 +86,10 @@ impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> 
             types.push("totp".into());
         }
 
-        let count =
-            self.credential_repo.count_by_user(tenant_id, user_id).await?;
+        let count = self
+            .credential_repo
+            .count_by_user(tenant_id, user_id)
+            .await?;
         if count > 0 {
             types.push("webauthn".into());
         }
@@ -107,8 +112,7 @@ impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> 
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
 
         // Count total methods.
-        let has_totp =
-            user.mfa_enabled && user.mfa_secret.is_some();
+        let has_totp = user.mfa_enabled && user.mfa_secret.is_some();
         let webauthn_count = self
             .credential_repo
             .count_by_user(tenant_id, user_id)
@@ -133,24 +137,21 @@ impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> 
             self.user_repo.update(tenant_id, user_id, update).await?;
         } else {
             // Parse as WebAuthn credential UUID.
-            let cred_id: Uuid = method_id.parse().map_err(|_| {
-                axiam_core::error::AxiamError::NotFound {
-                    entity: "mfa_method".into(),
-                    id: method_id.into(),
-                }
-            })?;
+            let cred_id: Uuid =
+                method_id
+                    .parse()
+                    .map_err(|_| axiam_core::error::AxiamError::NotFound {
+                        entity: "mfa_method".into(),
+                        id: method_id.into(),
+                    })?;
 
             // Verify it belongs to this user.
-            let cred = self
-                .credential_repo
-                .get_by_id(tenant_id, cred_id)
-                .await?;
+            let cred = self.credential_repo.get_by_id(tenant_id, cred_id).await?;
             if cred.user_id != user_id {
                 return Err(axiam_core::error::AxiamError::NotFound {
                     entity: "mfa_method".into(),
                     id: method_id.into(),
-                }
-                .into());
+                });
             }
 
             self.credential_repo.delete(tenant_id, cred_id).await?;

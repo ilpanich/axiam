@@ -52,10 +52,7 @@ fn parse_credential_type(s: &str) -> Result<WebauthnCredentialType, DbError> {
     }
 }
 
-fn row_to_credential(
-    row: WebauthnCredentialRow,
-    id: Uuid,
-) -> Result<WebauthnCredential, DbError> {
+fn row_to_credential(row: WebauthnCredentialRow, id: Uuid) -> Result<WebauthnCredential, DbError> {
     let tenant_id = Uuid::parse_str(&row.tenant_id)
         .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
     let user_id = Uuid::parse_str(&row.user_id)
@@ -82,8 +79,7 @@ impl WebauthnCredentialRowWithId {
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
         let user_id = Uuid::parse_str(&self.user_id)
             .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
-        let credential_type =
-            parse_credential_type(&self.credential_type)?;
+        let credential_type = parse_credential_type(&self.credential_type)?;
         Ok(WebauthnCredential {
             id,
             tenant_id,
@@ -111,13 +107,8 @@ impl<C: Connection> SurrealWebauthnCredentialRepository<C> {
     }
 }
 
-impl<C: Connection> WebauthnCredentialRepository
-    for SurrealWebauthnCredentialRepository<C>
-{
-    async fn create(
-        &self,
-        input: CreateWebauthnCredential,
-    ) -> AxiamResult<WebauthnCredential> {
+impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRepository<C> {
+    async fn create(&self, input: CreateWebauthnCredential) -> AxiamResult<WebauthnCredential> {
         let id = Uuid::new_v4();
         let id_str = id.to_string();
 
@@ -137,10 +128,7 @@ impl<C: Connection> WebauthnCredentialRepository
             .bind(("user_id", input.user_id.to_string()))
             .bind(("credential_id", input.credential_id))
             .bind(("name", input.name))
-            .bind((
-                "credential_type",
-                format!("{:?}", input.credential_type),
-            ))
+            .bind(("credential_type", format!("{:?}", input.credential_type)))
             .bind(("passkey_json", input.passkey_json))
             .await
             .map_err(DbError::from)?;
@@ -149,22 +137,16 @@ impl<C: Connection> WebauthnCredentialRepository
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        let rows: Vec<WebauthnCredentialRow> =
-            result.take(0).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-                entity: "webauthn_credential".into(),
-                id: id_str,
-            })?;
+        let rows: Vec<WebauthnCredentialRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "webauthn_credential".into(),
+            id: id_str,
+        })?;
 
         row_to_credential(row, id).map_err(Into::into)
     }
 
-    async fn get_by_id(
-        &self,
-        tenant_id: Uuid,
-        id: Uuid,
-    ) -> AxiamResult<WebauthnCredential> {
+    async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<WebauthnCredential> {
         let id_str = id.to_string();
 
         let mut result = self
@@ -178,13 +160,11 @@ impl<C: Connection> WebauthnCredentialRepository
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<WebauthnCredentialRow> =
-            result.take(0).map_err(DbError::from)?;
-        let row =
-            rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-                entity: "webauthn_credential".into(),
-                id: id_str,
-            })?;
+        let rows: Vec<WebauthnCredentialRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "webauthn_credential".into(),
+            id: id_str,
+        })?;
 
         row_to_credential(row, id).map_err(Into::into)
     }
@@ -208,18 +188,13 @@ impl<C: Connection> WebauthnCredentialRepository
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<WebauthnCredentialRowWithId> =
-            result.take(0).map_err(DbError::from)?;
+        let rows: Vec<WebauthnCredentialRowWithId> = result.take(0).map_err(DbError::from)?;
         rows.into_iter()
             .map(|r| r.try_into_credential().map_err(Into::into))
             .collect()
     }
 
-    async fn update_last_used(
-        &self,
-        tenant_id: Uuid,
-        id: Uuid,
-    ) -> AxiamResult<()> {
+    async fn update_last_used(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.db
             .query(
                 "UPDATE type::record('webauthn_credential', $id) SET \
@@ -234,11 +209,7 @@ impl<C: Connection> WebauthnCredentialRepository
         Ok(())
     }
 
-    async fn delete(
-        &self,
-        tenant_id: Uuid,
-        id: Uuid,
-    ) -> AxiamResult<()> {
+    async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.db
             .query(
                 "DELETE type::record('webauthn_credential', $id) \
@@ -252,11 +223,7 @@ impl<C: Connection> WebauthnCredentialRepository
         Ok(())
     }
 
-    async fn count_by_user(
-        &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-    ) -> AxiamResult<u64> {
+    async fn count_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
         let mut result = self
             .db
             .query(
@@ -270,8 +237,7 @@ impl<C: Connection> WebauthnCredentialRepository
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<CountRow> =
-            result.take(0).map_err(DbError::from)?;
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.first().map(|r| r.total).unwrap_or(0))
     }
 }

@@ -1,10 +1,10 @@
 //! Authentication endpoints — login, logout, refresh, and MFA.
 
 use actix_web::{HttpRequest, HttpResponse, web};
-use axiam_auth::{AuthService, MfaMethodService};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::service::{LoginInput, RefreshInput, VerifyMfaInput};
 use axiam_auth::token::issue_access_token;
+use axiam_auth::{AuthService, MfaMethodService};
 use axiam_core::models::certificate::DeviceAuthResponse;
 use axiam_core::repository::{SettingsRepository, TenantRepository};
 use axiam_db::{
@@ -25,10 +25,8 @@ type AuthSvc<C> = AuthService<
     SurrealFederationLinkRepository<C>,
 >;
 
-type MfaMethodSvc<C> = MfaMethodService<
-    SurrealUserRepository<C>,
-    SurrealWebauthnCredentialRepository<C>,
->;
+type MfaMethodSvc<C> =
+    MfaMethodService<SurrealUserRepository<C>, SurrealWebauthnCredentialRepository<C>>;
 
 // -----------------------------------------------------------------------
 // Request / response types
@@ -183,12 +181,9 @@ pub async fn login<C: Connection>(
             // Decode user/tenant from challenge to look up available methods.
             if let Ok((user_id, tenant_id, _org_id)) =
                 svc.decode_mfa_challenge_ids(&challenge.challenge_token)
+                && let Ok(types) = mfa_svc.available_method_types(tenant_id, user_id).await
             {
-                if let Ok(types) =
-                    mfa_svc.available_method_types(tenant_id, user_id).await
-                {
-                    challenge.available_methods = types;
-                }
+                challenge.available_methods = types;
             }
             Ok(HttpResponse::Accepted().json(MfaRequiredResponse {
                 mfa_required: true,
@@ -400,9 +395,7 @@ pub async fn setup_enroll_mfa<C: Connection>(
     svc: web::Data<AuthSvc<C>>,
     body: web::Json<MfaSetupEnrollRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let out = svc
-        .enroll_mfa_with_setup_token(&body.setup_token)
-        .await?;
+    let out = svc.enroll_mfa_with_setup_token(&body.setup_token).await?;
     Ok(HttpResponse::Ok().json(MfaEnrollResponse {
         secret_base32: out.secret_base32,
         totp_uri: out.totp_uri,
@@ -480,8 +473,7 @@ pub async fn reset_mfa<C: Connection>(
     if target_user_id == caller.user_id {
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
-                reason: "use the self-service MFA flow to manage your own MFA"
-                    .into(),
+                reason: "use the self-service MFA flow to manage your own MFA".into(),
             },
         ));
     }

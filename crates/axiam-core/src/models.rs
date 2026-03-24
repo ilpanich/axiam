@@ -10,6 +10,7 @@ pub mod email_template;
 pub mod email_verification;
 pub mod federation;
 pub mod group;
+pub mod mfa_method;
 pub mod notification_rule;
 pub mod oauth2_client;
 pub mod organization;

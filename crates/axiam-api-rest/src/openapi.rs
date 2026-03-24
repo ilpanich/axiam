@@ -26,6 +26,9 @@ use crate::handlers;
         handlers::auth::setup_enroll_mfa,
         handlers::auth::setup_confirm_mfa,
         handlers::auth::reset_mfa,
+        // MFA Methods
+        handlers::mfa_methods::list_mfa_methods,
+        handlers::mfa_methods::delete_mfa_method,
         // WebAuthn
         handlers::webauthn::start_registration,
         handlers::webauthn::finish_registration,
@@ -198,6 +201,9 @@ use crate::handlers;
         handlers::webauthn::FinishAuthenticationRequest,
         handlers::webauthn::WebauthnLoginResponse,
         axiam_core::models::webauthn_credential::WebauthnCredentialType,
+        // MFA Methods
+        handlers::mfa_methods::MfaMethodResponse,
+        axiam_core::models::mfa_method::MfaMethodType,
         // Organizations
         axiam_core::models::organization::Organization,
         axiam_core::models::organization::CreateOrganization,

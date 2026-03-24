@@ -62,6 +62,9 @@ pub enum AuthError {
     #[error("no WebAuthn credentials registered for this user")]
     WebauthnNoCredentials,
 
+    #[error("cannot remove the last MFA method while MFA is enabled")]
+    MfaCannotRemoveLastMethod,
+
     #[error("cryptography error: {0}")]
     Crypto(String),
 }
@@ -93,7 +96,8 @@ impl From<AuthError> for AxiamError {
             | AuthError::EmailAlreadyVerified
             | AuthError::ResetTokenInvalid
             | AuthError::FederatedUserPasswordReset
-            | AuthError::MfaAlreadyConfigured => AxiamError::Validation {
+            | AuthError::MfaAlreadyConfigured
+            | AuthError::MfaCannotRemoveLastMethod => AxiamError::Validation {
                 message: err.to_string(),
             },
             AuthError::MfaSetupTokenInvalid => AxiamError::AuthenticationFailed {

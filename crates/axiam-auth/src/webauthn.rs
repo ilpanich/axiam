@@ -13,6 +13,7 @@ use axiam_core::repository::WebauthnCredentialRepository;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
@@ -48,8 +49,9 @@ struct WebauthnStateClaims {
 // -------------------------------------------------------------------
 
 /// Orchestrates WebAuthn registration and authentication ceremonies.
+#[derive(Clone)]
 pub struct WebauthnService<W: WebauthnCredentialRepository> {
-    webauthn: Webauthn,
+    webauthn: Arc<Webauthn>,
     credential_repo: W,
     config: AuthConfig,
 }
@@ -74,7 +76,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .build()
             .map_err(|e| AuthError::Crypto(format!("WebAuthn build: {e}")))?;
 
-        Ok(Self { webauthn, credential_repo, config })
+        Ok(Self { webauthn: Arc::new(webauthn), credential_repo, config })
     }
 
     // ---- Registration ceremony ----

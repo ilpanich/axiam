@@ -66,6 +66,11 @@ pub struct MfaSetupOutput {
 pub struct MfaChallengeOutput {
     /// Short-lived JWT encoding user_id + tenant_id + org_id.
     pub challenge_token: String,
+    /// Available MFA method types (e.g. `["totp", "webauthn"]`).
+    ///
+    /// Populated by the REST handler layer (not `AuthService`) because
+    /// `AuthService` does not have visibility into WebAuthn credentials.
+    pub available_methods: Vec<String>,
 }
 
 /// Input for the refresh token rotation flow.
@@ -238,6 +243,7 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository>
                 self.issue_mfa_challenge(user.id, input.tenant_id, input.org_id)?;
             return Ok(LoginResult::MfaRequired(MfaChallengeOutput {
                 challenge_token,
+                available_methods: Vec::new(), // populated by REST handler
             }));
         }
 

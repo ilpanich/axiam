@@ -1,7 +1,7 @@
 //! Authentication endpoints — login, logout, refresh, and MFA.
 
 use actix_web::{HttpRequest, HttpResponse, web};
-use axiam_auth::AuthService;
+use axiam_auth::{AuthService, MfaMethodService};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::service::{LoginInput, RefreshInput, VerifyMfaInput};
 use axiam_auth::token::issue_access_token;
@@ -9,7 +9,7 @@ use axiam_core::models::certificate::DeviceAuthResponse;
 use axiam_core::repository::{SettingsRepository, TenantRepository};
 use axiam_db::{
     SurrealFederationLinkRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -23,6 +23,11 @@ type AuthSvc<C> = AuthService<
     SurrealUserRepository<C>,
     SurrealSessionRepository<C>,
     SurrealFederationLinkRepository<C>,
+>;
+
+type MfaMethodSvc<C> = MfaMethodService<
+    SurrealUserRepository<C>,
+    SurrealWebauthnCredentialRepository<C>,
 >;
 
 // -----------------------------------------------------------------------
@@ -49,6 +54,7 @@ pub struct LoginSuccessResponse {
 pub struct MfaRequiredResponse {
     pub mfa_required: bool,
     pub challenge_token: String,
+    pub available_methods: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -139,6 +145,7 @@ fn user_agent(req: &HttpRequest) -> Option<String> {
 pub async fn login<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,
+    mfa_svc: web::Data<MfaMethodSvc<C>>,
     settings_repo: web::Data<SurrealSettingsRepository<C>>,
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -172,10 +179,21 @@ pub async fn login<C: Connection>(
                 expires_in: out.expires_in,
             }))
         }
-        axiam_auth::LoginResult::MfaRequired(challenge) => {
+        axiam_auth::LoginResult::MfaRequired(mut challenge) => {
+            // Decode user/tenant from challenge to look up available methods.
+            if let Ok((user_id, tenant_id, _org_id)) =
+                svc.decode_mfa_challenge_ids(&challenge.challenge_token)
+            {
+                if let Ok(types) =
+                    mfa_svc.available_method_types(tenant_id, user_id).await
+                {
+                    challenge.available_methods = types;
+                }
+            }
             Ok(HttpResponse::Accepted().json(MfaRequiredResponse {
                 mfa_required: true,
                 challenge_token: challenge.challenge_token,
+                available_methods: challenge.available_methods,
             }))
         }
         axiam_auth::LoginResult::MfaSetupRequired(setup) => {

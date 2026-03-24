@@ -179,6 +179,18 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::post().to(handlers::auth::reset_mfa::<C>)),
             )
             .service(
+                web::resource("/users/{user_id}/mfa-methods")
+                    .route(web::get().to(
+                        handlers::mfa_methods::list_mfa_methods::<C>,
+                    )),
+            )
+            .service(
+                web::resource("/users/{user_id}/mfa-methods/{method_id}")
+                    .route(web::delete().to(
+                        handlers::mfa_methods::delete_mfa_method::<C>,
+                    )),
+            )
+            .service(
                 web::resource("/groups")
                     .route(web::post().to(handlers::groups::create::<C>))
                     .route(web::get().to(handlers::groups::list::<C>)),

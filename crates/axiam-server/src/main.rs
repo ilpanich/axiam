@@ -9,7 +9,7 @@ use axiam_api_rest::{
     HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes, openapi_routes,
 };
 use axiam_audit::AuditMiddleware;
-use axiam_auth::AuthService;
+use axiam_auth::{AuthService, MfaMethodService, WebauthnService};
 use axiam_auth::config::AuthConfig;
 use axiam_db::{
     DbConfig, DbManager, SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
@@ -19,7 +19,7 @@ use axiam_db::{
     SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebhookRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
@@ -111,6 +111,14 @@ async fn main() -> std::io::Result<()> {
         federation_link_repo_for_auth,
         config.auth.clone(),
     );
+
+    let webauthn_cred_repo =
+        SurrealWebauthnCredentialRepository::new(db.client().clone());
+    let webauthn_service =
+        WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
+            .expect("Failed to build WebauthnService");
+    let mfa_method_service =
+        MfaMethodService::new(user_repo.clone(), webauthn_cred_repo);
 
     // PKI service — encryption key for CA private keys.
     let pki_config = {
@@ -258,6 +266,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(scope_repo.clone()))
             .app_data(web::Data::new(service_account_repo.clone()))
             .app_data(web::Data::new(auth_service.clone()))
+            .app_data(web::Data::new(webauthn_service.clone()))
+            .app_data(web::Data::new(mfa_method_service.clone()))
             .app_data(web::Data::new(notification_publisher.clone()))
             .app_data(web::Data::new(ca_service.clone()))
             .app_data(web::Data::new(cert_service.clone()))

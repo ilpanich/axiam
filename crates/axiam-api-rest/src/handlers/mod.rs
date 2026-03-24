@@ -19,4 +19,5 @@ pub mod service_accounts;
 pub mod settings;
 pub mod tenants;
 pub mod users;
+pub mod webauthn;
 pub mod webhooks;

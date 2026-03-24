@@ -36,6 +36,7 @@ use crate::models::{
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     user::{CreateUser, UpdateUser, User},
+    webauthn_credential::{CreateWebauthnCredential, WebauthnCredential},
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
 };
 
@@ -1076,6 +1077,55 @@ pub trait PasswordResetTokenRepository: Send + Sync {
     /// Invalidate unconsumed tokens for a user (mark as consumed so
     /// they cannot be used, while preserving rate-limit counters).
     fn delete_unconsumed_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// -------------------------------------------------------------------
+// WebAuthn Credentials (tenant-scoped)
+// -------------------------------------------------------------------
+
+/// Repository for WebAuthn/FIDO2 credential storage.
+pub trait WebauthnCredentialRepository: Send + Sync {
+    /// Store a new WebAuthn credential.
+    fn create(
+        &self,
+        input: CreateWebauthnCredential,
+    ) -> impl Future<Output = AxiamResult<WebauthnCredential>> + Send;
+
+    /// Get a credential by ID.
+    fn get_by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<WebauthnCredential>> + Send;
+
+    /// Get all WebAuthn credentials for a user.
+    fn list_by_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<WebauthnCredential>>> + Send;
+
+    /// Update the `last_used_at` timestamp after successful
+    /// authentication.
+    fn update_last_used(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete a WebAuthn credential.
+    fn delete(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Count how many WebAuthn credentials a user has registered.
+    fn count_by_user(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,

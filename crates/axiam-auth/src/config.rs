@@ -46,6 +46,14 @@ pub struct AuthConfig {
     pub email_verification_grace_period_hours: u32,
     /// Password reset token expiry in hours (default: 1).
     pub password_reset_token_expiry_hours: u32,
+    /// WebAuthn Relying Party ID (typically the domain name,
+    /// e.g. "auth.example.com").
+    pub webauthn_rp_id: String,
+    /// WebAuthn Relying Party origin
+    /// (e.g. "https://auth.example.com").
+    pub webauthn_rp_origin: String,
+    /// WebAuthn Relying Party display name.
+    pub webauthn_rp_name: String,
 }
 
 impl AuthConfig {
@@ -85,6 +93,9 @@ impl Default for AuthConfig {
             max_lockout_duration_secs: 3600,
             email_verification_grace_period_hours: 24,
             password_reset_token_expiry_hours: 1,
+            webauthn_rp_id: "localhost".into(),
+            webauthn_rp_origin: "http://localhost:8080".into(),
+            webauthn_rp_name: "AXIAM".into(),
         }
     }
 }

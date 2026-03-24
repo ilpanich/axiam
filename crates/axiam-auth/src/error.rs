@@ -50,6 +50,18 @@ pub enum AuthError {
     #[error("MFA is already configured for this user")]
     MfaAlreadyConfigured,
 
+    #[error("WebAuthn registration failed: {0}")]
+    WebauthnRegistration(String),
+
+    #[error("WebAuthn authentication failed: {0}")]
+    WebauthnAuthentication(String),
+
+    #[error("WebAuthn state token invalid or expired")]
+    WebauthnStateInvalid,
+
+    #[error("no WebAuthn credentials registered for this user")]
+    WebauthnNoCredentials,
+
     #[error("cryptography error: {0}")]
     Crypto(String),
 }
@@ -63,9 +75,15 @@ impl From<AuthError> for AxiamError {
             | AuthError::AccountPendingVerification
             | AuthError::MfaRequired
             | AuthError::MfaInvalidCode
-            | AuthError::MfaNotEnrolled => AxiamError::AuthenticationFailed {
-                reason: err.to_string(),
-            },
+            | AuthError::MfaNotEnrolled
+            | AuthError::WebauthnRegistration(_)
+            | AuthError::WebauthnAuthentication(_)
+            | AuthError::WebauthnStateInvalid
+            | AuthError::WebauthnNoCredentials => {
+                AxiamError::AuthenticationFailed {
+                    reason: err.to_string(),
+                }
+            }
             AuthError::TokenExpired | AuthError::TokenInvalid(_) => {
                 AxiamError::AuthenticationFailed {
                     reason: err.to_string(),

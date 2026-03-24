@@ -59,6 +59,26 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             )
             .route("/device", web::post().to(handlers::auth::device_auth::<C>))
             .route(
+                "/webauthn/register/start",
+                web::post().to(handlers::webauthn::start_registration::<C>),
+            )
+            .route(
+                "/webauthn/register/finish",
+                web::post().to(handlers::webauthn::finish_registration::<C>),
+            )
+            .route(
+                "/webauthn/authenticate/start",
+                web::post().to(
+                    handlers::webauthn::start_authentication::<C>,
+                ),
+            )
+            .route(
+                "/webauthn/authenticate/finish",
+                web::post().to(
+                    handlers::webauthn::finish_authentication::<C>,
+                ),
+            )
+            .route(
                 "/verify-email",
                 web::post().to(handlers::email_verification::verify_email::<C>),
             )

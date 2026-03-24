@@ -10,6 +10,7 @@ pub mod service;
 pub mod token;
 pub mod totp;
 pub mod verification;
+pub mod webauthn;
 
 pub use config::AuthConfig;
 pub use error::AuthError;
@@ -20,3 +21,4 @@ pub use service::{
 };
 pub use token::{AccessTokenClaims, ValidatedClaims};
 pub use verification::EmailVerificationService;
+pub use webauthn::WebauthnService;

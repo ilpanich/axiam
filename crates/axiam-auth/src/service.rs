@@ -231,8 +231,9 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository>
             }
         }
 
-        // 6. Check MFA.
-        if user.mfa_enabled && user.mfa_secret.is_some() {
+        // 6. Check MFA — trigger for any user with mfa_enabled, regardless
+        //    of whether they use TOTP or WebAuthn.
+        if user.mfa_enabled {
             let challenge_token =
                 self.issue_mfa_challenge(user.id, input.tenant_id, input.org_id)?;
             return Ok(LoginResult::MfaRequired(MfaChallengeOutput {
@@ -310,6 +311,31 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository>
             input.user_agent,
         )
         .await
+    }
+
+    /// Decode an MFA challenge token and return the embedded IDs.
+    ///
+    /// This is used by the WebAuthn REST handler to extract
+    /// `(user_id, tenant_id, org_id)` from an MFA challenge token
+    /// so it can start a WebAuthn authentication ceremony.
+    pub fn decode_mfa_challenge_ids(
+        &self,
+        token: &str,
+    ) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+        let claims = self.decode_mfa_challenge(token)?;
+        let user_id: Uuid = claims
+            .sub
+            .parse()
+            .map_err(|_| AuthError::TokenInvalid("bad sub".into()))?;
+        let tenant_id: Uuid = claims
+            .tenant_id
+            .parse()
+            .map_err(|_| AuthError::TokenInvalid("bad tenant_id".into()))?;
+        let org_id: Uuid = claims
+            .org_id
+            .parse()
+            .map_err(|_| AuthError::TokenInvalid("bad org_id".into()))?;
+        Ok((user_id, tenant_id, org_id))
     }
 
     /// Start MFA enrollment for a user (step 1 of 2).
@@ -593,7 +619,11 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository>
         }
     }
 
-    async fn create_session_and_tokens(
+    /// Create a session and issue access + refresh tokens.
+    ///
+    /// Public so that `WebauthnService` callers (REST handlers) can
+    /// complete the login flow after WebAuthn authentication succeeds.
+    pub async fn create_session_and_tokens(
         &self,
         user_id: Uuid,
         tenant_id: Uuid,

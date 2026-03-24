@@ -103,6 +103,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "notification_rules",
         sql: SCHEMA_V13,
     },
+    Migration {
+        version: 14,
+        name: "webauthn_credentials",
+        sql: SCHEMA_V14,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -748,6 +753,31 @@ DEFINE FIELD updated_at ON TABLE notification_rule TYPE datetime \
     DEFAULT time::now();
 DEFINE INDEX idx_notification_rule_tenant ON TABLE notification_rule \
     COLUMNS tenant_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v14 — WebAuthn credentials
+// -----------------------------------------------------------------------
+
+const SCHEMA_V14: &str = "\
+-- =======================================================================
+-- WebAuthn Credentials (tenant scope)
+-- =======================================================================
+DEFINE TABLE webauthn_credential SCHEMAFULL;
+DEFINE FIELD tenant_id ON TABLE webauthn_credential TYPE string;
+DEFINE FIELD user_id ON TABLE webauthn_credential TYPE string;
+DEFINE FIELD credential_id ON TABLE webauthn_credential TYPE string;
+DEFINE FIELD name ON TABLE webauthn_credential TYPE string;
+DEFINE FIELD credential_type ON TABLE webauthn_credential TYPE string \
+    ASSERT $value IN ['Passkey', 'SecurityKey'];
+DEFINE FIELD passkey_json ON TABLE webauthn_credential TYPE string;
+DEFINE FIELD created_at ON TABLE webauthn_credential TYPE datetime \
+    DEFAULT time::now();
+DEFINE FIELD last_used_at ON TABLE webauthn_credential TYPE option<datetime>;
+DEFINE INDEX idx_webauthn_cred_tenant_user ON TABLE webauthn_credential \
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX idx_webauthn_cred_id ON TABLE webauthn_credential \
+    COLUMNS tenant_id, credential_id UNIQUE;
 ";
 
 // -----------------------------------------------------------------------

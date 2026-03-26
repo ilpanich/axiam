@@ -86,17 +86,22 @@ pub struct WebauthnLoginResponse {
 // Helpers
 // -------------------------------------------------------------------
 
+/// Maximum length for an IP address string (IPv6 with zone ID).
+const MAX_IP_LEN: usize = 45;
+/// Maximum length for a User-Agent string.
+const MAX_UA_LEN: usize = 512;
+
 fn client_ip(req: &HttpRequest) -> Option<String> {
     req.connection_info()
         .realip_remote_addr()
-        .map(|s| s.to_string())
+        .map(|s| s.chars().take(MAX_IP_LEN).collect())
 }
 
 fn user_agent(req: &HttpRequest) -> Option<String> {
     req.headers()
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+        .map(|s| s.chars().take(MAX_UA_LEN).collect())
 }
 
 /// Extract tenant_id from an unverified JWT state token by

@@ -1,9 +1,7 @@
 //! Integration tests for the WebAuthn credential repository
 //! implementation using in-memory SurrealDB.
 
-use axiam_core::models::webauthn_credential::{
-    CreateWebauthnCredential, WebauthnCredentialType,
-};
+use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredentialType};
 use axiam_core::repository::WebauthnCredentialRepository;
 use axiam_db::repository::SurrealWebauthnCredentialRepository;
 use surrealdb::Surreal;
@@ -68,10 +66,7 @@ async fn create_and_get_credential() {
     assert_eq!(fetched.id, cred.id);
     assert_eq!(fetched.tenant_id, tenant_id);
     assert_eq!(fetched.name, "My YubiKey");
-    assert_eq!(
-        fetched.credential_type,
-        WebauthnCredentialType::SecurityKey
-    );
+    assert_eq!(fetched.credential_type, WebauthnCredentialType::SecurityKey);
 }
 
 #[tokio::test]

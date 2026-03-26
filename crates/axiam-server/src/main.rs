@@ -9,8 +9,8 @@ use axiam_api_rest::{
     HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes, openapi_routes,
 };
 use axiam_audit::AuditMiddleware;
-use axiam_auth::{AuthService, MfaMethodService, WebauthnService};
 use axiam_auth::config::AuthConfig;
+use axiam_auth::{AuthService, MfaMethodService, WebauthnService};
 use axiam_db::{
     DbConfig, DbManager, SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
     SurrealCaCertificateRepository, SurrealCertificateRepository,
@@ -103,8 +103,7 @@ async fn main() -> std::io::Result<()> {
     let session_repo = SurrealSessionRepository::new(db.client().clone());
     let audit_repo = SurrealAuditLogRepository::new(db.client().clone());
     let ca_cert_repo = SurrealCaCertificateRepository::new(db.client().clone());
-    let federation_link_repo_for_auth =
-        SurrealFederationLinkRepository::new(db.client().clone());
+    let federation_link_repo_for_auth = SurrealFederationLinkRepository::new(db.client().clone());
     let auth_service = AuthService::new(
         user_repo.clone(),
         session_repo,
@@ -112,13 +111,10 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
     );
 
-    let webauthn_cred_repo =
-        SurrealWebauthnCredentialRepository::new(db.client().clone());
-    let webauthn_service =
-        WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
-            .expect("Failed to build WebauthnService");
-    let mfa_method_service =
-        MfaMethodService::new(user_repo.clone(), webauthn_cred_repo);
+    let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(db.client().clone());
+    let webauthn_service = WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
+        .expect("Failed to build WebauthnService");
+    let mfa_method_service = MfaMethodService::new(user_repo.clone(), webauthn_cred_repo);
 
     // PKI service — encryption key for CA private keys.
     let pki_config = {

@@ -82,11 +82,9 @@ impl From<AuthError> for AxiamError {
             | AuthError::WebauthnRegistration(_)
             | AuthError::WebauthnAuthentication(_)
             | AuthError::WebauthnStateInvalid
-            | AuthError::WebauthnNoCredentials => {
-                AxiamError::AuthenticationFailed {
-                    reason: err.to_string(),
-                }
-            }
+            | AuthError::WebauthnNoCredentials => AxiamError::AuthenticationFailed {
+                reason: err.to_string(),
+            },
             AuthError::TokenExpired | AuthError::TokenInvalid(_) => {
                 AxiamError::AuthenticationFailed {
                     reason: err.to_string(),

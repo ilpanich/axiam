@@ -1118,11 +1118,7 @@ pub trait WebauthnCredentialRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Delete a WebAuthn credential.
-    fn delete(
-        &self,
-        tenant_id: Uuid,
-        id: Uuid,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Count how many WebAuthn credentials a user has registered.
     fn count_by_user(

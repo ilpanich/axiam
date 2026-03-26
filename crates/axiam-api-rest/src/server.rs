@@ -34,6 +34,7 @@ pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
 pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/auth")
+            .app_data(web::JsonConfig::default().limit(16_384))
             .route("/login", web::post().to(handlers::auth::login::<C>))
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
@@ -68,15 +69,11 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             )
             .route(
                 "/webauthn/authenticate/start",
-                web::post().to(
-                    handlers::webauthn::start_authentication::<C>,
-                ),
+                web::post().to(handlers::webauthn::start_authentication::<C>),
             )
             .route(
                 "/webauthn/authenticate/finish",
-                web::post().to(
-                    handlers::webauthn::finish_authentication::<C>,
-                ),
+                web::post().to(handlers::webauthn::finish_authentication::<C>),
             )
             .route(
                 "/verify-email",

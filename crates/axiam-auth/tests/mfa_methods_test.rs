@@ -6,19 +6,16 @@ use axiam_core::models::mfa_method::MfaMethodType;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
-use axiam_core::models::webauthn_credential::{
-    CreateWebauthnCredential, WebauthnCredentialType,
-};
+use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredentialType};
 use axiam_core::repository::{
-    OrganizationRepository, TenantRepository, UserRepository,
-    WebauthnCredentialRepository,
+    OrganizationRepository, TenantRepository, UserRepository, WebauthnCredentialRepository,
 };
 use axiam_db::repository::{
-    SurrealOrganizationRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnCredentialRepository,
 };
-use surrealdb::engine::local::Mem;
 use surrealdb::Surreal;
+use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 type Db = surrealdb::engine::local::Db;
@@ -89,26 +86,19 @@ async fn setup() -> (
 fn build_service(
     user_repo: SurrealUserRepository<Db>,
     cred_repo: SurrealWebauthnCredentialRepository<Db>,
-) -> MfaMethodService<SurrealUserRepository<Db>, SurrealWebauthnCredentialRepository<Db>>
-{
+) -> MfaMethodService<SurrealUserRepository<Db>, SurrealWebauthnCredentialRepository<Db>> {
     MfaMethodService::new(user_repo, cred_repo)
 }
 
 /// Helper: enable MFA (TOTP) on the given user.
-async fn enable_totp(
-    user_repo: &SurrealUserRepository<Db>,
-    tenant_id: Uuid,
-    user_id: Uuid,
-) {
+async fn enable_totp(user_repo: &SurrealUserRepository<Db>, tenant_id: Uuid, user_id: Uuid) {
     user_repo
         .update(
             tenant_id,
             user_id,
             UpdateUser {
                 mfa_enabled: Some(true),
-                mfa_secret: Some(Some(
-                    "encrypted-secret-placeholder".into(),
-                )),
+                mfa_secret: Some(Some("encrypted-secret-placeholder".into())),
                 ..Default::default()
             },
         )
@@ -257,9 +247,7 @@ async fn delete_method_removes_totp() {
     .await;
     let svc = build_service(user_repo.clone(), cred_repo);
 
-    svc.delete_method(tenant_id, user_id, "totp")
-        .await
-        .unwrap();
+    svc.delete_method(tenant_id, user_id, "totp").await.unwrap();
 
     // TOTP secret should be cleared.
     let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
@@ -329,9 +317,7 @@ async fn delete_method_disables_mfa_when_last_removed() {
     let svc = build_service(user_repo.clone(), cred_repo);
 
     // Remove TOTP — leaves 1 webauthn, should succeed.
-    svc.delete_method(tenant_id, user_id, "totp")
-        .await
-        .unwrap();
+    svc.delete_method(tenant_id, user_id, "totp").await.unwrap();
 
     // User should still have mfa_enabled because one method remains.
     let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();

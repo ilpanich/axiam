@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Type of WebAuthn authenticator.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum WebauthnCredentialType {
     /// Discoverable / platform authenticator
     /// (1Password, Bitwarden, iCloud Keychain, Android).

@@ -34,6 +34,7 @@ pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
 pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/auth")
+            .app_data(web::JsonConfig::default().limit(65_536))
             .route("/login", web::post().to(handlers::auth::login::<C>))
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
@@ -49,7 +50,31 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 "/mfa/verify",
                 web::post().to(handlers::auth::verify_mfa::<C>),
             )
+            .route(
+                "/mfa/setup/enroll",
+                web::post().to(handlers::auth::setup_enroll_mfa::<C>),
+            )
+            .route(
+                "/mfa/setup/confirm",
+                web::post().to(handlers::auth::setup_confirm_mfa::<C>),
+            )
             .route("/device", web::post().to(handlers::auth::device_auth::<C>))
+            .route(
+                "/webauthn/register/start",
+                web::post().to(handlers::webauthn::start_registration::<C>),
+            )
+            .route(
+                "/webauthn/register/finish",
+                web::post().to(handlers::webauthn::finish_registration::<C>),
+            )
+            .route(
+                "/webauthn/authenticate/start",
+                web::post().to(handlers::webauthn::start_authentication::<C>),
+            )
+            .route(
+                "/webauthn/authenticate/finish",
+                web::post().to(handlers::webauthn::finish_authentication::<C>),
+            )
             .route(
                 "/verify-email",
                 web::post().to(handlers::email_verification::verify_email::<C>),
@@ -145,6 +170,22 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::get().to(handlers::users::get::<C>))
                     .route(web::put().to(handlers::users::update::<C>))
                     .route(web::delete().to(handlers::users::delete::<C>)),
+            )
+            .service(
+                web::resource("/users/{user_id}/reset-mfa")
+                    .route(web::post().to(handlers::auth::reset_mfa::<C>)),
+            )
+            .service(
+                web::resource("/users/{user_id}/mfa-methods")
+                    .route(web::get().to(
+                        handlers::mfa_methods::list_mfa_methods::<C>,
+                    )),
+            )
+            .service(
+                web::resource("/users/{user_id}/mfa-methods/{method_id}")
+                    .route(web::delete().to(
+                        handlers::mfa_methods::delete_mfa_method::<C>,
+                    )),
             )
             .service(
                 web::resource("/groups")

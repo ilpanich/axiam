@@ -23,6 +23,17 @@ use crate::handlers;
         handlers::auth::enroll_mfa,
         handlers::auth::confirm_mfa,
         handlers::auth::verify_mfa,
+        handlers::auth::setup_enroll_mfa,
+        handlers::auth::setup_confirm_mfa,
+        handlers::auth::reset_mfa,
+        // MFA Methods
+        handlers::mfa_methods::list_mfa_methods,
+        handlers::mfa_methods::delete_mfa_method,
+        // WebAuthn
+        handlers::webauthn::start_registration,
+        handlers::webauthn::finish_registration,
+        handlers::webauthn::start_authentication,
+        handlers::webauthn::finish_authentication,
         // Organizations
         handlers::organizations::create,
         handlers::organizations::list,
@@ -178,6 +189,21 @@ use crate::handlers;
         handlers::auth::MfaVerifyRequest,
         handlers::auth::MfaEnrollResponse,
         handlers::auth::MfaConfirmResponse,
+        handlers::auth::MfaSetupRequiredResponse,
+        handlers::auth::MfaSetupEnrollRequest,
+        handlers::auth::MfaSetupConfirmRequest,
+        // WebAuthn
+        handlers::webauthn::StartRegistrationResponse,
+        handlers::webauthn::FinishRegistrationRequest,
+        handlers::webauthn::CredentialResponse,
+        handlers::webauthn::StartAuthenticationRequest,
+        handlers::webauthn::StartAuthenticationResponse,
+        handlers::webauthn::FinishAuthenticationRequest,
+        handlers::webauthn::WebauthnLoginResponse,
+        axiam_core::models::webauthn_credential::WebauthnCredentialType,
+        // MFA Methods
+        handlers::mfa_methods::MfaMethodResponse,
+        axiam_core::models::mfa_method::MfaMethodType,
         // Organizations
         axiam_core::models::organization::Organization,
         axiam_core::models::organization::CreateOrganization,
@@ -327,6 +353,7 @@ use crate::handlers;
     tags(
         (name = "health", description = "Health and readiness probes"),
         (name = "auth", description = "Authentication — login, logout, refresh, MFA"),
+        (name = "webauthn", description = "WebAuthn passkey registration and authentication"),
         (name = "organizations", description = "Organization management"),
         (name = "tenants", description = "Tenant management"),
         (name = "users", description = "User management"),

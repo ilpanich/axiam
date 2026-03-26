@@ -44,6 +44,27 @@ pub enum AuthError {
     #[error("federated users cannot reset passwords")]
     FederatedUserPasswordReset,
 
+    #[error("MFA setup token expired or invalid")]
+    MfaSetupTokenInvalid,
+
+    #[error("MFA is already configured for this user")]
+    MfaAlreadyConfigured,
+
+    #[error("WebAuthn registration failed: {0}")]
+    WebauthnRegistration(String),
+
+    #[error("WebAuthn authentication failed: {0}")]
+    WebauthnAuthentication(String),
+
+    #[error("WebAuthn state token invalid or expired")]
+    WebauthnStateInvalid,
+
+    #[error("no WebAuthn credentials registered for this user")]
+    WebauthnNoCredentials,
+
+    #[error("cannot remove the last MFA method while MFA is enabled")]
+    MfaCannotRemoveLastMethod,
+
     #[error("cryptography error: {0}")]
     Crypto(String),
 }
@@ -57,7 +78,11 @@ impl From<AuthError> for AxiamError {
             | AuthError::AccountPendingVerification
             | AuthError::MfaRequired
             | AuthError::MfaInvalidCode
-            | AuthError::MfaNotEnrolled => AxiamError::AuthenticationFailed {
+            | AuthError::MfaNotEnrolled
+            | AuthError::WebauthnRegistration(_)
+            | AuthError::WebauthnAuthentication(_)
+            | AuthError::WebauthnStateInvalid
+            | AuthError::WebauthnNoCredentials => AxiamError::AuthenticationFailed {
                 reason: err.to_string(),
             },
             AuthError::TokenExpired | AuthError::TokenInvalid(_) => {
@@ -68,8 +93,13 @@ impl From<AuthError> for AxiamError {
             AuthError::VerificationTokenInvalid
             | AuthError::EmailAlreadyVerified
             | AuthError::ResetTokenInvalid
-            | AuthError::FederatedUserPasswordReset => AxiamError::Validation {
+            | AuthError::FederatedUserPasswordReset
+            | AuthError::MfaAlreadyConfigured
+            | AuthError::MfaCannotRemoveLastMethod => AxiamError::Validation {
                 message: err.to_string(),
+            },
+            AuthError::MfaSetupTokenInvalid => AxiamError::AuthenticationFailed {
+                reason: err.to_string(),
             },
             AuthError::Crypto(msg) => AxiamError::Crypto(msg),
         }

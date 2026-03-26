@@ -2,8 +2,9 @@
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::session::CreateSession;
+use axiam_core::models::settings::MfaPolicy;
 use axiam_core::models::user::{UpdateUser, UserStatus};
-use axiam_core::repository::{SessionRepository, UserRepository};
+use axiam_core::repository::{FederationLinkRepository, SessionRepository, UserRepository};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -25,6 +26,10 @@ pub struct LoginInput {
     pub password: String,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
+    /// Tenant-effective MFA policy — when present and `mfa_enforced` is
+    /// true, users without MFA will be asked to set it up before
+    /// completing login.
+    pub mfa_policy: Option<MfaPolicy>,
 }
 
 /// Successful login result (no MFA required).
@@ -36,13 +41,24 @@ pub struct LoginOutput {
     pub expires_in: u64,
 }
 
-/// Login result — either full success or MFA challenge.
+/// Login result — full success, MFA challenge, or MFA setup required.
 #[derive(Debug)]
 pub enum LoginResult {
     /// Credentials valid, no MFA — tokens issued.
     Success(LoginOutput),
     /// Credentials valid, MFA required — client must call `verify_mfa`.
     MfaRequired(MfaChallengeOutput),
+    /// Credentials valid, MFA enforced by policy but not yet configured
+    /// — client must complete MFA enrollment using the setup token.
+    MfaSetupRequired(MfaSetupOutput),
+}
+
+/// Output returned when MFA enforcement requires initial setup.
+#[derive(Debug)]
+pub struct MfaSetupOutput {
+    /// Short-lived JWT the client must present to `enroll_mfa_with_setup_token`
+    /// and `confirm_mfa_with_setup_token`.
+    pub setup_token: String,
 }
 
 /// MFA challenge token returned when login detects MFA is enabled.
@@ -50,6 +66,11 @@ pub enum LoginResult {
 pub struct MfaChallengeOutput {
     /// Short-lived JWT encoding user_id + tenant_id + org_id.
     pub challenge_token: String,
+    /// Available MFA method types (e.g. `["totp", "webauthn"]`).
+    ///
+    /// Populated by the REST handler layer (not `AuthService`) because
+    /// `AuthService` does not have visibility into WebAuthn credentials.
+    pub available_methods: Vec<String>,
 }
 
 /// Input for the refresh token rotation flow.
@@ -113,17 +134,19 @@ struct MfaChallengeClaims {
 /// Generic over repository implementations so that the auth layer
 /// has no dependency on the database crate.
 #[derive(Clone)]
-pub struct AuthService<U: UserRepository, S: SessionRepository> {
+pub struct AuthService<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> {
     user_repo: U,
     session_repo: S,
+    federation_repo: F,
     config: AuthConfig,
 }
 
-impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
-    pub fn new(user_repo: U, session_repo: S, config: AuthConfig) -> Self {
+impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthService<U, S, F> {
+    pub fn new(user_repo: U, session_repo: S, federation_repo: F, config: AuthConfig) -> Self {
         Self {
             user_repo,
             session_repo,
+            federation_repo,
             config,
         }
     }
@@ -181,12 +204,33 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
             self.config.email_verification_grace_period_hours,
         )?;
 
-        // 6. Check MFA.
-        if user.mfa_enabled && user.mfa_secret.is_some() {
+        // 5b. MFA enforcement — if policy requires MFA but user hasn't set it up,
+        //     return a setup token (unless the user is federated).
+        if let Some(ref policy) = input.mfa_policy
+            && policy.mfa_enforced
+            && !user.mfa_enabled
+        {
+            let links = self
+                .federation_repo
+                .get_by_user_id(input.tenant_id, user.id)
+                .await?;
+            if links.is_empty() {
+                let setup_token =
+                    self.issue_mfa_setup_token(user.id, input.tenant_id, input.org_id)?;
+                return Ok(LoginResult::MfaSetupRequired(MfaSetupOutput {
+                    setup_token,
+                }));
+            }
+        }
+
+        // 6. Check MFA — trigger for any user with mfa_enabled, regardless
+        //    of whether they use TOTP or WebAuthn.
+        if user.mfa_enabled {
             let challenge_token =
                 self.issue_mfa_challenge(user.id, input.tenant_id, input.org_id)?;
             return Ok(LoginResult::MfaRequired(MfaChallengeOutput {
                 challenge_token,
+                available_methods: Vec::new(), // populated by REST handler
             }));
         }
 
@@ -260,6 +304,28 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
             input.user_agent,
         )
         .await
+    }
+
+    /// Decode an MFA challenge token and return the embedded IDs.
+    ///
+    /// This is used by the WebAuthn REST handler to extract
+    /// `(user_id, tenant_id, org_id)` from an MFA challenge token
+    /// so it can start a WebAuthn authentication ceremony.
+    pub fn decode_mfa_challenge_ids(&self, token: &str) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+        let claims = self.decode_mfa_challenge(token)?;
+        let user_id: Uuid = claims
+            .sub
+            .parse()
+            .map_err(|_| AuthError::TokenInvalid("bad sub".into()))?;
+        let tenant_id: Uuid = claims
+            .tenant_id
+            .parse()
+            .map_err(|_| AuthError::TokenInvalid("bad tenant_id".into()))?;
+        let org_id: Uuid = claims
+            .org_id
+            .parse()
+            .map_err(|_| AuthError::TokenInvalid("bad org_id".into()))?;
+        Ok((user_id, tenant_id, org_id))
     }
 
     /// Start MFA enrollment for a user (step 1 of 2).
@@ -436,6 +502,69 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
             .await
     }
 
+    /// Start MFA enrollment using an MFA setup token (enforcement flow).
+    ///
+    /// This is the same as `enroll_mfa` but authenticates via the
+    /// setup token instead of requiring a pre-existing session.
+    pub async fn enroll_mfa_with_setup_token(
+        &self,
+        setup_token: &str,
+    ) -> AxiamResult<EnrollMfaOutput> {
+        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token)?;
+
+        // Guard: if MFA is already configured, reject.
+        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        if user.mfa_enabled && user.mfa_secret.is_some() {
+            return Err(AuthError::MfaAlreadyConfigured.into());
+        }
+
+        self.enroll_mfa(tenant_id, user_id).await
+    }
+
+    /// Confirm MFA enrollment and complete login using a setup token.
+    ///
+    /// Decodes the setup token, verifies the TOTP code, enables MFA,
+    /// then creates a session and issues tokens — same end state as
+    /// `verify_mfa`.
+    pub async fn confirm_mfa_with_setup_token(
+        &self,
+        setup_token: &str,
+        totp_code: &str,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> AxiamResult<LoginOutput> {
+        let (user_id, tenant_id, org_id) = self.decode_mfa_setup_token(setup_token)?;
+
+        // Confirm MFA (validates code, flips mfa_enabled to true).
+        self.confirm_mfa(tenant_id, user_id, totp_code).await?;
+
+        // Create session and issue tokens.
+        self.create_session_and_tokens(user_id, tenant_id, org_id, ip_address, user_agent)
+            .await
+    }
+
+    /// Reset MFA for a user — disables MFA, clears the secret, and
+    /// revokes all existing sessions.
+    pub async fn reset_mfa(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        self.user_repo
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    mfa_enabled: Some(false),
+                    mfa_secret: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        self.session_repo
+            .invalidate_user_sessions(tenant_id, user_id)
+            .await?;
+
+        Ok(())
+    }
+
     // -------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------
@@ -468,7 +597,11 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
         }
     }
 
-    async fn create_session_and_tokens(
+    /// Create a session and issue access + refresh tokens.
+    ///
+    /// Public so that `WebauthnService` callers (REST handlers) can
+    /// complete the login flow after WebAuthn authentication succeeds.
+    pub async fn create_session_and_tokens(
         &self,
         user_id: Uuid,
         tenant_id: Uuid,
@@ -553,6 +686,78 @@ impl<U: UserRepository, S: SessionRepository> AuthService<U, S> {
         }
 
         Ok(data.claims)
+    }
+
+    /// Issue a short-lived JWT for MFA setup (enforcement flow).
+    fn issue_mfa_setup_token(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        org_id: Uuid,
+    ) -> Result<String, AuthError> {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+
+        let now = Utc::now().timestamp();
+        let claims = MfaChallengeClaims {
+            sub: user_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            org_id: org_id.to_string(),
+            purpose: "mfa_setup".into(),
+            iss: self.config.jwt_issuer.clone(),
+            iat: now,
+            exp: now + self.config.mfa_challenge_lifetime_secs as i64,
+        };
+
+        let key = EncodingKey::from_ed_pem(self.config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        let header = Header::new(Algorithm::EdDSA);
+        jsonwebtoken::encode(&header, &claims, &key)
+            .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+    }
+
+    /// Decode and validate an MFA setup token, returning (user_id,
+    /// tenant_id, org_id).
+    fn decode_mfa_setup_token(&self, token: &str) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+
+        let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&self.config.jwt_issuer]);
+        validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+
+        let data =
+            jsonwebtoken::decode::<MfaChallengeClaims>(token, &key, &validation).map_err(|e| {
+                match e.kind() {
+                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+                        AuthError::MfaSetupTokenInvalid
+                    }
+                    _ => AuthError::MfaSetupTokenInvalid,
+                }
+            })?;
+
+        if data.claims.purpose != "mfa_setup" {
+            return Err(AuthError::MfaSetupTokenInvalid);
+        }
+
+        let user_id: Uuid = data
+            .claims
+            .sub
+            .parse()
+            .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
+        let tenant_id: Uuid = data
+            .claims
+            .tenant_id
+            .parse()
+            .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
+        let org_id: Uuid = data
+            .claims
+            .org_id
+            .parse()
+            .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
+
+        Ok((user_id, tenant_id, org_id))
     }
 
     async fn record_failed_login(

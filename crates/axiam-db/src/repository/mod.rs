@@ -25,6 +25,7 @@ mod session;
 mod settings;
 mod tenant;
 mod user;
+mod webauthn_credential;
 mod webhook;
 
 pub use audit::SurrealAuditLogRepository;
@@ -52,4 +53,5 @@ pub use session::SurrealSessionRepository;
 pub use settings::SurrealSettingsRepository;
 pub use tenant::SurrealTenantRepository;
 pub use user::{SurrealUserRepository, verify_password};
+pub use webauthn_credential::SurrealWebauthnCredentialRepository;
 pub use webhook::SurrealWebhookRepository;

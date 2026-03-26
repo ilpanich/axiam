@@ -142,6 +142,7 @@ axiam/
 │   ├── axiam-federation/   # SAML + OIDC federation
 │   ├── axiam-audit/        # Audit logging service
 │   ├── axiam-pki/          # Certificate management & GnuPG
+│   ├── axiam-email/          # Certificate management & GnuPG
 │   └── axiam-server/       # Binary — composes all crates
 ├── proto/                  # Protocol Buffer definitions
 ├── frontend/               # React admin UI
@@ -153,4 +154,4 @@ axiam/
 
 ## License
 
-AGPL-3.0-or-later
+Apache License v2.0

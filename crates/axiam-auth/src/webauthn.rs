@@ -10,14 +10,14 @@ use axiam_core::models::webauthn_credential::{
     CreateWebauthnCredential, WebauthnCredential, WebauthnCredentialType,
 };
 use axiam_core::repository::WebauthnCredentialRepository;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
-use webauthn_rs::prelude::*;
 use webauthn_rs::Webauthn;
+use webauthn_rs::prelude::*;
 
 use crate::config::AuthConfig;
 use crate::error::AuthError;
@@ -59,24 +59,21 @@ pub struct WebauthnService<W: WebauthnCredentialRepository> {
 impl<W: WebauthnCredentialRepository> WebauthnService<W> {
     /// Build the service, constructing the inner `Webauthn` instance
     /// from the relying-party configuration in [`AuthConfig`].
-    pub fn new(
-        credential_repo: W,
-        config: AuthConfig,
-    ) -> Result<Self, AuthError> {
-        let rp_origin = Url::parse(&config.webauthn_rp_origin).map_err(
-            |e| AuthError::Crypto(format!("invalid RP origin URL: {e}")),
-        )?;
-        let builder =
-            WebauthnBuilder::new(&config.webauthn_rp_id, &rp_origin)
-                .map_err(|e| {
-                    AuthError::Crypto(format!("WebAuthn builder: {e}"))
-                })?
-                .rp_name(&config.webauthn_rp_name);
+    pub fn new(credential_repo: W, config: AuthConfig) -> Result<Self, AuthError> {
+        let rp_origin = Url::parse(&config.webauthn_rp_origin)
+            .map_err(|e| AuthError::Crypto(format!("invalid RP origin URL: {e}")))?;
+        let builder = WebauthnBuilder::new(&config.webauthn_rp_id, &rp_origin)
+            .map_err(|e| AuthError::Crypto(format!("WebAuthn builder: {e}")))?
+            .rp_name(&config.webauthn_rp_name);
         let webauthn = builder
             .build()
             .map_err(|e| AuthError::Crypto(format!("WebAuthn build: {e}")))?;
 
-        Ok(Self { webauthn: Arc::new(webauthn), credential_repo, config })
+        Ok(Self {
+            webauthn: Arc::new(webauthn),
+            credential_repo,
+            config,
+        })
     }
 
     // ---- Registration ceremony ----
@@ -93,15 +90,15 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         username: &str,
     ) -> AxiamResult<(CreationChallengeResponse, String)> {
         // Fetch existing credentials to exclude from re-registration.
-        let existing =
-            self.credential_repo.list_by_user(tenant_id, user_id).await?;
+        let existing = self
+            .credential_repo
+            .list_by_user(tenant_id, user_id)
+            .await?;
 
         let encryption_key = self.require_encryption_key()?;
         let exclude_creds: Vec<Passkey> = existing
             .iter()
-            .filter_map(|c| {
-                self.decrypt_passkey(&encryption_key, &c.passkey_json).ok()
-            })
+            .filter_map(|c| self.decrypt_passkey(&encryption_key, &c.passkey_json).ok())
             .collect();
 
         // Extract credential IDs for the exclusion list so the
@@ -111,23 +108,11 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
 
         let (ccr, reg_state) = self
             .webauthn
-            .start_passkey_registration(
-                user_id,
-                username,
-                username,
-                Some(exclude_ids),
-            )
-            .map_err(|e| {
-                AuthError::WebauthnRegistration(e.to_string())
-            })?;
+            .start_passkey_registration(user_id, username, username, Some(exclude_ids))
+            .map_err(|e| AuthError::WebauthnRegistration(e.to_string()))?;
 
-        let state_token = self.encode_state_token(
-            user_id,
-            tenant_id,
-            org_id,
-            "webauthn_register",
-            &reg_state,
-        )?;
+        let state_token =
+            self.encode_state_token(user_id, tenant_id, org_id, "webauthn_register", &reg_state)?;
 
         Ok((ccr, state_token))
     }
@@ -144,10 +129,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         response: &RegisterPublicKeyCredential,
     ) -> AxiamResult<WebauthnCredential> {
         let (user_id, decoded_tenant_id, _org_id, reg_state) =
-            self.decode_state_token::<PasskeyRegistration>(
-                state_token,
-                "webauthn_register",
-            )?;
+            self.decode_state_token::<PasskeyRegistration>(state_token, "webauthn_register")?;
 
         if decoded_tenant_id != tenant_id {
             return Err(AuthError::WebauthnStateInvalid.into());
@@ -156,9 +138,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         let passkey = self
             .webauthn
             .finish_passkey_registration(response, &reg_state)
-            .map_err(|e| {
-                AuthError::WebauthnRegistration(e.to_string())
-            })?;
+            .map_err(|e| AuthError::WebauthnRegistration(e.to_string()))?;
 
         let encryption_key = self.require_encryption_key()?;
 
@@ -168,17 +148,12 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
 
         // Serialize and encrypt the passkey for at-rest storage.
         let passkey_json_plain = serde_json::to_string(&passkey)
-            .map_err(|e| {
-                AuthError::Crypto(format!("serialize passkey: {e}"))
-            })?;
-        let passkey_json_enc = totp::encrypt_secret(
-            &encryption_key,
-            passkey_json_plain.as_bytes(),
-        )?;
+            .map_err(|e| AuthError::Crypto(format!("serialize passkey: {e}")))?;
+        let passkey_json_enc =
+            totp::encrypt_secret(&encryption_key, passkey_json_plain.as_bytes())?;
 
         // credential_id as base64url-no-pad for external correlation.
-        let credential_id_str =
-            URL_SAFE_NO_PAD.encode(passkey.cred_id().as_ref());
+        let credential_id_str = URL_SAFE_NO_PAD.encode(passkey.cred_id().as_ref());
 
         let created = self
             .credential_repo
@@ -207,8 +182,10 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         org_id: Uuid,
         user_id: Uuid,
     ) -> AxiamResult<(RequestChallengeResponse, String)> {
-        let existing =
-            self.credential_repo.list_by_user(tenant_id, user_id).await?;
+        let existing = self
+            .credential_repo
+            .list_by_user(tenant_id, user_id)
+            .await?;
 
         if existing.is_empty() {
             return Err(AuthError::WebauthnNoCredentials.into());
@@ -217,9 +194,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         let encryption_key = self.require_encryption_key()?;
         let passkeys: Vec<Passkey> = existing
             .iter()
-            .filter_map(|c| {
-                self.decrypt_passkey(&encryption_key, &c.passkey_json).ok()
-            })
+            .filter_map(|c| self.decrypt_passkey(&encryption_key, &c.passkey_json).ok())
             .collect();
 
         if passkeys.is_empty() {
@@ -229,9 +204,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         let (rcr, auth_state) = self
             .webauthn
             .start_passkey_authentication(&passkeys)
-            .map_err(|e| {
-                AuthError::WebauthnAuthentication(e.to_string())
-            })?;
+            .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
 
         let state_token = self.encode_state_token(
             user_id,
@@ -256,10 +229,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         response: &PublicKeyCredential,
     ) -> AxiamResult<(Uuid, Uuid)> {
         let (user_id, decoded_tenant_id, org_id, auth_state) =
-            self.decode_state_token::<PasskeyAuthentication>(
-                state_token,
-                "webauthn_authenticate",
-            )?;
+            self.decode_state_token::<PasskeyAuthentication>(state_token, "webauthn_authenticate")?;
 
         if decoded_tenant_id != tenant_id {
             return Err(AuthError::WebauthnStateInvalid.into());
@@ -268,22 +238,25 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         let auth_result = self
             .webauthn
             .finish_passkey_authentication(response, &auth_state)
-            .map_err(|e| {
-                AuthError::WebauthnAuthentication(e.to_string())
-            })?;
+            .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
 
         // Update last_used_at for the credential that was used.
-        let cred_id_b64 =
-            URL_SAFE_NO_PAD.encode(auth_result.cred_id().as_ref());
-        let credentials =
-            self.credential_repo.list_by_user(tenant_id, user_id).await?;
-        if let Some(cred) =
-            credentials.iter().find(|c| c.credential_id == cred_id_b64)
-        {
-            let _ = self
+        let cred_id_b64 = URL_SAFE_NO_PAD.encode(auth_result.cred_id().as_ref());
+        let credentials = self
+            .credential_repo
+            .list_by_user(tenant_id, user_id)
+            .await?;
+        if let Some(cred) = credentials.iter().find(|c| c.credential_id == cred_id_b64)
+            && let Err(e) = self
                 .credential_repo
                 .update_last_used(tenant_id, cred.id)
-                .await;
+                .await
+        {
+            tracing::warn!(
+                credential_id = %cred.id,
+                error = %e,
+                "failed to update last_used_at for WebAuthn credential"
+            );
         }
 
         Ok((user_id, org_id))
@@ -292,25 +265,17 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
     // ---- Private helpers ----
 
     fn require_encryption_key(&self) -> Result<[u8; 32], AuthError> {
-        self.config.mfa_encryption_key.ok_or_else(|| {
-            AuthError::Crypto(
-                "MFA encryption key not configured".into(),
-            )
-        })
+        self.config
+            .mfa_encryption_key
+            .ok_or_else(|| AuthError::Crypto("MFA encryption key not configured".into()))
     }
 
-    fn decrypt_passkey(
-        &self,
-        key: &[u8; 32],
-        encrypted: &str,
-    ) -> Result<Passkey, AuthError> {
+    fn decrypt_passkey(&self, key: &[u8; 32], encrypted: &str) -> Result<Passkey, AuthError> {
         let json_bytes = totp::decrypt_secret(key, encrypted)?;
-        let json_str = String::from_utf8(json_bytes).map_err(|e| {
-            AuthError::Crypto(format!("passkey UTF-8: {e}"))
-        })?;
-        serde_json::from_str(&json_str).map_err(|e| {
-            AuthError::Crypto(format!("passkey deserialize: {e}"))
-        })
+        let json_str = String::from_utf8(json_bytes)
+            .map_err(|e| AuthError::Crypto(format!("passkey UTF-8: {e}")))?;
+        serde_json::from_str(&json_str)
+            .map_err(|e| AuthError::Crypto(format!("passkey deserialize: {e}")))
     }
 
     fn encode_state_token<T: Serialize>(
@@ -324,13 +289,9 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         use jsonwebtoken::{Algorithm, EncodingKey, Header};
 
         let encryption_key = self.require_encryption_key()?;
-        let state_json = serde_json::to_string(state).map_err(|e| {
-            AuthError::Crypto(format!("serialize state: {e}"))
-        })?;
-        let encrypted_state = totp::encrypt_secret(
-            &encryption_key,
-            state_json.as_bytes(),
-        )?;
+        let state_json = serde_json::to_string(state)
+            .map_err(|e| AuthError::Crypto(format!("serialize state: {e}")))?;
+        let encrypted_state = totp::encrypt_secret(&encryption_key, state_json.as_bytes())?;
 
         let now = chrono::Utc::now().timestamp();
         let claims = WebauthnStateClaims {
@@ -344,12 +305,8 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
-        let key = EncodingKey::from_ed_pem(
-            self.config.jwt_private_key_pem.as_bytes(),
-        )
-        .map_err(|e| {
-            AuthError::Crypto(format!("bad private key: {e}"))
-        })?;
+        let key = EncodingKey::from_ed_pem(self.config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
         let header = Header::new(Algorithm::EdDSA);
         jsonwebtoken::encode(&header, &claims, &key)
             .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
@@ -362,25 +319,15 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
     ) -> Result<(Uuid, Uuid, Uuid, T), AuthError> {
         use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 
-        let key = DecodingKey::from_ed_pem(
-            self.config.jwt_public_key_pem.as_bytes(),
-        )
-        .map_err(|e| {
-            AuthError::Crypto(format!("bad public key: {e}"))
-        })?;
+        let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
 
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&[&self.config.jwt_issuer]);
-        validation.set_required_spec_claims(&[
-            "sub", "exp", "iat", "iss",
-        ]);
+        validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
 
-        let data = jsonwebtoken::decode::<WebauthnStateClaims>(
-            token,
-            &key,
-            &validation,
-        )
-        .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
 
         if data.claims.purpose != expected_purpose {
             return Err(AuthError::WebauthnStateInvalid);
@@ -403,15 +350,11 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .map_err(|_| AuthError::WebauthnStateInvalid)?;
 
         let encryption_key = self.require_encryption_key()?;
-        let state_bytes =
-            totp::decrypt_secret(&encryption_key, &data.claims.state)?;
-        let state_json =
-            String::from_utf8(state_bytes).map_err(|e| {
-                AuthError::Crypto(format!("state UTF-8: {e}"))
-            })?;
-        let state: T = serde_json::from_str(&state_json).map_err(|e| {
-            AuthError::Crypto(format!("state deserialize: {e}"))
-        })?;
+        let state_bytes = totp::decrypt_secret(&encryption_key, &data.claims.state)?;
+        let state_json = String::from_utf8(state_bytes)
+            .map_err(|e| AuthError::Crypto(format!("state UTF-8: {e}")))?;
+        let state: T = serde_json::from_str(&state_json)
+            .map_err(|e| AuthError::Crypto(format!("state deserialize: {e}")))?;
 
         Ok((user_id, tenant_id, org_id, state))
     }

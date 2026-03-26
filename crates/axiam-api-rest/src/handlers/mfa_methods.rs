@@ -11,10 +11,8 @@ use uuid::Uuid;
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
-type MfaMethodSvc<C> = MfaMethodService<
-    SurrealUserRepository<C>,
-    SurrealWebauthnCredentialRepository<C>,
->;
+type MfaMethodSvc<C> =
+    MfaMethodService<SurrealUserRepository<C>, SurrealWebauthnCredentialRepository<C>>;
 
 // -------------------------------------------------------------------
 // Response types
@@ -59,6 +57,7 @@ impl From<MfaMethod> for MfaMethodResponse {
         (status = 200, description = "MFA methods list",
          body = Vec<MfaMethodResponse>),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Cannot view another user's MFA methods"),
         (status = 404, description = "User not found"),
     ),
     security(("bearer" = []))
@@ -69,17 +68,25 @@ pub async fn list_mfa_methods<C: Connection>(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_id = path.into_inner();
-    let methods = svc
-        .list_methods(caller.tenant_id, user_id)
-        .await?;
-    let response: Vec<MfaMethodResponse> =
-        methods.into_iter().map(Into::into).collect();
+
+    // TODO(T19): allow admin users to list MFA methods for other users
+    // once RBAC middleware is available.
+    if user_id != caller.user_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "can only view your own MFA methods".into(),
+            },
+        ));
+    }
+
+    let methods = svc.list_methods(caller.tenant_id, user_id).await?;
+    let response: Vec<MfaMethodResponse> = methods.into_iter().map(Into::into).collect();
     Ok(HttpResponse::Ok().json(response))
 }
 
 /// `DELETE /api/v1/users/{user_id}/mfa-methods/{method_id}`
 ///
-/// Remove a specific MFA method. Returns 409 if it is the last
+/// Remove a specific MFA method. Returns 400 if it is the last
 /// method and MFA is enabled.
 #[utoipa::path(
     delete,
@@ -94,7 +101,8 @@ pub async fn list_mfa_methods<C: Connection>(
         (status = 204, description = "Method removed"),
         (status = 401, description = "Unauthorized"),
         (status = 404, description = "Method not found"),
-        (status = 409, description = "Cannot remove last MFA method"),
+        (status = 400, description = "Cannot remove last MFA method"),
+        (status = 403, description = "Cannot delete another user's MFA methods"),
     ),
     security(("bearer" = []))
 )]
@@ -104,6 +112,17 @@ pub async fn delete_mfa_method<C: Connection>(
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let (user_id, method_id) = path.into_inner();
+
+    // TODO(T19): allow admin users to delete MFA methods for other users
+    // once RBAC middleware is available.
+    if user_id != caller.user_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "can only delete your own MFA methods".into(),
+            },
+        ));
+    }
+
     svc.delete_method(caller.tenant_id, user_id, &method_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())

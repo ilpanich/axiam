@@ -150,11 +150,14 @@ pub async fn login<C: Connection>(
     let b = body.into_inner();
 
     // Fetch the effective MFA policy for the tenant.
-    let mfa_policy = settings_repo
-        .get_effective_settings(b.org_id, b.tenant_id)
-        .await
-        .ok()
-        .map(|s| s.mfa);
+    // Propagate errors instead of silently falling back to no-enforcement,
+    // which could bypass MFA during DB outages.
+    let mfa_policy = Some(
+        settings_repo
+            .get_effective_settings(b.org_id, b.tenant_id)
+            .await
+            .map(|s| s.mfa)?,
+    );
 
     let input = LoginInput {
         tenant_id: b.tenant_id,
@@ -388,7 +391,7 @@ pub async fn device_auth<C: Connection>(
     request_body = MfaSetupEnrollRequest,
     responses(
         (status = 200, description = "MFA enrollment initiated", body = MfaEnrollResponse),
-        (status = 403, description = "Invalid or expired setup token"),
+        (status = 401, description = "Invalid or expired setup token"),
     )
 )]
 pub async fn setup_enroll_mfa<C: Connection>(
@@ -413,8 +416,7 @@ pub async fn setup_enroll_mfa<C: Connection>(
     responses(
         (status = 200, description = "MFA confirmed, login complete",
          body = LoginSuccessResponse),
-        (status = 403, description = "Invalid or expired setup token"),
-        (status = 401, description = "Invalid TOTP code"),
+        (status = 401, description = "Invalid or expired setup token / TOTP code"),
     )
 )]
 pub async fn setup_confirm_mfa<C: Connection>(
@@ -466,6 +468,11 @@ pub async fn reset_mfa<C: Connection>(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let target_user_id = path.into_inner();
+
+    // TODO(T19): add RBAC permission check — only users with
+    // `users:reset-mfa` permission should be able to call this endpoint.
+    // Currently any authenticated user can reset another user's MFA
+    // within the same tenant, which is a privilege escalation risk.
 
     // Prevent users from resetting their own MFA through the admin
     // endpoint — self-service MFA management uses the regular

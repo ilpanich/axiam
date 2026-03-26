@@ -4,15 +4,15 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::{AuthService, WebauthnService};
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
 use axiam_db::{
-    SurrealFederationLinkRepository, SurrealSessionRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealFederationLinkRepository, SurrealSessionRepository, SurrealUserRepository,
+    SurrealWebauthnCredentialRepository,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 use webauthn_rs_proto::{
-    CreationChallengeResponse, PublicKeyCredential,
-    RegisterPublicKeyCredential, RequestChallengeResponse,
+    CreationChallengeResponse, PublicKeyCredential, RegisterPublicKeyCredential,
+    RequestChallengeResponse,
 };
 
 use crate::error::AxiamApiError;
@@ -24,8 +24,7 @@ type AuthSvc<C> = AuthService<
     SurrealFederationLinkRepository<C>,
 >;
 
-type WebauthnSvc<C> =
-    WebauthnService<SurrealWebauthnCredentialRepository<C>>;
+type WebauthnSvc<C> = WebauthnService<SurrealWebauthnCredentialRepository<C>>;
 
 // -------------------------------------------------------------------
 // Request / response types
@@ -73,8 +72,6 @@ pub struct FinishAuthenticationRequest {
     pub state_token: String,
     #[schema(value_type = Object)]
     pub response: PublicKeyCredential,
-    pub ip_address: Option<String>,
-    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -106,11 +103,9 @@ fn user_agent(req: &HttpRequest) -> Option<String> {
 /// base64-decoding the payload segment.  This is safe because the
 /// token will be fully verified by `WebauthnService::finish_authentication`;
 /// we only peek to route the request to the correct tenant scope.
-fn peek_tenant_id(
-    state_token: &str,
-) -> Result<Uuid, AxiamApiError> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+fn peek_tenant_id(state_token: &str) -> Result<Uuid, AxiamApiError> {
     use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     let parts: Vec<&str> = state_token.split('.').collect();
     if parts.len() != 3 {
@@ -121,35 +116,27 @@ fn peek_tenant_id(
         ));
     }
 
-    let payload =
-        URL_SAFE_NO_PAD.decode(parts[1]).map_err(|_| {
-            AxiamApiError(
-                axiam_core::error::AxiamError::AuthenticationFailed {
-                    reason: "invalid state token payload".into(),
-                },
-            )
-        })?;
+    let payload = URL_SAFE_NO_PAD.decode(parts[1]).map_err(|_| {
+        AxiamApiError(axiam_core::error::AxiamError::AuthenticationFailed {
+            reason: "invalid state token payload".into(),
+        })
+    })?;
 
     #[derive(Deserialize)]
     struct Peek {
         tenant_id: String,
     }
 
-    let peek: Peek =
-        serde_json::from_slice(&payload).map_err(|_| {
-            AxiamApiError(
-                axiam_core::error::AxiamError::AuthenticationFailed {
-                    reason: "invalid state token claims".into(),
-                },
-            )
-        })?;
+    let peek: Peek = serde_json::from_slice(&payload).map_err(|_| {
+        AxiamApiError(axiam_core::error::AxiamError::AuthenticationFailed {
+            reason: "invalid state token claims".into(),
+        })
+    })?;
 
     peek.tenant_id.parse().map_err(|_| {
-        AxiamApiError(
-            axiam_core::error::AxiamError::AuthenticationFailed {
-                reason: "invalid tenant_id in state token".into(),
-            },
-        )
+        AxiamApiError(axiam_core::error::AxiamError::AuthenticationFailed {
+            reason: "invalid tenant_id in state token".into(),
+        })
     })
 }
 
@@ -178,12 +165,7 @@ pub async fn start_registration<C: Connection>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_name = user.user_id.to_string();
     let (challenge, state_token) = svc
-        .start_registration(
-            user.tenant_id,
-            user.org_id,
-            user.user_id,
-            &user_name,
-        )
+        .start_registration(user.tenant_id, user.org_id, user.user_id, &user_name)
         .await?;
 
     Ok(HttpResponse::Ok().json(StartRegistrationResponse {
@@ -256,9 +238,7 @@ pub async fn start_authentication<C: Connection>(
         .decode_mfa_challenge_ids(&body.challenge_token)
         .map_err(|e| AxiamApiError(e.into()))?;
 
-    let (challenge, state_token) = svc
-        .start_authentication(tenant_id, org_id, user_id)
-        .await?;
+    let (challenge, state_token) = svc.start_authentication(tenant_id, org_id, user_id).await?;
 
     Ok(HttpResponse::Ok().json(StartAuthenticationResponse {
         challenge,
@@ -291,11 +271,7 @@ pub async fn finish_authentication<C: Connection>(
     let tenant_id = peek_tenant_id(&b.state_token)?;
 
     let (user_id, org_id) = svc
-        .finish_authentication(
-            tenant_id,
-            &b.state_token,
-            &b.response,
-        )
+        .finish_authentication(tenant_id, &b.state_token, &b.response)
         .await?;
 
     let out = auth_svc

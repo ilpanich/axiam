@@ -2,18 +2,19 @@
 
 use actix_web::{App, test, web};
 use axiam_api_rest::register_api_v1_routes;
-use axiam_auth::AuthService;
 use axiam_auth::config::AuthConfig;
+use axiam_auth::{AuthService, MfaMethodService};
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::settings::system_defaults;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
-use axiam_core::models::settings::system_defaults;
 use axiam_core::repository::{
     OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealSessionRepository,
     SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnCredentialRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -124,8 +125,10 @@ macro_rules! test_app {
                     $db.clone(),
                 )))
                 .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealSettingsRepository::new(
-                    $db.clone(),
+                .app_data(web::Data::new(SurrealSettingsRepository::new($db.clone())))
+                .app_data(web::Data::new(MfaMethodService::new(
+                    SurrealUserRepository::new($db.clone()),
+                    SurrealWebauthnCredentialRepository::new($db.clone()),
                 )))
                 .configure(register_api_v1_routes::<TestDb>),
         )
@@ -317,7 +320,10 @@ async fn enable_mfa_enforcement(db: &Surreal<TestDb>, org_id: Uuid) {
     let settings_repo = SurrealSettingsRepository::new(db.clone());
     let mut defaults = system_defaults();
     defaults.mfa_enforced = true;
-    settings_repo.set_org_settings(org_id, defaults).await.unwrap();
+    settings_repo
+        .set_org_settings(org_id, defaults)
+        .await
+        .unwrap();
 }
 
 #[actix_rt::test]
@@ -386,7 +392,12 @@ async fn mfa_setup_enroll_with_setup_token_returns_200() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert!(body["secret_base32"].is_string());
-    assert!(body["totp_uri"].as_str().unwrap().starts_with("otpauth://totp/"));
+    assert!(
+        body["totp_uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/")
+    );
 }
 
 #[actix_rt::test]

@@ -34,7 +34,7 @@ pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
 pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/auth")
-            .app_data(web::JsonConfig::default().limit(16_384))
+            .app_data(web::JsonConfig::default().limit(65_536))
             .route("/login", web::post().to(handlers::auth::login::<C>))
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))

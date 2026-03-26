@@ -302,7 +302,7 @@ async fn delete_method_refuses_last_method() {
 }
 
 #[tokio::test]
-async fn delete_method_disables_mfa_when_last_removed() {
+async fn delete_method_refuses_last_method_when_mfa_enabled() {
     let (user_repo, cred_repo, tenant_id, user_id) = setup().await;
     enable_totp(&user_repo, tenant_id, user_id).await;
     // Add webauthn so total = 2; removing TOTP is allowed.

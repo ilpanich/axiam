@@ -126,15 +126,16 @@ impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> 
 
         if method_id == "totp" {
             // Remove TOTP secret.
-            let remaining_after = webauthn_count;
-            let mut update = UpdateUser {
-                mfa_secret: Some(None),
-                ..Default::default()
-            };
-            if remaining_after == 0 {
-                update.mfa_enabled = Some(false);
-            }
-            self.user_repo.update(tenant_id, user_id, update).await?;
+            self.user_repo
+                .update(
+                    tenant_id,
+                    user_id,
+                    UpdateUser {
+                        mfa_secret: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await?;
         } else {
             // Parse as WebAuthn credential UUID.
             let cred_id: Uuid =
@@ -155,11 +156,19 @@ impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> 
             }
 
             self.credential_repo.delete(tenant_id, cred_id).await?;
+        }
 
-            // If no methods remain, disable MFA.
-            let remaining_totp = if has_totp { 1u64 } else { 0 };
-            let remaining_webauthn = webauthn_count - 1;
-            if remaining_totp + remaining_webauthn == 0 {
+        // Post-delete safety: re-count actual remaining methods to
+        // handle concurrent deletions (TOCTOU).  If nothing remains,
+        // disable MFA so the user is never locked out.
+        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        if user.mfa_enabled {
+            let totp_remaining = if user.mfa_secret.is_some() { 1u64 } else { 0 };
+            let webauthn_remaining = self
+                .credential_repo
+                .count_by_user(tenant_id, user_id)
+                .await?;
+            if totp_remaining + webauthn_remaining == 0 {
                 self.user_repo
                     .update(
                         tenant_id,

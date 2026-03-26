@@ -484,7 +484,7 @@ async fn reset_mfa_requires_authentication() {
 }
 
 #[actix_rt::test]
-async fn reset_mfa_returns_204() {
+async fn reset_mfa_returns_403_until_rbac() {
     let (db, org_id, tenant_id, _admin_user_id) = setup_db().await;
     let auth = mfa_auth_config();
 
@@ -538,7 +538,7 @@ async fn reset_mfa_returns_204() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(
         resp.status().as_u16(),
-        204,
-        "expected 204 for successful MFA reset"
+        403,
+        "expected 403 — MFA reset is disabled until RBAC is implemented"
     );
 }

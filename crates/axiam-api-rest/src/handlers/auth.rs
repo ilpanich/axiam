@@ -463,28 +463,19 @@ pub async fn setup_confirm_mfa<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn reset_mfa<C: Connection>(
-    caller: AuthenticatedUser,
-    svc: web::Data<AuthSvc<C>>,
-    path: web::Path<Uuid>,
+    _caller: AuthenticatedUser,
+    _svc: web::Data<AuthSvc<C>>,
+    _path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let target_user_id = path.into_inner();
-
-    // TODO(T19): add RBAC permission check — only users with
-    // `users:reset-mfa` permission should be able to call this endpoint.
-    // Currently any authenticated user can reset another user's MFA
-    // within the same tenant, which is a privilege escalation risk.
-
-    // Prevent users from resetting their own MFA through the admin
-    // endpoint — self-service MFA management uses the regular
-    // enroll/confirm flow.
-    if target_user_id == caller.user_id {
-        return Err(AxiamApiError(
-            axiam_core::error::AxiamError::AuthorizationDenied {
-                reason: "use the self-service MFA flow to manage your own MFA".into(),
-            },
-        ));
-    }
-
-    svc.reset_mfa(caller.tenant_id, target_user_id).await?;
-    Ok(HttpResponse::NoContent().finish())
+    // TODO(T19): this endpoint is disabled until RBAC is implemented.
+    // Once `users:reset-mfa` permission checks are in place, remove
+    // this blanket deny and gate access through the authorization
+    // engine instead. Without RBAC, any authenticated user in the
+    // tenant could reset another user's MFA — a privilege escalation
+    // risk we refuse to leave open.
+    Err(AxiamApiError(
+        axiam_core::error::AxiamError::AuthorizationDenied {
+            reason: "MFA reset is disabled until RBAC is implemented".into(),
+        },
+    ))
 }

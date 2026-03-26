@@ -128,7 +128,10 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
             .bind(("user_id", input.user_id.to_string()))
             .bind(("credential_id", input.credential_id))
             .bind(("name", input.name))
-            .bind(("credential_type", format!("{:?}", input.credential_type)))
+            .bind((
+                "credential_type",
+                input.credential_type.as_str().to_string(),
+            ))
             .bind(("passkey_json", input.passkey_json))
             .await
             .map_err(DbError::from)?;

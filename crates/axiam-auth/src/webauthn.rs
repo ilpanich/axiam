@@ -124,6 +124,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
     pub async fn finish_registration(
         &self,
         tenant_id: Uuid,
+        caller_user_id: Uuid,
         state_token: &str,
         credential_name: &str,
         response: &RegisterPublicKeyCredential,
@@ -132,6 +133,10 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             self.decode_state_token::<PasskeyRegistration>(state_token, "webauthn_register")?;
 
         if decoded_tenant_id != tenant_id {
+            return Err(AuthError::WebauthnStateInvalid.into());
+        }
+
+        if user_id != caller_user_id {
             return Err(AuthError::WebauthnStateInvalid.into());
         }
 

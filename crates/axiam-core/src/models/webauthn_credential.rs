@@ -14,6 +14,16 @@ pub enum WebauthnCredentialType {
     SecurityKey,
 }
 
+impl WebauthnCredentialType {
+    /// Stable string representation for database storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Passkey => "Passkey",
+            Self::SecurityKey => "SecurityKey",
+        }
+    }
+}
+
 /// A registered WebAuthn credential for a user.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct WebauthnCredential {

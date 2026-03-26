@@ -203,6 +203,7 @@ pub async fn finish_registration<C: Connection>(
     let cred = svc
         .finish_registration(
             user.tenant_id,
+            user.user_id,
             &b.state_token,
             &b.credential_name,
             &b.response,

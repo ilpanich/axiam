@@ -19,27 +19,31 @@ import { PgpKeysPage } from "@/pages/pgp/PgpKeysPage";
 import { AuditLogsPage } from "@/pages/audit/AuditLogsPage";
 import { OAuth2ClientsPage } from "@/pages/oauth2/OAuth2ClientsPage";
 import { NotificationRulesPage } from "@/pages/notifications/NotificationRulesPage";
-import {
-  TenantsPage,
-  SettingsPage,
-  ProfilePage,
-  PasswordResetPage,
-  EmailVerificationPage,
-} from "@/pages/placeholders/Placeholder";
+import { TenantsPage, SettingsPage } from "@/pages/placeholders/Placeholder";
+import { ProfilePage } from "@/pages/profile/ProfilePage";
+import { ChangePasswordPage } from "@/pages/profile/ChangePasswordPage";
+import { MfaManagementPage } from "@/pages/profile/MfaManagementPage";
+import { ForgotPasswordPage } from "@/pages/auth/ForgotPasswordPage";
+import { ResetPasswordPage } from "@/pages/auth/ResetPasswordPage";
+import { VerifyEmailPage } from "@/pages/auth/VerifyEmailPage";
 
 export const router = createBrowserRouter([
-  // Public routes
+  // Public routes (no AppLayout, no auth required)
   {
     path: "/login",
     element: <LoginPage />,
   },
   {
+    path: "/auth/forgot-password",
+    element: <ForgotPasswordPage />,
+  },
+  {
     path: "/auth/reset-password",
-    element: <PasswordResetPage />,
+    element: <ResetPasswordPage />,
   },
   {
     path: "/auth/verify-email",
-    element: <EmailVerificationPage />,
+    element: <VerifyEmailPage />,
   },
 
   // Protected routes under AppLayout
@@ -155,6 +159,16 @@ export const router = createBrowserRouter([
         path: "profile",
         element: <ProfilePage />,
         handle: { crumb: "Profile" },
+      },
+      {
+        path: "profile/change-password",
+        element: <ChangePasswordPage />,
+        handle: { crumb: "Change Password" },
+      },
+      {
+        path: "profile/mfa",
+        element: <MfaManagementPage />,
+        handle: { crumb: "MFA Methods" },
       },
     ],
   },

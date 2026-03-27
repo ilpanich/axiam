@@ -122,24 +122,3 @@ export const SettingsPage = () => (
     description="Configure tenant-level settings including MFA policies, password policies, and session management."
   />
 );
-
-export const ProfilePage = () => (
-  <PlaceholderPage
-    title="Profile"
-    description="Manage your account profile, password, and MFA enrollment."
-  />
-);
-
-export const PasswordResetPage = () => (
-  <PlaceholderPage
-    title="Password Reset"
-    description="Password reset flow is being implemented."
-  />
-);
-
-export const EmailVerificationPage = () => (
-  <PlaceholderPage
-    title="Email Verification"
-    description="Email verification flow is being implemented."
-  />
-);

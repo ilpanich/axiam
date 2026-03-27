@@ -91,6 +91,13 @@ function TreeNodeRow({
         role="treeitem"
         aria-selected={isSelected}
         aria-expanded={hasChildren ? expanded : undefined}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect?.(node.resource);
+          }
+        }}
       >
         {/* Expand/collapse toggle */}
         <span

@@ -34,13 +34,15 @@ export function ForgotPasswordPage() {
   const [state, formAction, isPending] = useActionState<ForgotPasswordState, FormData>(
     async (_prev, formData) => {
       const email = (formData.get("email") as string).trim();
+      let internalError = false;
       try {
         await forgotPassword(email);
       } catch {
         // Intentionally swallow errors to prevent user enumeration.
         // We always show the same success message regardless of outcome.
+        internalError = true;
       }
-      return { submitted: true, internalError: false };
+      return { submitted: true, internalError };
     },
     { submitted: false, internalError: false }
   );

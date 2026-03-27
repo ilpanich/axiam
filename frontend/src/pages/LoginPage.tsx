@@ -72,8 +72,8 @@ export function LoginPage() {
       const response = await api.post<LoginResponse>("/auth/login", {
         username,
         password,
-        tenant_id: orgTenantData.tenantSlug,
-        org_id: orgTenantData.orgSlug,
+        tenant_slug: orgTenantData.tenantSlug,
+        org_slug: orgTenantData.orgSlug,
       });
 
       const data = response.data;
@@ -265,7 +265,7 @@ export function LoginPage() {
                   <div className="flex items-center justify-between">
                     <Label htmlFor="password">Password</Label>
                     <a
-                      href="/auth/reset-password"
+                      href="/auth/forgot-password"
                       className="text-xs text-primary hover:underline"
                     >
                       Forgot password?

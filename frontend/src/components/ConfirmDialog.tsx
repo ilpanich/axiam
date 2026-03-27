@@ -20,7 +20,7 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
 
-  // Trap focus and handle Escape key
+  // Set initial focus and handle Escape key
   useEffect(() => {
     if (!open) return;
     cancelRef.current?.focus();

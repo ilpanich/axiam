@@ -13,6 +13,7 @@ interface DataTableProps<T> {
   data: T[];
   isLoading?: boolean;
   emptyMessage?: string;
+  getRowKey?: (row: T, index: number) => string | number;
 }
 
 function SkeletonRow({ colCount }: { colCount: number }) {
@@ -32,6 +33,7 @@ export function DataTable<T extends object>({
   data,
   isLoading = false,
   emptyMessage = "No data found.",
+  getRowKey,
 }: DataTableProps<T>) {
   return (
     <div className="glass-card overflow-hidden p-0">
@@ -74,7 +76,7 @@ export function DataTable<T extends object>({
             ) : (
               data.map((row, rowIdx) => (
                 <tr
-                  key={rowIdx}
+                  key={getRowKey ? getRowKey(row, rowIdx) : rowIdx}
                   className="hover:bg-white/[0.03] transition-colors duration-150"
                 >
                   {columns.map((col) => (

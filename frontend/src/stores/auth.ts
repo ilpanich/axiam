@@ -48,13 +48,18 @@ export const useAuthStore = create<AuthState & AuthActions>()(
     {
       name: "axiam-auth",
       storage: createJSONStorage(() => sessionStorage),
+      // Do NOT persist isAuthenticated — derive it on rehydration
       partialize: (state) => ({
         accessToken: state.accessToken,
         user: state.user,
         tenantId: state.tenantId,
         orgId: state.orgId,
-        isAuthenticated: state.isAuthenticated,
       }),
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          state.isAuthenticated = state.accessToken !== null;
+        }
+      },
     }
   )
 );

@@ -9,11 +9,12 @@ import { UsersPage } from "@/pages/users/UsersPage";
 import { UserDetailPage } from "@/pages/users/UserDetailPage";
 import { GroupsPage } from "@/pages/groups/GroupsPage";
 import { GroupDetailPage } from "@/pages/groups/GroupDetailPage";
+import { RolesPage } from "@/pages/roles/RolesPage";
+import { RoleDetailPage } from "@/pages/roles/RoleDetailPage";
+import { PermissionsPage } from "@/pages/permissions/PermissionsPage";
+import { ResourcesPage } from "@/pages/resources/ResourcesPage";
 import {
   TenantsPage,
-  RolesPage,
-  PermissionsPage,
-  ResourcesPage,
   CertificatesPage,
   WebhooksPage,
   PgpKeysPage,
@@ -98,6 +99,11 @@ export const router = createBrowserRouter([
         path: "roles",
         element: <RolesPage />,
         handle: { crumb: "Roles" },
+      },
+      {
+        path: "roles/:roleId",
+        element: <RoleDetailPage />,
+        handle: { crumb: "Role Details" },
       },
       {
         path: "permissions",

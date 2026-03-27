@@ -19,7 +19,10 @@ import { PgpKeysPage } from "@/pages/pgp/PgpKeysPage";
 import { AuditLogsPage } from "@/pages/audit/AuditLogsPage";
 import { OAuth2ClientsPage } from "@/pages/oauth2/OAuth2ClientsPage";
 import { NotificationRulesPage } from "@/pages/notifications/NotificationRulesPage";
-import { TenantsPage, SettingsPage } from "@/pages/placeholders/Placeholder";
+import { ServiceAccountsPage } from "@/pages/service-accounts/ServiceAccountsPage";
+import { FederationPage } from "@/pages/federation/FederationPage";
+import { TenantsPage } from "@/pages/tenants/TenantsPage";
+import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { ProfilePage } from "@/pages/profile/ProfilePage";
 import { ChangePasswordPage } from "@/pages/profile/ChangePasswordPage";
 import { MfaManagementPage } from "@/pages/profile/MfaManagementPage";
@@ -149,6 +152,16 @@ export const router = createBrowserRouter([
         path: "notification-rules",
         element: <NotificationRulesPage />,
         handle: { crumb: "Notification Rules" },
+      },
+      {
+        path: "service-accounts",
+        element: <ServiceAccountsPage />,
+        handle: { crumb: "Service Accounts" },
+      },
+      {
+        path: "federation",
+        element: <FederationPage />,
+        handle: { crumb: "Federation" },
       },
       {
         path: "settings",

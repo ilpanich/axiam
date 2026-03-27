@@ -16,7 +16,8 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { cn, formatDate } from "@/lib/utils";
+import { formatDate } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -96,7 +97,7 @@ function RuleFormFields({
 }: RuleFormFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-event-type`}>Event Type *</Label>
         <select
           id={`${idPrefix}-event-type`}
@@ -114,18 +115,14 @@ function RuleFormFields({
         </select>
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-emails`}>Recipient Emails *</Label>
-        <textarea
+        <Textarea
           id={`${idPrefix}-emails`}
           value={recipientEmails}
           onChange={(e) => onRecipientEmailsChange(e.target.value)}
           placeholder={"admin@example.com\nops@example.com"}
           rows={3}
-          className={cn(
-            "w-full rounded-md border border-input bg-background/50 px-3 py-2 text-sm text-foreground",
-            "placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 resize-none"
-          )}
           aria-label="Recipient Emails (one per line)"
         />
         <p className="text-xs text-muted-foreground">One email address per line.</p>
@@ -138,7 +135,7 @@ function RuleFormFields({
         onChange={onIsActiveChange}
       />
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-description`}>Description</Label>
         <Input
           id={`${idPrefix}-description`}

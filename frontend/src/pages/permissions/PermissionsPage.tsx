@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
 const formatDate = (iso: string) =>
   new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
@@ -90,7 +91,7 @@ function PermissionFormFields({
 
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-name`}>Name *</Label>
         <Input
           id={`${idPrefix}-name`}
@@ -102,7 +103,7 @@ function PermissionFormFields({
         />
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-action`}>Action *</Label>
         <select
           id={`${idPrefix}-action`}
@@ -134,7 +135,7 @@ function PermissionFormFields({
         )}
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-resource`}>Resource</Label>
         <select
           id={`${idPrefix}-resource`}
@@ -156,21 +157,14 @@ function PermissionFormFields({
         </select>
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-description`}>Description</Label>
-        <textarea
+        <Textarea
           id={`${idPrefix}-description`}
           value={description}
           onChange={(e) => onDescriptionChange(e.target.value)}
           rows={2}
           placeholder="Optional description…"
-          className={cn(
-            "flex w-full rounded-md px-3 py-2 text-sm resize-none",
-            "bg-white/5 border border-primary/20 text-foreground",
-            "placeholder:text-muted-foreground",
-            "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
-            "transition-colors duration-200"
-          )}
         />
       </div>
 

@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn, formatDate } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -63,7 +64,7 @@ function CheckboxGroup({
   }
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       <Label>{label}</Label>
       <div
         className="rounded-md border border-input bg-background/50 p-3 space-y-2"
@@ -158,7 +159,7 @@ function ClientFormFields({
 }: ClientFormFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-name`}>Name *</Label>
         <Input
           id={`${idPrefix}-name`}
@@ -186,18 +187,15 @@ function ClientFormFields({
         onChange={onGrantTypesChange}
       />
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-redirect-uris`}>Redirect URIs</Label>
-        <textarea
+        <Textarea
           id={`${idPrefix}-redirect-uris`}
           value={redirectUris}
           onChange={(e) => onRedirectUrisChange(e.target.value)}
           placeholder={"https://app.example.com/callback\nhttps://app.example.com/silent-renew"}
           rows={3}
-          className={cn(
-            "w-full rounded-md border border-input bg-background/50 px-3 py-2 text-sm text-foreground",
-            "placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 resize-none font-mono"
-          )}
+          className="font-mono"
           aria-label="Redirect URIs (one per line)"
         />
         <p className="text-xs text-muted-foreground">One URI per line.</p>

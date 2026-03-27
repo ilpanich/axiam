@@ -98,7 +98,7 @@ function CreateUserFields({
 }: CreateUserFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="user-username">Username *</Label>
         <Input
           id="user-username"
@@ -109,7 +109,7 @@ function CreateUserFields({
           autoComplete="off"
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="user-email">Email *</Label>
         <Input
           id="user-email"
@@ -121,7 +121,7 @@ function CreateUserFields({
           autoComplete="off"
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="user-password">Password *</Label>
         <Input
           id="user-password"
@@ -133,7 +133,7 @@ function CreateUserFields({
           autoComplete="new-password"
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="user-display-name">Display Name</Label>
         <Input
           id="user-display-name"
@@ -177,7 +177,7 @@ function EditUserFields({
 }: EditUserFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="edit-user-email">Email *</Label>
         <Input
           id="edit-user-email"
@@ -188,7 +188,7 @@ function EditUserFields({
           required
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="edit-user-display-name">Display Name</Label>
         <Input
           id="edit-user-display-name"

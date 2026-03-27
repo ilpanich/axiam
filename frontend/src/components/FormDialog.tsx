@@ -50,7 +50,7 @@ export function FormDialog({
       />
 
       {/* Panel */}
-      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[90vh]">
+      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[90vh] p-6">
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-primary/10">
           <h2
@@ -71,7 +71,7 @@ export function FormDialog({
 
         {/* Body + Footer */}
         <form onSubmit={onSubmit} noValidate>
-          <div className="overflow-y-auto py-4 space-y-4">{children}</div>
+          <div className="overflow-y-auto py-4 space-y-4 -mx-6 px-6">{children}</div>
           <div className="flex justify-end gap-3 pt-4 border-t border-primary/10">
             <Button
               type="button"

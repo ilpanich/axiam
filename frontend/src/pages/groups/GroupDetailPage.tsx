@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2, Plus, Trash2, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
 const formatDate = (iso: string) =>
   new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
@@ -269,7 +270,7 @@ function EditGroupForm({
 }: EditGroupFormProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="group-detail-name">Name *</Label>
         <Input
           id="group-detail-name"
@@ -278,20 +279,13 @@ function EditGroupForm({
           required
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="group-detail-description">Description</Label>
-        <textarea
+        <Textarea
           id="group-detail-description"
           value={description}
           onChange={(e) => onDescriptionChange(e.target.value)}
           rows={3}
-          className={cn(
-            "flex w-full rounded-md px-3 py-2 text-sm resize-none",
-            "bg-white/5 border border-primary/20 text-foreground",
-            "placeholder:text-muted-foreground",
-            "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
-            "transition-colors duration-200"
-          )}
         />
       </div>
       {error && <p className="text-sm text-destructive">{error}</p>}

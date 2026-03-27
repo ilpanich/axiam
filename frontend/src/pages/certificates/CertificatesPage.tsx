@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ShieldPlus } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -60,7 +61,7 @@ function GenerateFields({
 }: GenerateFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="cert-common-name">Common Name *</Label>
         <Input
           id="cert-common-name"
@@ -72,7 +73,7 @@ function GenerateFields({
         />
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="cert-key-type">Key Type</Label>
         <select
           id="cert-key-type"
@@ -85,7 +86,7 @@ function GenerateFields({
         </select>
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="cert-validity-days">Validity Days</Label>
         <Input
           id="cert-validity-days"
@@ -97,27 +98,27 @@ function GenerateFields({
         />
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="cert-san-dns">SAN DNS Names (one per line)</Label>
-        <textarea
+        <Textarea
           id="cert-san-dns"
           value={sanDns}
           onChange={(e) => onSanDnsChange(e.target.value)}
           placeholder={"api.example.com\nwww.example.com"}
           rows={3}
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+          className="resize-y"
         />
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="cert-san-ip">SAN IP Addresses (one per line)</Label>
-        <textarea
+        <Textarea
           id="cert-san-ip"
           value={sanIp}
           onChange={(e) => onSanIpChange(e.target.value)}
           placeholder={"192.168.1.1\n10.0.0.1"}
           rows={2}
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+          className="resize-y"
         />
       </div>
 

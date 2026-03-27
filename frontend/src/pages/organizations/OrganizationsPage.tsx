@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Pencil, Trash2, Plus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
 const formatDate = (iso: string) =>
   new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
@@ -52,7 +52,7 @@ function OrgFormFields({
 }: OrgFormFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="org-name">Name *</Label>
         <Input
           id="org-name"
@@ -63,7 +63,7 @@ function OrgFormFields({
           autoComplete="off"
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="org-slug">Slug *</Label>
         <Input
           id="org-slug"
@@ -77,21 +77,14 @@ function OrgFormFields({
           URL-safe identifier, auto-generated from name.
         </p>
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="org-description">Description</Label>
-        <textarea
+        <Textarea
           id="org-description"
           value={description}
           onChange={(e) => onDescriptionChange(e.target.value)}
           placeholder="Optional description"
           rows={3}
-          className={cn(
-            "flex w-full rounded-md px-3 py-2 text-sm resize-none",
-            "bg-white/5 border border-primary/20 text-foreground",
-            "placeholder:text-muted-foreground",
-            "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
-            "transition-colors duration-200"
-          )}
         />
       </div>
       {error && <p className="text-sm text-destructive">{error}</p>}

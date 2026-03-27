@@ -124,7 +124,7 @@ export function ChangePasswordPage() {
 
           <div className="space-y-5">
             {/* Current password */}
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               <Label htmlFor="current_password">Current Password</Label>
               <Input
                 id="current_password"
@@ -137,7 +137,7 @@ export function ChangePasswordPage() {
             </div>
 
             {/* New password */}
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               <Label htmlFor="new_password">New Password</Label>
               <Input
                 id="new_password"
@@ -157,7 +157,7 @@ export function ChangePasswordPage() {
             </div>
 
             {/* Confirm new password */}
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               <Label htmlFor="confirm_password">Confirm New Password</Label>
               <Input
                 id="confirm_password"

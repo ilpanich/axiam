@@ -263,7 +263,7 @@ export function ProfilePage() {
             )}
 
             <div className="space-y-4">
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <Label htmlFor="display_name">Display Name</Label>
                 <Input
                   id="display_name"
@@ -274,7 +274,7 @@ export function ProfilePage() {
                   autoFocus
                 />
               </div>
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <Label htmlFor="email">Email</Label>
                 <Input
                   id="email"

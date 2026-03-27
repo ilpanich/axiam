@@ -18,6 +18,9 @@ import {
   Settings,
   X,
   ChevronRight,
+  KeyRound,
+  Globe,
+  BellRing,
 } from "lucide-react";
 
 interface NavItem {
@@ -50,6 +53,12 @@ const navSections: NavSection[] = [
       { to: "/roles", label: "Roles", icon: <Shield size={18} /> },
       { to: "/permissions", label: "Permissions", icon: <Lock size={18} /> },
       { to: "/resources", label: "Resources", icon: <Database size={18} /> },
+      {
+        to: "/service-accounts",
+        label: "Service Accounts",
+        icon: <KeyRound size={18} />,
+      },
+      { to: "/federation", label: "Federation", icon: <Globe size={18} /> },
     ],
   },
   {
@@ -82,6 +91,11 @@ const navSections: NavSection[] = [
         to: "/audit-logs",
         label: "Audit Logs",
         icon: <ScrollText size={18} />,
+      },
+      {
+        to: "/notification-rules",
+        label: "Notification Rules",
+        icon: <BellRing size={18} />,
       },
     ],
   },

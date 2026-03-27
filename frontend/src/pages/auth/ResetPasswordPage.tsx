@@ -157,7 +157,7 @@ export function ResetPasswordPage() {
 
         <div className="space-y-4">
           {/* New password */}
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <Label htmlFor="new_password">New Password</Label>
             <Input
               id="new_password"
@@ -178,7 +178,7 @@ export function ResetPasswordPage() {
           </div>
 
           {/* Confirm password */}
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <Label htmlFor="confirm_password">Confirm Password</Label>
             <Input
               id="confirm_password"

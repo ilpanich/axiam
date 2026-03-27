@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Pencil, Trash2, Plus, ChevronLeft, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
 const formatDate = (iso: string) =>
   new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
@@ -102,7 +103,7 @@ function TenantFormFields({
 }: TenantFormFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="tenant-name">Name *</Label>
         <Input
           id="tenant-name"
@@ -112,7 +113,7 @@ function TenantFormFields({
           required
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="tenant-slug">Slug *</Label>
         <Input
           id="tenant-slug"
@@ -122,21 +123,14 @@ function TenantFormFields({
           required
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="tenant-description">Description</Label>
-        <textarea
+        <Textarea
           id="tenant-description"
           value={description}
           onChange={(e) => onDescriptionChange(e.target.value)}
           placeholder="Optional description"
           rows={3}
-          className={cn(
-            "flex w-full rounded-md px-3 py-2 text-sm resize-none",
-            "bg-white/5 border border-primary/20 text-foreground",
-            "placeholder:text-muted-foreground",
-            "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
-            "transition-colors duration-200"
-          )}
         />
       </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
@@ -569,7 +563,7 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
         isLoading={generateMutation.isPending}
         submitLabel="Generate"
       >
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <Label htmlFor="cert-cn">Common Name *</Label>
           <Input
             id="cert-cn"
@@ -579,7 +573,7 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
             required
           />
         </div>
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <Label htmlFor="cert-key-type">Key Type</Label>
           <select
             id="cert-key-type"
@@ -598,7 +592,7 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
             <option value="Ed25519">Ed25519</option>
           </select>
         </div>
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <Label htmlFor="cert-validity">Validity (days)</Label>
           <Input
             id="cert-validity"
@@ -695,7 +689,7 @@ function SettingsTab({ orgId }: { orgId: string }) {
             Password Policy
           </h3>
 
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <Label htmlFor="pwd-min-len">Minimum length</Label>
             <Input
               id="pwd-min-len"
@@ -727,7 +721,7 @@ function SettingsTab({ orgId }: { orgId: string }) {
             </label>
           ))}
 
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <Label htmlFor="pwd-history">Password history count</Label>
             <Input
               id="pwd-history"
@@ -761,7 +755,7 @@ function SettingsTab({ orgId }: { orgId: string }) {
             <span className="text-sm text-foreground">Enforce MFA for all users</span>
           </label>
 
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <Label htmlFor="session-timeout">Session timeout (minutes)</Label>
             <Input
               id="session-timeout"
@@ -780,7 +774,7 @@ function SettingsTab({ orgId }: { orgId: string }) {
           <h3 className="text-base font-semibold text-foreground">
             Certificates
           </h3>
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <Label htmlFor="cert-validity-days">
               Default certificate validity (days)
             </Label>

@@ -170,7 +170,7 @@ function TotpSetupDialog({
         </div>
 
         {/* Manual entry */}
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <p className="text-xs text-muted-foreground">Or enter this key manually:</p>
           <div className="flex items-center gap-2">
             <code className="flex-1 text-xs font-mono bg-white/5 border border-white/10 rounded px-3 py-2 text-primary break-all">
@@ -203,7 +203,7 @@ function TotpSetupDialog({
             </div>
           )}
 
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <Label htmlFor="totp-verify-code">Verification Code</Label>
             <input
               ref={inputRef}

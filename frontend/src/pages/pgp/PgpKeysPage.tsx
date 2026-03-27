@@ -14,6 +14,7 @@ import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Eye, KeyRound, Lock } from "lucide-react";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -177,16 +178,16 @@ function EncryptDataModal({ open, onClose, pgpKeyId }: EncryptDataModalProps) {
         isLoading={encryptMutation.isPending}
         submitLabel="Encrypt"
       >
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <Label htmlFor="encrypt-data">Data to Encrypt *</Label>
-          <textarea
+          <Textarea
             id="encrypt-data"
             value={data}
             onChange={(e) => setData(e.target.value)}
             placeholder="Enter data to encrypt…"
             rows={5}
             required
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y font-mono"
+            className="resize-y font-mono"
           />
         </div>
         {error && <p className="text-sm text-destructive">{error}</p>}
@@ -225,7 +226,7 @@ function GenerateFields({
 }: GenerateFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="pgp-description">Description</Label>
         <Input
           id="pgp-description"
@@ -236,7 +237,7 @@ function GenerateFields({
         />
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="pgp-key-type">Key Type</Label>
         <select
           id="pgp-key-type"

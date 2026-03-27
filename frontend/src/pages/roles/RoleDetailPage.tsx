@@ -25,6 +25,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
 const formatDate = (iso: string) =>
   new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
@@ -500,7 +501,7 @@ function AssignGroupDialog({
       isLoading={assigning}
       submitLabel="Assign"
     >
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="assign-group-select">Group</Label>
         {isLoading ? (
           <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
@@ -556,7 +557,7 @@ function EditRoleForm({
 }: EditRoleFormProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="detail-edit-name">Name *</Label>
         <Input
           id="detail-edit-name"
@@ -565,20 +566,13 @@ function EditRoleForm({
           required
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="detail-edit-desc">Description</Label>
-        <textarea
+        <Textarea
           id="detail-edit-desc"
           value={description}
           onChange={(e) => onDescriptionChange(e.target.value)}
           rows={3}
-          className={cn(
-            "flex w-full rounded-md px-3 py-2 text-sm resize-none",
-            "bg-white/5 border border-primary/20 text-foreground",
-            "placeholder:text-muted-foreground",
-            "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
-            "transition-colors duration-200"
-          )}
         />
       </div>
       <div className="flex items-center gap-3">

@@ -110,7 +110,7 @@ function EditUserForm({
 }: EditFormProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="detail-edit-email">Email *</Label>
         <Input
           id="detail-edit-email"
@@ -120,7 +120,7 @@ function EditUserForm({
           required
         />
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="detail-edit-display-name">Display Name</Label>
         <Input
           id="detail-edit-display-name"
@@ -479,7 +479,7 @@ export function UserDetailPage() {
         isLoading={assignRoleMutation.isPending}
         submitLabel="Assign"
       >
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <Label htmlFor="assign-role-select">Role</Label>
           {allRoles.length === 0 ? (
             <p className="text-sm text-muted-foreground">

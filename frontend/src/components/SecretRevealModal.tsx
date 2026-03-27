@@ -146,7 +146,7 @@ export function SecretRevealModal({
         </div>
 
         {/* Secrets list */}
-        <div className="overflow-y-auto px-5 py-2 space-y-4 flex-1">
+        <div className="overflow-y-auto px-5 py-4 space-y-4 flex-1">
           {secrets.map((secret, idx) => (
             <div key={idx} className="space-y-1.5">
               <div className="flex items-center justify-between gap-3">

@@ -48,7 +48,7 @@ export function ConfirmDialog({
       />
 
       {/* Panel */}
-      <div className="relative z-10 glass-card w-full max-w-sm space-y-4">
+      <div className="relative z-10 glass-card w-full max-w-sm p-6 space-y-4">
         <h2
           id="confirm-dialog-title"
           className="text-lg font-semibold text-foreground"
@@ -56,7 +56,7 @@ export function ConfirmDialog({
           {title}
         </h2>
         <p className="text-sm text-muted-foreground">{description}</p>
-        <div className="flex justify-end gap-3 pt-2">
+        <div className="flex justify-end gap-3 pt-4 border-t border-primary/10">
           <button
             ref={cancelRef}
             onClick={onClose}

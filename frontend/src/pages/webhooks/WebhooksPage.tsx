@@ -130,7 +130,7 @@ function CreateWebhookFields({
 }: CreateWebhookFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="wh-url">URL *</Label>
         <Input
           id="wh-url"
@@ -143,7 +143,7 @@ function CreateWebhookFields({
         />
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="wh-description">Description</Label>
         <Input
           id="wh-description"
@@ -161,7 +161,7 @@ function CreateWebhookFields({
         onChange={onIsActiveChange}
       />
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label>Event Types *</Label>
         <div className="rounded-md border border-input bg-background/50 p-3">
           <EventTypeSelector
@@ -176,7 +176,7 @@ function CreateWebhookFields({
         )}
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="wh-secret">Secret</Label>
         <Input
           id="wh-secret"
@@ -223,7 +223,7 @@ function EditWebhookFields({
 }: EditWebhookFieldsProps) {
   return (
     <>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="edit-wh-url">URL *</Label>
         <Input
           id="edit-wh-url"
@@ -235,7 +235,7 @@ function EditWebhookFields({
         />
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor="edit-wh-description">Description</Label>
         <Input
           id="edit-wh-description"
@@ -252,7 +252,7 @@ function EditWebhookFields({
         onChange={onIsActiveChange}
       />
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label>Event Types *</Label>
         <div className="rounded-md border border-input bg-background/50 p-3">
           <EventTypeSelector

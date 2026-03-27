@@ -334,7 +334,7 @@ export function DashboardPage() {
                 {Array.from({ length: 4 }).map((_, i) => (
                   <li key={i} className="flex items-center gap-3 py-2">
                     <div className="w-3.5 h-3.5 rounded-full bg-white/10 animate-pulse shrink-0" />
-                    <div className="flex-1 space-y-1.5">
+                    <div className="flex-1 space-y-2">
                       <div className="h-3 bg-white/10 rounded animate-pulse w-3/4" />
                       <div className="h-2.5 bg-white/10 rounded animate-pulse w-1/2" />
                     </div>

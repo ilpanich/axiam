@@ -16,10 +16,11 @@ import { ResourcesPage } from "@/pages/resources/ResourcesPage";
 import { CertificatesPage } from "@/pages/certificates/CertificatesPage";
 import { WebhooksPage } from "@/pages/webhooks/WebhooksPage";
 import { PgpKeysPage } from "@/pages/pgp/PgpKeysPage";
+import { AuditLogsPage } from "@/pages/audit/AuditLogsPage";
+import { OAuth2ClientsPage } from "@/pages/oauth2/OAuth2ClientsPage";
+import { NotificationRulesPage } from "@/pages/notifications/NotificationRulesPage";
 import {
   TenantsPage,
-  OAuth2ClientsPage,
-  AuditLogsPage,
   SettingsPage,
   ProfilePage,
   PasswordResetPage,
@@ -139,6 +140,11 @@ export const router = createBrowserRouter([
         path: "audit-logs",
         element: <AuditLogsPage />,
         handle: { crumb: "Audit Logs" },
+      },
+      {
+        path: "notification-rules",
+        element: <NotificationRulesPage />,
+        handle: { crumb: "Notification Rules" },
       },
       {
         path: "settings",

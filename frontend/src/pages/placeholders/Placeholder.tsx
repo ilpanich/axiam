@@ -116,20 +116,6 @@ export const PgpKeysPage = () => (
   />
 );
 
-export const OAuth2ClientsPage = () => (
-  <PlaceholderPage
-    title="OAuth2 Clients"
-    description="Register and manage OAuth2 clients for Authorization Code + PKCE, Client Credentials, and Refresh Token flows."
-  />
-);
-
-export const AuditLogsPage = () => (
-  <PlaceholderPage
-    title="Audit Logs"
-    description="Browse append-only audit logs. All actions are immutably recorded for compliance."
-  />
-);
-
 export const SettingsPage = () => (
   <PlaceholderPage
     title="Settings"

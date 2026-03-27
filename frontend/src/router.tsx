@@ -5,11 +5,12 @@ import { DashboardPage } from "@/pages/DashboardPage";
 import { OrganizationsPage } from "@/pages/organizations/OrganizationsPage";
 import { OrganizationDetailPage } from "@/pages/organizations/OrganizationDetailPage";
 import { TenantDetailPage } from "@/pages/organizations/TenantDetailPage";
+import { UsersPage } from "@/pages/users/UsersPage";
+import { UserDetailPage } from "@/pages/users/UserDetailPage";
+import { GroupsPage } from "@/pages/groups/GroupsPage";
+import { GroupDetailPage } from "@/pages/groups/GroupDetailPage";
 import {
   TenantsPage,
-  UsersPage,
-  UserDetailPage,
-  GroupsPage,
   RolesPage,
   PermissionsPage,
   ResourcesPage,
@@ -87,6 +88,11 @@ export const router = createBrowserRouter([
         path: "groups",
         element: <GroupsPage />,
         handle: { crumb: "Groups" },
+      },
+      {
+        path: "groups/:groupId",
+        element: <GroupDetailPage />,
+        handle: { crumb: "Group Details" },
       },
       {
         path: "roles",

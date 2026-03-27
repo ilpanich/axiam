@@ -13,11 +13,11 @@ import { RolesPage } from "@/pages/roles/RolesPage";
 import { RoleDetailPage } from "@/pages/roles/RoleDetailPage";
 import { PermissionsPage } from "@/pages/permissions/PermissionsPage";
 import { ResourcesPage } from "@/pages/resources/ResourcesPage";
+import { CertificatesPage } from "@/pages/certificates/CertificatesPage";
+import { WebhooksPage } from "@/pages/webhooks/WebhooksPage";
+import { PgpKeysPage } from "@/pages/pgp/PgpKeysPage";
 import {
   TenantsPage,
-  CertificatesPage,
-  WebhooksPage,
-  PgpKeysPage,
   OAuth2ClientsPage,
   AuditLogsPage,
   SettingsPage,

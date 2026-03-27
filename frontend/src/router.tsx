@@ -2,9 +2,10 @@ import { createBrowserRouter, Navigate } from "react-router-dom";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { LoginPage } from "@/pages/LoginPage";
 import { DashboardPage } from "@/pages/DashboardPage";
+import { OrganizationsPage } from "@/pages/organizations/OrganizationsPage";
+import { OrganizationDetailPage } from "@/pages/organizations/OrganizationDetailPage";
+import { TenantDetailPage } from "@/pages/organizations/TenantDetailPage";
 import {
-  OrganizationsPage,
-  OrganizationDetailPage,
   TenantsPage,
   UsersPage,
   UserDetailPage,
@@ -61,6 +62,11 @@ export const router = createBrowserRouter([
         path: "organizations/:orgId",
         element: <OrganizationDetailPage />,
         handle: { crumb: "Organization Details" },
+      },
+      {
+        path: "organizations/:orgId/tenants/:tenantId",
+        element: <TenantDetailPage />,
+        handle: { crumb: "Tenant Details" },
       },
       {
         path: "tenants",

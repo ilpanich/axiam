@@ -1,0 +1,100 @@
+import { type ReactNode, useEffect, useRef } from "react";
+import { Button } from "@/components/ui/button";
+import { Loader2, X } from "lucide-react";
+
+interface FormDialogProps {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+  onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
+  isLoading?: boolean;
+  submitLabel?: string;
+}
+
+export function FormDialog({
+  open,
+  onClose,
+  title,
+  children,
+  onSubmit,
+  isLoading = false,
+  submitLabel = "Save",
+}: FormDialogProps) {
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    closeRef.current?.focus();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      aria-modal="true"
+      role="dialog"
+      aria-labelledby="form-dialog-title"
+    >
+      {/* Backdrop */}
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+
+      {/* Panel */}
+      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="flex items-center justify-between pb-4 border-b border-primary/10">
+          <h2
+            id="form-dialog-title"
+            className="text-lg font-semibold text-foreground"
+          >
+            {title}
+          </h2>
+          <button
+            ref={closeRef}
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-none focus:ring-2 focus:ring-primary/40"
+            aria-label="Close dialog"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Body + Footer */}
+        <form onSubmit={onSubmit} noValidate>
+          <div className="overflow-y-auto py-4 space-y-4">{children}</div>
+          <div className="flex justify-end gap-3 pt-4 border-t border-primary/10">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onClose}
+              disabled={isLoading}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={isLoading}
+              className="min-w-[80px]"
+            >
+              {isLoading ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                submitLabel
+              )}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

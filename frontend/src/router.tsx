@@ -1,0 +1,143 @@
+import { createBrowserRouter, Navigate } from "react-router-dom";
+import { AppLayout } from "@/components/layout/AppLayout";
+import { LoginPage } from "@/pages/LoginPage";
+import { DashboardPage } from "@/pages/DashboardPage";
+import {
+  OrganizationsPage,
+  OrganizationDetailPage,
+  TenantsPage,
+  UsersPage,
+  UserDetailPage,
+  GroupsPage,
+  RolesPage,
+  PermissionsPage,
+  ResourcesPage,
+  CertificatesPage,
+  WebhooksPage,
+  PgpKeysPage,
+  OAuth2ClientsPage,
+  AuditLogsPage,
+  SettingsPage,
+  ProfilePage,
+  PasswordResetPage,
+  EmailVerificationPage,
+} from "@/pages/placeholders/Placeholder";
+
+export const router = createBrowserRouter([
+  // Public routes
+  {
+    path: "/login",
+    element: <LoginPage />,
+  },
+  {
+    path: "/auth/reset-password",
+    element: <PasswordResetPage />,
+  },
+  {
+    path: "/auth/verify-email",
+    element: <EmailVerificationPage />,
+  },
+
+  // Protected routes under AppLayout
+  {
+    path: "/",
+    element: <AppLayout />,
+    children: [
+      {
+        index: true,
+        element: <Navigate to="/dashboard" replace />,
+      },
+      {
+        path: "dashboard",
+        element: <DashboardPage />,
+        handle: { crumb: "Dashboard" },
+      },
+      {
+        path: "organizations",
+        element: <OrganizationsPage />,
+        handle: { crumb: "Organizations" },
+      },
+      {
+        path: "organizations/:orgId",
+        element: <OrganizationDetailPage />,
+        handle: { crumb: "Organization Details" },
+      },
+      {
+        path: "tenants",
+        element: <TenantsPage />,
+        handle: { crumb: "Tenants" },
+      },
+      {
+        path: "users",
+        element: <UsersPage />,
+        handle: { crumb: "Users" },
+      },
+      {
+        path: "users/:userId",
+        element: <UserDetailPage />,
+        handle: { crumb: "User Details" },
+      },
+      {
+        path: "groups",
+        element: <GroupsPage />,
+        handle: { crumb: "Groups" },
+      },
+      {
+        path: "roles",
+        element: <RolesPage />,
+        handle: { crumb: "Roles" },
+      },
+      {
+        path: "permissions",
+        element: <PermissionsPage />,
+        handle: { crumb: "Permissions" },
+      },
+      {
+        path: "resources",
+        element: <ResourcesPage />,
+        handle: { crumb: "Resources" },
+      },
+      {
+        path: "certificates",
+        element: <CertificatesPage />,
+        handle: { crumb: "Certificates" },
+      },
+      {
+        path: "webhooks",
+        element: <WebhooksPage />,
+        handle: { crumb: "Webhooks" },
+      },
+      {
+        path: "pgp-keys",
+        element: <PgpKeysPage />,
+        handle: { crumb: "PGP Keys" },
+      },
+      {
+        path: "oauth2-clients",
+        element: <OAuth2ClientsPage />,
+        handle: { crumb: "OAuth2 Clients" },
+      },
+      {
+        path: "audit-logs",
+        element: <AuditLogsPage />,
+        handle: { crumb: "Audit Logs" },
+      },
+      {
+        path: "settings",
+        element: <SettingsPage />,
+        handle: { crumb: "Settings" },
+      },
+      {
+        path: "profile",
+        element: <ProfilePage />,
+        handle: { crumb: "Profile" },
+      },
+    ],
+  },
+
+  // Catch-all
+  {
+    path: "*",
+    element: <Navigate to="/dashboard" replace />,
+  },
+]);

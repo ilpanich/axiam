@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 236 78% 11%;
+    --foreground: 210 40% 98%;
+    --card: 236 78% 11%;
+    --card-foreground: 210 40% 98%;
+    --popover: 238 60% 15%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 191 100% 50%;
+    --primary-foreground: 236 78% 11%;
+    --secondary: 244 50% 20%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 244 50% 20%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 270 85% 63%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 191 100% 50% / 0.15;
+    --input: 191 100% 50% / 0.15;
+    --ring: 191 100% 50%;
+    --radius: 0.75rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    background: linear-gradient(135deg, #0d0d2b 0%, #1a0a3d 100%);
+    background-attachment: fixed;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100vh;
+    margin: 0;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+}
+
+@layer components {
+  .glass-card {
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(0, 212, 255, 0.15);
+    border-radius: 0.75rem;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+
+  .glow-cyan {
+    box-shadow: 0 0 12px rgba(0, 212, 255, 0.4);
+  }
+
+  .glow-cyan-lg {
+    box-shadow: 0 0 24px rgba(0, 212, 255, 0.3);
+  }
+
+  .glow-purple {
+    box-shadow: 0 0 12px rgba(168, 85, 247, 0.4);
+  }
+
+  .sidebar-item-active {
+    border-left: 3px solid #00d4ff;
+    background: rgba(0, 212, 255, 0.08);
+    box-shadow: 0 0 12px rgba(0, 212, 255, 0.4);
+    color: #00d4ff;
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, #00d4ff, #0099cc);
+    color: #0d0d2b;
+    font-weight: 600;
+    transition: all 0.2s ease;
+  }
+
+  .btn-primary:hover {
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
+    transform: translateY(-1px);
+  }
+
+  .input-axiam {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(0, 212, 255, 0.2);
+    color: #f8fafc;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .input-axiam:focus {
+    border-color: #00d4ff;
+    box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.2);
+    outline: none;
+  }
+
+  .input-axiam::placeholder {
+    color: #94a3b8;
+  }
+}

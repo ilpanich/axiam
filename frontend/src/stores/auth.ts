@@ -60,11 +60,10 @@ export const useAuthStore = create<AuthState & AuthActions>()(
         orgSlug: state.orgSlug,
       }),
       onRehydrateStorage: () => (state, error) => {
-        if (!error && state) {
-          // Use the store's set via the returned state merge
-          // Zustand applies returned object as a shallow merge
-          state.isAuthenticated = !!(state.accessToken && state.user);
-        }
+        if (error) return;
+        if (!state) return;
+        const isAuthenticated = !!(state.accessToken && state.user);
+        useAuthStore.setState({ isAuthenticated });
       },
     }
   )

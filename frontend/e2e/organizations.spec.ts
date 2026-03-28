@@ -52,8 +52,8 @@ async function mockAuth(
         accessToken: "fake-jwt-token",
         isAuthenticated: true,
         user: { id: "u1", email: "admin@axiam.dev", username: "admin" },
-        orgId: "org-1",
-        tenantId: "tenant-1",
+        orgSlug: "org-1",
+        tenantSlug: "tenant-1",
       },
       version: 0,
     };

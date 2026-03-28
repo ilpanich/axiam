@@ -33,8 +33,8 @@ export interface CreateProviderRequest {
   name: string;
   type: "saml" | "oidc";
   domain: string;
-  saml_config?: Omit<SamlConfig, never>;
-  oidc_config?: Omit<OidcConfig, never>;
+  saml_config?: SamlConfig;
+  oidc_config?: OidcConfig;
 }
 
 export interface UpdateProviderRequest {

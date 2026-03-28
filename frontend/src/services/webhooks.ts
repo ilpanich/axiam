@@ -60,9 +60,9 @@ export const WEBHOOK_EVENTS = [
 
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
-export const WEBHOOK_EVENT_GROUPS: Array<{
+export const WEBHOOK_EVENT_GROUPS: ReadonlyArray<{
   label: string;
-  events: string[];
+  events: WebhookEvent[];
 }> = [
   {
     label: "User Events",

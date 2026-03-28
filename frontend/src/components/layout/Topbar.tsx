@@ -169,12 +169,8 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               )}
               role="menu"
               aria-label="Tenant selector"
-              onKeyDown={handleMenuKeyDown}
             >
-              <p
-                className="px-3 py-2 text-xs text-muted-foreground"
-                role="status"
-              >
+              <p className="px-3 py-2 text-xs text-muted-foreground">
                 Tenant switching coming soon
               </p>
             </div>

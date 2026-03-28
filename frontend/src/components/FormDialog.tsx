@@ -33,7 +33,7 @@ export function FormDialog({
       }
       if (e.key === "Tab" && dialogRef.current) {
         const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
         );
         if (focusable.length === 0) return;
         const first = focusable[0];
@@ -47,7 +47,7 @@ export function FormDialog({
         }
       }
     },
-    [onClose, isLoading]
+    [onClose, isLoading],
   );
 
   useEffect(() => {
@@ -86,9 +86,10 @@ export function FormDialog({
           </h2>
           <button
             ref={closeRef}
-            onClick={onClose}
+            onClick={isLoading ? undefined : onClose}
             className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-none focus:ring-2 focus:ring-primary/40"
             aria-label="Close dialog"
+            disabled={isLoading}
           >
             <X size={18} />
           </button>
@@ -96,7 +97,9 @@ export function FormDialog({
 
         {/* Body + Footer */}
         <form onSubmit={onSubmit} noValidate>
-          <div className="overflow-y-auto py-4 space-y-4 -mx-6 px-6">{children}</div>
+          <div className="overflow-y-auto py-4 space-y-4 -mx-6 px-6">
+            {children}
+          </div>
           <div className="flex justify-end gap-3 pt-4 border-t border-primary/10">
             <Button
               type="button"
@@ -106,11 +109,7 @@ export function FormDialog({
             >
               Cancel
             </Button>
-            <Button
-              type="submit"
-              disabled={isLoading}
-              className="min-w-[80px]"
-            >
+            <Button type="submit" disabled={isLoading} className="min-w-[80px]">
               {isLoading ? (
                 <Loader2 size={14} className="animate-spin" />
               ) : (

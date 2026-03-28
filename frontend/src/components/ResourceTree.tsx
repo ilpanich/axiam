@@ -301,12 +301,14 @@ export function ResourceTree({
       const allIds = collectAllIds(roots);
       setExpandedIds((prev) => {
         const next = new Set(prev);
+        let changed = false;
         for (const id of allIds) {
           if (!prev.has(id)) {
             next.add(id);
+            changed = true;
           }
         }
-        return next;
+        return changed ? next : prev;
       });
     }
   }, [resources, roots]);

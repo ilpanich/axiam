@@ -51,7 +51,7 @@ RUN for dir in crates/*/; do \
     done
 
 # Pre-build dependencies only. This layer is cached until Cargo.toml/lock change.
-RUN cargo build --release -p axiam-server 2>/dev/null || true
+RUN cargo build --release -p axiam-server || true
 
 # Now copy the real source code and proto definitions
 COPY crates/ crates/

@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: surrealdb
+  namespace: axiam
+  labels:
+    app: axiam
+    component: surrealdb
+spec:
+  serviceName: surrealdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: axiam
+      component: surrealdb
+  template:
+    metadata:
+      labels:
+        app: axiam
+        component: surrealdb
+    spec:
+      containers:
+        - name: surrealdb
+          image: surrealdb/surrealdb:v2
+          command: ["surreal"]
+          args: ["start", "--user", "root", "--pass", "root", "--log", "info"]
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - name: surrealdb-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            exec:
+              command: ["/surreal", "isready"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["/surreal", "isready"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: surrealdb-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi

@@ -97,28 +97,42 @@ function TreeNodeRow({
             e.preventDefault();
             onSelect?.(node.resource);
           }
+          if (e.key === "ArrowRight" && hasChildren && !expanded) {
+            e.preventDefault();
+            setExpanded(true);
+          }
+          if (e.key === "ArrowLeft" && hasChildren && expanded) {
+            e.preventDefault();
+            setExpanded(false);
+          }
         }}
       >
         {/* Expand/collapse toggle */}
-        <span
-          className="shrink-0 w-4 h-4 flex items-center justify-center text-muted-foreground"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (hasChildren) setExpanded((v) => !v);
-          }}
-          aria-hidden="true"
-        >
-          {hasChildren ? (
-            expanded ? (
+        {hasChildren ? (
+          <button
+            type="button"
+            className="shrink-0 w-4 h-4 flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+            tabIndex={-1}
+            aria-label={expanded ? "Collapse" : "Expand"}
+          >
+            {expanded ? (
               <ChevronDown size={14} />
             ) : (
               <ChevronRight size={14} />
-            )
-          ) : (
-            // Leaf spacer — subtle dot indicator
+            )}
+          </button>
+        ) : (
+          <span
+            className="shrink-0 w-4 h-4 flex items-center justify-center"
+            aria-hidden="true"
+          >
             <span className="w-1 h-1 rounded-full bg-white/20 mx-auto" />
-          )}
-        </span>
+          </span>
+        )}
 
         {/* Resource name */}
         <span className="flex-1 text-sm font-medium truncate">

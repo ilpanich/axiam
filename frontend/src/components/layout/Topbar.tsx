@@ -11,7 +11,7 @@ interface TopbarProps {
 export function Topbar({ onMenuClick }: TopbarProps) {
   const navigate = useNavigate();
   const matches = useMatches();
-  const { user, tenantId, orgId, clearAuth } = useAuthStore();
+  const { user, tenantSlug, orgSlug, clearAuth } = useAuthStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tenantMenuOpen, setTenantMenuOpen] = useState(false);
 
@@ -83,8 +83,8 @@ export function Topbar({ onMenuClick }: TopbarProps) {
           >
             <Building2 size={14} aria-hidden="true" />
             <span className="hidden sm:inline">
-              {tenantId
-                ? `${orgId ?? "org"} / ${tenantId}`
+              {tenantSlug
+                ? `${orgSlug ?? "org"} / ${tenantSlug}`
                 : "Select tenant"}
             </span>
             <ChevronDown size={14} aria-hidden="true" />

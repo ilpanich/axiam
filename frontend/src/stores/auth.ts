@@ -10,22 +10,23 @@ export interface AuthUser {
 interface AuthState {
   accessToken: string | null;
   user: AuthUser | null;
-  tenantId: string | null;
-  orgId: string | null;
+  tenantSlug: string | null;
+  orgSlug: string | null;
   isAuthenticated: boolean;
 }
 
 interface AuthActions {
   setTokens: (accessToken: string, user: AuthUser) => void;
+  updateAccessToken: (accessToken: string) => void;
   clearAuth: () => void;
-  setTenantContext: (tenantId: string, orgId: string) => void;
+  setTenantContext: (tenantSlug: string, orgSlug: string) => void;
 }
 
 const initialState: AuthState = {
   accessToken: null,
   user: null,
-  tenantId: null,
-  orgId: null,
+  tenantSlug: null,
+  orgSlug: null,
   isAuthenticated: false,
 };
 
@@ -41,9 +42,12 @@ export const useAuthStore = create<AuthState & AuthActions>()(
           isAuthenticated: true,
         }),
 
+      updateAccessToken: (accessToken) => set({ accessToken }),
+
       clearAuth: () => set({ ...initialState }),
 
-      setTenantContext: (tenantId, orgId) => set({ tenantId, orgId }),
+      setTenantContext: (tenantSlug, orgSlug) =>
+        set({ tenantSlug, orgSlug }),
     }),
     {
       name: "axiam-auth",
@@ -52,12 +56,14 @@ export const useAuthStore = create<AuthState & AuthActions>()(
       partialize: (state) => ({
         accessToken: state.accessToken,
         user: state.user,
-        tenantId: state.tenantId,
-        orgId: state.orgId,
+        tenantSlug: state.tenantSlug,
+        orgSlug: state.orgSlug,
       }),
-      onRehydrateStorage: () => (state) => {
-        if (state) {
-          state.isAuthenticated = state.accessToken !== null;
+      onRehydrateStorage: () => (state, error) => {
+        if (!error && state) {
+          // Use the store's set via the returned state merge
+          // Zustand applies returned object as a shallow merge
+          state.isAuthenticated = !!(state.accessToken && state.user);
         }
       },
     }

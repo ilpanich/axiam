@@ -31,92 +31,92 @@ export function PlaceholderPage({
   );
 }
 
-// Individual placeholder exports for each route
-export const OrganizationsPage = () => (
+// Individual placeholder exports — suffixed to avoid collisions with real pages
+export const OrganizationsPlaceholderPage = () => (
   <PlaceholderPage
     title="Organizations"
     description="Manage top-level organizations and their CA certificates."
   />
 );
 
-export const OrganizationDetailPage = () => (
+export const OrganizationDetailPlaceholderPage = () => (
   <PlaceholderPage
     title="Organization Details"
     description="View and manage organization settings, tenants, and certificates."
   />
 );
 
-export const TenantsPage = () => (
+export const TenantsPlaceholderPage = () => (
   <PlaceholderPage
     title="Tenants"
     description="Manage tenants within your organization. Each tenant provides full data isolation."
   />
 );
 
-export const UsersPage = () => (
+export const UsersPlaceholderPage = () => (
   <PlaceholderPage
     title="Users"
     description="Create and manage user accounts, credentials, and MFA settings."
   />
 );
 
-export const UserDetailPage = () => (
+export const UserDetailPlaceholderPage = () => (
   <PlaceholderPage
     title="User Details"
     description="View user profile, roles, groups, and authentication history."
   />
 );
 
-export const GroupsPage = () => (
+export const GroupsPlaceholderPage = () => (
   <PlaceholderPage
     title="Groups"
     description="Organize users into groups. Roles assigned to a group are inherited by all members."
   />
 );
 
-export const RolesPage = () => (
+export const RolesPlaceholderPage = () => (
   <PlaceholderPage
     title="Roles"
     description="Define roles as collections of permissions. Roles support inheritance through resource hierarchies."
   />
 );
 
-export const PermissionsPage = () => (
+export const PermissionsPlaceholderPage = () => (
   <PlaceholderPage
     title="Permissions"
     description="Define fine-grained permissions on resources with scope-level granularity."
   />
 );
 
-export const ResourcesPage = () => (
+export const ResourcesPlaceholderPage = () => (
   <PlaceholderPage
     title="Resources"
     description="Organize resources hierarchically. Role assignments cascade to child resources unless overridden."
   />
 );
 
-export const CertificatesPage = () => (
+export const CertificatesPlaceholderPage = () => (
   <PlaceholderPage
     title="Certificates"
     description="Manage X.509 certificates for users, services, and IoT devices."
   />
 );
 
-export const WebhooksPage = () => (
+export const WebhooksPlaceholderPage = () => (
   <PlaceholderPage
     title="Webhooks"
     description="Configure webhooks to deliver real-time event notifications to external systems via HMAC-SHA256 signed payloads."
   />
 );
 
-export const PgpKeysPage = () => (
+export const PgpKeysPlaceholderPage = () => (
   <PlaceholderPage
     title="PGP Keys"
     description="Manage OpenPGP keys used for audit log signing and encrypted data exports."
   />
 );
 
-export const SettingsPage = () => (
+export const SettingsPlaceholderPage = () => (
   <PlaceholderPage
     title="Settings"
     description="Configure tenant-level settings including MFA policies, password policies, and session management."

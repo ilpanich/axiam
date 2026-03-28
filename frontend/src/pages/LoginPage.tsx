@@ -88,6 +88,8 @@ export function LoginPage() {
         setTokens(data.access_token, data.user);
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
         navigate("/dashboard");
+      } else if (!data.mfa_required) {
+        setError("Unexpected server response. Please try again.");
       }
     } catch (err) {
       const axiosErr = err as AxiosError<ErrorResponse>;

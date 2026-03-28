@@ -85,13 +85,14 @@ api.interceptors.response.use(
           { withCredentials: true }
         );
         const newToken = response.data.access_token;
-        const { user, tenantId, orgId } = useAuthStore.getState();
+        const { user } = useAuthStore.getState();
 
         if (user) {
           useAuthStore.getState().setTokens(newToken, user);
-        }
-        if (tenantId && orgId) {
-          useAuthStore.getState().setTenantContext(tenantId, orgId);
+        } else {
+          // Token exists without user (partial rehydration) —
+          // update the token directly so retried requests use it
+          useAuthStore.getState().updateAccessToken(newToken);
         }
 
         processQueue(null, newToken);

@@ -174,7 +174,7 @@ function QuickAction({ icon, label, to, iconColor }: QuickActionProps) {
 // ─── Dashboard page ───────────────────────────────────────────────────────────
 
 export function DashboardPage() {
-  const { user, tenantId, orgId } = useAuthStore();
+  const { user, tenantSlug, orgSlug } = useAuthStore();
 
   const results = useQueries({
     queries: [
@@ -234,11 +234,11 @@ export function DashboardPage() {
             </>
           ) : null}
         </h1>
-        {(orgId || tenantId) && (
+        {(orgSlug || tenantSlug) && (
           <p className="text-muted-foreground text-sm mt-1">
             Workspace:{" "}
             <span className="font-mono text-xs text-primary/80">
-              {orgId}/{tenantId}
+              {orgSlug}/{tenantSlug}
             </span>
           </p>
         )}

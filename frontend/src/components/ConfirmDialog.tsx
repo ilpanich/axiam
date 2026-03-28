@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { Loader2 } from "lucide-react";
 
 interface ConfirmDialogProps {
@@ -18,27 +18,52 @@ export function ConfirmDialog({
   description,
   isLoading = false,
 }: ConfirmDialogProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
 
-  // Set initial focus and handle Escape key
+  // Focus trap: keep Tab cycling within the dialog, handle Escape
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key === "Tab" && dialogRef.current) {
+        const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    },
+    [onClose]
+  );
+
   useEffect(() => {
     if (!open) return;
     cancelRef.current?.focus();
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open, handleKeyDown]);
 
   if (!open) return null;
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       aria-modal="true"
       role="dialog"
       aria-labelledby="confirm-dialog-title"
+      aria-describedby="confirm-dialog-description"
     >
       {/* Backdrop */}
       <div
@@ -55,7 +80,12 @@ export function ConfirmDialog({
         >
           {title}
         </h2>
-        <p className="text-sm text-muted-foreground">{description}</p>
+        <p
+          id="confirm-dialog-description"
+          className="text-sm text-muted-foreground"
+        >
+          {description}
+        </p>
         <div className="flex justify-end gap-3 pt-4 border-t border-primary/10">
           <button
             ref={cancelRef}

@@ -25,7 +25,7 @@ export function ConfirmDialog({
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        if (!isLoading) onClose();
         return;
       }
       if (e.key === "Tab" && dialogRef.current) {
@@ -44,7 +44,7 @@ export function ConfirmDialog({
         }
       }
     },
-    [onClose]
+    [onClose, isLoading]
   );
 
   useEffect(() => {
@@ -68,7 +68,7 @@ export function ConfirmDialog({
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={onClose}
+        onClick={isLoading ? undefined : onClose}
         aria-hidden="true"
       />
 

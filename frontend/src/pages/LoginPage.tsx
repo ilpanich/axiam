@@ -123,6 +123,8 @@ export function LoginPage() {
         setTokens(data.access_token, data.user);
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
         navigate("/dashboard");
+      } else {
+        setError("Unexpected server response. Please try again.");
       }
     } catch (err) {
       const axiosErr = err as AxiosError<ErrorResponse>;

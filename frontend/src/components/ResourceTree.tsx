@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronRight, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Resource } from "@/services/resources";
@@ -62,6 +62,19 @@ interface TreeNodeRowProps {
   onSelect?: (resource: Resource) => void;
   selectedId?: string;
   actions?: (resource: Resource) => ReactNode;
+  focusedId: string | null;
+  onFocus: (id: string) => void;
+  visibleIds: string[];
+  isFirstRoot: boolean;
+  expandedIds: Set<string>;
+  onToggleExpand: (id: string) => void;
+}
+
+function focusNodeById(id: string) {
+  const el = document.querySelector<HTMLElement>(
+    `[data-tree-node-id="${id}"]`
+  );
+  el?.focus();
 }
 
 function TreeNodeRow({
@@ -70,12 +83,23 @@ function TreeNodeRow({
   onSelect,
   selectedId,
   actions,
+  focusedId,
+  onFocus,
+  visibleIds,
+  isFirstRoot,
+  expandedIds,
+  onToggleExpand,
 }: TreeNodeRowProps) {
-  const [expanded, setExpanded] = useState(true);
   const hasChildren = node.children.length > 0;
+  const expanded = expandedIds.has(node.resource.id);
   const isSelected = selectedId === node.resource.id;
   // Clamp indentation at MAX_DEPTH to avoid runaway layouts
   const indent = Math.min(depth, MAX_DEPTH) * 20;
+
+  // Roving tabindex: only the focused node (or first root as default) is tabbable
+  const isTabbable =
+    focusedId === node.resource.id ||
+    (focusedId === null && isFirstRoot);
 
   return (
     <>
@@ -87,11 +111,16 @@ function TreeNodeRow({
             : "hover:bg-white/[0.04] text-foreground/80"
         )}
         style={{ paddingLeft: `${12 + indent}px` }}
-        onClick={() => onSelect?.(node.resource)}
+        data-tree-node-id={node.resource.id}
+        onClick={() => {
+          onFocus(node.resource.id);
+          onSelect?.(node.resource);
+        }}
+        onFocus={() => onFocus(node.resource.id)}
         role="treeitem"
         aria-selected={isSelected}
         aria-expanded={hasChildren ? expanded : undefined}
-        tabIndex={0}
+        tabIndex={isTabbable ? 0 : -1}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
@@ -99,11 +128,45 @@ function TreeNodeRow({
           }
           if (e.key === "ArrowRight" && hasChildren && !expanded) {
             e.preventDefault();
-            setExpanded(true);
+            onToggleExpand(node.resource.id);
           }
           if (e.key === "ArrowLeft" && hasChildren && expanded) {
             e.preventDefault();
-            setExpanded(false);
+            onToggleExpand(node.resource.id);
+          }
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            const idx = visibleIds.indexOf(node.resource.id);
+            if (idx >= 0 && idx < visibleIds.length - 1) {
+              const nextId = visibleIds[idx + 1];
+              onFocus(nextId);
+              focusNodeById(nextId);
+            }
+          }
+          if (e.key === "ArrowUp") {
+            e.preventDefault();
+            const idx = visibleIds.indexOf(node.resource.id);
+            if (idx > 0) {
+              const prevId = visibleIds[idx - 1];
+              onFocus(prevId);
+              focusNodeById(prevId);
+            }
+          }
+          if (e.key === "Home") {
+            e.preventDefault();
+            if (visibleIds.length > 0) {
+              const firstId = visibleIds[0];
+              onFocus(firstId);
+              focusNodeById(firstId);
+            }
+          }
+          if (e.key === "End") {
+            e.preventDefault();
+            if (visibleIds.length > 0) {
+              const lastId = visibleIds[visibleIds.length - 1];
+              onFocus(lastId);
+              focusNodeById(lastId);
+            }
           }
         }}
       >
@@ -114,7 +177,7 @@ function TreeNodeRow({
             className="shrink-0 w-4 h-4 flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
             onClick={(e) => {
               e.stopPropagation();
-              setExpanded((v) => !v);
+              onToggleExpand(node.resource.id);
             }}
             tabIndex={-1}
             aria-label={expanded ? "Collapse" : "Expand"}
@@ -170,6 +233,12 @@ function TreeNodeRow({
               onSelect={onSelect}
               selectedId={selectedId}
               actions={actions}
+              focusedId={focusedId}
+              onFocus={onFocus}
+              visibleIds={visibleIds}
+              isFirstRoot={false}
+              expandedIds={expandedIds}
+              onToggleExpand={onToggleExpand}
             />
           ))}
         </div>
@@ -180,6 +249,37 @@ function TreeNodeRow({
 
 // ─── Public component ─────────────────────────────────────────────────────────
 
+/** Collect all node IDs that should default to expanded (all of them). */
+function collectAllIds(nodes: TreeNode[]): Set<string> {
+  const ids = new Set<string>();
+  function walk(list: TreeNode[]) {
+    for (const n of list) {
+      ids.add(n.resource.id);
+      walk(n.children);
+    }
+  }
+  walk(nodes);
+  return ids;
+}
+
+/** Build a flat ordered list of currently visible node IDs. */
+function buildVisibleIds(
+  nodes: TreeNode[],
+  expandedIds: Set<string>
+): string[] {
+  const result: string[] = [];
+  function walk(list: TreeNode[]) {
+    for (const n of list) {
+      result.push(n.resource.id);
+      if (n.children.length > 0 && expandedIds.has(n.resource.id)) {
+        walk(n.children);
+      }
+    }
+  }
+  walk(nodes);
+  return result;
+}
+
 export function ResourceTree({
   resources,
   onSelect,
@@ -187,6 +287,49 @@ export function ResourceTree({
   actions,
 }: ResourceTreeProps) {
   const roots = useMemo(() => buildTree(resources), [resources]);
+
+  // Lifted expand/collapse state: all nodes start expanded
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(
+    () => collectAllIds(roots)
+  );
+
+  // Sync expandedIds when resources change (new nodes should default expanded)
+  const prevResourcesRef = useRef(resources);
+  if (prevResourcesRef.current !== resources) {
+    prevResourcesRef.current = resources;
+    const allIds = collectAllIds(roots);
+    // Merge: keep existing collapse decisions, add any new IDs
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of allIds) {
+        if (!prev.has(id)) {
+          next.add(id);
+        }
+      }
+      return next;
+    });
+  }
+
+  const handleToggleExpand = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  // Roving tabindex state
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+
+  // Flat list of visible node IDs for arrow key navigation
+  const visibleIds = useMemo(
+    () => buildVisibleIds(roots, expandedIds),
+    [roots, expandedIds]
+  );
 
   if (roots.length === 0) {
     return (
@@ -199,7 +342,7 @@ export function ResourceTree({
 
   return (
     <div role="tree" aria-label="Resource hierarchy" className="space-y-0.5">
-      {roots.map((node) => (
+      {roots.map((node, index) => (
         <TreeNodeRow
           key={node.resource.id}
           node={node}
@@ -207,6 +350,12 @@ export function ResourceTree({
           onSelect={onSelect}
           selectedId={selectedId}
           actions={actions}
+          focusedId={focusedId}
+          onFocus={setFocusedId}
+          visibleIds={visibleIds}
+          isFirstRoot={index === 0}
+          expandedIds={expandedIds}
+          onToggleExpand={handleToggleExpand}
         />
       ))}
     </div>

@@ -17,12 +17,9 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Eye, KeyRound, Lock } from "lucide-react";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+import { formatDate } from "@/lib/utils";
 
-const formatDate = (iso: string) =>
-  new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
-    new Date(iso)
-  );
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function truncateFingerprint(fp: string): string {
   return fp.length > 24 ? `${fp.slice(0, 24)}…` : fp;

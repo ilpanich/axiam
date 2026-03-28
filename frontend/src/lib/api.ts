@@ -47,9 +47,14 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response: AxiosResponse) => response,
   async (error: AxiosError) => {
-    const originalRequest = error.config as InternalAxiosRequestConfig & {
-      _retry?: boolean;
-    };
+    const originalRequest = error.config as
+      | (InternalAxiosRequestConfig & { _retry?: boolean })
+      | undefined;
+
+    // Guard: error.config can be undefined on network/setup failures
+    if (!originalRequest) {
+      return Promise.reject(error);
+    }
 
     // Skip refresh logic for auth endpoints and when no token is present
     const isAuthRoute = originalRequest.url?.match(/\/auth\//);

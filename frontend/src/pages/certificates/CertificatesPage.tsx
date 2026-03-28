@@ -15,15 +15,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ShieldPlus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const formatDate = (iso: string) =>
-  new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
-    new Date(iso)
-  );
 
 function isExpiringSoon(expiresAt: string): boolean {
   const diff = new Date(expiresAt).getTime() - Date.now();

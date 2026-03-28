@@ -15,11 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Pencil, Trash2, Plus } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
-
-const formatDate = (iso: string) =>
-  new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
-    new Date(iso)
-  );
+import { formatDate } from "@/lib/utils";
 
 function slugify(value: string): string {
   return value

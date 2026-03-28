@@ -18,12 +18,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+import { formatDate } from "@/lib/utils";
 
-const formatDate = (iso: string) =>
-  new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
-    new Date(iso)
-  );
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // ─── Event type multi-select ──────────────────────────────────────────────────
 

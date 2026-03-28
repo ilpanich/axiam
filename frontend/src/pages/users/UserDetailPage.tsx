@@ -15,13 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2, Trash2, ShieldX } from "lucide-react";
-import { cn } from "@/lib/utils";
-
-const formatDate = (iso: string) =>
-  new Intl.DateTimeFormat("en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(iso));
+import { cn, formatDate } from "@/lib/utils";
 
 // ─── Section card wrapper ─────────────────────────────────────────────────────
 

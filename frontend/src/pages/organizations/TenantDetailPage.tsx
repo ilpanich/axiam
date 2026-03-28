@@ -4,11 +4,7 @@ import { tenantService, orgService } from "@/services/organizations";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft } from "lucide-react";
-
-const formatDate = (iso: string) =>
-  new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
-    new Date(iso)
-  );
+import { formatDate } from "@/lib/utils";
 
 export function TenantDetailPage() {
   const { orgId, tenantId } = useParams<{ orgId: string; tenantId: string }>();

@@ -27,3 +27,5 @@ target
 
 # CodeGraphContext
 mcp.json
+login-page.png
+.playwright-mcp/

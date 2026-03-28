@@ -44,3 +44,15 @@ check: fmt-check lint test
 # Run the AXIAM server
 run:
     RUST_LOG=axiam=debug cargo run --bin axiam-server
+
+# Start frontend dev server
+frontend-dev:
+    cd frontend && npm run dev
+
+# Build frontend for production
+frontend-build:
+    cd frontend && npm run build
+
+# Run frontend E2E tests
+frontend-test:
+    cd frontend && npx playwright test

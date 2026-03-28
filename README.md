@@ -100,11 +100,11 @@ The project follows a structured roadmap of **64 tasks across 16 phases**:
 | Phase 9 | Webhook system | Done |
 | Phase 10 | OAuth2 & OIDC | Done |
 | Phase 11 | Federation (SAML + OIDC) | Done |
-| Phase 12 | Hierarchical Settings & Password Policy | Next |
-| Phase 13 | Email Service & Account Flows | Planned |
-| Phase 14 | Advanced MFA | Planned |
-| Phase 15 | Admin frontend | Planned |
-| Phase 16 | Docker & Kubernetes | Planned |
+| Phase 12 | Hierarchical Settings & Password Policy | Done |
+| Phase 13 | Email Service & Account Flows | Done |
+| Phase 14 | Advanced MFA | Done |
+| Phase 15 | Admin frontend | Done |
+| Phase 16 | Docker & Kubernetes | Done |
 | Phase 17 | SDKs (Rust, TS, Python, Java, C#, PHP, Go) | Planned |
 | Phase 18 | Security audit, compliance, docs | Planned |
 

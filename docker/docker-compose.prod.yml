@@ -1,0 +1,103 @@
+# Production-like Docker Compose for local testing of the full AXIAM stack.
+# Usage: docker compose -f docker/docker-compose.prod.yml up --build
+#
+# This file is NOT intended for actual production deployment (use Kubernetes
+# manifests in k8s/ for that). It exists so developers can spin up the entire
+# stack locally with a single command and validate end-to-end behaviour.
+
+services:
+  # ---------------------------------------------------------------------------
+  # AXIAM Backend (REST + gRPC)
+  # ---------------------------------------------------------------------------
+  axiam-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    container_name: axiam-server
+    ports:
+      - "8080:8080"   # REST API
+      - "50051:50051" # gRPC
+    environment:
+      AXIAM_DATABASE__URL: "ws://surrealdb:8000"
+      AXIAM_DATABASE__USERNAME: "root"
+      AXIAM_DATABASE__PASSWORD: "root"
+      AXIAM_DATABASE__NAMESPACE: "axiam"
+      AXIAM_DATABASE__DATABASE: "axiam"
+      AXIAM_AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
+      RUST_LOG: "axiam=info"
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - axiam-network
+
+  # ---------------------------------------------------------------------------
+  # AXIAM Frontend (React / Nginx)
+  # ---------------------------------------------------------------------------
+  axiam-frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    container_name: axiam-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - axiam-server
+    restart: unless-stopped
+    networks:
+      - axiam-network
+
+  # ---------------------------------------------------------------------------
+  # SurrealDB — document/graph database
+  # ---------------------------------------------------------------------------
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    container_name: axiam-surrealdb
+    command: start --user root --pass root --log info
+    volumes:
+      - surrealdb-data:/data
+    healthcheck:
+      test: ["CMD", "/surreal", "isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - axiam-network
+
+  # ---------------------------------------------------------------------------
+  # RabbitMQ — AMQP message broker
+  # ---------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: axiam-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: axiam
+      RABBITMQ_DEFAULT_PASS: axiam
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - axiam-network
+
+volumes:
+  surrealdb-data:
+  rabbitmq-data:
+
+networks:
+  axiam-network:
+    driver: bridge

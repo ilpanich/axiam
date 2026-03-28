@@ -1,0 +1,110 @@
+# ============================================================================
+# AXIAM Server — Multi-stage Docker Build
+# ============================================================================
+# Build:  docker build -f docker/Dockerfile.server -t axiam-server .
+# Run:    docker run -p 8080:8080 -p 50051:50051 axiam-server
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build the release binary
+# ---------------------------------------------------------------------------
+FROM rust:1.86-bookworm AS builder
+
+# Install build-time dependencies: protobuf compiler for tonic/prost codegen
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy manifests first for better layer caching.
+# When only source code changes (not dependencies), Docker reuses the
+# dependency-download layer, which is the slowest part of a Rust build.
+COPY Cargo.toml Cargo.lock ./
+
+# Copy every crate's Cargo.toml so cargo can resolve the full dependency graph.
+COPY crates/axiam-core/Cargo.toml         crates/axiam-core/Cargo.toml
+COPY crates/axiam-db/Cargo.toml           crates/axiam-db/Cargo.toml
+COPY crates/axiam-auth/Cargo.toml         crates/axiam-auth/Cargo.toml
+COPY crates/axiam-authz/Cargo.toml        crates/axiam-authz/Cargo.toml
+COPY crates/axiam-api-rest/Cargo.toml     crates/axiam-api-rest/Cargo.toml
+COPY crates/axiam-api-grpc/Cargo.toml     crates/axiam-api-grpc/Cargo.toml
+COPY crates/axiam-amqp/Cargo.toml         crates/axiam-amqp/Cargo.toml
+COPY crates/axiam-oauth2/Cargo.toml       crates/axiam-oauth2/Cargo.toml
+COPY crates/axiam-federation/Cargo.toml   crates/axiam-federation/Cargo.toml
+COPY crates/axiam-audit/Cargo.toml        crates/axiam-audit/Cargo.toml
+COPY crates/axiam-pki/Cargo.toml          crates/axiam-pki/Cargo.toml
+COPY crates/axiam-email/Cargo.toml        crates/axiam-email/Cargo.toml
+COPY crates/axiam-server/Cargo.toml       crates/axiam-server/Cargo.toml
+
+# Create stub lib.rs / main.rs so cargo can compile dependencies without
+# the real source. This is the "skeleton trick" — it lets Docker cache
+# the expensive dependency compilation layer.
+RUN for dir in crates/*/; do \
+        mkdir -p "$dir/src"; \
+        name=$(basename "$dir"); \
+        if [ "$name" = "axiam-server" ]; then \
+            echo 'fn main() {}' > "$dir/src/main.rs"; \
+        else \
+            echo '' > "$dir/src/lib.rs"; \
+        fi; \
+    done
+
+# Pre-build dependencies only. This layer is cached until Cargo.toml/lock change.
+RUN cargo build --release -p axiam-server 2>/dev/null || true
+
+# Now copy the real source code and proto definitions
+COPY crates/ crates/
+COPY proto/  proto/
+
+# Touch all source files so cargo sees them as newer than the stub artifacts
+RUN find crates/ -name "*.rs" -exec touch {} +
+
+# Build the actual server binary and strip debug symbols
+RUN cargo build --release -p axiam-server \
+    && strip target/release/axiam-server
+
+# ---------------------------------------------------------------------------
+# Stage 2: Minimal runtime image
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+LABEL org.opencontainers.image.title="axiam-server" \
+      org.opencontainers.image.description="AXIAM — Access eXtended Identity and Authorization Management" \
+      org.opencontainers.image.vendor="AXIAM Contributors" \
+      org.opencontainers.image.source="https://github.com/emanuele/axiam" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+
+# Install runtime dependencies:
+#   ca-certificates — TLS root CAs for outbound HTTPS
+#   libssl3         — OpenSSL shared libs (transitive deps may need it)
+#   curl            — used by HEALTHCHECK
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libssl3 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd --gid 1000 axiam \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin axiam
+
+# Copy the release binary from the builder stage
+COPY --from=builder --chown=axiam:axiam \
+    /build/target/release/axiam-server /usr/local/bin/axiam-server
+
+# Switch to non-root user
+USER axiam
+WORKDIR /home/axiam
+
+# Default environment
+ENV RUST_LOG=axiam=info
+
+# REST API + gRPC
+EXPOSE 8080 50051
+
+# Health check: probe the REST health endpoint
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -sf http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["axiam-server"]

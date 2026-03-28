@@ -1,0 +1,48 @@
+# Build artifacts
+target/
+
+# Frontend dependencies
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Version control
+.git/
+.gitignore
+
+# Deployment configs (not needed inside the image)
+docker/
+k8s/
+
+# SDKs and dev docs
+sdks/
+claude_dev/
+
+# GitHub workflows
+.github/
+
+# Environment and secrets — NEVER bake into images
+.env
+.env.*
+.env.local
+
+# Documentation files
+*.md
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db

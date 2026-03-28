@@ -37,9 +37,10 @@ export function ForgotPasswordPage() {
       let internalError = false;
       try {
         await forgotPassword(email);
-      } catch {
+      } catch (err) {
         // Intentionally swallow errors to prevent user enumeration.
         // We always show the same success message regardless of outcome.
+        console.warn("[ForgotPassword] request failed:", err);
         internalError = true;
       }
       return { submitted: true, internalError };

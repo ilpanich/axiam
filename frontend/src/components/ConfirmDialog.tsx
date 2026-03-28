@@ -21,7 +21,7 @@ export function ConfirmDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
 
-  // Focus trap: keep Tab cycling within the dialog, handle Escape
+  // Keep Tab cycling within the dialog and close on Escape
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === "Escape") {

@@ -5,6 +5,7 @@ import {
   orgService,
   type Organization,
   type CreateOrganizationPayload,
+  type UpdateOrganizationPayload,
 } from "@/services/organizations";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
@@ -117,7 +118,7 @@ export function OrganizationsPage() {
     },
     onError: (err: unknown) => {
       setCreateError(
-        err instanceof Error ? err.message : "Failed to create organization."
+        err instanceof Error ? err.message : "Failed to create organization.",
       );
     },
   });
@@ -156,15 +157,20 @@ export function OrganizationsPage() {
   const [editError, setEditError] = useState("");
 
   const editMutation = useMutation({
-    mutationFn: ({ id, payload }: { id: string; payload: CreateOrganizationPayload }) =>
-      orgService.update(id, payload),
+    mutationFn: ({
+      id,
+      payload,
+    }: {
+      id: string;
+      payload: UpdateOrganizationPayload;
+    }) => orgService.update(id, payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["organizations"] });
       setEditOrg(null);
     },
     onError: (err: unknown) => {
       setEditError(
-        err instanceof Error ? err.message : "Failed to update organization."
+        err instanceof Error ? err.message : "Failed to update organization.",
       );
     },
   });

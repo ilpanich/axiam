@@ -5,6 +5,7 @@ import {
   groupService,
   type Group,
   type CreateGroupPayload,
+  type UpdateGroupPayload,
 } from "@/services/users";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
@@ -88,7 +89,7 @@ export function GroupsPage() {
     },
     onError: (err: unknown) => {
       setCreateError(
-        err instanceof Error ? err.message : "Failed to create group."
+        err instanceof Error ? err.message : "Failed to create group.",
       );
     },
   });
@@ -124,7 +125,7 @@ export function GroupsPage() {
       payload,
     }: {
       id: string;
-      payload: CreateGroupPayload;
+      payload: UpdateGroupPayload;
     }) => groupService.update(id, payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["groups"] });
@@ -132,7 +133,7 @@ export function GroupsPage() {
     },
     onError: (err: unknown) => {
       setEditError(
-        err instanceof Error ? err.message : "Failed to update group."
+        err instanceof Error ? err.message : "Failed to update group.",
       );
     },
   });

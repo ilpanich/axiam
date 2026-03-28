@@ -2,7 +2,7 @@ import { useNavigate, useMatches } from "react-router-dom";
 import { Menu, LogOut, ChevronDown, Building2 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 interface TopbarProps {
   onMenuClick: () => void;
@@ -14,6 +14,40 @@ export function Topbar({ onMenuClick }: TopbarProps) {
   const { user, tenantSlug, orgSlug, clearAuth } = useAuthStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tenantMenuOpen, setTenantMenuOpen] = useState(false);
+  const tenantPanelRef = useRef<HTMLDivElement>(null);
+  const userPanelRef = useRef<HTMLDivElement>(null);
+
+  const closeAll = useCallback(() => {
+    setUserMenuOpen(false);
+    setTenantMenuOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!userMenuOpen && !tenantMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeAll();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [userMenuOpen, tenantMenuOpen, closeAll]);
+
+  useEffect(() => {
+    if (tenantMenuOpen && tenantPanelRef.current) {
+      const first = tenantPanelRef.current.querySelector<HTMLElement>(
+        "button, a, [tabindex]",
+      );
+      first?.focus();
+    }
+  }, [tenantMenuOpen]);
+
+  useEffect(() => {
+    if (userMenuOpen && userPanelRef.current) {
+      const first = userPanelRef.current.querySelector<HTMLElement>(
+        "button, a, [tabindex]",
+      );
+      first?.focus();
+    }
+  }, [userMenuOpen]);
 
   const handleLogout = () => {
     clearAuth();
@@ -22,7 +56,10 @@ export function Topbar({ onMenuClick }: TopbarProps) {
 
   // Build breadcrumb from current route matches
   const breadcrumbs = matches
-    .filter((m) => m.handle && typeof (m.handle as { crumb?: string }).crumb === "string")
+    .filter(
+      (m) =>
+        m.handle && typeof (m.handle as { crumb?: string }).crumb === "string",
+    )
     .map((m) => (m.handle as { crumb: string }).crumb);
 
   return (
@@ -76,7 +113,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               "flex items-center gap-2 px-3 py-1.5 rounded-md text-sm",
               "border border-primary/20 bg-white/5",
               "text-muted-foreground hover:text-foreground hover:border-primary/40",
-              "transition-all duration-200"
+              "transition-all duration-200",
             )}
             aria-expanded={tenantMenuOpen}
             aria-haspopup="true"
@@ -91,11 +128,13 @@ export function Topbar({ onMenuClick }: TopbarProps) {
           </button>
           {tenantMenuOpen && (
             <div
+              ref={tenantPanelRef}
               className={cn(
                 "absolute right-0 top-full mt-1 z-50 min-w-48",
-                "glass-card py-1 shadow-glass"
+                "glass-card py-1 shadow-glass",
               )}
-              role="menu"
+              role="dialog"
+              aria-label="Tenant selector"
             >
               <p className="px-3 py-2 text-xs text-muted-foreground">
                 Tenant switching coming soon
@@ -115,7 +154,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               "flex items-center gap-2 px-3 py-1.5 rounded-md text-sm",
               "border border-primary/20 bg-white/5",
               "text-muted-foreground hover:text-foreground hover:border-primary/40",
-              "transition-all duration-200"
+              "transition-all duration-200",
             )}
             aria-expanded={userMenuOpen}
             aria-haspopup="true"
@@ -135,11 +174,13 @@ export function Topbar({ onMenuClick }: TopbarProps) {
 
           {userMenuOpen && (
             <div
+              ref={userPanelRef}
               className={cn(
                 "absolute right-0 top-full mt-1 z-50 min-w-40",
-                "glass-card py-1 shadow-glass"
+                "glass-card py-1 shadow-glass",
               )}
-              role="menu"
+              role="dialog"
+              aria-label="User menu"
             >
               <div className="px-3 py-2 border-b border-primary/10">
                 <p className="text-sm text-foreground font-medium">
@@ -150,7 +191,6 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               <button
                 onClick={handleLogout}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-destructive/10 transition-colors"
-                role="menuitem"
               >
                 <LogOut size={14} aria-hidden="true" />
                 Sign out
@@ -160,14 +200,10 @@ export function Topbar({ onMenuClick }: TopbarProps) {
         </div>
       </div>
 
-      {/* Click outside to close menus */}
       {(userMenuOpen || tenantMenuOpen) && (
         <div
           className="fixed inset-0 z-40"
-          onClick={() => {
-            setUserMenuOpen(false);
-            setTenantMenuOpen(false);
-          }}
+          onClick={closeAll}
           aria-hidden="true"
         />
       )}

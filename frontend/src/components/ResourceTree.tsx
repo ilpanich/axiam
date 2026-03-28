@@ -1,4 +1,11 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { ChevronRight, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Resource } from "@/services/resources";
@@ -71,9 +78,7 @@ interface TreeNodeRowProps {
 }
 
 function focusNodeById(id: string) {
-  const el = document.querySelector<HTMLElement>(
-    `[data-tree-node-id="${id}"]`
-  );
+  const el = document.querySelector<HTMLElement>(`[data-tree-node-id="${id}"]`);
   el?.focus();
 }
 
@@ -98,8 +103,7 @@ function TreeNodeRow({
 
   // Roving tabindex: only the focused node (or first root as default) is tabbable
   const isTabbable =
-    focusedId === node.resource.id ||
-    (focusedId === null && isFirstRoot);
+    focusedId === node.resource.id || (focusedId === null && isFirstRoot);
 
   return (
     <>
@@ -108,7 +112,7 @@ function TreeNodeRow({
           "flex items-center gap-2 px-3 py-2 rounded-md group transition-colors duration-100 cursor-pointer select-none",
           isSelected
             ? "bg-cyan-500/15 text-cyan-400"
-            : "hover:bg-white/[0.04] text-foreground/80"
+            : "hover:bg-white/[0.04] text-foreground/80",
         )}
         style={{ paddingLeft: `${12 + indent}px` }}
         data-tree-node-id={node.resource.id}
@@ -182,11 +186,7 @@ function TreeNodeRow({
             tabIndex={-1}
             aria-label={expanded ? "Collapse" : "Expand"}
           >
-            {expanded ? (
-              <ChevronDown size={14} />
-            ) : (
-              <ChevronRight size={14} />
-            )}
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
         ) : (
           <span
@@ -265,7 +265,7 @@ function collectAllIds(nodes: TreeNode[]): Set<string> {
 /** Build a flat ordered list of currently visible node IDs. */
 function buildVisibleIds(
   nodes: TreeNode[],
-  expandedIds: Set<string>
+  expandedIds: Set<string>,
 ): string[] {
   const result: string[] = [];
   function walk(list: TreeNode[]) {
@@ -289,26 +289,27 @@ export function ResourceTree({
   const roots = useMemo(() => buildTree(resources), [resources]);
 
   // Lifted expand/collapse state: all nodes start expanded
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(
-    () => collectAllIds(roots)
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() =>
+    collectAllIds(roots),
   );
 
   // Sync expandedIds when resources change (new nodes should default expanded)
   const prevResourcesRef = useRef(resources);
-  if (prevResourcesRef.current !== resources) {
-    prevResourcesRef.current = resources;
-    const allIds = collectAllIds(roots);
-    // Merge: keep existing collapse decisions, add any new IDs
-    setExpandedIds((prev) => {
-      const next = new Set(prev);
-      for (const id of allIds) {
-        if (!prev.has(id)) {
-          next.add(id);
+  useEffect(() => {
+    if (prevResourcesRef.current !== resources) {
+      prevResourcesRef.current = resources;
+      const allIds = collectAllIds(roots);
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of allIds) {
+          if (!prev.has(id)) {
+            next.add(id);
+          }
         }
-      }
-      return next;
-    });
-  }
+        return next;
+      });
+    }
+  }, [resources, roots]);
 
   const handleToggleExpand = useCallback((id: string) => {
     setExpandedIds((prev) => {
@@ -328,7 +329,7 @@ export function ResourceTree({
   // Flat list of visible node IDs for arrow key navigation
   const visibleIds = useMemo(
     () => buildVisibleIds(roots, expandedIds),
-    [roots, expandedIds]
+    [roots, expandedIds],
   );
 
   if (roots.length === 0) {

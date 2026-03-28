@@ -46,22 +46,20 @@ export const serviceAccountService = {
     api.get<ServiceAccount[]>(BASE).then((r) => r.data),
 
   create: (
-    data: CreateServiceAccountRequest
+    data: CreateServiceAccountRequest,
   ): Promise<ServiceAccountCreatedResponse> =>
-    api
-      .post<ServiceAccountCreatedResponse>(BASE, data)
-      .then((r) => r.data),
+    api.post<ServiceAccountCreatedResponse>(BASE, data).then((r) => r.data),
 
   getById: (id: string): Promise<ServiceAccount> =>
     api.get<ServiceAccount>(`${BASE}/${id}`).then((r) => r.data),
 
   update: (
     id: string,
-    data: UpdateServiceAccountRequest
+    data: UpdateServiceAccountRequest,
   ): Promise<ServiceAccount> =>
     api.put<ServiceAccount>(`${BASE}/${id}`, data).then((r) => r.data),
 
-  delete: (id: string): Promise<void> =>
+  remove: (id: string): Promise<void> =>
     api.delete(`${BASE}/${id}`).then(() => undefined),
 
   rotateSecret: (id: string): Promise<RotateSecretResponse> =>

@@ -2,7 +2,13 @@ import { useNavigate, useMatches } from "react-router-dom";
 import { Menu, LogOut, ChevronDown, Building2 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
 import { cn } from "@/lib/utils";
-import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 
 interface TopbarProps {
   onMenuClick: () => void;
@@ -48,6 +54,34 @@ export function Topbar({ onMenuClick }: TopbarProps) {
       first?.focus();
     }
   }, [userMenuOpen]);
+
+  const handleMenuKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      const container = e.currentTarget;
+      const items = Array.from(
+        container.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      );
+      if (items.length === 0) return;
+
+      const current = document.activeElement as HTMLElement;
+      const idx = items.indexOf(current);
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        items[idx < items.length - 1 ? idx + 1 : 0]?.focus();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        items[idx > 0 ? idx - 1 : items.length - 1]?.focus();
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        items[0]?.focus();
+      } else if (e.key === "End") {
+        e.preventDefault();
+        items[items.length - 1]?.focus();
+      }
+    },
+    [],
+  );
 
   const handleLogout = () => {
     clearAuth();
@@ -116,7 +150,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               "transition-all duration-200",
             )}
             aria-expanded={tenantMenuOpen}
-            aria-haspopup="true"
+            aria-haspopup="menu"
           >
             <Building2 size={14} aria-hidden="true" />
             <span className="hidden sm:inline">
@@ -133,10 +167,14 @@ export function Topbar({ onMenuClick }: TopbarProps) {
                 "absolute right-0 top-full mt-1 z-50 min-w-48",
                 "glass-card py-1 shadow-glass",
               )}
-              role="dialog"
+              role="menu"
               aria-label="Tenant selector"
+              onKeyDown={handleMenuKeyDown}
             >
-              <p className="px-3 py-2 text-xs text-muted-foreground">
+              <p
+                className="px-3 py-2 text-xs text-muted-foreground"
+                role="status"
+              >
                 Tenant switching coming soon
               </p>
             </div>
@@ -157,7 +195,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               "transition-all duration-200",
             )}
             aria-expanded={userMenuOpen}
-            aria-haspopup="true"
+            aria-haspopup="menu"
             aria-label="User menu"
           >
             <div
@@ -179,8 +217,9 @@ export function Topbar({ onMenuClick }: TopbarProps) {
                 "absolute right-0 top-full mt-1 z-50 min-w-40",
                 "glass-card py-1 shadow-glass",
               )}
-              role="dialog"
+              role="menu"
               aria-label="User menu"
+              onKeyDown={handleMenuKeyDown}
             >
               <div className="px-3 py-2 border-b border-primary/10">
                 <p className="text-sm text-foreground font-medium">
@@ -189,6 +228,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
                 <p className="text-xs text-muted-foreground">{user?.email}</p>
               </div>
               <button
+                role="menuitem"
                 onClick={handleLogout}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-destructive/10 transition-colors"
               >

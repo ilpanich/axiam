@@ -67,17 +67,13 @@ export const federationService = {
 
   update: (
     id: string,
-    data: UpdateProviderRequest
+    data: UpdateProviderRequest,
   ): Promise<FederationProvider> =>
-    api
-      .put<FederationProvider>(`${BASE}/${id}`, data)
-      .then((r) => r.data),
+    api.put<FederationProvider>(`${BASE}/${id}`, data).then((r) => r.data),
 
-  delete: (id: string): Promise<void> =>
+  remove: (id: string): Promise<void> =>
     api.delete(`${BASE}/${id}`).then(() => undefined),
 
   testConnection: (id: string): Promise<TestConnectionResult> =>
-    api
-      .post<TestConnectionResult>(`${BASE}/${id}/test`)
-      .then((r) => r.data),
+    api.post<TestConnectionResult>(`${BASE}/${id}/test`).then((r) => r.data),
 };

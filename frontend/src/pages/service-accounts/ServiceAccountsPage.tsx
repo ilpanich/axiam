@@ -1,11 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  Plus,
-  Pencil,
-  Trash2,
-  RotateCw,
-} from "lucide-react";
+import { Plus, Pencil, Trash2, RotateCw } from "lucide-react";
 import {
   serviceAccountService,
   type ServiceAccount,
@@ -104,9 +99,7 @@ function CreateFields({
           placeholder={"admin\nreader\nwriter"}
           rows={3}
         />
-        <p className="text-xs text-muted-foreground">
-          One role per line.
-        </p>
+        <p className="text-xs text-muted-foreground">One role per line.</p>
       </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
     </>
@@ -194,7 +187,7 @@ export function ServiceAccountsPage() {
     ? accounts.filter(
         (sa) =>
           sa.name.toLowerCase().includes(search.toLowerCase()) ||
-          sa.client_id.toLowerCase().includes(search.toLowerCase())
+          sa.client_id.toLowerCase().includes(search.toLowerCase()),
       )
     : accounts;
 
@@ -225,7 +218,7 @@ export function ServiceAccountsPage() {
       setRevealedSecret(resp.client_secret);
       setSecretModalTitle("Service Account Created");
       setSecretModalDesc(
-        "Your service account has been created. Save the credentials now — the secret will not be shown again."
+        "Your service account has been created. Save the credentials now — the secret will not be shown again.",
       );
       setSecretModalOpen(true);
     },
@@ -233,7 +226,7 @@ export function ServiceAccountsPage() {
       setCreateError(
         err instanceof Error
           ? err.message
-          : "Failed to create service account."
+          : "Failed to create service account.",
       );
     },
   });
@@ -255,16 +248,15 @@ export function ServiceAccountsPage() {
     createMutation.mutate({
       name: createName.trim(),
       description: createDesc.trim() || undefined,
-      roles: parseRoles(createRoles).length > 0
-        ? parseRoles(createRoles)
-        : undefined,
+      roles:
+        parseRoles(createRoles).length > 0
+          ? parseRoles(createRoles)
+          : undefined,
     });
   }
 
   // ─── Edit state ────────────────────────────────────────────────────────────
-  const [editAccount, setEditAccount] = useState<ServiceAccount | null>(
-    null
-  );
+  const [editAccount, setEditAccount] = useState<ServiceAccount | null>(null);
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editIsActive, setEditIsActive] = useState(true);
@@ -288,7 +280,7 @@ export function ServiceAccountsPage() {
       setEditError(
         err instanceof Error
           ? err.message
-          : "Failed to update service account."
+          : "Failed to update service account.",
       );
     },
   });
@@ -319,11 +311,12 @@ export function ServiceAccountsPage() {
   }
 
   // ─── Delete state ──────────────────────────────────────────────────────────
-  const [deleteAccount, setDeleteAccount] =
-    useState<ServiceAccount | null>(null);
+  const [deleteAccount, setDeleteAccount] = useState<ServiceAccount | null>(
+    null,
+  );
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => serviceAccountService.delete(id),
+    mutationFn: (id: string) => serviceAccountService.remove(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["service-accounts"],
@@ -333,8 +326,9 @@ export function ServiceAccountsPage() {
   });
 
   // ─── Rotate secret state ───────────────────────────────────────────────────
-  const [rotateAccount, setRotateAccount] =
-    useState<ServiceAccount | null>(null);
+  const [rotateAccount, setRotateAccount] = useState<ServiceAccount | null>(
+    null,
+  );
 
   const rotateMutation = useMutation({
     mutationFn: (id: string) => serviceAccountService.rotateSecret(id),
@@ -347,7 +341,7 @@ export function ServiceAccountsPage() {
       setRevealedSecret(resp.client_secret);
       setSecretModalTitle("Secret Rotated");
       setSecretModalDesc(
-        "The client secret has been rotated. Save the new credentials — the old secret is now invalid."
+        "The client secret has been rotated. Save the new credentials — the old secret is now invalid.",
       );
       setSecretModalOpen(true);
     },
@@ -378,9 +372,7 @@ export function ServiceAccountsPage() {
       key: "status",
       header: "Status",
       render: (row) => (
-        <StatusBadge
-          status={row.status === "active" ? "active" : "inactive"}
-        />
+        <StatusBadge status={row.status === "active" ? "active" : "inactive"} />
       ),
     },
     {

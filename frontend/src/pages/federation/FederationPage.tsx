@@ -28,7 +28,7 @@ function ProviderTypeBadge({ type }: { type: "saml" | "oidc" }) {
         "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border",
         type === "saml"
           ? "bg-purple-500/15 text-purple-400 border-purple-500/30"
-          : "bg-blue-500/15 text-blue-400 border-blue-500/30"
+          : "bg-blue-500/15 text-blue-400 border-blue-500/30",
       )}
     >
       {type === "saml" ? "SAML" : "OIDC"}
@@ -139,14 +139,12 @@ function CreateFields({
         <select
           id={`${idPrefix}-type`}
           value={type}
-          onChange={(e) =>
-            onTypeChange(e.target.value as "saml" | "oidc")
-          }
+          onChange={(e) => onTypeChange(e.target.value as "saml" | "oidc")}
           className={cn(
             "w-full rounded-md px-3 py-2 text-sm",
             "bg-white/5 border border-primary/20 text-foreground",
             "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
-            "transition-colors duration-200"
+            "transition-colors duration-200",
           )}
           aria-label="Provider type"
         >
@@ -180,9 +178,7 @@ function CreateFields({
             </p>
           </div>
           <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-metadata-url`}>
-              Metadata URL
-            </Label>
+            <Label htmlFor={`${idPrefix}-metadata-url`}>Metadata URL</Label>
             <Input
               id={`${idPrefix}-metadata-url`}
               value={metadataUrl}
@@ -212,9 +208,7 @@ function CreateFields({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-certificate`}>
-              Certificate (PEM)
-            </Label>
+            <Label htmlFor={`${idPrefix}-certificate`}>Certificate (PEM)</Label>
             <Textarea
               id={`${idPrefix}-certificate`}
               value={certificate}
@@ -236,9 +230,7 @@ function CreateFields({
             </p>
           </div>
           <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-issuer-url`}>
-              Issuer URL *
-            </Label>
+            <Label htmlFor={`${idPrefix}-issuer-url`}>Issuer URL *</Label>
             <Input
               id={`${idPrefix}-issuer-url`}
               value={issuerUrl}
@@ -258,9 +250,7 @@ function CreateFields({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-client-secret`}>
-              Client Secret *
-            </Label>
+            <Label htmlFor={`${idPrefix}-client-secret`}>Client Secret *</Label>
             <Input
               id={`${idPrefix}-client-secret`}
               type="password"
@@ -403,7 +393,7 @@ export function FederationPage() {
     ? providers.filter(
         (p) =>
           p.name.toLowerCase().includes(search.toLowerCase()) ||
-          p.domain.toLowerCase().includes(search.toLowerCase())
+          p.domain.toLowerCase().includes(search.toLowerCase()),
       )
     : providers;
 
@@ -425,7 +415,7 @@ export function FederationPage() {
       createForm.setError(
         err instanceof Error
           ? err.message
-          : "Failed to create federation provider."
+          : "Failed to create federation provider.",
       );
     },
   });
@@ -450,9 +440,7 @@ export function FederationPage() {
 
     if (createForm.type === "saml") {
       if (!createForm.entityId.trim() || !createForm.ssoUrl.trim()) {
-        createForm.setError(
-          "Entity ID and SSO URL are required for SAML."
-        );
+        createForm.setError("Entity ID and SSO URL are required for SAML.");
         return;
       }
       payload.saml_config = {
@@ -468,7 +456,7 @@ export function FederationPage() {
         !createForm.clientSecret.trim()
       ) {
         createForm.setError(
-          "Issuer URL, Client ID, and Client Secret are required for OIDC."
+          "Issuer URL, Client ID, and Client Secret are required for OIDC.",
         );
         return;
       }
@@ -484,8 +472,9 @@ export function FederationPage() {
   }
 
   // ─── Edit state ────────────────────────────────────────────────────────────
-  const [editProvider, setEditProvider] =
-    useState<FederationProvider | null>(null);
+  const [editProvider, setEditProvider] = useState<FederationProvider | null>(
+    null,
+  );
   const editForm = useProviderFormState();
 
   const editMutation = useMutation({
@@ -506,7 +495,7 @@ export function FederationPage() {
       editForm.setError(
         err instanceof Error
           ? err.message
-          : "Failed to update federation provider."
+          : "Failed to update federation provider.",
       );
     },
   });
@@ -558,7 +547,7 @@ export function FederationPage() {
     useState<FederationProvider | null>(null);
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => federationService.delete(id),
+    mutationFn: (id: string) => federationService.remove(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["federation-providers"],
@@ -583,8 +572,7 @@ export function FederationPage() {
     onError: (err: unknown) => {
       setTestResult({
         success: false,
-        message:
-          err instanceof Error ? err.message : "Connection test failed.",
+        message: err instanceof Error ? err.message : "Connection test failed.",
       });
       setTestingId(null);
     },
@@ -614,9 +602,7 @@ export function FederationPage() {
       key: "status",
       header: "Status",
       render: (row) => (
-        <StatusBadge
-          status={row.status === "active" ? "active" : "inactive"}
-        />
+        <StatusBadge status={row.status === "active" ? "active" : "inactive"} />
       ),
     },
     {
@@ -658,7 +644,7 @@ export function FederationPage() {
             disabled={testingId === row.id}
             className={cn(
               "p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors",
-              testingId === row.id && "animate-pulse"
+              testingId === row.id && "animate-pulse",
             )}
             title="Test connection"
           >
@@ -708,7 +694,7 @@ export function FederationPage() {
             "mb-4 px-4 py-3 rounded-lg border text-sm flex items-center justify-between",
             testResult.success
               ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
-              : "bg-red-500/10 border-red-500/30 text-red-400"
+              : "bg-red-500/10 border-red-500/30 text-red-400",
           )}
           role="alert"
         >

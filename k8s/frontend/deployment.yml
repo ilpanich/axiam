@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: axiam-frontend
+  namespace: axiam
+  labels:
+    app: axiam
+    component: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: axiam
+      component: frontend
+  template:
+    metadata:
+      labels:
+        app: axiam
+        component: frontend
+    spec:
+      containers:
+        - name: axiam-frontend
+          image: ghcr.io/OWNER/frontend:latest
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: axiam-config
+  namespace: axiam
+  labels:
+    app: axiam
+    component: server
+data:
+  AXIAM_DB__URL: "ws://surrealdb:8000"
+  AXIAM_DB__NAMESPACE: "axiam"
+  AXIAM_DB__DATABASE: "axiam"
+  AXIAM_AMQP__URL: "amqp://rabbitmq:5672"
+  AXIAM_SERVER__HOST: "0.0.0.0"
+  AXIAM_GRPC__HOST: "0.0.0.0"
+  RUST_LOG: "info,axiam=debug"

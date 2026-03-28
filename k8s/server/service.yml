@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: axiam-server
+  namespace: axiam
+  labels:
+    app: axiam
+    component: server
+spec:
+  type: ClusterIP
+  selector:
+    app: axiam
+    component: server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP

@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: axiam-server
+  namespace: axiam
+  labels:
+    app: axiam
+    component: server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: axiam
+      component: server
+  template:
+    metadata:
+      labels:
+        app: axiam
+        component: server
+    spec:
+      containers:
+        - name: axiam-server
+          image: ghcr.io/OWNER/server:latest
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          envFrom:
+            - configMapRef:
+                name: axiam-config
+            - secretRef:
+                name: axiam-secrets
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true

@@ -56,3 +56,18 @@ frontend-build:
 # Run frontend E2E tests
 frontend-test:
     cd frontend && npx playwright test
+
+# Start full production-like stack (build images + run all services)
+prod-up:
+    docker compose -f docker/docker-compose.prod.yml up --build -d
+    @echo "AXIAM Frontend: http://localhost"
+    @echo "AXIAM REST API: http://localhost:8080"
+    @echo "AXIAM gRPC:     localhost:50051"
+
+# Stop production-like stack
+prod-down:
+    docker compose -f docker/docker-compose.prod.yml down
+
+# Stop production-like stack and remove volumes
+prod-clean:
+    docker compose -f docker/docker-compose.prod.yml down -v

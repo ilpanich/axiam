@@ -12,6 +12,7 @@ frontend/dist/
 
 # Deployment configs (not needed inside the image)
 docker/
+!docker/nginx.conf
 k8s/
 
 # SDKs and dev docs

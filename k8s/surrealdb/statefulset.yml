@@ -23,7 +23,25 @@ spec:
         - name: surrealdb
           image: surrealdb/surrealdb:v2
           command: ["surreal"]
-          args: ["start", "--user", "root", "--pass", "root", "--log", "info"]
+          args:
+            - "start"
+            - "--user"
+            - "$(SURREALDB_USER)"
+            - "--pass"
+            - "$(SURREALDB_PASS)"
+            - "--log"
+            - "info"
+          env:
+            - name: SURREALDB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: surrealdb-credentials
+                  key: username
+            - name: SURREALDB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: surrealdb-credentials
+                  key: password
           ports:
             - containerPort: 8000
               name: http

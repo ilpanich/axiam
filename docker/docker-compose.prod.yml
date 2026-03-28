@@ -18,12 +18,14 @@ services:
       - "8080:8080"   # REST API
       - "50051:50051" # gRPC
     environment:
-      AXIAM_DATABASE__URL: "ws://surrealdb:8000"
-      AXIAM_DATABASE__USERNAME: "root"
-      AXIAM_DATABASE__PASSWORD: "root"
-      AXIAM_DATABASE__NAMESPACE: "axiam"
-      AXIAM_DATABASE__DATABASE: "axiam"
+      AXIAM_DB__URL: "ws://surrealdb:8000"
+      AXIAM_DB__USERNAME: "root"
+      AXIAM_DB__PASSWORD: "root"
+      AXIAM_DB__NAMESPACE: "axiam"
+      AXIAM_DB__DATABASE: "axiam"
       AXIAM_AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
+      AXIAM_SERVER__HOST: "0.0.0.0"
+      AXIAM_GRPC__HOST: "0.0.0.0"
       RUST_LOG: "axiam=info"
     depends_on:
       surrealdb:
@@ -49,7 +51,7 @@ services:
       dockerfile: docker/Dockerfile.frontend
     container_name: axiam-frontend
     ports:
-      - "80:80"
+      - "80:8080"
     depends_on:
       - axiam-server
     restart: unless-stopped

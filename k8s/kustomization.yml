@@ -18,5 +18,7 @@ resources:
   - ingress.yml
   - surrealdb/statefulset.yml
   - surrealdb/service.yml
+  - surrealdb/secret.yml
   - rabbitmq/statefulset.yml
   - rabbitmq/service.yml
+  - rabbitmq/secret.yml

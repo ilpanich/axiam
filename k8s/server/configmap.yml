@@ -7,8 +7,10 @@ metadata:
     app: axiam
     component: server
 data:
-  AXIAM_DATABASE__URL: "ws://surrealdb:8000"
-  AXIAM_DATABASE__NAMESPACE: "axiam"
-  AXIAM_DATABASE__DATABASE: "axiam"
+  AXIAM_DB__URL: "ws://surrealdb:8000"
+  AXIAM_DB__NAMESPACE: "axiam"
+  AXIAM_DB__DATABASE: "axiam"
   AXIAM_AMQP__URL: "amqp://rabbitmq:5672"
+  AXIAM_SERVER__HOST: "0.0.0.0"
+  AXIAM_GRPC__HOST: "0.0.0.0"
   RUST_LOG: "info,axiam=debug"

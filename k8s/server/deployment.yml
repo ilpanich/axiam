@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: axiam-server
-          image: ghcr.io/OWNER/axiam-server:latest
+          image: ghcr.io/OWNER/server:latest
           ports:
             - name: http
               containerPort: 8080
@@ -37,7 +37,7 @@ spec:
               memory: 512Mi
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10

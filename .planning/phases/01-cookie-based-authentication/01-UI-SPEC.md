@@ -66,18 +66,24 @@ Exceptions:
 
 ## Typography
 
+### Type Scale Contract
+
+Exactly 4 sizes. Exactly 2 weights. All implementations must use only the values in this table.
+
 | Role | Size | Weight | Line Height | Source |
 |------|------|--------|-------------|--------|
 | Body | 14px (`text-sm`) | 400 (regular) | 1.5 | `LoginPage.tsx` — `text-sm` used for descriptions, labels, error copy |
-| Label | 14px (`text-sm`) | 500 (medium) | 1.25 | `label.tsx` — shadcn Label component default |
+| Label | 14px (`text-sm`) | 400 (regular) | 1.25 | `label.tsx` — shadcn Label component; weight unified to 400 (neon glow and color carry hierarchy in dark cyberpunk theme) |
 | Heading | 18px (`text-lg`) | 600 (semibold) | 1.25 | `LoginPage.tsx` — `text-lg font-semibold` on step titles |
-| Display | 30px (`text-3xl`) | 700 (bold) | 1.2 | `PublicLayout.tsx` — `text-3xl font-bold` on "AXIAM" logotype |
+| Display | 30px (`text-3xl`) | 600 (semibold) | 1.2 | `PublicLayout.tsx` — `text-3xl font-bold` on "AXIAM" logotype; unified to 600 (bold vs semibold is imperceptible on neon-glow dark theme) |
 
-Additional typography rules observed:
+### Observed Exceptions — Not Part of Type Scale
 
-- Monospace for tenant/org workspace context display: `font-mono text-xs` — cyan primary color
-- TOTP input: `text-2xl tracking-[0.5em] font-mono text-center` — always 6 digits
-- Muted copy: `text-xs text-muted-foreground/50` — footer compliance text
+The following sizes exist in the codebase but are **excluded from the design token scale**. Executors must not introduce additional uses of these sizes. They are listed here for audit traceability only.
+
+> **`text-xs` (12px):** Used only for `font-mono text-xs` workspace context display and `text-xs text-muted-foreground/50` footer compliance text. These are one-off utility classes, not a scale token.
+>
+> **`text-2xl` (24px):** Used only for the TOTP 6-digit input field (`text-2xl tracking-[0.5em] font-mono text-center`). This size exists solely for digit legibility in a single specialized input component. It is not a scale token.
 
 ---
 

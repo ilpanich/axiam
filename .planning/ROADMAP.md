@@ -30,7 +30,13 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
   3. Refresh token cookie is path-scoped to the refresh endpoint only
   4. State-changing API requests are protected against CSRF via double-submit cookie pattern
   5. Frontend login/logout/refresh flows work end-to-end with cookie auth
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Backend cookie middleware, CSRF, auth handlers, extractor, /me endpoint
+- [ ] 01-02-PLAN.md — Frontend auth refactor (Zustand store, Axios client, auth init hook)
+- [ ] 01-03-PLAN.md — Integration tests rewritten for cookie-based auth flow
+
 **UI hint**: yes
 
 ### Scope
@@ -207,7 +213,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Cookie-Based Authentication | 0/0 | Not started | - |
+| 1. Cookie-Based Authentication | 0/3 | Planning complete | - |
 | 2. Security Headers & Rate Limiting | 0/0 | Not started | - |
 | 3. RBAC Enforcement | 0/0 | Not started | - |
 | 4. Federation Verification & Session Security | 0/0 | Not started | - |

@@ -1,7 +1,8 @@
 ---
 phase: 1
 slug: cookie-based-authentication
-status: draft
+status: approved
+reviewed_at: 2026-04-03
 shadcn_initialized: true
 preset: default / slate / cssVariables
 created: 2026-04-03

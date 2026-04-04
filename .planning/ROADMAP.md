@@ -10,7 +10,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 
 ## Phases
 
-- [ ] **Phase 1: Cookie-Based Authentication** - Migrate JWT delivery from sessionStorage to httpOnly secure cookies with CSRF protection
+- [x] **Phase 1: Cookie-Based Authentication** - Migrate JWT delivery from sessionStorage to httpOnly secure cookies with CSRF protection (completed 2026-04-04)
 - [ ] **Phase 2: Security Headers & Rate Limiting** - Add OWASP-recommended security headers and brute-force protection to all endpoints
 - [ ] **Phase 3: RBAC Enforcement** - Wire authorization engine to every endpoint with default-deny and admin bootstrap
 - [ ] **Phase 4: Federation Verification & Session Security** - Cryptographically verify federation tokens and enforce session lifecycle
@@ -35,7 +35,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 Plans:
 - [x] 01-01-PLAN.md — Backend cookie middleware, CSRF, auth handlers, extractor, /me endpoint
 - [x] 01-02-PLAN.md — Frontend auth refactor (Zustand store, Axios client, auth init hook)
-- [ ] 01-03-PLAN.md — Integration tests rewritten for cookie-based auth flow
+- [x] 01-03-PLAN.md — Integration tests rewritten for cookie-based auth flow
 
 **UI hint**: yes
 
@@ -213,7 +213,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Cookie-Based Authentication | 0/3 | Planning complete | - |
+| 1. Cookie-Based Authentication | 3/3 | Complete   | 2026-04-04 |
 | 2. Security Headers & Rate Limiting | 0/0 | Not started | - |
 | 3. RBAC Enforcement | 0/0 | Not started | - |
 | 4. Federation Verification & Session Security | 0/0 | Not started | - |

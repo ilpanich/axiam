@@ -18,14 +18,18 @@ interface OrgTenantData {
 }
 
 interface LoginResponse {
-  access_token?: string;
-  mfa_required?: boolean;
-  mfa_session_token?: string;
   user?: {
     id: string;
     username: string;
     email: string;
   };
+  session_id?: string;
+  expires_in?: number;
+  mfa_required?: boolean;
+  challenge_token?: string;
+  available_methods?: string[];
+  mfa_setup_required?: boolean;
+  setup_token?: string;
 }
 
 interface ErrorResponse {
@@ -35,7 +39,7 @@ interface ErrorResponse {
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const { setTokens, setTenantContext } = useAuthStore();
+  const { setUser, setTenantContext } = useAuthStore();
 
   const [step, setStep] = useState<LoginStep>("org-tenant");
   const [orgTenantData, setOrgTenantData] = useState<OrgTenantData>({
@@ -45,7 +49,7 @@ export function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
-  const [mfaSessionToken, setMfaSessionToken] = useState("");
+  const [mfaChallengeToken, setMfaChallengeToken] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -69,7 +73,7 @@ export function LoginPage() {
 
     setIsLoading(true);
     try {
-      const response = await api.post<LoginResponse>("/auth/login", {
+      const response = await api.post<LoginResponse>("/api/v1/auth/login", {
         username,
         password,
         tenant_slug: orgTenantData.tenantSlug,
@@ -79,20 +83,27 @@ export function LoginPage() {
       const data = response.data;
 
       if (data.mfa_required) {
-        setMfaSessionToken(data.mfa_session_token ?? "");
+        setMfaChallengeToken(data.challenge_token ?? "");
         setStep("mfa");
         return;
       }
 
-      if (data.access_token && data.user) {
-        setTokens(data.access_token, data.user);
+      if (data.user) {
+        setUser(data.user);
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
         navigate("/dashboard");
-      } else if (!data.mfa_required) {
-        setError("Unexpected server response. Please try again.");
+      } else {
+        setError("Authentication error. Please sign in again.");
+        navigate("/login");
       }
     } catch (err) {
       const axiosErr = err as AxiosError<ErrorResponse>;
+      if (axiosErr.response?.status === 403) {
+        setError(
+          "Request rejected for security reasons. Please refresh the page and try again."
+        );
+        return;
+      }
       const msg =
         axiosErr.response?.data?.message ??
         axiosErr.response?.data?.error ??
@@ -113,21 +124,28 @@ export function LoginPage() {
 
     setIsLoading(true);
     try {
-      const response = await api.post<LoginResponse>("/auth/mfa/verify", {
+      const response = await api.post<LoginResponse>("/api/v1/auth/mfa/verify", {
         code: totpCode,
-        session_token: mfaSessionToken,
+        challenge_token: mfaChallengeToken,
       });
 
       const data = response.data;
-      if (data.access_token && data.user) {
-        setTokens(data.access_token, data.user);
+      if (data.user) {
+        setUser(data.user);
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
         navigate("/dashboard");
       } else {
-        setError("Unexpected server response. Please try again.");
+        setError("Authentication error. Please sign in again.");
+        navigate("/login");
       }
     } catch (err) {
       const axiosErr = err as AxiosError<ErrorResponse>;
+      if (axiosErr.response?.status === 403) {
+        setError(
+          "Request rejected for security reasons. Please refresh the page and try again."
+        );
+        return;
+      }
       const msg =
         axiosErr.response?.data?.message ??
         axiosErr.response?.data?.error ??

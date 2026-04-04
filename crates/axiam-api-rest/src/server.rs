@@ -8,6 +8,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::handlers;
+use crate::middleware::csrf::CsrfMiddleware;
 use crate::openapi::ApiDoc;
 
 /// Register health and readiness routes.
@@ -34,10 +35,12 @@ pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
 pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/auth")
+            .wrap(CsrfMiddleware)
             .app_data(web::JsonConfig::default().limit(65_536))
             .route("/login", web::post().to(handlers::auth::login::<C>))
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
+            .route("/me", web::get().to(handlers::auth::me::<C>))
             .route(
                 "/mfa/enroll",
                 web::post().to(handlers::auth::enroll_mfa::<C>),
@@ -500,6 +503,7 @@ pub fn build_cors(allowed_origins: &[String]) -> Cors {
             header::CONTENT_TYPE,
             header::ACCEPT,
         ])
+        .allowed_header("X-CSRF-Token")
         .max_age(3600);
 
     for origin in allowed_origins {

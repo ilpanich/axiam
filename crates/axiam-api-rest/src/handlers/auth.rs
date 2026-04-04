@@ -2,11 +2,12 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
-use axiam_auth::service::{LoginInput, RefreshInput, VerifyMfaInput};
-use axiam_auth::token::issue_access_token;
+use axiam_auth::service::{LoginInput, LoginOutput, RefreshInput, VerifyMfaInput};
+use axiam_auth::token::{issue_access_token, validate_access_token};
 use axiam_auth::{AuthService, MfaMethodService};
+use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceAuthResponse;
-use axiam_core::repository::{SettingsRepository, TenantRepository};
+use axiam_core::repository::{SettingsRepository, TenantRepository, UserRepository};
 use axiam_db::{
     SurrealFederationLinkRepository, SurrealSessionRepository, SurrealSettingsRepository,
     SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
@@ -18,6 +19,10 @@ use uuid::Uuid;
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::cert_auth::CertificateAuthenticated;
+use crate::middleware::csrf::{
+    access_cookie, clear_access_cookie, clear_csrf_cookie, clear_refresh_cookie, csrf_cookie,
+    generate_csrf_token, refresh_cookie,
+};
 
 type AuthSvc<C> = AuthService<
     SurrealUserRepository<C>,
@@ -40,10 +45,20 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+/// User info included in login/me responses.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct LoginUserInfo {
+    pub id: Uuid,
+    pub username: String,
+    pub email: String,
+}
+
+/// Login success response body.
+///
+/// Tokens are delivered via `Set-Cookie` headers — not in this body.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LoginSuccessResponse {
-    pub access_token: String,
-    pub refresh_token: String,
+    pub user: LoginUserInfo,
     pub session_id: Uuid,
     pub expires_in: u64,
 }
@@ -55,11 +70,18 @@ pub struct MfaRequiredResponse {
     pub available_methods: Vec<String>,
 }
 
+/// Refresh success response body.
+///
+/// The new access token is delivered via `Set-Cookie` headers.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RefreshSuccessResponse {
+    pub expires_in: u64,
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RefreshRequest {
     pub tenant_id: Uuid,
     pub org_id: Uuid,
-    pub refresh_token: String,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -106,6 +128,12 @@ pub struct MfaSetupConfirmRequest {
     pub totp_code: String,
 }
 
+/// GET /auth/me response body.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MeResponse {
+    pub user: LoginUserInfo,
+}
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
@@ -121,6 +149,52 @@ fn user_agent(req: &HttpRequest) -> Option<String> {
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
+}
+
+/// Build an `HttpResponse` that sets all three auth cookies and returns
+/// the `LoginSuccessResponse` body. A fresh CSRF token is generated on
+/// every call (D-02 — new CSRF token on login and refresh rotation).
+async fn cookie_response_from_output<C: Connection>(
+    out: &LoginOutput,
+    config: &AuthConfig,
+    user_repo: &SurrealUserRepository<C>,
+) -> Result<HttpResponse, AxiamApiError> {
+    // Decode the just-issued access token to get user_id.
+    let claims = validate_access_token(&out.access_token, config).map_err(AxiamError::from)?;
+    let user_id = Uuid::parse_str(&claims.0.sub).map_err(|_| AxiamError::AuthenticationFailed {
+        reason: "invalid sub in issued token".into(),
+    })?;
+    let tenant_id =
+        Uuid::parse_str(&claims.0.tenant_id).map_err(|_| AxiamError::AuthenticationFailed {
+            reason: "invalid tenant_id in issued token".into(),
+        })?;
+
+    let user = user_repo.get_by_id(tenant_id, user_id).await.map_err(|_| {
+        AxiamError::AuthenticationFailed {
+            reason: "user not found after login".into(),
+        }
+    })?;
+
+    let csrf_token = generate_csrf_token();
+    Ok(HttpResponse::Ok()
+        .cookie(access_cookie(
+            &out.access_token,
+            config.access_token_lifetime_secs,
+        ))
+        .cookie(refresh_cookie(
+            &out.refresh_token,
+            config.refresh_token_lifetime_secs,
+        ))
+        .cookie(csrf_cookie(&csrf_token, config.access_token_lifetime_secs))
+        .json(LoginSuccessResponse {
+            user: LoginUserInfo {
+                id: user.id,
+                username: user.username,
+                email: user.email,
+            },
+            session_id: out.session_id,
+            expires_in: out.expires_in,
+        }))
 }
 
 // -----------------------------------------------------------------------
@@ -145,6 +219,8 @@ pub async fn login<C: Connection>(
     svc: web::Data<AuthSvc<C>>,
     mfa_svc: web::Data<MfaMethodSvc<C>>,
     settings_repo: web::Data<SurrealSettingsRepository<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -173,12 +249,7 @@ pub async fn login<C: Connection>(
 
     match result {
         axiam_auth::LoginResult::Success(out) => {
-            Ok(HttpResponse::Ok().json(LoginSuccessResponse {
-                access_token: out.access_token,
-                refresh_token: out.refresh_token,
-                session_id: out.session_id,
-                expires_in: out.expires_in,
-            }))
+            cookie_response_from_output(&out, &auth_config, &user_repo).await
         }
         axiam_auth::LoginResult::MfaRequired(mut challenge) => {
             // Decode user/tenant from challenge to look up available methods.
@@ -221,7 +292,11 @@ pub async fn logout<C: Connection>(
     body: web::Json<LogoutRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     svc.logout(user.tenant_id, body.session_id).await?;
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::NoContent()
+        .cookie(clear_access_cookie())
+        .cookie(clear_refresh_cookie())
+        .cookie(clear_csrf_cookie())
+        .finish())
 }
 
 /// `POST /auth/refresh`
@@ -231,32 +306,54 @@ pub async fn logout<C: Connection>(
     tag = "auth",
     request_body = RefreshRequest,
     responses(
-        (status = 200, description = "Tokens refreshed", body = LoginSuccessResponse),
+        (status = 200, description = "Tokens refreshed", body = RefreshSuccessResponse),
         (status = 401, description = "Invalid refresh token"),
     )
 )]
 pub async fn refresh<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<RefreshRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
+
+    // Refresh token must come from the httpOnly cookie.
+    let raw_refresh_token = req
+        .cookie("axiam_refresh")
+        .map(|c| c.value().to_owned())
+        .ok_or_else(|| AxiamError::AuthenticationFailed {
+            reason: "missing refresh token cookie".into(),
+        })?;
+
     let input = RefreshInput {
         tenant_id: b.tenant_id,
         org_id: b.org_id,
-        raw_refresh_token: b.refresh_token,
+        raw_refresh_token,
         ip_address: client_ip(&req),
         user_agent: user_agent(&req),
     };
 
     let out = svc.refresh(input).await?;
 
-    Ok(HttpResponse::Ok().json(LoginSuccessResponse {
-        access_token: out.access_token,
-        refresh_token: out.refresh_token,
-        session_id: out.session_id,
-        expires_in: out.expires_in,
-    }))
+    // Issue a new CSRF token on every refresh rotation (D-02).
+    let csrf_token = generate_csrf_token();
+    Ok(HttpResponse::Ok()
+        .cookie(access_cookie(
+            &out.access_token,
+            auth_config.access_token_lifetime_secs,
+        ))
+        .cookie(refresh_cookie(
+            &out.refresh_token,
+            auth_config.refresh_token_lifetime_secs,
+        ))
+        .cookie(csrf_cookie(
+            &csrf_token,
+            auth_config.access_token_lifetime_secs,
+        ))
+        .json(RefreshSuccessResponse {
+            expires_in: out.expires_in,
+        }))
 }
 
 /// `POST /auth/mfa/enroll`
@@ -317,6 +414,8 @@ pub async fn confirm_mfa<C: Connection>(
 pub async fn verify_mfa<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<MfaVerifyRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -328,13 +427,7 @@ pub async fn verify_mfa<C: Connection>(
     };
 
     let out = svc.verify_mfa(input).await?;
-
-    Ok(HttpResponse::Ok().json(LoginSuccessResponse {
-        access_token: out.access_token,
-        refresh_token: out.refresh_token,
-        session_id: out.session_id,
-        expires_in: out.expires_in,
-    }))
+    cookie_response_from_output(&out, &auth_config, &user_repo).await
 }
 
 /// `POST /auth/device`
@@ -422,6 +515,8 @@ pub async fn setup_enroll_mfa<C: Connection>(
 pub async fn setup_confirm_mfa<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<MfaSetupConfirmRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -434,11 +529,38 @@ pub async fn setup_confirm_mfa<C: Connection>(
         )
         .await?;
 
-    Ok(HttpResponse::Ok().json(LoginSuccessResponse {
-        access_token: out.access_token,
-        refresh_token: out.refresh_token,
-        session_id: out.session_id,
-        expires_in: out.expires_in,
+    cookie_response_from_output(&out, &auth_config, &user_repo).await
+}
+
+/// `GET /auth/me`
+///
+/// Returns the authenticated user's profile. Requires a valid session cookie.
+#[utoipa::path(
+    get,
+    path = "/auth/me",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Authenticated user info", body = MeResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn me<C: Connection>(
+    user: AuthenticatedUser,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let u = user_repo
+        .get_by_id(user.tenant_id, user.user_id)
+        .await
+        .map_err(|_| AxiamError::AuthenticationFailed {
+            reason: "user not found".into(),
+        })?;
+    Ok(HttpResponse::Ok().json(MeResponse {
+        user: LoginUserInfo {
+            id: user.user_id,
+            username: u.username,
+            email: u.email,
+        },
     }))
 }
 

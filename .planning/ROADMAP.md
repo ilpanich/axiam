@@ -33,7 +33,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 **Plans**: 3 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Backend cookie middleware, CSRF, auth handlers, extractor, /me endpoint
+- [x] 01-01-PLAN.md — Backend cookie middleware, CSRF, auth handlers, extractor, /me endpoint
 - [ ] 01-02-PLAN.md — Frontend auth refactor (Zustand store, Axios client, auth init hook)
 - [ ] 01-03-PLAN.md — Integration tests rewritten for cookie-based auth flow
 

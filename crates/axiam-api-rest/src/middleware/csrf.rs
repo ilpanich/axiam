@@ -42,6 +42,7 @@ pub const HEADER_CSRF: &str = "X-CSRF-Token";
 const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     "/auth/login",
     "/auth/mfa/verify",
+    "/auth/mfa/setup/enroll",
     "/auth/mfa/setup/confirm",
     "/auth/device",
 ];

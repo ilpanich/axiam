@@ -11,39 +11,52 @@ const api: AxiosInstance = axios.create({
   headers: {
     "Content-Type": "application/json",
   },
+  withCredentials: true, // Send cookies on ALL requests
 });
 
-// Track if a refresh is already in progress to avoid multiple concurrent refreshes
-let isRefreshing = false;
-let failedQueue: Array<{
-  resolve: (value: string) => void;
-  reject: (error: unknown) => void;
-}> = [];
-
-function processQueue(error: unknown, token: string | null = null) {
-  failedQueue.forEach((prom) => {
-    if (error) {
-      prom.reject(error);
-    } else if (token) {
-      prom.resolve(token);
-    }
-  });
-  failedQueue = [];
+// Parse a named cookie from document.cookie string
+function getCookie(name: string): string | null {
+  const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
-// Request interceptor: attach Authorization header
+// State-changing HTTP methods that need CSRF token
+const CSRF_METHODS = new Set(["post", "put", "patch", "delete"]);
+
+// Request interceptor: inject X-CSRF-Token header on state-changing requests (per D-03, D-04)
 api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
-    const token = useAuthStore.getState().accessToken;
-    if (token && config.headers) {
-      config.headers.Authorization = `Bearer ${token}`;
+    const method = (config.method || "get").toLowerCase();
+    if (CSRF_METHODS.has(method) && config.headers) {
+      const csrfToken = getCookie("axiam_csrf");
+      if (csrfToken) {
+        config.headers["X-CSRF-Token"] = csrfToken;
+      }
     }
     return config;
   },
   (error: AxiosError) => Promise.reject(error)
 );
 
-// Response interceptor: handle 401 with silent token refresh
+// Track if a refresh is already in progress
+let isRefreshing = false;
+let failedQueue: Array<{
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
+}> = [];
+
+function processQueue(error: unknown) {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(undefined);
+    }
+  });
+  failedQueue = [];
+}
+
+// Response interceptor: handle 401 with silent cookie-based refresh (per D-14)
 api.interceptors.response.use(
   (response: AxiosResponse) => response,
   async (error: AxiosError) => {
@@ -51,63 +64,41 @@ api.interceptors.response.use(
       | (InternalAxiosRequestConfig & { _retry?: boolean })
       | undefined;
 
-    // Guard: error.config can be undefined on network/setup failures
     if (!originalRequest) {
       return Promise.reject(error);
     }
 
-    // Skip refresh logic for auth endpoints and when no token is present
-    const isAuthRoute = originalRequest.url?.match(/\/auth\//);
-    const hasToken = !!useAuthStore.getState().accessToken;
+    // Skip refresh for auth endpoints (login, refresh itself, etc.)
+    const isAuthRoute = originalRequest.url?.includes("/auth/");
+    const isAuthenticated = useAuthStore.getState().isAuthenticated;
 
     if (
       error.response?.status === 401 &&
       !originalRequest._retry &&
       !isAuthRoute &&
-      hasToken
+      isAuthenticated
     ) {
       if (isRefreshing) {
-        // Queue request until refresh completes
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject });
-        })
-          .then((token) => {
-            if (originalRequest.headers) {
-              originalRequest.headers.Authorization = `Bearer ${token}`;
-            }
-            return api(originalRequest);
-          })
-          .catch((err: unknown) => Promise.reject(err));
+        }).then(() => api(originalRequest));
       }
 
       originalRequest._retry = true;
       isRefreshing = true;
 
       try {
-        const response = await axios.post<{ access_token: string }>(
-          "/auth/refresh",
+        // Cookie-based refresh — cookies sent automatically, no token in body
+        await axios.post(
+          "/api/v1/auth/refresh",
           {},
           { withCredentials: true }
         );
-        const newToken = response.data.access_token;
-        const { user } = useAuthStore.getState();
-
-        if (user) {
-          useAuthStore.getState().setTokens(newToken, user);
-        } else {
-          // Token exists without user (partial rehydration) —
-          // update the token directly so retried requests use it
-          useAuthStore.getState().updateAccessToken(newToken);
-        }
-
-        processQueue(null, newToken);
-
-        if (originalRequest.headers) {
-          originalRequest.headers.Authorization = `Bearer ${newToken}`;
-        }
+        // New cookies set by server response — no store update needed
+        processQueue(null);
         return api(originalRequest);
       } catch (refreshError) {
-        processQueue(refreshError, null);
+        processQueue(refreshError);
         useAuthStore.getState().clearAuth();
         window.location.href = "/login";
         return Promise.reject(refreshError);

@@ -1,8 +1,8 @@
 //! JWT-based authentication extractor.
 //!
 //! [`AuthenticatedUser`] implements Actix-Web's `FromRequest` trait.
-//! It extracts and validates the `Authorization: Bearer <token>` header,
-//! returning the authenticated user's identity.
+//! It extracts the JWT from the `axiam_access` httpOnly cookie (browser clients)
+//! or falls back to `Authorization: Bearer <token>` header (service clients).
 
 use std::sync::Arc;
 
@@ -53,29 +53,35 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
         .app_data::<web::Data<AuthConfig>>()
         .ok_or(AxiamError::Internal("missing auth config".into()))?;
 
-    let header = req
-        .headers()
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(AxiamError::AuthenticationFailed {
-            reason: "missing Authorization header".into(),
-        })?;
+    // Try cookie first (browser clients), then Authorization header (service clients).
+    let token = if let Some(cookie) = req.cookie("axiam_access") {
+        cookie.value().to_owned()
+    } else {
+        // Fall back to Authorization: Bearer header for non-browser clients.
+        let header = req
+            .headers()
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AxiamError::AuthenticationFailed {
+                reason: "missing authentication credentials".into(),
+            })?;
 
-    // Parse `Authorization` as case-insensitive Bearer with flexible whitespace.
-    let header = header.trim();
-    let mut parts = header.splitn(2, char::is_whitespace);
-    let scheme = parts.next().unwrap_or("");
-    let credentials = parts.next().unwrap_or("").trim();
+        // Parse `Authorization` as case-insensitive Bearer with flexible whitespace.
+        let header = header.trim();
+        let mut parts = header.splitn(2, char::is_whitespace);
+        let scheme = parts.next().unwrap_or("");
+        let credentials = parts.next().unwrap_or("").trim();
 
-    if !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
-        return Err(AxiamError::AuthenticationFailed {
-            reason: "invalid Authorization scheme, expected Bearer".into(),
+        if !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
+            return Err(AxiamError::AuthenticationFailed {
+                reason: "invalid Authorization scheme, expected Bearer".into(),
+            }
+            .into());
         }
-        .into());
-    }
+        credentials.to_owned()
+    };
 
-    let token = credentials;
-    let validated = validate_access_token(token, config).map_err(AxiamError::from)?;
+    let validated = validate_access_token(&token, config).map_err(AxiamError::from)?;
 
     let user_id =
         Uuid::parse_str(&validated.0.sub).map_err(|_| AxiamError::AuthenticationFailed {

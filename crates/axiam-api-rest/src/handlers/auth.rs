@@ -160,8 +160,7 @@ async fn cookie_response_from_output<C: Connection>(
     user_repo: &SurrealUserRepository<C>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // Decode the just-issued access token to get user_id.
-    let claims = validate_access_token(&out.access_token, config)
-        .map_err(AxiamError::from)?;
+    let claims = validate_access_token(&out.access_token, config).map_err(AxiamError::from)?;
     let user_id = Uuid::parse_str(&claims.0.sub).map_err(|_| AxiamError::AuthenticationFailed {
         reason: "invalid sub in issued token".into(),
     })?;
@@ -170,17 +169,22 @@ async fn cookie_response_from_output<C: Connection>(
             reason: "invalid tenant_id in issued token".into(),
         })?;
 
-    let user = user_repo
-        .get_by_id(tenant_id, user_id)
-        .await
-        .map_err(|_| AxiamError::AuthenticationFailed {
+    let user = user_repo.get_by_id(tenant_id, user_id).await.map_err(|_| {
+        AxiamError::AuthenticationFailed {
             reason: "user not found after login".into(),
-        })?;
+        }
+    })?;
 
     let csrf_token = generate_csrf_token();
     Ok(HttpResponse::Ok()
-        .cookie(access_cookie(&out.access_token, config.access_token_lifetime_secs))
-        .cookie(refresh_cookie(&out.refresh_token, config.refresh_token_lifetime_secs))
+        .cookie(access_cookie(
+            &out.access_token,
+            config.access_token_lifetime_secs,
+        ))
+        .cookie(refresh_cookie(
+            &out.refresh_token,
+            config.refresh_token_lifetime_secs,
+        ))
         .cookie(csrf_cookie(&csrf_token, config.access_token_lifetime_secs))
         .json(LoginSuccessResponse {
             user: LoginUserInfo {
@@ -335,9 +339,18 @@ pub async fn refresh<C: Connection>(
     // Issue a new CSRF token on every refresh rotation (D-02).
     let csrf_token = generate_csrf_token();
     Ok(HttpResponse::Ok()
-        .cookie(access_cookie(&out.access_token, auth_config.access_token_lifetime_secs))
-        .cookie(refresh_cookie(&out.refresh_token, auth_config.refresh_token_lifetime_secs))
-        .cookie(csrf_cookie(&csrf_token, auth_config.access_token_lifetime_secs))
+        .cookie(access_cookie(
+            &out.access_token,
+            auth_config.access_token_lifetime_secs,
+        ))
+        .cookie(refresh_cookie(
+            &out.refresh_token,
+            auth_config.refresh_token_lifetime_secs,
+        ))
+        .cookie(csrf_cookie(
+            &csrf_token,
+            auth_config.access_token_lifetime_secs,
+        ))
         .json(RefreshSuccessResponse {
             expires_in: out.expires_in,
         }))

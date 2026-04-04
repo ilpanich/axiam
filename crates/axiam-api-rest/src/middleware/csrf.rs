@@ -132,9 +132,7 @@ where
         }
 
         // Extract CSRF cookie and header.
-        let cookie_value = req
-            .cookie(COOKIE_CSRF)
-            .map(|c| c.value().to_owned());
+        let cookie_value = req.cookie(COOKIE_CSRF).map(|c| c.value().to_owned());
 
         let header_value = req
             .headers()
@@ -144,9 +142,7 @@ where
 
         // Validate — both must be present and equal (constant-time).
         let valid = match (cookie_value, header_value) {
-            (Some(cookie), Some(header)) => {
-                cookie.as_bytes().ct_eq(header.as_bytes()).into()
-            }
+            (Some(cookie), Some(header)) => cookie.as_bytes().ct_eq(header.as_bytes()).into(),
             _ => false,
         };
 
@@ -226,9 +222,7 @@ pub fn csrf_cookie(token: &str, max_age_secs: u64) -> Cookie<'static> {
 
 /// Clear the `axiam_access` cookie (Max-Age=0, per D-08).
 pub fn clear_access_cookie() -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_ACCESS, "")
-        .path("/")
-        .finish();
+    let mut c = Cookie::build(COOKIE_ACCESS, "").path("/").finish();
     c.make_removal();
     c
 }
@@ -244,9 +238,7 @@ pub fn clear_refresh_cookie() -> Cookie<'static> {
 
 /// Clear the `axiam_csrf` cookie.
 pub fn clear_csrf_cookie() -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_CSRF, "")
-        .path("/")
-        .finish();
+    let mut c = Cookie::build(COOKIE_CSRF, "").path("/").finish();
     c.make_removal();
     c
 }

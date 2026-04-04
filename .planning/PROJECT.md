@@ -46,7 +46,7 @@ See `.planning/REQUIREMENTS.md` for detailed REQ-IDs.
 - [ ] Per-endpoint RBAC enforcement with admin bootstrap
 - [ ] Federation client secret encryption at rest (AES-256-GCM)
 - [ ] Session invalidation on password reset
-- [ ] Migrate JWT from sessionStorage to httpOnly secure cookies
+- [x] Migrate JWT from sessionStorage to httpOnly secure cookies — Validated in Phase 1: Cookie-Based Authentication
 - [ ] CSP, HSTS, Permissions-Policy headers
 
 **Functional — Required for MVP:**
@@ -109,7 +109,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. H
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Migrate JWT from sessionStorage to httpOnly cookies | IAM products must protect tokens from XSS; sessionStorage is accessible to JS | — Pending |
+| Migrate JWT from sessionStorage to httpOnly cookies | IAM products must protect tokens from XSS; sessionStorage is accessible to JS | ✓ Phase 1 |
 | Full per-endpoint RBAC (not simplified admin/user check) | MVP users will expect granular permissions; simplification would need rework later | — Pending |
 | Consolidate Phase 18 + 19 into single hardening milestone | Security items span both phases; treating as one prevents gaps | — Pending |
 | SMTP + external provider support for email | User wants configurable email delivery, not just logging | — Pending |
@@ -133,4 +133,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-03-30 after initialization*
+*Last updated: 2026-04-04 after Phase 1 completion*

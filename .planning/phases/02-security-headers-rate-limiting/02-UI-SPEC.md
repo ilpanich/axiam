@@ -45,8 +45,6 @@ Declared values (must be multiples of 4). Pre-populated from existing codebase p
 | 2xl | 48px | Major section breaks |
 | 3xl | 64px | Page-level spacing |
 
-Exceptions: Action button touch targets use p-1.5 (6px) — consistent with existing Users page action buttons (`p-1.5 rounded` pattern). Do not change to 8px; would alter existing layout.
-
 ---
 
 ## Typography
@@ -94,6 +92,8 @@ warning: {
 
 Locked badge uses: `bg-amber-500/15 text-amber-400 border border-amber-500/30` — matching the existing StatusBadge and MfaBadge pattern.
 
+**Focal point — Users page:** Primary visual anchor is the amber "Locked" badge in the Status column — draws admin attention to accounts requiring action.
+
 ---
 
 ## Component Inventory
@@ -104,7 +104,7 @@ Components already present (do NOT re-implement):
 |-----------|------|----------|
 | `StatusBadge` | `frontend/src/components/StatusBadge.tsx` | Active/inactive/revoked status — extend with "locked" variant |
 | `Badge` | `frontend/src/components/ui/badge.tsx` | shadcn badge primitives (variant: default, secondary, destructive, outline, accent) |
-| `Button` | `frontend/src/components/ui/button.tsx` | All action buttons including "Unlock" |
+| `Button` | `frontend/src/components/ui/button.tsx` | All action buttons including "Unlock Account" |
 | `ConfirmDialog` | `frontend/src/components/ConfirmDialog.tsx` | Destructive confirmations — reuse for unlock confirmation |
 | `DataTable` | `frontend/src/components/DataTable.tsx` | User list table — add locked column + filter |
 | `SearchInput` | `frontend/src/components/SearchInput.tsx` | Existing search — filter row will sit alongside |
@@ -116,6 +116,8 @@ New component additions for Phase 2:
 | `LockedBadge` (inline or StatusBadge extension) | `frontend/src/pages/users/UsersPage.tsx` | Amber badge for locked users — follows MfaBadge inline pattern |
 | Locked filter toggle | `frontend/src/pages/users/UsersPage.tsx` | Checkbox or toggle button: "Show locked only" — sits in search row |
 | Unlock button | `frontend/src/pages/users/UsersPage.tsx` | Icon button in Actions column — `LockOpen` lucide icon, shown only when user is locked |
+
+**Inherited convention:** Existing action buttons in the Users page use `p-1.5 rounded` (6px padding) — this is an established layout convention from prior phases, not part of the new spacing scale. Do not change this value; altering it would break the existing table row height rhythm.
 
 ---
 
@@ -141,11 +143,12 @@ New component additions for Phase 2:
 
 - Position: Actions column, rightmost — shown only when user is locked
 - Appearance: Icon button `p-1.5 rounded hover:bg-cyan-500/10 text-muted-foreground hover:text-cyan-400 transition-colors` with `LockOpen` lucide icon (size 14)
+  - Note: `p-1.5` (6px) is an inherited convention matching all other action icon buttons in this table — not derived from the new spacing scale.
 - `aria-label`: `"Unlock {username}"`
 - On click: Opens `ConfirmDialog` (reuse existing component)
 - Confirm dialog title: "Unlock Account"
 - Confirm dialog description: "Unlock {username}'s account? They will be able to log in immediately."
-- Confirm button label: "Unlock"
+- Confirm button label: "Unlock Account"
 - Confirm button variant: default (cyan — positive action, not destructive)
 - On confirm: Calls `POST /api/v1/users/{id}/unlock` — invalidates `["users"]` query on success
 - Success: No toast needed — table re-renders with badge gone (optimistic or refetch)
@@ -163,7 +166,7 @@ New component additions for Phase 2:
 | Unlock button aria-label | "Unlock {username}" | Matches existing "Edit {username}", "Delete {username}" pattern |
 | Unlock confirm title | "Unlock Account" | Action-first, no punctuation |
 | Unlock confirm body | "Unlock {username}'s account? They will be able to log in immediately." | Confirms consequence; no alarming language (unlock is not destructive) |
-| Unlock confirm CTA | "Unlock" | Primary verb; no "Submit" or "Confirm" — specific action |
+| Unlock confirm CTA | "Unlock Account" | Verb + noun — fully self-contained, no "Submit" or "Confirm" |
 | Empty state (locked filter active, no locked users) | "No locked accounts." | Follows existing `emptyMessage="No users found."` pattern |
 | Error state (unlock fails) | "Failed to unlock account. Please try again." | Problem + next step; consistent with existing error messages in UsersPage |
 | Rate limit error (frontend receives 429) | "Too many attempts. Please wait {N} seconds before trying again." | Surfaced on login page — D-03 specifies `retry_after: N` in 429 response body |
@@ -220,9 +223,10 @@ No third-party registry blocks declared for this phase. Registry vetting gate: n
 | Font stack | `frontend/src/index.css` | system-ui stack |
 | Color tokens | `frontend/tailwind.config.js` | All 5 semantic tokens extracted |
 | Typography scale | `frontend/src/pages/users/UsersPage.tsx`, `frontend/src/components/ui/badge.tsx` | Inferred from text-xs/text-sm/base patterns |
-| Spacing | `frontend/src/pages/users/UsersPage.tsx` | Inferred from p-1.5/gap-1/mb-4 patterns |
+| Spacing | `frontend/src/pages/users/UsersPage.tsx` | Inferred from p-1.5/gap-1/mb-4 patterns; 6px p-1.5 demoted to inherited convention, removed from scale |
 | Locked badge color | Design default | amber-500 — no existing warning token; new token specified |
-| Copywriting | CONTEXT.md D-08, D-09 + existing pattern matching | Matched to existing UsersPage copy style |
+| Copywriting | CONTEXT.md D-08, D-09 + existing pattern matching | Matched to existing UsersPage copy style; "Unlock Account" CTA made fully self-contained |
 | Interaction contract | CONTEXT.md D-08, D-09 | Locked badge, filter, unlock button spec |
 | Unlock confirm dialog | CONTEXT.md D-09 + existing ConfirmDialog usage | Reuses existing component |
 | Registry safety | Codebase scan | No third-party blocks; official shadcn only |
+| Focal point | Revision — checker feedback | Added amber badge as primary visual anchor on Users page |

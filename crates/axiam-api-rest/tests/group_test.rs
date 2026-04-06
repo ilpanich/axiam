@@ -2,6 +2,7 @@
 
 use actix_web::{App, test, web};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::RateLimitConfig;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -121,7 +122,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealGroupRepository::new($db.clone())))
-                .configure(register_api_v1_routes::<TestDb>),
+                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
         )
         .await
     };

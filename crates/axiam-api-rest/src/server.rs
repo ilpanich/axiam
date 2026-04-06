@@ -1,15 +1,35 @@
 //! Actix-Web application factory — composable route and middleware builders.
 
 use actix_cors::Cors;
+use actix_governor::Governor;
+use actix_governor::GovernorConfigBuilder;
+use actix_governor::governor::middleware::NoOpMiddleware;
 use actix_web::http::header;
 use actix_web::web;
 use axiam_db::WsClient;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::config::RateLimitConfig;
+use crate::extractors::rate_limit::XForwardedForKeyExtractor;
 use crate::handlers;
 use crate::middleware::csrf::CsrfMiddleware;
 use crate::openapi::ApiDoc;
+
+/// Build a per-endpoint Governor middleware instance from a requests-per-minute
+/// limit.
+///
+/// Each call creates an independent in-memory store — never share configs
+/// between endpoints with different limits (that would merge their counters).
+fn build_governor(requests_per_min: u32) -> Governor<XForwardedForKeyExtractor, NoOpMiddleware> {
+    let config = GovernorConfigBuilder::default()
+        .requests_per_minute(requests_per_min as u64)
+        .burst_size(requests_per_min)
+        .key_extractor(XForwardedForKeyExtractor)
+        .finish()
+        .expect("valid governor config");
+    Governor::new(&config)
+}
 
 /// Register health and readiness routes.
 pub fn health_routes(cfg: &mut web::ServiceConfig) {
@@ -26,18 +46,26 @@ pub fn openapi_routes(cfg: &mut web::ServiceConfig) {
 
 /// Register the API v1 scope with all domain endpoints (production WsClient).
 pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
-    register_api_v1_routes::<WsClient>(cfg);
+    register_api_v1_routes::<WsClient>(cfg, &RateLimitConfig::default());
 }
 
 /// Register the API v1 scope, generic over the SurrealDB connection type.
 ///
 /// This allows tests to use an in-memory DB while production uses WebSocket.
-pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceConfig) {
+/// The `rate_limit_cfg` parameter controls per-endpoint rate limits.
+pub fn register_api_v1_routes<C: surrealdb::Connection>(
+    cfg: &mut web::ServiceConfig,
+    rate_limit_cfg: &RateLimitConfig,
+) {
     cfg.service(
         web::scope("/auth")
             .wrap(CsrfMiddleware)
             .app_data(web::JsonConfig::default().limit(65_536))
-            .route("/login", web::post().to(handlers::auth::login::<C>))
+            .service(
+                web::resource("/login")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(web::post().to(handlers::auth::login::<C>)),
+            )
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
             .route("/me", web::get().to(handlers::auth::me::<C>))
@@ -86,9 +114,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 "/resend-verification",
                 web::post().to(handlers::email_verification::resend_verification::<C>),
             )
-            .route(
-                "/reset",
-                web::post().to(handlers::password_reset::request_reset::<C>),
+            .service(
+                web::resource("/reset")
+                    .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
+                    .route(web::post().to(handlers::password_reset::request_reset::<C>)),
             )
             .route(
                 "/reset/confirm",
@@ -106,7 +135,11 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 "/authorize",
                 web::get().to(handlers::oauth2::authorize::<C>),
             )
-            .route("/token", web::post().to(handlers::oauth2::token::<C>))
+            .service(
+                web::resource("/token")
+                    .wrap(build_governor(rate_limit_cfg.token_per_min))
+                    .route(web::post().to(handlers::oauth2::token::<C>)),
+            )
             .route("/revoke", web::post().to(handlers::oauth2::revoke::<C>))
             .route(
                 "/introspect",

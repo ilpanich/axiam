@@ -37,6 +37,12 @@ actix-web = "4"
 actix-rt = "2"
 actix-http = "3"
 actix-cors = "0.7"
+actix-governor = "0.10"
+tower_governor = { version = "0.8", features = ["tonic"] }
+governor = "0.10"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+bytes = "1"
 tracing-actix-web = "0.7"
 
 # gRPC

@@ -19,6 +19,11 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
+tower_governor = { workspace = true }
+governor = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

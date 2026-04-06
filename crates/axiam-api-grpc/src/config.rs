@@ -11,6 +11,11 @@ pub struct GrpcConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Max gRPC authz requests per second per IP (default: 100).
+    /// Generous for service-mesh patterns where authz is called per-request.
+    /// Configure via AXIAM__GRPC__GRPC_AUTHZ_PER_SEC env var.
+    #[serde(default = "default_grpc_authz_per_sec")]
+    pub grpc_authz_per_sec: u32,
 }
 
 impl Default for GrpcConfig {
@@ -18,6 +23,7 @@ impl Default for GrpcConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            grpc_authz_per_sec: default_grpc_authz_per_sec(),
         }
     }
 }
@@ -41,4 +47,8 @@ fn default_host() -> String {
 
 fn default_port() -> u16 {
     50051
+}
+
+fn default_grpc_authz_per_sec() -> u32 {
+    100
 }

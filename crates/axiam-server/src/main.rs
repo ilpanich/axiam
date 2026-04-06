@@ -5,8 +5,10 @@ use std::sync::Arc;
 use actix_web::{App, HttpServer, web};
 use axiam_amqp::{AmqpConfig, AmqpManager};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
+use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
 use axiam_api_rest::{
-    HealthChecker, ServerConfig, api_v1_routes, build_cors, health_routes, openapi_routes,
+    HealthChecker, RateLimitConfig, ServerConfig, build_cors, health_routes, openapi_routes,
+    register_api_v1_routes,
 };
 use axiam_audit::AuditMiddleware;
 use axiam_auth::config::AuthConfig;
@@ -41,6 +43,8 @@ struct AppConfig {
     grpc: GrpcConfig,
     #[serde(default)]
     amqp: AmqpConfig,
+    #[serde(default)]
+    rate_limit: RateLimitConfig,
 }
 
 #[tokio::main]
@@ -177,8 +181,11 @@ async fn main() -> std::io::Result<()> {
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
     );
 
+    config.rate_limit.validate();
+
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
+    let rate_limit_cfg = config.rate_limit.clone();
     let auth_config = config.auth.clone();
     let health_checker: Arc<dyn HealthChecker> = Arc::new(db);
 
@@ -233,9 +240,16 @@ async fn main() -> std::io::Result<()> {
     );
     let grpc_user_repo = user_repo.clone();
     let grpc_auth_config = config.auth.clone();
+    let grpc_config = config.grpc.clone();
     tokio::spawn(async move {
-        if let Err(e) =
-            start_grpc_server(grpc_addr, grpc_engine, grpc_user_repo, grpc_auth_config).await
+        if let Err(e) = start_grpc_server(
+            grpc_addr,
+            grpc_engine,
+            grpc_user_repo,
+            grpc_auth_config,
+            &grpc_config,
+        )
+        .await
         {
             tracing::error!(error = %e, "gRPC server failed — shutting down process");
             std::process::exit(1);
@@ -245,7 +259,9 @@ async fn main() -> std::io::Result<()> {
     let audit_middleware = AuditMiddleware::spawn(audit_repo.clone());
 
     HttpServer::new(move || {
+        let rl = rate_limit_cfg.clone();
         App::new()
+            .wrap(SecurityHeadersMiddleware)
             .wrap(TracingLogger::default())
             .wrap(audit_middleware.clone())
             .wrap(build_cors(&server_config.cors_allowed_origins))
@@ -280,7 +296,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(federation_link_repo.clone()))
             .app_data(web::Data::new(http_client.clone()))
             .configure(health_routes)
-            .configure(api_v1_routes)
+            .configure(|cfg| register_api_v1_routes::<axiam_db::WsClient>(cfg, &rl))
             .configure(openapi_routes)
     })
     .bind(&bind_addr)?

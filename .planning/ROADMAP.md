@@ -61,10 +61,10 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — Security headers middleware (backend + nginx) + tests
-- [ ] 02-02-PLAN.md — REST rate limiting (actix-governor, config, per-endpoint wiring)
-- [ ] 02-03-PLAN.md — gRPC rate limiting (tower-governor layer)
-- [ ] 02-04-PLAN.md — Unlock endpoint + UserResponse extension + frontend lockout UI
+- [x] 02-01-PLAN.md — Security headers middleware (backend + nginx) + tests
+- [x] 02-02-PLAN.md — REST rate limiting (actix-governor, config, per-endpoint wiring)
+- [x] 02-03-PLAN.md — gRPC rate limiting (tower-governor layer)
+- [x] 02-04-PLAN.md — Unlock endpoint + UserResponse extension + frontend lockout UI
 
 **UI hint**: yes
 

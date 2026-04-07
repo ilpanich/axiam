@@ -16,8 +16,19 @@ import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Eye, Pencil, Plus, Trash2 } from "lucide-react";
+import { Eye, Lock, LockOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
+
+// ─── Locked Badge ─────────────────────────────────────────────────────────────
+
+function LockedBadge({ locked }: { locked: boolean }) {
+  if (!locked) return null;
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30">
+      Locked
+    </span>
+  );
+}
 
 // ─── MFA Badge ────────────────────────────────────────────────────────────────
 
@@ -209,9 +220,10 @@ export function UsersPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  // ─── Pagination + search state ───────────────────────────────────────────────
+  // ─── Pagination + search + filter state ─────────────────────────────────────
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [lockedOnly, setLockedOnly] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["users", page, search],
@@ -222,6 +234,9 @@ export function UsersPage() {
   const total = data?.total ?? 0;
   const perPage = data?.per_page ?? 20;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
+
+  const lockedCount = users.filter((u) => u.is_locked).length;
+  const filteredUsers = lockedOnly ? users.filter((u) => u.is_locked) : users;
 
   function handleSearchChange(value: string) {
     setSearch(value);
@@ -333,6 +348,17 @@ export function UsersPage() {
     },
   });
 
+  // ─── Unlock state ─────────────────────────────────────────────────────────────
+  const [userToUnlock, setUserToUnlock] = useState<User | null>(null);
+
+  const unlockMutation = useMutation({
+    mutationFn: (userId: string) => userService.unlock(userId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      setUserToUnlock(null);
+    },
+  });
+
   // ─── Table columns ─────────────────────────────────────────────────────────────
   const columns: Column<User>[] = [
     {
@@ -364,7 +390,10 @@ export function UsersPage() {
       key: "is_active",
       header: "Status",
       render: (row) => (
-        <StatusBadge status={row.is_active ? "active" : "inactive"} />
+        <div className="flex items-center gap-1.5">
+          <StatusBadge status={row.is_active ? "active" : "inactive"} />
+          <LockedBadge locked={row.is_locked} />
+        </div>
       ),
     },
     {
@@ -401,9 +430,18 @@ export function UsersPage() {
     {
       key: "actions",
       header: "Actions",
-      width: "w-28",
+      width: "w-36",
       render: (row) => (
         <div className="flex items-center gap-1">
+          {row.is_locked && (
+            <button
+              aria-label={`Unlock ${row.username}`}
+              onClick={() => setUserToUnlock(row)}
+              className="p-1.5 rounded hover:bg-cyan-500/10 text-muted-foreground hover:text-cyan-400 transition-colors"
+            >
+              <LockOpen size={14} />
+            </button>
+          )}
           <button
             aria-label={`Edit ${row.username}`}
             onClick={() => openEdit(row)}
@@ -448,21 +486,37 @@ export function UsersPage() {
         }
       />
 
-      {/* Search */}
-      <div className="mb-4">
+      {/* Search + filter */}
+      <div className="mb-4 flex items-center gap-3">
         <SearchInput
           value={search}
           onChange={handleSearchChange}
           placeholder="Search users…"
           className="max-w-sm"
         />
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            setLockedOnly(!lockedOnly);
+            setPage(1);
+          }}
+          className={
+            lockedOnly
+              ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+              : "text-muted-foreground"
+          }
+        >
+          <Lock className="mr-1 h-3.5 w-3.5" />
+          {lockedOnly ? `Locked (${lockedCount})` : "Locked"}
+        </Button>
       </div>
 
       <DataTable
         columns={columns}
-        data={users}
+        data={filteredUsers}
         isLoading={isLoading}
-        emptyMessage="No users found."
+        emptyMessage={lockedOnly ? "No locked accounts." : "No users found."}
       />
 
       {/* Pagination */}
@@ -546,6 +600,65 @@ export function UsersPage() {
         description={`Are you sure you want to delete "${deleteUser?.username}"? This action cannot be undone.`}
         isLoading={deleteMutation.isPending}
       />
+
+      {/* Unlock confirm */}
+      {userToUnlock !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          aria-modal="true"
+          role="dialog"
+          aria-labelledby="unlock-dialog-title"
+          aria-describedby="unlock-dialog-description"
+        >
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={
+              unlockMutation.isPending
+                ? undefined
+                : () => setUserToUnlock(null)
+            }
+            aria-hidden="true"
+          />
+          <div className="relative z-10 glass-card w-full max-w-sm p-6 space-y-4">
+            <h2
+              id="unlock-dialog-title"
+              className="text-lg font-semibold text-foreground"
+            >
+              Unlock Account
+            </h2>
+            <p
+              id="unlock-dialog-description"
+              className="text-sm text-muted-foreground"
+            >
+              Unlock{" "}
+              <span className="text-foreground font-medium">
+                {userToUnlock.username}
+              </span>
+              {"'"}s account? They will be able to log in immediately.
+            </p>
+            <div className="flex justify-end gap-3 pt-4 border-t border-primary/10">
+              <button
+                onClick={() => setUserToUnlock(null)}
+                disabled={unlockMutation.isPending}
+                className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-md text-muted-foreground hover:bg-white/5 hover:text-foreground transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => unlockMutation.mutate(userToUnlock.id)}
+                disabled={unlockMutation.isPending}
+                className="inline-flex items-center justify-center min-w-[120px] px-4 py-2 text-sm font-medium rounded-md bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-400/40 disabled:opacity-50"
+              >
+                {unlockMutation.isPending ? (
+                  <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-cyan-400 border-t-transparent rounded-full" />
+                ) : (
+                  "Unlock Account"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

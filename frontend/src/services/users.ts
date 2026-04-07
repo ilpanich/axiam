@@ -12,6 +12,10 @@ export interface User {
   email_verified: boolean;
   created_at: string;
   updated_at: string;
+  status: string;
+  is_locked: boolean;
+  locked_until: string | null;
+  failed_login_attempts: number;
 }
 
 export interface MfaMethod {
@@ -98,6 +102,9 @@ export const userService = {
 
   resetMfa: (userId: string): Promise<void> =>
     api.post(`/api/v1/users/${userId}/reset-mfa`).then(() => undefined),
+
+  unlock: (userId: string): Promise<User> =>
+    api.post<User>(`/api/v1/users/${userId}/unlock`).then((r) => r.data),
 };
 
 // ─── Groups service ───────────────────────────────────────────────────────────

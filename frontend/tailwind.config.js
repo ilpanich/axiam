@@ -35,6 +35,10 @@ export default {
           DEFAULT: "#ef4444",
           foreground: "#f8fafc",
         },
+        warning: {
+          DEFAULT: "#f59e0b",
+          foreground: "#0d0d2b",
+        },
         card: {
           DEFAULT: "rgba(255,255,255,0.05)",
           foreground: "#f8fafc",

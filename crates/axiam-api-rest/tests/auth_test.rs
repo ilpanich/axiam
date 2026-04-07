@@ -4,8 +4,14 @@
 //! header). CSRF double-submit cookie flow is validated throughout.
 
 use actix_web::{App, test, web};
-use axiam_api_rest::register_api_v1_routes;
+use std::net::SocketAddr;
+
 use axiam_api_rest::RateLimitConfig;
+
+/// Loopback peer address for test requests so the rate-limiter key extractor
+/// (XForwardedForKeyExtractor) can resolve a client IP without a real socket.
+const TEST_PEER: &str = "127.0.0.1:12345";
+use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{AuthService, MfaMethodService};
 use axiam_core::models::organization::CreateOrganization;
@@ -135,7 +141,9 @@ macro_rules! test_app {
                     SurrealUserRepository::new($db.clone()),
                     SurrealWebauthnCredentialRepository::new($db.clone()),
                 )))
-                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     };
@@ -192,6 +200,7 @@ async fn login_sets_httponly_access_cookie() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -268,6 +277,7 @@ async fn login_sets_pathscoped_refresh_cookie() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -314,6 +324,7 @@ async fn login_sets_csrf_cookie() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -360,6 +371,7 @@ async fn csrf_missing_header_returns_403() {
 
     // Login to get access cookie.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -377,6 +389,7 @@ async fn csrf_missing_header_returns_403() {
 
     // POST /auth/logout with access cookie but WITHOUT X-CSRF-Token header.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/logout")
         .insert_header(("Cookie", format!("axiam_access={access_token}")))
         .set_json(serde_json::json!({ "session_id": session_id }))
@@ -398,6 +411,7 @@ async fn csrf_valid_header_allows_request() {
 
     // Login to get cookies.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -416,6 +430,7 @@ async fn csrf_valid_header_allows_request() {
 
     // POST with valid X-CSRF-Token — should NOT be rejected with 403.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/logout")
         .insert_header((
             "Cookie",
@@ -443,6 +458,7 @@ async fn csrf_get_request_passes_without_token() {
 
     // Login to get access cookie.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -458,6 +474,7 @@ async fn csrf_get_request_passes_without_token() {
 
     // GET /auth/me with only access cookie — no X-CSRF-Token needed for GET.
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/me")
         .insert_header(("Cookie", format!("axiam_access={access_token}")))
         .to_request();
@@ -482,6 +499,7 @@ async fn logout_clears_cookies() {
 
     // Login to get all cookies.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -500,6 +518,7 @@ async fn logout_clears_cookies() {
 
     // POST /auth/logout with cookies + CSRF header.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/logout")
         .insert_header((
             "Cookie",
@@ -549,6 +568,7 @@ async fn refresh_uses_cookie_returns_new_access_cookie() {
 
     // Login to get cookies.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -571,6 +591,7 @@ async fn refresh_uses_cookie_returns_new_access_cookie() {
     let csrf_token = extract_cookie_value(&resp, "axiam_csrf").unwrap();
 
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/refresh")
         .insert_header((
             "Cookie",
@@ -629,6 +650,7 @@ async fn me_returns_user_info() {
 
     // Login to get access cookie.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -644,6 +666,7 @@ async fn me_returns_user_info() {
 
     // GET /auth/me with access cookie.
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/me")
         .insert_header(("Cookie", format!("axiam_access={access_token}")))
         .to_request();
@@ -678,7 +701,10 @@ async fn me_returns_401_without_cookie() {
     let app = test_app!(db, auth);
 
     // GET /auth/me with no cookies and no Authorization header.
-    let req = test::TestRequest::get().uri("/auth/me").to_request();
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/auth/me")
+        .to_request();
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(
@@ -699,6 +725,7 @@ async fn login_with_invalid_password_returns_401() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -719,6 +746,7 @@ async fn login_with_nonexistent_user_returns_401() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -741,6 +769,7 @@ async fn refresh_with_invalid_token_returns_401() {
     // Need a CSRF token to pass the middleware — get one from a login first,
     // then pass an invalid refresh cookie value.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -754,6 +783,7 @@ async fn refresh_with_invalid_token_returns_401() {
     let csrf_token = extract_cookie_value(&resp, "axiam_csrf").unwrap();
 
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/refresh")
         .insert_header((
             "Cookie",
@@ -816,6 +846,7 @@ async fn mfa_enforcement_login_returns_403_with_setup_token() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -849,6 +880,7 @@ async fn mfa_setup_enroll_with_setup_token_returns_200() {
 
     // Login to get setup_token.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -863,6 +895,7 @@ async fn mfa_setup_enroll_with_setup_token_returns_200() {
 
     // Enroll with setup_token.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/mfa/setup/enroll")
         .set_json(serde_json::json!({ "setup_token": setup_token }))
         .to_request();
@@ -888,6 +921,7 @@ async fn mfa_setup_full_flow_sets_cookies() {
 
     // Step 1: Login → 403 with setup_token.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -903,6 +937,7 @@ async fn mfa_setup_full_flow_sets_cookies() {
 
     // Step 2: Enroll → get secret.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/mfa/setup/enroll")
         .set_json(serde_json::json!({ "setup_token": &setup_token }))
         .to_request();
@@ -928,6 +963,7 @@ async fn mfa_setup_full_flow_sets_cookies() {
 
     // Step 4: Confirm → 200 with cookies (not tokens in body).
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/mfa/setup/confirm")
         .set_json(serde_json::json!({
             "setup_token": &setup_token,
@@ -973,6 +1009,7 @@ async fn reset_mfa_requires_authentication() {
 
     // POST without any cookie → 401.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/api/v1/users/{user_id}/reset-mfa"))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1018,6 +1055,7 @@ async fn reset_mfa_returns_403_until_rbac() {
 
     // Login as alice to get access cookie.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/auth/login")
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,
@@ -1032,6 +1070,7 @@ async fn reset_mfa_returns_403_until_rbac() {
     // Reset MFA for the target user — using cookie-based auth.
     // The /api/v1 scope has no CSRF middleware, so no X-CSRF-Token needed here.
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/api/v1/users/{}/reset-mfa", target.id))
         .insert_header(("Cookie", format!("axiam_access={access_token}")))
         .to_request();

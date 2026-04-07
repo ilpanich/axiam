@@ -4,8 +4,14 @@
 //! the real HTTP layer, using an in-memory SurrealDB instance.
 
 use actix_web::{App, test, web};
-use axiam_api_rest::register_api_v1_routes;
+use std::net::SocketAddr;
+
 use axiam_api_rest::RateLimitConfig;
+
+/// Loopback peer address for test requests so the rate-limiter key extractor
+/// can resolve a client IP without a real socket.
+const TEST_PEER: &str = "127.0.0.1:12345";
+use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -136,7 +142,9 @@ macro_rules! test_app {
                 .app_data(web::Data::new(user_repo))
                 .app_data(web::Data::new(authz_service))
                 .app_data(web::Data::new(token_service))
-                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     }};
@@ -169,6 +177,7 @@ async fn create_client(
 ) -> (String, String, String) {
     let redirect_uri = "https://app.example.com/callback";
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
         .set_json(serde_json::json!({
@@ -216,6 +225,7 @@ async fn do_authorize(
     }
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&uri)
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
@@ -267,6 +277,7 @@ async fn do_token_exchange(
     }
 
     test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -483,6 +494,7 @@ async fn invalid_redirect_uri_rejected_at_authorize() {
     );
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&uri)
         .insert_header(("Authorization", format!("Bearer {user_jwt}")))
         .to_request();
@@ -546,6 +558,7 @@ async fn unsupported_response_type_rejected() {
         "/oauth2/authorize?response_type=token&client_id={client_id}&redirect_uri={redirect_uri}"
     );
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&uri)
         .insert_header(("Authorization", format!("Bearer {user_jwt}")))
         .to_request();
@@ -576,6 +589,7 @@ async fn missing_code_returns_error() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -603,6 +617,7 @@ async fn unsupported_grant_type_returns_error() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -662,6 +677,7 @@ async fn state_parameter_echoed_in_redirect() {
     );
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&uri)
         .insert_header(("Authorization", format!("Bearer {user_jwt}")))
         .to_request();
@@ -737,6 +753,7 @@ async fn create_cc_client(
     token: &str,
 ) -> (String, String) {
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
         .set_json(serde_json::json!({
@@ -770,6 +787,7 @@ async fn client_credentials_grant() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -804,6 +822,7 @@ async fn client_credentials_wrong_secret() {
          &client_id={client_id}&client_secret=wrong-secret"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -833,6 +852,7 @@ async fn client_credentials_unauthorized_grant() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -881,6 +901,7 @@ async fn refresh_token_grant() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -930,6 +951,7 @@ async fn refresh_token_rotation_invalidates_old() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -943,6 +965,7 @@ async fn refresh_token_rotation_invalidates_old() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -988,6 +1011,7 @@ async fn revoke_refresh_token() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/revoke?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -1001,6 +1025,7 @@ async fn revoke_refresh_token() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -1027,6 +1052,7 @@ async fn revoke_unknown_token_returns_200() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/revoke?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -1070,6 +1096,7 @@ async fn introspect_active_access_token() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -1100,6 +1127,7 @@ async fn introspect_unknown_token_returns_inactive() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -1126,6 +1154,7 @@ async fn introspect_requires_client_auth() {
          &client_id={client_id}&client_secret=wrong-secret"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -1167,6 +1196,7 @@ async fn introspect_revoked_refresh_token() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/revoke?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -1179,6 +1209,7 @@ async fn introspect_revoked_refresh_token() {
          &client_id={client_id}&client_secret={client_secret}"
     );
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
         .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
         .set_payload(form)
@@ -1202,6 +1233,7 @@ async fn oidc_discovery_document() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/.well-known/openid-configuration")
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1234,7 +1266,10 @@ async fn oidc_jwks_endpoint() {
     let _user_id = create_admin_user(&db, tenant_id).await;
     let app = test_app!(db, auth);
 
-    let req = test::TestRequest::get().uri("/oauth2/jwks").to_request();
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/oauth2/jwks")
+        .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
 
@@ -1258,6 +1293,7 @@ async fn oidc_userinfo_returns_sub() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/oauth2/userinfo")
         .insert_header(("Authorization", format!("Bearer {user_jwt}")))
         .to_request();
@@ -1278,6 +1314,7 @@ async fn oidc_userinfo_requires_auth() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/oauth2/userinfo")
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1294,6 +1331,7 @@ async fn oidc_userinfo_with_email_scope() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/oauth2/userinfo")
         .insert_header(("Authorization", format!("Bearer {user_jwt}")))
         .to_request();
@@ -1315,6 +1353,7 @@ async fn oidc_userinfo_with_profile_scope() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/oauth2/userinfo")
         .insert_header(("Authorization", format!("Bearer {user_jwt}")))
         .to_request();
@@ -1345,6 +1384,7 @@ async fn oidc_id_token_in_auth_code_flow() {
          &nonce=test-nonce-123"
     );
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&uri)
         .insert_header(("Authorization", format!("Bearer {user_jwt}")))
         .to_request();
@@ -1415,6 +1455,7 @@ async fn oidc_no_id_token_without_openid_scope() {
     // Create a client registered with only "read:data" scope (no openid)
     let redirect_uri = "https://app.example.com/callback";
     let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {user_jwt}")))
         .set_json(serde_json::json!({

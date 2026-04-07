@@ -44,10 +44,20 @@ pub struct UserResponse {
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Number of consecutive failed login attempts.
+    pub failed_login_attempts: u32,
+    /// Timestamp until which the account is locked, if any.
+    pub locked_until: Option<DateTime<Utc>>,
+    /// Whether the account is currently locked (locked_until is in the future).
+    pub is_locked: bool,
 }
 
 impl From<User> for UserResponse {
     fn from(u: User) -> Self {
+        let is_locked = u
+            .locked_until
+            .map(|t| t > chrono::Utc::now())
+            .unwrap_or(false);
         Self {
             id: u.id,
             tenant_id: u.tenant_id,
@@ -58,6 +68,9 @@ impl From<User> for UserResponse {
             metadata: u.metadata,
             created_at: u.created_at,
             updated_at: u.updated_at,
+            failed_login_attempts: u.failed_login_attempts,
+            locked_until: u.locked_until,
+            is_locked,
         }
     }
 }
@@ -193,4 +206,39 @@ pub async fn delete<C: Connection>(
 ) -> Result<HttpResponse, AxiamApiError> {
     repo.delete(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /api/v1/users/{user_id}/unlock`
+///
+/// Resets a locked user account: clears `locked_until`, resets
+/// `failed_login_attempts` to 0, and sets status back to `Active`.
+#[utoipa::path(
+    post,
+    path = "/api/v1/users/{user_id}/unlock",
+    tag = "users",
+    params(("user_id" = Uuid, Path, description = "User ID")),
+    responses(
+        (status = 200, description = "User unlocked", body = UserResponse),
+        (status = 404, description = "User not found"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn unlock<C: Connection>(
+    auth_user: AuthenticatedUser,
+    repo: web::Data<SurrealUserRepository<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let user_id = path.into_inner();
+    let tenant_id = auth_user.tenant_id;
+
+    let update = UpdateUser {
+        failed_login_attempts: Some(0),
+        locked_until: Some(None),
+        last_failed_login_at: Some(None),
+        status: Some(UserStatus::Active),
+        ..Default::default()
+    };
+
+    let user = repo.update(tenant_id, user_id, update).await?;
+    Ok(HttpResponse::Ok().json(UserResponse::from(user)))
 }

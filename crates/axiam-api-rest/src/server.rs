@@ -208,6 +208,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
                     .route(web::delete().to(handlers::users::delete::<C>)),
             )
             .service(
+                web::resource("/users/{user_id}/unlock")
+                    .route(web::post().to(handlers::users::unlock::<C>)),
+            )
+            .service(
                 web::resource("/users/{user_id}/reset-mfa")
                     .route(web::post().to(handlers::auth::reset_mfa::<C>)),
             )

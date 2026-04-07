@@ -58,13 +58,14 @@ Plans:
   3. Repeated login attempts from the same IP are throttled after 10 requests per minute
   4. Account locks out after 5 consecutive failed logins with a 15-minute cooldown
   5. gRPC authorization endpoint has brute-force protection
-**Plans**: 4 plans
+**Plans**: 5 plans
 
 Plans:
 - [x] 02-01-PLAN.md — Security headers middleware (backend + nginx) + tests
 - [x] 02-02-PLAN.md — REST rate limiting (actix-governor, config, per-endpoint wiring)
 - [x] 02-03-PLAN.md — gRPC rate limiting (tower-governor layer)
 - [x] 02-04-PLAN.md — Unlock endpoint + UserResponse extension + frontend lockout UI
+- [ ] 02-05-PLAN.md — Gap closure: wire register rate limit + fix lockout cooldown default
 
 **UI hint**: yes
 
@@ -222,7 +223,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Cookie-Based Authentication | 3/3 | Complete   | 2026-04-04 |
-| 2. Security Headers & Rate Limiting | 0/4 | Planning complete | - |
+| 2. Security Headers & Rate Limiting | 4/5 | Gap closure | - |
 | 3. RBAC Enforcement | 0/0 | Not started | - |
 | 4. Federation Verification & Session Security | 0/0 | Not started | - |
 | 5. Email Delivery & GDPR Compliance | 0/0 | Not started | - |

@@ -159,8 +159,10 @@ async fn create_user_omits_sensitive_fields() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert!(body.get("password_hash").is_none());
     assert!(body.get("mfa_secret").is_none());
-    assert!(body.get("failed_login_attempts").is_none());
-    assert!(body.get("locked_until").is_none());
+    // failed_login_attempts and locked_until are now exposed in UserResponse
+    // for admin visibility of lockout state
+    assert!(body["failed_login_attempts"].is_number());
+    assert!(body.get("locked_until").is_some()); // present (may be null)
 }
 
 #[actix_rt::test]
@@ -260,4 +262,54 @@ async fn delete_user_returns_204() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 204);
+}
+
+#[actix_rt::test]
+async fn user_response_includes_lock_state_fields() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/users/{user_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    // is_locked should be present and false for a freshly created user
+    assert_eq!(body["is_locked"], false);
+    // locked_until should be present (null for a non-locked user)
+    assert!(body.get("locked_until").is_some());
+    // failed_login_attempts should be 0
+    assert_eq!(body["failed_login_attempts"], 0);
+}
+
+#[actix_rt::test]
+async fn unlock_user_returns_200() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // POST to unlock endpoint — user is not locked but unlock is idempotent
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/users/{user_id}/unlock"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["is_locked"], false);
+    assert_eq!(body["failed_login_attempts"], 0);
+    assert!(body["locked_until"].is_null());
+    // status should be Active after unlock
+    assert_eq!(body["status"], "Active");
 }

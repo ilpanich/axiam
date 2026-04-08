@@ -198,6 +198,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
             )
             .service(
                 web::resource("/users")
+                    .wrap(build_governor(rate_limit_cfg.register_per_min))
                     .route(web::post().to(handlers::users::create::<C>))
                     .route(web::get().to(handlers::users::list::<C>)),
             )

@@ -65,7 +65,7 @@ Plans:
 - [x] 02-02-PLAN.md — REST rate limiting (actix-governor, config, per-endpoint wiring)
 - [x] 02-03-PLAN.md — gRPC rate limiting (tower-governor layer)
 - [x] 02-04-PLAN.md — Unlock endpoint + UserResponse extension + frontend lockout UI
-- [ ] 02-05-PLAN.md — Gap closure: wire register rate limit + fix lockout cooldown default
+- [x] 02-05-PLAN.md — Gap closure: wire register rate limit + fix lockout cooldown default
 
 **UI hint**: yes
 

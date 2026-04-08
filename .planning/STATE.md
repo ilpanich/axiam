@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-04-07T21:06:15.792Z"
-last_activity: 2026-04-07
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-04-08T20:50:19.651Z"
+last_activity: 2026-04-08
 progress:
   total_phases: 7
   completed_phases: 2
-  total_plans: 7
-  completed_plans: 7
+  total_plans: 8
+  completed_plans: 8
   percent: 0
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 02 (security-headers-rate-limiting) — EXECUTING
-Plan: 2 of 4
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-04-07
+Last activity: 2026-04-08
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-cookie-based-authentication P02 | 4 | 2 tasks | 5 files |
 | Phase 01-cookie-based-authentication P03 | 23 | 1 tasks | 2 files |
 | Phase 02-security-headers-rate-limiting P04 | 35 | 2 tasks | 6 files |
+| Phase 02-security-headers-rate-limiting P05 | 10 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,8 @@ Recent decisions affecting current work:
 - [Phase 01-cookie-based-authentication]: /auth/mfa/setup/enroll is CSRF exempt because setup_token in body is the auth mechanism (no session cookie exists during enrollment)
 - [Phase 02-security-headers-rate-limiting]: is_locked computed from locked_until at serialization time — derived at serialization, always accurate without a separate DB boolean
 - [Phase 02-security-headers-rate-limiting]: Inline unlock dialog created instead of extending ConfirmDialog — ConfirmDialog has hardcoded destructive styling not suitable for positive unlock action
+- [Phase 02-security-headers-rate-limiting]: Wrap entire /users resource with rate limiter — GET at 5 req/min acceptable for admin list endpoint
+- [Phase 02-security-headers-rate-limiting]: lockout_duration_secs default changed from 300 to 900 to match REQ-3 (15-minute cooldown)
 
 ### Pending Todos
 
@@ -85,6 +88,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T21:06:15.787Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-04-08T20:50:19.648Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None

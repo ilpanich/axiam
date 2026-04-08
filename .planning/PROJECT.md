@@ -47,7 +47,7 @@ See `.planning/REQUIREMENTS.md` for detailed REQ-IDs.
 - [ ] Federation client secret encryption at rest (AES-256-GCM)
 - [ ] Session invalidation on password reset
 - [x] Migrate JWT from sessionStorage to httpOnly secure cookies — Validated in Phase 1: Cookie-Based Authentication
-- [ ] CSP, HSTS, Permissions-Policy headers
+- [x] CSP, HSTS, Permissions-Policy headers — Validated in Phase 2: Security Headers & Rate Limiting
 
 **Functional — Required for MVP:**
 - [ ] Wire email delivery to password reset and verification endpoints
@@ -67,7 +67,7 @@ See `.planning/REQUIREMENTS.md` for detailed REQ-IDs.
 - [ ] CI hardening (security scanning, dependency audit, frontend tests)
 - [ ] K8s NetworkPolicy, pod security standards
 - [ ] Docker image hardening (non-root, minimal base, health checks)
-- [ ] gRPC brute-force protection (T19.5)
+- [x] gRPC brute-force protection (T19.5) — Validated in Phase 2: Security Headers & Rate Limiting
 - [ ] OpenAPI schema accuracy (T19.4)
 
 **Testing:**
@@ -110,6 +110,8 @@ AXIAM has completed 16 development phases with a working backend and frontend. H
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | Migrate JWT from sessionStorage to httpOnly cookies | IAM products must protect tokens from XSS; sessionStorage is accessible to JS | ✓ Phase 1 |
+| OWASP security headers + brute-force rate limiting | IAM endpoints are high-value targets; must resist automated attacks | ✓ Phase 2 |
+| Defer lockout UI human testing to Phase 3 | Frontend login requires slug resolution + admin bootstrap (Phase 3 scope) before UI can be manually tested | — Deferred |
 | Full per-endpoint RBAC (not simplified admin/user check) | MVP users will expect granular permissions; simplification would need rework later | — Pending |
 | Consolidate Phase 18 + 19 into single hardening milestone | Security items span both phases; treating as one prevents gaps | — Pending |
 | SMTP + external provider support for email | User wants configurable email delivery, not just logging | — Pending |
@@ -133,4 +135,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-04 after Phase 1 completion*
+*Last updated: 2026-04-08 after Phase 2 completion*

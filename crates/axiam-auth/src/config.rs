@@ -35,7 +35,7 @@ pub struct AuthConfig {
     pub totp_issuer: String,
     /// Max consecutive failed login attempts before lockout (default: 5).
     pub max_failed_login_attempts: u32,
-    /// Initial lockout duration in seconds (default: 300 = 5 min).
+    /// Initial lockout duration in seconds (default: 900 = 15 min).
     pub lockout_duration_secs: u64,
     /// Exponential backoff multiplier for repeated lockouts (default: 2.0).
     pub lockout_backoff_multiplier: f64,
@@ -88,7 +88,7 @@ impl Default for AuthConfig {
             mfa_challenge_lifetime_secs: 300,
             totp_issuer: "AXIAM".into(),
             max_failed_login_attempts: 5,
-            lockout_duration_secs: 300,
+            lockout_duration_secs: 900,
             lockout_backoff_multiplier: 2.0,
             max_lockout_duration_secs: 3600,
             email_verification_grace_period_hours: 24,

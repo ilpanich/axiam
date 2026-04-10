@@ -89,7 +89,14 @@ Plans:
   3. Self-service endpoints (profile, own MFA) work for the resource owner but reject other users
   4. Admin bootstrap creates the first admin user when no admins exist, then disables itself
   5. Admin can list users and manage MFA for other users
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+- [ ] 03-01-PLAN.md — Permission registry, seeder, AuthzMiddleware, AuthzChecker wiring
+- [ ] 03-02-PLAN.md — Handler-level RequirePermission checks + self-service ownership
+- [ ] 03-03-PLAN.md — Admin bootstrap endpoint + default role seeding
+- [ ] 03-04-PLAN.md — Frontend RBAC sidebar gating + /me permissions response
+- [ ] 03-05-PLAN.md — Integration tests + bootstrap page UI
 **UI hint**: yes
 
 ### Scope
@@ -114,7 +121,7 @@ Plans:
   3. Changing or resetting a password immediately invalidates all other active sessions
   4. Federation client secrets are encrypted at rest in the database
   5. Service accounts receive a dedicated token type distinguishable from user tokens
-**Plans**: TBD
+**Plans**: 5 plans
 
 ### Scope
 - OIDC JWKS fetching, caching (1h TTL), and ID token signature verification
@@ -140,7 +147,7 @@ Plans:
   3. A user can export all their personal data as a single JSON download
   4. A user can request account deletion, which removes PII and pseudonymizes audit logs
   5. Audit log entries for deleted users show DELETED_USER_<hash> instead of PII
-**Plans**: TBD
+**Plans**: 5 plans
 
 ### Scope
 - Wire password reset handler to EmailService (T19.11)
@@ -167,7 +174,7 @@ Plans:
   3. K8s NetworkPolicy restricts pod-to-pod traffic to only required paths
   4. Container image scan runs on every Docker build in CI
   5. OpenAPI schema matches actual endpoint signatures
-**Plans**: TBD
+**Plans**: 5 plans
 
 ### Scope
 - cargo-audit step in CI (fail on known vulnerabilities with patches)
@@ -195,7 +202,7 @@ Plans:
   3. OIDC Core 1.0 conformance verification passes (discovery, JWKS, userinfo, token validation)
   4. All previously untested crates (axiam-pki, axiam-authz, axiam-federation, axiam-api-grpc) have integration tests
   5. Frontend E2E tests cover login, RBAC-gated navigation, and federation flows
-**Plans**: TBD
+**Plans**: 5 plans
 **UI hint**: yes
 
 ### Scope
@@ -224,7 +231,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 |-------|----------------|--------|-----------|
 | 1. Cookie-Based Authentication | 3/3 | Complete   | 2026-04-04 |
 | 2. Security Headers & Rate Limiting | 4/5 | Gap closure | - |
-| 3. RBAC Enforcement | 0/0 | Not started | - |
+| 3. RBAC Enforcement | 0/5 | Planning done | - |
 | 4. Federation Verification & Session Security | 0/0 | Not started | - |
 | 5. Email Delivery & GDPR Compliance | 0/0 | Not started | - |
 | 6. CI/CD & Infrastructure Hardening | 0/0 | Not started | - |

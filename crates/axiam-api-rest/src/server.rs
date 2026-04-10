@@ -13,6 +13,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::config::RateLimitConfig;
 use crate::extractors::rate_limit::XForwardedForKeyExtractor;
 use crate::handlers;
+use crate::middleware::authz::AuthzMiddleware;
 use crate::middleware::csrf::CsrfMiddleware;
 use crate::openapi::ApiDoc;
 
@@ -59,6 +60,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
 ) {
     cfg.service(
         web::scope("/auth")
+            .wrap(AuthzMiddleware)
             .wrap(CsrfMiddleware)
             .app_data(web::JsonConfig::default().limit(65_536))
             .service(
@@ -131,6 +133,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
     );
     cfg.service(
         web::scope("/oauth2")
+            .wrap(AuthzMiddleware)
             .route(
                 "/authorize",
                 web::get().to(handlers::oauth2::authorize::<C>),
@@ -150,6 +153,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
     );
     cfg.service(
         web::scope("/api/v1")
+            .wrap(AuthzMiddleware)
             .service(
                 web::resource("/organizations")
                     .route(web::post().to(handlers::organizations::create::<C>))

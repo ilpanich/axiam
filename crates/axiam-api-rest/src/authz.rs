@@ -114,3 +114,15 @@ impl RequirePermission {
 
 /// Convenience alias for the app-data type.
 pub type AuthzData = actix_web::web::Data<Arc<dyn AuthzChecker>>;
+
+/// Marker inserted into request extensions after a successful
+/// [`RequirePermission`] check.
+///
+/// Handlers can insert this after calling `RequirePermission::check()` to
+/// signal to the outer middleware (and integration tests) that authorization
+/// was explicitly performed:
+///
+/// ```ignore
+/// req.extensions_mut().insert(AuthzChecked);
+/// ```
+pub struct AuthzChecked;

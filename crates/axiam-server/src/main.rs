@@ -13,6 +13,7 @@ use axiam_api_rest::{
 use axiam_audit::AuditMiddleware;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{AuthService, MfaMethodService, WebauthnService};
+use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
 use axiam_db::{
     DbConfig, DbManager, SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
     SurrealCaCertificateRepository, SurrealCertificateRepository,
@@ -85,6 +86,48 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to run database migrations");
 
     tracing::info!("Database connected and migrations applied");
+
+    // Seed permissions for all existing tenants (D-07).
+    // Uses UPSERT — safe to run on every startup.
+    {
+        let seed_org_repo = SurrealOrganizationRepository::new(db.client().clone());
+        let seed_tenant_repo = SurrealTenantRepository::new(db.client().clone());
+        let all_orgs = seed_org_repo
+            .list(Pagination {
+                offset: 0,
+                limit: 10_000,
+            })
+            .await
+            .expect("Failed to list organizations for permission seeding");
+        let mut seeded_count = 0usize;
+        for org in all_orgs.items {
+            let tenants = seed_tenant_repo
+                .list_by_organization(
+                    org.id,
+                    Pagination {
+                        offset: 0,
+                        limit: 10_000,
+                    },
+                )
+                .await
+                .expect("Failed to list tenants for permission seeding");
+            for tenant in tenants.items {
+                axiam_db::seed_permissions(
+                    db.client(),
+                    tenant.id,
+                    axiam_api_rest::permissions::PERMISSION_REGISTRY,
+                )
+                .await
+                .expect("Failed to seed permissions for tenant");
+                seeded_count += 1;
+            }
+        }
+        tracing::info!(
+            tenants = seeded_count,
+            "Seeded permissions for {} tenants",
+            seeded_count
+        );
+    }
 
     // Connect to RabbitMQ and declare queues.
     let amqp = AmqpManager::connect_with_retry(&config.amqp)
@@ -191,6 +234,16 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
+    // Build REST-facing authorization checker (D-01, D-02).
+    let rest_authz: Arc<dyn axiam_api_rest::authz::AuthzChecker> =
+        Arc::new(axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        ));
+
     // Spawn AMQP authorization consumer on a background task.
     // Uses a publisher channel because the consumer also publishes responses.
     let amqp_channel = amqp
@@ -265,6 +318,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(TracingLogger::default())
             .wrap(audit_middleware.clone())
             .wrap(build_cors(&server_config.cors_allowed_origins))
+            .app_data(web::Data::from(rest_authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(health_checker.clone()))
             .app_data(web::Data::new(audit_repo.clone()))

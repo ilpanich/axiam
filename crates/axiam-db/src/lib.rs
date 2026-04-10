@@ -11,6 +11,7 @@ mod connection;
 mod error;
 pub mod repository;
 mod schema;
+pub mod seeder;
 
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
@@ -28,6 +29,7 @@ pub use repository::{
     verify_password,
 };
 pub use schema::{run_migrations, schema_v1};
+pub use seeder::seed_permissions;
 /// Re-export SurrealDB connection types for use in repository type aliases.
 pub use surrealdb::Connection;
 pub use surrealdb::engine::remote::ws::Client as WsClient;

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-04-09T20:13:40.725Z"
-last_activity: 2026-04-08
+stopped_at: Completed 03-rbac-enforcement Plan 01
+last_updated: "2026-04-10T12:08:18.661Z"
+last_activity: 2026-04-10
 progress:
   total_phases: 7
   completed_phases: 2
-  total_plans: 8
-  completed_plans: 8
+  total_plans: 13
+  completed_plans: 9
   percent: 0
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 02 — security-headers-rate-limiting
+**Current focus:** Phase 03 — rbac-enforcement
 
 ## Current Position
 
-Phase: 3
-Plan: Not started
+Phase: 03 (rbac-enforcement) — EXECUTING
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-04-08
+Last activity: 2026-04-10
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-cookie-based-authentication P03 | 23 | 1 tasks | 2 files |
 | Phase 02-security-headers-rate-limiting P04 | 35 | 2 tasks | 6 files |
 | Phase 02-security-headers-rate-limiting P05 | 10 | 2 tasks | 2 files |
+| Phase 03-rbac-enforcement P01 | 20 | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,8 @@ Recent decisions affecting current work:
 - [Phase 02-security-headers-rate-limiting]: Inline unlock dialog created instead of extending ConfirmDialog — ConfirmDialog has hardcoded destructive styling not suitable for positive unlock action
 - [Phase 02-security-headers-rate-limiting]: Wrap entire /users resource with rate limiter — GET at 5 req/min acceptable for admin list endpoint
 - [Phase 02-security-headers-rate-limiting]: lockout_duration_secs default changed from 300 to 900 to match REQ-3 (15-minute cooldown)
+- [Phase 03-rbac-enforcement]: TenantRepository has no generic list() — used OrganizationRepository::list() + list_by_organization() to enumerate all tenants for startup seeding
+- [Phase 03-rbac-enforcement]: AuthzMiddleware wraps all three API scopes (/auth, /oauth2, /api/v1) with public-path allowlist for auth-exempt endpoints (D-04)
 
 ### Pending Todos
 
@@ -88,6 +91,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-09T20:13:40.720Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-rbac-enforcement/03-CONTEXT.md
+Last session: 2026-04-10T12:08:18.657Z
+Stopped at: Completed 03-rbac-enforcement Plan 01
+Resume file: None

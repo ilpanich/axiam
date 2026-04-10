@@ -115,6 +115,14 @@ impl RequirePermission {
 /// Convenience alias for the app-data type.
 pub type AuthzData = actix_web::web::Data<Arc<dyn AuthzChecker>>;
 
+/// Check if the caller is accessing their own resource (self-service).
+///
+/// Returns `true` when `caller.user_id == target_user_id`, allowing
+/// self-service endpoints to skip the authorization engine check.
+pub fn is_own_resource(caller: &AuthenticatedUser, target_user_id: Uuid) -> bool {
+    caller.user_id == target_user_id
+}
+
 /// Marker inserted into request extensions after a successful
 /// [`RequirePermission`] check.
 ///

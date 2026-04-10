@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission, is_own_resource};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -92,9 +93,13 @@ impl From<User> for UserResponse {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealUserRepository<C>>,
     body: web::Json<CreateUserRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("users:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     let input = CreateUser {
         tenant_id: user.tenant_id,
@@ -120,9 +125,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealUserRepository<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("users:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, query.into_inner()).await?;
     let items: Vec<UserResponse> = result.items.into_iter().map(UserResponse::from).collect();
     Ok(HttpResponse::Ok().json(PaginatedResult {
@@ -147,10 +156,17 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealUserRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let target = repo.get_by_id(user.tenant_id, path.into_inner()).await?;
+    let target_id = path.into_inner();
+    if !is_own_resource(&user, target_id) {
+        RequirePermission::new("users:get", Uuid::nil())
+            .check(&user, authz.get_ref().as_ref())
+            .await?;
+    }
+    let target = repo.get_by_id(user.tenant_id, target_id).await?;
     Ok(HttpResponse::Ok().json(UserResponse::from(target)))
 }
 
@@ -169,10 +185,17 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealUserRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateUserRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    let target_id = path.into_inner();
+    if !is_own_resource(&user, target_id) {
+        RequirePermission::new("users:update", Uuid::nil())
+            .check(&user, authz.get_ref().as_ref())
+            .await?;
+    }
     let req = body.into_inner();
     let input = UpdateUser {
         username: req.username,
@@ -182,7 +205,7 @@ pub async fn update<C: Connection>(
         ..Default::default()
     };
     let updated = repo
-        .update(user.tenant_id, path.into_inner(), input)
+        .update(user.tenant_id, target_id, input)
         .await?;
     Ok(HttpResponse::Ok().json(UserResponse::from(updated)))
 }
@@ -201,9 +224,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealUserRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("users:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     repo.delete(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -225,9 +252,13 @@ pub async fn delete<C: Connection>(
 )]
 pub async fn unlock<C: Connection>(
     auth_user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealUserRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("users:admin", Uuid::nil())
+        .check(&auth_user, authz.get_ref().as_ref())
+        .await?;
     let user_id = path.into_inner();
     let tenant_id = auth_user.tenant_id;
 

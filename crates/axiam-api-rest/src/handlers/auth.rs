@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission, is_own_resource};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::cert_auth::CertificateAuthenticated;
@@ -585,19 +586,17 @@ pub async fn me<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn reset_mfa<C: Connection>(
-    _caller: AuthenticatedUser,
-    _svc: web::Data<AuthSvc<C>>,
-    _path: web::Path<Uuid>,
+    caller: AuthenticatedUser,
+    authz: AuthzData,
+    svc: web::Data<AuthSvc<C>>,
+    path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    // TODO(T19): this endpoint is disabled until RBAC is implemented.
-    // Once `users:reset-mfa` permission checks are in place, remove
-    // this blanket deny and gate access through the authorization
-    // engine instead. Without RBAC, any authenticated user in the
-    // tenant could reset another user's MFA — a privilege escalation
-    // risk we refuse to leave open.
-    Err(AxiamApiError(
-        axiam_core::error::AxiamError::AuthorizationDenied {
-            reason: "MFA reset is disabled until RBAC is implemented".into(),
-        },
-    ))
+    let target_user_id = path.into_inner();
+    if !is_own_resource(&caller, target_user_id) {
+        RequirePermission::new("users:admin", Uuid::nil())
+            .check(&caller, authz.get_ref().as_ref())
+            .await?;
+    }
+    svc.reset_mfa(caller.tenant_id, target_user_id).await?;
+    Ok(HttpResponse::NoContent().finish())
 }

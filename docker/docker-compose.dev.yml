@@ -1,6 +1,6 @@
 services:
   surrealdb:
-    image: surrealdb/surrealdb:v2
+    image: surrealdb/surrealdb:v3
     container_name: axiam-surrealdb
     command: start --user root --pass root --log info
     ports:

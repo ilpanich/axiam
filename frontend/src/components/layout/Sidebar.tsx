@@ -1,5 +1,6 @@
 import { NavLink, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
+import { usePermissions } from "@/hooks/usePermissions";
 import {
   LayoutDashboard,
   Users,
@@ -27,6 +28,12 @@ interface NavItem {
   to: string;
   label: string;
   icon: React.ReactNode;
+  /**
+   * Permission required to access this nav target. `null` means the
+   * item is always visible (self-service surfaces: Dashboard, Audit
+   * Logs, Profile).
+   */
+  requiredPermission: string | null;
 }
 
 interface NavSection {
@@ -42,23 +49,55 @@ const navSections: NavSection[] = [
         to: "/dashboard",
         label: "Dashboard",
         icon: <LayoutDashboard size={18} />,
+        requiredPermission: null,
       },
     ],
   },
   {
     title: "Identity",
     items: [
-      { to: "/users", label: "Users", icon: <Users size={18} /> },
-      { to: "/groups", label: "Groups", icon: <UsersRound size={18} /> },
-      { to: "/roles", label: "Roles", icon: <Shield size={18} /> },
-      { to: "/permissions", label: "Permissions", icon: <Lock size={18} /> },
-      { to: "/resources", label: "Resources", icon: <Database size={18} /> },
+      {
+        to: "/users",
+        label: "Users",
+        icon: <Users size={18} />,
+        requiredPermission: "users:list",
+      },
+      {
+        to: "/groups",
+        label: "Groups",
+        icon: <UsersRound size={18} />,
+        requiredPermission: "groups:list",
+      },
+      {
+        to: "/roles",
+        label: "Roles",
+        icon: <Shield size={18} />,
+        requiredPermission: "roles:list",
+      },
+      {
+        to: "/permissions",
+        label: "Permissions",
+        icon: <Lock size={18} />,
+        requiredPermission: "permissions:list",
+      },
+      {
+        to: "/resources",
+        label: "Resources",
+        icon: <Database size={18} />,
+        requiredPermission: "resources:list",
+      },
       {
         to: "/service-accounts",
         label: "Service Accounts",
         icon: <KeyRound size={18} />,
+        requiredPermission: "service_accounts:list",
       },
-      { to: "/federation", label: "Federation", icon: <Globe size={18} /> },
+      {
+        to: "/federation",
+        label: "Federation",
+        icon: <Globe size={18} />,
+        requiredPermission: "federation:list",
+      },
     ],
   },
   {
@@ -68,15 +107,32 @@ const navSections: NavSection[] = [
         to: "/organizations",
         label: "Organizations",
         icon: <Building2 size={18} />,
+        requiredPermission: "organizations:list",
       },
-      { to: "/tenants", label: "Tenants", icon: <Network size={18} /> },
+      {
+        to: "/tenants",
+        label: "Tenants",
+        icon: <Network size={18} />,
+        requiredPermission: "tenants:list",
+      },
       {
         to: "/certificates",
         label: "Certificates",
         icon: <Award size={18} />,
+        requiredPermission: "certificates:list",
       },
-      { to: "/pgp-keys", label: "PGP Keys", icon: <Key size={18} /> },
-      { to: "/webhooks", label: "Webhooks", icon: <Webhook size={18} /> },
+      {
+        to: "/pgp-keys",
+        label: "PGP Keys",
+        icon: <Key size={18} />,
+        requiredPermission: "pgp_keys:list",
+      },
+      {
+        to: "/webhooks",
+        label: "Webhooks",
+        icon: <Webhook size={18} />,
+        requiredPermission: "webhooks:list",
+      },
     ],
   },
   {
@@ -86,24 +142,37 @@ const navSections: NavSection[] = [
         to: "/oauth2-clients",
         label: "OAuth2 Clients",
         icon: <Code2 size={18} />,
+        requiredPermission: "oauth2_clients:list",
       },
       {
         to: "/audit-logs",
         label: "Audit Logs",
         icon: <ScrollText size={18} />,
+        requiredPermission: null,
       },
       {
         to: "/notification-rules",
         label: "Notification Rules",
         icon: <BellRing size={18} />,
+        requiredPermission: "notification_rules:list",
       },
     ],
   },
   {
     title: "Account",
     items: [
-      { to: "/profile", label: "Profile", icon: <UserCircle size={18} /> },
-      { to: "/settings", label: "Settings", icon: <Settings size={18} /> },
+      {
+        to: "/profile",
+        label: "Profile",
+        icon: <UserCircle size={18} />,
+        requiredPermission: null,
+      },
+      {
+        to: "/settings",
+        label: "Settings",
+        icon: <Settings size={18} />,
+        requiredPermission: "settings:get",
+      },
     ],
   },
 ];
@@ -115,6 +184,7 @@ interface SidebarProps {
 
 export function Sidebar({ onClose, mobile = false }: SidebarProps) {
   const location = useLocation();
+  const { can } = usePermissions();
 
   return (
     <aside
@@ -160,18 +230,31 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
                   location.pathname === item.to ||
                   (item.to !== "/dashboard" &&
                     location.pathname.startsWith(item.to));
+                const isDisabled =
+                  item.requiredPermission !== null &&
+                  !can(item.requiredPermission);
                 return (
                   <li key={item.to}>
                     <NavLink
                       to={item.to}
-                      onClick={mobile ? onClose : undefined}
+                      onClick={
+                        isDisabled
+                          ? (e) => e.preventDefault()
+                          : mobile
+                            ? onClose
+                            : undefined
+                      }
                       className={cn(
                         "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-all duration-200 group",
                         isActive
                           ? "sidebar-item-active font-medium"
-                          : "text-muted-foreground hover:text-foreground hover:bg-white/5 pl-3"
+                          : "text-muted-foreground hover:text-foreground hover:bg-white/5 pl-3",
+                        isDisabled &&
+                          "opacity-40 cursor-not-allowed pointer-events-none"
                       )}
                       aria-current={isActive ? "page" : undefined}
+                      aria-disabled={isDisabled ? "true" : undefined}
+                      tabIndex={isDisabled ? -1 : undefined}
                     >
                       <span
                         className={cn(
@@ -185,7 +268,7 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
                         {item.icon}
                       </span>
                       <span className="truncate">{item.label}</span>
-                      {isActive && (
+                      {isActive && !isDisabled && (
                         <ChevronRight
                           size={14}
                           className="ml-auto text-primary"

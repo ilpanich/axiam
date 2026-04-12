@@ -94,7 +94,7 @@ Plans:
 Plans:
 - [x] 03-01-PLAN.md — Permission registry, seeder, AuthzMiddleware, AuthzChecker wiring
 - [ ] 03-02-PLAN.md — Handler-level RequirePermission checks + self-service ownership
-- [ ] 03-03-PLAN.md — Admin bootstrap endpoint + default role seeding
+- [x] 03-03-PLAN.md — Admin bootstrap endpoint + default role seeding
 - [ ] 03-04-PLAN.md — Frontend RBAC sidebar gating + /me permissions response
 - [ ] 03-05-PLAN.md — Integration tests + bootstrap page UI
 **UI hint**: yes
@@ -231,7 +231,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 |-------|----------------|--------|-----------|
 | 1. Cookie-Based Authentication | 3/3 | Complete   | 2026-04-04 |
 | 2. Security Headers & Rate Limiting | 4/5 | Gap closure | - |
-| 3. RBAC Enforcement | 1/5 | In Progress|  |
+| 3. RBAC Enforcement | 2/5 | In Progress|  |
 | 4. Federation Verification & Session Security | 0/0 | Not started | - |
 | 5. Email Delivery & GDPR Compliance | 0/0 | Not started | - |
 | 6. CI/CD & Infrastructure Hardening | 0/0 | Not started | - |

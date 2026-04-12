@@ -9,6 +9,7 @@ use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -55,10 +56,14 @@ pub struct CreateScopeRequest {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealScopeRepository<C>>,
     path: web::Path<ResourcePath>,
     body: web::Json<CreateScopeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("scopes:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     let input = CreateScope {
         tenant_id: user.tenant_id,
@@ -83,9 +88,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealScopeRepository<C>>,
     path: web::Path<ResourcePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("scopes:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let scopes = repo
         .list_by_resource(user.tenant_id, path.resource_id)
         .await?;
@@ -109,9 +118,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealScopeRepository<C>>,
     path: web::Path<ScopePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("scopes:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let scope = repo.get_by_id(user.tenant_id, path.scope_id).await?;
     if scope.resource_id != path.resource_id {
         return Err(AxiamError::NotFound {
@@ -141,10 +154,14 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealScopeRepository<C>>,
     path: web::Path<ScopePath>,
     body: web::Json<UpdateScope>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("scopes:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let existing = repo.get_by_id(user.tenant_id, path.scope_id).await?;
     if existing.resource_id != path.resource_id {
         return Err(AxiamError::NotFound {
@@ -176,9 +193,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealScopeRepository<C>>,
     path: web::Path<ScopePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("scopes:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let existing = repo.get_by_id(user.tenant_id, path.scope_id).await?;
     if existing.resource_id != path.resource_id {
         return Err(AxiamError::NotFound {

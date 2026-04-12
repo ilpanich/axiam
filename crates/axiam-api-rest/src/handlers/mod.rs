@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod bootstrap;
 pub mod auth;
 pub mod ca_certificates;
 pub mod certificates;

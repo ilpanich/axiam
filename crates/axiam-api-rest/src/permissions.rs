@@ -27,7 +27,10 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("users:create", "Create a new user"),
     ("users:update", "Update an existing user"),
     ("users:delete", "Delete a user"),
-    ("users:admin", "Perform administrative user actions (unlock, reset MFA)"),
+    (
+        "users:admin",
+        "Perform administrative user actions (unlock, reset MFA)",
+    ),
     // Groups
     ("groups:list", "List groups"),
     ("groups:get", "Retrieve a single group"),
@@ -72,7 +75,10 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("certificates:get", "Retrieve a single certificate"),
     ("certificates:generate", "Generate a new certificate"),
     ("certificates:revoke", "Revoke a certificate"),
-    ("certificates:bind", "Bind a certificate to a service account"),
+    (
+        "certificates:bind",
+        "Bind a certificate to a service account",
+    ),
     // CA Certificates
     ("ca_certificates:list", "List CA certificates"),
     ("ca_certificates:get", "Retrieve a single CA certificate"),
@@ -80,21 +86,30 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("ca_certificates:revoke", "Revoke a CA certificate"),
     // Audit Logs
     ("audit_logs:list", "List audit logs for the tenant"),
-    ("audit_logs:list_system", "List system-wide audit logs (all tenants)"),
+    (
+        "audit_logs:list_system",
+        "List system-wide audit logs (all tenants)",
+    ),
     // Service Accounts
     ("service_accounts:list", "List service accounts"),
     ("service_accounts:get", "Retrieve a single service account"),
     ("service_accounts:create", "Create a new service account"),
     ("service_accounts:update", "Update a service account"),
     ("service_accounts:delete", "Delete a service account"),
-    ("service_accounts:rotate_secret", "Rotate a service account secret"),
+    (
+        "service_accounts:rotate_secret",
+        "Rotate a service account secret",
+    ),
     // PGP Keys
     ("pgp_keys:list", "List PGP keys"),
     ("pgp_keys:get", "Retrieve a single PGP key"),
     ("pgp_keys:generate", "Generate a new PGP key"),
     ("pgp_keys:revoke", "Revoke a PGP key"),
     ("pgp_keys:encrypt", "Encrypt data with a PGP key"),
-    ("pgp_keys:sign_audit_batch", "Sign an audit log batch with a PGP key"),
+    (
+        "pgp_keys:sign_audit_batch",
+        "Sign an audit log batch with a PGP key",
+    ),
     // Webhooks
     ("webhooks:list", "List webhooks"),
     ("webhooks:get", "Retrieve a single webhook"),
@@ -109,13 +124,19 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("oauth2_clients:delete", "Delete an OAuth2 client"),
     // Federation
     ("federation:list", "List federation configurations"),
-    ("federation:get", "Retrieve a single federation configuration"),
+    (
+        "federation:get",
+        "Retrieve a single federation configuration",
+    ),
     ("federation:create", "Create a federation configuration"),
     ("federation:update", "Update a federation configuration"),
     ("federation:delete", "Delete a federation configuration"),
     // Notification Rules
     ("notification_rules:list", "List notification rules"),
-    ("notification_rules:get", "Retrieve a single notification rule"),
+    (
+        "notification_rules:get",
+        "Retrieve a single notification rule",
+    ),
     ("notification_rules:create", "Create a notification rule"),
     ("notification_rules:update", "Update a notification rule"),
     ("notification_rules:delete", "Delete a notification rule"),
@@ -135,9 +156,15 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("organizations:update", "Update an organization"),
     ("organizations:delete", "Delete an organization"),
     ("organizations:get_settings", "Read organization settings"),
-    ("organizations:update_settings", "Update organization settings"),
+    (
+        "organizations:update_settings",
+        "Update organization settings",
+    ),
     // Bootstrap
-    ("admin:bootstrap", "Bootstrap the first admin user in a tenant"),
+    (
+        "admin:bootstrap",
+        "Bootstrap the first admin user in a tenant",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -204,21 +231,69 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/organizations", "organizations:list"),
     ("POST", "/api/v1/organizations", "organizations:create"),
     ("GET", "/api/v1/organizations/{org_id}", "organizations:get"),
-    ("PUT", "/api/v1/organizations/{org_id}", "organizations:update"),
-    ("DELETE", "/api/v1/organizations/{org_id}", "organizations:delete"),
+    (
+        "PUT",
+        "/api/v1/organizations/{org_id}",
+        "organizations:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/organizations/{org_id}",
+        "organizations:delete",
+    ),
     // Organization Settings
-    ("GET", "/api/v1/organizations/{org_id}/settings", "organizations:get_settings"),
-    ("PUT", "/api/v1/organizations/{org_id}/settings", "organizations:update_settings"),
+    (
+        "GET",
+        "/api/v1/organizations/{org_id}/settings",
+        "organizations:get_settings",
+    ),
+    (
+        "PUT",
+        "/api/v1/organizations/{org_id}/settings",
+        "organizations:update_settings",
+    ),
     // Tenants
-    ("GET", "/api/v1/organizations/{org_id}/tenants", "tenants:list"),
-    ("POST", "/api/v1/organizations/{org_id}/tenants", "tenants:create"),
-    ("GET", "/api/v1/organizations/{org_id}/tenants/{tenant_id}", "tenants:get"),
-    ("PUT", "/api/v1/organizations/{org_id}/tenants/{tenant_id}", "tenants:update"),
-    ("DELETE", "/api/v1/organizations/{org_id}/tenants/{tenant_id}", "tenants:delete"),
+    (
+        "GET",
+        "/api/v1/organizations/{org_id}/tenants",
+        "tenants:list",
+    ),
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/tenants",
+        "tenants:create",
+    ),
+    (
+        "GET",
+        "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
+        "tenants:get",
+    ),
+    (
+        "PUT",
+        "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
+        "tenants:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
+        "tenants:delete",
+    ),
     // CA Certificates
-    ("GET", "/api/v1/organizations/{org_id}/ca-certificates", "ca_certificates:list"),
-    ("POST", "/api/v1/organizations/{org_id}/ca-certificates", "ca_certificates:generate"),
-    ("GET", "/api/v1/organizations/{org_id}/ca-certificates/{id}", "ca_certificates:get"),
+    (
+        "GET",
+        "/api/v1/organizations/{org_id}/ca-certificates",
+        "ca_certificates:list",
+    ),
+    (
+        "POST",
+        "/api/v1/organizations/{org_id}/ca-certificates",
+        "ca_certificates:generate",
+    ),
+    (
+        "GET",
+        "/api/v1/organizations/{org_id}/ca-certificates/{id}",
+        "ca_certificates:get",
+    ),
     (
         "POST",
         "/api/v1/organizations/{org_id}/ca-certificates/{id}/revoke",
@@ -233,16 +308,32 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     ("POST", "/api/v1/users/{user_id}/unlock", "users:admin"),
     ("POST", "/api/v1/users/{user_id}/reset-mfa", "users:admin"),
     ("GET", "/api/v1/users/{user_id}/mfa-methods", "users:get"),
-    ("DELETE", "/api/v1/users/{user_id}/mfa-methods/{method_id}", "users:admin"),
+    (
+        "DELETE",
+        "/api/v1/users/{user_id}/mfa-methods/{method_id}",
+        "users:admin",
+    ),
     // Groups
     ("GET", "/api/v1/groups", "groups:list"),
     ("POST", "/api/v1/groups", "groups:create"),
     ("GET", "/api/v1/groups/{group_id}", "groups:get"),
     ("PUT", "/api/v1/groups/{group_id}", "groups:update"),
     ("DELETE", "/api/v1/groups/{group_id}", "groups:delete"),
-    ("GET", "/api/v1/groups/{group_id}/members", "groups:list_members"),
-    ("POST", "/api/v1/groups/{group_id}/members", "groups:add_member"),
-    ("DELETE", "/api/v1/groups/{group_id}/members/{user_id}", "groups:remove_member"),
+    (
+        "GET",
+        "/api/v1/groups/{group_id}/members",
+        "groups:list_members",
+    ),
+    (
+        "POST",
+        "/api/v1/groups/{group_id}/members",
+        "groups:add_member",
+    ),
+    (
+        "DELETE",
+        "/api/v1/groups/{group_id}/members/{user_id}",
+        "groups:remove_member",
+    ),
     // Roles
     ("GET", "/api/v1/roles", "roles:list"),
     ("POST", "/api/v1/roles", "roles:create"),
@@ -250,61 +341,177 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     ("PUT", "/api/v1/roles/{role_id}", "roles:update"),
     ("DELETE", "/api/v1/roles/{role_id}", "roles:delete"),
     ("POST", "/api/v1/roles/{role_id}/users", "roles:assign"),
-    ("DELETE", "/api/v1/roles/{role_id}/users/{user_id}", "roles:unassign"),
+    (
+        "DELETE",
+        "/api/v1/roles/{role_id}/users/{user_id}",
+        "roles:unassign",
+    ),
     ("POST", "/api/v1/roles/{role_id}/groups", "roles:assign"),
-    ("DELETE", "/api/v1/roles/{role_id}/groups/{group_id}", "roles:unassign"),
+    (
+        "DELETE",
+        "/api/v1/roles/{role_id}/groups/{group_id}",
+        "roles:unassign",
+    ),
     // Permissions
     ("GET", "/api/v1/permissions", "permissions:list"),
     ("POST", "/api/v1/permissions", "permissions:create"),
-    ("GET", "/api/v1/permissions/{permission_id}", "permissions:get"),
-    ("PUT", "/api/v1/permissions/{permission_id}", "permissions:update"),
-    ("DELETE", "/api/v1/permissions/{permission_id}", "permissions:delete"),
-    ("GET", "/api/v1/roles/{role_id}/permissions", "permissions:list"),
-    ("POST", "/api/v1/roles/{role_id}/permissions", "permissions:grant"),
-    ("DELETE", "/api/v1/roles/{role_id}/permissions/{permission_id}", "permissions:revoke"),
+    (
+        "GET",
+        "/api/v1/permissions/{permission_id}",
+        "permissions:get",
+    ),
+    (
+        "PUT",
+        "/api/v1/permissions/{permission_id}",
+        "permissions:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/permissions/{permission_id}",
+        "permissions:delete",
+    ),
+    (
+        "GET",
+        "/api/v1/roles/{role_id}/permissions",
+        "permissions:list",
+    ),
+    (
+        "POST",
+        "/api/v1/roles/{role_id}/permissions",
+        "permissions:grant",
+    ),
+    (
+        "DELETE",
+        "/api/v1/roles/{role_id}/permissions/{permission_id}",
+        "permissions:revoke",
+    ),
     // Resources
     ("GET", "/api/v1/resources", "resources:list"),
     ("POST", "/api/v1/resources", "resources:create"),
     ("GET", "/api/v1/resources/{resource_id}", "resources:get"),
     ("PUT", "/api/v1/resources/{resource_id}", "resources:update"),
-    ("DELETE", "/api/v1/resources/{resource_id}", "resources:delete"),
-    ("GET", "/api/v1/resources/{resource_id}/children", "resources:list_children"),
-    ("GET", "/api/v1/resources/{resource_id}/ancestors", "resources:list_ancestors"),
+    (
+        "DELETE",
+        "/api/v1/resources/{resource_id}",
+        "resources:delete",
+    ),
+    (
+        "GET",
+        "/api/v1/resources/{resource_id}/children",
+        "resources:list_children",
+    ),
+    (
+        "GET",
+        "/api/v1/resources/{resource_id}/ancestors",
+        "resources:list_ancestors",
+    ),
     // Scopes
-    ("GET", "/api/v1/resources/{resource_id}/scopes", "scopes:list"),
-    ("POST", "/api/v1/resources/{resource_id}/scopes", "scopes:create"),
-    ("GET", "/api/v1/resources/{resource_id}/scopes/{scope_id}", "scopes:get"),
-    ("PUT", "/api/v1/resources/{resource_id}/scopes/{scope_id}", "scopes:update"),
-    ("DELETE", "/api/v1/resources/{resource_id}/scopes/{scope_id}", "scopes:delete"),
+    (
+        "GET",
+        "/api/v1/resources/{resource_id}/scopes",
+        "scopes:list",
+    ),
+    (
+        "POST",
+        "/api/v1/resources/{resource_id}/scopes",
+        "scopes:create",
+    ),
+    (
+        "GET",
+        "/api/v1/resources/{resource_id}/scopes/{scope_id}",
+        "scopes:get",
+    ),
+    (
+        "PUT",
+        "/api/v1/resources/{resource_id}/scopes/{scope_id}",
+        "scopes:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/resources/{resource_id}/scopes/{scope_id}",
+        "scopes:delete",
+    ),
     // Certificates
     ("GET", "/api/v1/certificates", "certificates:list"),
     ("POST", "/api/v1/certificates", "certificates:generate"),
     ("GET", "/api/v1/certificates/{id}", "certificates:get"),
-    ("POST", "/api/v1/certificates/{id}/revoke", "certificates:revoke"),
-    ("POST", "/api/v1/service-accounts/{sa_id}/bind-certificate", "certificates:bind"),
+    (
+        "POST",
+        "/api/v1/certificates/{id}/revoke",
+        "certificates:revoke",
+    ),
+    (
+        "POST",
+        "/api/v1/service-accounts/{sa_id}/bind-certificate",
+        "certificates:bind",
+    ),
     // Audit Logs
     ("GET", "/api/v1/audit-logs", "audit_logs:list"),
     ("GET", "/api/v1/audit-logs/system", "audit_logs:list_system"),
     // Service Accounts
     ("GET", "/api/v1/service-accounts", "service_accounts:list"),
-    ("POST", "/api/v1/service-accounts", "service_accounts:create"),
-    ("GET", "/api/v1/service-accounts/{sa_id}", "service_accounts:get"),
-    ("PUT", "/api/v1/service-accounts/{sa_id}", "service_accounts:update"),
-    ("DELETE", "/api/v1/service-accounts/{sa_id}", "service_accounts:delete"),
-    ("POST", "/api/v1/service-accounts/{sa_id}/rotate-secret", "service_accounts:rotate_secret"),
+    (
+        "POST",
+        "/api/v1/service-accounts",
+        "service_accounts:create",
+    ),
+    (
+        "GET",
+        "/api/v1/service-accounts/{sa_id}",
+        "service_accounts:get",
+    ),
+    (
+        "PUT",
+        "/api/v1/service-accounts/{sa_id}",
+        "service_accounts:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/service-accounts/{sa_id}",
+        "service_accounts:delete",
+    ),
+    (
+        "POST",
+        "/api/v1/service-accounts/{sa_id}/rotate-secret",
+        "service_accounts:rotate_secret",
+    ),
     // PGP Keys
     ("GET", "/api/v1/pgp-keys", "pgp_keys:list"),
     ("POST", "/api/v1/pgp-keys", "pgp_keys:generate"),
     ("GET", "/api/v1/pgp-keys/{id}", "pgp_keys:get"),
     ("POST", "/api/v1/pgp-keys/{id}/revoke", "pgp_keys:revoke"),
     ("POST", "/api/v1/pgp-keys/{id}/encrypt", "pgp_keys:encrypt"),
-    ("POST", "/api/v1/pgp-keys/sign-audit-batch", "pgp_keys:sign_audit_batch"),
+    (
+        "POST",
+        "/api/v1/pgp-keys/sign-audit-batch",
+        "pgp_keys:sign_audit_batch",
+    ),
     // Notification Rules
-    ("GET", "/api/v1/notification-rules", "notification_rules:list"),
-    ("POST", "/api/v1/notification-rules", "notification_rules:create"),
-    ("GET", "/api/v1/notification-rules/{id}", "notification_rules:get"),
-    ("PUT", "/api/v1/notification-rules/{id}", "notification_rules:update"),
-    ("DELETE", "/api/v1/notification-rules/{id}", "notification_rules:delete"),
+    (
+        "GET",
+        "/api/v1/notification-rules",
+        "notification_rules:list",
+    ),
+    (
+        "POST",
+        "/api/v1/notification-rules",
+        "notification_rules:create",
+    ),
+    (
+        "GET",
+        "/api/v1/notification-rules/{id}",
+        "notification_rules:get",
+    ),
+    (
+        "PUT",
+        "/api/v1/notification-rules/{id}",
+        "notification_rules:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/notification-rules/{id}",
+        "notification_rules:delete",
+    ),
     // Webhooks
     ("GET", "/api/v1/webhooks", "webhooks:list"),
     ("POST", "/api/v1/webhooks", "webhooks:create"),
@@ -315,17 +522,41 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/oauth2-clients", "oauth2_clients:list"),
     ("POST", "/api/v1/oauth2-clients", "oauth2_clients:create"),
     ("GET", "/api/v1/oauth2-clients/{id}", "oauth2_clients:get"),
-    ("PUT", "/api/v1/oauth2-clients/{id}", "oauth2_clients:update"),
-    ("DELETE", "/api/v1/oauth2-clients/{id}", "oauth2_clients:delete"),
+    (
+        "PUT",
+        "/api/v1/oauth2-clients/{id}",
+        "oauth2_clients:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/oauth2-clients/{id}",
+        "oauth2_clients:delete",
+    ),
     // Federation
     ("GET", "/api/v1/federation-configs", "federation:list"),
     ("POST", "/api/v1/federation-configs", "federation:create"),
     ("GET", "/api/v1/federation-configs/{id}", "federation:get"),
-    ("PUT", "/api/v1/federation-configs/{id}", "federation:update"),
-    ("DELETE", "/api/v1/federation-configs/{id}", "federation:delete"),
+    (
+        "PUT",
+        "/api/v1/federation-configs/{id}",
+        "federation:update",
+    ),
+    (
+        "DELETE",
+        "/api/v1/federation-configs/{id}",
+        "federation:delete",
+    ),
     // Federation Links (user-scoped, admin view)
-    ("GET", "/api/v1/federation-links/user/{user_id}", "federation:list"),
-    ("DELETE", "/api/v1/federation-links/{id}", "federation:delete"),
+    (
+        "GET",
+        "/api/v1/federation-links/user/{user_id}",
+        "federation:list",
+    ),
+    (
+        "DELETE",
+        "/api/v1/federation-links/{id}",
+        "federation:delete",
+    ),
     // Settings
     ("GET", "/api/v1/settings", "settings:get"),
     ("PUT", "/api/v1/settings", "settings:update"),

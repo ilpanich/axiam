@@ -528,6 +528,11 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
                     .route(
                         web::delete().to(handlers::federation::delete_link::<C>),
                     ),
+            )
+            // --- Admin Bootstrap (public — no auth required) ---
+            .service(
+                web::resource("/admin/bootstrap")
+                    .route(web::post().to(handlers::bootstrap::bootstrap::<C>)),
             ),
     );
 }

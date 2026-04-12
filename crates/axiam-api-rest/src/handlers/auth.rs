@@ -7,12 +7,16 @@ use axiam_auth::token::{issue_access_token, validate_access_token};
 use axiam_auth::{AuthService, MfaMethodService};
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceAuthResponse;
-use axiam_core::repository::{SettingsRepository, TenantRepository, UserRepository};
+use axiam_core::repository::{
+    PermissionRepository, RoleRepository, SettingsRepository, TenantRepository, UserRepository,
+};
 use axiam_db::{
-    SurrealFederationLinkRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealFederationLinkRepository, SurrealPermissionRepository, SurrealRoleRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -130,9 +134,15 @@ pub struct MfaSetupConfirmRequest {
 }
 
 /// GET /auth/me response body.
+///
+/// `permissions` contains the caller's effective permission action strings
+/// (deduplicated, sorted). If the caller has the `super-admin` role, the
+/// array is prefixed with `"*"` so clients can short-circuit fine-grained
+/// checks. Empty array means the user has no assigned roles.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MeResponse {
     pub user: LoginUserInfo,
+    pub permissions: Vec<String>,
 }
 
 // -----------------------------------------------------------------------
@@ -549,6 +559,8 @@ pub async fn setup_confirm_mfa<C: Connection>(
 pub async fn me<C: Connection>(
     user: AuthenticatedUser,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    role_repo: web::Data<SurrealRoleRepository<C>>,
+    permission_repo: web::Data<SurrealPermissionRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let u = user_repo
         .get_by_id(user.tenant_id, user.user_id)
@@ -556,12 +568,41 @@ pub async fn me<C: Connection>(
         .map_err(|_| AxiamError::AuthenticationFailed {
             reason: "user not found".into(),
         })?;
+
+    // Effective permissions = union of action strings across every role
+    // assigned to the user (direct + via group membership). `get_user_roles`
+    // handles both sources, so we don't need a separate group lookup here.
+    let roles = role_repo
+        .get_user_roles(user.tenant_id, user.user_id)
+        .await?;
+
+    let mut actions: BTreeSet<String> = BTreeSet::new();
+    let mut is_super_admin = false;
+    for role in &roles {
+        if role.name == "super-admin" {
+            is_super_admin = true;
+        }
+        let perms = permission_repo
+            .get_role_permissions(user.tenant_id, role.id)
+            .await?;
+        for p in perms {
+            actions.insert(p.action);
+        }
+    }
+
+    let mut permissions: Vec<String> = actions.into_iter().collect();
+    if is_super_admin {
+        // Wildcard short-circuits client-side `can()` checks (per UI-SPEC).
+        permissions.insert(0, "*".to_string());
+    }
+
     Ok(HttpResponse::Ok().json(MeResponse {
         user: LoginUserInfo {
             id: user.user_id,
             username: u.username,
             email: u.email,
         },
+        permissions,
     }))
 }
 

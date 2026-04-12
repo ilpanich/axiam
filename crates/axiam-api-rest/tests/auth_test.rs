@@ -22,9 +22,9 @@ use axiam_core::repository::{
     OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnCredentialRepository,
+    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
+    SurrealRoleRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -137,6 +137,10 @@ macro_rules! test_app {
                 )))
                 .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealSettingsRepository::new($db.clone())))
+                .app_data(web::Data::new(SurrealRoleRepository::new($db.clone())))
+                .app_data(web::Data::new(SurrealPermissionRepository::new(
+                    $db.clone(),
+                )))
                 .app_data(web::Data::new(MfaMethodService::new(
                     SurrealUserRepository::new($db.clone()),
                     SurrealWebauthnCredentialRepository::new($db.clone()),

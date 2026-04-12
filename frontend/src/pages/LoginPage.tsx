@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { cn } from "@/lib/utils";
 import api from "@/lib/api";
+import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
 import { KeyRound, ChevronRight, Loader2, AlertCircle } from "lucide-react";
 import type { AxiosError } from "axios";
 
@@ -89,7 +90,12 @@ export function LoginPage() {
       }
 
       if (data.user) {
-        setUser(data.user);
+        // Re-fetch via /auth/me so the store is populated with the
+        // permissions array — login response does not include it.
+        // Fallback to login payload with empty permissions if /me
+        // fails (e.g., cookies still propagating).
+        const hydrated = await fetchCurrentUser();
+        setUser(hydrated ?? { ...data.user, permissions: [] });
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
         navigate("/dashboard");
       } else {
@@ -131,7 +137,12 @@ export function LoginPage() {
 
       const data = response.data;
       if (data.user) {
-        setUser(data.user);
+        // Re-fetch via /auth/me so the store is populated with the
+        // permissions array — login response does not include it.
+        // Fallback to login payload with empty permissions if /me
+        // fails (e.g., cookies still propagating).
+        const hydrated = await fetchCurrentUser();
+        setUser(hydrated ?? { ...data.user, permissions: [] });
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
         navigate("/dashboard");
       } else {

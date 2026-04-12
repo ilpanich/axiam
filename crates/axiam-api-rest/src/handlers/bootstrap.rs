@@ -10,8 +10,8 @@ use axiam_core::repository::{
     OrganizationRepository, Pagination, RoleRepository, TenantRepository, UserRepository,
 };
 use axiam_db::{
-    SurrealOrganizationRepository, SurrealRoleRepository,
-    SurrealTenantRepository, SurrealUserRepository, seed_default_roles, seed_permissions,
+    SurrealOrganizationRepository, SurrealRoleRepository, SurrealTenantRepository,
+    SurrealUserRepository, seed_default_roles, seed_permissions,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::{Connection, Surreal};
@@ -162,7 +162,12 @@ pub async fn bootstrap<C: Connection>(
 
     // 7. Assign super-admin role to the new user.
     role_repo
-        .assign_to_user(req.tenant_id, user.id, seed_result.super_admin_role_id, None)
+        .assign_to_user(
+            req.tenant_id,
+            user.id,
+            seed_result.super_admin_role_id,
+            None,
+        )
         .await?;
 
     // 8. Return 201 — no token (user must login via /auth/login, per D-11).

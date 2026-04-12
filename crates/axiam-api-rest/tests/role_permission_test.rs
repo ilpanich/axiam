@@ -1,8 +1,8 @@
 //! Integration tests for role, permission, and assignment endpoints.
 
 use actix_web::{App, test, web};
-use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::group::CreateGroup;
@@ -108,7 +108,9 @@ macro_rules! test_app {
                 .app_data(web::Data::new(SurrealPermissionRepository::new(
                     $db.clone(),
                 )))
-                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     };

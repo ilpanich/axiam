@@ -1,8 +1,8 @@
 //! Integration tests for webhook management endpoints.
 
 use actix_web::{App, test, web};
-use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -96,7 +96,9 @@ macro_rules! test_app {
             App::new()
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new(SurrealWebhookRepository::new($db.clone())))
-                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     };

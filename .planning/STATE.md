@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-rbac-enforcement Plan 03
-last_updated: "2026-04-12T10:37:24.688Z"
+stopped_at: Completed 03-rbac-enforcement 03-02-PLAN.md
+last_updated: "2026-04-12T10:52:26.384Z"
 last_activity: 2026-04-12
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 13
-  completed_plans: 10
+  completed_plans: 11
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 03 (rbac-enforcement) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-04-12
 
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02-security-headers-rate-limiting P05 | 10 | 2 tasks | 2 files |
 | Phase 03-rbac-enforcement P01 | 20 | 2 tasks | 9 files |
 | Phase 03-rbac-enforcement P03 | 15 | 2 tasks | 5 files |
+| Phase 03-rbac-enforcement P02 | 45 | 3 tasks | 18 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,8 @@ Recent decisions affecting current work:
 - [Phase 02-security-headers-rate-limiting]: lockout_duration_secs default changed from 300 to 900 to match REQ-3 (15-minute cooldown)
 - [Phase 03-rbac-enforcement]: TenantRepository has no generic list() — used OrganizationRepository::list() + list_by_organization() to enumerate all tenants for startup seeding
 - [Phase 03-rbac-enforcement]: AuthzMiddleware wraps all three API scopes (/auth, /oauth2, /api/v1) with public-path allowlist for auth-exempt endpoints (D-04)
+- [Phase 03-rbac-enforcement]: Audit list self-service: restrict to actor_id when caller lacks audit_logs:list permission
+- [Phase 03-rbac-enforcement]: New tenants get permissions auto-seeded via seed_permissions in tenants::create handler
 
 ### Pending Todos
 
@@ -92,6 +95,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-12T10:37:24.684Z
-Stopped at: Completed 03-rbac-enforcement Plan 03
+Last session: 2026-04-12T10:52:26.379Z
+Stopped at: Completed 03-rbac-enforcement 03-02-PLAN.md
 Resume file: None

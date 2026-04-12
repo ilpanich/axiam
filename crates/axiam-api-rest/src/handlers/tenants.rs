@@ -3,15 +3,17 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::models::tenant::{CreateTenant, Tenant, UpdateTenant};
 use axiam_core::repository::{PaginatedResult, Pagination, TenantRepository};
-use axiam_db::SurrealTenantRepository;
+use axiam_db::{SurrealTenantRepository, seed_permissions};
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
 use axiam_core::error::AxiamError;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::permissions::PERMISSION_REGISTRY;
 
 /// Request body for tenant creation (organization_id comes from the URL path).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -47,11 +49,16 @@ pub struct TenantPath {
     security(("bearer" = []))
 )]
 pub async fn create<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealTenantRepository<C>>,
+    db: web::Data<surrealdb::Surreal<C>>,
     path: web::Path<OrgPath>,
     body: web::Json<CreateTenantRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("tenants:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     let input = CreateTenant {
         organization_id: path.org_id,
@@ -60,6 +67,21 @@ pub async fn create<C: Connection>(
         metadata: req.metadata,
     };
     let tenant = repo.create(input).await?;
+
+    // Auto-seed permissions for the new tenant so RBAC works immediately.
+    seed_permissions(db.get_ref(), tenant.id, PERMISSION_REGISTRY)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to seed permissions for new tenant {}: {}",
+                tenant.id,
+                e
+            );
+            AxiamApiError(AxiamError::Internal(
+                "Failed to seed permissions for tenant".into(),
+            ))
+        })?;
+
     Ok(HttpResponse::Created().json(tenant))
 }
 
@@ -78,11 +100,15 @@ pub async fn create<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn list<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealTenantRepository<C>>,
     path: web::Path<OrgPath>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("tenants:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo
         .list_by_organization(path.org_id, query.into_inner())
         .await?;
@@ -105,10 +131,14 @@ pub async fn list<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn get<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealTenantRepository<C>>,
     path: web::Path<TenantPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("tenants:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let tenant = repo.get_by_id(path.tenant_id).await?;
     if tenant.organization_id != path.org_id {
         return Err(AxiamError::NotFound {
@@ -137,11 +167,15 @@ pub async fn get<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn update<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealTenantRepository<C>>,
     path: web::Path<TenantPath>,
     body: web::Json<UpdateTenant>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("tenants:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let existing = repo.get_by_id(path.tenant_id).await?;
     if existing.organization_id != path.org_id {
         return Err(AxiamError::NotFound {
@@ -170,10 +204,14 @@ pub async fn update<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn delete<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealTenantRepository<C>>,
     path: web::Path<TenantPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("tenants:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let existing = repo.get_by_id(path.tenant_id).await?;
     if existing.organization_id != path.org_id {
         return Err(AxiamError::NotFound {

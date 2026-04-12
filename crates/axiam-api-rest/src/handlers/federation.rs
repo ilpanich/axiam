@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -186,9 +187,13 @@ fn protocol_to_string(p: &FederationProtocol) -> &'static str {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
     body: web::Json<CreateFederationConfigRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
 
     if req.provider.is_empty() {
@@ -241,9 +246,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, pagination.into_inner()).await?;
     let response = PaginatedResult {
         items: result
@@ -273,9 +282,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let config = repo.get_by_id(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
@@ -297,10 +310,14 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
     body: web::Json<UpdateFederationConfigRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let req = body.into_inner();
 
@@ -356,9 +373,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
@@ -509,9 +530,13 @@ pub async fn oidc_callback<C: Connection>(
 )]
 pub async fn list_user_links<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationLinkRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let target_user_id = path.into_inner();
     let links = repo.get_by_user_id(user.tenant_id, target_user_id).await?;
     let response: Vec<FederationLinkResponse> = links
@@ -535,9 +560,13 @@ pub async fn list_user_links<C: Connection>(
 )]
 pub async fn delete_link<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationLinkRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())

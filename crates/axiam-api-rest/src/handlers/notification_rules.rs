@@ -12,6 +12,7 @@ use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::AuthenticatedUser;
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 
 // -------------------------------------------------------------------
@@ -87,9 +88,13 @@ impl From<NotificationRule> for NotificationRuleResponse {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealNotificationRuleRepository<C>>,
     body: web::Json<CreateNotificationRuleRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("notification_rules:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
 
     validate_name(&req.name)?;
@@ -122,9 +127,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealNotificationRuleRepository<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("notification_rules:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, pagination.into_inner()).await?;
     let response = PaginatedResult {
         items: result
@@ -153,9 +162,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealNotificationRuleRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("notification_rules:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let rule = repo.get_by_id(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(NotificationRuleResponse::from(rule)))
@@ -176,10 +189,14 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealNotificationRuleRepository<C>>,
     body: web::Json<UpdateNotificationRuleRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("notification_rules:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let req = body.into_inner();
 
@@ -222,9 +239,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealNotificationRuleRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("notification_rules:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())

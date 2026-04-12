@@ -7,6 +7,7 @@ use axiam_db::SurrealOrganizationRepository;
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -22,10 +23,14 @@ use crate::extractors::auth::AuthenticatedUser;
     security(("bearer" = []))
 )]
 pub async fn create<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealOrganizationRepository<C>>,
     body: web::Json<CreateOrganization>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("organizations:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let org = repo.create(body.into_inner()).await?;
     Ok(HttpResponse::Created().json(org))
 }
@@ -42,10 +47,14 @@ pub async fn create<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn list<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealOrganizationRepository<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("organizations:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(query.into_inner()).await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -63,10 +72,14 @@ pub async fn list<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn get<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealOrganizationRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("organizations:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let org = repo.get_by_id(path.into_inner()).await?;
     Ok(HttpResponse::Ok().json(org))
 }
@@ -85,11 +98,15 @@ pub async fn get<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn update<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealOrganizationRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateOrganization>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("organizations:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let org = repo.update(path.into_inner(), body.into_inner()).await?;
     Ok(HttpResponse::Ok().json(org))
 }
@@ -107,10 +124,14 @@ pub async fn update<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn delete<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealOrganizationRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("organizations:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     repo.delete(path.into_inner()).await?;
     Ok(HttpResponse::NoContent().finish())
 }

@@ -9,6 +9,7 @@ use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::AuthenticatedUser;
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 
 /// `POST /api/v1/organizations/{org_id}/ca-certificates`
@@ -25,11 +26,15 @@ use crate::error::AxiamApiError;
     security(("bearer" = []))
 )]
 pub async fn generate<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     service: web::Data<CaService<SurrealCaCertificateRepository<C>>>,
     body: web::Json<CreateCaCertificate>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("ca_certificates:generate", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let org_id = path.into_inner();
     let mut input = body.into_inner();
     input.organization_id = org_id;
@@ -53,11 +58,15 @@ pub async fn generate<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn list<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     service: web::Data<CaService<SurrealCaCertificateRepository<C>>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("ca_certificates:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let org_id = path.into_inner();
     let result = service.list(org_id, pagination.into_inner()).await?;
     Ok(HttpResponse::Ok().json(result))
@@ -78,10 +87,14 @@ pub async fn list<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn get<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<(Uuid, Uuid)>,
     service: web::Data<CaService<SurrealCaCertificateRepository<C>>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("ca_certificates:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let (org_id, id) = path.into_inner();
     let result = service.get(org_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
@@ -102,10 +115,14 @@ pub async fn get<C: Connection>(
     security(("bearer" = []))
 )]
 pub async fn revoke<C: Connection>(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<(Uuid, Uuid)>,
     service: web::Data<CaService<SurrealCaCertificateRepository<C>>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("ca_certificates:revoke", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let (org_id, id) = path.into_inner();
     service.revoke(org_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))

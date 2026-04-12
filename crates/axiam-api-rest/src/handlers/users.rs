@@ -204,9 +204,7 @@ pub async fn update<C: Connection>(
         metadata: req.metadata,
         ..Default::default()
     };
-    let updated = repo
-        .update(user.tenant_id, target_id, input)
-        .await?;
+    let updated = repo.update(user.tenant_id, target_id, input).await?;
     Ok(HttpResponse::Ok().json(UserResponse::from(updated)))
 }
 

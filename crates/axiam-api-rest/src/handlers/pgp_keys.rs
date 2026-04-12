@@ -12,6 +12,7 @@ use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::AuthenticatedUser;
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 
 /// `POST /api/v1/pgp-keys`
@@ -28,9 +29,13 @@ use crate::error::AxiamApiError;
 )]
 pub async fn generate<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
     body: web::Json<CreatePgpKey>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("pgp_keys:generate", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let mut input = body.into_inner();
     input.tenant_id = user.tenant_id;
     let result = service.generate(input).await?;
@@ -51,9 +56,13 @@ pub async fn generate<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("pgp_keys:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = service
         .list(user.tenant_id, pagination.into_inner())
         .await?;
@@ -73,9 +82,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("pgp_keys:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let result = service.get(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
@@ -94,9 +107,13 @@ pub async fn get<C: Connection>(
 )]
 pub async fn revoke<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("pgp_keys:revoke", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     service.revoke(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
@@ -116,10 +133,14 @@ pub async fn revoke<C: Connection>(
 )]
 pub async fn sign_audit_batch<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     pgp_service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
     audit_repo: web::Data<SurrealAuditLogRepository<C>>,
     body: web::Json<SignAuditBatchRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("pgp_keys:sign_audit_batch", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let request = body.into_inner();
 
     // Reject empty or duplicate entry IDs
@@ -175,10 +196,14 @@ pub async fn sign_audit_batch<C: Connection>(
 )]
 pub async fn encrypt<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
     body: web::Json<EncryptRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("pgp_keys:encrypt", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let key_id = path.into_inner();
     let plaintext = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,

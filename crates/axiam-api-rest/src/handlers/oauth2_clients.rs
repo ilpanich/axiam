@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -158,9 +159,13 @@ fn validate_grant_types(grant_types: &[String]) -> Result<(), AxiamApiError> {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealOAuth2ClientRepository<C>>,
     body: web::Json<CreateOAuth2ClientRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("oauth2_clients:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
 
     if req.name.is_empty() {
@@ -213,9 +218,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealOAuth2ClientRepository<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("oauth2_clients:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, pagination.into_inner()).await?;
     let response = PaginatedResult {
         items: result
@@ -245,9 +254,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealOAuth2ClientRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("oauth2_clients:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let client = repo.get_by_id(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(OAuth2ClientResponse::from(client)))
@@ -269,10 +282,14 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealOAuth2ClientRepository<C>>,
     body: web::Json<UpdateOAuth2ClientRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("oauth2_clients:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let req = body.into_inner();
 
@@ -342,9 +359,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealOAuth2ClientRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("oauth2_clients:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())

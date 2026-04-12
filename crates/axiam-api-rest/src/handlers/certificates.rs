@@ -15,6 +15,7 @@ use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::AuthenticatedUser;
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 
 /// `POST /api/v1/certificates`
@@ -31,12 +32,16 @@ use crate::error::AxiamApiError;
 )]
 pub async fn generate<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     service: web::Data<
         CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
     >,
     tenant_repo: web::Data<SurrealTenantRepository<C>>,
     body: web::Json<CreateCertificate>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("certificates:generate", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let mut input = body.into_inner();
     input.tenant_id = user.tenant_id;
 
@@ -66,11 +71,15 @@ pub async fn generate<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     service: web::Data<
         CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
     >,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("certificates:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = service
         .list(user.tenant_id, pagination.into_inner())
         .await?;
@@ -90,11 +99,15 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     service: web::Data<
         CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
     >,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("certificates:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let result = service.get(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
@@ -113,11 +126,15 @@ pub async fn get<C: Connection>(
 )]
 pub async fn revoke<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     service: web::Data<
         CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
     >,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("certificates:revoke", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     service.revoke(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
@@ -137,11 +154,15 @@ pub async fn revoke<C: Connection>(
 )]
 pub async fn bind<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     cert_repo: web::Data<SurrealCertificateRepository<C>>,
     sa_repo: web::Data<axiam_db::SurrealServiceAccountRepository<C>>,
     body: web::Json<BindCertificate>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("certificates:bind", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let sa_id = path.into_inner();
     let input = body.into_inner();
 

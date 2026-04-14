@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-rbac-enforcement 03-04-PLAN.md
-last_updated: "2026-04-12T11:15:00.000Z"
-last_activity: 2026-04-12 -- Phase 03 plan 04 completed (frontend permission gating)
+stopped_at: Completed 03-05-PLAN.md
+last_updated: "2026-04-14T20:56:28.114Z"
+last_activity: 2026-04-14
 progress:
   total_phases: 7
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 13
-  completed_plans: 12
-  percent: 0
+  completed_plans: 13
+  percent: 100
 ---
 
 # Project State
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 03 (rbac-enforcement) — EXECUTING
-Plan: 5 of 5
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-04-12 -- Phase 03 plan 04 completed (frontend permission gating)
+Last activity: 2026-04-14
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -60,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-rbac-enforcement P01 | 20 | 2 tasks | 9 files |
 | Phase 03-rbac-enforcement P03 | 15 | 2 tasks | 5 files |
 | Phase 03-rbac-enforcement P02 | 45 | 3 tasks | 18 files |
+| Phase 03 P05 | 26m | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,8 @@ Recent decisions affecting current work:
 - [Phase 03-rbac-enforcement]: AuthzMiddleware wraps all three API scopes (/auth, /oauth2, /api/v1) with public-path allowlist for auth-exempt endpoints (D-04)
 - [Phase 03-rbac-enforcement]: Audit list self-service: restrict to actor_id when caller lacks audit_logs:list permission
 - [Phase 03-rbac-enforcement]: New tenants get permissions auto-seeded via seed_permissions in tenants::create handler
+- [Phase 03]: 03-05: Fixed pre-existing seed_permissions bug (wrong table name 'permissions' vs 'permission') that broke RBAC grants in every seeded tenant; discovered while debugging super-admin 403
+- [Phase 03]: 03-05: RBAC enforcement validated end-to-end via 7-test rbac_test + 4-test bootstrap_test; route-permission parity enforced at test time via ROUTE_PERMISSION_MAP↔PERMISSION_REGISTRY cross-check
 
 ### Pending Todos
 
@@ -95,6 +98,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-12T10:52:26.379Z
-Stopped at: Completed 03-rbac-enforcement 03-02-PLAN.md
+Last session: 2026-04-14T20:56:28.111Z
+Stopped at: Completed 03-05-PLAN.md
 Resume file: None

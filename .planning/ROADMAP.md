@@ -95,8 +95,8 @@ Plans:
 - [x] 03-01-PLAN.md — Permission registry, seeder, AuthzMiddleware, AuthzChecker wiring
 - [x] 03-02-PLAN.md — Handler-level RequirePermission checks + self-service ownership
 - [x] 03-03-PLAN.md — Admin bootstrap endpoint + default role seeding
-- [ ] 03-04-PLAN.md — Frontend RBAC sidebar gating + /me permissions response
-- [ ] 03-05-PLAN.md — Integration tests + bootstrap page UI
+- [x] 03-04-PLAN.md — Frontend RBAC sidebar gating + /me permissions response
+- [x] 03-05-PLAN.md — Integration tests + bootstrap page UI
 **UI hint**: yes
 
 ### Scope

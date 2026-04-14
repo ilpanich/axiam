@@ -46,12 +46,12 @@ pub async fn seed_permissions<C: Connection>(
         let tenant_str = tenant_id.to_string();
 
         db.query(
-            "UPSERT type::record('permissions', $id) SET \
+            "UPSERT type::record('permission', $id) SET \
              tenant_id = $tenant_id, \
              action = $action, \
              description = $description, \
-             created_at = IF (SELECT created_at FROM type::record('permissions', $id))[0].created_at \
-               THEN (SELECT created_at FROM type::record('permissions', $id))[0].created_at \
+             created_at = IF (SELECT created_at FROM type::record('permission', $id))[0].created_at \
+               THEN (SELECT created_at FROM type::record('permission', $id))[0].created_at \
                ELSE time::now() END, \
              updated_at = time::now()",
         )
@@ -104,13 +104,7 @@ pub async fn seed_default_roles<C: Connection>(
         .await
         .map_err(|e| DbError::Migration(format!("seed_default_roles list roles failed: {e}")))?;
 
-    let find_role = |name: &str| {
-        existing
-            .items
-            .iter()
-            .find(|r| r.name == name)
-            .map(|r| r.id)
-    };
+    let find_role = |name: &str| existing.items.iter().find(|r| r.name == name).map(|r| r.id);
 
     let super_admin_id = match find_role("super-admin") {
         Some(id) => id,
@@ -179,7 +173,9 @@ pub async fn seed_default_roles<C: Connection>(
             },
         )
         .await
-        .map_err(|e| DbError::Migration(format!("seed_default_roles list permissions failed: {e}")))?;
+        .map_err(|e| {
+            DbError::Migration(format!("seed_default_roles list permissions failed: {e}"))
+        })?;
 
     // -----------------------------------------------------------------------
     // 3. Grant permissions to roles
@@ -230,4 +226,3 @@ pub async fn seed_default_roles<C: Connection>(
         viewer_role_id: viewer_id,
     })
 }
-

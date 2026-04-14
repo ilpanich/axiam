@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, Link, useSearchParams } from "react-router-dom";
 import { useAuthStore } from "@/stores/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,6 +41,18 @@ interface ErrorResponse {
 export function LoginPage() {
   const navigate = useNavigate();
   const { setUser, setTenantContext } = useAuthStore();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [bootstrapNotice, setBootstrapNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (searchParams.get("bootstrapped") === "1") {
+      setBootstrapNotice("Admin account created. Sign in to continue.");
+      // Strip the query param so a refresh doesn't re-show the notice.
+      const next = new URLSearchParams(searchParams);
+      next.delete("bootstrapped");
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const [step, setStep] = useState<LoginStep>("org-tenant");
   const [orgTenantData, setOrgTenantData] = useState<OrgTenantData>({
@@ -198,6 +210,16 @@ export function LoginPage() {
       </div>
 
       <div>
+        {/* Bootstrap success notice (?bootstrapped=1) */}
+        {bootstrapNotice && (
+          <div
+            role="status"
+            className="mb-4 flex items-start gap-2 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-primary"
+          >
+            <span>{bootstrapNotice}</span>
+          </div>
+        )}
+
         {/* Error banner */}
         {error && (
           <div

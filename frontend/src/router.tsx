@@ -1,6 +1,7 @@
 import { createBrowserRouter, Navigate } from "react-router-dom";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { LoginPage } from "@/pages/LoginPage";
+import { BootstrapPage } from "@/pages/BootstrapPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { OrganizationsPage } from "@/pages/organizations/OrganizationsPage";
 import { OrganizationDetailPage } from "@/pages/organizations/OrganizationDetailPage";
@@ -35,6 +36,10 @@ export const router = createBrowserRouter([
   {
     path: "/login",
     element: <LoginPage />,
+  },
+  {
+    path: "/bootstrap",
+    element: <BootstrapPage />,
   },
   {
     path: "/auth/forgot-password",

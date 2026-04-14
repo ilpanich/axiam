@@ -5,6 +5,11 @@ import { useAuthStore } from "@/stores/auth";
 import { Loader2 } from "lucide-react";
 import { router } from "./router";
 
+// Public routes registered in `./router`:
+//   - /login               — sign-in flow
+//   - /bootstrap           — first-run admin setup (Phase 03-05)
+//   - /auth/forgot-password, /auth/reset-password, /auth/verify-email
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

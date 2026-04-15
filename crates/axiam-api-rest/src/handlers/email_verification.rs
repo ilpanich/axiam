@@ -44,7 +44,7 @@ pub struct ResendVerificationRequest {
 /// consumed atomically — replaying the same token returns an error.
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/verify-email",
+    path = "/api/v1/auth/verify-email",
     tag = "auth",
     request_body = VerifyEmailRequest,
     responses(
@@ -80,7 +80,7 @@ pub async fn verify_email<C: Connection>(
 /// delivery will be wired in a future phase (T19) via `EmailService`.
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/resend-verification",
+    path = "/api/v1/auth/resend-verification",
     tag = "auth",
     request_body = ResendVerificationRequest,
     responses(

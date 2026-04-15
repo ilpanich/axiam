@@ -51,7 +51,7 @@ pub struct ConfirmResetBody {
 /// delivery will be wired in a future phase (T19) via `EmailService`.
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/reset",
+    path = "/api/v1/auth/reset",
     tag = "auth",
     request_body = RequestResetBody,
     responses(
@@ -116,7 +116,7 @@ pub async fn request_reset<C: Connection>(
 /// violations if the new password is too weak.
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/reset/confirm",
+    path = "/api/v1/auth/reset/confirm",
     tag = "auth",
     request_body = ConfirmResetBody,
     responses(

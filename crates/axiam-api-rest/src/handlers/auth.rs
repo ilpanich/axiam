@@ -215,7 +215,7 @@ async fn cookie_response_from_output<C: Connection>(
 /// `POST /api/v1/auth/login`
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/login",
+    path = "/api/v1/auth/login",
     tag = "auth",
     request_body = LoginRequest,
     responses(
@@ -288,7 +288,7 @@ pub async fn login<C: Connection>(
 /// `POST /api/v1/auth/logout`
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/logout",
+    path = "/api/v1/auth/logout",
     tag = "auth",
     request_body = LogoutRequest,
     responses(
@@ -313,7 +313,7 @@ pub async fn logout<C: Connection>(
 /// `POST /api/v1/auth/refresh`
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/refresh",
+    path = "/api/v1/auth/refresh",
     tag = "auth",
     request_body = RefreshRequest,
     responses(
@@ -370,7 +370,7 @@ pub async fn refresh<C: Connection>(
 /// `POST /api/v1/auth/mfa/enroll`
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/mfa/enroll",
+    path = "/api/v1/auth/mfa/enroll",
     tag = "auth",
     responses(
         (status = 200, description = "MFA enrollment initiated", body = MfaEnrollResponse),
@@ -392,7 +392,7 @@ pub async fn enroll_mfa<C: Connection>(
 /// `POST /api/v1/auth/mfa/confirm`
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/mfa/confirm",
+    path = "/api/v1/auth/mfa/confirm",
     tag = "auth",
     request_body = MfaConfirmRequest,
     responses(
@@ -414,7 +414,7 @@ pub async fn confirm_mfa<C: Connection>(
 /// `POST /api/v1/auth/mfa/verify`
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/mfa/verify",
+    path = "/api/v1/auth/mfa/verify",
     tag = "auth",
     request_body = MfaVerifyRequest,
     responses(
@@ -447,7 +447,7 @@ pub async fn verify_mfa<C: Connection>(
 /// The certificate must be bound to a service account.
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/device",
+    path = "/api/v1/auth/device",
     tag = "auth",
     responses(
         (status = 200, description = "Device authenticated", body = DeviceAuthResponse),
@@ -490,7 +490,7 @@ pub async fn device_auth<C: Connection>(
 /// MFA is enforced but not yet configured).
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/mfa/setup/enroll",
+    path = "/api/v1/auth/mfa/setup/enroll",
     tag = "auth",
     request_body = MfaSetupEnrollRequest,
     responses(
@@ -514,7 +514,7 @@ pub async fn setup_enroll_mfa<C: Connection>(
 /// Confirm MFA enrollment and complete login using a setup token.
 #[utoipa::path(
     post,
-    path = "/api/v1/api/v1/auth/mfa/setup/confirm",
+    path = "/api/v1/auth/mfa/setup/confirm",
     tag = "auth",
     request_body = MfaSetupConfirmRequest,
     responses(
@@ -548,7 +548,7 @@ pub async fn setup_confirm_mfa<C: Connection>(
 /// Returns the authenticated user's profile. Requires a valid session cookie.
 #[utoipa::path(
     get,
-    path = "/api/v1/api/v1/auth/me",
+    path = "/api/v1/auth/me",
     tag = "auth",
     responses(
         (status = 200, description = "Authenticated user info", body = MeResponse),

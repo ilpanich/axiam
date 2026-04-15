@@ -62,6 +62,8 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-rbac-enforcement P02 | 45 | 3 tasks | 18 files |
 | Phase 03 P05 | 26m | 2 tasks | 8 files |
 | Phase 01-cookie-based-authentication P04 | 30m | 8 tasks | 15 files |
+| Phase 01-cookie-based-authentication P05 | 45m | 6 tasks | 2 files |
+| Phase 02-security-headers-rate-limiting P_UAT | 60m | 5 assertions | 4 files |
 
 ## Accumulated Context
 
@@ -89,6 +91,10 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-05: Fixed pre-existing seed_permissions bug (wrong table name 'permissions' vs 'permission') that broke RBAC grants in every seeded tenant; discovered while debugging super-admin 403
 - [Phase 03]: 03-05: RBAC enforcement validated end-to-end via 7-test rbac_test + 4-test bootstrap_test; route-permission parity enforced at test time via ROUTE_PERMISSION_MAP↔PERMISSION_REGISTRY cross-check
 - [Phase 01-cookie-based-authentication]: 01-04 gap closure — auth scope moved from /auth to /api/v1/auth so refresh cookie Path and admin UI URL space align with the server; oauth2 and .well-known scopes intentionally unchanged
+- [Phase 01-cookie-based-authentication]: 01-05 gap closure — backend login body accepts org_slug/tenant_slug alongside UUIDs and aliases `username` to `username_or_email`, matching the admin UI's payload; slug-resolution failures map to AuthenticationFailed (401) to avoid org/tenant enumeration
+- [Phase 01-cookie-based-authentication]: `.app_data(web::Data::new(rest_authz.clone()))` — using `new` (not `from`) wraps the Arc to match handler extractors typed `web::Data<Arc<dyn AuthzChecker>>`; `from` unwraps the Arc and breaks every RBAC-protected endpoint with 500
+- [Phase 02-security-headers-rate-limiting]: UAT Test 1 closed via Playwright end-to-end — all 5 lockout UI assertions verified (amber Locked badge, Locked(N) filter toggle, unlock dialog, badge disappearance after unlock, "No locked accounts." empty state); screenshots at .planning/phases/02-security-headers-rate-limiting/uat-evidence/
+- [Phase 02-security-headers-rate-limiting]: frontend PaginatedUsers shape aligned with backend PaginatedResult (items/limit), unblocking the admin Users page; broader pagination-contract audit filed as follow-up for other admin services
 
 ### Pending Todos
 
@@ -100,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-15T14:34:52.000Z
-Stopped at: Completed 01-04-PLAN.md (Phase 01 gap closure — auth scope realignment)
+Last session: 2026-04-15T19:30:00.000Z
+Stopped at: Completed 01-05-PLAN.md + Phase 02 UAT Test 1 (lockout admin UI) verified end-to-end via Playwright
 Resume file: None

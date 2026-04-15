@@ -121,18 +121,39 @@ These changes are in the working tree (uncommitted) and were required to reach t
 5. **Bootstrap handler missing app_data** (`crates/axiam-server/src/main.rs`) — registered the raw `Surreal<Client>` handle as `web::Data` so the `/api/v1/admin/bootstrap` handler's `db: web::Data<Surreal<C>>` extractor succeeds. Verified by POST against :8090 directly returning HTTP 201 with the created admin's user_id.
 6. **Actix debug logs were dropped** (`Cargo.toml`, `crates/axiam-server/Cargo.toml`) — added the `tracing-log` feature and direct crate dep so `log::debug!` events from third-party crates (actix-web, hyper, tungstenite, lapin) surface in the structured tracing output. Confirmed by seeing tungstenite / lapin DEBUG events at runtime.
 
+## Addendum (2026-04-15, phase 02 UAT drive)
+
+Phase 02 UAT drive through Playwright revealed that 01-04 had only closed half
+of the blocker behind UAT Test 5 — the path-scope half. A separate contract drift
+(frontend POSTs `{username, tenant_slug, org_slug}`; backend LoginRequest expected
+`{username_or_email, tenant_id, org_id}`) kept the admin UI from ever completing a
+successful login. This was indistinguishable from the path-scope issue at the
+protocol-level curl probes we used to close Tests 4 and 5 earlier — both would
+produce 401 from the client's perspective.
+
+Status after the follow-up gap closure:
+  - Plan 01-05 (commit f89de1f) makes the backend accept slugs + `username` alias.
+  - Additional fix (commit 5949609) corrects `web::Data::new` vs `from` for
+    rest_authz so every RBAC-protected admin endpoint stops 500ing.
+  - Additional fix (commit 8a8589a) aligns PaginatedUsers TypeScript shape with
+    the backend's items/limit response.
+
+With those three landed, end-to-end login from the admin UI is verified working
+(Playwright captured `/dashboard` after successful login, and `/users` renders 3
+users correctly). UAT Tests 4 and 5 now hold on BOTH protocol-level AND UI-level
+evidence.
+
 ## Next Action
 
-Phase 01 UAT complete — all 5 tests pass. The path-scope gap was closed by plan 01-04
-(commit e2d667c), and Tests 4 and 5 were re-verified at the protocol level against a
-fresh prod stack rebuilt from the fixed binary.
+Phase 01 UAT complete — all 5 tests pass, now with UI-level verification on top
+of the protocol-level evidence captured earlier.
 
 Follow-ups (NOT phase 01 blockers; recorded here for traceability):
 
 1. Persistent SurrealDB storage — the `axiam-surrealdb` container's start command
    `start --user root --pass root --log info` omits a datastore path and therefore
-   runs in-memory, wiping on every restart. This made browser-driven end-to-end
-   re-bootstrapping impractical during UAT. Track as a separate infra improvement.
+   runs in-memory, wiping on every restart. The volume mount `surrealdb-data:/data`
+   exists but is unused because no `file://` path is passed to `start`.
 2. Pre-existing test failures surfaced during 01-04 baseline comparison (not introduced
    by the gap closure):
      - device_auth_test: 3 tests return HTTP 500 on cert flow
@@ -140,5 +161,10 @@ Follow-ups (NOT phase 01 blockers; recorded here for traceability):
        harness bypasses browser cookie Path scoping, so this fails for a different
        reason than UAT Test 4 did)
      - auth_test::reset_mfa_returns_403_until_rbac: HTTP 500
-     - webhook_test (all 16 tests): HTTP 500 on webhook create
-   These deserve their own gap phase.
+     - webhook_test (all 16 tests): HTTP 500 on webhook create (likely the same
+       `web::Data::from` vs `new` pattern elsewhere, or another missing registration)
+3. Frontend/backend pagination contract drift — only users/audit/groups/roles were
+   fixed or audited during this run. Every other admin service (orgs, permissions,
+   resources, certificates, service-accounts, federation, pgp-keys, notification-rules)
+   calls `api.get<X[]>(...)` expecting a bare array, which the backend does not
+   return. Those pages probably silently render empty. Deserves a dedicated audit.

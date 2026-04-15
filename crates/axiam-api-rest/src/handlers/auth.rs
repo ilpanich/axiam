@@ -8,12 +8,13 @@ use axiam_auth::{AuthService, MfaMethodService};
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceAuthResponse;
 use axiam_core::repository::{
-    PermissionRepository, RoleRepository, SettingsRepository, TenantRepository, UserRepository,
+    OrganizationRepository, PermissionRepository, RoleRepository, SettingsRepository,
+    TenantRepository, UserRepository,
 };
 use axiam_db::{
-    SurrealFederationLinkRepository, SurrealPermissionRepository, SurrealRoleRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
+    SurrealRoleRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -44,8 +45,15 @@ type MfaMethodSvc<C> =
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
-    pub tenant_id: Uuid,
-    pub org_id: Uuid,
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
+    #[serde(default)]
+    pub org_id: Option<Uuid>,
+    #[serde(default)]
+    pub tenant_slug: Option<String>,
+    #[serde(default)]
+    pub org_slug: Option<String>,
+    #[serde(alias = "username")]
     pub username_or_email: String,
     pub password: String,
 }
@@ -225,30 +233,71 @@ async fn cookie_response_from_output<C: Connection>(
         (status = 401, description = "Invalid credentials"),
     )
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn login<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,
     mfa_svc: web::Data<MfaMethodSvc<C>>,
     settings_repo: web::Data<SurrealSettingsRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    org_repo: web::Data<SurrealOrganizationRepository<C>>,
+    tenant_repo: web::Data<SurrealTenantRepository<C>>,
     auth_config: web::Data<AuthConfig>,
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
+
+    // Resolve workspace identity — accept either UUIDs or slugs. Slug-resolution
+    // failures are deliberately mapped to AuthenticationFailed (401) to avoid
+    // disclosing whether an organization or tenant with a given slug exists.
+    let org_id = match (b.org_id, b.org_slug.as_deref()) {
+        (Some(id), _) => id,
+        (None, Some(slug)) => {
+            org_repo
+                .get_by_slug(slug)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid credentials".into(),
+                })?
+                .id
+        }
+        (None, None) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "must provide org_id or org_slug".into(),
+            }));
+        }
+    };
+    let tenant_id = match (b.tenant_id, b.tenant_slug.as_deref()) {
+        (Some(id), _) => id,
+        (None, Some(slug)) => {
+            tenant_repo
+                .get_by_slug(org_id, slug)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid credentials".into(),
+                })?
+                .id
+        }
+        (None, None) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "must provide tenant_id or tenant_slug".into(),
+            }));
+        }
+    };
 
     // Fetch the effective MFA policy for the tenant.
     // Propagate errors instead of silently falling back to no-enforcement,
     // which could bypass MFA during DB outages.
     let mfa_policy = Some(
         settings_repo
-            .get_effective_settings(b.org_id, b.tenant_id)
+            .get_effective_settings(org_id, tenant_id)
             .await
             .map(|s| s.mfa)?,
     );
 
     let input = LoginInput {
-        tenant_id: b.tenant_id,
-        org_id: b.org_id,
+        tenant_id,
+        org_id,
         username_or_email: b.username_or_email,
         password: b.password,
         ip_address: client_ip(&req),

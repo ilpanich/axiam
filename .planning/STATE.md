@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-rbac-enforcement P03 | 15 | 2 tasks | 5 files |
 | Phase 03-rbac-enforcement P02 | 45 | 3 tasks | 18 files |
 | Phase 03 P05 | 26m | 2 tasks | 8 files |
+| Phase 01-cookie-based-authentication P04 | 30m | 8 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -87,6 +88,7 @@ Recent decisions affecting current work:
 - [Phase 03-rbac-enforcement]: New tenants get permissions auto-seeded via seed_permissions in tenants::create handler
 - [Phase 03]: 03-05: Fixed pre-existing seed_permissions bug (wrong table name 'permissions' vs 'permission') that broke RBAC grants in every seeded tenant; discovered while debugging super-admin 403
 - [Phase 03]: 03-05: RBAC enforcement validated end-to-end via 7-test rbac_test + 4-test bootstrap_test; route-permission parity enforced at test time via ROUTE_PERMISSION_MAP↔PERMISSION_REGISTRY cross-check
+- [Phase 01-cookie-based-authentication]: 01-04 gap closure — auth scope moved from /auth to /api/v1/auth so refresh cookie Path and admin UI URL space align with the server; oauth2 and .well-known scopes intentionally unchanged
 
 ### Pending Todos
 
@@ -98,6 +100,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-14T20:56:28.111Z
-Stopped at: Completed 03-05-PLAN.md
+Last session: 2026-04-15T14:34:52.000Z
+Stopped at: Completed 01-04-PLAN.md (Phase 01 gap closure — auth scope realignment)
 Resume file: None

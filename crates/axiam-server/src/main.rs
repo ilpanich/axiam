@@ -50,6 +50,9 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // `tracing-subscriber` with the `tracing-log` feature auto-installs a
+    // LogTracer so third-party crates (actix-web, hyper, etc.) that log via
+    // the `log` crate surface in structured tracing output.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("axiam=info".parse().unwrap()))
         .json()
@@ -138,6 +141,9 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to declare AMQP queues");
     tracing::info!("RabbitMQ connected and queues declared");
 
+    // Raw SurrealDB handle — registered as app_data so handlers that need direct
+    // access (e.g. /api/v1/admin/bootstrap) can request `web::Data<Surreal<C>>`.
+    let db_handle = db.client().clone();
     let org_repo = SurrealOrganizationRepository::new(db.client().clone());
     let tenant_repo = SurrealTenantRepository::new(db.client().clone());
     let user_repo = SurrealUserRepository::new(db.client().clone());
@@ -318,8 +324,14 @@ async fn main() -> std::io::Result<()> {
             .wrap(TracingLogger::default())
             .wrap(audit_middleware.clone())
             .wrap(build_cors(&server_config.cors_allowed_origins))
-            .app_data(web::Data::from(rest_authz.clone()))
+            // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce
+            // web::Data<Arc<dyn AuthzChecker>>, matching the AuthzData type alias used
+            // by every RBAC-protected handler. web::Data::from would unwrap the Arc and
+            // register it as web::Data<dyn AuthzChecker>, causing "Requested application
+            // data is not configured correctly" 500s on every admin endpoint.
+            .app_data(web::Data::new(rest_authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
+            .app_data(web::Data::new(db_handle.clone()))
             .app_data(web::Data::new(health_checker.clone()))
             .app_data(web::Data::new(audit_repo.clone()))
             .app_data(web::Data::new(org_repo.clone()))

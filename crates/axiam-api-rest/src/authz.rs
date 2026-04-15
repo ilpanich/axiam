@@ -134,3 +134,21 @@ pub fn is_own_resource(caller: &AuthenticatedUser, target_user_id: Uuid) -> bool
 /// req.extensions_mut().insert(AuthzChecked);
 /// ```
 pub struct AuthzChecked;
+
+/// Always-allow [`AuthzChecker`] for integration tests.
+///
+/// Production code should never use this. Register it as
+/// `web::Data::new(Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>)`
+/// in test fixtures that don't exercise RBAC decisions — it lets handlers'
+/// `RequirePermission::check()` calls pass without seeding role/permission
+/// data in the test DB.
+pub struct AllowAllAuthzChecker;
+
+impl AuthzChecker for AllowAllAuthzChecker {
+    fn check_access<'a>(
+        &'a self,
+        _request: &'a AccessRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
+        Box::pin(async move { Ok(AccessDecision::Allow) })
+    }
+}

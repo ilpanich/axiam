@@ -441,7 +441,7 @@ async fn bootstrap_admin_can_login() {
     // 3. Login with the bootstrap credentials. LoginRequest expects the
     //    tenant/org IDs and a username-or-email field.
     let req = test::TestRequest::post()
-        .uri("/auth/login")
+        .uri("/api/v1/auth/login")
         .peer_addr(peer)
         .set_json(serde_json::json!({
             "tenant_id": tenant_id,

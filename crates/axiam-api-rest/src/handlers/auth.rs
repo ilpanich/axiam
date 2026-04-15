@@ -133,7 +133,7 @@ pub struct MfaSetupConfirmRequest {
     pub totp_code: String,
 }
 
-/// GET /auth/me response body.
+/// GET /api/v1/auth/me response body.
 ///
 /// `permissions` contains the caller's effective permission action strings
 /// (deduplicated, sorted). If the caller has the `super-admin` role, the
@@ -212,10 +212,10 @@ async fn cookie_response_from_output<C: Connection>(
 // Handlers
 // -----------------------------------------------------------------------
 
-/// `POST /auth/login`
+/// `POST /api/v1/auth/login`
 #[utoipa::path(
     post,
-    path = "/auth/login",
+    path = "/api/v1/api/v1/auth/login",
     tag = "auth",
     request_body = LoginRequest,
     responses(
@@ -285,10 +285,10 @@ pub async fn login<C: Connection>(
     }
 }
 
-/// `POST /auth/logout`
+/// `POST /api/v1/auth/logout`
 #[utoipa::path(
     post,
-    path = "/auth/logout",
+    path = "/api/v1/api/v1/auth/logout",
     tag = "auth",
     request_body = LogoutRequest,
     responses(
@@ -310,10 +310,10 @@ pub async fn logout<C: Connection>(
         .finish())
 }
 
-/// `POST /auth/refresh`
+/// `POST /api/v1/auth/refresh`
 #[utoipa::path(
     post,
-    path = "/auth/refresh",
+    path = "/api/v1/api/v1/auth/refresh",
     tag = "auth",
     request_body = RefreshRequest,
     responses(
@@ -367,10 +367,10 @@ pub async fn refresh<C: Connection>(
         }))
 }
 
-/// `POST /auth/mfa/enroll`
+/// `POST /api/v1/auth/mfa/enroll`
 #[utoipa::path(
     post,
-    path = "/auth/mfa/enroll",
+    path = "/api/v1/api/v1/auth/mfa/enroll",
     tag = "auth",
     responses(
         (status = 200, description = "MFA enrollment initiated", body = MfaEnrollResponse),
@@ -389,10 +389,10 @@ pub async fn enroll_mfa<C: Connection>(
     }))
 }
 
-/// `POST /auth/mfa/confirm`
+/// `POST /api/v1/auth/mfa/confirm`
 #[utoipa::path(
     post,
-    path = "/auth/mfa/confirm",
+    path = "/api/v1/api/v1/auth/mfa/confirm",
     tag = "auth",
     request_body = MfaConfirmRequest,
     responses(
@@ -411,10 +411,10 @@ pub async fn confirm_mfa<C: Connection>(
     Ok(HttpResponse::Ok().json(MfaConfirmResponse { mfa_enabled: true }))
 }
 
-/// `POST /auth/mfa/verify`
+/// `POST /api/v1/auth/mfa/verify`
 #[utoipa::path(
     post,
-    path = "/auth/mfa/verify",
+    path = "/api/v1/api/v1/auth/mfa/verify",
     tag = "auth",
     request_body = MfaVerifyRequest,
     responses(
@@ -441,13 +441,13 @@ pub async fn verify_mfa<C: Connection>(
     cookie_response_from_output(&out, &auth_config, &user_repo).await
 }
 
-/// `POST /auth/device`
+/// `POST /api/v1/auth/device`
 ///
 /// Authenticate a device via its client certificate (mTLS).
 /// The certificate must be bound to a service account.
 #[utoipa::path(
     post,
-    path = "/auth/device",
+    path = "/api/v1/api/v1/auth/device",
     tag = "auth",
     responses(
         (status = 200, description = "Device authenticated", body = DeviceAuthResponse),
@@ -484,13 +484,13 @@ pub async fn device_auth<C: Connection>(
     }))
 }
 
-/// `POST /auth/mfa/setup/enroll`
+/// `POST /api/v1/auth/mfa/setup/enroll`
 ///
 /// Start MFA enrollment using a setup token (issued during login when
 /// MFA is enforced but not yet configured).
 #[utoipa::path(
     post,
-    path = "/auth/mfa/setup/enroll",
+    path = "/api/v1/api/v1/auth/mfa/setup/enroll",
     tag = "auth",
     request_body = MfaSetupEnrollRequest,
     responses(
@@ -509,12 +509,12 @@ pub async fn setup_enroll_mfa<C: Connection>(
     }))
 }
 
-/// `POST /auth/mfa/setup/confirm`
+/// `POST /api/v1/auth/mfa/setup/confirm`
 ///
 /// Confirm MFA enrollment and complete login using a setup token.
 #[utoipa::path(
     post,
-    path = "/auth/mfa/setup/confirm",
+    path = "/api/v1/api/v1/auth/mfa/setup/confirm",
     tag = "auth",
     request_body = MfaSetupConfirmRequest,
     responses(
@@ -543,12 +543,12 @@ pub async fn setup_confirm_mfa<C: Connection>(
     cookie_response_from_output(&out, &auth_config, &user_repo).await
 }
 
-/// `GET /auth/me`
+/// `GET /api/v1/auth/me`
 ///
 /// Returns the authenticated user's profile. Requires a valid session cookie.
 #[utoipa::path(
     get,
-    path = "/auth/me",
+    path = "/api/v1/api/v1/auth/me",
     tag = "auth",
     responses(
         (status = 200, description = "Authenticated user info", body = MeResponse),

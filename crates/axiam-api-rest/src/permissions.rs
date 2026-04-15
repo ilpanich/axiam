@@ -177,22 +177,22 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
 /// - Entries ending with `*` are prefix-matched (strip the `*`, use `starts_with`).
 /// - All other entries are exact-matched against `req.path()`.
 pub const PUBLIC_PATHS: &[&str] = &[
-    // Authentication flows (under /auth scope)
-    "/auth/login",
-    "/auth/register",
-    "/auth/device",
-    "/auth/mfa/verify",
-    "/auth/mfa/setup/enroll",
-    "/auth/mfa/setup/confirm",
-    "/auth/reset",
-    "/auth/reset/confirm",
-    "/auth/verify-email",
-    "/auth/resend-verification",
+    // Authentication flows (under /api/v1/auth scope)
+    "/api/v1/auth/login",
+    "/api/v1/auth/register",
+    "/api/v1/auth/device",
+    "/api/v1/auth/mfa/verify",
+    "/api/v1/auth/mfa/setup/enroll",
+    "/api/v1/auth/mfa/setup/confirm",
+    "/api/v1/auth/reset",
+    "/api/v1/auth/reset/confirm",
+    "/api/v1/auth/verify-email",
+    "/api/v1/auth/resend-verification",
     // WebAuthn — public registration/authentication initiation
-    "/auth/webauthn/register/start",
-    "/auth/webauthn/register/finish",
-    "/auth/webauthn/authenticate/start",
-    "/auth/webauthn/authenticate/finish",
+    "/api/v1/auth/webauthn/register/start",
+    "/api/v1/auth/webauthn/register/finish",
+    "/api/v1/auth/webauthn/authenticate/start",
+    "/api/v1/auth/webauthn/authenticate/finish",
     // Health probes
     "/health",
     "/ready",

@@ -251,7 +251,7 @@ async fn device_auth_full_flow() {
     // 5. Authenticate via device cert
     let encoded_pem = urlencode(&public_cert_pem);
     let req = test::TestRequest::post()
-        .uri("/auth/device")
+        .uri("/api/v1/auth/device")
         .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -276,7 +276,7 @@ async fn device_auth_unbound_cert_returns_error() {
     // Try to authenticate without binding
     let encoded_pem = urlencode(&public_cert_pem);
     let req = test::TestRequest::post()
-        .uri("/auth/device")
+        .uri("/api/v1/auth/device")
         .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -290,7 +290,9 @@ async fn device_auth_missing_cert_header_returns_401() {
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    let req = test::TestRequest::post().uri("/auth/device").to_request();
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/device")
+        .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
 }
@@ -350,7 +352,7 @@ async fn device_auth_revoked_cert_returns_error() {
     // Try to authenticate with revoked cert
     let encoded_pem = urlencode(&public_cert_pem);
     let req = test::TestRequest::post()
-        .uri("/auth/device")
+        .uri("/api/v1/auth/device")
         .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
         .to_request();
     let resp = test::call_service(&app, req).await;

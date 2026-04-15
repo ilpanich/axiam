@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn public_paths_are_recognized() {
         assert!(is_public_path("/health"));
-        assert!(is_public_path("/auth/login"));
+        assert!(is_public_path("/api/v1/auth/login"));
         assert!(is_public_path("/.well-known/openid-configuration"));
         assert!(is_public_path("/oauth2/token"));
         assert!(is_public_path("/api/docs/openapi.json")); // prefix match via /api/docs/*

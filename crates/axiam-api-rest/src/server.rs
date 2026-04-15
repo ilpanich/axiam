@@ -59,7 +59,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
     rate_limit_cfg: &RateLimitConfig,
 ) {
     cfg.service(
-        web::scope("/auth")
+        web::scope("/api/v1/auth")
             .wrap(AuthzMiddleware)
             .wrap(CsrfMiddleware)
             .app_data(web::JsonConfig::default().limit(65_536))

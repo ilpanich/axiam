@@ -40,11 +40,11 @@ pub const HEADER_CSRF: &str = "X-CSRF-Token";
 /// yet have a CSRF cookie, or token-based OAuth2 flows that use their own
 /// security model.
 const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
-    "/auth/login",
-    "/auth/mfa/verify",
-    "/auth/mfa/setup/enroll",
-    "/auth/mfa/setup/confirm",
-    "/auth/device",
+    "/api/v1/auth/login",
+    "/api/v1/auth/mfa/verify",
+    "/api/v1/auth/mfa/setup/enroll",
+    "/api/v1/auth/mfa/setup/confirm",
+    "/api/v1/auth/device",
 ];
 
 /// Path prefixes that are exempt from CSRF validation (OAuth2).

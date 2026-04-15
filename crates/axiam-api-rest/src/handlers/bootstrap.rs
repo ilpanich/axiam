@@ -47,7 +47,7 @@ pub struct BootstrapResponse {
 ///
 /// Creates the initial admin user with the super-admin role and seeds the
 /// default permission set. Returns 404 once an admin already exists (D-09).
-/// No token is issued — the user must authenticate via `/auth/login` (D-11).
+/// No token is issued — the user must authenticate via `/api/v1/auth/login` (D-11).
 ///
 /// Guarded by the `AXIAM_BOOTSTRAP_ADMIN_EMAIL` environment variable (D-10):
 /// if set, requests with a non-matching email are rejected with 403.
@@ -170,9 +170,9 @@ pub async fn bootstrap<C: Connection>(
         )
         .await?;
 
-    // 8. Return 201 — no token (user must login via /auth/login, per D-11).
+    // 8. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
     Ok(HttpResponse::Created().json(BootstrapResponse {
-        message: "Admin user created. Login via /auth/login.".into(),
+        message: "Admin user created. Login via /api/v1/auth/login.".into(),
         user_id: user.id,
     }))
 }

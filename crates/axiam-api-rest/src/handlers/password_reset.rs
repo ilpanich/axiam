@@ -40,7 +40,7 @@ pub struct ConfirmResetBody {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /auth/reset`
+/// `POST /api/v1/auth/reset`
 ///
 /// Initiates a password reset by creating a reset token. Always
 /// returns `{"sent": true}` to prevent email enumeration — regardless
@@ -51,7 +51,7 @@ pub struct ConfirmResetBody {
 /// delivery will be wired in a future phase (T19) via `EmailService`.
 #[utoipa::path(
     post,
-    path = "/auth/reset",
+    path = "/api/v1/api/v1/auth/reset",
     tag = "auth",
     request_body = RequestResetBody,
     responses(
@@ -107,7 +107,7 @@ pub async fn request_reset<C: Connection>(
     Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
 }
 
-/// `POST /auth/reset/confirm`
+/// `POST /api/v1/auth/reset/confirm`
 ///
 /// Confirms a password reset using a one-time token and a new
 /// password. The token is consumed atomically.
@@ -116,7 +116,7 @@ pub async fn request_reset<C: Connection>(
 /// violations if the new password is too weak.
 #[utoipa::path(
     post,
-    path = "/auth/reset/confirm",
+    path = "/api/v1/api/v1/auth/reset/confirm",
     tag = "auth",
     request_body = ConfirmResetBody,
     responses(

@@ -149,13 +149,13 @@ fn peek_tenant_id(state_token: &str) -> Result<Uuid, AxiamApiError> {
 // Handlers
 // -------------------------------------------------------------------
 
-/// `POST /auth/webauthn/register/start`
+/// `POST /api/v1/auth/webauthn/register/start`
 ///
 /// Begin a WebAuthn passkey registration ceremony for the
 /// authenticated user.
 #[utoipa::path(
     post,
-    path = "/auth/webauthn/register/start",
+    path = "/api/v1/api/v1/auth/webauthn/register/start",
     tag = "webauthn",
     responses(
         (status = 200, description = "Registration challenge",
@@ -179,12 +179,12 @@ pub async fn start_registration<C: Connection>(
     }))
 }
 
-/// `POST /auth/webauthn/register/finish`
+/// `POST /api/v1/auth/webauthn/register/finish`
 ///
 /// Complete a WebAuthn passkey registration ceremony.
 #[utoipa::path(
     post,
-    path = "/auth/webauthn/register/finish",
+    path = "/api/v1/api/v1/auth/webauthn/register/finish",
     tag = "webauthn",
     request_body = FinishRegistrationRequest,
     responses(
@@ -220,13 +220,13 @@ pub async fn finish_registration<C: Connection>(
     }))
 }
 
-/// `POST /auth/webauthn/authenticate/start`
+/// `POST /api/v1/auth/webauthn/authenticate/start`
 ///
 /// Begin a WebAuthn passkey authentication ceremony.  Requires a
 /// valid MFA challenge token (obtained from the login flow).
 #[utoipa::path(
     post,
-    path = "/auth/webauthn/authenticate/start",
+    path = "/api/v1/api/v1/auth/webauthn/authenticate/start",
     tag = "webauthn",
     request_body = StartAuthenticationRequest,
     responses(
@@ -252,13 +252,13 @@ pub async fn start_authentication<C: Connection>(
     }))
 }
 
-/// `POST /auth/webauthn/authenticate/finish`
+/// `POST /api/v1/auth/webauthn/authenticate/finish`
 ///
 /// Complete a WebAuthn passkey authentication ceremony.  On success
 /// a session is created and access/refresh tokens are issued.
 #[utoipa::path(
     post,
-    path = "/auth/webauthn/authenticate/finish",
+    path = "/api/v1/api/v1/auth/webauthn/authenticate/finish",
     tag = "webauthn",
     request_body = FinishAuthenticationRequest,
     responses(

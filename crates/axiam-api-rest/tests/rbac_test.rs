@@ -446,7 +446,7 @@ async fn public_routes_no_auth_required() {
     // bad credentials), but the failure mode is NOT the middleware gate.
     let app = test_app!(db, auth, authz);
     let req = test::TestRequest::post()
-        .uri("/auth/login")
+        .uri("/api/v1/auth/login")
         .peer_addr("127.0.0.1:12345".parse().unwrap())
         .set_json(serde_json::json!({
             "username": "nobody",
@@ -462,7 +462,7 @@ async fn public_routes_no_auth_required() {
     let status = resp.status().as_u16();
     assert_ne!(
         status, 401,
-        "/auth/login must not be blocked by AuthzMiddleware (got {status})"
+        "/api/v1/auth/login must not be blocked by AuthzMiddleware (got {status})"
     );
 }
 

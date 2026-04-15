@@ -1,7 +1,10 @@
 //! Integration tests for webhook management endpoints.
 
+use std::sync::Arc;
+
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -91,17 +94,19 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
 }
 
 macro_rules! test_app {
-    ($db:expr, $auth:expr) => {
+    ($db:expr, $auth:expr) => {{
+        let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new(SurrealWebhookRepository::new($db.clone())))
+                .app_data(web::Data::new(authz))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
         )
         .await
-    };
+    }};
 }
 
 #[actix_rt::test]

@@ -73,7 +73,7 @@ fn test_auth_config(lifetime: u64) -> AuthConfig {
         email_verification_grace_period_hours: 24,
         password_reset_token_expiry_hours: 1,
         webauthn_rp_id: "localhost".into(),
-        webauthn_rp_origin: "http://localhost:8080".into(),
+        webauthn_rp_origin: "http://localhost:8090".into(),
         webauthn_rp_name: "AXIAM-Test".into(),
     }
 }

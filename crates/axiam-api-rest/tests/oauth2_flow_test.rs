@@ -12,6 +12,8 @@ use axiam_api_rest::RateLimitConfig;
 /// can resolve a client IP without a real socket.
 const TEST_PEER: &str = "127.0.0.1:12345";
 use axiam_api_rest::register_api_v1_routes;
+use std::sync::Arc;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -142,6 +144,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(user_repo))
                 .app_data(web::Data::new(authz_service))
                 .app_data(web::Data::new(token_service))
+                .app_data(web::Data::new(Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),

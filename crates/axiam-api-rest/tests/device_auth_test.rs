@@ -1,7 +1,10 @@
 //! Integration tests for IoT device certificate authentication (mTLS).
 
+use std::sync::Arc;
+
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -109,6 +112,7 @@ macro_rules! test_app {
         let tenant_repo = SurrealTenantRepository::new($db.clone());
         let sa_repo = SurrealServiceAccountRepository::new($db.clone());
         let device_auth_service = DeviceAuthService::new(cert_repo.clone());
+        let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
@@ -125,6 +129,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(tenant_repo))
                 .app_data(web::Data::new(sa_repo))
                 .app_data(web::Data::new(device_auth_service))
+                .app_data(web::Data::new(authz))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),

@@ -441,28 +441,28 @@ async fn public_routes_no_auth_required() {
     let resp = test::call_service(&health_app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
 
-    // Login with an invalid body — must NOT get a 401 from AuthzMiddleware.
-    // The login handler will reject for its own reasons (validation /
-    // bad credentials), but the failure mode is NOT the middleware gate.
+    // Login with a body missing the `password` field — the JSON parser must
+    // reject with 400 AFTER the request gets past AuthzMiddleware. We
+    // deliberately send an incomplete body so the failure is at the
+    // serde-layer (400), not at the handler-level credentials check (401 —
+    // which 01-05 returns for unknown slugs to prevent enumeration). A 400
+    // here is definitive proof that the middleware did not block the route.
     let app = test_app!(db, auth, authz);
     let req = test::TestRequest::post()
         .uri("/api/v1/auth/login")
         .peer_addr("127.0.0.1:12345".parse().unwrap())
         .set_json(serde_json::json!({
             "username": "nobody",
-            "password": "wrong",
             "tenant_slug": "test-tenant",
             "org_slug": "test-org",
         }))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    // Anything except 401 from the middleware's "authentication required"
-    // gate is acceptable here — the endpoint is public.
     let status = resp.status().as_u16();
-    assert_ne!(
-        status, 401,
-        "/api/v1/auth/login must not be blocked by AuthzMiddleware (got {status})"
+    assert_eq!(
+        status, 400,
+        "/api/v1/auth/login must reach the JSON parser (got {status} — middleware likely blocked)"
     );
 }
 

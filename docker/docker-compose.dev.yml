@@ -1,8 +1,23 @@
 services:
+  # One-shot init: chown /data for the non-root SurrealDB user (65532).
+  # Named volumes are root-owned by default; without this surreal can't write.
+  surrealdb-init:
+    image: busybox
+    container_name: axiam-surrealdb-init
+    command: ["sh", "-c", "chown -R 65532:65532 /data && chmod -R u+rwX /data"]
+    volumes:
+      - surrealdb-data:/data
+    restart: "no"
+
   surrealdb:
     image: surrealdb/surrealdb:v3
     container_name: axiam-surrealdb
-    command: start --user root --pass root --log info
+    depends_on:
+      surrealdb-init:
+        condition: service_completed_successfully
+    # Persist the datastore on the mounted volume. Without a PATH arg the
+    # default is `memory` and all state is wiped on restart.
+    command: start --user root --pass root --log info surrealkv:/data/axiam.db
     ports:
       - "8000:8000"
     volumes:
@@ -15,7 +30,7 @@ services:
     restart: unless-stopped
 
   rabbitmq:
-    image: rabbitmq:3-management-alpine
+    image: rabbitmq:4-management-alpine
     container_name: axiam-rabbitmq
     ports:
       - "5672:5672"

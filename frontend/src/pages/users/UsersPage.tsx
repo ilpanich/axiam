@@ -230,9 +230,9 @@ export function UsersPage() {
     queryFn: () => userService.list(page, 20, search),
   });
 
-  const users = data?.data ?? [];
+  const users = data?.items ?? [];
   const total = data?.total ?? 0;
-  const perPage = data?.per_page ?? 20;
+  const perPage = data?.limit ?? 20;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   const lockedCount = users.filter((u) => u.is_locked).length;

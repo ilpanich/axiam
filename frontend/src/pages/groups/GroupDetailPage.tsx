@@ -95,7 +95,7 @@ function AddMemberDialog({
       setSearching(true);
       try {
         const data = await userService.list(1, 20, term.trim());
-        setResults(data.data);
+        setResults(data.items);
       } catch {
         setResults([]);
       } finally {

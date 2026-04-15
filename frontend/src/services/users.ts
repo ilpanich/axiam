@@ -26,10 +26,10 @@ export interface MfaMethod {
 }
 
 export interface PaginatedUsers {
-  data: User[];
+  items: User[];
   total: number;
-  page: number;
-  per_page: number;
+  offset: number;
+  limit: number;
 }
 
 // ─── Request payloads ─────────────────────────────────────────────────────────

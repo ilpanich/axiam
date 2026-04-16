@@ -29,3 +29,8 @@ target
 mcp.json
 login-page.png
 .playwright-mcp/
+
+# Local dev secrets (JWT signing keys, TLS certs) — never commit
+docker/.secrets/
+**/*.pem
+**/*.key

@@ -57,12 +57,33 @@ frontend-build:
 frontend-test:
     cd frontend && npx playwright test
 
-# Start full production-like stack (build images + run all services)
+# Start full production-like stack (build images + run all services).
+# Generates a local-only Ed25519 JWT signing keypair on first run under
+# docker/.secrets/ (gitignored) and exports it into the shell so the compose
+# file can forward it to axiam-server. Host port 80 is left free so a local
+# HTTPS reverse proxy (e.g. Caddy) can sit in front of the frontend on :8081.
 prod-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SECRETS_DIR="docker/.secrets"
+    PRIV="$SECRETS_DIR/jwt_ed25519.pem"
+    PUB="$SECRETS_DIR/jwt_ed25519.pub.pem"
+    if [[ ! -f "$PRIV" || ! -f "$PUB" ]]; then
+        echo "→ Generating Ed25519 JWT keypair in $SECRETS_DIR/ (first-run only)"
+        mkdir -p "$SECRETS_DIR"
+        openssl genpkey -algorithm ed25519 -out "$PRIV"
+        openssl pkey -in "$PRIV" -pubout -out "$PUB"
+        chmod 600 "$PRIV"
+    fi
+    export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(cat "$PRIV")"
+    export AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(cat "$PUB")"
     docker compose -f docker/docker-compose.prod.yml up --build -d
-    @echo "AXIAM Frontend: http://localhost"
-    @echo "AXIAM REST API: http://localhost:8080"
-    @echo "AXIAM gRPC:     localhost:50051"
+    echo "AXIAM Frontend: http://localhost:8081 (front it with Caddy for HTTPS)"
+    echo "AXIAM REST API: http://localhost:8090"
+    echo "AXIAM gRPC:     localhost:50051"
+    echo ""
+    echo "For HTTPS cookie tests, in another terminal run:"
+    echo "  sudo caddy reverse-proxy --from https://localhost --to :8081"
 
 # Stop production-like stack
 prod-down:

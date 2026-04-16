@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       rabbitmq:
-        image: rabbitmq:3-management-alpine
+        image: rabbitmq:4-management-alpine
         ports:
           - 5672:5672
           - 15672:15672
@@ -72,7 +72,7 @@ jobs:
       - name: Start SurrealDB
         run: |
           docker run -d --name surrealdb -p 8000:8000 \
-            surrealdb/surrealdb:v2 start \
+            surrealdb/surrealdb:v3 start \
             --user root --pass root --log info
           for i in $(seq 1 30); do
             docker exec surrealdb /surreal isready 2>/dev/null && break || sleep 2

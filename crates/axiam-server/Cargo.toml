@@ -25,6 +25,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-actix-web = { workspace = true }
+tracing-log = "0.2"
 config = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }

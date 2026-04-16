@@ -24,7 +24,7 @@ spec:
               service:
                 name: axiam-server
                 port:
-                  number: 8080
+                  number: 8090
           - path: /
             pathType: Prefix
             backend:

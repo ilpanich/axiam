@@ -12,7 +12,7 @@ pub use rate_limit::RateLimitConfig;
 pub struct ServerConfig {
     /// Bind address (default: "127.0.0.1").
     pub host: String,
-    /// Bind port (default: 8080).
+    /// Bind port (default: 8090).
     pub port: u16,
     /// Allowed CORS origins. Empty disables cross-origin requests (restrictive).
     pub cors_allowed_origins: Vec<String>,
@@ -22,7 +22,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".into(),
-            port: 8080,
+            port: 8090,
             cors_allowed_origins: Vec::new(),
         }
     }

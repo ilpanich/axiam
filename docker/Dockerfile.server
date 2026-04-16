@@ -2,7 +2,7 @@
 # AXIAM Server — Multi-stage Docker Build
 # ============================================================================
 # Build:  docker build -f docker/Dockerfile.server -t axiam-server .
-# Run:    docker run -p 8080:8080 -p 50051:50051 axiam-server
+# Run:    docker run -p 8090:8090 -p 50051:50051 axiam-server
 # ============================================================================
 
 # ---------------------------------------------------------------------------
@@ -101,10 +101,10 @@ WORKDIR /home/axiam
 ENV RUST_LOG=axiam=info
 
 # REST API + gRPC
-EXPOSE 8080 50051
+EXPOSE 8090 50051
 
 # Health check: probe the REST health endpoint
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://localhost:8080/health || exit 1
+    CMD curl -sf http://localhost:8090/health || exit 1
 
 ENTRYPOINT ["axiam-server"]

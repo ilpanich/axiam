@@ -23,7 +23,7 @@ spec:
           image: ghcr.io/OWNER/server:latest
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 8090
               protocol: TCP
             - name: grpc
               containerPort: 50051
@@ -38,13 +38,13 @@ spec:
           readinessProbe:
             httpGet:
               path: /ready
-              port: 8080
+              port: 8090
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
-              port: 8080
+              port: 8090
             initialDelaySeconds: 30
             periodSeconds: 30
           envFrom:

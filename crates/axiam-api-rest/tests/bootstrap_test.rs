@@ -26,11 +26,11 @@ use axiam_db::repository::{
     SurrealAuditLogRepository, SurrealCaCertificateRepository, SurrealCertificateRepository,
     SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealServiceAccountRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
-    SurrealWebhookRepository,
+    SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
+    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -110,11 +110,13 @@ fn make_auth_service(
     SurrealUserRepository<TestDb>,
     SurrealSessionRepository<TestDb>,
     SurrealFederationLinkRepository<TestDb>,
+    SurrealRefreshTokenRepository<TestDb>,
 > {
     AuthService::new(
         SurrealUserRepository::new(db.clone()),
         SurrealSessionRepository::new(db.clone()),
         SurrealFederationLinkRepository::new(db.clone()),
+        SurrealRefreshTokenRepository::new(db.clone()),
         auth.clone(),
     )
 }
@@ -201,6 +203,12 @@ macro_rules! test_app {
                     $db.clone(),
                 )))
                 .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
+                .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
+                    $db.clone(),
+                )))
+                .app_data(web::Data::new(SurrealPasswordHistoryRepository::new(
+                    $db.clone(),
+                )))
                 .app_data(web::Data::new(SurrealWebauthnCredentialRepository::new(
                     $db.clone(),
                 )))

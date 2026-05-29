@@ -23,9 +23,10 @@ use axiam_core::repository::{
     OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealRoleRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
+    SurrealPermissionRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use std::sync::Arc;
 use surrealdb::Surreal;
@@ -118,11 +119,13 @@ fn make_auth_service(
     SurrealUserRepository<TestDb>,
     SurrealSessionRepository<TestDb>,
     SurrealFederationLinkRepository<TestDb>,
+    SurrealRefreshTokenRepository<TestDb>,
 > {
     AuthService::new(
         SurrealUserRepository::new(db.clone()),
         SurrealSessionRepository::new(db.clone()),
         SurrealFederationLinkRepository::new(db.clone()),
+        SurrealRefreshTokenRepository::new(db.clone()),
         auth.clone(),
     )
 }
@@ -141,6 +144,13 @@ macro_rules! test_app {
                 .app_data(web::Data::new(SurrealSettingsRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealRoleRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealPermissionRepository::new(
+                    $db.clone(),
+                )))
+                .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
+                .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
+                    $db.clone(),
+                )))
+                .app_data(web::Data::new(SurrealPasswordHistoryRepository::new(
                     $db.clone(),
                 )))
                 .app_data(web::Data::new(MfaMethodService::new(

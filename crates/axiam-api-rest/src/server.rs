@@ -129,6 +129,41 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
                 web::resource("/password/change")
                     .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
                     .route(web::post().to(handlers::auth::change_password::<C>)),
+            )
+            // --- First-time SSO — public (Phase 4 D-22) ---
+            // These routes are listed in PUBLIC_PATHS (permissions.rs) so the
+            // AuthzMiddleware lets them through without a JWT.
+            .service(
+                web::resource("/federation/oidc/start")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::federation::oidc_start_public::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/federation/oidc/callback")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::federation::oidc_callback_public::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/federation/saml/login")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::federation::saml_login_public::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/federation/saml/acs")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::federation::saml_acs_public::<C>),
+                    ),
             ),
     );
     // OIDC Discovery (must be outside /oauth2 scope per spec)

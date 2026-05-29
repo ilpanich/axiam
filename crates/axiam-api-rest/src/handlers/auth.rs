@@ -182,7 +182,7 @@ fn user_agent(req: &HttpRequest) -> Option<String> {
 /// Build an `HttpResponse` that sets all three auth cookies and returns
 /// the `LoginSuccessResponse` body. A fresh CSRF token is generated on
 /// every call (D-02 — new CSRF token on login and refresh rotation).
-async fn cookie_response_from_output<C: Connection>(
+pub async fn cookie_response_from_output<C: Connection>(
     out: &LoginOutput,
     config: &AuthConfig,
     user_repo: &SurrealUserRepository<C>,

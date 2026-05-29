@@ -155,6 +155,16 @@ mod tests {
     }
 
     #[test]
+    fn first_time_sso_paths_are_public() {
+        // Phase 4 D-22 — unauthenticated first-time SSO endpoints must be
+        // reachable without a JWT.
+        assert!(is_public_path("/api/v1/auth/federation/oidc/start"));
+        assert!(is_public_path("/api/v1/auth/federation/oidc/callback"));
+        assert!(is_public_path("/api/v1/auth/federation/saml/login"));
+        assert!(is_public_path("/api/v1/auth/federation/saml/acs"));
+    }
+
+    #[test]
     fn protected_paths_are_not_public() {
         assert!(!is_public_path("/api/v1/users"));
         assert!(!is_public_path("/api/v1/roles"));

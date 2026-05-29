@@ -208,6 +208,12 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/federation/oidc/callback",
     "/api/v1/federation/saml/acs",
     "/api/v1/federation/saml/metadata",
+    // First-time SSO (Phase 4 D-22) — unauthenticated, distinct from
+    // /api/v1/federation/* link-account endpoints (which require auth).
+    "/api/v1/auth/federation/oidc/start",
+    "/api/v1/auth/federation/oidc/callback",
+    "/api/v1/auth/federation/saml/login",
+    "/api/v1/auth/federation/saml/acs",
     // Admin bootstrap (public until first admin is created; handler enforces one-shot logic)
     "/api/v1/admin/bootstrap",
     // OpenAPI docs

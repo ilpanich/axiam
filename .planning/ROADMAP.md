@@ -13,7 +13,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 - [x] **Phase 1: Cookie-Based Authentication** - Migrate JWT delivery from sessionStorage to httpOnly secure cookies with CSRF protection (completed 2026-04-04)
 - [ ] **Phase 2: Security Headers & Rate Limiting** - Add OWASP-recommended security headers and brute-force protection to all endpoints
 - [ ] **Phase 3: RBAC Enforcement** - Wire authorization engine to every endpoint with default-deny and admin bootstrap
-- [ ] **Phase 4: Federation Verification & Session Security** - Cryptographically verify federation tokens and enforce session lifecycle
+- [x] **Phase 4: Federation Verification & Session Security** - Cryptographically verify federation tokens and enforce session lifecycle (completed 2026-05-29)
 - [ ] **Phase 5: Email Delivery & GDPR Compliance** - Wire email service to auth flows and implement data subject rights
 - [ ] **Phase 6: CI/CD & Infrastructure Hardening** - Add security scanning to CI and harden Docker/K8s configurations
 - [ ] **Phase 7: Compliance Verification & Test Closure** - Verify OWASP ASVS, OAuth2 RFC, OIDC conformance and close remaining test gaps
@@ -236,7 +236,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 | 1. Cookie-Based Authentication | 3/3 | Complete   | 2026-04-04 |
 | 2. Security Headers & Rate Limiting | 4/5 | Gap closure | - |
 | 3. RBAC Enforcement | 3/5 | In Progress|  |
-| 4. Federation Verification & Session Security | 5/6 | In Progress|  |
+| 4. Federation Verification & Session Security | 6/6 | Complete   | 2026-05-29 |
 | 5. Email Delivery & GDPR Compliance | 0/0 | Not started | - |
 | 6. CI/CD & Infrastructure Hardening | 0/0 | Not started | - |
 | 7. Compliance Verification & Test Closure | 0/0 | Not started | - |

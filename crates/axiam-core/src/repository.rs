@@ -677,6 +677,35 @@ pub trait FederationLinkRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// SAML Assertion Replay (D-09)
+// ---------------------------------------------------------------------------
+
+/// Repository for tracking consumed SAML assertion IDs.
+///
+/// Provides insert-or-conflict semantics: inserting an assertion ID that has
+/// already been recorded for the same tenant returns
+/// `Err(AxiamError::ReplayDetected)`.  The replay table rows live until the
+/// assertion's `NotOnOrAfter` time; `cleanup_expired` removes them.
+pub trait AssertionReplayRepository: Send + Sync {
+    /// Record a consumed assertion ID.
+    ///
+    /// Returns `Ok(())` on first insertion.  Returns
+    /// `Err(AxiamError::ReplayDetected)` if an identical `(tenant_id,
+    /// assertion_id)` pair already exists (UNIQUE constraint violation).
+    fn insert_assertion(
+        &self,
+        tenant_id: Uuid,
+        assertion_id: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired assertion replay rows across all tenants.
+    ///
+    /// Returns the number of rows deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // PKI / Certificates
 // ---------------------------------------------------------------------------
 

@@ -24,3 +24,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 samael = { workspace = true }
 flate2 = { workspace = true }
+x509-parser = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }

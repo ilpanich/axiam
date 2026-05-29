@@ -71,6 +71,24 @@ pub enum FederationError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    // ------------------------------------------------------------------
+    // SAML XML signature / replay errors (plan 04-03)
+    // ------------------------------------------------------------------
+    /// The IdP signing certificate PEM is invalid (rejected at upload or at
+    /// verify time if a stored cert becomes corrupt).
+    #[error("Invalid IdP certificate: {0}")]
+    InvalidIdpCert(String),
+
+    /// The SAML XML signature is missing, structurally invalid, or does not
+    /// verify against the configured IdP certificate.
+    #[error("SAML signature invalid: {0}")]
+    SamlSignatureInvalid(String),
+
+    /// A SAML assertion with this ID has already been consumed by this tenant
+    /// (replay attack detected).
+    #[error("Assertion replay detected")]
+    AssertionReplay,
 }
 
 impl From<FederationError> for axiam_core::error::AxiamError {
@@ -97,6 +115,17 @@ impl From<FederationError> for axiam_core::error::AxiamError {
                 axiam_core::error::AxiamError::AuthenticationFailed {
                     reason: err.to_string(),
                 }
+            }
+            // SAML signature / replay errors → 401
+            FederationError::SamlSignatureInvalid(reason) => {
+                axiam_core::error::AxiamError::AuthenticationFailed { reason }
+            }
+            FederationError::AssertionReplay => axiam_core::error::AxiamError::AuthenticationFailed {
+                reason: "assertion replay".into(),
+            },
+            // IdP cert validation error → admin-facing 400 (Validation)
+            FederationError::InvalidIdpCert(msg) => {
+                axiam_core::error::AxiamError::Validation { message: msg }
             }
             other => axiam_core::error::AxiamError::Internal(other.to_string()),
         }

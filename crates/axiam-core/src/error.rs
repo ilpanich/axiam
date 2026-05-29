@@ -43,6 +43,9 @@ pub enum AxiamError {
     #[error("Rate limit exceeded")]
     RateLimited,
 
+    #[error("SAML assertion replay detected")]
+    ReplayDetected,
+
     #[error("Internal error: {0}")]
     Internal(String),
 }

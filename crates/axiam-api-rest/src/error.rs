@@ -36,7 +36,9 @@ impl actix_web::ResponseError for AxiamApiError {
         match &self.0 {
             AxiamError::NotFound { .. } => StatusCode::NOT_FOUND,
             AxiamError::AlreadyExists { .. } => StatusCode::CONFLICT,
-            AxiamError::AuthenticationFailed { .. } => StatusCode::UNAUTHORIZED,
+            AxiamError::AuthenticationFailed { .. } | AxiamError::ReplayDetected => {
+                StatusCode::UNAUTHORIZED
+            }
             AxiamError::AuthorizationDenied { .. } => StatusCode::FORBIDDEN,
             AxiamError::Validation { .. } | AxiamError::TenantContext => StatusCode::BAD_REQUEST,
             AxiamError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -47,6 +49,7 @@ impl actix_web::ResponseError for AxiamApiError {
             | AxiamError::EmailDelivery(_)
             | AxiamError::WebhookDelivery(_)
             | AxiamError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            // Note: ReplayDetected is handled above in the UNAUTHORIZED arm.
         }
     }
 
@@ -54,7 +57,9 @@ impl actix_web::ResponseError for AxiamApiError {
         let error = match &self.0 {
             AxiamError::NotFound { .. } => "not_found",
             AxiamError::AlreadyExists { .. } => "already_exists",
-            AxiamError::AuthenticationFailed { .. } => "authentication_failed",
+            AxiamError::AuthenticationFailed { .. } | AxiamError::ReplayDetected => {
+                "authentication_failed"
+            }
             AxiamError::AuthorizationDenied { .. } => "authorization_denied",
             AxiamError::Validation { .. } => "validation_error",
             AxiamError::TenantContext => "tenant_context",

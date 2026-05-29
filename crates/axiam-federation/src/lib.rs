@@ -5,8 +5,10 @@
 //! Shibboleth, ADFS, etc.).
 
 pub mod error;
+pub mod jwks_cache;
 pub mod oidc;
 pub mod saml;
+pub mod secrets;
 
 use error::FederationError;
 

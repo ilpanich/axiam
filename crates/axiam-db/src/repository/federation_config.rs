@@ -365,4 +365,62 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             limit: pagination.limit,
         })
     }
+
+    async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {
+        // Return rows that have a non-empty plaintext secret but no ciphertext yet.
+        // This is the predicate used by the boot backfill task (D-12).
+        let result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * \
+                 FROM federation_config \
+                 WHERE client_secret_ciphertext IS NONE \
+                 AND client_secret IS NOT NONE \
+                 AND client_secret != \"\"",
+            )
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<FederationConfigRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|r| r.try_into_entry().map_err(Into::into))
+            .collect()
+    }
+
+    async fn set_encrypted_secret(
+        &self,
+        tenant_id: Uuid,
+        config_id: Uuid,
+        nonce_b64: String,
+        ciphertext_b64: String,
+        key_version: i64,
+    ) -> AxiamResult<()> {
+        // Write the split encrypted columns and null out the legacy plaintext.
+        // Per MEMORY.md: bind() requires owned Strings.
+        let result = self
+            .db
+            .query(
+                "UPDATE type::record('federation_config', $config_id) \
+                 SET client_secret_nonce = $nonce, \
+                     client_secret_ciphertext = $ciphertext, \
+                     client_secret_key_version = $kv, \
+                     client_secret = '' \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("config_id", config_id.to_string()))
+            .bind(("nonce", nonce_b64))
+            .bind(("ciphertext", ciphertext_b64))
+            .bind(("kv", key_version))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
 }

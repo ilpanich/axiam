@@ -1,0 +1,306 @@
+//! JWKS cache with D-01/D-02/D-03 semantics.
+//!
+//! - D-01: 1-hour TTL — return cached keys if `fetched_at + 1h > now`.
+//! - D-02: Single forced refetch on unknown kid, rate-limited to 1 per 60 s.
+//! - D-03: 24-hour stale-while-revalidate — if the IdP is unreachable but
+//!   the cache entry is no older than 24 h past TTL, serve stale keys with
+//!   a WARN log rather than surfacing an error.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use jsonwebtoken::jwk::JwkSet;
+use tokio::sync::RwLock;
+use uuid::Uuid;
+
+use crate::error::FederationError;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// D-01: JWKS cache TTL (1 hour).
+pub const TTL: Duration = Duration::from_secs(3600);
+
+/// D-03: Stale-while-revalidate window (24 h past TTL).
+pub const STALE_WINDOW: Duration = Duration::from_secs(24 * 3600);
+
+/// D-02: Minimum interval between forced refetches for an unknown kid.
+pub const FORCED_REFETCH_COOLDOWN: Duration = Duration::from_secs(60);
+
+// ---------------------------------------------------------------------------
+// Cache entry
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct JwksCacheEntry {
+    pub keys: JwkSet,
+    /// When the keys were last successfully fetched.
+    pub fetched_at: DateTime<Utc>,
+    /// Last time a forced refetch was attempted (unknown-kid path).
+    pub last_refetch_attempt: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
+// Cache type alias
+// ---------------------------------------------------------------------------
+
+pub type JwksCacheMap = HashMap<(Uuid, Uuid), JwksCacheEntry>;
+
+// ---------------------------------------------------------------------------
+// JwksCache
+// ---------------------------------------------------------------------------
+
+/// Process-wide JWKS cache keyed by `(tenant_id, federation_config_id)`.
+///
+/// Uses a [`tokio::sync::RwLock`] so it can be shared across async handlers
+/// without blocking the executor.
+#[derive(Clone)]
+pub struct JwksCache(pub(crate) Arc<RwLock<JwksCacheMap>>);
+
+impl JwksCache {
+    pub fn new() -> Self {
+        Self(Arc::new(RwLock::new(HashMap::new())))
+    }
+
+    /// Return JWKS for the given key, fetching if needed.
+    ///
+    /// 1. Cache hit within 1-h TTL → return cached keys (no HTTP).
+    /// 2. Cache miss or TTL expired → attempt fetch.
+    ///    - On success: update entry, return keys.
+    ///    - On failure AND entry is within 24-h stale window → WARN + return stale keys.
+    ///    - On failure AND no usable cached entry → propagate error.
+    pub async fn get_or_fetch(
+        &self,
+        http: &reqwest::Client,
+        key: (Uuid, Uuid),
+        jwks_uri: &str,
+    ) -> Result<JwkSet, FederationError> {
+        let now = Utc::now();
+
+        // --- Fast path: cache hit within TTL ---
+        {
+            let guard = self.0.read().await;
+            if let Some(entry) = guard.get(&key) {
+                // Compare expiry directly to handle sub-millisecond clock jitter
+                // (to_std() returns Err for negative durations — fetched_at in the
+                // future by a tiny amount — which would falsely miss the cache).
+                let ttl_chrono = chrono::Duration::from_std(TTL).unwrap_or_default();
+                if entry.fetched_at + ttl_chrono > now {
+                    return Ok(entry.keys.clone());
+                }
+            }
+        }
+
+        // --- Slow path: attempt a fresh fetch ---
+        match fetch_jwks(http, jwks_uri).await {
+            Ok(jwks) => {
+                let mut guard = self.0.write().await;
+                let entry = guard.entry(key).or_insert_with(|| JwksCacheEntry {
+                    keys: jwks.clone(),
+                    fetched_at: now,
+                    last_refetch_attempt: None,
+                });
+                entry.keys = jwks.clone();
+                entry.fetched_at = now;
+                Ok(jwks)
+            }
+            Err(fetch_err) => {
+                // Check for stale-while-revalidate.
+                let guard = self.0.read().await;
+                if let Some(entry) = guard.get(&key) {
+                    let stale_window_chrono =
+                        chrono::Duration::from_std(STALE_WINDOW).unwrap_or_default();
+                    if entry.fetched_at + stale_window_chrono > now {
+                        tracing::warn!(jwks_uri, "serving stale JWKS while IdP unreachable");
+                        return Ok(entry.keys.clone());
+                    }
+                }
+                Err(fetch_err)
+            }
+        }
+    }
+
+    /// Force a refetch when the caller encounters an unknown kid.
+    ///
+    /// Rate-limited: if a forced refetch was attempted within
+    /// [`FORCED_REFETCH_COOLDOWN`], return `Err(JwksKidUnknown)` immediately
+    /// without issuing any HTTP request.
+    pub async fn force_refetch_if_allowed(
+        &self,
+        http: &reqwest::Client,
+        key: (Uuid, Uuid),
+        jwks_uri: &str,
+    ) -> Result<JwkSet, FederationError> {
+        let now = Utc::now();
+
+        // Check rate-limit window (read lock).
+        {
+            let guard = self.0.read().await;
+            if let Some(entry) = guard.get(&key)
+                && let Some(last_attempt) = entry.last_refetch_attempt
+            {
+                let cooldown_chrono =
+                    chrono::Duration::from_std(FORCED_REFETCH_COOLDOWN).unwrap_or_default();
+                if last_attempt + cooldown_chrono > now {
+                    return Err(FederationError::JwksKidUnknown);
+                }
+            }
+        }
+
+        // Update last_refetch_attempt before the fetch so that concurrent
+        // callers also see the cooldown.
+        {
+            let mut guard = self.0.write().await;
+            let entry = guard.entry(key).or_insert_with(|| JwksCacheEntry {
+                keys: JwkSet { keys: vec![] },
+                fetched_at: DateTime::UNIX_EPOCH,
+                last_refetch_attempt: None,
+            });
+            entry.last_refetch_attempt = Some(now);
+        }
+
+        // Perform the fetch.
+        match fetch_jwks(http, jwks_uri).await {
+            Ok(jwks) => {
+                let mut guard = self.0.write().await;
+                if let Some(entry) = guard.get_mut(&key) {
+                    entry.keys = jwks.clone();
+                    entry.fetched_at = now;
+                }
+                Ok(jwks)
+            }
+            Err(_) => Err(FederationError::JwksKidUnknown),
+        }
+    }
+}
+
+impl Default for JwksCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helper
+// ---------------------------------------------------------------------------
+
+async fn fetch_jwks(http: &reqwest::Client, jwks_uri: &str) -> Result<JwkSet, FederationError> {
+    let response = http
+        .get(jwks_uri)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| FederationError::JwksFetchFailed(format!("HTTP request failed: {e}")))?;
+
+    response
+        .error_for_status()
+        .map_err(|e| FederationError::JwksFetchFailed(format!("IdP returned error: {e}")))?
+        .json::<JwkSet>()
+        .await
+        .map_err(|e| FederationError::JwksFetchFailed(format!("Failed to parse JWKS: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration as CDuration;
+
+    fn test_key() -> (Uuid, Uuid) {
+        (Uuid::new_v4(), Uuid::new_v4())
+    }
+
+    fn empty_jwks() -> JwkSet {
+        JwkSet { keys: vec![] }
+    }
+
+    /// Insert a cache entry with a custom `fetched_at`.
+    async fn insert_entry(
+        cache: &JwksCache,
+        key: (Uuid, Uuid),
+        fetched_at: DateTime<Utc>,
+        jwks: JwkSet,
+    ) {
+        let mut guard = cache.0.write().await;
+        guard.insert(
+            key,
+            JwksCacheEntry {
+                keys: jwks,
+                fetched_at,
+                last_refetch_attempt: None,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_hit_within_ttl() {
+        let cache = JwksCache::new();
+        let k = test_key();
+
+        // Insert an entry fresh right now.
+        insert_entry(&cache, k, Utc::now(), empty_jwks()).await;
+
+        // Use a URL that would fail if actually called (port 0 → connection refused).
+        let http = reqwest::Client::new();
+        let result = cache
+            .get_or_fetch(&http, k, "http://127.0.0.1:0/jwks-unreachable")
+            .await;
+
+        // Must return the cached entry without making an HTTP call.
+        assert!(
+            result.is_ok(),
+            "expected cached result, got error: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_while_revalidate_on_fetch_err() {
+        let cache = JwksCache::new();
+        let k = test_key();
+
+        // Insert an entry that is past 1-h TTL but within 24-h stale window.
+        let fetched_at = Utc::now() - CDuration::minutes(90);
+        insert_entry(&cache, k, fetched_at, empty_jwks()).await;
+
+        let http = reqwest::Client::new();
+        // The fetch will fail because the URL is unreachable.
+        let result = cache
+            .get_or_fetch(&http, k, "http://127.0.0.1:0/jwks-unreachable")
+            .await;
+
+        // Should return cached (stale) keys rather than propagating the error.
+        assert!(
+            result.is_ok(),
+            "expected stale keys to be served, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_refetch_rate_limited() {
+        let cache = JwksCache::new();
+        let k = test_key();
+
+        let http = reqwest::Client::new();
+
+        // First call — will attempt a fetch (fails) but records last_refetch_attempt.
+        let _ = cache
+            .force_refetch_if_allowed(&http, k, "http://127.0.0.1:0/jwks-unreachable")
+            .await;
+
+        // Second call within 60 s — MUST return JwksKidUnknown without HTTP.
+        let result = cache
+            .force_refetch_if_allowed(&http, k, "http://127.0.0.1:0/jwks-unreachable")
+            .await;
+
+        assert!(
+            matches!(result, Err(FederationError::JwksKidUnknown)),
+            "expected JwksKidUnknown (rate-limited), got: {result:?}"
+        );
+    }
+}

@@ -30,3 +30,9 @@ config = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true }
+
+[dev-dependencies]
+surrealdb = { workspace = true, features = ["kv-mem"] }
+surrealdb-types = "3"
+tokio-test = { workspace = true }
+uuid = { workspace = true }

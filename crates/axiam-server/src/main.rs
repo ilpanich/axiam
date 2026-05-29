@@ -24,6 +24,7 @@ use axiam_db::{
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
     SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
+use axiam_federation::jwks_cache::JwksCache;
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
@@ -116,6 +117,31 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to run database migrations");
 
     tracing::info!("Database connected and migrations applied");
+
+    // Boot backfill: encrypt any legacy plaintext federation client_secret rows (D-12).
+    // Idempotent — rows that are already encrypted are skipped. Runs before HTTP bind
+    // to avoid serving plaintext-secret rows after this deploy.
+    {
+        let boot_fed_repo = axiam_db::SurrealFederationConfigRepository::new(db.client().clone());
+        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(db.client().clone());
+        if let Some(fed_key) = config.auth.federation_encryption_key {
+            match axiam_federation::secrets::migrate_plaintext_federation_secrets(
+                &boot_fed_repo,
+                &boot_audit_repo,
+                &fed_key,
+            )
+            .await
+            {
+                Ok(n) => tracing::info!(migrated = n, "federation secrets backfill complete"),
+                Err(e) => tracing::warn!(error = %e, "federation secrets backfill failed"),
+            }
+        } else {
+            tracing::warn!(
+                "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY missing — \
+                 skipping federation secret backfill"
+            );
+        }
+    }
 
     // Seed permissions for all existing tenants (D-07).
     // Uses UPSERT — safe to run on every startup.
@@ -228,6 +254,8 @@ async fn main() -> std::io::Result<()> {
     let settings_repo = SurrealSettingsRepository::new(db.client().clone());
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client().clone());
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client().clone());
+    // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
+    let jwks_cache = Arc::new(JwksCache::new());
     // Disable automatic redirects to prevent SSRF bypass (an HTTPS URL
     // could redirect to http:// or an internal host). Apply a global
     // timeout for consistent outbound HTTP behaviour.
@@ -388,6 +416,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(federation_config_repo.clone()))
             .app_data(web::Data::new(federation_link_repo.clone()))
             .app_data(web::Data::new(http_client.clone()))
+            .app_data(web::Data::new(jwks_cache.clone()))
             .configure(health_routes)
             .configure(|cfg| register_api_v1_routes::<axiam_db::WsClient>(cfg, &rl))
             .configure(openapi_routes)

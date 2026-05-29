@@ -8,10 +8,7 @@
 //! 4. Is idempotent — second invocation returns 0 migrations.
 //! 5. Decryption round-trips correctly.
 
-use axiam_core::repository::FederationConfigRepository;
-use axiam_db::{
-    SurrealAuditLogRepository, SurrealFederationConfigRepository, run_migrations,
-};
+use axiam_db::{SurrealAuditLogRepository, SurrealFederationConfigRepository, run_migrations};
 use axiam_federation::secrets::{
     current_key_version, decrypt_client_secret, migrate_plaintext_federation_secrets,
 };
@@ -70,23 +67,29 @@ struct SecretRow {
 }
 
 /// Re-select the federation_config row to inspect encrypted columns.
+///
+/// Scoped by both `tenant_id` and `config_id` — this confirms the
+/// tenant-scoped `set_encrypted_secret` UPDATE (which carries a
+/// `WHERE tenant_id = $tenant_id` clause) actually persisted the encrypted
+/// columns under the correct tenant.
 async fn read_secret_row(
     db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: uuid::Uuid,
     config_id: uuid::Uuid,
 ) -> SecretRow {
     let result = db
         .query(
             "SELECT client_secret, client_secret_nonce, \
              client_secret_ciphertext, client_secret_key_version \
-             FROM federation_config WHERE meta::id(id) = $id",
+             FROM federation_config \
+             WHERE meta::id(id) = $id AND tenant_id = $tenant_id",
         )
         .bind(("id", config_id.to_string()))
+        .bind(("tenant_id", tenant_id.to_string()))
         .await
         .expect("select");
 
-    let mut result = result
-        .check()
-        .expect("check");
+    let mut result = result.check().expect("check");
     let rows: Vec<SecretRow> = result.take(0).expect("take");
     rows.into_iter().next().expect("row must exist")
 }
@@ -98,7 +101,7 @@ async fn backfill_encrypts_plaintext_secret_and_is_idempotent() {
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
 
     // --- Pre-condition: plaintext secret is present, encrypted columns are absent ---
-    let before = read_secret_row(&db, config_id).await;
+    let before = read_secret_row(&db, tenant_id, config_id).await;
     assert_eq!(before.client_secret.as_deref(), Some("supersecret"));
     assert!(before.client_secret_nonce.is_none());
     assert!(before.client_secret_ciphertext.is_none());
@@ -111,7 +114,7 @@ async fn backfill_encrypts_plaintext_secret_and_is_idempotent() {
     assert_eq!(migrated, 1, "exactly 1 row should be migrated");
 
     // --- Post-condition assertions ---
-    let after = read_secret_row(&db, config_id).await;
+    let after = read_secret_row(&db, tenant_id, config_id).await;
 
     // Legacy plaintext column must be cleared (set to empty string to avoid
     // violating the TYPE string schema constraint).
@@ -134,7 +137,10 @@ async fn backfill_encrypts_plaintext_secret_and_is_idempotent() {
 
     assert!(!nonce.is_empty(), "nonce must be non-empty");
     assert!(!ciphertext.is_empty(), "ciphertext must be non-empty");
-    assert_ne!(nonce, ciphertext, "nonce and ciphertext must be distinct values");
+    assert_ne!(
+        nonce, ciphertext,
+        "nonce and ciphertext must be distinct values"
+    );
 
     // Key version must be set.
     assert_eq!(
@@ -144,9 +150,12 @@ async fn backfill_encrypts_plaintext_secret_and_is_idempotent() {
     );
 
     // Decryption must round-trip correctly.
-    let decrypted = decrypt_client_secret(&TEST_KEY, nonce, ciphertext)
-        .expect("decryption must succeed");
-    assert_eq!(decrypted, "supersecret", "decrypted value must match original");
+    let decrypted =
+        decrypt_client_secret(&TEST_KEY, nonce, ciphertext).expect("decryption must succeed");
+    assert_eq!(
+        decrypted, "supersecret",
+        "decrypted value must match original"
+    );
 
     // --- Idempotency: second run returns 0 ---
     let migrated_again = migrate_plaintext_federation_secrets(&fed_repo, &audit_repo, &TEST_KEY)

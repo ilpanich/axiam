@@ -591,10 +591,10 @@ pub(crate) fn reject_alg_none_raw(token: &str) -> Result<(), FederationError> {
         .map_err(|_| FederationError::JwtSignatureInvalid)?;
     let header_json: serde_json::Value =
         serde_json::from_slice(&header_bytes).map_err(|_| FederationError::JwtSignatureInvalid)?;
-    if let Some(alg) = header_json.get("alg").and_then(|v| v.as_str()) {
-        if alg.to_lowercase() == "none" {
-            return Err(FederationError::AlgorithmNotAllowed("none".into()));
-        }
+    if let Some(alg) = header_json.get("alg").and_then(|v| v.as_str())
+        && alg.to_lowercase() == "none"
+    {
+        return Err(FederationError::AlgorithmNotAllowed("none".into()));
     }
     Ok(())
 }

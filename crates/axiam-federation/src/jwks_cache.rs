@@ -139,13 +139,13 @@ impl JwksCache {
         // Check rate-limit window (read lock).
         {
             let guard = self.0.read().await;
-            if let Some(entry) = guard.get(&key) {
-                if let Some(last_attempt) = entry.last_refetch_attempt {
-                    let cooldown_chrono =
-                        chrono::Duration::from_std(FORCED_REFETCH_COOLDOWN).unwrap_or_default();
-                    if last_attempt + cooldown_chrono > now {
-                        return Err(FederationError::JwksKidUnknown);
-                    }
+            if let Some(entry) = guard.get(&key)
+                && let Some(last_attempt) = entry.last_refetch_attempt
+            {
+                let cooldown_chrono =
+                    chrono::Duration::from_std(FORCED_REFETCH_COOLDOWN).unwrap_or_default();
+                if last_attempt + cooldown_chrono > now {
+                    return Err(FederationError::JwksKidUnknown);
                 }
             }
         }

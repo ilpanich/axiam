@@ -11,9 +11,8 @@ use axiam_api_rest::RateLimitConfig;
 /// Loopback peer address for test requests so the rate-limiter key extractor
 /// can resolve a client IP without a real socket.
 const TEST_PEER: &str = "127.0.0.1:12345";
-use axiam_api_rest::register_api_v1_routes;
-use std::sync::Arc;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -30,6 +29,7 @@ use axiam_oauth2::token::TokenService;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -109,7 +109,16 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 macro_rules! test_app {
@@ -144,7 +153,9 @@ macro_rules! test_app {
                 .app_data(web::Data::new(user_repo))
                 .app_data(web::Data::new(authz_service))
                 .app_data(web::Data::new(token_service))
-                .app_data(web::Data::new(Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
@@ -1330,7 +1341,16 @@ async fn oidc_userinfo_with_email_scope() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let scopes = vec!["openid".to_owned(), "email".to_owned()];
-    let user_jwt = issue_access_token(user_id, tenant_id, org_id, &scopes, &auth).unwrap();
+    let user_jwt = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &scopes,
+        &auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
@@ -1352,7 +1372,16 @@ async fn oidc_userinfo_with_profile_scope() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let scopes = vec!["openid".to_owned(), "profile".to_owned()];
-    let user_jwt = issue_access_token(user_id, tenant_id, org_id, &scopes, &auth).unwrap();
+    let user_jwt = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &scopes,
+        &auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()

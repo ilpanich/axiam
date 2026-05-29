@@ -476,7 +476,16 @@ async fn validate_access_token_works() {
     let tid = Uuid::new_v4();
     let oid = Uuid::new_v4();
 
-    let jwt = token::issue_access_token(uid, tid, oid, &[], &config).unwrap();
+    let jwt = token::issue_access_token(
+        uid,
+        tid,
+        oid,
+        &[],
+        &config,
+        Uuid::new_v4().to_string(),
+        token::AUD_USER,
+    )
+    .unwrap();
     let validated = token::validate_access_token(&jwt, &config).unwrap();
     assert_eq!(validated.0.sub, uid.to_string());
 

@@ -11,9 +11,8 @@ use axiam_api_rest::RateLimitConfig;
 /// Loopback peer address for test requests so the rate-limiter key extractor
 /// (XForwardedForKeyExtractor) can resolve a client IP without a real socket.
 const TEST_PEER: &str = "127.0.0.1:12345";
-use axiam_api_rest::register_api_v1_routes;
-use std::sync::Arc;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{AuthService, MfaMethodService};
 use axiam_core::models::organization::CreateOrganization;
@@ -28,6 +27,7 @@ use axiam_db::repository::{
     SurrealRoleRepository, SurrealSessionRepository, SurrealSettingsRepository,
     SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -147,7 +147,9 @@ macro_rules! test_app {
                     SurrealUserRepository::new($db.clone()),
                     SurrealWebauthnCredentialRepository::new($db.clone()),
                 )))
-                .app_data(web::Data::new(Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),

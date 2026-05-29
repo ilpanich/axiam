@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::config::AuthConfig;
 use crate::error::AuthError;
+use crate::token::AUD_USER;
 use crate::{password, token, totp};
 
 // -----------------------------------------------------------------------
@@ -478,9 +479,16 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             })
             .await?;
 
-        // 6. Issue new access token.
-        let access_token =
-            token::issue_access_token(user.id, input.tenant_id, input.org_id, &[], &self.config)?;
+        // 6. Issue new access token (jti = new session.id per D-15).
+        let access_token = token::issue_access_token(
+            user.id,
+            input.tenant_id,
+            input.org_id,
+            &[],
+            &self.config,
+            new_session.id.to_string(),
+            AUD_USER,
+        )?;
 
         Ok(RefreshOutput {
             access_token,
@@ -626,8 +634,16 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             })
             .await?;
 
-        let access_token =
-            token::issue_access_token(user_id, tenant_id, org_id, &[], &self.config)?;
+        // jti = session.id per D-15 (session-based revocation).
+        let access_token = token::issue_access_token(
+            user_id,
+            tenant_id,
+            org_id,
+            &[],
+            &self.config,
+            session.id.to_string(),
+            AUD_USER,
+        )?;
 
         Ok(LoginOutput {
             access_token,

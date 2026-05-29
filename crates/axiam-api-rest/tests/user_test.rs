@@ -2,9 +2,8 @@
 
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
-use axiam_api_rest::register_api_v1_routes;
-use std::sync::Arc;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -14,6 +13,7 @@ use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepos
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -90,7 +90,16 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 macro_rules! test_app {
@@ -103,7 +112,9 @@ macro_rules! test_app {
                 )))
                 .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
@@ -120,7 +131,8 @@ async fn create_user_returns_201() {
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let req = test::TestRequest::post().insert_header(("X-Forwarded-For", "127.0.0.1"))
+    let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
         .set_json(serde_json::json!({
@@ -148,7 +160,8 @@ async fn create_user_omits_sensitive_fields() {
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let req = test::TestRequest::post().insert_header(("X-Forwarded-For", "127.0.0.1"))
+    let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
         .set_json(serde_json::json!({
@@ -178,7 +191,8 @@ async fn list_users_returns_200() {
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let req = test::TestRequest::get().insert_header(("X-Forwarded-For", "127.0.0.1"))
+    let req = test::TestRequest::get()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
@@ -200,7 +214,8 @@ async fn get_user_returns_200() {
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let req = test::TestRequest::get().insert_header(("X-Forwarded-For", "127.0.0.1"))
+    let req = test::TestRequest::get()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{user_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
@@ -221,7 +236,8 @@ async fn update_user_returns_200() {
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let req = test::TestRequest::put().insert_header(("X-Forwarded-For", "127.0.0.1"))
+    let req = test::TestRequest::put()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{user_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .set_json(serde_json::json!({
@@ -247,7 +263,8 @@ async fn delete_user_returns_204() {
     let app = test_app!(db, auth);
 
     // Create a second user to delete
-    let req = test::TestRequest::post().insert_header(("X-Forwarded-For", "127.0.0.1"))
+    let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
         .set_json(serde_json::json!({
@@ -260,7 +277,8 @@ async fn delete_user_returns_204() {
     let created: serde_json::Value = test::read_body_json(resp).await;
     let delete_id = created["id"].as_str().unwrap();
 
-    let req = test::TestRequest::delete().insert_header(("X-Forwarded-For", "127.0.0.1"))
+    let req = test::TestRequest::delete()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{delete_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
@@ -277,7 +295,8 @@ async fn user_response_includes_lock_state_fields() {
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
 
-    let req = test::TestRequest::get().insert_header(("X-Forwarded-For", "127.0.0.1"))
+    let req = test::TestRequest::get()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{user_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
@@ -303,7 +322,8 @@ async fn unlock_user_returns_200() {
     let app = test_app!(db, auth);
 
     // POST to unlock endpoint — user is not locked but unlock is idempotent
-    let req = test::TestRequest::post().insert_header(("X-Forwarded-For", "127.0.0.1"))
+    let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{user_id}/unlock"))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();

@@ -26,6 +26,12 @@ struct FederationConfigRow {
     client_secret: String,
     attribute_map: serde_json::Value,
     enabled: bool,
+    // Phase 4 fields (D-10 / D-11) — DB schema defaults to [] / None for legacy rows
+    allowed_algorithms: Vec<String>,
+    idp_signing_cert_pem: Option<String>,
+    client_secret_ciphertext: Option<String>,
+    client_secret_nonce: Option<String>,
+    client_secret_key_version: Option<i64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -41,6 +47,12 @@ struct FederationConfigRowWithId {
     client_secret: String,
     attribute_map: serde_json::Value,
     enabled: bool,
+    // Phase 4 fields (D-10 / D-11)
+    allowed_algorithms: Vec<String>,
+    idp_signing_cert_pem: Option<String>,
+    client_secret_ciphertext: Option<String>,
+    client_secret_nonce: Option<String>,
+    client_secret_key_version: Option<i64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -84,6 +96,11 @@ impl FederationConfigRow {
             client_secret: self.client_secret,
             attribute_map: self.attribute_map,
             enabled: self.enabled,
+            allowed_algorithms: self.allowed_algorithms,
+            idp_signing_cert_pem: self.idp_signing_cert_pem,
+            client_secret_ciphertext: self.client_secret_ciphertext,
+            client_secret_nonce: self.client_secret_nonce,
+            client_secret_key_version: self.client_secret_key_version,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -104,6 +121,11 @@ impl FederationConfigRowWithId {
             client_secret: self.client_secret,
             attribute_map: self.attribute_map,
             enabled: self.enabled,
+            allowed_algorithms: self.allowed_algorithms,
+            idp_signing_cert_pem: self.idp_signing_cert_pem,
+            client_secret_ciphertext: self.client_secret_ciphertext,
+            client_secret_nonce: self.client_secret_nonce,
+            client_secret_key_version: self.client_secret_key_version,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })

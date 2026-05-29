@@ -922,6 +922,9 @@ fn random_base64url() -> String {
 /// Validate that a redirect_uri is a well-formed absolute HTTPS (or HTTP
 /// localhost) URL.  This is a minimal open-redirect guard — a full
 /// per-config allowlist would require a schema change (deferred).
+// TODO(T19.14): tighten open-redirect protection — add a per-FederationConfig
+// registered redirect_uri allowlist (needs a schema column) instead of the
+// current scheme/host-only guard. Tracked for Phase 19.
 fn validate_redirect_uri(uri: &str) -> Result<(), AxiamApiError> {
     let parsed = url::Url::parse(uri).map_err(|_| {
         AxiamApiError(AxiamError::Validation {
@@ -1131,10 +1134,9 @@ pub async fn oidc_callback_public<C: Connection>(
 
     let user = callback_result.user;
 
-    // Fetch tenant to get org_id (needed for session creation).
-    // We need org_id for the access token claims; fall back to Uuid::nil()
-    // if the tenant lookup fails (should not happen — tenant was validated
-    // at start time and the user is just provisioned).
+    // TODO(T19.15): resolve real org_id from the tenant instead of Uuid::nil().
+    // SSO-provisioned access tokens currently carry an empty org_id claim.
+    // Wire a tenant->org_id lookup here (and at the OIDC callback below). Phase 19.
     let auth_out = auth_svc
         .create_session_and_tokens(user.id, tenant_id, Uuid::nil(), None, None)
         .await?;
@@ -1351,6 +1353,8 @@ pub async fn saml_acs_public<C: Connection>(
 
     let user = callback_result.user;
 
+    // TODO(T19.15): resolve real org_id from the tenant instead of Uuid::nil()
+    // (see the SAML callback above) — SSO tokens carry an empty org_id claim. Phase 19.
     let auth_out = auth_svc
         .create_session_and_tokens(user.id, tenant_id, Uuid::nil(), None, None)
         .await?;

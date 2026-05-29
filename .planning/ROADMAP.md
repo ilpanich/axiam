@@ -135,6 +135,10 @@ Plans:
 - Service-account dedicated token type with sub_kind: "ServiceAccount"
 - Unauthenticated federation login endpoints for first-time SSO
 
+### Phase 19 follow-ups raised during Phase 4 execution
+- Per-FederationConfig registered redirect_uri allowlist for first-time SSO endpoints (currently only a scheme/host HTTPS guard; needs a schema column) (T19.14)
+- Resolve real org_id from tenant in SSO callback session/token creation (currently `Uuid::nil()`; SSO access tokens carry an empty org_id claim) (T19.15)
+
 ---
 
 ### Phase 5: Email Delivery & GDPR Compliance

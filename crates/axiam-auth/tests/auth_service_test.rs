@@ -49,6 +49,8 @@ fn test_config() -> AuthConfig {
         pepper: None,
         min_password_length: 12,
         mfa_encryption_key: Some(TEST_MFA_KEY),
+        federation_encryption_key: None,
+        allow_missing_aud_as_user: true,
         mfa_challenge_lifetime_secs: 300,
         totp_issuer: "AXIAM-Test".into(),
         max_failed_login_attempts: 5,

@@ -4,9 +4,8 @@
 
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
-use axiam_api_rest::register_api_v1_routes;
-use std::sync::Arc;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -20,6 +19,7 @@ use axiam_db::repository::{
 };
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -94,7 +94,16 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 /// Build a test app with all services needed for OAuth2 client + flow tests.
@@ -130,7 +139,9 @@ macro_rules! test_app {
                 .app_data(web::Data::new(user_repo))
                 .app_data(web::Data::new(authz_service))
                 .app_data(web::Data::new(token_service))
-                .app_data(web::Data::new(Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),

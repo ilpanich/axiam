@@ -76,7 +76,16 @@ fn test_auth_config() -> AuthConfig {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 // -------------------------------------------------------------------------

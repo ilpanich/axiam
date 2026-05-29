@@ -23,11 +23,29 @@ pub struct FederationConfig {
     /// OIDC discovery URL or SAML metadata URL.
     pub metadata_url: Option<String>,
     pub client_id: String,
-    /// Encrypted client secret.
+    /// Legacy plaintext client secret (kept for back-compat; nulled by plan 04-02 backfill).
     pub client_secret: String,
     /// Maps external IdP attributes to AXIAM user fields.
     pub attribute_map: serde_json::Value,
     pub enabled: bool,
+    // ------------------------------------------------------------------
+    // Phase 4 additions (D-10 / D-11)
+    // ------------------------------------------------------------------
+    /// JWT signing algorithms accepted from this IdP's ID tokens.
+    ///
+    /// Default: `["RS256"]` for OIDC configs; empty for SAML configs.
+    pub allowed_algorithms: Vec<String>,
+    /// PEM-encoded X.509 certificate used to verify this IdP's SAML assertions
+    /// or fallback OIDC signatures (when JWKS is unavailable).
+    pub idp_signing_cert_pem: Option<String>,
+    /// AES-256-GCM ciphertext of the OAuth2 client secret (base64, no nonce prefix).
+    /// Stored separately from `client_secret_nonce` — see `axiam_auth::crypto::encrypt_separate`.
+    pub client_secret_ciphertext: Option<String>,
+    /// Base64-encoded 12-byte AES-256-GCM nonce corresponding to `client_secret_ciphertext`.
+    pub client_secret_nonce: Option<String>,
+    /// Key version used when encrypting `client_secret_ciphertext`.
+    /// Enables key rotation without re-encrypting all secrets at once.
+    pub client_secret_key_version: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

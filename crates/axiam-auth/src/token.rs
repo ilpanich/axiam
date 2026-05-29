@@ -12,6 +12,14 @@ use uuid::Uuid;
 use crate::config::AuthConfig;
 use crate::error::AuthError;
 
+/// Audience value for user-facing access tokens (issued by the login/refresh
+/// flow — `sub` is a user UUID).
+pub const AUD_USER: &str = "axiam:user";
+
+/// Audience value for M2M / service-account access tokens (issued by the
+/// OAuth2 Client Credentials grant — `sub` is a `client_id` string).
+pub const AUD_M2M: &str = "axiam:m2m";
+
 /// JWT claims embedded in every access token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessTokenClaims {
@@ -27,8 +35,20 @@ pub struct AccessTokenClaims {
     pub iat: i64,
     /// Expiration (Unix timestamp).
     pub exp: i64,
-    /// Unique token ID (UUID string).
+    /// Unique token ID.
+    ///
+    /// For tokens issued from Phase 4 onward this equals the `session.id` of
+    /// the issuing session (user flow) or a random UUIDv4 (M2M / no session
+    /// row). Pre-Phase-4 tokens carry a random UUID here — D-15 session
+    /// revocation tolerates this by treating the jti-to-session relationship
+    /// as advisory.
     pub jti: String,
+    /// Token audience — `"axiam:user"` or `"axiam:m2m"`.
+    ///
+    /// `None` means the token was issued before Phase 4 and should be treated
+    /// as `axiam:user` when `AuthConfig.allow_missing_aud_as_user` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
     /// OAuth2 scopes (space-separated string). Present when non-empty
     /// scopes are granted — both Client Credentials and Authorization
     /// Code flows.
@@ -38,6 +58,12 @@ pub struct AccessTokenClaims {
 
 /// Issue a signed EdDSA (Ed25519) JWT access token.
 ///
+/// `jti` should be the `session.id` of the issuing session (pass
+/// `session.id.to_string()`). This enables stateless session revocation
+/// checks in D-15 without a DB lookup.
+///
+/// `aud` should be [`AUD_USER`] for user-facing tokens.
+///
 /// When `scopes` is non-empty a space-separated `scope` claim is
 /// included in the token; otherwise the claim is omitted.
 pub fn issue_access_token(
@@ -46,6 +72,8 @@ pub fn issue_access_token(
     org_id: Uuid,
     scopes: &[String],
     config: &AuthConfig,
+    jti: String,
+    aud: &str,
 ) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     let scope = if scopes.is_empty() {
@@ -61,7 +89,8 @@ pub fn issue_access_token(
         iss: config.effective_issuer().to_owned(),
         iat: now,
         exp: now + config.access_token_lifetime_secs as i64,
-        jti: Uuid::new_v4().to_string(),
+        jti,
+        aud: Some(aud.to_string()),
         scope,
     };
 
@@ -76,6 +105,8 @@ pub fn issue_access_token(
 /// Issue a JWT access token for OAuth2 Client Credentials grant (M2M).
 ///
 /// The `sub` claim is the OAuth2 `client_id` (not a user UUID).
+/// `jti` is a random UUID — service accounts have no session row.
+/// `aud` is set to [`AUD_M2M`].
 /// If `scopes` is non-empty, a space-separated `scope` claim is
 /// included in the token.
 pub fn issue_client_credentials_token(
@@ -100,6 +131,7 @@ pub fn issue_client_credentials_token(
         iat: now,
         exp: now + config.access_token_lifetime_secs as i64,
         jti: Uuid::new_v4().to_string(),
+        aud: Some(AUD_M2M.to_string()),
         scope,
     };
 
@@ -189,6 +221,12 @@ pub fn issue_id_token(
 }
 
 /// Decode and verify an EdDSA JWT access token.
+///
+/// Audience validation: when `aud` is present it must be either
+/// [`AUD_USER`] or [`AUD_M2M`]. When `aud` is absent (pre-Phase-4 token)
+/// the library skips the audience check, preserving backward compatibility
+/// during the rollout window. Per-route narrowing to a specific audience
+/// happens in plan 04-04.
 pub fn decode_access_token(
     token: &str,
     config: &AuthConfig,
@@ -198,7 +236,13 @@ pub fn decode_access_token(
 
     let mut validation = Validation::new(Algorithm::EdDSA);
     validation.set_issuer(&[config.effective_issuer()]);
+    // Do NOT require `aud` — pre-Phase-4 tokens omit it (D-20 back-compat).
     validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+    // Accept both user and M2M audiences; presence is checked for membership
+    // only when the claim exists (jsonwebtoken skips aud check when token has
+    // no `aud` claim and validate_aud=true with a configured audience set).
+    validation.set_audience(&[AUD_USER, AUD_M2M]);
+    validation.leeway = 60;
 
     jsonwebtoken::decode::<AccessTokenClaims>(token, &key, &validation)
         .map(|data| data.claims)
@@ -290,6 +334,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             pepper: None,
             min_password_length: 12,
             mfa_encryption_key: None,
+            federation_encryption_key: None,
+            allow_missing_aud_as_user: true,
             mfa_challenge_lifetime_secs: 300,
             totp_issuer: "AXIAM-Test".into(),
             max_failed_login_attempts: 5,
@@ -312,14 +358,47 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let user_id = Uuid::new_v4();
         let tenant_id = Uuid::new_v4();
         let org_id = Uuid::new_v4();
+        let jti = Uuid::new_v4().to_string();
 
-        let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
+        let token = issue_access_token(
+            user_id,
+            tenant_id,
+            org_id,
+            &[],
+            &config,
+            jti.clone(),
+            AUD_USER,
+        )
+        .unwrap();
         let claims = decode_access_token(&token, &config).unwrap();
 
         assert_eq!(claims.sub, user_id.to_string());
         assert_eq!(claims.tenant_id, tenant_id.to_string());
         assert_eq!(claims.org_id, org_id.to_string());
         assert_eq!(claims.iss, "axiam-test");
+        assert_eq!(claims.jti, jti);
+        assert_eq!(claims.aud, Some(AUD_USER.to_string()));
+    }
+
+    #[test]
+    fn jti_equals_session_id() {
+        // D-15: jti must equal the issuing session.id so revocation can be
+        // performed statlessly without a DB lookup.
+        let config = test_config();
+        let session_id = "00000000-0000-0000-0000-000000000001".to_string();
+        let token = issue_access_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+            session_id.clone(),
+            AUD_USER,
+        )
+        .unwrap();
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert_eq!(claims.jti, session_id);
+        assert_eq!(claims.aud, Some("axiam:user".to_string()));
     }
 
     #[test]
@@ -329,8 +408,26 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let tid = Uuid::new_v4();
         let oid = Uuid::new_v4();
 
-        let t1 = issue_access_token(uid, tid, oid, &[], &config).unwrap();
-        let t2 = issue_access_token(uid, tid, oid, &[], &config).unwrap();
+        let t1 = issue_access_token(
+            uid,
+            tid,
+            oid,
+            &[],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .unwrap();
+        let t2 = issue_access_token(
+            uid,
+            tid,
+            oid,
+            &[],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .unwrap();
 
         let c1 = decode_access_token(&t1, &config).unwrap();
         let c2 = decode_access_token(&t2, &config).unwrap();
@@ -402,9 +499,16 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     #[test]
     fn user_token_has_no_scope_claim() {
         let config = test_config();
-        let token =
-            issue_access_token(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), &[], &config)
-                .unwrap();
+        let token = issue_access_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .unwrap();
 
         let claims = decode_access_token(&token, &config).unwrap();
         assert!(claims.scope.is_none());
@@ -420,6 +524,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             Uuid::new_v4(),
             &scopes,
             &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
         )
         .unwrap();
 

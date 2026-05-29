@@ -368,6 +368,49 @@ DEFINE FIELD created_at ON TABLE federation_config TYPE datetime \
     DEFAULT time::now();
 DEFINE FIELD updated_at ON TABLE federation_config TYPE datetime \
     DEFAULT time::now();
+-- Phase 4 additions: encrypted client secret columns + algorithm allow-list
+-- (legacy client_secret column is kept for back-compat; nulled by plan 04-02 backfill)
+DEFINE FIELD IF NOT EXISTS allowed_algorithms ON TABLE federation_config \
+    TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS idp_signing_cert_pem ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS client_secret_ciphertext ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS client_secret_nonce ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS client_secret_key_version ON TABLE federation_config \
+    TYPE option<int>;
+
+-- =======================================================================
+-- SAML Assertion Replay Table (D-09)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS saml_assertion_replay SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_assertion_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS assertion_id ON TABLE saml_assertion_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE saml_assertion_replay TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_assertion_replay TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_replay_uniq ON TABLE saml_assertion_replay \
+    COLUMNS tenant_id, assertion_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_replay_expires_at ON TABLE saml_assertion_replay \
+    COLUMNS expires_at;
+
+-- =======================================================================
+-- Federation Login State Table (D-24)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS federation_login_state SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS state ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS nonce ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS federation_config_id ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS redirect_uri ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE federation_login_state TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE federation_login_state TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_login_state_uniq ON TABLE federation_login_state \
+    COLUMNS state UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_login_state_expires_at ON TABLE federation_login_state \
+    COLUMNS expires_at;
 
 -- =======================================================================
 -- Certificates (tenant scope)

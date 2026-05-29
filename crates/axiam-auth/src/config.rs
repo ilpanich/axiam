@@ -2,6 +2,10 @@
 
 use serde::Deserialize;
 
+fn default_true() -> bool {
+    true
+}
+
 /// Configuration for the authentication service.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -29,6 +33,17 @@ pub struct AuthConfig {
     /// `None` disables MFA enrollment. Set programmatically (not from config files).
     #[serde(skip)]
     pub mfa_encryption_key: Option<[u8; 32]>,
+    /// 256-bit AES-GCM key for encrypting federation client secrets at rest.
+    /// `None` means federation config create/update will fail at runtime.
+    /// Set programmatically from `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` (not from
+    /// config files). Federation is optional — absence is warned, not fatal.
+    #[serde(skip)]
+    pub federation_encryption_key: Option<[u8; 32]>,
+    /// When `true`, access tokens decoded without an `aud` claim are treated as
+    /// `axiam:user`. Enables a back-compat window during the Phase 4 rollout
+    /// while pre-Phase-4 tokens are still circulating. Default: `true`.
+    #[serde(default = "default_true")]
+    pub allow_missing_aud_as_user: bool,
     /// MFA challenge token lifetime in seconds (default: 300 = 5 minutes).
     pub mfa_challenge_lifetime_secs: u64,
     /// Issuer name shown in authenticator apps.
@@ -85,6 +100,8 @@ impl Default for AuthConfig {
             pepper: None,
             min_password_length: 12,
             mfa_encryption_key: None,
+            federation_encryption_key: None,
+            allow_missing_aud_as_user: true,
             mfa_challenge_lifetime_secs: 300,
             totp_issuer: "AXIAM".into(),
             max_failed_login_attempts: 5,

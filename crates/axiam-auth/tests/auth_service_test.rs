@@ -49,6 +49,8 @@ fn test_config() -> AuthConfig {
         pepper: None,
         min_password_length: 12,
         mfa_encryption_key: Some(TEST_MFA_KEY),
+        federation_encryption_key: None,
+        allow_missing_aud_as_user: true,
         mfa_challenge_lifetime_secs: 300,
         totp_issuer: "AXIAM-Test".into(),
         max_failed_login_attempts: 5,
@@ -476,7 +478,16 @@ async fn validate_access_token_works() {
     let tid = Uuid::new_v4();
     let oid = Uuid::new_v4();
 
-    let jwt = token::issue_access_token(uid, tid, oid, &[], &config).unwrap();
+    let jwt = token::issue_access_token(
+        uid,
+        tid,
+        oid,
+        &[],
+        &config,
+        Uuid::new_v4().to_string(),
+        token::AUD_USER,
+    )
+    .unwrap();
     let validated = token::validate_access_token(&jwt, &config).unwrap();
     assert_eq!(validated.0.sub, uid.to_string());
 

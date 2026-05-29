@@ -517,12 +517,15 @@ pub async fn device_auth<C: Connection>(
     // TODO(T15): Introduce a dedicated service-account token with `sub_kind: "ServiceAccount"`
     // so downstream handlers/audit can distinguish SA tokens from user tokens.
     // For now, reuse the user token shape; `sub` contains the service_account_id.
+    // Service-account/device auth has no session row — use random jti.
     let access_token = issue_access_token(
         cert_auth.service_account_id,
         cert_auth.tenant_id,
         tenant.organization_id,
         &[],
         &auth_config,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
     )
     .map_err(axiam_core::error::AxiamError::from)?;
 

@@ -32,7 +32,11 @@ url = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
+axiam-core = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 surrealdb-types = "3"
 tokio-test = { workspace = true }
 uuid = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+wiremock = "0.6"

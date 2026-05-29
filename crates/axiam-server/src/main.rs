@@ -1,6 +1,9 @@
 //! AXIAM Server — Application entry point.
 
+mod cleanup;
+
 use std::sync::Arc;
+use std::time::Duration;
 
 use actix_web::{App, HttpServer, web};
 use axiam_amqp::{AmqpConfig, AmqpManager};
@@ -18,12 +21,13 @@ use axiam_db::{
     DbConfig, DbManager, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
     SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
+    SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealRefreshTokenRepository,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
+    SurrealServiceAccountRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_oauth2::authorize::AuthorizeService;
@@ -32,6 +36,11 @@ use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
 use tracing_subscriber::EnvFilter;
+
+/// Returns the default cleanup interval in seconds (5 minutes).
+fn default_cleanup_interval_secs() -> u64 {
+    300
+}
 
 /// Top-level configuration aggregating all sub-configs.
 #[derive(Debug, Deserialize)]
@@ -48,6 +57,11 @@ struct AppConfig {
     amqp: AmqpConfig,
     #[serde(default)]
     rate_limit: RateLimitConfig,
+    /// How often (in seconds) the background cleanup task sweeps expired rows.
+    /// Configurable via `AXIAM__SERVER__CLEANUP_INTERVAL_SECS`. Bounded to
+    /// `60..=3600` at startup (T-04-35).
+    #[serde(default = "default_cleanup_interval_secs")]
+    cleanup_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -96,6 +110,9 @@ async fn main() -> std::io::Result<()> {
              — federation create/use will fail at runtime"
         );
     }
+
+    // Clamp cleanup interval to 60..=3600 seconds (T-04-35).
+    config.cleanup_interval_secs = config.cleanup_interval_secs.clamp(60, 3600);
 
     // Load allow_missing_aud_as_user override (bool, default true).
     // The serde default already sets it to true; this allows an operator to
@@ -262,6 +279,8 @@ async fn main() -> std::io::Result<()> {
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client().clone());
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client().clone());
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client().clone());
+    let federation_login_state_repo =
+        SurrealFederationLoginStateRepository::new(db.client().clone());
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
     // Disable automatic redirects to prevent SSRF bypass (an HTTPS URL
@@ -383,6 +402,17 @@ async fn main() -> std::io::Result<()> {
 
     let audit_middleware = AuditMiddleware::spawn(audit_repo.clone());
 
+    // Spawn the periodic cleanup task (D-09, D-24).
+    // Shutdown channel: main sends `true` after HttpServer returns on SIGTERM.
+    let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
+    let cleanup = cleanup::CleanupTask::new(
+        Arc::new(assertion_replay_repo.clone()),
+        Arc::new(federation_login_state_repo.clone()),
+        Duration::from_secs(config.cleanup_interval_secs),
+        cleanup_shutdown_rx,
+    );
+    let cleanup_handle = tokio::spawn(cleanup.run());
+
     HttpServer::new(move || {
         let rl = rate_limit_cfg.clone();
         App::new()
@@ -430,6 +460,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(federation_config_repo.clone()))
             .app_data(web::Data::new(federation_link_repo.clone()))
             .app_data(web::Data::new(assertion_replay_repo.clone()))
+            .app_data(web::Data::new(federation_login_state_repo.clone()))
             .app_data(web::Data::new(http_client.clone()))
             .app_data(web::Data::new(jwks_cache.clone()))
             .configure(health_routes)
@@ -438,7 +469,15 @@ async fn main() -> std::io::Result<()> {
     })
     .bind(&bind_addr)?
     .run()
-    .await
+    .await?;
+
+    // Signal the cleanup task to shut down and wait for it to finish.
+    let _ = cleanup_shutdown_tx.send(true);
+    if let Err(e) = cleanup_handle.await {
+        tracing::warn!(error = ?e, "cleanup task join error");
+    }
+
+    Ok(())
 }
 
 fn load_config() -> AppConfig {

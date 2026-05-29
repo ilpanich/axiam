@@ -1010,6 +1010,7 @@ dependencies = [
 name = "axiam-server"
 version = "0.1.0"
 dependencies = [
+ "actix-rt",
  "actix-web",
  "axiam-amqp",
  "axiam-api-grpc",

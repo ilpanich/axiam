@@ -19,11 +19,11 @@ use axiam_db::{
     SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
-    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
+    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_oauth2::authorize::AuthorizeService;
@@ -211,12 +211,18 @@ async fn main() -> std::io::Result<()> {
     let audit_repo = SurrealAuditLogRepository::new(db.client().clone());
     let ca_cert_repo = SurrealCaCertificateRepository::new(db.client().clone());
     let federation_link_repo_for_auth = SurrealFederationLinkRepository::new(db.client().clone());
+    // A separate refresh-token repo instance for AuthService (used by
+    // revoke_all_sessions / revoke_all_sessions_except on password change and reset).
+    let auth_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
     let auth_service = AuthService::new(
         user_repo.clone(),
-        session_repo,
+        session_repo.clone(),
         federation_link_repo_for_auth,
+        auth_refresh_token_repo,
         config.auth.clone(),
     );
+    // Password history repository — used by the password-change handler.
+    let password_history_repo = SurrealPasswordHistoryRepository::new(db.client().clone());
 
     let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(db.client().clone());
     let webauthn_service = WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
@@ -269,6 +275,9 @@ async fn main() -> std::io::Result<()> {
     let oauth2_client_repo = SurrealOAuth2ClientRepository::new(db.client().clone());
     let auth_code_repo = SurrealAuthorizationCodeRepository::new(db.client().clone());
     let refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
+    // Separate instance for password-reset/change handlers that need direct
+    // RefreshTokenRepository access via web::Data (TokenService owns the main one).
+    let handler_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
 
     // OAuth2 authorization code grant services.
     let authorize_service = AuthorizeService::new(
@@ -404,6 +413,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(webauthn_service.clone()))
             .app_data(web::Data::new(mfa_method_service.clone()))
             .app_data(web::Data::new(notification_publisher.clone()))
+            .app_data(web::Data::new(session_repo.clone()))
+            .app_data(web::Data::new(handler_refresh_token_repo.clone()))
+            .app_data(web::Data::new(password_history_repo.clone()))
             .app_data(web::Data::new(ca_service.clone()))
             .app_data(web::Data::new(cert_service.clone()))
             .app_data(web::Data::new(cert_repo.clone()))

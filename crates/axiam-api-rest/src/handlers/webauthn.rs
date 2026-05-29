@@ -4,8 +4,8 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::{AuthService, WebauthnService};
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
 use axiam_db::{
-    SurrealFederationLinkRepository, SurrealSessionRepository, SurrealUserRepository,
-    SurrealWebauthnCredentialRepository,
+    SurrealFederationLinkRepository, SurrealRefreshTokenRepository, SurrealSessionRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -22,6 +22,7 @@ type AuthSvc<C> = AuthService<
     SurrealUserRepository<C>,
     SurrealSessionRepository<C>,
     SurrealFederationLinkRepository<C>,
+    SurrealRefreshTokenRepository<C>,
 >;
 
 type WebauthnSvc<C> = WebauthnService<SurrealWebauthnCredentialRepository<C>>;

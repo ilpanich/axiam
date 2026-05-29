@@ -8,8 +8,8 @@ use axiam_auth::PasswordResetService;
 use axiam_core::error::AxiamError;
 use axiam_db::{
     SurrealFederationLinkRepository, SurrealPasswordHistoryRepository,
-    SurrealPasswordResetTokenRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository,
+    SurrealPasswordResetTokenRepository, SurrealRefreshTokenRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use serde::Deserialize;
 use surrealdb::Connection;
@@ -63,6 +63,8 @@ pub async fn request_reset<C: Connection>(
     token_repo: web::Data<SurrealPasswordResetTokenRepository<C>>,
     federation_repo: web::Data<SurrealFederationLinkRepository<C>>,
     history_repo: web::Data<SurrealPasswordHistoryRepository<C>>,
+    session_repo: web::Data<SurrealSessionRepository<C>>,
+    refresh_token_repo: web::Data<SurrealRefreshTokenRepository<C>>,
     auth_config: web::Data<axiam_auth::AuthConfig>,
     body: web::Json<RequestResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -72,6 +74,8 @@ pub async fn request_reset<C: Connection>(
         token_repo.as_ref().clone(),
         federation_repo.as_ref().clone(),
         history_repo.as_ref().clone(),
+        session_repo.as_ref().clone(),
+        refresh_token_repo.as_ref().clone(),
     );
 
     let expiry_hours = auth_config.password_reset_token_expiry_hours;
@@ -130,6 +134,8 @@ pub async fn confirm_reset<C: Connection>(
     token_repo: web::Data<SurrealPasswordResetTokenRepository<C>>,
     federation_repo: web::Data<SurrealFederationLinkRepository<C>>,
     history_repo: web::Data<SurrealPasswordHistoryRepository<C>>,
+    session_repo: web::Data<SurrealSessionRepository<C>>,
+    refresh_token_repo: web::Data<SurrealRefreshTokenRepository<C>>,
     tenant_repo: web::Data<SurrealTenantRepository<C>>,
     settings_repo: web::Data<SurrealSettingsRepository<C>>,
     auth_config: web::Data<axiam_auth::AuthConfig>,
@@ -153,6 +159,8 @@ pub async fn confirm_reset<C: Connection>(
         token_repo.as_ref().clone(),
         federation_repo.as_ref().clone(),
         history_repo.as_ref().clone(),
+        session_repo.as_ref().clone(),
+        refresh_token_repo.as_ref().clone(),
     );
 
     svc.confirm_reset(

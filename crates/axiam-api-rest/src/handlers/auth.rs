@@ -12,9 +12,10 @@ use axiam_core::repository::{
     TenantRepository, UserRepository,
 };
 use axiam_db::{
-    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealRoleRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
+    SurrealPermissionRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -34,6 +35,7 @@ type AuthSvc<C> = AuthService<
     SurrealUserRepository<C>,
     SurrealSessionRepository<C>,
     SurrealFederationLinkRepository<C>,
+    SurrealRefreshTokenRepository<C>,
 >;
 
 type MfaMethodSvc<C> =
@@ -151,6 +153,13 @@ pub struct MfaSetupConfirmRequest {
 pub struct MeResponse {
     pub user: LoginUserInfo,
     pub permissions: Vec<String>,
+}
+
+/// Request body for `POST /api/v1/auth/password/change`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
 }
 
 // -----------------------------------------------------------------------
@@ -691,5 +700,65 @@ pub async fn reset_mfa<C: Connection>(
             .await?;
     }
     svc.reset_mfa(caller.tenant_id, target_user_id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /api/v1/auth/password/change`
+///
+/// Change the authenticated user's password. Requires the current password for
+/// re-verification (T-04-21: guards against session-hijack pivot). On success,
+/// all other sessions and OAuth2 refresh tokens are revoked; the caller's
+/// current session is preserved (D-14, D-15).
+///
+/// Returns 204 on success, 401 on wrong current password, 422 on policy
+/// violation.
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/password/change",
+    tag = "auth",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 204, description = "Password changed; other sessions revoked"),
+        (status = 401, description = "Wrong current password or unauthenticated"),
+        (status = 422, description = "New password violates policy"),
+    ),
+    security(("bearer" = []))
+)]
+#[allow(clippy::too_many_arguments)] // Actix DI extractors
+pub async fn change_password<C: Connection>(
+    user: AuthenticatedUser,
+    svc: web::Data<AuthSvc<C>>,
+    settings_repo: web::Data<SurrealSettingsRepository<C>>,
+    tenant_repo: web::Data<SurrealTenantRepository<C>>,
+    history_repo: web::Data<SurrealPasswordHistoryRepository<C>>,
+    body: web::Json<ChangePasswordRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    use axiam_core::repository::{SettingsRepository, TenantRepository};
+
+    // DoS guard: reject oversized new-password before any crypto work.
+    if body.new_password.len() > 1024 {
+        return Err(axiam_core::error::AxiamError::Validation {
+            message: "new_password exceeds maximum length of 1024 bytes".into(),
+        }
+        .into());
+    }
+
+    // Resolve tenant to look up org_id for effective settings.
+    let tenant = tenant_repo.get_by_id(user.tenant_id).await?;
+    let settings = settings_repo
+        .get_effective_settings(tenant.organization_id, user.tenant_id)
+        .await?;
+
+    svc.change_password(
+        user.tenant_id,
+        user.user_id,
+        user.session_id,
+        &body.current_password,
+        &body.new_password,
+        &settings.password,
+        history_repo.as_ref(),
+    )
+    .await?;
+
     Ok(HttpResponse::NoContent().finish())
 }

@@ -124,6 +124,11 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
             .route(
                 "/reset/confirm",
                 web::post().to(handlers::password_reset::confirm_reset::<C>),
+            )
+            .service(
+                web::resource("/password/change")
+                    .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
+                    .route(web::post().to(handlers::auth::change_password::<C>)),
             ),
     );
     // OIDC Discovery (must be outside /oauth2 scope per spec)

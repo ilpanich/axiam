@@ -17,8 +17,8 @@ use axiam_core::repository::{
 };
 use axiam_db::repository::{
     SurrealFederationConfigRepository, SurrealFederationLinkRepository,
-    SurrealOrganizationRepository, SurrealSessionRepository, SurrealTenantRepository,
-    SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealRefreshTokenRepository, SurrealSessionRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use chrono::{Duration, Utc};
 use surrealdb::Surreal;
@@ -72,6 +72,7 @@ async fn setup() -> (
     SurrealUserRepository<surrealdb::engine::local::Db>,
     SurrealSessionRepository<surrealdb::engine::local::Db>,
     SurrealFederationLinkRepository<surrealdb::engine::local::Db>,
+    SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
     Uuid,                                  // org_id
     Uuid,                                  // tenant_id
     Uuid,                                  // user_id
@@ -129,11 +130,13 @@ async fn setup() -> (
 
     let session_repo = SurrealSessionRepository::new(db.clone());
     let federation_repo = SurrealFederationLinkRepository::new(db.clone());
+    let refresh_token_repo = SurrealRefreshTokenRepository::new(db.clone());
 
     (
         user_repo,
         session_repo,
         federation_repo,
+        refresh_token_repo,
         org.id,
         tenant.id,
         user.id,
@@ -147,6 +150,7 @@ async fn login_alice(
         SurrealUserRepository<surrealdb::engine::local::Db>,
         SurrealSessionRepository<surrealdb::engine::local::Db>,
         SurrealFederationLinkRepository<surrealdb::engine::local::Db>,
+        SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
     >,
     tenant_id: Uuid,
     org_id: Uuid,
@@ -175,9 +179,16 @@ async fn login_alice(
 
 #[tokio::test]
 async fn login_happy_path() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _user_id, _db) = setup().await;
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _user_id, _db) =
+        setup().await;
     let config = test_config();
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, config.clone());
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config.clone(),
+    );
 
     let result = login_alice(&svc, tenant_id, org_id).await;
 
@@ -193,8 +204,15 @@ async fn login_happy_path() {
 
 #[tokio::test]
 async fn login_by_email() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let result = svc
         .login(LoginInput {
@@ -213,8 +231,15 @@ async fn login_by_email() {
 
 #[tokio::test]
 async fn login_wrong_password() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let err = svc
         .login(LoginInput {
@@ -237,8 +262,15 @@ async fn login_wrong_password() {
 
 #[tokio::test]
 async fn login_user_not_found() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let err = svc
         .login(LoginInput {
@@ -258,7 +290,8 @@ async fn login_user_not_found() {
 
 #[tokio::test]
 async fn login_locked_user() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, _db) = setup().await;
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
 
     user_repo
         .update(
@@ -272,7 +305,13 @@ async fn login_locked_user() {
         .await
         .unwrap();
 
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let err = svc
         .login(LoginInput {
@@ -300,7 +339,8 @@ async fn login_locked_user() {
 
 #[tokio::test]
 async fn login_inactive_user() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, _db) = setup().await;
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
 
     user_repo
         .update(
@@ -314,7 +354,13 @@ async fn login_inactive_user() {
         .await
         .unwrap();
 
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let err = svc
         .login(LoginInput {
@@ -342,8 +388,15 @@ async fn login_inactive_user() {
 
 #[tokio::test]
 async fn logout_invalidates_session() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let login_out = login_alice(&svc, tenant_id, org_id).await;
     svc.logout(tenant_id, login_out.session_id).await.unwrap();
@@ -355,9 +408,16 @@ async fn logout_invalidates_session() {
 
 #[tokio::test]
 async fn refresh_happy_path() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _, _db) = setup().await;
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _, _db) =
+        setup().await;
     let config = test_config();
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, config.clone());
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config.clone(),
+    );
 
     let login_out = login_alice(&svc, tenant_id, org_id).await;
 
@@ -382,8 +442,15 @@ async fn refresh_happy_path() {
 
 #[tokio::test]
 async fn refresh_replay_attack_fails() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let login_out = login_alice(&svc, tenant_id, org_id).await;
     let old_token = login_out.refresh_token.clone();
@@ -414,8 +481,15 @@ async fn refresh_replay_attack_fails() {
 
 #[tokio::test]
 async fn refresh_invalid_token_fails() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let err = svc
         .refresh(RefreshInput {
@@ -433,10 +507,17 @@ async fn refresh_invalid_token_fails() {
 
 #[tokio::test]
 async fn refresh_locked_user_fails() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, db) = setup().await;
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
 
     let lock_repo = SurrealUserRepository::new(db);
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let login_out = login_alice(&svc, tenant_id, org_id).await;
 
@@ -497,8 +578,15 @@ async fn validate_access_token_works() {
 
 #[tokio::test]
 async fn revoke_all_sessions() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let login1 = login_alice(&svc, tenant_id, org_id).await;
     let login2 = login_alice(&svc, tenant_id, org_id).await;
@@ -536,8 +624,15 @@ async fn revoke_all_sessions() {
 
 #[tokio::test]
 async fn mfa_enroll_and_confirm() {
-    let (user_repo, session_repo, fed_repo, _org_id, tenant_id, user_id, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, _org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     // Step 1: enroll — get secret + URI.
     let enrollment = svc.enroll_mfa(tenant_id, user_id).await.unwrap();
@@ -565,9 +660,16 @@ async fn mfa_enroll_and_confirm() {
 
 #[tokio::test]
 async fn mfa_login_challenge_flow() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, _db) = setup().await;
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
     let config = test_config();
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, config.clone());
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config.clone(),
+    );
 
     // Enroll and confirm MFA.
     let enrollment = svc.enroll_mfa(tenant_id, user_id).await.unwrap();
@@ -627,8 +729,15 @@ async fn mfa_login_challenge_flow() {
 
 #[tokio::test]
 async fn mfa_wrong_code_rejected() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     // Enroll + confirm.
     let enrollment = svc.enroll_mfa(tenant_id, user_id).await.unwrap();
@@ -682,8 +791,15 @@ async fn mfa_wrong_code_rejected() {
 
 #[tokio::test]
 async fn mfa_confirm_wrong_code_rejected() {
-    let (user_repo, session_repo, fed_repo, _org_id, tenant_id, user_id, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, _org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     svc.enroll_mfa(tenant_id, user_id).await.unwrap();
 
@@ -697,8 +813,15 @@ async fn mfa_confirm_wrong_code_rejected() {
 
 #[tokio::test]
 async fn login_without_mfa_still_returns_success() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let result = svc
         .login(LoginInput {
@@ -726,6 +849,7 @@ async fn bad_login(
         SurrealUserRepository<surrealdb::engine::local::Db>,
         SurrealSessionRepository<surrealdb::engine::local::Db>,
         SurrealFederationLinkRepository<surrealdb::engine::local::Db>,
+        SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
     >,
     tenant_id: Uuid,
     org_id: Uuid,
@@ -745,8 +869,15 @@ async fn bad_login(
 
 #[tokio::test]
 async fn failed_login_increments_counter() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     bad_login(&svc, tenant_id, org_id).await;
     bad_login(&svc, tenant_id, org_id).await;
@@ -760,10 +891,17 @@ async fn failed_login_increments_counter() {
 
 #[tokio::test]
 async fn account_locks_after_max_attempts() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, db) = setup().await;
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
     let mut config = test_config();
     config.max_failed_login_attempts = 3; // lower threshold for test
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, config);
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config,
+    );
 
     for _ in 0..3 {
         bad_login(&svc, tenant_id, org_id).await;
@@ -793,8 +931,15 @@ async fn account_locks_after_max_attempts() {
 
 #[tokio::test]
 async fn lockout_expires_allows_login() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     // Manually set locked_until in the past.
     let lock_repo = SurrealUserRepository::new(db);
@@ -818,8 +963,15 @@ async fn lockout_expires_allows_login() {
 
 #[tokio::test]
 async fn successful_login_resets_counter() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     // Fail twice.
     bad_login(&svc, tenant_id, org_id).await;
@@ -837,12 +989,19 @@ async fn successful_login_resets_counter() {
 
 #[tokio::test]
 async fn exponential_backoff_increases_lockout() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, db) = setup().await;
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
     let mut config = test_config();
     config.max_failed_login_attempts = 3;
     config.lockout_duration_secs = 60;
     config.lockout_backoff_multiplier = 2.0;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, config);
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config,
+    );
 
     // 3 failures → first lockout (60s * 2^0 = 60s).
     for _ in 0..3 {
@@ -906,6 +1065,7 @@ async fn enable_mfa_for_alice(
         SurrealUserRepository<surrealdb::engine::local::Db>,
         SurrealSessionRepository<surrealdb::engine::local::Db>,
         SurrealFederationLinkRepository<surrealdb::engine::local::Db>,
+        SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
     >,
     tenant_id: Uuid,
     user_id: Uuid,
@@ -933,8 +1093,15 @@ fn mfa_not_enforced_policy() -> Option<MfaPolicy> {
 
 #[tokio::test]
 async fn login_mfa_enforced_no_mfa_configured_returns_setup_required() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _user_id, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let result = svc
         .login(LoginInput {
@@ -962,8 +1129,15 @@ async fn login_mfa_enforced_no_mfa_configured_returns_setup_required() {
 
 #[tokio::test]
 async fn login_mfa_enforced_mfa_already_configured_returns_mfa_challenge() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     // Enable MFA first.
     enable_mfa_for_alice(&svc, tenant_id, user_id).await;
@@ -994,8 +1168,15 @@ async fn login_mfa_enforced_mfa_already_configured_returns_mfa_challenge() {
 
 #[tokio::test]
 async fn login_mfa_not_enforced_no_mfa_returns_success() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _user_id, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     let result = svc
         .login(LoginInput {
@@ -1018,8 +1199,15 @@ async fn login_mfa_not_enforced_no_mfa_returns_success() {
 
 #[tokio::test]
 async fn login_mfa_enforced_federated_user_skips_enforcement() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     // Create a federation config + link so the user is "federated".
     let fed_config_repo = SurrealFederationConfigRepository::new(db.clone());
@@ -1070,8 +1258,15 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
 
 #[tokio::test]
 async fn enroll_mfa_with_setup_token_succeeds() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _user_id, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     // Login with MFA enforced to get a setup_token.
     let setup_token = match svc
@@ -1099,9 +1294,16 @@ async fn enroll_mfa_with_setup_token_succeeds() {
 
 #[tokio::test]
 async fn confirm_mfa_with_setup_token_returns_login_tokens() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, _user_id, _db) = setup().await;
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _user_id, _db) =
+        setup().await;
     let config = test_config();
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, config.clone());
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config.clone(),
+    );
 
     // Step 1: Login with enforcement → get setup_token.
     let setup_token = match svc
@@ -1144,8 +1346,15 @@ async fn confirm_mfa_with_setup_token_returns_login_tokens() {
 
 #[tokio::test]
 async fn reset_mfa_clears_state_and_revokes_sessions() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     // Enable MFA and create a session.
     enable_mfa_for_alice(&svc, tenant_id, user_id).await;
@@ -1236,8 +1445,15 @@ async fn reset_mfa_clears_state_and_revokes_sessions() {
 
 #[tokio::test]
 async fn login_after_reset_requires_setup_again() {
-    let (user_repo, session_repo, fed_repo, org_id, tenant_id, user_id, _db) = setup().await;
-    let svc = AuthService::new(user_repo, session_repo, fed_repo, test_config());
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+    );
 
     // Enable MFA, then reset it.
     enable_mfa_for_alice(&svc, tenant_id, user_id).await;

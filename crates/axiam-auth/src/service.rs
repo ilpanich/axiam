@@ -1,10 +1,14 @@
 //! Authentication service — login, logout, token refresh, and MFA.
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::password_history::CreatePasswordHistoryEntry;
 use axiam_core::models::session::CreateSession;
-use axiam_core::models::settings::MfaPolicy;
+use axiam_core::models::settings::{MfaPolicy, PasswordPolicy};
 use axiam_core::models::user::{UpdateUser, UserStatus};
-use axiam_core::repository::{FederationLinkRepository, SessionRepository, UserRepository};
+use axiam_core::repository::{
+    FederationLinkRepository, PasswordHistoryRepository, RefreshTokenRepository, SessionRepository,
+    UserRepository,
+};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -134,20 +138,44 @@ struct MfaChallengeClaims {
 ///
 /// Generic over repository implementations so that the auth layer
 /// has no dependency on the database crate.
+///
+/// `T` is the OAuth2 refresh-token repository. It is used by
+/// `revoke_all_sessions` and `revoke_all_sessions_except` to ensure that
+/// both session-flow and OAuth2-flow refresh tokens are revoked whenever
+/// a credential change occurs (RESEARCH §4 — "two chokepoints").
 #[derive(Clone)]
-pub struct AuthService<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> {
+pub struct AuthService<
+    U: UserRepository,
+    S: SessionRepository,
+    F: FederationLinkRepository,
+    T: RefreshTokenRepository,
+> {
     user_repo: U,
     session_repo: S,
     federation_repo: F,
+    refresh_token_repo: T,
     config: AuthConfig,
 }
 
-impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthService<U, S, F> {
-    pub fn new(user_repo: U, session_repo: S, federation_repo: F, config: AuthConfig) -> Self {
+impl<
+    U: UserRepository,
+    S: SessionRepository,
+    F: FederationLinkRepository,
+    T: RefreshTokenRepository,
+> AuthService<U, S, F, T>
+{
+    pub fn new(
+        user_repo: U,
+        session_repo: S,
+        federation_repo: F,
+        refresh_token_repo: T,
+        config: AuthConfig,
+    ) -> Self {
         Self {
             user_repo,
             session_repo,
             federation_repo,
+            refresh_token_repo,
             config,
         }
     }
@@ -503,11 +531,162 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
         self.session_repo.invalidate(tenant_id, session_id).await
     }
 
-    /// Revoke all sessions for a user (e.g. on password change).
+    /// Revoke all sessions for a user AND all OAuth2 refresh tokens.
+    ///
+    /// Used by password reset confirm and MFA reset — caller is unauthenticated
+    /// so there is no current session to preserve (D-16).
+    ///
+    /// Revokes both the session-flow refresh tokens (via `session_repo`) AND
+    /// the OAuth2-flow refresh tokens (via `refresh_token_repo`). RESEARCH §4
+    /// confirmed these are two separate tables; both must be hit.
     pub async fn revoke_all_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
         self.session_repo
             .invalidate_user_sessions(tenant_id, user_id)
-            .await
+            .await?;
+
+        // Also revoke OAuth2 refresh tokens for this user (the second
+        // chokepoint identified in RESEARCH §4). Tolerate 0 revocations —
+        // user may not have any OAuth2 tokens.
+        let oauth2_revoked = self
+            .refresh_token_repo
+            .revoke_all_for_user(tenant_id, user_id)
+            .await?;
+        tracing::debug!(
+            %tenant_id, %user_id, %oauth2_revoked,
+            "revoke_all_sessions: session-flow and OAuth2 refresh tokens revoked"
+        );
+
+        Ok(())
+    }
+
+    /// Revoke all sessions for a user EXCEPT the current one, AND revoke all
+    /// OAuth2 refresh tokens.
+    ///
+    /// Used on password change — the caller's current session (identified by
+    /// `current_session_id` = JWT `jti` = `session.id`) is preserved so the
+    /// caller can continue using the application after changing their password
+    /// (D-14, D-15).
+    ///
+    /// Audit-log entry: `event_type = "sessions_revoked_except_current"`.
+    pub async fn revoke_all_sessions_except(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+    ) -> AxiamResult<()> {
+        let sessions_deleted = self
+            .session_repo
+            .invalidate_user_sessions_except(tenant_id, user_id, current_session_id)
+            .await?;
+
+        // Revoke all OAuth2 refresh tokens for the user. OAuth2 tokens are not
+        // session-scoped, so we must revoke all of them even on a "keep current
+        // session" path — the caller's browser session continues but any OAuth2
+        // app must re-authenticate. Tolerate 0 revocations.
+        let oauth2_revoked = self
+            .refresh_token_repo
+            .revoke_all_for_user(tenant_id, user_id)
+            .await?;
+        tracing::debug!(
+            %tenant_id, %user_id, %sessions_deleted, %oauth2_revoked,
+            event_type = "sessions_revoked_except_current",
+            "password change: other sessions and all OAuth2 tokens revoked; current session preserved"
+        );
+
+        Ok(())
+    }
+
+    /// Change a user's password with current-password verification.
+    ///
+    /// Security protocol (D-14, D-21):
+    /// 1. Verify `current_password` against the stored Argon2id hash.
+    ///    Mismatch → `AuthenticationFailed` (maps to 401 in the REST layer).
+    /// 2. Evaluate `new_password` against the tenant password policy.
+    ///    Failure → `Validation` (maps to 422 in the REST layer).
+    /// 3. Hash and store the new password.
+    /// 4. Store old hash in password history.
+    /// 5. Revoke all sessions except the caller's current session.
+    /// 6. Emit audit log entry.
+    pub async fn change_password<H: PasswordHistoryRepository>(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+        current_password: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        history_repo: &H,
+    ) -> AxiamResult<()> {
+        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+
+        // 1. Verify current password.
+        let valid = password::verify_password(
+            current_password,
+            &user.password_hash,
+            self.config.pepper.as_deref(),
+        )
+        .map_err(|e| AxiamError::Crypto(e.to_string()))?;
+
+        if !valid {
+            return Err(AuthError::InvalidCredentials.into());
+        }
+
+        // 2. Evaluate new password against policy.
+        let check = crate::policy::evaluate_password(
+            new_password,
+            self.config.pepper.as_deref(),
+            policy,
+            tenant_id,
+            user_id,
+            history_repo,
+            None, // no HIBP client in the sync change-password path
+        )
+        .await?;
+
+        if !check.is_ok() {
+            return Err(AxiamError::Validation {
+                message: check.error_message(),
+            });
+        }
+
+        // 3. Hash new password.
+        let new_hash = password::hash_password(new_password, self.config.pepper.as_deref())?;
+
+        // 4. Store old password in history before overwriting.
+        history_repo
+            .create(CreatePasswordHistoryEntry {
+                tenant_id,
+                user_id,
+                password_hash: user.password_hash.clone(),
+            })
+            .await?;
+
+        // 5. Update user with new password hash.
+        self.user_repo
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    password_hash: Some(new_hash),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // 6. Revoke all other sessions + OAuth2 tokens; preserve current session.
+        self.revoke_all_sessions_except(tenant_id, user_id, current_session_id)
+            .await?;
+
+        tracing::info!(
+            %tenant_id,
+            actor = %user_id,
+            target = %user_id,
+            mode = "self_service",
+            event_type = "password_changed",
+            "user changed their password"
+        );
+
+        Ok(())
     }
 
     /// Start MFA enrollment using an MFA setup token (enforcement flow).

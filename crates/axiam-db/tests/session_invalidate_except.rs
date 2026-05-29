@@ -146,7 +146,10 @@ async fn invalidate_except_other_users_untouched() {
         .await
         .unwrap();
 
-    assert_eq!(deleted, 0, "no U sessions should be deleted (only the preserved one)");
+    assert_eq!(
+        deleted, 0,
+        "no U sessions should be deleted (only the preserved one)"
+    );
 
     // V's session must be untouched.
     let v_alive = repo.get_by_id(tenant_id, session_v).await;

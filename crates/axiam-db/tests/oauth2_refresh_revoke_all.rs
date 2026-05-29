@@ -134,5 +134,8 @@ async fn oauth2_revoke_all_idempotent() {
 
     // Second call — all tokens already revoked — returns 0.
     let second = repo.revoke_all_for_user(tenant_id, user_u).await.unwrap();
-    assert_eq!(second, 0, "second call should be idempotent (no newly-revoked tokens)");
+    assert_eq!(
+        second, 0,
+        "second call should be idempotent (no newly-revoked tokens)"
+    );
 }

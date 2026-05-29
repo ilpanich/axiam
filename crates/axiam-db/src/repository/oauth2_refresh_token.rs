@@ -210,6 +210,28 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         Ok(())
     }
 
+    async fn revoke_all_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
+        // Revoke all non-revoked tokens for the user atomically. Skip already-revoked
+        // tokens so the returned count reflects only newly-revoked tokens.
+        // RETURN AFTER gives us the updated rows for counting.
+        let mut result = self
+            .db
+            .query(
+                "UPDATE oauth2_refresh_token SET revoked = true \
+                 WHERE tenant_id = $tenant_id \
+                   AND user_id = $user_id \
+                   AND revoked = false \
+                 RETURN AFTER",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
+    }
+
     async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<()> {
         let client_id_owned = client_id.to_string();
         let tenant_id_str = tenant_id.to_string();

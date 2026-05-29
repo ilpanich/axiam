@@ -401,6 +401,16 @@ pub trait SessionRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+    /// Invalidate all sessions for a user except one (e.g., on password
+    /// change — preserve the caller's current session).
+    ///
+    /// Returns the number of sessions deleted.
+    fn invalidate_user_sessions_except(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
     /// Remove all expired sessions.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
@@ -598,6 +608,17 @@ pub trait RefreshTokenRepository: Send + Sync {
         tenant_id: Uuid,
         client_id: &str,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Revoke all refresh tokens for a user within a tenant (e.g., on
+    /// password change or reset). Idempotent — already-revoked tokens are
+    /// skipped and do not count toward the returned total.
+    ///
+    /// Returns the number of tokens newly revoked.
+    fn revoke_all_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
     /// Delete expired and revoked refresh tokens (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;

@@ -162,7 +162,7 @@ macro_rules! test_app {
                     SurrealWebauthnCredentialRepository::new($db.clone()),
                 )))
                 .app_data(web::Data::new(
-                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>,
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
@@ -220,7 +220,10 @@ async fn me_status(
     let req = test::TestRequest::get()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/me")
-        .insert_header(("Cookie", format!("axiam_access={access}; axiam_csrf={csrf}")))
+        .insert_header((
+            "Cookie",
+            format!("axiam_access={access}; axiam_csrf={csrf}"),
+        ))
         .insert_header(("X-CSRF-Token", csrf.to_owned()))
         .to_request();
     test::call_service(app, req).await.status().as_u16()
@@ -250,7 +253,10 @@ async fn mfa_reset_invalidates_sessions() {
     let req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/api/v1/users/{user_id}/reset-mfa"))
-        .insert_header(("Cookie", format!("axiam_access={access}; axiam_csrf={csrf}")))
+        .insert_header((
+            "Cookie",
+            format!("axiam_access={access}; axiam_csrf={csrf}"),
+        ))
         .insert_header(("X-CSRF-Token", csrf.clone()))
         .to_request();
     let resp = test::call_service(&app, req).await;

@@ -10,7 +10,9 @@ use actix_web::dev::Payload;
 use actix_web::web;
 use actix_web::{HttpMessage, HttpRequest};
 use axiam_auth::config::AuthConfig;
-use axiam_auth::token::{AUD_M2M, AUD_USER, CachedUserIdentity, ValidatedClaims, validate_access_token};
+use axiam_auth::token::{
+    AUD_M2M, AUD_USER, CachedUserIdentity, ValidatedClaims, validate_access_token,
+};
 use axiam_core::error::AxiamError;
 use uuid::Uuid;
 
@@ -235,7 +237,9 @@ fn check_user_aud_and_parse_jti(
 // AuthenticatedServiceAccount extractor
 // ---------------------------------------------------------------------------
 
-fn extract_service_account(req: &HttpRequest) -> Result<AuthenticatedServiceAccount, AxiamApiError> {
+fn extract_service_account(
+    req: &HttpRequest,
+) -> Result<AuthenticatedServiceAccount, AxiamApiError> {
     let validated = parse_validated_claims(req)?;
 
     match validated.0.aud.as_deref() {
@@ -330,14 +334,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
     }
 
     fn make_m2m_token(config: &AuthConfig) -> String {
-        issue_client_credentials_token(
-            "my-service",
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            &[],
-            config,
-        )
-        .unwrap()
+        issue_client_credentials_token("my-service", Uuid::new_v4(), Uuid::new_v4(), &[], config)
+            .unwrap()
     }
 
     fn make_no_aud_token(config: &AuthConfig) -> String {
@@ -362,8 +360,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             aud: None, // no audience
             scope: None,
         };
-        let key =
-            EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes()).unwrap();
+        let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes()).unwrap();
         let header = Header::new(Algorithm::EdDSA);
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
@@ -395,7 +392,10 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
         let token = make_no_aud_token(&config);
         let req = req_with_config_and_bearer(config, &token);
         let result = extract_user(&req);
-        assert!(result.is_ok(), "expected Ok with flag=true, got: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok with flag=true, got: {result:?}"
+        );
     }
 
     #[test]
@@ -405,10 +405,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
         let token = make_no_aud_token(&config);
         let req = req_with_config_and_bearer(config, &token);
         let result = extract_user(&req);
-        assert!(
-            result.is_err(),
-            "expected 401, got Ok when flag=false"
-        );
+        assert!(result.is_err(), "expected 401, got Ok when flag=false");
     }
 
     #[test]
@@ -417,7 +414,10 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
         let token = make_m2m_token(&config);
         let req = req_with_config_and_bearer(config, &token);
         let result = extract_user(&req);
-        assert!(result.is_err(), "expected rejection of m2m token on user route");
+        assert!(
+            result.is_err(),
+            "expected rejection of m2m token on user route"
+        );
     }
 
     #[test]
@@ -449,6 +449,9 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
         let token = make_user_token(&config, None);
         let req = req_with_config_and_bearer(config, &token);
         let result = extract_service_account(&req);
-        assert!(result.is_err(), "expected rejection of user token on m2m route");
+        assert!(
+            result.is_err(),
+            "expected rejection of user token on m2m route"
+        );
     }
 }

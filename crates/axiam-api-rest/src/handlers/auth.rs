@@ -12,10 +12,10 @@ use axiam_core::repository::{
     TenantRepository, UserRepository,
 };
 use axiam_db::{
-    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
-    SurrealPermissionRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealFederationLinkRepository, SurrealOrganizationRepository,
+    SurrealPasswordHistoryRepository, SurrealPermissionRepository, SurrealRefreshTokenRepository,
+    SurrealRoleRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;

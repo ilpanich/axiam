@@ -23,10 +23,10 @@ use axiam_core::repository::{
     OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
-    SurrealPermissionRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealFederationLinkRepository, SurrealOrganizationRepository,
+    SurrealPasswordHistoryRepository, SurrealPermissionRepository, SurrealRefreshTokenRepository,
+    SurrealRoleRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use std::sync::Arc;
 use surrealdb::Surreal;

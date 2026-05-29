@@ -8,11 +8,16 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build the release binary
 # ---------------------------------------------------------------------------
-FROM rust:1.94-bookworm AS builder
+FROM rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS builder
 
 # Install build-time dependencies: protobuf compiler for tonic/prost codegen
 RUN apt-get update && apt-get install -y --no-install-recommends \
         protobuf-compiler \
+        libxml2-dev \
+        libxmlsec1-dev \
+        libxmlsec1-openssl \
+        clang \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -67,7 +72,7 @@ RUN cargo build --release -p axiam-server \
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime image
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS runtime
 
 LABEL org.opencontainers.image.title="axiam-server" \
       org.opencontainers.image.description="AXIAM — Access eXtended Identity and Authorization Management" \
@@ -82,6 +87,9 @@ LABEL org.opencontainers.image.title="axiam-server" \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libssl3 \
+        libxml2 \
+        libxmlsec1 \
+        libxmlsec1-openssl \
         curl \
     && rm -rf /var/lib/apt/lists/*
 

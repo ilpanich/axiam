@@ -101,7 +101,7 @@ x509-parser = "0.17"
 pgp = "0.19"
 
 # SAML
-samael = { version = "0.0.19", default-features = false }
+samael = { version = "0.0.19", features = ["xmlsec"] }
 flate2 = "1"
 
 # Email

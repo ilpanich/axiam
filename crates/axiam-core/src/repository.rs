@@ -698,6 +698,52 @@ pub trait FederationLinkRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Federation Login State (D-24) — first-time SSO state + nonce correlation
+// ---------------------------------------------------------------------------
+
+/// A pending first-time SSO login state row.
+///
+/// Created by `oidc_start_public` / `saml_login_public` and consumed atomically
+/// by the corresponding callback. Rows have a 10-minute TTL enforced at
+/// consume time (expires_at check) and swept by `cleanup_expired`.
+#[derive(Debug, Clone)]
+pub struct FederationLoginState {
+    /// Random 32-byte base64url value used as CSRF state and as the DB key.
+    pub state: String,
+    /// Random 32-byte base64url nonce (OIDC only; empty string for SAML).
+    pub nonce: String,
+    pub tenant_id: uuid::Uuid,
+    pub federation_config_id: uuid::Uuid,
+    /// SPA post-login destination (NOT the AXIAM ACS/callback URL).
+    pub redirect_uri: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Repository for first-time SSO login state rows.
+pub trait FederationLoginStateRepository: Send + Sync {
+    /// Persist a new login state row. Returns `Err(Conflict)` if the same
+    /// `state` value already exists (UNIQUE index violation).
+    fn insert(&self, row: &FederationLoginState) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Atomically consume a state row: SELECT + DELETE in one transaction.
+    ///
+    /// Returns `Ok(Some(row))` if the row was found and has not expired.
+    /// Returns `Ok(None)` if the row was not found or was expired — the
+    /// caller MUST treat both as `401 state not found or expired` to avoid
+    /// distinguishing between the two cases (timing side-channel).
+    ///
+    /// The row is always deleted if found, regardless of expiry — this
+    /// prevents a second consume from succeeding on an expired row.
+    fn consume_by_state(
+        &self,
+        state: &str,
+    ) -> impl Future<Output = AxiamResult<Option<FederationLoginState>>> + Send;
+
+    /// Delete all rows where `expires_at < now()`. Returns the count deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // SAML Assertion Replay (D-09)
 // ---------------------------------------------------------------------------
 

@@ -928,11 +928,13 @@ dependencies = [
 name = "axiam-federation"
 version = "0.1.0"
 dependencies = [
+ "axiam-auth",
  "axiam-core",
  "axiam-db",
  "base64 0.22.1",
  "chrono",
  "flate2",
+ "jsonwebtoken",
  "reqwest 0.12.28",
  "samael",
  "serde",
@@ -1012,12 +1014,16 @@ dependencies = [
  "hex",
  "reqwest 0.12.28",
  "serde",
+ "surrealdb",
+ "surrealdb-types",
  "tokio",
+ "tokio-test",
  "tracing",
  "tracing-actix-web",
  "tracing-log",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]

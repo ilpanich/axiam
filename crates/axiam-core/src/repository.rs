@@ -625,6 +625,29 @@ pub trait FederationConfigRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<FederationConfig>>> + Send;
+
+    /// Return all `federation_config` rows where the legacy plaintext
+    /// `client_secret` is present and the encrypted columns are absent.
+    ///
+    /// Used by the boot backfill task (D-12) to find rows that have not yet
+    /// been encrypted with AES-256-GCM.
+    fn list_with_legacy_plaintext_secret(
+        &self,
+    ) -> impl Future<Output = AxiamResult<Vec<FederationConfig>>> + Send;
+
+    /// Persist the AES-256-GCM encrypted client secret split-column values
+    /// (D-11) and clear the legacy plaintext column.
+    ///
+    /// Writes `client_secret_nonce`, `client_secret_ciphertext`,
+    /// `client_secret_key_version`, and sets `client_secret = NONE`.
+    fn set_encrypted_secret(
+        &self,
+        tenant_id: Uuid,
+        config_id: Uuid,
+        nonce_b64: String,
+        ciphertext_b64: String,
+        key_version: i64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 pub trait FederationLinkRepository: Send + Sync {

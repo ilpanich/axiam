@@ -120,9 +120,11 @@ impl From<FederationError> for axiam_core::error::AxiamError {
             FederationError::SamlSignatureInvalid(reason) => {
                 axiam_core::error::AxiamError::AuthenticationFailed { reason }
             }
-            FederationError::AssertionReplay => axiam_core::error::AxiamError::AuthenticationFailed {
-                reason: "assertion replay".into(),
-            },
+            FederationError::AssertionReplay => {
+                axiam_core::error::AxiamError::AuthenticationFailed {
+                    reason: "assertion replay".into(),
+                }
+            }
             // IdP cert validation error → admin-facing 400 (Validation)
             FederationError::InvalidIdpCert(msg) => {
                 axiam_core::error::AxiamError::Validation { message: msg }

@@ -15,14 +15,15 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::{AuthService, MfaMethodService, WebauthnService};
 use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
 use axiam_db::{
-    DbConfig, DbManager, SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
-    SurrealCaCertificateRepository, SurrealCertificateRepository,
-    SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealGroupRepository,
-    SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    DbConfig, DbManager, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
+    SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    SurrealCertificateRepository, SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
+    SurrealOrganizationRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
+    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_oauth2::authorize::AuthorizeService;
@@ -254,6 +255,7 @@ async fn main() -> std::io::Result<()> {
     let settings_repo = SurrealSettingsRepository::new(db.client().clone());
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client().clone());
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client().clone());
+    let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client().clone());
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
     // Disable automatic redirects to prevent SSRF bypass (an HTTPS URL
@@ -415,6 +417,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(settings_repo.clone()))
             .app_data(web::Data::new(federation_config_repo.clone()))
             .app_data(web::Data::new(federation_link_repo.clone()))
+            .app_data(web::Data::new(assertion_replay_repo.clone()))
             .app_data(web::Data::new(http_client.clone()))
             .app_data(web::Data::new(jwks_cache.clone()))
             .configure(health_routes)

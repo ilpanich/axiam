@@ -14,7 +14,8 @@ use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, PaginatedResult, Pagination,
 };
 use axiam_db::{
-    SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealUserRepository,
+    SurrealAssertionReplayRepository, SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealUserRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -705,6 +706,7 @@ pub async fn saml_acs<C: Connection>(
     config_repo: web::Data<SurrealFederationConfigRepository<C>>,
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     body: web::Json<SamlAcsRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -718,6 +720,7 @@ pub async fn saml_acs<C: Connection>(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
+        (**replay_repo).clone(),
         (**http_client).clone(),
     );
 

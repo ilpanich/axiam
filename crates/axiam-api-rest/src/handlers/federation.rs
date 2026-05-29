@@ -3,6 +3,8 @@
 //! Provides CRUD for federation configurations, the OIDC authorization
 //! and callback flow, and federation link management.
 
+use std::sync::Arc;
+
 use actix_web::{HttpResponse, web};
 use axiam_core::models::federation::{
     CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol,
@@ -14,6 +16,7 @@ use axiam_core::repository::{
 use axiam_db::{
     SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealUserRepository,
 };
+use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
 use axiam_federation::saml::SamlFederationService;
 use chrono::{DateTime, Utc};
@@ -416,6 +419,7 @@ pub async fn oidc_authorize<C: Connection>(
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
     http_client: web::Data<reqwest::Client>,
+    jwks_cache: web::Data<Arc<JwksCache>>,
     body: web::Json<OidcAuthorizeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -435,6 +439,7 @@ pub async fn oidc_authorize<C: Connection>(
         (**link_repo).clone(),
         (**user_repo).clone(),
         (**http_client).clone(),
+        Arc::clone(&jwks_cache),
     );
 
     let auth_url = service
@@ -473,6 +478,7 @@ pub async fn oidc_callback<C: Connection>(
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
     http_client: web::Data<reqwest::Client>,
+    jwks_cache: web::Data<Arc<JwksCache>>,
     body: web::Json<OidcCallbackRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -492,6 +498,7 @@ pub async fn oidc_callback<C: Connection>(
         (**link_repo).clone(),
         (**user_repo).clone(),
         (**http_client).clone(),
+        Arc::clone(&jwks_cache),
     );
 
     let result = service

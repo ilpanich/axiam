@@ -33,10 +33,16 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 axiam-core = { workspace = true }
+axiam-db = { workspace = true }
+axiam-auth = { workspace = true }
+axiam-federation = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 surrealdb-types = "3"
 tokio-test = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 base64 = { workspace = true }
+jsonwebtoken = { workspace = true }
+serde_json = { workspace = true }
 wiremock = "0.6"
+rsa = { version = "0.9", features = ["sha2"] }

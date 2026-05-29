@@ -78,6 +78,33 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
+    // Load federation encryption key from env (skipped by serde on AuthConfig).
+    if let Ok(hex) = std::env::var("AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY") {
+        let bytes = hex::decode(&hex).expect(
+            "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY must be a 64-char hex string (32 bytes / 256 bits)",
+        );
+        let key: [u8; 32] = bytes
+            .try_into()
+            .expect("AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY must be exactly 32 bytes (256 bits)");
+        config.auth.federation_encryption_key = Some(key);
+        tracing::info!("Federation encryption key loaded");
+    } else {
+        tracing::warn!(
+            "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY not set \
+             — federation create/use will fail at runtime"
+        );
+    }
+
+    // Load allow_missing_aud_as_user override (bool, default true).
+    // The serde default already sets it to true; this allows an operator to
+    // explicitly disable the back-compat window via env var.
+    if let Ok(val) = std::env::var("AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER") {
+        match val.to_lowercase().as_str() {
+            "false" | "0" | "no" => config.auth.allow_missing_aud_as_user = false,
+            _ => config.auth.allow_missing_aud_as_user = true,
+        }
+    }
+
     // Connect to SurrealDB
     let db = DbManager::connect(&config.db)
         .await

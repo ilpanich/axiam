@@ -1,49 +1,26 @@
 //! TOTP generation, verification, and AES-256-GCM secret encryption.
 
-use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use totp_rs::{Algorithm, Secret, TOTP};
 
+use crate::crypto;
 use crate::error::AuthError;
 
 /// Encrypt a TOTP secret with AES-256-GCM.
 ///
 /// Returns `base64(nonce || ciphertext || tag)`.
+///
+/// Delegates to [`crate::crypto::aes256gcm_encrypt`] — the bundled format
+/// is shared; changing the wire format here would break existing TOTP secrets
+/// stored in the database.
 pub fn encrypt_secret(key: &[u8; 32], plaintext: &[u8]) -> Result<String, AuthError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| AuthError::Crypto(format!("AES-GCM encrypt: {e}")))?;
-
-    let mut combined = nonce_bytes.to_vec();
-    combined.extend_from_slice(&ciphertext);
-    Ok(STANDARD.encode(combined))
+    crypto::aes256gcm_encrypt(key, plaintext)
 }
 
 /// Decrypt an AES-256-GCM encrypted TOTP secret.
+///
+/// Delegates to [`crate::crypto::aes256gcm_decrypt`].
 pub fn decrypt_secret(key: &[u8; 32], encoded: &str) -> Result<Vec<u8>, AuthError> {
-    let combined = STANDARD
-        .decode(encoded)
-        .map_err(|e| AuthError::Crypto(format!("base64 decode: {e}")))?;
-
-    if combined.len() < 13 {
-        return Err(AuthError::Crypto("ciphertext too short".into()));
-    }
-
-    let (nonce_bytes, ciphertext) = combined.split_at(12);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(nonce_bytes);
-
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| AuthError::Crypto(format!("AES-GCM decrypt: {e}")))
+    crypto::aes256gcm_decrypt(key, encoded)
 }
 
 /// Generate a TOTP enrollment: secret + otpauth URI.

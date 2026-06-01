@@ -142,7 +142,7 @@ async fn setup(
 }
 
 /// Build a no-op OidcFederationService (the test calls verify_id_token directly).
-fn make_oidc_svc(
+async fn make_oidc_svc(
     cache: Arc<JwksCache>,
 ) -> OidcFederationService<
     axiam_db::SurrealFederationConfigRepository<surrealdb::engine::local::Db>,
@@ -154,9 +154,7 @@ fn make_oidc_svc(
     // Use an unconfigured in-memory DB (no ns/db needed for the test).
     use surrealdb::Surreal;
     use surrealdb::engine::local::Mem;
-    // This is a blocking-compatible async construction pattern.
-    let rt = tokio::runtime::Handle::current();
-    let db = rt.block_on(async { Surreal::new::<Mem>(()).await.expect("in-memory DB") });
+    let db = Surreal::new::<Mem>(()).await.expect("in-memory DB");
     let http_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
@@ -180,7 +178,7 @@ fn make_oidc_svc(
 #[tokio::test]
 async fn oidc_rejects_alg_none() {
     let (_server, doc, _keys, client_id, cache) = setup("test-kid").await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     // Craft an alg=none token manually (three base64url parts, unsigned).
@@ -210,7 +208,7 @@ async fn oidc_rejects_alg_none() {
 #[tokio::test]
 async fn oidc_rejects_invalid_signature() {
     let (_server, doc, _keys, client_id, cache) = setup("test-kid").await;
-    let svc = make_oidc_svc(cache.clone());
+    let svc = make_oidc_svc(cache.clone()).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     // Sign with a DIFFERENT key (not in the JWKS).
@@ -241,7 +239,7 @@ async fn oidc_rejects_invalid_signature() {
 #[tokio::test]
 async fn oidc_rejects_wrong_iss() {
     let (_server, doc, keys, client_id, cache) = setup("test-kid").await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     let now = now_secs();
@@ -268,7 +266,7 @@ async fn oidc_rejects_wrong_iss() {
 #[tokio::test]
 async fn oidc_rejects_wrong_aud() {
     let (_server, doc, keys, client_id, cache) = setup("test-kid").await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     let now = now_secs();
@@ -289,7 +287,7 @@ async fn oidc_rejects_wrong_aud() {
 #[tokio::test]
 async fn oidc_rejects_expired_token() {
     let (_server, doc, keys, client_id, cache) = setup("test-kid").await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     let now = now_secs();
@@ -311,7 +309,7 @@ async fn oidc_rejects_expired_token() {
 #[tokio::test]
 async fn oidc_rejects_disallowed_alg() {
     let (_server, doc, _keys, client_id, cache) = setup("test-kid").await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     // Sign with HS256.
@@ -337,7 +335,7 @@ async fn oidc_rejects_disallowed_alg() {
 #[tokio::test]
 async fn oidc_rejects_unknown_kid_after_refetch() {
     let (server, doc, keys, client_id, cache) = setup("known-kid").await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     // Token carries a kid that is NOT in the JWKS.
@@ -372,7 +370,7 @@ async fn oidc_rejects_unknown_kid_after_refetch() {
 #[tokio::test]
 async fn oidc_jwks_ttl_no_refetch_within_1h() {
     let (server, doc, keys, client_id, cache) = setup("test-kid").await;
-    let svc = make_oidc_svc(cache.clone());
+    let svc = make_oidc_svc(cache.clone()).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     let now = now_secs();
@@ -407,7 +405,7 @@ async fn oidc_jwks_ttl_no_refetch_within_1h() {
 #[tokio::test]
 async fn oidc_rejects_wrong_nonce() {
     let (_server, doc, keys, client_id, cache) = setup("test-kid").await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     let now = now_secs();
@@ -452,7 +450,7 @@ async fn oidc_rejects_wrong_nonce_in_claims() {
 #[tokio::test]
 async fn oidc_happy_path() {
     let (_server, doc, keys, client_id, cache) = setup("test-kid").await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
 
     let now = now_secs();
@@ -520,7 +518,7 @@ async fn oidc_jwks_served_stale_on_idp_outage() {
         jwks_uri: format!("{issuer}/jwks"),
     };
 
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let now = now_secs();
     let claims = valid_claims(&issuer, "test-client", "nonce", now + 3600, now);
     let token = sign_jwt(&claims, &keys.encoding_key(), "test-kid", Algorithm::RS256);

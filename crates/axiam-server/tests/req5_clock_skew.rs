@@ -93,7 +93,7 @@ async fn make_svc(
     (server, doc, issuer)
 }
 
-fn make_oidc_svc(
+async fn make_oidc_svc(
     cache: Arc<JwksCache>,
 ) -> OidcFederationService<
     axiam_db::SurrealFederationConfigRepository<surrealdb::engine::local::Db>,
@@ -102,8 +102,7 @@ fn make_oidc_svc(
 > {
     use surrealdb::Surreal;
     use surrealdb::engine::local::Mem;
-    let rt = tokio::runtime::Handle::current();
-    let db = rt.block_on(async { Surreal::new::<Mem>(()).await.expect("db") });
+    let db = Surreal::new::<Mem>(()).await.expect("db");
     let http_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
@@ -128,7 +127,7 @@ async fn oidc_exp_minus_30s_within_leeway() {
     let keys = TestKeys::generate();
     let cache = Arc::new(JwksCache::new());
     let (_server, doc, issuer) = make_svc(&keys, cache.clone()).await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
     let client_id = "test-client";
 
@@ -157,7 +156,7 @@ async fn oidc_exp_minus_90s_beyond_leeway() {
     let keys = TestKeys::generate();
     let cache = Arc::new(JwksCache::new());
     let (_server, doc, issuer) = make_svc(&keys, cache.clone()).await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
     let client_id = "test-client";
 
@@ -186,7 +185,7 @@ async fn oidc_iat_plus_30s_within_leeway() {
     let keys = TestKeys::generate();
     let cache = Arc::new(JwksCache::new());
     let (_server, doc, issuer) = make_svc(&keys, cache.clone()).await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
     let client_id = "test-client";
 
@@ -217,7 +216,7 @@ async fn oidc_iat_plus_90s_beyond_leeway() {
     let keys = TestKeys::generate();
     let cache = Arc::new(JwksCache::new());
     let (_server, doc, issuer) = make_svc(&keys, cache.clone()).await;
-    let svc = make_oidc_svc(cache);
+    let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
     let client_id = "test-client";
 

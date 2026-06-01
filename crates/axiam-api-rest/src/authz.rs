@@ -152,3 +152,27 @@ impl AuthzChecker for AllowAllAuthzChecker {
         Box::pin(async move { Ok(AccessDecision::Allow) })
     }
 }
+
+/// Always-deny [`AuthzChecker`] for integration tests.
+///
+/// The mirror of [`AllowAllAuthzChecker`]: it returns
+/// [`AccessDecision::Deny`] for every request, simulating a caller who
+/// lacks the required permission. Register it as
+/// `web::Data::new(Arc::new(DenyAllAuthzChecker) as Arc<dyn AuthzChecker>)`
+/// in test fixtures that need to assert a handler's *forbidden* path
+/// (e.g. a non-admin caller hitting an admin-gated endpoint) without
+/// seeding role/permission data in the test DB.
+pub struct DenyAllAuthzChecker;
+
+impl AuthzChecker for DenyAllAuthzChecker {
+    fn check_access<'a>(
+        &'a self,
+        _request: &'a AccessRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(AccessDecision::Deny(
+                "caller lacks the required permission".into(),
+            ))
+        })
+    }
+}

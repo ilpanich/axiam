@@ -11,7 +11,7 @@ use axiam_api_rest::RateLimitConfig;
 /// Loopback peer address for test requests so the rate-limiter key extractor
 /// (XForwardedForKeyExtractor) can resolve a client IP without a real socket.
 const TEST_PEER: &str = "127.0.0.1:12345";
-use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker, DenyAllAuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{AuthService, MfaMethodService};
@@ -131,7 +131,16 @@ fn make_auth_service(
 }
 
 macro_rules! test_app {
+    // Default: allow-all authz checker (most tests don't exercise RBAC denial).
     ($db:expr, $auth:expr) => {
+        test_app!(
+            $db,
+            $auth,
+            Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+        )
+    };
+    // Explicit checker: lets a test assert the forbidden path (e.g. DenyAll).
+    ($db:expr, $auth:expr, $authz:expr) => {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
@@ -157,9 +166,7 @@ macro_rules! test_app {
                     SurrealUserRepository::new($db.clone()),
                     SurrealWebauthnCredentialRepository::new($db.clone()),
                 )))
-                .app_data(web::Data::new(
-                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
-                ))
+                .app_data(web::Data::new($authz))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
@@ -1039,8 +1046,14 @@ async fn reset_mfa_requires_authentication() {
     );
 }
 
+// A non-admin caller (one whose `users:admin` check is denied by the authz
+// engine) must NOT be able to reset another user's MFA. We register a
+// `DenyAllAuthzChecker` to simulate the missing permission, and the handler's
+// `RequirePermission` gate must turn that denial into HTTP 403 — proving the
+// privilege-escalation guard (any authenticated user resetting another's MFA)
+// is closed. See [`reset_mfa_allowed_for_admin_returns_204`] for the allow path.
 #[actix_rt::test]
-async fn reset_mfa_returns_403_until_rbac() {
+async fn reset_mfa_denied_for_non_admin_returns_403() {
     let (db, org_id, tenant_id, _admin_user_id) = setup_db().await;
     let auth = mfa_auth_config();
 
@@ -1070,7 +1083,12 @@ async fn reset_mfa_returns_403_until_rbac() {
         .await
         .unwrap();
 
-    let app = test_app!(db, auth);
+    // Authz engine denies the `users:admin` permission for this caller.
+    let app = test_app!(
+        db,
+        auth,
+        Arc::new(DenyAllAuthzChecker) as Arc<dyn AuthzChecker>
+    );
 
     // Login as alice to get access cookie.
     let req = test::TestRequest::post()
@@ -1097,6 +1115,69 @@ async fn reset_mfa_returns_403_until_rbac() {
     assert_eq!(
         resp.status().as_u16(),
         403,
-        "expected 403 — MFA reset is disabled until RBAC is implemented"
+        "non-admin caller must be forbidden from resetting another user's MFA"
+    );
+}
+
+// The mirror of [`reset_mfa_denied_for_non_admin_returns_403`]: when the authz
+// engine GRANTS `users:admin` (here via `AllowAllAuthzChecker`), the reset
+// succeeds and returns 204. This confirms the gate is a real authorization
+// decision, not a blanket deny.
+#[actix_rt::test]
+async fn reset_mfa_allowed_for_admin_returns_204() {
+    let (db, org_id, tenant_id, _admin_user_id) = setup_db().await;
+    let auth = mfa_auth_config();
+
+    // Create + activate a second user to be the target of the reset.
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let target = user_repo
+        .create(axiam_core::models::user::CreateUser {
+            tenant_id,
+            username: "bob".into(),
+            email: "bob@example.com".into(),
+            password: "password12345".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    user_repo
+        .update(
+            tenant_id,
+            target.id,
+            axiam_core::models::user::UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Default app uses AllowAllAuthzChecker → caller is treated as authorized.
+    let app = test_app!(db, auth);
+
+    // Login as alice to get access cookie.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let access_token = extract_cookie_value(&resp, "axiam_access").unwrap();
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{}/reset-mfa", target.id))
+        .insert_header(("Cookie", format!("axiam_access={access_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "authorized admin caller must succeed in resetting MFA"
     );
 }

@@ -179,6 +179,12 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
 pub const PUBLIC_PATHS: &[&str] = &[
     // Authentication flows (under /api/v1/auth scope)
     "/api/v1/auth/login",
+    // Refresh authenticates via its own opaque `axiam_refresh` cookie, not the
+    // access token. It MUST be public: the `axiam_access` cookie expires with
+    // the 15-min access token, so a client refreshing after expiry carries no
+    // access credential — `AuthzMiddleware` would otherwise 401 it before the
+    // handler runs, making token rotation impossible.
+    "/api/v1/auth/refresh",
     "/api/v1/auth/register",
     "/api/v1/auth/device",
     "/api/v1/auth/mfa/verify",

@@ -69,9 +69,18 @@ struct CountRow {
 }
 
 /// SurrealDB implementation of the RefreshToken repository.
-#[derive(Clone)]
 pub struct SurrealRefreshTokenRepository<C: Connection> {
     db: Surreal<C>,
+}
+
+// Manual Clone impl (not derive): avoids the spurious `C: Clone` bound that
+// blocks cloning under generic `C: Connection` callers. Matches SurrealUserRepository.
+impl<C: Connection> Clone for SurrealRefreshTokenRepository<C> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+        }
+    }
 }
 
 impl<C: Connection> SurrealRefreshTokenRepository<C> {

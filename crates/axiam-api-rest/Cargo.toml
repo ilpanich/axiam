@@ -47,3 +47,4 @@ actix-http = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }
 totp-rs = { workspace = true }
+jsonwebtoken = { workspace = true }

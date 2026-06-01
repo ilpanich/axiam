@@ -180,7 +180,7 @@ macro_rules! test_app {
 /// Log in as alice and return (access_cookie, csrf_cookie), or None on failure.
 async fn login(
     app: &impl actix_web::dev::Service<
-        actix_web::test::TestRequest,
+        actix_http::Request,
         Response = actix_web::dev::ServiceResponse,
         Error = actix_web::Error,
     >,
@@ -218,7 +218,7 @@ async fn login(
 /// Call `GET /api/v1/auth/me` and return the HTTP status code.
 async fn me_status(
     app: &impl actix_web::dev::Service<
-        actix_web::test::TestRequest,
+        actix_http::Request,
         Response = actix_web::dev::ServiceResponse,
         Error = actix_web::Error,
     >,
@@ -240,7 +240,7 @@ async fn me_status(
 /// Helper: POST /api/v1/auth/password/change and return the HTTP status.
 async fn change_password(
     app: &impl actix_web::dev::Service<
-        actix_web::test::TestRequest,
+        actix_http::Request,
         Response = actix_web::dev::ServiceResponse,
         Error = actix_web::Error,
     >,

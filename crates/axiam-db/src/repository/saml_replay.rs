@@ -28,9 +28,18 @@ struct CountRow {
 // ---------------------------------------------------------------------------
 
 /// SurrealDB implementation of the SAML assertion replay repository.
-#[derive(Clone)]
 pub struct SurrealAssertionReplayRepository<C: Connection> {
     db: Surreal<C>,
+}
+
+// Manual Clone impl (not derive): avoids the spurious `C: Clone` bound that
+// blocks cloning under generic `C: Connection` callers. Matches SurrealUserRepository.
+impl<C: Connection> Clone for SurrealAssertionReplayRepository<C> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+        }
+    }
 }
 
 impl<C: Connection> SurrealAssertionReplayRepository<C> {

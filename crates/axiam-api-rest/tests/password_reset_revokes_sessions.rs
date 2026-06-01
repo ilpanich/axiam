@@ -188,7 +188,7 @@ macro_rules! test_app {
 /// Log in and return (access_cookie, csrf_cookie).
 async fn login(
     app: &impl actix_web::dev::Service<
-        actix_web::test::TestRequest,
+        actix_http::Request,
         Response = actix_web::dev::ServiceResponse,
         Error = actix_web::Error,
     >,
@@ -224,7 +224,7 @@ async fn login(
 
 async fn me_status(
     app: &impl actix_web::dev::Service<
-        actix_web::test::TestRequest,
+        actix_http::Request,
         Response = actix_web::dev::ServiceResponse,
         Error = actix_web::Error,
     >,

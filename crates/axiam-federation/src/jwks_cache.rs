@@ -65,6 +65,14 @@ impl JwksCache {
         Self(Arc::new(RwLock::new(HashMap::new())))
     }
 
+    /// Test-only seam: insert a cache entry directly so integration tests can
+    /// seed stale entries (e.g. to exercise stale-while-revalidate). Keeps the
+    /// inner map encapsulated (`pub(crate)`) while allowing cross-crate tests.
+    #[doc(hidden)]
+    pub async fn insert_for_test(&self, key: (Uuid, Uuid), entry: JwksCacheEntry) {
+        self.0.write().await.insert(key, entry);
+    }
+
     /// Return JWKS for the given key, fetching if needed.
     ///
     /// 1. Cache hit within 1-h TTL → return cached keys (no HTTP).

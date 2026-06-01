@@ -39,7 +39,7 @@ struct TestKeys {
 
 impl TestKeys {
     fn generate(kid: &str) -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand_core::OsRng;
         let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("generate RSA key");
 
         let private_key_pem = private_key
@@ -492,17 +492,16 @@ async fn oidc_jwks_served_stale_on_idp_outage() {
     let cache_key = (tenant_id, config_id);
 
     let stale_fetched_at = Utc::now() - CDuration::hours(2);
-    {
-        let mut guard = cache.0.write().await;
-        guard.insert(
+    cache
+        .insert_for_test(
             cache_key,
             JwksCacheEntry {
                 keys: jwks,
                 fetched_at: stale_fetched_at,
                 last_refetch_attempt: None,
             },
-        );
-    }
+        )
+        .await;
 
     // Build a JWKS server that returns 500 (IdP down).
     let server = MockServer::start().await;

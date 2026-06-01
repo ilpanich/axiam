@@ -77,9 +77,19 @@ struct CountRow {
 }
 
 /// SurrealDB implementation of the Session repository.
-#[derive(Clone)]
 pub struct SurrealSessionRepository<C: Connection> {
     db: Surreal<C>,
+}
+
+// Manual Clone impl (not derive): `#[derive(Clone)]` would add a `C: Clone`
+// bound that generic `C: Connection` callers (e.g. REST handlers) cannot
+// satisfy, silently cloning a `&Self` instead. Matches SurrealUserRepository.
+impl<C: Connection> Clone for SurrealSessionRepository<C> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+        }
+    }
 }
 
 impl<C: Connection> SurrealSessionRepository<C> {

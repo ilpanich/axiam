@@ -19,6 +19,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rsa::RsaPrivateKey;
+use rsa::pkcs1::EncodeRsaPrivateKey;
 use rsa::traits::PublicKeyParts;
 use serde_json::json;
 use uuid::Uuid;
@@ -39,7 +40,7 @@ struct TestKeys {
 
 impl TestKeys {
     fn generate() -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand_core::OsRng;
         let pk = RsaPrivateKey::new(&mut rng, 2048).expect("RSA key");
         let pem = pk
             .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
@@ -89,7 +90,6 @@ async fn make_svc(
         userinfo_endpoint: None,
         jwks_uri: format!("{issuer}/jwks"),
     };
-    ("test-client".to_string(), doc, issuer).1;
     (server, doc, issuer)
 }
 

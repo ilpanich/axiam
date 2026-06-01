@@ -16,7 +16,8 @@ pub mod seeder;
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use repository::{
-    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    SurrealAssertionReplayRepository, SurrealAuditLogRepository,
+    SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealEmailTemplateRepository,
     SurrealEmailVerificationTokenRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,

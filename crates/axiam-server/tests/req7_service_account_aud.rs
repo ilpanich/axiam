@@ -202,7 +202,7 @@ async fn m2m_token_has_axiam_m2m_audience() {
         axiam_auth::token::validate_access_token(&token, &auth).expect("validate M2M token");
 
     assert_eq!(
-        parsed.aud.as_deref(),
+        parsed.0.aud.as_deref(),
         Some(AUD_M2M),
         "M2M token must have aud = axiam:m2m"
     );
@@ -230,7 +230,7 @@ async fn user_token_has_axiam_user_audience() {
         axiam_auth::token::validate_access_token(&token, &auth).expect("validate user token");
 
     assert_eq!(
-        parsed.aud.as_deref(),
+        parsed.0.aud.as_deref(),
         Some(AUD_USER),
         "user token must have aud = axiam:user"
     );
@@ -382,7 +382,7 @@ async fn grpc_authz_accepts_both_audiences_unit_test() {
         "user token must validate for gRPC: {user_claims:?}"
     );
     assert_eq!(
-        user_claims.unwrap().aud.as_deref(),
+        user_claims.unwrap().0.aud.as_deref(),
         Some(AUD_USER),
         "user token must have axiam:user aud"
     );
@@ -398,7 +398,7 @@ async fn grpc_authz_accepts_both_audiences_unit_test() {
         "M2M token must validate for gRPC: {m2m_claims:?}"
     );
     assert_eq!(
-        m2m_claims.unwrap().aud.as_deref(),
+        m2m_claims.unwrap().0.aud.as_deref(),
         Some(AUD_M2M),
         "M2M token must have axiam:m2m aud"
     );

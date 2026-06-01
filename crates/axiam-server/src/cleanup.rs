@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axiam_core::error::AxiamError;
+use axiam_core::repository::{AssertionReplayRepository, FederationLoginStateRepository};
 use axiam_db::{SurrealAssertionReplayRepository, SurrealFederationLoginStateRepository};
 use surrealdb::Connection;
 use tokio::sync::watch;

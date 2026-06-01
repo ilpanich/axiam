@@ -33,8 +33,8 @@ use axiam_core::models::settings::system_defaults;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
-    OrganizationRepository, RefreshTokenRepository, SettingsRepository, TenantRepository,
-    UserRepository,
+    OrganizationRepository, PasswordResetTokenRepository, RefreshTokenRepository,
+    SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealFederationLinkRepository, SurrealOrganizationRepository,
@@ -193,7 +193,7 @@ macro_rules! test_app {
 
 async fn login(
     app: &impl actix_web::dev::Service<
-        actix_web::test::TestRequest,
+        actix_http::Request,
         Response = actix_web::dev::ServiceResponse,
         Error = actix_web::Error,
     >,
@@ -230,7 +230,7 @@ async fn login(
 
 async fn me_status(
     app: &impl actix_web::dev::Service<
-        actix_web::test::TestRequest,
+        actix_http::Request,
         Response = actix_web::dev::ServiceResponse,
         Error = actix_web::Error,
     >,
@@ -251,7 +251,7 @@ async fn me_status(
 
 async fn change_password(
     app: &impl actix_web::dev::Service<
-        actix_web::test::TestRequest,
+        actix_http::Request,
         Response = actix_web::dev::ServiceResponse,
         Error = actix_web::Error,
     >,

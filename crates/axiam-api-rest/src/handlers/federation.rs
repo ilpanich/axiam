@@ -12,6 +12,7 @@ use axiam_core::models::federation::{
 };
 use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, PaginatedResult, Pagination,
+    UserRepository,
 };
 use axiam_db::{
     SurrealAssertionReplayRepository, SurrealFederationConfigRepository,
@@ -669,6 +670,7 @@ pub async fn saml_authn_request<C: Connection>(
     config_repo: web::Data<SurrealFederationConfigRepository<C>>,
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     body: web::Json<SamlAuthnRequestRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -682,6 +684,7 @@ pub async fn saml_authn_request<C: Connection>(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
+        (**replay_repo).clone(),
         (**http_client).clone(),
     );
 
@@ -777,6 +780,7 @@ pub async fn saml_metadata<C: Connection>(
     config_repo: web::Data<SurrealFederationConfigRepository<C>>,
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     query: web::Query<SamlMetadataQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -784,6 +788,7 @@ pub async fn saml_metadata<C: Connection>(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
+        (**replay_repo).clone(),
         (**http_client).clone(),
     );
 

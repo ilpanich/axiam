@@ -30,6 +30,7 @@ config = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true }
+surrealdb = { workspace = true }
 
 [dev-dependencies]
 axiam-core = { workspace = true }
@@ -47,3 +48,7 @@ serde_json = { workspace = true }
 wiremock = "0.6"
 rsa = { version = "0.9", features = ["sha2"] }
 actix-rt = { workspace = true }
+actix-http = { workspace = true }
+# rsa 0.9 requires a rand_core 0.6 CryptoRng; the workspace `rand` (0.9) ThreadRng
+# does not satisfy it. Use rand_core 0.6 OsRng for RSA test-key generation.
+rand_core = { version = "0.6", features = ["getrandom"] }

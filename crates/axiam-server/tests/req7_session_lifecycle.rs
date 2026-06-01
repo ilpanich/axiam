@@ -180,6 +180,15 @@ macro_rules! test_app {
                 .app_data(web::Data::new(SurrealPasswordHistoryRepository::new(
                     $db.clone(),
                 )))
+                // confirm_reset handler also needs these (token + federation link
+                // repos + an http client for the optional HIBP check).
+                .app_data(web::Data::new(
+                    axiam_db::SurrealPasswordResetTokenRepository::new($db.clone()),
+                ))
+                .app_data(web::Data::new(
+                    axiam_db::SurrealFederationLinkRepository::new($db.clone()),
+                ))
+                .app_data(web::Data::new(reqwest::Client::new()))
                 .app_data(web::Data::new(MfaMethodService::new(
                     SurrealUserRepository::new($db.clone()),
                     SurrealWebauthnCredentialRepository::new($db.clone()),

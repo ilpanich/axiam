@@ -4,6 +4,8 @@
 //! It extracts the JWT from the `axiam_access` httpOnly cookie (browser clients)
 //! or falls back to `Authorization: Bearer <token>` header (service clients).
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use actix_web::dev::Payload;
@@ -14,9 +16,48 @@ use axiam_auth::token::{
     AUD_M2M, AUD_USER, CachedUserIdentity, ValidatedClaims, validate_access_token,
 };
 use axiam_core::error::AxiamError;
+use axiam_core::repository::SessionRepository;
+use axiam_db::SurrealSessionRepository;
+use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
+
+/// Object-safe per-request session-validity check (D-15 / REQ-7).
+///
+/// Access tokens are stateless JWTs, so revoking a session (deleting its row)
+/// has no effect unless every authenticated request re-checks that the session
+/// behind the token's `jti` (= `session.id`) is still active. This trait is the
+/// object-safe seam that lets the connection-agnostic [`AuthenticatedUser`]
+/// extractor perform that check without being generic over the DB `Connection`.
+///
+/// Mirrors the [`crate::authz::AuthzChecker`] boxed-future pattern because the
+/// underlying repository methods are native `async fn` (RPITIT, not dyn-safe).
+pub trait SessionValidator: Send + Sync {
+    /// Returns `true` if a non-expired session with `session_id` exists for
+    /// `tenant_id`. A revoked session (row deleted) or an expired one is
+    /// considered inactive.
+    fn is_session_active<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+}
+
+impl<C: Connection> SessionValidator for SurrealSessionRepository<C> {
+    fn is_session_active<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            match self.get_by_id(tenant_id, session_id).await {
+                Ok(session) => session.expires_at > chrono::Utc::now(),
+                Err(_) => false,
+            }
+        })
+    }
+}
 
 /// Authenticated user context extracted from a valid JWT.
 ///
@@ -45,10 +86,33 @@ pub struct AuthenticatedUser {
 
 impl actix_web::FromRequest for AuthenticatedUser {
     type Error = AxiamApiError;
-    type Future = std::future::Ready<Result<Self, Self::Error>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
-        std::future::ready(extract_user(req))
+        // Synchronous JWT/aud/jti extraction first (ends the `req` borrow before
+        // the async block). Clone the optional session validator (an Arc) so the
+        // returned future is `'static`.
+        let user_result = extract_user(req);
+        let validator = req
+            .app_data::<web::Data<Arc<dyn SessionValidator>>>()
+            .map(|d| d.get_ref().clone());
+
+        Box::pin(async move {
+            let user = user_result?;
+            // REQ-7 / D-15: reject access tokens whose session has been revoked
+            // (row deleted on password change/reset/MFA reset) or expired. The
+            // validator is optional so non-session test harnesses are unaffected;
+            // the production server (and session-security tests) always register it.
+            if let Some(validator) = validator
+                && !validator.is_session_active(user.tenant_id, user.session_id).await
+            {
+                return Err(AxiamError::AuthenticationFailed {
+                    reason: "session revoked or expired".into(),
+                }
+                .into());
+            }
+            Ok(user)
+        })
     }
 }
 

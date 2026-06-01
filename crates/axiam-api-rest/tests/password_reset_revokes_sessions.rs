@@ -157,6 +157,10 @@ macro_rules! test_app {
                     $db.clone(),
                 )))
                 .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
+                .app_data(web::Data::new(Arc::new(SurrealSessionRepository::new(
+                    $db.clone(),
+                ))
+                    as Arc<dyn axiam_api_rest::SessionValidator>))
                 .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
                     $db.clone(),
                 )))

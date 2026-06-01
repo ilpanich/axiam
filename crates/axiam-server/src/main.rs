@@ -225,6 +225,11 @@ async fn main() -> std::io::Result<()> {
     let scope_repo = SurrealScopeRepository::new(db.client().clone());
     let service_account_repo = SurrealServiceAccountRepository::new(db.client().clone());
     let session_repo = SurrealSessionRepository::new(db.client().clone());
+    // REQ-7 / D-15: per-request session-validity check so revoked sessions'
+    // access tokens are rejected immediately (the AuthenticatedUser extractor
+    // consults this on every authenticated request).
+    let session_validator: std::sync::Arc<dyn axiam_api_rest::SessionValidator> =
+        std::sync::Arc::new(session_repo.clone());
     let audit_repo = SurrealAuditLogRepository::new(db.client().clone());
     let ca_cert_repo = SurrealCaCertificateRepository::new(db.client().clone());
     let federation_link_repo_for_auth = SurrealFederationLinkRepository::new(db.client().clone());
@@ -444,6 +449,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(mfa_method_service.clone()))
             .app_data(web::Data::new(notification_publisher.clone()))
             .app_data(web::Data::new(session_repo.clone()))
+            .app_data(web::Data::new(session_validator.clone()))
             .app_data(web::Data::new(handler_refresh_token_repo.clone()))
             .app_data(web::Data::new(password_history_repo.clone()))
             .app_data(web::Data::new(ca_service.clone()))

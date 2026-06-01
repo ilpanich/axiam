@@ -19,6 +19,9 @@ pub enum AxiamError {
     #[error("Validation error: {message}")]
     Validation { message: String },
 
+    #[error("Password policy violation: {message}")]
+    PasswordPolicy { message: String },
+
     #[error("Database error: {0}")]
     Database(String),
 

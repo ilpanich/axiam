@@ -41,6 +41,7 @@ impl actix_web::ResponseError for AxiamApiError {
             }
             AxiamError::AuthorizationDenied { .. } => StatusCode::FORBIDDEN,
             AxiamError::Validation { .. } | AxiamError::TenantContext => StatusCode::BAD_REQUEST,
+            AxiamError::PasswordPolicy { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AxiamError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             AxiamError::EmailConfig(_) => StatusCode::BAD_REQUEST,
             AxiamError::Database(_)
@@ -62,6 +63,7 @@ impl actix_web::ResponseError for AxiamApiError {
             }
             AxiamError::AuthorizationDenied { .. } => "authorization_denied",
             AxiamError::Validation { .. } => "validation_error",
+            AxiamError::PasswordPolicy { .. } => "password_policy_violation",
             AxiamError::TenantContext => "tenant_context",
             AxiamError::RateLimited => "rate_limited",
             _ => "internal_error",

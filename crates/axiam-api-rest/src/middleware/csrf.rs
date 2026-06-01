@@ -45,6 +45,11 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     "/api/v1/auth/mfa/setup/enroll",
     "/api/v1/auth/mfa/setup/confirm",
     "/api/v1/auth/device",
+    // Password reset request + confirm are unauthenticated and token-based:
+    // the caller has no session and therefore no CSRF cookie yet (same model
+    // as /login). Without these, a forgotten-password reset is CSRF-blocked (403).
+    "/api/v1/auth/reset",
+    "/api/v1/auth/reset/confirm",
 ];
 
 /// Path prefixes that are exempt from CSRF validation (OAuth2).

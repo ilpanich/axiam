@@ -617,8 +617,13 @@ where
             .map(String::from)
             .unwrap_or_else(|| format!("federated-{config_id}-{name_id}"));
 
+        // Prefer an explicit email attribute; otherwise, if the SAML NameID is
+        // itself email-shaped (the common `emailAddress` NameID format), use it
+        // directly. Only fall back to a synthetic, namespaced address when the
+        // NameID is opaque (e.g. a persistent/transient identifier).
         let user_email = email
             .map(String::from)
+            .or_else(|| name_id.contains('@').then(|| name_id.to_string()))
             .unwrap_or_else(|| format!("{name_id}.{config_id}@federated.local"));
 
         // Federated users get a random non-usable password since they

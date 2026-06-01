@@ -644,7 +644,7 @@ impl<
         .await?;
 
         if !check.is_ok() {
-            return Err(AxiamError::Validation {
+            return Err(AxiamError::PasswordPolicy {
                 message: check.error_message(),
             });
         }

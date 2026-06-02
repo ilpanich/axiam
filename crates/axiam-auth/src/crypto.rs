@@ -16,8 +16,13 @@ use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use uuid::Uuid;
 
 use crate::error::AuthError;
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ---------------------------------------------------------------------------
 // Private helper
@@ -136,6 +141,29 @@ pub fn decrypt_separate(
 }
 
 // ---------------------------------------------------------------------------
+// GDPR pseudonym helper (D-02)
+// ---------------------------------------------------------------------------
+
+/// Compute a deterministic, keyed GDPR audit pseudonym for a deleted user.
+///
+/// Returns `"DELETED_USER_{16-char-hex}"` (64 bits from HMAC-SHA256).
+///
+/// - **Deterministic**: the same `(pepper, tenant_id, user_id)` triple always
+///   produces the same pseudonym, so all audit entries for a deleted user can
+///   still be correlated post-erasure without re-identifying the subject.
+/// - **Brute-force resistant**: the pepper must be secret. Without it, an
+///   attacker cannot map candidate `user_id` values back to a pseudonym.
+/// - **Per-tenant**: `tenant_id` is part of the HMAC input, so the same
+///   `user_id` in two different tenants produces different pseudonyms.
+pub fn gdpr_pseudonym(pepper: &[u8; 32], tenant_id: Uuid, user_id: Uuid) -> String {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(pepper).expect("HMAC accepts any key length");
+    mac.update(tenant_id.as_bytes());
+    mac.update(user_id.as_bytes());
+    let tag = mac.finalize().into_bytes();
+    format!("DELETED_USER_{}", hex::encode(&tag[..8]))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -172,6 +200,53 @@ mod tests {
         let (other_nonce, _) = encrypt_separate(&key, b"other").unwrap();
         let result = decrypt_separate(&key, &other_nonce, &ct_b64);
         assert!(result.is_err(), "decryption with wrong nonce must fail");
+    }
+
+    #[test]
+    fn gdpr_pseudonym_deterministic() {
+        let pepper = [0x42u8; 32];
+        let tenant = Uuid::nil();
+        let user = Uuid::new_v4();
+        let p1 = gdpr_pseudonym(&pepper, tenant, user);
+        let p2 = gdpr_pseudonym(&pepper, tenant, user);
+        assert_eq!(p1, p2, "same inputs must produce the same pseudonym");
+        assert!(
+            p1.starts_with("DELETED_USER_"),
+            "format must match DELETED_USER_<hex>"
+        );
+        assert_eq!(
+            p1.len(),
+            "DELETED_USER_".len() + 16,
+            "must be 16 hex chars (8 bytes)"
+        );
+    }
+
+    #[test]
+    fn gdpr_pseudonym_differs_for_different_users() {
+        let pepper = [0x42u8; 32];
+        let tenant = Uuid::nil();
+        let user1 = Uuid::new_v4();
+        let user2 = Uuid::new_v4();
+        let p1 = gdpr_pseudonym(&pepper, tenant, user1);
+        let p2 = gdpr_pseudonym(&pepper, tenant, user2);
+        assert_ne!(
+            p1, p2,
+            "different user_ids must produce different pseudonyms"
+        );
+    }
+
+    #[test]
+    fn gdpr_pseudonym_differs_for_different_tenants() {
+        let pepper = [0x42u8; 32];
+        let user = Uuid::new_v4();
+        let t1 = Uuid::new_v4();
+        let t2 = Uuid::new_v4();
+        let p1 = gdpr_pseudonym(&pepper, t1, user);
+        let p2 = gdpr_pseudonym(&pepper, t2, user);
+        assert_ne!(
+            p1, p2,
+            "different tenant_ids must produce different pseudonyms"
+        );
     }
 
     #[test]

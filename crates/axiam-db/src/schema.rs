@@ -943,8 +943,8 @@ DEFINE FIELD IF NOT EXISTS deletion_pending ON TABLE user TYPE bool
 DEFINE FIELD IF NOT EXISTS scheduled_purge_at ON TABLE user
     TYPE option<datetime>;
 
--- Re-DEFINE user.status ASSERT to include 'Anonymized'
-DEFINE FIELD status ON TABLE user TYPE string
+-- Re-DEFINE user.status ASSERT to include 'Anonymized' (OVERWRITE extends the ASSERT)
+DEFINE FIELD OVERWRITE status ON TABLE user TYPE string
     ASSERT $value IN ['Active', 'Inactive', 'Locked', 'PendingVerification',
                       'Anonymized'];
 
@@ -952,7 +952,7 @@ DEFINE FIELD status ON TABLE user TYPE string
 -- ALTER audit_log permissions: add gdpr_pseudonymizer UPDATE path (D-04)
 -- Note: FOR delete stays NONE. True enforcement is the single repo method.
 -- =======================================================================
-DEFINE TABLE audit_log SCHEMAFULL
+DEFINE TABLE OVERWRITE audit_log SCHEMAFULL
     PERMISSIONS
         FOR create FULL
         FOR select FULL
@@ -962,7 +962,7 @@ DEFINE TABLE audit_log SCHEMAFULL
 -- =======================================================================
 -- ALTER email_template.kind ASSERT: add deletion_scheduled, export_ready
 -- =======================================================================
-DEFINE FIELD kind ON TABLE email_template TYPE string
+DEFINE FIELD OVERWRITE kind ON TABLE email_template TYPE string
     ASSERT $value IN ['activation', 'password_reset', 'mfa_setup_reminder',
                       'admin_notification', 'deletion_scheduled', 'export_ready'];
 ";

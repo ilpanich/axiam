@@ -18,7 +18,7 @@ pub use error::DbError;
 pub use repository::{
     SurrealAssertionReplayRepository, SurrealAuditLogRepository,
     SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealEmailTemplateRepository,
+    SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
     SurrealEmailVerificationTokenRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,

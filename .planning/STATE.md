@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 4 context gathered
-last_updated: "2026-05-29T07:42:24.476Z"
-last_activity: 2026-05-29 -- Phase 04 execution started
+stopped_at: Phase 04 complete + post-completion hardening (SAML feature flag, signature-verification security fix, CI no-saml guard)
+last_updated: "2026-06-02"
+last_activity: 2026-06-02 -- Phase 04 SAML signature-verification security fix + `saml` feature flag + CI guard (pushed)
 progress:
   total_phases: 7
-  completed_phases: 3
-  total_plans: 21
-  completed_plans: 15
-  percent: 43
+  completed_phases: 4
+  total_plans: 34
+  completed_plans: 19
+  percent: 57
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 04 — federation-verification-session-security
+**Current focus:** Phase 04 complete; next is Phase 05 — email-delivery-gdpr-compliance
 
 ## Current Position
 
-Phase: 04 (federation-verification-session-security) — EXECUTING
-Plan: 1 of 6
-Status: Executing Phase 04
-Last activity: 2026-05-29 -- Phase 04 execution started
+Phase: 04 (federation-verification-session-security) — COMPLETE (6/6 plans + post-completion hardening)
+Next: Phase 05 (email-delivery-gdpr-compliance) — NOT STARTED (needs planning)
+Status: Phases 1–4 complete and verified; ready to plan Phase 05
+Last activity: 2026-06-02 -- Phase 04 SAML signature-verification security fix, `saml` feature flag (default on), CI no-saml guard (commits c786148 / 60befcd / 60490b7 pushed); security finding logged to issue #65
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██████░░░░] 57% (4/7 phases complete)
 
 ## Performance Metrics
 
@@ -98,14 +98,20 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+Deferred to Phase 19 (raised during Phase 04):
+- T19.14 — per-FederationConfig registered redirect_uri allowlist for first-time SSO endpoints (needs a schema column; currently scheme/host HTTPS guard only)
+- T19.15 — resolve real org_id from tenant in SSO callback session/token creation (currently `Uuid::nil()`)
+
+Raised 2026-06-02 (SAML feature-flag work):
+- Extend CI `build-no-saml` guard to `--tests` once the pre-existing `-Dwarnings` drift in axiam-server test files is cleaned (currently lib+bin `cargo check` only)
 
 ### Blockers/Concerns
 
-None yet.
+- 36 Dependabot vulnerabilities on the default branch (13 high / 15 moderate / 8 low) — surfaced on push 2026-06-02; triage separately (relates to Phase 6 REQ-9 cargo-audit/cargo-deny work)
+- Tracking note: `02-VERIFICATION.md` status field still reads `human_needed`, but the lone human item was closed via Playwright UAT (`02-HUMAN-UAT.md` status: complete, result: pass, evidence in uat-evidence/) — Phase 2 is complete despite the stale verification-file field
 
 ## Session Continuity
 
-Last session: 2026-05-12T20:42:34.329Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-federation-verification-session-security/04-CONTEXT.md
+Last session: 2026-06-02
+Stopped at: Phases 1–4 complete (Phase 04 verified in Docker + hardened today); tracking reconciled in STATE.md + ROADMAP.md
+Resume file: Phase 05 not yet planned — run /gsd plan-phase for Phase 05 (email-delivery-gdpr-compliance)

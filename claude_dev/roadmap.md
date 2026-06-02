@@ -514,15 +514,19 @@ After a successful password reset (`confirm_reset`), invalidate all active sessi
 
 **Commit**: `security(auth): invalidate sessions on password reset`
 
-### T19.11 — Wire Email Sending for Password Reset and Verification
-Connect the `EmailService` to the `/auth/reset` and `/auth/resend-verification` handlers so that reset/verification emails are actually delivered. Currently the handlers generate and store tokens but do not send emails (marked with `TODO(T19)` comments).
+### ~~T19.11 — Wire Email Sending for Password Reset and Verification~~ ✓ RESOLVED (Phase 05-04)
+~~Connect the `EmailService` to the `/auth/reset` and `/auth/resend-verification` handlers so that reset/verification emails are actually delivered. Currently the handlers generate and store tokens but do not send emails (marked with `TODO(T19)` comments).~~
 
-**Commit**: `feat(email): wire email delivery for password reset and verification endpoints`
+Resolved in Phase 05 Plan 04: handlers now enqueue `OutboundMailMessage(PasswordReset/EmailVerification)` to `axiam.mail.outbound`; responses are enumeration-safe (D-15). The `TODO(T19)` stubs in `password_reset.rs` and `email_verification.rs` are wired.
 
-### T19.12 — Wire NotificationDispatcher Email Delivery
-Connect `NotificationDispatcher` to `EmailService` with template resolution and org_id lookup so that matched notification rules actually send emails. Currently the dispatcher returns matched rules/recipients but does not send (marked with `TODO(T19)` in `crates/axiam-audit/src/notification.rs`).
+**Commit**: `feat(05-04): wire password-reset and email-verify handlers to enqueue mail (D-14/D-15)`
 
-**Commit**: `feat(notifications): wire email delivery for admin notification dispatch`
+### ~~T19.12 — Wire NotificationDispatcher Email Delivery~~ ✓ RESOLVED (Phase 05-04)
+~~Connect `NotificationDispatcher` to `EmailService` with template resolution and org_id lookup so that matched notification rules actually send emails. Currently the dispatcher returns matched rules/recipients but does not send (marked with `TODO(T19)` in `crates/axiam-audit/src/notification.rs`).~~
+
+Resolved in Phase 05 Plan 04: `NotificationDispatcher::dispatch` now accepts a `&impl MailPublisher` and enqueues one `OutboundMailMessage(Notification)` per matched recipient. The `TODO(T19)` stub in `notification.rs` is wired.
+
+**Commit**: `feat(05-04): notification dispatcher enqueues mail messages (T19.12/T19.13)`
 
 ### T19.20 — Admin Email-Config CRUD API
 Add admin-facing REST endpoints to create/read/update/delete `email_config` rows (org- and tenant-scoped), guarded by an appropriate RBAC permission (e.g. `email_config:write`). Phase 5 builds the DB-backed `SurrealEmailConfigRepository` (encrypt-at-rest, all five providers) and resolves the effective provider per org/tenant, but provider rows are seeded/written via the repository only — there is no admin UI/API in Phase 5. This task exposes that configuration surface. Deferred from Phase 5 (see `.planning/phases/05-email-delivery-gdpr-compliance/05-CONTEXT.md` Claude's Discretion).

@@ -529,6 +529,16 @@ Add admin-facing REST endpoints to create/read/update/delete `email_config` rows
 
 **Commit**: `feat(api-rest): admin email-config CRUD endpoints (org/tenant scoped)`
 
+### T19.21 — Per-Org/Tenant Custom Template Lookup in Mail Consumer
+The mail consumer (`axiam-amqp/src/mail_consumer.rs`) currently uses the built-in default template only (`resolve_template(kind, None, None)`). Wire the `SurrealEmailTemplateRepository` to fetch per-org and per-tenant custom templates and pass them to `resolve_template`, so custom templates are applied at delivery time.
+
+**Commit**: `feat(amqp): wire custom template resolution in mail consumer`
+
+### T19.22 — Email Config Secrets Backfill UPDATE Path
+`SurrealEmailConfigRepository::backfill_plaintext_secrets` counts unencrypted rows but does not yet UPDATE them (returns the pending count and logs a warning). Implement the UPDATE path: for each row where `smtp_password_ciphertext IS NULL AND smtp_password IS NOT NULL` (or API-key equivalent), encrypt via `encrypt_field` and UPDATE the row. This path is needed only if pre-Phase-5 tooling wrote plaintext rows before schema v15 was deployed.
+
+**Commit**: `feat(db): implement email config secrets backfill UPDATE path (T19.22)`
+
 ---
 
 ## Summary

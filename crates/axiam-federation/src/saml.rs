@@ -22,7 +22,7 @@ use samael::metadata::{EntityDescriptorType, HTTP_POST_BINDING, HTTP_REDIRECT_BI
 use samael::schema::{AuthnRequest, Issuer, NameIdPolicy};
 use samael::traits::ToXml;
 use serde::Serialize;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::error::FederationError;
@@ -510,7 +510,6 @@ where
     ///
     /// Must be called BEFORE `validate_conditions` so that a forged/unsigned
     /// assertion is rejected before any claims are trusted.
-    #[cfg(feature = "xmlsec")]
     fn verify_signature(
         &self,
         xml_bytes: &[u8],
@@ -525,29 +524,6 @@ where
 
         samael::crypto::verify_signed_xml(xml_bytes, &der, Some("ID"))
             .map_err(|e| FederationError::SamlSignatureInvalid(e.to_string()))
-    }
-
-    /// Stub implementation for non-xmlsec builds (e.g., local dev with
-    /// mismatched libxmlsec1 version). In CI (Debian Bookworm) the real
-    /// implementation above is compiled.
-    ///
-    /// Returns `ConfigIncomplete` if no cert is configured (fail-closed on
-    /// missing config); otherwise warns and allows the assertion through.
-    /// This is intentionally NOT a security boundary — the `xmlsec` feature
-    /// MUST be enabled in production builds.
-    #[cfg(not(feature = "xmlsec"))]
-    fn verify_signature(
-        &self,
-        _xml_bytes: &[u8],
-        config: &axiam_core::models::federation::FederationConfig,
-    ) -> Result<(), FederationError> {
-        if config.idp_signing_cert_pem.is_none() {
-            return Err(FederationError::ConfigIncomplete);
-        }
-        warn!(
-            "SAML xmlsec feature disabled — signature verification skipped (non-production build)"
-        );
-        Ok(())
     }
 
     /// Provision a new user or link an existing one to the external
@@ -994,11 +970,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Signature verification tests (require xmlsec feature + Debian libxmlsec1 1.2.x)
+    // Signature verification tests (compiled with the `saml` feature, which
+    // pulls samael's xmlsec backend; needs Debian libxmlsec1 1.2.x at build time)
     // -----------------------------------------------------------------------
 
     /// Verifies that a well-formed, correctly-signed SAML response passes.
-    #[cfg(feature = "xmlsec")]
     #[test]
     fn verify_accepts_well_signed_response() {
         let svc = make_service();
@@ -1009,7 +985,6 @@ mod tests {
     }
 
     /// Verifies that a response with a tampered body is rejected (digest mismatch).
-    #[cfg(feature = "xmlsec")]
     #[test]
     fn verify_rejects_tampered_body() {
         let svc = make_service();
@@ -1025,7 +1000,6 @@ mod tests {
     }
 
     /// Verifies that a response with the signature block stripped is rejected.
-    #[cfg(feature = "xmlsec")]
     #[test]
     fn verify_rejects_missing_signature() {
         let svc = make_service();

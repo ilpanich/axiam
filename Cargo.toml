@@ -118,11 +118,15 @@ axiam-core = { path = "crates/axiam-core" }
 axiam-db = { path = "crates/axiam-db" }
 axiam-auth = { path = "crates/axiam-auth" }
 axiam-authz = { path = "crates/axiam-authz" }
-axiam-api-rest = { path = "crates/axiam-api-rest" }
+# default-features = false so SAML/samael is opt-in: api-rest and axiam-server
+# re-enable it through their own `saml` feature (on by default). This lets the
+# whole workspace build `--no-default-features` on hosts whose system libxml2 is
+# incompatible with samael (e.g. Arch libxml2 2.15.x).
+axiam-api-rest = { path = "crates/axiam-api-rest", default-features = false }
 axiam-api-grpc = { path = "crates/axiam-api-grpc" }
 axiam-amqp = { path = "crates/axiam-amqp" }
 axiam-oauth2 = { path = "crates/axiam-oauth2" }
-axiam-federation = { path = "crates/axiam-federation" }
+axiam-federation = { path = "crates/axiam-federation", default-features = false }
 axiam-audit = { path = "crates/axiam-audit" }
 axiam-email = { path = "crates/axiam-email" }
 axiam-pki = { path = "crates/axiam-pki" }

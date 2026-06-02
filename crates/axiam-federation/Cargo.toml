@@ -22,9 +22,20 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
-samael = { workspace = true }
+samael = { workspace = true, optional = true }
 flate2 = { workspace = true }
 x509-parser = { workspace = true }
+
+[features]
+# SAML Service Provider support. Pulls in `samael` (and transitively its
+# `xmlsec` feature → libxmlsec1/libxml2 FFI). Enabled by default so production
+# and CI builds get full SAML with real XML-DSig signature verification.
+#
+# Disable (`--no-default-features`) to build without samael — required on hosts
+# whose system libxml2 is too new for samael's pinned bindings (e.g. Arch's
+# libxml2 2.15.x). OIDC federation is unaffected; SAML simply isn't compiled.
+default = ["saml"]
+saml = ["dep:samael"]
 
 [dev-dependencies]
 rcgen = { workspace = true }

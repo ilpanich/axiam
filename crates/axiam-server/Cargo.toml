@@ -12,6 +12,8 @@ axiam-core = { workspace = true }
 axiam-db = { workspace = true }
 axiam-auth = { workspace = true }
 axiam-authz = { workspace = true }
+# default-features (=false) inherited from [workspace.dependencies]; the `saml`
+# feature below re-enables SAML across api-rest + federation (on by default).
 axiam-api-rest = { workspace = true }
 axiam-api-grpc = { workspace = true }
 axiam-amqp = { workspace = true }
@@ -31,6 +33,13 @@ hex = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true }
 surrealdb = { workspace = true }
+
+[features]
+# SAML SP support, forwarded to the api-rest and federation crates (→ samael).
+# On by default; `--no-default-features` builds the server without SAML/samael
+# so it compiles on hosts with an incompatible system libxml2 (e.g. Arch 2.15.x).
+default = ["saml"]
+saml = ["axiam-api-rest/saml", "axiam-federation/saml"]
 
 [dev-dependencies]
 axiam-core = { workspace = true }

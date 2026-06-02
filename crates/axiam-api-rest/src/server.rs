@@ -7,7 +7,6 @@ use actix_governor::governor::middleware::NoOpMiddleware;
 use actix_web::http::header;
 use actix_web::web;
 use axiam_db::WsClient;
-use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::RateLimitConfig;
@@ -15,7 +14,7 @@ use crate::extractors::rate_limit::XForwardedForKeyExtractor;
 use crate::handlers;
 use crate::middleware::authz::AuthzMiddleware;
 use crate::middleware::csrf::CsrfMiddleware;
-use crate::openapi::ApiDoc;
+use crate::openapi::api_doc;
 
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
 /// limit.
@@ -40,9 +39,7 @@ pub fn health_routes(cfg: &mut web::ServiceConfig) {
 
 /// Register Swagger UI and OpenAPI JSON spec routes.
 pub fn openapi_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        SwaggerUi::new("/api/docs/{_:.*}").url("/api/docs/openapi.json", ApiDoc::openapi()),
-    );
+    cfg.service(SwaggerUi::new("/api/docs/{_:.*}").url("/api/docs/openapi.json", api_doc()));
 }
 
 /// Register the API v1 scope with all domain endpoints (production WsClient).
@@ -58,8 +55,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
     cfg: &mut web::ServiceConfig,
     rate_limit_cfg: &RateLimitConfig,
 ) {
-    cfg.service(
-        web::scope("/api/v1/auth")
+    let auth_scope = web::scope("/api/v1/auth")
             .wrap(AuthzMiddleware)
             .wrap(CsrfMiddleware)
             .app_data(web::JsonConfig::default().limit(65_536))
@@ -148,24 +144,21 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
                         web::post()
                             .to(handlers::federation::oidc_callback_public::<C>),
                     ),
-            )
-            .service(
-                web::resource("/federation/saml/login")
-                    .wrap(build_governor(rate_limit_cfg.login_per_min))
-                    .route(
-                        web::post()
-                            .to(handlers::federation::saml_login_public::<C>),
-                    ),
-            )
-            .service(
-                web::resource("/federation/saml/acs")
-                    .wrap(build_governor(rate_limit_cfg.login_per_min))
-                    .route(
-                        web::post()
-                            .to(handlers::federation::saml_acs_public::<C>),
-                    ),
-            ),
-    );
+            );
+    // First-time SSO SAML public routes — only when the `saml` feature is on.
+    #[cfg(feature = "saml")]
+    let auth_scope = auth_scope
+        .service(
+            web::resource("/federation/saml/login")
+                .wrap(build_governor(rate_limit_cfg.login_per_min))
+                .route(web::post().to(handlers::federation::saml_login_public::<C>)),
+        )
+        .service(
+            web::resource("/federation/saml/acs")
+                .wrap(build_governor(rate_limit_cfg.login_per_min))
+                .route(web::post().to(handlers::federation::saml_acs_public::<C>)),
+        );
+    cfg.service(auth_scope);
     // OIDC Discovery (must be outside /oauth2 scope per spec)
     cfg.route(
         "/.well-known/openid-configuration",
@@ -191,8 +184,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
             .route("/jwks", web::get().to(handlers::oauth2::jwks))
             .route("/userinfo", web::get().to(handlers::oauth2::userinfo::<C>)),
     );
-    cfg.service(
-        web::scope("/api/v1")
+    let api_scope = web::scope("/api/v1")
             .wrap(AuthzMiddleware)
             .service(
                 web::resource("/organizations")
@@ -527,25 +519,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
                         web::post().to(handlers::federation::oidc_callback::<C>),
                     ),
             )
-            // --- Federation SAML Flow ---
-            .service(
-                web::resource("/federation/saml/authn-request")
-                    .route(
-                        web::post().to(handlers::federation::saml_authn_request::<C>),
-                    ),
-            )
-            .service(
-                web::resource("/federation/saml/acs")
-                    .route(
-                        web::post().to(handlers::federation::saml_acs::<C>),
-                    ),
-            )
-            .service(
-                web::resource("/federation/saml/metadata")
-                    .route(
-                        web::get().to(handlers::federation::saml_metadata::<C>),
-                    ),
-            )
+            // --- Federation SAML Flow: registered at the end, feature-gated ---
             // --- Tenant Settings (from JWT context) ---
             .service(
                 web::resource("/settings")
@@ -573,8 +547,23 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
             .service(
                 web::resource("/admin/bootstrap")
                     .route(web::post().to(handlers::bootstrap::bootstrap::<C>)),
-            ),
-    );
+            );
+    // Authenticated SAML SP routes — only when the `saml` feature is on.
+    #[cfg(feature = "saml")]
+    let api_scope = api_scope
+        .service(
+            web::resource("/federation/saml/authn-request")
+                .route(web::post().to(handlers::federation::saml_authn_request::<C>)),
+        )
+        .service(
+            web::resource("/federation/saml/acs")
+                .route(web::post().to(handlers::federation::saml_acs::<C>)),
+        )
+        .service(
+            web::resource("/federation/saml/metadata")
+                .route(web::get().to(handlers::federation::saml_metadata::<C>)),
+        );
+    cfg.service(api_scope);
 }
 
 /// Build CORS middleware from configuration.

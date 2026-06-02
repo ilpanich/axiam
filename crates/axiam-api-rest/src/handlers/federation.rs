@@ -15,11 +15,14 @@ use axiam_core::repository::{
     UserRepository,
 };
 use axiam_db::{
-    SurrealAssertionReplayRepository, SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealUserRepository,
+    SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealUserRepository,
 };
+// Replay protection is only used by the SAML ACS handlers.
+#[cfg(feature = "saml")]
+use axiam_db::SurrealAssertionReplayRepository;
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
+#[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -599,6 +602,7 @@ pub async fn delete_link<C: Connection>(
 // ---------------------------------------------------------------------------
 
 /// Request to build a SAML AuthnRequest.
+#[cfg(feature = "saml")]
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SamlAuthnRequestRequest {
     /// ID of the SAML federation config.
@@ -611,6 +615,7 @@ pub struct SamlAuthnRequestRequest {
 }
 
 /// Response containing the SAML AuthnRequest details.
+#[cfg(feature = "saml")]
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SamlAuthnRequestResponse {
     /// Full redirect URL (HTTP-Redirect) or IdP SSO URL (HTTP-POST).
@@ -625,6 +630,7 @@ pub struct SamlAuthnRequestResponse {
 }
 
 /// Request to handle a SAML Response at the ACS endpoint.
+#[cfg(feature = "saml")]
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SamlAcsRequest {
     /// ID of the SAML federation config.
@@ -636,6 +642,7 @@ pub struct SamlAcsRequest {
 }
 
 /// Query parameters for SP metadata generation.
+#[cfg(feature = "saml")]
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SamlMetadataQuery {
     /// ID of the SAML federation config.
@@ -654,6 +661,7 @@ pub struct SamlMetadataQuery {
 /// Builds a SAML AuthnRequest for the specified federation config.
 /// Returns the SSO URL, encoded request, and binding type for the
 /// caller to initiate the redirect or POST to the IdP.
+#[cfg(feature = "saml")]
 #[utoipa::path(
     post,
     path = "/api/v1/federation/saml/authn-request",
@@ -706,6 +714,7 @@ pub async fn saml_authn_request<C: Connection>(
 /// Handles the SAML Response received from the external IdP after
 /// user authentication. Validates the assertion, extracts claims,
 /// and provisions or links the local user.
+#[cfg(feature = "saml")]
 #[utoipa::path(
     post,
     path = "/api/v1/federation/saml/acs",
@@ -761,6 +770,7 @@ pub async fn saml_acs<C: Connection>(
 ///
 /// Generates the SP metadata XML for the specified SAML federation
 /// config. Returns XML with content type `application/samlmetadata+xml`.
+#[cfg(feature = "saml")]
 #[utoipa::path(
     get,
     path = "/api/v1/federation/saml/metadata",
@@ -869,6 +879,7 @@ pub struct OidcPublicCallbackRequest {
 }
 
 /// Request body for `POST /api/v1/auth/federation/saml/login`.
+#[cfg(feature = "saml")]
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SamlLoginRequest {
     pub org_id: Option<Uuid>,
@@ -881,6 +892,7 @@ pub struct SamlLoginRequest {
 }
 
 /// Response body for `POST /api/v1/auth/federation/saml/login`.
+#[cfg(feature = "saml")]
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SamlLoginResponse {
     /// SAML binding URI.
@@ -894,6 +906,7 @@ pub struct SamlLoginResponse {
 }
 
 /// Request body for `POST /api/v1/auth/federation/saml/acs`.
+#[cfg(feature = "saml")]
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SamlAcsPublicRequest {
     pub saml_response_b64: String,
@@ -920,7 +933,7 @@ pub struct SsoLoginSuccessResponse {
 fn random_base64url() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -1182,6 +1195,7 @@ pub async fn oidc_callback_public<C: Connection>(
 ///
 /// Builds a SAML AuthnRequest, persists state, and returns the POST-binding
 /// payload for the client to submit to the IdP.
+#[cfg(feature = "saml")]
 #[utoipa::path(
     post,
     path = "/api/v1/auth/federation/saml/login",
@@ -1296,6 +1310,7 @@ pub async fn saml_login_public<C: Connection>(
 /// Assertion Consumer Service endpoint for first-time SSO.  Consumes the
 /// RelayState (maps to our state row), runs the verified SAML flow from
 /// plan 04-03, provisions or links the user, and returns Set-Cookie response.
+#[cfg(feature = "saml")]
 #[utoipa::path(
     post,
     path = "/api/v1/auth/federation/saml/acs",

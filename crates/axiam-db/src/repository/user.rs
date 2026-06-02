@@ -31,6 +31,10 @@ struct UserRow {
     last_failed_login_at: Option<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
     email_verified_at: Option<DateTime<Utc>>,
+    /// GDPR Art. 17 — set when user requests account deletion (D-08).
+    deletion_pending: Option<bool>,
+    /// Scheduled purge date when deletion_pending is true (D-08).
+    scheduled_purge_at: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -51,6 +55,10 @@ struct UserRowWithId {
     last_failed_login_at: Option<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
     email_verified_at: Option<DateTime<Utc>>,
+    /// GDPR Art. 17 — set when user requests account deletion (D-08).
+    deletion_pending: Option<bool>,
+    /// Scheduled purge date when deletion_pending is true (D-08).
+    scheduled_purge_at: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -62,6 +70,7 @@ fn parse_status(s: &str) -> Result<UserStatus, DbError> {
         "Inactive" => Ok(UserStatus::Inactive),
         "Locked" => Ok(UserStatus::Locked),
         "PendingVerification" => Ok(UserStatus::PendingVerification),
+        "Anonymized" => Ok(UserStatus::Anonymized),
         other => Err(DbError::Migration(format!("unknown user status: {other}"))),
     }
 }
@@ -72,6 +81,7 @@ fn status_to_string(s: &UserStatus) -> &'static str {
         UserStatus::Inactive => "Inactive",
         UserStatus::Locked => "Locked",
         UserStatus::PendingVerification => "PendingVerification",
+        UserStatus::Anonymized => "Anonymized",
     }
 }
 
@@ -92,6 +102,8 @@ impl UserRow {
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
             email_verified_at: self.email_verified_at,
+            deletion_pending: self.deletion_pending.unwrap_or(false),
+            scheduled_purge_at: self.scheduled_purge_at,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -118,6 +130,8 @@ impl UserRowWithId {
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
             email_verified_at: self.email_verified_at,
+            deletion_pending: self.deletion_pending.unwrap_or(false),
+            scheduled_purge_at: self.scheduled_purge_at,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,

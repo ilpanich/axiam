@@ -108,6 +108,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "webauthn_credentials",
         sql: SCHEMA_V14,
     },
+    Migration {
+        version: 15,
+        name: "phase5_email_gdpr",
+        sql: SCHEMA_V15,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -821,6 +826,145 @@ DEFINE INDEX idx_webauthn_cred_tenant_user ON TABLE webauthn_credential \
     COLUMNS tenant_id, user_id;
 DEFINE INDEX idx_webauthn_cred_id ON TABLE webauthn_credential \
     COLUMNS tenant_id, credential_id UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v15 — Phase 5: email delivery & GDPR compliance
+// -----------------------------------------------------------------------
+
+const SCHEMA_V15: &str = "\
+-- =======================================================================
+-- Email Config (org/tenant scope) — provider secrets stored encrypted
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS email_config SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS scope ON TABLE email_config TYPE string
+    ASSERT $value IN ['org', 'tenant'];
+DEFINE FIELD IF NOT EXISTS scope_id ON TABLE email_config TYPE string;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE email_config TYPE bool
+    DEFAULT true;
+DEFINE FIELD IF NOT EXISTS from_name ON TABLE email_config TYPE string;
+DEFINE FIELD IF NOT EXISTS from_email ON TABLE email_config TYPE string;
+DEFINE FIELD IF NOT EXISTS reply_to ON TABLE email_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS provider_kind ON TABLE email_config TYPE string
+    ASSERT $value IN ['smtp', 'send_grid', 'postmark', 'resend', 'brevo'];
+DEFINE FIELD IF NOT EXISTS smtp_host ON TABLE email_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS smtp_port ON TABLE email_config TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS smtp_username ON TABLE email_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS smtp_starttls ON TABLE email_config TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS smtp_password_ciphertext ON TABLE email_config
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS smtp_password_nonce ON TABLE email_config
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS api_url ON TABLE email_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS api_key_ciphertext ON TABLE email_config
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS api_key_nonce ON TABLE email_config
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS secret_key_version ON TABLE email_config
+    TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE email_config TYPE datetime
+    DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE email_config TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_email_config_scope ON TABLE email_config
+    COLUMNS scope, scope_id UNIQUE;
+
+-- =======================================================================
+-- Consent (tenant scope, immutable records — append-only)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS consent SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE consent TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE consent TYPE string;
+DEFINE FIELD IF NOT EXISTS consent_type ON TABLE consent TYPE string;
+DEFINE FIELD IF NOT EXISTS version ON TABLE consent TYPE string;
+DEFINE FIELD IF NOT EXISTS accepted_at ON TABLE consent TYPE datetime
+    DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS ip_address ON TABLE consent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS user_agent ON TABLE consent TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_consent_tenant_user_type ON TABLE consent
+    COLUMNS tenant_id, user_id, consent_type, version UNIQUE;
+
+-- =======================================================================
+-- Account Deletion Requests (tenant scope)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS account_deletion SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE account_deletion TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE account_deletion TYPE string;
+DEFINE FIELD IF NOT EXISTS cancel_token_hash ON TABLE account_deletion TYPE string;
+DEFINE FIELD IF NOT EXISTS scheduled_purge_at ON TABLE account_deletion
+    TYPE datetime;
+DEFINE FIELD IF NOT EXISTS status ON TABLE account_deletion TYPE string
+    ASSERT $value IN ['pending', 'cancelled', 'completed'];
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE account_deletion TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_account_deletion_tenant_user ON TABLE account_deletion
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_account_deletion_token ON TABLE account_deletion
+    COLUMNS tenant_id, cancel_token_hash;
+
+-- =======================================================================
+-- Export Jobs (tenant scope)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS export_job SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE export_job TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE export_job TYPE string;
+DEFINE FIELD IF NOT EXISTS status ON TABLE export_job TYPE string
+    ASSERT $value IN ['queued', 'ready', 'downloaded', 'expired'];
+DEFINE FIELD IF NOT EXISTS encrypted_blob ON TABLE export_job
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS file_path ON TABLE export_job TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS blob_nonce ON TABLE export_job TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS download_token_hash ON TABLE export_job
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE export_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE export_job TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_export_job_tenant_user ON TABLE export_job
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_export_job_token ON TABLE export_job
+    COLUMNS tenant_id, download_token_hash;
+
+-- =======================================================================
+-- Erasure Proof (PII-free record proving erasure happened)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS erasure_proof SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS pseudonym ON TABLE erasure_proof TYPE string;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE erasure_proof TYPE string;
+DEFINE FIELD IF NOT EXISTS erased_at ON TABLE erasure_proof TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_erasure_proof_tenant ON TABLE erasure_proof
+    COLUMNS tenant_id;
+
+-- =======================================================================
+-- ALTER user table: add GDPR deletion fields
+-- =======================================================================
+DEFINE FIELD IF NOT EXISTS deletion_pending ON TABLE user TYPE bool
+    DEFAULT false;
+DEFINE FIELD IF NOT EXISTS scheduled_purge_at ON TABLE user
+    TYPE option<datetime>;
+
+-- Re-DEFINE user.status ASSERT to include 'Anonymized'
+DEFINE FIELD status ON TABLE user TYPE string
+    ASSERT $value IN ['Active', 'Inactive', 'Locked', 'PendingVerification',
+                      'Anonymized'];
+
+-- =======================================================================
+-- ALTER audit_log permissions: add gdpr_pseudonymizer UPDATE path (D-04)
+-- Note: FOR delete stays NONE. True enforcement is the single repo method.
+-- =======================================================================
+DEFINE TABLE audit_log SCHEMAFULL
+    PERMISSIONS
+        FOR create FULL
+        FOR select FULL
+        FOR update WHERE $auth.role = 'gdpr_pseudonymizer'
+        FOR delete NONE;
+
+-- =======================================================================
+-- ALTER email_template.kind ASSERT: add deletion_scheduled, export_ready
+-- =======================================================================
+DEFINE FIELD kind ON TABLE email_template TYPE string
+    ASSERT $value IN ['activation', 'password_reset', 'mfa_setup_reminder',
+                      'admin_notification', 'deletion_scheduled', 'export_ready'];
 ";
 
 // -----------------------------------------------------------------------

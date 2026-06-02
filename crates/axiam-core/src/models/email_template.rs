@@ -23,6 +23,10 @@ pub enum TemplateKind {
     PasswordReset,
     MfaSetupReminder,
     AdminNotification,
+    /// Sent when an account deletion is scheduled (includes cancel link). D-09.
+    DeletionScheduled,
+    /// Sent when a data-export file is ready for download. D-12.
+    ExportReady,
 }
 
 impl TemplateKind {
@@ -32,7 +36,41 @@ impl TemplateKind {
         Self::PasswordReset,
         Self::MfaSetupReminder,
         Self::AdminNotification,
+        Self::DeletionScheduled,
+        Self::ExportReady,
     ];
+
+    /// Return a built-in default template for this kind.
+    ///
+    /// Placeholder tokens follow the `{{name}}` syntax understood by the
+    /// template renderer.  Available tokens per kind:
+    /// - `DeletionScheduled`: `username`, `tenant_name`, `action_url` (cancel link), `expiry_time`
+    /// - `ExportReady`: `username`, `tenant_name`, `action_url` (download link), `expiry_time`
+    pub fn builtin_template(&self) -> (&'static str, &'static str, &'static str) {
+        // (subject, html_body, text_body)
+        match self {
+            Self::DeletionScheduled => (
+                "Your account deletion has been scheduled",
+                "<p>Hi {{username}},</p>\
+                 <p>Your account on <strong>{{tenant_name}}</strong> is scheduled for \
+                 deletion on <strong>{{expiry_time}}</strong>.</p>\
+                 <p>If you did not request this, \
+                 <a href=\"{{action_url}}\">click here to cancel</a> before that date.</p>",
+                "Hi {{username}},\n\nYour account on {{tenant_name}} is scheduled for \
+                 deletion on {{expiry_time}}.\n\nTo cancel, visit: {{action_url}}",
+            ),
+            Self::ExportReady => (
+                "Your data export is ready",
+                "<p>Hi {{username}},</p>\
+                 <p>Your data export for <strong>{{tenant_name}}</strong> is ready. \
+                 <a href=\"{{action_url}}\">Download it here</a> — the link expires at \
+                 <strong>{{expiry_time}}</strong> and can only be used once.</p>",
+                "Hi {{username}},\n\nYour data export for {{tenant_name}} is ready.\n\
+                 Download: {{action_url}}\nExpires: {{expiry_time}}\nSingle-use link.",
+            ),
+            _ => ("", "", ""),
+        }
+    }
 }
 
 impl std::fmt::Display for TemplateKind {
@@ -42,6 +80,8 @@ impl std::fmt::Display for TemplateKind {
             Self::PasswordReset => write!(f, "password_reset"),
             Self::MfaSetupReminder => write!(f, "mfa_setup_reminder"),
             Self::AdminNotification => write!(f, "admin_notification"),
+            Self::DeletionScheduled => write!(f, "deletion_scheduled"),
+            Self::ExportReady => write!(f, "export_ready"),
         }
     }
 }
@@ -55,6 +95,8 @@ impl std::str::FromStr for TemplateKind {
             "password_reset" => Ok(Self::PasswordReset),
             "mfa_setup_reminder" => Ok(Self::MfaSetupReminder),
             "admin_notification" => Ok(Self::AdminNotification),
+            "deletion_scheduled" => Ok(Self::DeletionScheduled),
+            "export_ready" => Ok(Self::ExportReady),
             other => Err(format!("invalid template kind: {other}")),
         }
     }
@@ -205,7 +247,26 @@ mod tests {
     // --- TemplateKind::ALL ---
 
     #[test]
-    fn all_contains_four_kinds() {
-        assert_eq!(TemplateKind::ALL.len(), 4);
+    fn all_contains_six_kinds() {
+        assert_eq!(TemplateKind::ALL.len(), 6);
+    }
+
+    #[test]
+    fn new_kinds_round_trip() {
+        for kind in [TemplateKind::DeletionScheduled, TemplateKind::ExportReady] {
+            let s = kind.to_string();
+            let parsed: TemplateKind = s.parse().unwrap();
+            assert_eq!(kind, parsed);
+        }
+    }
+
+    #[test]
+    fn new_kinds_have_builtin_templates() {
+        for kind in [TemplateKind::DeletionScheduled, TemplateKind::ExportReady] {
+            let (subj, html, text) = kind.builtin_template();
+            assert!(!subj.is_empty());
+            assert!(!html.is_empty());
+            assert!(!text.is_empty());
+        }
     }
 }

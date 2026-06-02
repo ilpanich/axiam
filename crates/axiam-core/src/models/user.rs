@@ -10,6 +10,8 @@ pub enum UserStatus {
     Inactive,
     Locked,
     PendingVerification,
+    /// User has been anonymized in-place following Art. 17 erasure (D-05).
+    Anonymized,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -27,6 +29,10 @@ pub struct User {
     pub last_failed_login_at: Option<DateTime<Utc>>,
     pub locked_until: Option<DateTime<Utc>>,
     pub email_verified_at: Option<DateTime<Utc>>,
+    /// GDPR Art. 17 — set when user requests account deletion (D-08).
+    pub deletion_pending: bool,
+    /// Scheduled purge date when `deletion_pending` is true (D-08).
+    pub scheduled_purge_at: Option<DateTime<Utc>>,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

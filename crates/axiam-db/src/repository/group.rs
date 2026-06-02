@@ -78,6 +78,7 @@ fn parse_status(s: &str) -> Result<UserStatus, DbError> {
         "Inactive" => Ok(UserStatus::Inactive),
         "Locked" => Ok(UserStatus::Locked),
         "PendingVerification" => Ok(UserStatus::PendingVerification),
+        "Anonymized" => Ok(UserStatus::Anonymized),
         other => Err(DbError::Migration(format!("unknown user status: {other}"))),
     }
 }
@@ -101,6 +102,9 @@ impl MemberRow {
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
             email_verified_at: self.email_verified_at,
+            // Group queries do not fetch GDPR deletion fields — safe defaults.
+            deletion_pending: false,
+            scheduled_purge_at: None,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,

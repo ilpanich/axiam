@@ -772,6 +772,8 @@ impl<
             UserStatus::Active => Ok(()),
             UserStatus::Locked => Err(AuthError::AccountLocked),
             UserStatus::Inactive => Err(AuthError::AccountInactive),
+            // Anonymized users cannot log in — treat as inactive.
+            UserStatus::Anonymized => Err(AuthError::AccountInactive),
             UserStatus::PendingVerification => {
                 if grace_period_hours > 0 {
                     let grace_end = created_at + Duration::hours(grace_period_hours as i64);

@@ -52,6 +52,7 @@ fn status_to_str(s: &UserStatus) -> &'static str {
         UserStatus::Inactive => "Inactive",
         UserStatus::Locked => "Locked",
         UserStatus::PendingVerification => "PendingVerification",
+        UserStatus::Anonymized => "Anonymized",
     }
 }
 

@@ -17,6 +17,10 @@ use crate::models::{
         CreateFederationConfig, CreateFederationLink, FederationConfig, FederationLink,
         UpdateFederationConfig,
     },
+    gdpr::{
+        AccountDeletion, Consent, CreateAccountDeletion, CreateConsent, CreateErasureProof,
+        CreateExportJob, ErasureProof, ExportJob,
+    },
     group::{CreateGroup, Group, UpdateGroup},
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
@@ -511,6 +515,26 @@ pub trait AuditLogRepository: Send + Sync {
         tenant_id: Uuid,
         ids: &[Uuid],
     ) -> impl Future<Output = AxiamResult<Vec<AuditLogEntry>>> + Send;
+
+    /// Pseudonymize audit entries for a deleted user (D-03/D-04).
+    ///
+    /// This is the ONLY non-INSERT write permitted on `audit_log`.
+    /// It runs under the `gdpr_pseudonymizer` schema permission (v15).
+    ///
+    /// Full D-03 scrub:
+    /// - `actor_id` → nil UUID
+    /// - `metadata.actor_pseudonym` → `pseudonym` string
+    /// - `ip_address` → NULL
+    /// - known PII metadata keys (`email`, `username`, `name`, etc.) → `[redacted]`
+    /// - `resource_id` → nil UUID where it equals `user_id`
+    ///
+    /// Returns the count of updated rows.
+    fn pseudonymize_actor(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        pseudonym: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,4 +1269,102 @@ pub trait WebauthnCredentialRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// GDPR — Consent (REQ-8)
+// ---------------------------------------------------------------------------
+
+pub trait ConsentRepository: Send + Sync {
+    /// Record a new consent (immutable — no update/delete).
+    fn create(&self, input: CreateConsent) -> impl Future<Output = AxiamResult<Consent>> + Send;
+
+    /// List all consent records for a user in a tenant.
+    fn list_by_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Consent>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// GDPR — Account Deletion (D-08/D-09)
+// ---------------------------------------------------------------------------
+
+pub trait AccountDeletionRepository: Send + Sync {
+    /// Create a deletion request; stores only the cancel_token_hash.
+    fn create(
+        &self,
+        input: CreateAccountDeletion,
+    ) -> impl Future<Output = AxiamResult<AccountDeletion>> + Send;
+
+    /// Find by cancel-token hash (for the cancel-link endpoint).
+    fn find_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        cancel_token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<AccountDeletion>>> + Send;
+
+    /// Mark as cancelled (user clicked cancel link in time).
+    fn mark_cancelled(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Mark as completed (purge ran successfully).
+    fn mark_completed(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// GDPR — Export Job (D-12/D-13)
+// ---------------------------------------------------------------------------
+
+pub trait ExportJobRepository: Send + Sync {
+    /// Create a new queued export job.
+    fn create(&self, input: CreateExportJob)
+    -> impl Future<Output = AxiamResult<ExportJob>> + Send;
+
+    /// Find queued jobs (for the export worker).
+    fn find_queued(&self) -> impl Future<Output = AxiamResult<Vec<ExportJob>>> + Send;
+
+    /// Mark job as ready with encrypted blob and single-use download token hash.
+    fn set_ready(
+        &self,
+        id: Uuid,
+        download_token_hash: String,
+        encrypted_blob: Option<String>,
+        file_path: Option<String>,
+        blob_nonce: Option<String>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Find a ready job by its download token hash (single-use).
+    fn find_by_download_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<ExportJob>>> + Send;
+
+    /// Mark a job as downloaded (single-use consumed).
+    fn mark_downloaded(&self, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete an expired or downloaded job and its file.
+    fn delete(&self, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// GDPR — Erasure Proof (D-06)
+// ---------------------------------------------------------------------------
+
+pub trait ErasureProofRepository: Send + Sync {
+    /// Append a PII-free erasure proof record (INSERT-only).
+    fn create(
+        &self,
+        input: CreateErasureProof,
+    ) -> impl Future<Output = AxiamResult<ErasureProof>> + Send;
 }

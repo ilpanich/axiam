@@ -490,6 +490,115 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GDPR deletion / anonymization methods (D-05, D-08)
+// ---------------------------------------------------------------------------
+
+impl<C: Connection> SurrealUserRepository<C> {
+    /// Mark a user as deletion-pending and set the scheduled purge date (D-08).
+    ///
+    /// The user account is immediately disabled (status Inactive) so that
+    /// login is blocked during the grace period.
+    pub async fn mark_deletion_pending(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        scheduled_purge_at: DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 deletion_pending = true, \
+                 scheduled_purge_at = $purge_at, \
+                 status = 'Inactive', \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("purge_at", scheduled_purge_at))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Anonymize a user row in-place (D-05).
+    ///
+    /// Scrubs every PII column:
+    /// - email → `email_hash` (SHA-256 hex of original email, passed by caller)
+    /// - username → `pseudonym` (DELETED_USER_<hmac>)
+    /// - password_hash → NULL (login permanently blocked)
+    /// - mfa_secret → NULL
+    /// - metadata → `{}`
+    /// - locked_until / last_failed_login_at → NULL
+    /// - status → `Anonymized`
+    ///
+    /// The row and its `id` are kept to preserve referential integrity for
+    /// `created_by`/owner foreign-key references.
+    pub async fn anonymize_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+    ) -> AxiamResult<()> {
+        // password_hash is TYPE string (not nullable) — use empty string as
+        // tombstone value. Argon2 output is never empty, so login is permanently
+        // blocked without needing to make the column nullable.
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 email = $email_hash, \
+                 username = $pseudonym, \
+                 password_hash = '', \
+                 mfa_secret = NONE, \
+                 mfa_enabled = false, \
+                 metadata = {}, \
+                 locked_until = NONE, \
+                 last_failed_login_at = NONE, \
+                 deletion_pending = false, \
+                 scheduled_purge_at = NONE, \
+                 status = 'Anonymized', \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("email_hash", email_hash.to_string()))
+            .bind(("pseudonym", pseudonym.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Find users whose scheduled purge date has passed (D-08).
+    ///
+    /// Used by the `CleanupTask` sweep to run the purge pipeline.
+    pub async fn find_due_for_purge(&self, now: DateTime<Utc>) -> AxiamResult<Vec<User>> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM user \
+                 WHERE deletion_pending = true \
+                 AND scheduled_purge_at <= $now",
+            )
+            .bind(("now", now))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<UserRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|r| r.try_into_user().map_err(Into::into))
+            .collect()
+    }
+}
+
 /// Verify a password against an Argon2id hash.
 ///
 /// Public for use by the auth layer.
@@ -513,5 +622,89 @@ pub fn verify_password(password: &str, hash: &str, pepper: Option<&str>) -> Resu
         Ok(()) => Ok(true),
         Err(argon2::password_hash::Error::Password) => Ok(false),
         Err(e) => Err(DbError::Migration(format!("verify error: {e}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::models::user::CreateUser;
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::Mem;
+
+    async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        crate::schema::run_migrations(&db).await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn mark_deletion_pending_and_anonymize() {
+        let db = setup_db().await;
+        let repo = SurrealUserRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+
+        // Create a user.
+        let user = repo
+            .create(CreateUser {
+                tenant_id,
+                username: "alice".into(),
+                email: "alice@example.com".into(),
+                password: "correct-horse".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+
+        // Mark deletion pending.
+        let purge_at = Utc::now() + chrono::Duration::days(30);
+        repo.mark_deletion_pending(tenant_id, user.id, purge_at)
+            .await
+            .unwrap();
+
+        let updated = repo.get_by_id(tenant_id, user.id).await.unwrap();
+        assert!(updated.deletion_pending, "deletion_pending must be true");
+        assert_eq!(updated.status, UserStatus::Inactive);
+
+        // find_due_for_purge should find it when purge_at is in the past.
+        let past = Utc::now() + chrono::Duration::days(31);
+        let due = repo.find_due_for_purge(past).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, user.id);
+
+        // Not found when querying in the present (purge_at is 30 days away).
+        let now = Utc::now();
+        let not_due = repo.find_due_for_purge(now).await.unwrap();
+        assert!(not_due.is_empty());
+
+        // Anonymize.
+        repo.anonymize_user(
+            tenant_id,
+            user.id,
+            "sha256_of_alice_at_example_com",
+            "DELETED_USER_deadbeef01234567",
+        )
+        .await
+        .unwrap();
+
+        let anon = repo.get_by_id(tenant_id, user.id).await.unwrap();
+        assert_eq!(anon.status, UserStatus::Anonymized);
+        assert_eq!(anon.email, "sha256_of_alice_at_example_com");
+        assert_eq!(anon.username, "DELETED_USER_deadbeef01234567");
+        // password_hash schema is TYPE string (not nullable); tombstone = empty string
+        assert_eq!(
+            anon.password_hash, "",
+            "password_hash must be empty (tombstone) after anonymization"
+        );
+        assert!(anon.mfa_secret.is_none(), "mfa_secret must be scrubbed");
+        assert!(
+            !anon.deletion_pending,
+            "deletion_pending cleared after anonymization"
+        );
     }
 }

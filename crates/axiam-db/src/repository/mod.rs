@@ -1,11 +1,15 @@
 //! SurrealDB repository implementations.
 
+mod account_deletion;
 mod audit;
 mod ca_certificate;
 mod certificate;
+mod consent;
 mod email_config;
 mod email_template;
 mod email_verification_token;
+mod erasure_proof;
+mod export_job;
 mod federation_config;
 mod federation_link;
 mod federation_login_state;
@@ -31,12 +35,16 @@ mod user;
 mod webauthn_credential;
 mod webhook;
 
+pub use account_deletion::SurrealAccountDeletionRepository;
 pub use audit::SurrealAuditLogRepository;
 pub use ca_certificate::SurrealCaCertificateRepository;
 pub use certificate::SurrealCertificateRepository;
+pub use consent::SurrealConsentRepository;
 pub use email_config::SurrealEmailConfigRepository;
 pub use email_template::SurrealEmailTemplateRepository;
 pub use email_verification_token::SurrealEmailVerificationTokenRepository;
+pub use erasure_proof::SurrealErasureProofRepository;
+pub use export_job::SurrealExportJobRepository;
 pub use federation_config::SurrealFederationConfigRepository;
 pub use federation_link::SurrealFederationLinkRepository;
 pub use federation_login_state::SurrealFederationLoginStateRepository;

@@ -46,6 +46,22 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo build --workspace
 
+  build-no-saml:
+    name: Build (SAML off / --no-default-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Install ONLY protobuf-compiler. libxmlsec1-dev / libxml2-dev are
+      # deliberately NOT installed: the `saml` feature (→ samael → libxmlsec1)
+      # is off here, so if SAML ever leaks back into the default-off build the
+      # compile must FAIL for lack of the native lib. This guards the very
+      # configuration that lets the workspace build on hosts with an
+      # incompatible system libxml2 (e.g. Arch 2.15.x).
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: cargo check -p axiam-federation -p axiam-api-rest -p axiam-server --no-default-features
+
   test:
     name: Test
     runs-on: ubuntu-latest

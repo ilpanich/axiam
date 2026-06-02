@@ -18,16 +18,16 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::{AuthService, MfaMethodService, WebauthnService};
 use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
 use axiam_db::{
-    DbConfig, DbManager, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
-    SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
-    SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
-    SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealRefreshTokenRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealServiceAccountRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
-    SurrealWebhookRepository,
+    DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
+    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealErasureProofRepository,
+    SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
+    SurrealFederationLoginStateRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
+    SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
+    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_oauth2::authorize::AuthorizeService;
@@ -308,6 +308,9 @@ async fn main() -> std::io::Result<()> {
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(db.client().clone());
     let consent_repo = axiam_db::SurrealConsentRepository::new(db.client().clone());
+    let account_deletion_repo = SurrealAccountDeletionRepository::new(db.client().clone());
+    let export_job_repo = SurrealExportJobRepository::new(db.client().clone());
+    let erasure_proof_repo = SurrealErasureProofRepository::new(db.client().clone());
 
     let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(db.client().clone());
     let webauthn_service = WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
@@ -502,9 +505,30 @@ async fn main() -> std::io::Result<()> {
     // Spawn the periodic cleanup task (D-09, D-24).
     // Shutdown channel: main sends `true` after HttpServer returns on SIGTERM.
     let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
+    // Mail publisher for export-ready notifications from the cleanup task.
+    let cleanup_mail_pub_channel = amqp
+        .create_publisher_channel()
+        .await
+        .expect("Failed to create AMQP cleanup mail channel");
+    let cleanup_mail_publisher: Arc<axiam_amqp::MailOutboundPublisher> = Arc::new(
+        axiam_amqp::MailOutboundPublisher::new(cleanup_mail_pub_channel),
+    );
+    let cleanup_federation_link_repo =
+        axiam_db::SurrealFederationLinkRepository::new(db_handle.clone());
     let cleanup = cleanup::CleanupTask::new(
         Arc::new(assertion_replay_repo.clone()),
         Arc::new(federation_login_state_repo.clone()),
+        Arc::new(user_repo.clone()),
+        Arc::new(auth_service.clone()),
+        Arc::new(audit_repo.clone()),
+        Arc::new(account_deletion_repo.clone()),
+        Arc::new(erasure_proof_repo.clone()),
+        Arc::new(cleanup_federation_link_repo),
+        Arc::new(export_job_repo.clone()),
+        Arc::new(consent_repo.clone()),
+        cleanup_mail_publisher,
+        config.gdpr_pseudonym_pepper,
+        config.email_encryption_key,
         Duration::from_secs(config.cleanup_interval_secs),
         cleanup_shutdown_rx,
     );
@@ -546,6 +570,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(handler_refresh_token_repo.clone()))
             .app_data(web::Data::new(password_history_repo.clone()))
             .app_data(web::Data::new(consent_repo.clone()))
+            .app_data(web::Data::new(account_deletion_repo.clone()))
+            .app_data(web::Data::new(export_job_repo.clone()))
+            .app_data(web::Data::new(erasure_proof_repo.clone()))
+            .app_data(web::Data::new(config.email_encryption_key))
             .app_data(web::Data::new(ca_service.clone()))
             .app_data(web::Data::new(cert_service.clone()))
             .app_data(web::Data::new(cert_repo.clone()))

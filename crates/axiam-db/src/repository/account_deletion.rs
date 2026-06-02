@@ -86,6 +86,64 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
     pub fn new(db: Surreal<C>) -> Self {
         Self { db }
     }
+
+    /// Find a pending deletion request by user_id within a tenant.
+    ///
+    /// Used by the purge sweep to mark the deletion row as completed once
+    /// the purge pipeline finishes.
+    pub async fn find_pending_by_user_id(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<Option<AccountDeletion>> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM account_deletion \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id AND status = 'pending'",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<AccountDeletionRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .next()
+            .map(|r| r.try_into_domain().map_err(Into::into))
+            .transpose()
+    }
+
+    /// Look up a pending deletion by token hash without requiring tenant_id.
+    ///
+    /// Used by the public cancel endpoint where the caller is not authenticated
+    /// and the tenant_id is not in the request context (D-09).  The token hash
+    /// uniqueness enforced by the UNIQUE index makes cross-tenant collision
+    /// practically impossible.
+    pub async fn find_by_token_hash_global(
+        &self,
+        cancel_token_hash: &str,
+    ) -> AxiamResult<Option<AccountDeletion>> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM account_deletion \
+                 WHERE cancel_token_hash = $hash",
+            )
+            .bind(("hash", cancel_token_hash.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<AccountDeletionRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .next()
+            .map(|r| r.try_into_domain().map_err(Into::into))
+            .transpose()
+    }
 }
 
 impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionRepository<C> {

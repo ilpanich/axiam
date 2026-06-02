@@ -575,6 +575,34 @@ impl<C: Connection> SurrealUserRepository<C> {
         Ok(())
     }
 
+    /// Clear deletion-pending state and re-enable a user (D-09 cancel path).
+    ///
+    /// Called when the user clicks the emailed cancel link within the grace
+    /// window.  Resets `deletion_pending`, `scheduled_purge_at`, and sets
+    /// status back to `Active`.
+    pub async fn clear_deletion_pending(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<()> {
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 deletion_pending = false, \
+                 scheduled_purge_at = NONE, \
+                 status = 'Active', \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
     /// Find users whose scheduled purge date has passed (D-08).
     ///
     /// Used by the `CleanupTask` sweep to run the purge pipeline.

@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 5 context gathered
-last_updated: "2026-06-02T14:28:31.944Z"
+last_updated: "2026-06-02T14:39:01.580Z"
 last_activity: 2026-06-02
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 26
-  completed_plans: 22
+  completed_plans: 23
   percent: 57
 ---
 
@@ -26,12 +26,12 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 05 (email-delivery-gdpr-compliance) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Next: Phase 05 (email-delivery-gdpr-compliance) — NOT STARTED (needs planning)
 Status: Ready to execute
 Last activity: 2026-06-02
 
-Progress: [█████████░] 85%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -65,6 +65,7 @@ Progress: [█████████░] 85%
 | Phase 01-cookie-based-authentication P04 | 30m | 8 tasks | 15 files |
 | Phase 01-cookie-based-authentication P05 | 45m | 6 tasks | 2 files |
 | Phase 02-security-headers-rate-limiting P_UAT | 60m | 5 assertions | 4 files |
+| Phase 05-email-delivery-gdpr-compliance P02 | 8 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,7 @@ Recent decisions affecting current work:
 - [Phase 01-cookie-based-authentication]: `.app_data(web::Data::new(rest_authz.clone()))` — using `new` (not `from`) wraps the Arc to match handler extractors typed `web::Data<Arc<dyn AuthzChecker>>`; `from` unwraps the Arc and breaks every RBAC-protected endpoint with 500
 - [Phase 02-security-headers-rate-limiting]: UAT Test 1 closed via Playwright end-to-end — all 5 lockout UI assertions verified (amber Locked badge, Locked(N) filter toggle, unlock dialog, badge disappearance after unlock, "No locked accounts." empty state); screenshots at .planning/phases/02-security-headers-rate-limiting/uat-evidence/
 - [Phase 02-security-headers-rate-limiting]: frontend PaginatedUsers shape aligned with backend PaginatedResult (items/limit), unblocking the admin Users page; broader pagination-contract audit filed as follow-up for other admin services
+- [Phase ?]: MAIL_OUTBOUND_DLQ added to ALL_QUEUES loop first; MAIL_OUTBOUND declared separately with x-dead-letter-exchange FieldTable (D-14 explicit dead-letter routing, no broker defaults)
 
 ### Pending Todos
 
@@ -115,6 +117,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-02T14:28:31.929Z
+Last session: 2026-06-02T14:38:58.512Z
 Stopped at: Phase 5 context gathered
 Resume file: None

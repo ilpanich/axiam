@@ -11,6 +11,7 @@ pub mod email_verification;
 pub mod federation;
 pub mod gdpr;
 pub mod group;
+pub mod mail;
 pub mod mfa_method;
 pub mod notification_rule;
 pub mod oauth2_client;

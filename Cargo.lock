@@ -795,6 +795,7 @@ dependencies = [
  "actix-http",
  "actix-rt",
  "actix-web",
+ "axiam-amqp",
  "axiam-audit",
  "axiam-auth",
  "axiam-authz",

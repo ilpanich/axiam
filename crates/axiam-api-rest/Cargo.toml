@@ -13,6 +13,7 @@ axiam-auth = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-db = { workspace = true }
 axiam-audit = { workspace = true }
+axiam-amqp = { workspace = true }
 axiam-oauth2 = { workspace = true }
 # default-features (=false) is inherited from [workspace.dependencies]; the
 # `saml` feature below re-enables it (on by default via this crate's `default`).

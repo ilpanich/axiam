@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::{App, HttpServer, web};
-use axiam_amqp::{AmqpConfig, AmqpManager};
+use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
 use axiam_api_rest::{
@@ -307,6 +307,7 @@ async fn main() -> std::io::Result<()> {
     );
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(db.client().clone());
+    let consent_repo = axiam_db::SurrealConsentRepository::new(db.client().clone());
 
     let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(db.client().clone());
     let webauthn_service = WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
@@ -428,6 +429,13 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to create AMQP notification channel");
     let notification_publisher = axiam_amqp::NotificationPublisher::new(notif_channel);
 
+    // Publisher channel for outbound mail (password-reset, email-verify, etc.)
+    let mail_pub_channel = amqp
+        .create_publisher_channel()
+        .await
+        .expect("Failed to create AMQP mail outbound publisher channel");
+    let mail_outbound_publisher = MailOutboundPublisher::new(mail_pub_channel);
+
     // Spawn AMQP audit event consumer on a background task.
     let audit_channel = amqp
         .create_channel()
@@ -532,10 +540,12 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(webauthn_service.clone()))
             .app_data(web::Data::new(mfa_method_service.clone()))
             .app_data(web::Data::new(notification_publisher.clone()))
+            .app_data(web::Data::new(mail_outbound_publisher.clone()))
             .app_data(web::Data::new(session_repo.clone()))
             .app_data(web::Data::new(session_validator.clone()))
             .app_data(web::Data::new(handler_refresh_token_repo.clone()))
             .app_data(web::Data::new(password_history_repo.clone()))
+            .app_data(web::Data::new(consent_repo.clone()))
             .app_data(web::Data::new(ca_service.clone()))
             .app_data(web::Data::new(cert_service.clone()))
             .app_data(web::Data::new(cert_repo.clone()))

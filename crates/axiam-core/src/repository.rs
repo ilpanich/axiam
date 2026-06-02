@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::AxiamResult;
+use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
@@ -1367,4 +1368,25 @@ pub trait ErasureProofRepository: Send + Sync {
         &self,
         input: CreateErasureProof,
     ) -> impl Future<Output = AxiamResult<ErasureProof>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Mail Publisher (D-14 — thin trait for async mail enqueue)
+// ---------------------------------------------------------------------------
+
+/// Trait for publishing outbound mail messages to the async delivery queue.
+///
+/// Implemented by `axiam-amqp`'s `MailOutboundPublisher`.  The thin trait
+/// lives in `axiam-core` so that `axiam-audit` (which must not depend on
+/// `axiam-amqp` due to the circular-dep constraint) can accept a generic
+/// publisher without coupling to the AMQP infrastructure layer.
+pub trait MailPublisher: Send + Sync {
+    /// Enqueue a single outbound mail message.
+    ///
+    /// Implementations MUST be fire-and-forget at the call site: callers
+    /// log a warning on error but do **not** propagate it to the client.
+    fn publish(
+        &self,
+        msg: OutboundMailMessage,
+    ) -> impl Future<Output = crate::error::AxiamResult<()>> + Send;
 }

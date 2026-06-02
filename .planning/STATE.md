@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Phase 04 complete + post-completion hardening (SAML feature flag, signature-verification security fix, CI no-saml guard)
-last_updated: "2026-06-02"
-last_activity: 2026-06-02 -- Phase 04 SAML signature-verification security fix + `saml` feature flag + CI guard (pushed)
+status: planning
+stopped_at: Phase 5 context gathered
+last_updated: "2026-06-02T11:33:04.431Z"
+last_activity: "2026-06-02 -- Phase 04 SAML signature-verification security fix, `saml` feature flag (default on), CI no-saml guard (commits c786148 / 60befcd / 60490b7 pushed); security finding logged to issue #65"
 progress:
   total_phases: 7
   completed_phases: 4
-  total_plans: 34
-  completed_plans: 19
+  total_plans: 21
+  completed_plans: 21
   percent: 57
 ---
 
@@ -99,10 +99,12 @@ Recent decisions affecting current work:
 ### Pending Todos
 
 Deferred to Phase 19 (raised during Phase 04):
+
 - T19.14 — per-FederationConfig registered redirect_uri allowlist for first-time SSO endpoints (needs a schema column; currently scheme/host HTTPS guard only)
 - T19.15 — resolve real org_id from tenant in SSO callback session/token creation (currently `Uuid::nil()`)
 
 Raised 2026-06-02 (SAML feature-flag work):
+
 - Extend CI `build-no-saml` guard to `--tests` once the pre-existing `-Dwarnings` drift in axiam-server test files is cleaned (currently lib+bin `cargo check` only)
 
 ### Blockers/Concerns
@@ -112,6 +114,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-02
-Stopped at: Phases 1–4 complete (Phase 04 verified in Docker + hardened today); tracking reconciled in STATE.md + ROADMAP.md
-Resume file: Phase 05 not yet planned — run /gsd plan-phase for Phase 05 (email-delivery-gdpr-compliance)
+Last session: 2026-06-02T11:33:04.416Z
+Stopped at: Phase 5 context gathered
+Resume file: .planning/phases/05-email-delivery-gdpr-compliance/05-CONTEXT.md

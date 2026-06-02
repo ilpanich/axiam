@@ -21,18 +21,22 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 ## Phase Details
 
 ### Phase 1: Cookie-Based Authentication
+
 **Goal**: Users authenticate via httpOnly secure cookies instead of XSS-vulnerable sessionStorage tokens
 **Depends on**: Nothing (foundational change)
 **Requirements**: REQ-1
 **Success Criteria** (what must be TRUE):
+
   1. Browser never exposes JWT tokens to JavaScript (no sessionStorage, no Authorization header)
   2. Login returns Set-Cookie headers with httpOnly, Secure, SameSite=Strict flags
   3. Refresh token cookie is path-scoped to the refresh endpoint only
   4. State-changing API requests are protected against CSRF via double-submit cookie pattern
   5. Frontend login/logout/refresh flows work end-to-end with cookie auth
+
 **Plans**: 3 plans
 
 Plans:
+
 - [x] 01-01-PLAN.md — Backend cookie middleware, CSRF, auth handlers, extractor, /me endpoint
 - [x] 01-02-PLAN.md — Frontend auth refactor (Zustand store, Axios client, auth init hook)
 - [x] 01-03-PLAN.md — Integration tests rewritten for cookie-based auth flow
@@ -40,6 +44,7 @@ Plans:
 **UI hint**: yes
 
 ### Scope
+
 - Backend cookie middleware (Set-Cookie on login/refresh, clear on logout)
 - CSRF double-submit cookie implementation
 - Frontend refactor: remove sessionStorage handling, remove Authorization header, switch to credentials: "include"
@@ -49,18 +54,22 @@ Plans:
 ---
 
 ### Phase 2: Security Headers & Rate Limiting
+
 **Goal**: All HTTP responses include security headers and authentication endpoints resist brute-force attacks
 **Depends on**: Phase 1
 **Requirements**: REQ-2, REQ-3
 **Success Criteria** (what must be TRUE):
+
   1. Security audit tools (e.g., securityheaders.com) report no missing headers on API responses
   2. Nginx frontend config includes CSP, HSTS, and Permissions-Policy headers
   3. Repeated login attempts from the same IP are throttled after 10 requests per minute
   4. Account locks out after 5 consecutive failed logins with a 15-minute cooldown
   5. gRPC authorization endpoint has brute-force protection
+
 **Plans**: 5 plans
 
 Plans:
+
 - [x] 02-01-PLAN.md — Security headers middleware (backend + nginx) + tests
 - [x] 02-02-PLAN.md — REST rate limiting (actix-governor, config, per-endpoint wiring)
 - [x] 02-03-PLAN.md — gRPC rate limiting (tower-governor layer)
@@ -70,6 +79,7 @@ Plans:
 **UI hint**: yes
 
 ### Scope
+
 - Actix-Web middleware for X-Content-Type-Options, X-Frame-Options, Referrer-Policy
 - Nginx config for CSP, HSTS, Permissions-Policy
 - actix-governor rate limiting on /auth/login, /auth/register, /oauth2/token, /auth/password-reset
@@ -80,26 +90,32 @@ Plans:
 ---
 
 ### Phase 3: RBAC Enforcement
+
 **Goal**: Every API endpoint enforces authorization with default-deny, and the first admin can bootstrap the system
 **Depends on**: Phase 1, Phase 2
 **Requirements**: REQ-4
 **Success Criteria** (what must be TRUE):
+
   1. An unauthenticated request to any non-public endpoint returns 401
   2. An authenticated user without the required permission gets 403
   3. Self-service endpoints (profile, own MFA) work for the resource owner but reject other users
   4. Admin bootstrap creates the first admin user when no admins exist, then disables itself
   5. Admin can list users and manage MFA for other users
+
 **Plans**: 5 plans
 
 Plans:
+
 - [x] 03-01-PLAN.md — Permission registry, seeder, AuthzMiddleware, AuthzChecker wiring
 - [x] 03-02-PLAN.md — Handler-level RequirePermission checks + self-service ownership
 - [x] 03-03-PLAN.md — Admin bootstrap endpoint + default role seeding
 - [x] 03-04-PLAN.md — Frontend RBAC sidebar gating + /me permissions response
 - [x] 03-05-PLAN.md — Integration tests + bootstrap page UI
+
 **UI hint**: yes
 
 ### Scope
+
 - Default-deny authorization middleware
 - Public endpoint allowlist (login, register, health, OIDC discovery, JWKS, federation callbacks)
 - Permission-per-endpoint mapping (e.g., users:read, users:write, roles:read)
@@ -112,18 +128,22 @@ Plans:
 ---
 
 ### Phase 4: Federation Verification & Session Security
+
 **Goal**: Federation tokens are cryptographically verified and session lifecycle is properly managed
 **Depends on**: Phase 1
 **Requirements**: REQ-5, REQ-7
 **Success Criteria** (what must be TRUE):
+
   1. OIDC login rejects tokens with invalid signatures, expired claims, or wrong audience
   2. SAML login rejects responses with invalid XML signatures or expired conditions
   3. Changing or resetting a password immediately invalidates all other active sessions
   4. Federation client secrets are encrypted at rest in the database
   5. Service accounts receive a dedicated token type distinguishable from user tokens
+
 **Plans**: 5 plans
 
 ### Scope
+
 - OIDC JWKS fetching, caching (1h TTL), and ID token signature verification
 - OIDC claim validation (iss, aud, exp, nonce) with algorithm pinning (reject "none")
 - SAML XML signature verification and condition validation (NotOnOrAfter, NotBefore, Audience)
@@ -136,31 +156,44 @@ Plans:
 - Unauthenticated federation login endpoints for first-time SSO
 
 ### Phase 19 follow-ups raised during Phase 4 execution
+
 - Per-FederationConfig registered redirect_uri allowlist for first-time SSO endpoints (currently only a scheme/host HTTPS guard; needs a schema column) (T19.14)
 - Resolve real org_id from tenant in SSO callback session/token creation (currently `Uuid::nil()`; SSO access tokens carry an empty org_id claim) (T19.15)
 
 ---
 
 ### Phase 5: Email Delivery & GDPR Compliance
+
 **Goal**: Auth flows send real emails and users can exercise GDPR data rights
 **Depends on**: Phase 3
 **Requirements**: REQ-6, REQ-8
 **Success Criteria** (what must be TRUE):
+
   1. Password reset flow sends an email with a reset link to the user's address
   2. Email verification flow sends a verification email after registration
   3. A user can export all their personal data as a single JSON download
   4. A user can request account deletion, which removes PII and pseudonymizes audit logs
   5. Audit log entries for deleted users show DELETED_USER_<hash> instead of PII
+
 **Plans**: 5 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 05-01-PLAN.md — Schema v15 + EmailConfigRepository (encrypted secrets) + gdpr_pseudonym + user anonymization + GDPR support repos
 - [ ] 05-02-PLAN.md — AMQP mail transport: OutboundMailMessage/MailType + mail.outbound queue + dead-letter queue
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 05-03-PLAN.md — Mail consumer (retry + delivery_failed audit) + key loading + email-secret backfill + consumer spawn
 - [ ] 05-04-PLAN.md — Wire reset/verify/notification stubs to enqueue mail (enumeration-safe) + consent at registration
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 05-05-PLAN.md — GDPR Art. 15 export + Art. 17 erasure (purge/export sweeps, pseudonymization, cancel) + gdpr_test.rs
 
 ### Scope
+
 - Wire password reset handler to EmailService (T19.11)
 - Wire email verification handler to EmailService (T19.12)
 - Wire notification dispatcher to EmailService (T19.13)
@@ -176,18 +209,22 @@ Plans:
 ---
 
 ### Phase 6: CI/CD & Infrastructure Hardening
+
 **Goal**: CI pipeline catches vulnerabilities automatically and deployment configs follow security best practices
 **Depends on**: Phase 1 (cookie auth changes affect Docker compose and K8s configs)
 **Requirements**: REQ-9, REQ-10
 **Success Criteria** (what must be TRUE):
+
   1. A PR with a known vulnerable dependency fails CI
   2. Docker images run as non-root with a minimal base image
   3. K8s NetworkPolicy restricts pod-to-pod traffic to only required paths
   4. Container image scan runs on every Docker build in CI
   5. OpenAPI schema matches actual endpoint signatures
+
 **Plans**: 5 plans
 
 ### Scope
+
 - cargo-audit step in CI (fail on known vulnerabilities with patches)
 - cargo-deny step in CI (license + vulnerability + duplicate checking)
 - npm audit step in CI for frontend
@@ -204,19 +241,23 @@ Plans:
 ---
 
 ### Phase 7: Compliance Verification & Test Closure
+
 **Goal**: AXIAM passes security compliance audits and all critical test gaps are closed
 **Depends on**: Phase 1, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6
 **Requirements**: REQ-11
 **Success Criteria** (what must be TRUE):
+
   1. OWASP ASVS Level 2 checklist for IAM-relevant controls has no open items
   2. OAuth2 RFC 6749/7636 compliance verification passes (all required parameters, error codes, PKCE)
   3. OIDC Core 1.0 conformance verification passes (discovery, JWKS, userinfo, token validation)
   4. All previously untested crates (axiam-pki, axiam-authz, axiam-federation, axiam-api-grpc) have integration tests
   5. Frontend E2E tests cover login, RBAC-gated navigation, and federation flows
+
 **Plans**: 5 plans
 **UI hint**: yes
 
 ### Scope
+
 - gRPC authorization integration tests (T19.1)
 - Concurrent batch authorization tests (T19.2)
 - PKI/certificate generation tests (axiam-pki)

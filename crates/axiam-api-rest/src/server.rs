@@ -121,6 +121,16 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
                 "/reset/confirm",
                 web::post().to(handlers::password_reset::confirm_reset::<C>),
             )
+            // --- GDPR delete-cancel (public — emailed single-use token, D-09) ---
+            // Listed in PUBLIC_PATHS so AuthzMiddleware lets it through without a JWT.
+            .service(
+                web::resource("/account/delete/cancel")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(
+                        web::get()
+                            .to(handlers::gdpr::cancel_account_delete::<C>),
+                    ),
+            )
             .service(
                 web::resource("/password/change")
                     .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
@@ -547,6 +557,31 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
             .service(
                 web::resource("/admin/bootstrap")
                     .route(web::post().to(handlers::bootstrap::bootstrap::<C>)),
+            )
+            // --- GDPR Art. 15 Export ---
+            .service(
+                web::resource("/account/export")
+                    .wrap(build_governor(rate_limit_cfg.register_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::gdpr::request_account_export::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/account/export/{token}")
+                    .route(
+                        web::get()
+                            .to(handlers::gdpr::download_account_export::<C>),
+                    ),
+            )
+            // --- GDPR Art. 17 Delete ---
+            .service(
+                web::resource("/account/delete")
+                    .wrap(build_governor(rate_limit_cfg.register_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::gdpr::request_account_delete::<C>),
+                    ),
             );
     // Authenticated SAML SP routes — only when the `saml` feature is on.
     #[cfg(feature = "saml")]

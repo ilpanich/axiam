@@ -165,6 +165,15 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "admin:bootstrap",
         "Bootstrap the first admin user in a tenant",
     ),
+    // GDPR data-subject rights (D-07/D-13)
+    (
+        "gdpr:export",
+        "Request or download a GDPR Art. 15 data export",
+    ),
+    (
+        "users:erase",
+        "Request GDPR Art. 17 erasure of a user account",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -224,6 +233,8 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/admin/bootstrap",
     // OpenAPI docs
     "/api/docs/*",
+    // GDPR delete-cancel link (emailed, public — single-use token-gated, D-09)
+    "/api/v1/auth/account/delete/cancel",
 ];
 
 // ---------------------------------------------------------------------------

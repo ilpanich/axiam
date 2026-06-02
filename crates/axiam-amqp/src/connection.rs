@@ -18,13 +18,23 @@ pub mod queues {
     pub const AUDIT_EVENTS: &str = "axiam.audit.events";
     /// Outbound real-time event notifications.
     pub const NOTIFICATIONS: &str = "axiam.notifications";
+    /// Outbound async mail delivery queue (D-14).
+    ///
+    /// Messages dead-letter to [`MAIL_OUTBOUND_DLQ`] when exhausted.
+    pub const MAIL_OUTBOUND: &str = "axiam.mail.outbound";
+    /// Dead-letter queue for [`MAIL_OUTBOUND`] exhausted-retry messages (D-14).
+    pub const MAIL_OUTBOUND_DLQ: &str = "axiam.mail.outbound.dlq";
 }
 
+/// Queues declared via the plain durable loop (no special arguments).
 const ALL_QUEUES: &[&str] = &[
     queues::AUTHZ_REQUEST,
     queues::AUTHZ_RESPONSE,
     queues::AUDIT_EVENTS,
     queues::NOTIFICATIONS,
+    // MAIL_OUTBOUND_DLQ is plain-durable (no DLQ args of its own).
+    queues::MAIL_OUTBOUND_DLQ,
+    // MAIL_OUTBOUND is declared separately below with x-dead-letter-exchange.
 ];
 
 /// Manages a RabbitMQ connection and channel.
@@ -97,6 +107,11 @@ impl AmqpManager {
     }
 
     /// Declare all AXIAM queues as durable.
+    ///
+    /// `MAIL_OUTBOUND_DLQ` is declared first (plain durable, no DLQ args),
+    /// then `MAIL_OUTBOUND` is declared explicitly with
+    /// `x-dead-letter-exchange` pointing at the DLQ so that exhausted-retry
+    /// messages dead-letter rather than being silently dropped (D-14).
     pub async fn declare_queues(&self) -> Result<(), AmqpError> {
         let options = QueueDeclareOptions {
             durable: true,
@@ -110,6 +125,22 @@ impl AmqpManager {
                 .map_err(AmqpError::Declaration)?;
             info!(queue, "Declared queue");
         }
+
+        // Declare MAIL_OUTBOUND with explicit dead-letter routing (D-14).
+        // The DLQ must already exist at this point (declared in the loop above).
+        let mut mail_args = FieldTable::default();
+        mail_args.insert(
+            "x-dead-letter-exchange".into(),
+            lapin::types::AMQPValue::LongString(queues::MAIL_OUTBOUND_DLQ.into()),
+        );
+        self.channel
+            .queue_declare(queues::MAIL_OUTBOUND.into(), options, mail_args)
+            .await
+            .map_err(AmqpError::Declaration)?;
+        info!(
+            queue = queues::MAIL_OUTBOUND,
+            "Declared queue (with DLQ routing)"
+        );
 
         Ok(())
     }

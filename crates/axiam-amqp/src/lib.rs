@@ -10,5 +10,7 @@ pub mod notification_publisher;
 
 pub use config::AmqpConfig;
 pub use connection::AmqpManager;
+pub use connection::queues;
 pub use error::AmqpError;
+pub use messages::{MailType, OutboundMailMessage};
 pub use notification_publisher::NotificationPublisher;

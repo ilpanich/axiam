@@ -218,9 +218,9 @@ REQ-11 (Testing) ──────────── runs after each REQ as ver
 | REQ-3 | Phase 2 | Complete |
 | REQ-4 | Phase 3 | Complete |
 | REQ-5 | Phase 4 | Pending |
-| REQ-6 | Phase 5 | Pending |
+| REQ-6 | Phase 5 | Complete |
 | REQ-7 | Phase 4 | Pending |
-| REQ-8 | Phase 5 | Pending |
+| REQ-8 | Phase 5 | Complete |
 | REQ-9 | Phase 6 | Pending |
 | REQ-10 | Phase 6 | Pending |
 | REQ-11 | Phase 7 | Pending |

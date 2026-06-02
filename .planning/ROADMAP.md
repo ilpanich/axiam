@@ -180,7 +180,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 05-01-PLAN.md — Schema v15 + EmailConfigRepository (encrypted secrets) + gdpr_pseudonym + user anonymization + GDPR support repos
+- [x] 05-01-PLAN.md — Schema v15 + EmailConfigRepository (encrypted secrets) + gdpr_pseudonym + user anonymization + GDPR support repos
 - [ ] 05-02-PLAN.md — AMQP mail transport: OutboundMailMessage/MailType + mail.outbound queue + dead-letter queue
 
 **Wave 2** *(blocked on Wave 1 completion)*
@@ -285,7 +285,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 | 2. Security Headers & Rate Limiting | 5/5 | Complete   | 2026-05-29 |
 | 3. RBAC Enforcement | 5/5 | Complete   | 2026-05-29 |
 | 4. Federation Verification & Session Security | 6/6 | Complete   | 2026-05-29 |
-| 5. Email Delivery & GDPR Compliance | 0/5 | Planned | - |
+| 5. Email Delivery & GDPR Compliance | 1/5 | In Progress|  |
 | 6. CI/CD & Infrastructure Hardening | 0/0 | Not started | - |
 | 7. Compliance Verification & Test Closure | 0/0 | Not started | - |
 

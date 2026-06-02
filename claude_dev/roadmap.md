@@ -524,6 +524,11 @@ Connect `NotificationDispatcher` to `EmailService` with template resolution and 
 
 **Commit**: `feat(notifications): wire email delivery for admin notification dispatch`
 
+### T19.20 — Admin Email-Config CRUD API
+Add admin-facing REST endpoints to create/read/update/delete `email_config` rows (org- and tenant-scoped), guarded by an appropriate RBAC permission (e.g. `email_config:write`). Phase 5 builds the DB-backed `SurrealEmailConfigRepository` (encrypt-at-rest, all five providers) and resolves the effective provider per org/tenant, but provider rows are seeded/written via the repository only — there is no admin UI/API in Phase 5. This task exposes that configuration surface. Deferred from Phase 5 (see `.planning/phases/05-email-delivery-gdpr-compliance/05-CONTEXT.md` Claude's Discretion).
+
+**Commit**: `feat(api-rest): admin email-config CRUD endpoints (org/tenant scoped)`
+
 ---
 
 ## Summary

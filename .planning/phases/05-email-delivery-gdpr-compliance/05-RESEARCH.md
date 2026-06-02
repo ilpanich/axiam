@@ -34,7 +34,7 @@
 - D-14: All outbound mail sent asynchronously via AMQP with retry. Five mail types: password reset, email verification, audit notifications, deletion-cancel link, export-ready link.
 - D-15: Password-reset and email-verification request endpoints return uniform enumeration-safe response. Merely enqueue; account existence never leaks.
 - D-16: `email.delivery_failed` audit event keyed on `user_id` (not raw email); `metadata = { provider, error_class, attempt_count, next_retry_at, mail_type }`.
-- D-17: Provider secrets encrypted at rest mirroring Phase 4 federation-secret pattern: `AXIAM_EMAIL_ENCRYPTION_KEY` (32-byte base64), AES-256-GCM, ciphertext + nonce + key_version. Research must verify whether already implemented or aspirational stub.
+- D-17: Provider secrets encrypted at rest mirroring Phase 4 federation-secret pattern: `AXIAM__EMAIL_ENCRYPTION_KEY` (32-byte base64), AES-256-GCM, ciphertext + nonce + key_version. Research must verify whether already implemented or aspirational stub.
 
 **Template Escaping**
 - D-18: Triple-stash `{{{...}}}` audit is moot — axiam-email uses custom `{{placeholder}}` engine. New wiring must use `render_html` for HTML bodies.
@@ -187,7 +187,7 @@ handler: ownership check (AuthenticatedUser.id == target_id OR users:erase permi
             - DELETE webauthn_credentials WHERE user_id = X
             - UPDATE user SET mfa_secret = NULL
          b. Compute HMAC pseudonym:
-            hash = HMAC-SHA256(AXIAM_GDPR_PSEUDONYM_PEPPER, tenant_id || user_id)
+            hash = HMAC-SHA256(AXIAM__GDPR_PSEUDONYM_PEPPER, tenant_id || user_id)
             truncated_hex = &hex(hash)[..16]  // 16 hex chars = 64 bits
             pseudonym = format!("DELETED_USER_{truncated_hex}")
          c. Anonymize user row in place:
@@ -277,11 +277,11 @@ fn compute_pseudonym(pepper: &[u8; 32], tenant_id: Uuid, user_id: Uuid) -> Strin
 ```
 Note: `hex` crate — check if workspace dep. If not, use `format!("{:02x}", b)` or add to workspace. [ASSUMED: `hex` not confirmed as workspace dep — planner should check or use manual format]
 
-**Env-key loading** (for new `AXIAM_EMAIL_ENCRYPTION_KEY` and `AXIAM_GDPR_PSEUDONYM_PEPPER`):
+**Env-key loading** (for new `AXIAM__EMAIL_ENCRYPTION_KEY` and `AXIAM__GDPR_PSEUDONYM_PEPPER`):
 ```rust
 // Source: crates/axiam-server/src/main.rs lines 83-112
 // Pattern: read env hex string, hex::decode, try_into [u8; 32]
-if let Ok(hex) = std::env::var("AXIAM_EMAIL_ENCRYPTION_KEY") {
+if let Ok(hex) = std::env::var("AXIAM__EMAIL_ENCRYPTION_KEY") {
     let bytes = hex::decode(&hex).expect("...");
     let key: [u8; 32] = bytes.try_into().expect("...");
     // store in config struct
@@ -444,7 +444,7 @@ DEFINE INDEX idx_email_config_scope ON TABLE email_config
 
 2. **SurrealEmailConfigRepository implementation** in `axiam-db/src/repository/email_config.rs` implementing the `EmailConfigRepository` trait.
 
-3. **Env key loading** in `axiam-server/src/main.rs`: `AXIAM_EMAIL_ENCRYPTION_KEY` (same pattern as `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY`, lines 96-112).
+3. **Env key loading** in `axiam-server/src/main.rs`: `AXIAM__EMAIL_ENCRYPTION_KEY` (same pattern as `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY`, lines 96-112).
 
 4. **Decrypt at read time** in the repository's `get_org_config` / `get_effective_config` — return plaintext `password`/`api_key` fields in the `EmailConfig` struct (which is ephemeral, not persisted plaintext).
 
@@ -555,7 +555,7 @@ pub struct OutboundMailMessage {
 
 ### Pitfall 6: Export File AES-GCM Key Not Available to Consumer
 
-**What goes wrong:** Background export worker cannot encrypt the file because `AXIAM_EMAIL_ENCRYPTION_KEY` is not loaded.
+**What goes wrong:** Background export worker cannot encrypt the file because `AXIAM__EMAIL_ENCRYPTION_KEY` is not loaded.
 **Why it happens:** The key is loaded in `main.rs` but not passed to the background job task.
 **How to avoid:** Pass the key (as `[u8; 32]`) to the background job at construction time (mirrors how `auth_config.mfa_encryption_key` is used in auth handlers).
 
@@ -609,8 +609,8 @@ tokio::select! {
 ### Verified Pattern: Env Key Loading
 ```rust
 // Source: crates/axiam-server/src/main.rs lines 83-112
-// Pattern for AXIAM_EMAIL_ENCRYPTION_KEY and AXIAM_GDPR_PSEUDONYM_PEPPER
-if let Ok(hex) = std::env::var("AXIAM_EMAIL_ENCRYPTION_KEY") {
+// Pattern for AXIAM__EMAIL_ENCRYPTION_KEY and AXIAM__GDPR_PSEUDONYM_PEPPER
+if let Ok(hex) = std::env::var("AXIAM__EMAIL_ENCRYPTION_KEY") {
     let bytes = hex::decode(&hex).expect("must be 64-char hex");
     let key: [u8; 32] = bytes.try_into().expect("must be 32 bytes");
     config.email_encryption_key = Some(key);
@@ -753,22 +753,19 @@ Nyquist validation is enabled (`nyquist_validation: true` in config.json).
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Schema permission for `pseudonymize_actor` (D-04)**
+1. **Schema permission for `pseudonymize_actor` (D-04)** — **RESOLVED**
    - What we know: `audit_log FOR update NONE` is schema-enforced (schema.rs:310)
-   - What's unclear: Whether SurrealDB v3 root auth bypasses table-level `FOR update NONE`
-   - Recommendation: Planner must include a schema migration (v15) to relax the UPDATE permission with a scoped condition. Until SurrealDB behavior is verified, both Option A and B should be documented as viable paths, with Option A as the default.
+   - Resolution: **Option A is the default.** Schema migration v15 (Plan 05-01, Task 1) relaxes the `audit_log` UPDATE permission to `FOR update WHERE $auth.role = 'gdpr_pseudonymizer'`, scoping the single sanctioned `pseudonymize_actor` path. Option B (root-auth connection bypass) is the documented **runtime fallback** if assumption A1 holds (root auth bypasses `FOR update NONE`) and the scoped-role relaxation proves insufficient in SurrealDB v3. The 05-01 SUMMARY records which mechanism SurrealDB actually honored. True enforcement remains the app-layer single-method guard (only `pseudonymize_actor` issues UPDATE).
 
-2. **Email config for the mail consumer before DB implementation**
+2. **Email config for the mail consumer before DB implementation** — **RESOLVED**
    - What we know: The mail consumer needs `effective_email_config` to send; the DB implementation doesn't exist yet.
-   - What's unclear: Sequencing within Phase 5 — can the consumer fall back to a static env-var config while the DB repo is being built?
-   - Recommendation: Plan the DB repo implementation (D-17) as the first wave task so the consumer can use it. Alternatively, a fallback AXIAM_SMTP_URL env var could bootstrap the consumer for initial testing.
+   - Resolution: Wave ordering guarantees the repo exists first. **EmailConfigRepository is built in Plan 05-01 (Wave 1); the mail consumer is Plan 05-03 (Wave 2).** Wave 2 cannot start until Wave 1 completes, so the consumer always has a real `SurrealEmailConfigRepository`. No env-var fallback config is needed or planned.
 
-3. **AMQP dead-letter exchange configuration**
+3. **AMQP dead-letter exchange configuration** — **RESOLVED**
    - What we know: Current queue declarations in `connection.rs` use `FieldTable::default()` (no DLQ arguments).
-   - What's unclear: Whether the RabbitMQ instance has a dead-letter exchange pre-configured.
-   - Recommendation: Planner should add `x-dead-letter-exchange` to the mail queue declaration with an explicit DLQ name. The application should not assume broker-level DLQ routing.
+   - Resolution: **Plan 05-02 declares an explicit `x-dead-letter-exchange` on the `axiam.mail.outbound` queue** (FieldTable arg pointing at `axiam.mail.outbound.dlq`), and declares the DLQ itself in `ALL_QUEUES`. The application never assumes broker-level DLQ pre-config.
 
 ---
 

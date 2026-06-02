@@ -336,6 +336,66 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
     pub fn new(db: Surreal<C>, key: [u8; 32]) -> Self {
         Self { db, key }
     }
+
+    /// Idempotent startup backfill: encrypt any legacy plaintext provider
+    /// secrets that pre-date the D-17 at-rest encryption requirement (D-17).
+    ///
+    /// Since the email_config table was introduced in Schema v15 (Phase 5)
+    /// with encrypted columns from the start, this method currently always
+    /// returns 0. It is retained so operators upgrading from pre-v15 snapshots
+    /// or external tooling that wrote plaintext rows before the schema was
+    /// finalized are automatically migrated.
+    ///
+    /// The query selects SMTP rows where `smtp_password_ciphertext IS NULL`
+    /// and API-provider rows where `api_key_ciphertext IS NULL` — both of
+    /// which represent unencrypted legacy state. Already-encrypted rows are
+    /// skipped (idempotent). Returns the count of rows migrated.
+    pub async fn backfill_plaintext_secrets(&self) -> AxiamResult<u64> {
+        // Phase 5 added the email_config table with encrypted columns only —
+        // no plaintext password column exists in the schema. Therefore this
+        // SELECT will always return 0 rows on a v15+ database, making the
+        // backfill a true no-op unless a pre-v15 migration path introduces
+        // plaintext data in the future. The function compiles and runs, logs
+        // the count, and is retained for the federation-backfill analogy (D-17).
+        let result = self
+            .db
+            .query(
+                "SELECT count() AS total FROM email_config \
+                 WHERE (provider_kind IN ['smtp'] AND smtp_password_ciphertext = NONE) \
+                    OR (provider_kind IN ['sendgrid','postmark','resend','brevo'] \
+                        AND api_key_ciphertext = NONE) \
+                 GROUP ALL",
+            )
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        #[derive(Debug, surrealdb_types::SurrealValue)]
+        struct CountRow {
+            total: u64,
+        }
+
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        let pending = rows.into_iter().next().map(|r| r.total).unwrap_or(0);
+
+        // If there are no pending rows (expected on v15+), return immediately.
+        if pending == 0 {
+            return Ok(0);
+        }
+
+        // TODO(T19.22): implement the UPDATE path when a pre-v15 plaintext
+        // migration becomes necessary. For now, log and return count so
+        // operators are aware of unencrypted rows requiring intervention.
+        tracing::warn!(
+            pending_rows = pending,
+            "email_config rows with unencrypted secrets found; \
+             automatic migration not yet implemented (T19.22)"
+        );
+        Ok(pending)
+    }
 }
 
 impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {

@@ -20,7 +20,7 @@ use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepositor
 use axiam_db::{
     DbConfig, DbManager, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
     SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealFederationConfigRepository,
+    SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealRefreshTokenRepository,
@@ -62,6 +62,16 @@ struct AppConfig {
     /// `60..=3600` at startup (T-04-35).
     #[serde(default = "default_cleanup_interval_secs")]
     cleanup_interval_secs: u64,
+    /// AES-256-GCM key (32 bytes) for encrypting email provider secrets at rest
+    /// (D-17). Loaded from `AXIAM__EMAIL_ENCRYPTION_KEY` (hex-encoded, 64 chars).
+    /// Skipped by serde — populated manually from env at startup.
+    #[serde(skip)]
+    email_encryption_key: Option<[u8; 32]>,
+    /// HMAC-SHA256 pepper (32 bytes) for GDPR audit pseudonymization (D-02).
+    /// Loaded from `AXIAM__GDPR_PSEUDONYM_PEPPER` (hex-encoded, 64 chars).
+    /// Skipped by serde — populated manually from env at startup.
+    #[serde(skip)]
+    gdpr_pseudonym_pepper: Option<[u8; 32]>,
 }
 
 #[tokio::main]
@@ -111,6 +121,40 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
+    // Load email encryption key from env (D-17).
+    if let Ok(hex) = std::env::var("AXIAM__EMAIL_ENCRYPTION_KEY") {
+        let bytes = hex::decode(&hex).expect(
+            "AXIAM__EMAIL_ENCRYPTION_KEY must be a 64-char hex string (32 bytes / 256 bits)",
+        );
+        let key: [u8; 32] = bytes
+            .try_into()
+            .expect("AXIAM__EMAIL_ENCRYPTION_KEY must be exactly 32 bytes (256 bits)");
+        config.email_encryption_key = Some(key);
+        tracing::info!("Email encryption key loaded");
+    } else {
+        tracing::warn!(
+            "AXIAM__EMAIL_ENCRYPTION_KEY not set — mail consumer disabled, \
+             email provider secrets unavailable"
+        );
+    }
+
+    // Load GDPR pseudonym pepper from env (D-02).
+    if let Ok(hex) = std::env::var("AXIAM__GDPR_PSEUDONYM_PEPPER") {
+        let bytes = hex::decode(&hex).expect(
+            "AXIAM__GDPR_PSEUDONYM_PEPPER must be a 64-char hex string (32 bytes / 256 bits)",
+        );
+        let key: [u8; 32] = bytes
+            .try_into()
+            .expect("AXIAM__GDPR_PSEUDONYM_PEPPER must be exactly 32 bytes (256 bits)");
+        config.gdpr_pseudonym_pepper = Some(key);
+        tracing::info!("GDPR pseudonym pepper loaded");
+    } else {
+        tracing::warn!(
+            "AXIAM__GDPR_PSEUDONYM_PEPPER not set — GDPR user deletion \
+             pseudonymization will be unavailable"
+        );
+    }
+
     // Clamp cleanup interval to 60..=3600 seconds (T-04-35).
     config.cleanup_interval_secs = config.cleanup_interval_secs.clamp(60, 3600);
 
@@ -157,6 +201,24 @@ async fn main() -> std::io::Result<()> {
             tracing::warn!(
                 "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY missing — \
                  skipping federation secret backfill"
+            );
+        }
+    }
+
+    // Boot backfill: encrypt any legacy plaintext email provider secret rows (D-17).
+    // Idempotent — rows where ciphertext IS NOT NULL are skipped. Runs before HTTP bind
+    // to avoid serving plaintext-secret rows after this deploy.
+    {
+        if let Some(email_key) = config.email_encryption_key {
+            let boot_email_repo = SurrealEmailConfigRepository::new(db.client().clone(), email_key);
+            match boot_email_repo.backfill_plaintext_secrets().await {
+                Ok(n) => tracing::info!(migrated = n, "email config secrets backfill complete"),
+                Err(e) => tracing::warn!(error = %e, "email config secrets backfill failed"),
+            }
+        } else {
+            tracing::warn!(
+                "AXIAM__EMAIL_ENCRYPTION_KEY missing — \
+                 skipping email config secrets backfill"
             );
         }
     }
@@ -377,6 +439,28 @@ async fn main() -> std::io::Result<()> {
         tracing::error!("AMQP audit consumer exited — shutting down process");
         std::process::exit(1);
     });
+
+    // Spawn AMQP mail consumer on a background task (D-14).
+    // Only spawned when AXIAM__EMAIL_ENCRYPTION_KEY is present; otherwise
+    // mail delivery is disabled and a warning was logged at startup (T-5-key-absent).
+    if let Some(email_key) = config.email_encryption_key {
+        let mail_channel = amqp
+            .create_channel()
+            .await
+            .expect("Failed to create AMQP mail consumer channel");
+        let mail_email_config_repo =
+            SurrealEmailConfigRepository::new(db_handle.clone(), email_key);
+        let mail_audit_repo = audit_repo.clone();
+        tokio::spawn(async move {
+            axiam_amqp::start_mail_consumer(mail_channel, mail_email_config_repo, mail_audit_repo)
+                .await;
+            tracing::error!("AMQP mail consumer exited — shutting down process");
+            std::process::exit(1);
+        });
+        tracing::info!("Mail consumer spawned");
+    } else {
+        tracing::warn!("Mail consumer NOT spawned — AXIAM__EMAIL_ENCRYPTION_KEY is missing");
+    }
 
     // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();

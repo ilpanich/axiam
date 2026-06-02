@@ -1052,7 +1052,13 @@ pub async fn oidc_start_public<C: Connection>(
     );
 
     let auth_url = service
-        .build_authorization_url(tenant_id, b.federation_config_id, &b.redirect_uri, &state, &nonce)
+        .build_authorization_url(
+            tenant_id,
+            b.federation_config_id,
+            &b.redirect_uri,
+            &state,
+            &nonce,
+        )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 
@@ -1146,7 +1152,13 @@ pub async fn oidc_callback_public<C: Connection>(
     // URL.  Since we built the authorize URL using the SPA redirect_uri as
     // the redirect_uri query param, we must echo the same value here.
     let callback_result = service
-        .handle_callback(tenant_id, config_id, &b.code, &spa_redirect_uri, &expected_nonce)
+        .handle_callback(
+            tenant_id,
+            config_id,
+            &b.code,
+            &spa_redirect_uri,
+            &expected_nonce,
+        )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 
@@ -1367,7 +1379,12 @@ pub async fn saml_acs_public<C: Connection>(
     );
 
     let callback_result = service
-        .handle_saml_response(tenant_id, config_id, &b.saml_response_b64, Some(&b.relay_state))
+        .handle_saml_response(
+            tenant_id,
+            config_id,
+            &b.saml_response_b64,
+            Some(&b.relay_state),
+        )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 

@@ -104,7 +104,9 @@ impl actix_web::FromRequest for AuthenticatedUser {
             // validator is optional so non-session test harnesses are unaffected;
             // the production server (and session-security tests) always register it.
             if let Some(validator) = validator
-                && !validator.is_session_active(user.tenant_id, user.session_id).await
+                && !validator
+                    .is_session_active(user.tenant_id, user.session_id)
+                    .await
             {
                 return Err(AxiamError::AuthenticationFailed {
                     reason: "session revoked or expired".into(),

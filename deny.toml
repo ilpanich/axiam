@@ -1,0 +1,49 @@
+# deny.toml — cargo-deny workspace configuration
+# Docs: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+# Policy decisions: .planning/phases/06-ci-cd-infrastructure-hardening/06-CONTEXT.md (D-01..D-03)
+
+[advisories]
+version = 2
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+ignore = [
+    # RUSTSEC-2023-0071: Marvin Attack — potential RSA key recovery through timing sidechannels.
+    # Affects rsa 0.9.x via pgp 0.19.x (axiam-pki) and jsonwebtoken 10.x (surrealdb-core).
+    # No fixed upgrade is available upstream (rsa crate has no 0.10+ release with a fix).
+    # Mitigated: AXIAM uses RSA keys only for PGP asymmetric encryption (not PKCS#1 v1.5 decryption
+    # in an online signing oracle context). JWT signing uses Ed25519 (not RSA). The timing
+    # side-channel requires a local or remote decryption oracle, which is not exposed by AXIAM.
+    # Review date: 2026-06-04. Re-evaluate when pgp crate or rsa crate publishes a fix.
+    { id = "RUSTSEC-2023-0071", reason = "No upstream fix; RSA used only in PGP encryption path (not decryption oracle); JWT uses Ed25519. Review: 2026-06-04" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

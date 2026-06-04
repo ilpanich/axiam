@@ -69,41 +69,57 @@ RUN find crates/ -name "*.rs" -exec touch {} +
 RUN cargo build --release -p axiam-server \
     && strip target/release/axiam-server
 
+# Enumerate runtime .so dependencies for verification (Pitfall 1: distroless has no apt).
+# This step lets CI confirm exactly which shared libraries the binary needs.
+# The cc-debian12 variant already provides glibc, libgcc, libssl3, libstdc++6, ca-certs.
+# Everything else (xmlsec1, libxml2, libltdl, liblzma) must be COPY'd from builder.
+RUN ldd /build/target/release/axiam-server
+
 # ---------------------------------------------------------------------------
-# Stage 2: Minimal runtime image
+# Stage 2: Minimal runtime image — distroless/cc-debian12 (D-08)
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS runtime
+# nonroot = UID 65532 (username "nonroot") — no shell, no package manager.
+# cc variant includes: glibc, libgcc1, libssl3, libstdc++6, ca-certificates.
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:bd2899c12b335c827750ccf2359879eab09c09b206023dcebea408947d54127c
 
 LABEL org.opencontainers.image.title="axiam-server" \
       org.opencontainers.image.description="AXIAM — Access eXtended Identity and Authorization Management" \
       org.opencontainers.image.vendor="AXIAM Contributors" \
       org.opencontainers.image.source="https://github.com/emanuele/axiam" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      org.opencontainers.image.licenses="Apache-2.0"
 
-# Install runtime dependencies:
-#   ca-certificates — TLS root CAs for outbound HTTPS
-#   libssl3         — OpenSSL shared libs (transitive deps may need it)
-#   curl            — used by HEALTHCHECK
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        libssl3 \
-        libxml2 \
-        libxmlsec1 \
-        libxmlsec1-openssl \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
+# ---------------------------------------------------------------------------
+# SAML runtime libraries (distroless has no apt — COPY from builder, D-08)
+# The cc variant provides glibc/libgcc/libssl3; COPY only the delta needed
+# for xmlsec1/libxml2. Soname symlinks (*.so.N) are the runtime entry points.
+# ---------------------------------------------------------------------------
+# Core xmlsec1 engine
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libxmlsec1.so.1 \
+                    /usr/lib/x86_64-linux-gnu/
+# OpenSSL backend for xmlsec1
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libxmlsec1-openssl.so.1 \
+                    /usr/lib/x86_64-linux-gnu/
+# libxml2 (xmlsec1 dependency)
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libxml2.so.2 \
+                    /usr/lib/x86_64-linux-gnu/
+# libltdl (libtool dlopen — xmlsec1 dynamic engine loading)
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libltdl.so.7 \
+                    /usr/lib/x86_64-linux-gnu/
+# liblzma (libxml2 transitive — XML compression)
+COPY --from=builder /usr/lib/x86_64-linux-gnu/liblzma.so.5 \
+                    /usr/lib/x86_64-linux-gnu/
+# ICU libs (libxml2 transitive — Unicode normalisation); bookworm ships icu72
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libicuuc.so.72 \
+                    /usr/lib/x86_64-linux-gnu/
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libicudata.so.72 \
+                    /usr/lib/x86_64-linux-gnu/
 
-# Create non-root user
-RUN groupadd --gid 1000 axiam \
-    && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin axiam
-
-# Copy the release binary from the builder stage
-COPY --from=builder --chown=axiam:axiam \
+# Copy the release binary from the builder stage (nonroot UID 65532)
+COPY --from=builder --chown=65532:65532 \
     /build/target/release/axiam-server /usr/local/bin/axiam-server
 
-# Switch to non-root user
-USER axiam
-WORKDIR /home/axiam
+# Switch to non-root user (distroless nonroot = UID 65532)
+USER nonroot
 
 # Default environment
 ENV RUST_LOG=axiam=info
@@ -111,8 +127,8 @@ ENV RUST_LOG=axiam=info
 # REST API + gRPC
 EXPOSE 8090 50051
 
-# Health check: probe the REST health endpoint
+# D-09: HEALTHCHECK using the healthcheck subcommand (no curl/shell in distroless)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://localhost:8090/health || exit 1
+    CMD ["/usr/local/bin/axiam-server", "healthcheck"]
 
-ENTRYPOINT ["axiam-server"]
+ENTRYPOINT ["/usr/local/bin/axiam-server"]

@@ -8,7 +8,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build the React frontend
 # ---------------------------------------------------------------------------
-FROM node:24-alpine AS builder
+FROM node:24-alpine@sha256:2bdb65ed1dab192432bc31c95f94155ca5ad7fc1392fb7eb7526ab682fa5bf14 AS builder
 
 WORKDIR /app
 
@@ -26,7 +26,7 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Stage 2: Serve with unprivileged nginx (listens on 8080, runs as uid 101)
 # ---------------------------------------------------------------------------
-FROM nginxinc/nginx-unprivileged:1.29-alpine
+FROM nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
 
 # Copy built assets from builder
 COPY --from=builder /app/dist /usr/share/nginx/html
@@ -40,6 +40,6 @@ LABEL org.opencontainers.image.title="axiam-frontend" \
       org.opencontainers.image.description="AXIAM IAM admin dashboard" \
       org.opencontainers.image.vendor="AXIAM Contributors" \
       org.opencontainers.image.source="https://github.com/emanuele/axiam" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      org.opencontainers.image.licenses="Apache-2.0"
 
 CMD ["nginx", "-g", "daemon off;"]

@@ -19,6 +19,12 @@ jobs:
   build-server:
     name: Build Server Image
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -44,6 +50,39 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
 
+      # D-06 Step 1: build locally (load: true, no push) for scanning
+      - name: Build image (scan target)
+        id: build-local
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.server
+          load: true
+          tags: axiam-server:scan-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # D-06 Step 2: scan — block on HIGH/CRITICAL fixable vulns before push
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: axiam-server:scan-${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+          format: sarif
+          output: trivy-image-server.sarif
+
+      # D-07: upload SARIF to GitHub Security tab
+      - name: Upload image scan SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: trivy-image-server.sarif
+          category: trivy-image-server
+
+      # D-06 Step 3: push (same GHA cache → same layers → same digest)
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
@@ -53,10 +92,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      # D-06: sign the pushed digest (after push, after passing scan)
       - name: Sign image with cosign
         run: cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository }}/server@${{ steps.build.outputs.digest }}
 
@@ -69,6 +110,12 @@ jobs:
   build-frontend:
     name: Build Frontend Image
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -94,6 +141,39 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
 
+      # D-06 Step 1: build locally (load: true, no push) for scanning
+      - name: Build image (scan target)
+        id: build-local
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.frontend
+          load: true
+          tags: axiam-frontend:scan-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # D-06 Step 2: scan — block on HIGH/CRITICAL fixable vulns before push
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: axiam-frontend:scan-${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+          format: sarif
+          output: trivy-image-frontend.sarif
+
+      # D-07: upload SARIF to GitHub Security tab
+      - name: Upload image scan SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: trivy-image-frontend.sarif
+          category: trivy-image-frontend
+
+      # D-06 Step 3: push (same GHA cache → same layers → same digest)
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
@@ -103,10 +183,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      # D-06: sign the pushed digest (after push, after passing scan)
       - name: Sign image with cosign
         run: cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository }}/frontend@${{ steps.build.outputs.digest }}
 

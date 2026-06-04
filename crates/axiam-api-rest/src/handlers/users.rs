@@ -1,10 +1,9 @@
 //! User management endpoints (tenant-scoped via JWT).
 
 use actix_web::{HttpRequest, HttpResponse, web};
-use axiam_core::models::gdpr::CreateConsent;
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
-use axiam_core::repository::{ConsentRepository, PaginatedResult, Pagination, UserRepository};
-use axiam_db::{SurrealConsentRepository, SurrealUserRepository};
+use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
+use axiam_db::SurrealUserRepository;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -101,7 +100,6 @@ pub async fn create<C: Connection>(
     user: AuthenticatedUser,
     authz: AuthzData,
     repo: web::Data<SurrealUserRepository<C>>,
-    consent_repo: web::Data<SurrealConsentRepository<C>>,
     body: web::Json<CreateUserRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("users:create", Uuid::nil())
@@ -115,10 +113,8 @@ pub async fn create<C: Connection>(
         password: req.password,
         metadata: req.metadata,
     };
-    let created = repo.create(input).await?;
 
-    // Record terms_of_service consent atomically with user creation (REQ-8).
-    // Capture IP and User-Agent for Art. 7 proof-of-consent record.
+    // Capture IP and User-Agent for the Art. 7 proof-of-consent record.
     let ip_address = http_req
         .connection_info()
         .realip_remote_addr()
@@ -129,26 +125,12 @@ pub async fn create<C: Connection>(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    if let Err(e) = consent_repo
-        .create(CreateConsent {
-            tenant_id: user.tenant_id,
-            user_id: created.id,
-            consent_type: "terms_of_service".to_string(),
-            version: "current".to_string(),
-            ip_address,
-            user_agent,
-        })
-        .await
-    {
-        // Consent persistence failure is a non-fatal warning — the user was
-        // already created.  Log for investigation; do not fail the request.
-        // T19: Consider making this atomic in a future plan (pitfall 5 note).
-        tracing::warn!(
-            error = %e,
-            user_id = %created.id,
-            "failed to record terms_of_service consent at registration"
-        );
-    }
+    // The user and its terms_of_service consent are written in one transaction:
+    // a consent failure rolls back user creation, so a user can never exist
+    // without proof-of-consent (REQ-8, threat T-5-consent-gap).
+    let created = repo
+        .create_with_consent(input, "terms_of_service", "current", ip_address, user_agent)
+        .await?;
 
     Ok(HttpResponse::Created().json(UserResponse::from(created)))
 }
@@ -319,8 +301,7 @@ pub async fn unlock<C: Connection>(
 
 #[cfg(test)]
 mod consent_tests {
-    use axiam_core::models::gdpr::CreateConsent;
-    use axiam_core::repository::{ConsentRepository, UserRepository};
+    use axiam_core::repository::ConsentRepository;
     use axiam_db::{SurrealConsentRepository, SurrealUserRepository};
     use surrealdb::Surreal;
     use surrealdb::engine::local::Mem;
@@ -333,7 +314,8 @@ mod consent_tests {
         db
     }
 
-    /// Registration records exactly one terms_of_service consent for the new user.
+    /// The atomic registration path commits exactly one terms_of_service
+    /// consent row alongside the new user (threat T-5-consent-gap).
     #[tokio::test]
     async fn registration_creates_consent_row() {
         let db = setup_db().await;
@@ -341,32 +323,25 @@ mod consent_tests {
         let consent_repo = SurrealConsentRepository::new(db.clone());
         let tenant_id = Uuid::new_v4();
 
-        // Create user
+        // Atomic user + consent creation — the handler's real path.
         let user = user_repo
-            .create(axiam_core::models::user::CreateUser {
-                tenant_id,
-                username: "testuser".to_string(),
-                email: "test@example.com".to_string(),
-                password: "Test1234!".to_string(),
-                metadata: None,
-            })
+            .create_with_consent(
+                axiam_core::models::user::CreateUser {
+                    tenant_id,
+                    username: "testuser".to_string(),
+                    email: "test@example.com".to_string(),
+                    password: "Test1234!".to_string(),
+                    metadata: None,
+                },
+                "terms_of_service",
+                "current",
+                Some("127.0.0.1".to_string()),
+                Some("test-agent/1.0".to_string()),
+            )
             .await
             .unwrap();
 
-        // Record consent (mirrors the handler's consent logic)
-        consent_repo
-            .create(CreateConsent {
-                tenant_id,
-                user_id: user.id,
-                consent_type: "terms_of_service".to_string(),
-                version: "current".to_string(),
-                ip_address: Some("127.0.0.1".to_string()),
-                user_agent: Some("test-agent/1.0".to_string()),
-            })
-            .await
-            .unwrap();
-
-        // Verify exactly one consent row for this user
+        // The consent row must be committed with user_id == the new user's id.
         let consents = consent_repo.list_by_user(tenant_id, user.id).await.unwrap();
         assert_eq!(consents.len(), 1, "expected exactly one consent row");
         assert_eq!(consents[0].consent_type, "terms_of_service");
@@ -374,5 +349,6 @@ mod consent_tests {
         assert_eq!(consents[0].user_id, user.id);
         assert_eq!(consents[0].tenant_id, tenant_id);
         assert_eq!(consents[0].ip_address.as_deref(), Some("127.0.0.1"));
+        assert_eq!(consents[0].user_agent.as_deref(), Some("test-agent/1.0"));
     }
 }

@@ -495,6 +495,90 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 // ---------------------------------------------------------------------------
 
 impl<C: Connection> SurrealUserRepository<C> {
+    /// Atomically create a user together with its `terms_of_service` consent
+    /// row (REQ-8 / GDPR Art. 7 proof-of-consent).
+    ///
+    /// Both inserts run inside a single SurrealDB `BEGIN..COMMIT` transaction:
+    /// if the consent insert fails, the user insert is rolled back. This makes
+    /// the invariant *"a user never exists without proof-of-consent"* hold even
+    /// on a partial DB failure (threat T-5-consent-gap). AXIAM never physically
+    /// deletes user rows (anonymize-in-place preserves FK integrity), so a
+    /// compensating delete could not satisfy this invariant — the transaction
+    /// is required.
+    pub async fn create_with_consent(
+        &self,
+        input: CreateUser,
+        consent_type: &str,
+        consent_version: &str,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> AxiamResult<User> {
+        let id = Uuid::new_v4();
+        let id_str = id.to_string();
+        let consent_id = Uuid::new_v4().to_string();
+        let tenant_id_str = input.tenant_id.to_string();
+
+        let password_hash = hash_password(&input.password, self.pepper.as_deref())?;
+
+        let metadata = input
+            .metadata
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+
+        // Result slots: BEGIN=0, CREATE user=1, CREATE consent=2, COMMIT=3.
+        let result = self
+            .db
+            .query(
+                "BEGIN TRANSACTION; \
+                 CREATE type::record('user', $id) SET \
+                 tenant_id = $tenant_id, \
+                 username = $username, email = $email, \
+                 password_hash = $password_hash, \
+                 status = $status, \
+                 mfa_enabled = false, \
+                 failed_login_attempts = 0, \
+                 last_failed_login_at = NONE, \
+                 locked_until = NONE, \
+                 email_verified_at = NONE, \
+                 metadata = $metadata; \
+                 CREATE type::record('consent', $consent_id) SET \
+                 tenant_id = $tenant_id, \
+                 user_id = $id, \
+                 consent_type = $consent_type, \
+                 version = $consent_version, \
+                 accepted_at = time::now(), \
+                 ip_address = $ip_address, \
+                 user_agent = $user_agent; \
+                 COMMIT TRANSACTION",
+            )
+            .bind(("id", id_str.clone()))
+            .bind(("consent_id", consent_id))
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("username", input.username))
+            .bind(("email", input.email))
+            .bind(("password_hash", password_hash))
+            .bind(("status", "PendingVerification".to_string()))
+            .bind(("metadata", metadata))
+            .bind(("consent_type", consent_type.to_string()))
+            .bind(("consent_version", consent_version.to_string()))
+            .bind(("ip_address", ip_address))
+            .bind(("user_agent", user_agent))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        // The user CREATE result is at index 1 (BEGIN occupies slot 0).
+        let rows: Vec<UserRow> = result.take(1).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "user".into(),
+            id: id_str,
+        })?;
+
+        Ok(row.into_user(id)?)
+    }
+
     /// Mark a user as deletion-pending and set the scheduled purge date (D-08).
     ///
     /// The user account is immediately disabled (status Inactive) so that
@@ -580,11 +664,7 @@ impl<C: Connection> SurrealUserRepository<C> {
     /// Called when the user clicks the emailed cancel link within the grace
     /// window.  Resets `deletion_pending`, `scheduled_purge_at`, and sets
     /// status back to `Active`.
-    pub async fn clear_deletion_pending(
-        &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-    ) -> AxiamResult<()> {
+    pub async fn clear_deletion_pending(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
         self.db
             .query(
                 "UPDATE type::record('user', $id) SET \

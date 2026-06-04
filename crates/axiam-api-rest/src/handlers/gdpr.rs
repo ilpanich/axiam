@@ -217,13 +217,13 @@ pub async fn download_account_export<C: Connection>(
         }
         .into());
     }
-    if let Some(expires_at) = job.expires_at {
-        if expires_at < Utc::now() {
-            return Err(AxiamError::AuthorizationDenied {
-                reason: "export token expired".into(),
-            }
-            .into());
+    if let Some(expires_at) = job.expires_at
+        && expires_at < Utc::now()
+    {
+        return Err(AxiamError::AuthorizationDenied {
+            reason: "export token expired".into(),
         }
+        .into());
     }
 
     // Decrypt the blob.

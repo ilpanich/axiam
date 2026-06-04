@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 6 context gathered
-last_updated: "2026-06-04T12:19:31.242Z"
-last_activity: 2026-06-04 -- Phase 06 planning complete
+last_updated: "2026-06-04T14:08:34.826Z"
+last_activity: 2026-06-04
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 31
-  completed_plans: 26
+  completed_plans: 27
   percent: 71
 ---
 
@@ -21,17 +21,17 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 6 — ci/cd & infrastructure hardening
+**Current focus:** Phase 06 — ci-cd-infrastructure-hardening
 
 ## Current Position
 
-Phase: 6
-Plan: Not started
+Phase: 06 (ci-cd-infrastructure-hardening) — EXECUTING
+Plan: 2 of 5
 Next: Phase 05 (email-delivery-gdpr-compliance) — NOT STARTED (needs planning)
 Status: Ready to execute
-Last activity: 2026-06-04 -- Phase 06 planning complete
+Last activity: 2026-06-04
 
-Progress: [██████████] 100%
+Progress: [█████████░] 87%
 
 ## Performance Metrics
 
@@ -68,6 +68,7 @@ Progress: [██████████] 100%
 | Phase 05-email-delivery-gdpr-compliance P02 | 8 | 2 tasks | 3 files |
 | Phase 05-email-delivery-gdpr-compliance P03 | 65 | 2 tasks | 8 files |
 | Phase 05-email-delivery-gdpr-compliance P05 | 90m | 3 tasks | 9 files |
+| Phase 06-ci-cd-infrastructure-hardening P01 | 45 | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,7 @@ Recent decisions affecting current work:
 - [Phase 02-security-headers-rate-limiting]: frontend PaginatedUsers shape aligned with backend PaginatedResult (items/limit), unblocking the admin Users page; broader pagination-contract audit filed as follow-up for other admin services
 - [Phase ?]: MAIL_OUTBOUND_DLQ added to ALL_QUEUES loop first; MAIL_OUTBOUND declared separately with x-dead-letter-exchange FieldTable (D-14 explicit dead-letter routing, no broker defaults)
 - [Phase ?]: Export stored as DB blob (encrypted_blob), not on-disk file — avoids filesystem lifecycle management
+- [Phase 06-01]: deny.toml ignore entries for RUSTSEC-2023-0071 (rsa Marvin attack, no upstream fix), RUSTSEC-2025-0141 (bincode unmaintained via surrealdb), RUSTSEC-2023-0089 (atomic-polyfill unmaintained via surrealdb); BUSL-1.1 exception for surrealdb family; GPL-3.0 exception for actix-governor; cargo-deny 0.18.9 lacks vulnerability/unmaintained top-level advisory fields
 
 ### Pending Todos
 
@@ -120,6 +122,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-04T10:35:39.476Z
+Last session: 2026-06-04T14:07:37.888Z
 Stopped at: Phase 6 context gathered
-Resume file: .planning/phases/06-ci-cd-infrastructure-hardening/06-CONTEXT.md
+Resume file: None

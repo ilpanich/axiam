@@ -31,7 +31,7 @@ tracing-log = "0.2"
 config = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
 surrealdb = { workspace = true }
 
 [features]

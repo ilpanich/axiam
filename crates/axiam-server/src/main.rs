@@ -76,6 +76,20 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // D-09: healthcheck subcommand — self-probe /health, exit 0 on 2xx, exit 1 otherwise.
+    // Runs before tracing init and before the async stack to keep the probe lightweight.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("healthcheck") {
+            let url = std::env::var("AXIAM_HEALTHCHECK_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8090/health".to_owned());
+            let ok = reqwest::blocking::get(&url)
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+    }
+
     // `tracing-subscriber` with the `tracing-log` feature auto-installs a
     // LogTracer so third-party crates (actix-web, hyper, etc.) that log via
     // the `log` crate surface in structured tracing output.

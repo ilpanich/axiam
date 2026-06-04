@@ -54,5 +54,11 @@ spec:
                 name: axiam-secrets
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1000
+            runAsUser: 65532          # distroless/cc-debian12:nonroot UID (D-08)
             readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false   # D-13: restricted profile
+            capabilities:
+              drop:
+                - ALL                 # D-13: restricted profile
+            seccompProfile:
+              type: RuntimeDefault    # D-13: restricted profile

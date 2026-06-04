@@ -33,6 +33,17 @@ spec:
                 secretKeyRef:
                   name: rabbitmq-credentials
                   key: password
+          securityContext:
+            runAsNonRoot: true
+            # D-13 best-effort: RabbitMQ default UID is 999 (rabbitmq user in official image)
+            # If volume permission errors occur at runtime, add an initContainer: chown 999:999 /var/lib/rabbitmq
+            runAsUser: 999
+            allowPrivilegeEscalation: false   # D-13: restricted profile
+            capabilities:
+              drop:
+                - ALL                 # D-13: restricted profile
+            seccompProfile:
+              type: RuntimeDefault    # D-13: restricted profile
           ports:
             - containerPort: 5672
               name: amqp

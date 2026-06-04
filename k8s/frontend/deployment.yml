@@ -48,3 +48,24 @@ spec:
             runAsNonRoot: true
             runAsUser: 101
             runAsGroup: 101
+            readOnlyRootFilesystem: true      # D-13: restricted profile (nginx-unprivileged supports this with emptyDir)
+            allowPrivilegeEscalation: false   # D-13: restricted profile
+            capabilities:
+              drop:
+                - ALL                 # D-13: restricted profile
+            seccompProfile:
+              type: RuntimeDefault    # D-13: restricted profile
+          volumeMounts:
+            - name: nginx-tmp
+              mountPath: /tmp
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+      volumes:
+        - name: nginx-tmp
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}

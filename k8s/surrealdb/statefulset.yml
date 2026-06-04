@@ -43,6 +43,15 @@ spec:
                 secretKeyRef:
                   name: surrealdb-credentials
                   key: password
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532          # D-13 best-effort: surrealdb v3 nonroot UID (adjust if image uses different UID)
+            allowPrivilegeEscalation: false   # D-13: restricted profile
+            capabilities:
+              drop:
+                - ALL                 # D-13: restricted profile
+            seccompProfile:
+              type: RuntimeDefault    # D-13: restricted profile
           ports:
             - containerPort: 8000
               name: http

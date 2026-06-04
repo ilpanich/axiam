@@ -1205,7 +1205,9 @@ updates:
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All three resolved during planning: cluster CIDRs → documented placeholder in 06-05; D-18 compose target → new axiam-server service added to docker-compose.dev.yml in 06-04; trivy-action version → confirmation moved into 06-02 acceptance criteria.
 
 1. **Cluster-specific CIDRs for D-12 NetworkPolicy**
    - What we know: RFC1918 ranges are fixed; cluster pod/service CIDRs vary by deployment.

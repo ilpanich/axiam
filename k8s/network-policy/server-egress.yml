@@ -1,0 +1,46 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: server-egress
+  namespace: axiam
+spec:
+  podSelector:
+    matchLabels:
+      component: server
+  policyTypes:
+    - Egress
+  egress:
+    # Allow server → SurrealDB (D-11)
+    - to:
+        - podSelector:
+            matchLabels:
+              component: surrealdb
+      ports:
+        - protocol: TCP
+          port: 8000
+
+    # Allow server → RabbitMQ (D-11)
+    - to:
+        - podSelector:
+            matchLabels:
+              component: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672
+
+    # Allow server → external HTTPS (OIDC JWKS, SAML IdP, email APIs) (D-12)
+    # Excludes private ranges to deny lateral movement on 443.
+    # RFC1918 + CGN are excluded; cluster-specific CIDRs must also be excluded by the operator.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8          # RFC1918 class A
+              - 172.16.0.0/12       # RFC1918 class B
+              - 192.168.0.0/16      # RFC1918 class C
+              - 100.64.0.0/10       # Carrier-grade NAT (CGN)
+              # TODO: operator must add cluster pod CIDR here, e.g. 10.244.0.0/16 (flannel/calico default)
+              # TODO: operator must add cluster service CIDR here, e.g. 10.96.0.0/12 (kubeadm default)
+      ports:
+        - protocol: TCP
+          port: 443

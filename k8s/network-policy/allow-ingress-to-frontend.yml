@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-frontend
+  namespace: axiam
+spec:
+  podSelector:
+    matchLabels:
+      component: frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow ingress controller → frontend:8080 (D-11)
+    # Adjust the namespaceSelector label to match your ingress controller namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx  # TODO: operator must adjust to match ingress controller namespace
+      ports:
+        - protocol: TCP
+          port: 8080

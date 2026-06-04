@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 6 context gathered
-last_updated: "2026-06-04T14:08:34.826Z"
+stopped_at: "Completed 06-03-PLAN.md (checkpoint: human-verify)"
+last_updated: "2026-06-04T14:32:02.241Z"
 last_activity: 2026-06-04
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 31
-  completed_plans: 27
+  completed_plans: 28
   percent: 71
 ---
 
@@ -26,12 +26,12 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 06 (ci-cd-infrastructure-hardening) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Next: Phase 05 (email-delivery-gdpr-compliance) — NOT STARTED (needs planning)
 Status: Ready to execute
 Last activity: 2026-06-04
 
-Progress: [█████████░] 87%
+Progress: [█████████░] 90%
 
 ## Performance Metrics
 
@@ -69,6 +69,7 @@ Progress: [█████████░] 87%
 | Phase 05-email-delivery-gdpr-compliance P03 | 65 | 2 tasks | 8 files |
 | Phase 05-email-delivery-gdpr-compliance P05 | 90m | 3 tasks | 9 files |
 | Phase 06-ci-cd-infrastructure-hardening P01 | 45 | 3 tasks | 8 files |
+| Phase 06 P03 | 30m | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -103,6 +104,9 @@ Recent decisions affecting current work:
 - [Phase ?]: MAIL_OUTBOUND_DLQ added to ALL_QUEUES loop first; MAIL_OUTBOUND declared separately with x-dead-letter-exchange FieldTable (D-14 explicit dead-letter routing, no broker defaults)
 - [Phase ?]: Export stored as DB blob (encrypted_blob), not on-disk file — avoids filesystem lifecycle management
 - [Phase 06-01]: deny.toml ignore entries for RUSTSEC-2023-0071 (rsa Marvin attack, no upstream fix), RUSTSEC-2025-0141 (bincode unmaintained via surrealdb), RUSTSEC-2023-0089 (atomic-polyfill unmaintained via surrealdb); BUSL-1.1 exception for surrealdb family; GPL-3.0 exception for actix-governor; cargo-deny 0.18.9 lacks vulnerability/unmaintained top-level advisory fields
+- [Phase ?]: Distroless cc-debian12:nonroot for server runtime with SAML .so COPY'd from builder (D-08)
+- [Phase ?]: axiam-server healthcheck subcommand replaces curl probe in distroless containers (D-09)
+- [Phase ?]: All Dockerfile base images digest-pinned; license labels corrected to Apache-2.0 (D-04/D-10)
 
 ### Pending Todos
 
@@ -122,6 +126,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-04T14:07:37.888Z
-Stopped at: Phase 6 context gathered
+Last session: 2026-06-04T14:32:02.228Z
+Stopped at: Completed 06-03-PLAN.md (checkpoint: human-verify)
 Resume file: None

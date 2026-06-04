@@ -227,7 +227,7 @@ Plans:
 **Wave 1**
 
 - [x] 06-01-PLAN.md — Dependency/license scanning + remediation: deny.toml, dependabot, ci.yml security-scan, license fix, 36-vuln burndown (D-01..D-04, D-16)
-- [ ] 06-03-PLAN.md — Distroless server image + healthcheck subcommand + frontend digest pins + license labels (D-08, D-09, D-10, D-04)
+- [x] 06-03-PLAN.md — Distroless server image + healthcheck subcommand + frontend digest pins + license labels (D-08, D-09, D-10, D-04)
 - [ ] 06-05-PLAN.md — K8s NetworkPolicy + Pod Security Standards + secret hygiene (D-11, D-12, D-13, D-14)
 
 **Wave 2** *(blocked on Wave 1 completion)*
@@ -298,7 +298,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 | 3. RBAC Enforcement | 5/5 | Complete   | 2026-05-29 |
 | 4. Federation Verification & Session Security | 6/6 | Complete   | 2026-05-29 |
 | 5. Email Delivery & GDPR Compliance | 5/5 | Complete   | 2026-06-02 |
-| 6. CI/CD & Infrastructure Hardening | 1/5 | In Progress|  |
+| 6. CI/CD & Infrastructure Hardening | 2/5 | In Progress|  |
 | 7. Compliance Verification & Test Closure | 0/0 | Not started | - |
 
 ---

@@ -62,6 +62,107 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo check -p axiam-federation -p axiam-api-rest -p axiam-server --no-default-features
 
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Rust toolchain (for cargo-audit and cargo-deny) ---
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
+
+      # --- cargo audit ---
+      - name: cargo audit
+        uses: actions-rust-lang/audit@v1
+
+      # --- cargo deny (advisories + licenses + bans + sources) ---
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+      # --- npm audit ---
+      - name: npm audit
+        working-directory: frontend
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+
+      # --- Hadolint Dockerfile lint ---
+      - name: Hadolint server Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile.server
+          format: sarif
+          output-file: hadolint-server.sarif
+          no-fail: true
+
+      - name: Hadolint frontend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile.frontend
+          format: sarif
+          output-file: hadolint-frontend.sarif
+          no-fail: true
+
+      # --- Trivy filesystem scan (vuln — HIGH/CRITICAL, exit 1) ---
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: sarif
+          output: trivy-fs.sarif
+
+      # --- Trivy config scan (Dockerfile/K8s misconfig — advisory, exit 0) ---
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-config.sarif
+          exit-code: '0'
+
+      # --- Upload all SARIF results to GitHub Security tab (D-07) ---
+      - name: Upload hadolint server SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: hadolint-server.sarif
+          category: hadolint-server
+
+      - name: Upload hadolint frontend SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: hadolint-frontend.sarif
+          category: hadolint-frontend
+
+      - name: Upload trivy filesystem SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Upload trivy config SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+
   test:
     name: Test
     runs-on: ubuntu-latest

@@ -232,7 +232,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 06-02-PLAN.md — release.yml build→scan→push→sign reorder with trivy image gate (D-06, D-07) — depends on 06-03
+- [x] 06-02-PLAN.md — release.yml build→scan→push→sign reorder with trivy image gate (D-06, D-07) — depends on 06-03
 - [ ] 06-04-PLAN.md — Frontend build hardening (sourcemap/SRI) + route↔openapi parity test + dev cookie Secure flag (D-15, D-17, D-18) — depends on 06-01
 
 ### Scope
@@ -298,7 +298,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 | 3. RBAC Enforcement | 5/5 | Complete   | 2026-05-29 |
 | 4. Federation Verification & Session Security | 6/6 | Complete   | 2026-05-29 |
 | 5. Email Delivery & GDPR Compliance | 5/5 | Complete   | 2026-06-02 |
-| 6. CI/CD & Infrastructure Hardening | 3/5 | In Progress|  |
+| 6. CI/CD & Infrastructure Hardening | 4/5 | In Progress|  |
 | 7. Compliance Verification & Test Closure | 0/0 | Not started | - |
 
 ---

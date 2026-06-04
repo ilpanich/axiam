@@ -25,8 +25,8 @@ services:
     # are silently ignored and in-code defaults win.
     environment:
       # SurrealDB v3 Rust SDK's Ws engine takes a bare `host:port`, NOT a URL.
-      # Passing `ws://host:port` makes the SDK try to resolve the literal string
-      # `ws` as a hostname and fail with a confusing DNS error.
+      # Passing a websocket URL scheme makes the SDK try to resolve the scheme
+      # as a hostname and fail with a confusing DNS error.
       AXIAM__DB__URL: "surrealdb:8000"
       AXIAM__DB__USERNAME: "root"
       AXIAM__DB__PASSWORD: "root"
@@ -47,7 +47,8 @@ services:
       rabbitmq:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      # D-09: distroless has no shell; use the axiam-server healthcheck subcommand
+      test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5

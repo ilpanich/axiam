@@ -24,3 +24,6 @@ pub use openapi::ApiDoc;
 pub use server::{
     api_v1_routes, build_cors, health_routes, openapi_routes, register_api_v1_routes,
 };
+
+#[cfg(test)]
+mod tests;

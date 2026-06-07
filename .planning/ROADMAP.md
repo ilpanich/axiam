@@ -275,7 +275,7 @@ Plans:
 - [x] 07-01-PLAN.md — axiam-pki critical-path tests (CA, leaf cert, mTLS reject, PGP sign+verify)
 - [x] 07-02-PLAN.md — OAuth2 RFC 6749/7636 + OIDC Core conformance tests + MUST-matrix docs + FINDINGS seed
 - [x] 07-03-PLAN.md — gRPC in-process tonic harness + authz (T19.1) + concurrent batch (T19.2)
-- [ ] 07-04-PLAN.md — Frontend E2E rewrite (11 specs, cookie-auth) + live-backend seeded-DB CI job
+- [x] 07-04-PLAN.md — Frontend E2E rewrite (11 specs, cookie-auth) + live-backend seeded-DB CI job
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -312,7 +312,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 | 4. Federation Verification & Session Security | 6/6 | Complete   | 2026-05-29 |
 | 5. Email Delivery & GDPR Compliance | 5/5 | Complete   | 2026-06-02 |
 | 6. CI/CD & Infrastructure Hardening | 5/5 | Complete   | 2026-06-07 |
-| 7. Compliance Verification & Test Closure | 3/5 | In Progress|  |
+| 7. Compliance Verification & Test Closure | 4/5 | In Progress|  |
 
 ---
 

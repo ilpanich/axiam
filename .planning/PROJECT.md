@@ -58,9 +58,9 @@ See `.planning/REQUIREMENTS.md` for detailed REQ-IDs.
 - [ ] Admin MFA management for other users (requires RBAC)
 
 **Compliance:**
-- [ ] OWASP ASVS audit checklist and remediation
-- [ ] OAuth2 RFC compliance verification
-- [ ] OIDC conformance verification
+- [x] OWASP ASVS audit checklist and remediation — Validated in Phase 7: Compliance Verification & Test Closure
+- [x] OAuth2 RFC compliance verification — Validated in Phase 7: Compliance Verification & Test Closure
+- [x] OIDC conformance verification — Validated in Phase 7: Compliance Verification & Test Closure
 - [ ] GDPR data export and right-to-deletion
 
 **Infrastructure:**
@@ -71,10 +71,10 @@ See `.planning/REQUIREMENTS.md` for detailed REQ-IDs.
 - [ ] OpenAPI schema accuracy (T19.4)
 
 **Testing:**
-- [ ] gRPC integration tests (T19.1)
-- [ ] Concurrent batch authorization (T19.2)
-- [ ] PKI/certificate tests
-- [ ] Federation flow tests
+- [x] gRPC integration tests (T19.1) — Validated in Phase 7: Compliance Verification & Test Closure
+- [x] Concurrent batch authorization (T19.2) — Validated in Phase 7: Compliance Verification & Test Closure
+- [x] PKI/certificate tests — Validated in Phase 7: Compliance Verification & Test Closure
+- [x] Federation flow tests — Validated in Phase 7 (pre-existing OIDC/SAML e2e suites cited in SC#4)
 
 ### Out of Scope
 
@@ -135,4 +135,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-08 after Phase 2 completion*
+*Last updated: 2026-06-07 after Phase 7 completion — final milestone phase; compliance verification and test closure complete (2 human-UAT items tracked in 07-HUMAN-UAT.md).*

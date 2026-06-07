@@ -2,7 +2,7 @@
 phase: 07-compliance-verification-test-closure
 plan: "05"
 subsystem: compliance-docs
-tags: [compliance, asvs, owasp, sc4, findings, checkpoint]
+tags: [compliance, asvs, owasp, sc4, findings, checkpoint, complete]
 dependency_graph:
   requires: ["07-01", "07-02", "07-03", "07-04"]
   provides: [asvs-l2-checklist, sc4-coverage-table, findings-register]
@@ -25,10 +25,11 @@ decisions:
   - "F-05 (CSP header) deferred Medium: REST API serves JSON only, no untrusted HTML rendering"
   - "F-02 (Playwright tsconfig IDE) deferred Info: runtime and CI unaffected; cosmetic IDE issue"
   - "No gh issue create executed in Task 1 — proposals staged in FINDINGS.md for Task 2 human approval"
+  - "Task 2: 4 compliance issues created (#98-#101) only after human auditor sign-off (T-07-18 mitigation)"
 metrics:
-  duration: "~30 min"
+  duration: "~40 min"
   completed: "2026-06-07"
-  tasks_completed: 1
+  tasks_completed: 2
   files_created: 2
   files_modified: 1
 requirements: [REQ-11]
@@ -38,19 +39,31 @@ requirements: [REQ-11]
 
 **One-liner:** 103-control ASVS L2 checklist (V2/V3/V4/V6/V7/V8/V9/V10/V14) with concrete
 evidence citations, SC#4 REQ-11 coverage table for 6 pre-existing test suites, and finalized
-FINDINGS register with 4 staged deferred-findings proposals — compliance milestone gate
-reached; awaiting human auditor sign-off at Task 2.
+FINDINGS register — compliance milestone gate (ROADMAP SC #1) achieved with zero open items;
+4 deferred-findings tracking issues (#98-#101) created after human auditor sign-off.
 
 ## Tasks Completed
 
 | # | Task | Commit | Files |
 |---|------|--------|-------|
 | 1 | Author ASVS L2 checklist + SC#4 coverage table + stage FINDINGS | b4b8e4c | docs/compliance/asvs-l2-checklist.md, docs/compliance/sc4-coverage.md, docs/compliance/FINDINGS.md |
+| 2 | Auditor sign-off + create staged compliance issues | 06e7e4f | docs/compliance/FINDINGS.md |
 
-## PAUSED AT CHECKPOINT (Task 2)
+## Checkpoint Resolution (Task 2)
 
-Task 2 is a `type="checkpoint:human-verify"` gate. GitHub `compliance` issues must NOT be
-created until the human auditor approves the deferred findings set. See checkpoint details below.
+Task 2 was a `type="checkpoint:human-verify"` gate. The human auditor reviewed the three
+compliance documents and approved the "no open items" gate. After sign-off, the executor
+created 4 GitHub `compliance`-labeled issues (one per Deferred-without-existing-issue row)
+and replaced each FINDINGS `PENDING` cell with the created issue URL:
+
+| Finding | Issue |
+|---------|-------|
+| F-02 | https://github.com/ilpanich/axiam/issues/98 |
+| F-03 | https://github.com/ilpanich/axiam/issues/99 |
+| F-04 | https://github.com/ilpanich/axiam/issues/100 |
+| F-05 | https://github.com/ilpanich/axiam/issues/101 |
+
+T-07-18 mitigation honored: no `gh issue create` ran before the blocking human approval.
 
 ## Compliance Summary
 
@@ -91,18 +104,20 @@ REQ-11 all AC items: **SATISFIED** (including Phase 7 Plans 01-04 new tests).
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
 | F-01 | WWW-Authenticate on 401 | Low | Fixed (commit 20c8174) |
-| F-02 | Playwright e2e tsconfig IDE gap | Info | Deferred — PENDING issue |
-| F-03 | HIBP breach-password check | Low | Deferred — PENDING issue |
-| F-04 | TLS 1.3 minimum not enforced in code | Low | Deferred — PENDING issue |
-| F-05 | CSP header not set | Medium | Deferred — PENDING issue |
+| F-02 | Playwright e2e tsconfig IDE gap | Info | Deferred — issue #98 |
+| F-03 | HIBP breach-password check | Low | Deferred — issue #99 |
+| F-04 | TLS 1.3 minimum not enforced in code | Low | Deferred — issue #100 |
+| F-05 | CSP header not set | Medium | Deferred — issue #101 |
 
 **No High-severity Deferred finding. Beta compliance gate: satisfied.**
 
 ## Deviations from Plan
 
 None — plan executed exactly as written. Dry-run `gh issue list --label compliance` returned
-"No Issues" (no pre-existing compliance issues). Four staged proposals written in FINDINGS.md
-"Proposed Issues" section. No `gh issue create` executed.
+"No Issues" (no pre-existing compliance issues) in Task 1. After Task 2 human sign-off, the
+4 staged proposals were created as GitHub issues #98-#101 and the staging section was removed
+from FINDINGS.md. Required `compliance`/`security`/`frontend`/`low`/`medium` labels were
+created where missing before issue creation.
 
 ## Known Stubs
 
@@ -119,9 +134,9 @@ Files created:
 - `docs/compliance/sc4-coverage.md` — FOUND (all 6 SC#4 test files cited)
 
 File modified:
-- `docs/compliance/FINDINGS.md` — FOUND (F-01 existing, F-02..F-05 added)
+- `docs/compliance/FINDINGS.md` — FOUND (F-01 existing, F-02..F-05 added + issue URLs)
 
-Commit b4b8e4c — FOUND (git log confirmed)
+Commits b4b8e4c (Task 1) + 06e7e4f (Task 2) — FOUND (git log confirmed)
 
 SC#4 file presence verified:
 - `crates/axiam-authz/tests/authz_engine_test.rs` — exists
@@ -131,4 +146,4 @@ SC#4 file presence verified:
 - `crates/axiam-api-rest/tests/auth_test.rs` — exists
 - `crates/axiam-api-rest/tests/gdpr_test.rs` — exists
 
-No `gh issue create` executed (verified by `gh issue list --label compliance` returning "No Issues").
+GitHub issues created (after human sign-off): #98, #99, #100, #101 (all `compliance`-labeled).

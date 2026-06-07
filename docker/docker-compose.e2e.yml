@@ -1,0 +1,64 @@
+services:
+  # E2E-only: SurrealDB in memory mode — no persistence, no volume chown needed.
+  surrealdb:
+    image: surrealdb/surrealdb:v3
+    container_name: axiam-e2e-surrealdb
+    command: start --user root --pass root --log info memory
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "/surreal", "isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: axiam-e2e-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: axiam
+      RABBITMQ_DEFAULT_PASS: axiam
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # axiam-server — BUILT FROM PR SOURCE (build: key instead of stale registry image).
+  # Using image: ghcr.io/axiamhq/axiam/server:latest is deliberately absent here:
+  # that tag is stale/absent for PR branches and would produce false-green E2E (W8).
+  # COOKIE_SECURE=false so auth cookies work over plain http:// in CI (D-18).
+  # NEVER set AXIAM__AUTH__COOKIE_SECURE=false in staging or production.
+  axiam-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    container_name: axiam-e2e-server
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8090:8090"
+    environment:
+      AXIAM__DB__URL: "surrealdb:8000"
+      AXIAM__DB__USERNAME: root
+      AXIAM__DB__PASSWORD: root
+      AXIAM__AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
+      RUST_LOG: "${RUST_LOG:-axiam=info}"
+      # D-18: cookies work over HTTP in CI/local dev (http://localhost).
+      # Default in code is true (prod-safe). NEVER set false in production.
+      AXIAM__AUTH__COOKIE_SECURE: "false"
+      # Bootstrap guard: only requests with this email are accepted by /admin/bootstrap.
+      AXIAM__BOOTSTRAP_ADMIN_EMAIL: "${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: "no"

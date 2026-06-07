@@ -268,6 +268,14 @@ Plans:
 **Plans**: 5 plans
 **UI hint**: yes
 
+Plans:
+
+- [ ] 07-01-PLAN.md — axiam-pki critical-path tests (CA, leaf cert, mTLS reject, PGP sign+verify)
+- [ ] 07-02-PLAN.md — OAuth2 RFC 6749/7636 + OIDC Core conformance tests + MUST-matrix docs + FINDINGS seed
+- [ ] 07-03-PLAN.md — gRPC in-process tonic harness + authz (T19.1) + concurrent batch (T19.2)
+- [ ] 07-04-PLAN.md — Frontend E2E rewrite (11 specs, cookie-auth) + live-backend seeded-DB CI job
+- [ ] 07-05-PLAN.md — ASVS L2 checklist (V2-V14) + finalized FINDINGS register (Wave 2)
+
 ### Scope
 
 - gRPC authorization integration tests (T19.1)

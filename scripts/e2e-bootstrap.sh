@@ -55,11 +55,16 @@ fi
 # ---------------------------------------------------------------------------
 echo "[e2e-bootstrap] Creating org '${ORG_SLUG}' and tenant '${TENANT_SLUG}' via SurrealDB..."
 
-# Generate deterministic UUIDs for the org and tenant so the bootstrap call
-# can reference them. We use date-based seeds for reproducibility.
+# Generate fresh random UUIDs for the org and tenant so the bootstrap call
+# can reference them. Each run uses new IDs against a fresh (memory-mode) DB.
 ORG_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
 TENANT_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
 
+# NOTE: SurrealQL uses the double-colon `type::record(...)` function (single
+# colon `type:record(...)` is a syntax error). Critically, SurrealDB's /sql
+# endpoint returns HTTP 200 even when an individual statement fails, so
+# `curl -sf` alone does NOT catch SQL errors — we MUST inspect each
+# statement's "status" field in the JSON response (W8: no silent false-green).
 SURREAL_RESPONSE=$(curl -sf \
   -X POST "${SURREAL_URL}/sql" \
   -H "Accept: application/json" \
@@ -68,14 +73,14 @@ SURREAL_RESPONSE=$(curl -sf \
   -H "surreal-db: axiam" \
   -u "root:root" \
   --data-binary "
-CREATE type:record('organization', '${ORG_ID}') SET
+CREATE type::record('organization', '${ORG_ID}') SET
   name = 'E2E Test Org',
   slug = '${ORG_SLUG}',
   metadata = {},
   created_at = time::now(),
   updated_at = time::now();
 
-CREATE type:record('tenant', '${TENANT_ID}') SET
+CREATE type::record('tenant', '${TENANT_ID}') SET
   organization_id = '${ORG_ID}',
   name = 'E2E Default Tenant',
   slug = '${TENANT_SLUG}',
@@ -84,11 +89,18 @@ CREATE type:record('tenant', '${TENANT_ID}') SET
   created_at = time::now(),
   updated_at = time::now();
 " 2>&1) || {
-  echo "[e2e-bootstrap] ERROR: SurrealDB SQL failed. Response: ${SURREAL_RESPONSE}"
+  echo "[e2e-bootstrap] ERROR: SurrealDB SQL request failed (HTTP/transport). Response: ${SURREAL_RESPONSE}"
   exit 1
 }
 
-echo "[e2e-bootstrap] Org and tenant created."
+# Fail closed if ANY statement returned a non-OK status (HTTP 200 hides these).
+if printf '%s' "${SURREAL_RESPONSE}" | grep -q '"status":"ERR"' \
+   || ! printf '%s' "${SURREAL_RESPONSE}" | grep -q '"status":"OK"'; then
+  echo "[e2e-bootstrap] ERROR: SurrealDB statement-level failure during seed. Response: ${SURREAL_RESPONSE}"
+  exit 1
+fi
+
+echo "[e2e-bootstrap] Org and tenant created (both statements OK)."
 
 # ---------------------------------------------------------------------------
 # Step 3: Call POST /api/v1/admin/bootstrap (public endpoint).

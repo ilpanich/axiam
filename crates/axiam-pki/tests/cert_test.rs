@@ -212,8 +212,11 @@ async fn cert_generate_rejects_expired_ca() {
         "leaf cert issuance against an expired CA must fail"
     );
     let err_msg = format!("{:?}", result.unwrap_err());
+    // Assert the specific reject reason. A `|| contains("valid")` fallback was too
+    // broad ("valid" appears in many unrelated messages); the CA-expiry path must
+    // explicitly mention expiry.
     assert!(
-        err_msg.contains("expired") || err_msg.contains("valid"),
+        err_msg.contains("expired"),
         "error must mention expiry, got: {err_msg}"
     );
 }

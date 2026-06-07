@@ -95,8 +95,9 @@ test.describe("User detail page", () => {
         .getByRole("heading", { name: "MFA Methods", level: 2 })
         .isVisible()
         .catch(() => false);
-      // Either MFA section shows or we're on a valid page without /login redirect
-      expect(hasMfaSection || true).toBe(true);
+      // The user detail page must render the MFA Methods section.
+      // (A `|| true` here would make the assertion unfalsifiable.)
+      expect(hasMfaSection).toBe(true);
     }
   });
 });
@@ -134,7 +135,8 @@ test.describe("Groups list page", () => {
     await expect(page).not.toHaveURL(/\/login/);
     const hasGroups = await page.getByRole("button").filter({ hasText: /.+/ }).count().then(n => n > 0);
     const hasEmptyState = await page.getByText(/no groups/i).isVisible().catch(() => false);
-    // Page must be accessible and show some content
-    expect(hasGroups || hasEmptyState || true).toBe(true);
+    // Page must be accessible and show either a populated list or the empty state.
+    // (A `|| true` here would make the assertion unfalsifiable.)
+    expect(hasGroups || hasEmptyState).toBe(true);
   });
 });

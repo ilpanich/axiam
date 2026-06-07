@@ -274,8 +274,10 @@ async fn mtls_rejects_expired_cert() {
     assert!(result.is_err(), "expired cert must be rejected");
     let err_msg = format!("{:?}", result.unwrap_err());
     // mtls.rs returns AxiamError::Certificate("certificate is expired or not yet valid")
+    // Assert the specific reject reason — a bare `|| contains("Certificate")` fallback
+    // would pass even if the expiry check were swapped for any other Certificate error.
     assert!(
-        err_msg.contains("expired") || err_msg.contains("Certificate"),
+        err_msg.contains("expired"),
         "error must mention expiry, got: {err_msg}"
     );
 }
@@ -337,8 +339,9 @@ async fn mtls_rejects_revoked_cert() {
     assert!(result.is_err(), "revoked cert must be rejected");
     let err_msg = format!("{:?}", result.unwrap_err());
     // mtls.rs: AxiamError::Certificate("certificate is not active")
+    // Assert the specific reject reason — not just the Certificate error variant.
     assert!(
-        err_msg.contains("not active") || err_msg.contains("Certificate"),
+        err_msg.contains("not active"),
         "error must mention inactive status, got: {err_msg}"
     );
 }

@@ -47,6 +47,30 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # axiam-server — run with COOKIE_SECURE=false so auth cookies work over
+  # plain http://localhost during local development (D-18).
+  # NEVER set AXIAM__AUTH__COOKIE_SECURE=false in staging or production.
+  axiam-server:
+    image: ghcr.io/axiamhq/axiam/server:latest
+    container_name: axiam-server
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8090:8090"
+    environment:
+      AXIAM__DB__URL: "surrealdb:8000"
+      AXIAM__DB__USERNAME: root
+      AXIAM__DB__PASSWORD: root
+      AXIAM__AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
+      RUST_LOG: "${RUST_LOG:-axiam=debug}"
+      # D-18: cookies work over HTTP in local dev (http://localhost).
+      # Default in code is true (prod-safe). NEVER set false in production.
+      AXIAM__AUTH__COOKIE_SECURE: "false"
+    restart: unless-stopped
+
 volumes:
   surrealdb-data:
   rabbitmq-data:

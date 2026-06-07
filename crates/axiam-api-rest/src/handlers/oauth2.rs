@@ -425,20 +425,26 @@ fn build_error_redirect(
 
 /// Build an OAuth2 JSON error response with the appropriate HTTP status.
 ///
-/// `invalid_client` returns 401.  No `WWW-Authenticate` header is sent
-/// because the token endpoint uses `client_secret_post` (credentials in
-/// the request body), not HTTP Basic authentication.
+/// `invalid_client` returns 401 with a `WWW-Authenticate` header per
+/// RFC 6749 §5.2.  Although the token endpoint uses `client_secret_post`,
+/// RFC 6749 §5.2 still requires the 401 response to include
+/// `WWW-Authenticate` indicating the authentication scheme.
 fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
     let status = match e {
         OAuth2Error::InvalidClient(_) => actix_web::http::StatusCode::UNAUTHORIZED,
         OAuth2Error::ServerError(_) => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
         _ => actix_web::http::StatusCode::BAD_REQUEST,
     };
-    HttpResponse::build(status)
+    let mut builder = HttpResponse::build(status);
+    builder
         .append_header(("Cache-Control", "no-store"))
-        .append_header(("Pragma", "no-cache"))
-        .json(OAuth2ErrorResponse {
-            error: e.error_code().to_string(),
-            error_description: e.error_description(),
-        })
+        .append_header(("Pragma", "no-cache"));
+    // RFC 6749 §5.2: 401 responses MUST include WWW-Authenticate
+    if status == actix_web::http::StatusCode::UNAUTHORIZED {
+        builder.append_header(("WWW-Authenticate", "Bearer realm=\"axiam\""));
+    }
+    builder.json(OAuth2ErrorResponse {
+        error: e.error_code().to_string(),
+        error_description: e.error_description(),
+    })
 }

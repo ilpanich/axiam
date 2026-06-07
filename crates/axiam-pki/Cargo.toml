@@ -27,3 +27,8 @@ base64 = { workspace = true }
 pgp = { workspace = true }
 smallvec = "1"
 time = "0.3"
+
+[dev-dependencies]
+axiam-db = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }
+uuid = { workspace = true }

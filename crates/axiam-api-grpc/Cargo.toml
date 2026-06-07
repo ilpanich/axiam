@@ -25,6 +25,17 @@ tower = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 
+[features]
+client = []
+
+[dev-dependencies]
+axiam-db = { path = "../axiam-db" }
+axiam-auth = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
 [build-dependencies]
 tonic-build = { workspace = true }
 tonic-prost-build = { workspace = true }

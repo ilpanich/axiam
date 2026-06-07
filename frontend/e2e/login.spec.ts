@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { loginAsAdmin } from "./helpers/auth";
 
 test.describe("Login flow", () => {
   test("redirects unauthenticated users to /login", async ({ page }) => {
@@ -43,21 +44,28 @@ test.describe("Login flow", () => {
     ).toBeVisible();
   });
 
-  // NOTE: This test requires the backend to be running at http://localhost:8080.
-  // Skip it in CI environments without a running backend.
-  test.skip("shows error on wrong credentials", async ({ page }) => {
-    // This test is skipped because it requires a running backend.
-    // To run it manually: ensure the backend is available at http://localhost:8080,
-    // then remove the test.skip wrapper.
+  test("successful login lands off /login with navigation visible", async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await expect(page).not.toHaveURL(/\/login/);
+    await expect(page.getByRole("navigation")).toBeVisible();
+  });
+
+  test("wrong credentials stay on /login with error message", async ({
+    page,
+  }) => {
     await page.goto("/login");
-    await page.getByLabel("Organization slug").fill("test-org");
-    await page.getByLabel("Tenant slug").fill("default");
+    const orgSlug = process.env["E2E_ORG_SLUG"] ?? "test-org";
+    const tenantSlug = process.env["E2E_TENANT_SLUG"] ?? "default";
+    await page.getByLabel("Organization slug").fill(orgSlug);
+    await page.getByLabel("Tenant slug").fill(tenantSlug);
     await page.getByRole("button", { name: "Continue" }).click();
     await page.getByLabel("Username or email").fill("wrong@example.com");
-    await page.getByLabel("Password").fill("wrongpassword");
+    await page.getByLabel("Password").fill("wrongpassword123");
     await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(
-      page.getByText(/Invalid credentials|error/i)
-    ).toBeVisible();
+    // Should remain on /login and show an error
+    await expect(page).toHaveURL(/\/login/);
+    await expect(page.getByText(/Invalid credentials|error|incorrect/i)).toBeVisible();
   });
 });

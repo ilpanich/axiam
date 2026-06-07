@@ -39,3 +39,12 @@ uuid = { workspace = true }
 [build-dependencies]
 tonic-build = { workspace = true }
 tonic-prost-build = { workspace = true }
+
+# The gRPC authz integration tests need generated client stubs, which are only
+# produced under the `client` feature (build.rs gates on CARGO_FEATURE_CLIENT).
+# `required-features` makes Cargo SKIP this target when the feature is off
+# (so `cargo test --workspace` compiles cleanly) and build+run it when the
+# feature is enabled (`cargo test -p axiam-api-grpc --features client`).
+[[test]]
+name = "grpc_authz_test"
+required-features = ["client"]

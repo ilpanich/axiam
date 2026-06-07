@@ -196,6 +196,11 @@ jobs:
           done
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo test --workspace
+      # gRPC authz integration tests require the `client` feature (generated
+      # client stubs). `cargo test --workspace` above skips them via
+      # required-features; run them explicitly here so they execute as
+      # compliance evidence (D-10, T19.1, T19.2 / SC#4).
+      - run: cargo test -p axiam-api-grpc --features client --test grpc_authz_test
 
   e2e:
     name: E2E Tests

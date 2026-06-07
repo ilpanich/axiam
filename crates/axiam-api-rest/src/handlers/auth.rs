@@ -208,12 +208,18 @@ pub async fn cookie_response_from_output<C: Connection>(
         .cookie(access_cookie(
             &out.access_token,
             config.access_token_lifetime_secs,
+            config.cookie_secure,
         ))
         .cookie(refresh_cookie(
             &out.refresh_token,
             config.refresh_token_lifetime_secs,
+            config.cookie_secure,
         ))
-        .cookie(csrf_cookie(&csrf_token, config.access_token_lifetime_secs))
+        .cookie(csrf_cookie(
+            &csrf_token,
+            config.access_token_lifetime_secs,
+            config.cookie_secure,
+        ))
         .json(LoginSuccessResponse {
             user: LoginUserInfo {
                 id: user.id,
@@ -411,14 +417,17 @@ pub async fn refresh<C: Connection>(
         .cookie(access_cookie(
             &out.access_token,
             auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
         ))
         .cookie(refresh_cookie(
             &out.refresh_token,
             auth_config.refresh_token_lifetime_secs,
+            auth_config.cookie_secure,
         ))
         .cookie(csrf_cookie(
             &csrf_token,
             auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
         ))
         .json(RefreshSuccessResponse {
             expires_in: out.expires_in,

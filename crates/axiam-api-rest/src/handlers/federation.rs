@@ -1182,14 +1182,17 @@ pub async fn oidc_callback_public<C: Connection>(
         .cookie(crate::middleware::csrf::access_cookie(
             &auth_out.access_token,
             auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
         ))
         .cookie(crate::middleware::csrf::refresh_cookie(
             &auth_out.refresh_token,
             auth_config.refresh_token_lifetime_secs,
+            auth_config.cookie_secure,
         ))
         .cookie(crate::middleware::csrf::csrf_cookie(
             &csrf_token,
             auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
         ))
         .json(SsoLoginSuccessResponse {
             user_id: user_detail.id,
@@ -1407,14 +1410,17 @@ pub async fn saml_acs_public<C: Connection>(
         .cookie(crate::middleware::csrf::access_cookie(
             &auth_out.access_token,
             auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
         ))
         .cookie(crate::middleware::csrf::refresh_cookie(
             &auth_out.refresh_token,
             auth_config.refresh_token_lifetime_secs,
+            auth_config.cookie_secure,
         ))
         .cookie(crate::middleware::csrf::csrf_cookie(
             &csrf_token,
             auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
         ))
         .json(SsoLoginSuccessResponse {
             user_id: user_detail.id,

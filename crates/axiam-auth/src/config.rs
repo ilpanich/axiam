@@ -44,6 +44,12 @@ pub struct AuthConfig {
     /// while pre-Phase-4 tokens are still circulating. Default: `true`.
     #[serde(default = "default_true")]
     pub allow_missing_aud_as_user: bool,
+    /// When `true` (default), all auth cookies are marked `Secure` and are
+    /// therefore sent only over HTTPS. Set `AXIAM__AUTH__COOKIE_SECURE=false`
+    /// **only** in local HTTP development (e.g. http://localhost) — **never**
+    /// in production or staging (D-18).
+    #[serde(default = "default_true")]
+    pub cookie_secure: bool,
     /// MFA challenge token lifetime in seconds (default: 300 = 5 minutes).
     pub mfa_challenge_lifetime_secs: u64,
     /// Issuer name shown in authenticator apps.
@@ -102,6 +108,7 @@ impl Default for AuthConfig {
             mfa_encryption_key: None,
             federation_encryption_key: None,
             allow_missing_aud_as_user: true,
+            cookie_secure: true,
             mfa_challenge_lifetime_secs: 300,
             totp_issuer: "AXIAM".into(),
             max_failed_login_attempts: 5,

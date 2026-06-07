@@ -184,13 +184,15 @@ pub fn generate_csrf_token() -> String {
 /// Build the `axiam_access` httpOnly cookie (per D-05).
 ///
 /// - `httpOnly(true)` — not accessible from JavaScript
-/// - `Secure` — HTTPS only
+/// - `Secure` — controlled by `cookie_secure`; must be `true` in production
 /// - `SameSite::Strict` — no cross-site sending
 /// - `path("/")` — all paths
-pub fn access_cookie(token: &str, max_age_secs: u64) -> Cookie<'static> {
+///
+/// `cookie_secure` should be read from `AuthConfig::cookie_secure` (D-18).
+pub fn access_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cookie<'static> {
     Cookie::build(COOKIE_ACCESS, token.to_owned())
         .http_only(true)
-        .secure(true)
+        .secure(cookie_secure)
         .same_site(SameSite::Strict)
         .path("/")
         .max_age(Duration::seconds(max_age_secs as i64))
@@ -200,10 +202,12 @@ pub fn access_cookie(token: &str, max_age_secs: u64) -> Cookie<'static> {
 /// Build the `axiam_refresh` httpOnly cookie (per D-06).
 ///
 /// Path-scoped to the refresh endpoint to minimise exposure surface.
-pub fn refresh_cookie(token: &str, max_age_secs: u64) -> Cookie<'static> {
+///
+/// `cookie_secure` should be read from `AuthConfig::cookie_secure` (D-18).
+pub fn refresh_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cookie<'static> {
     Cookie::build(COOKIE_REFRESH, token.to_owned())
         .http_only(true)
-        .secure(true)
+        .secure(cookie_secure)
         .same_site(SameSite::Strict)
         .path("/api/v1/auth/refresh")
         .max_age(Duration::seconds(max_age_secs as i64))
@@ -213,17 +217,61 @@ pub fn refresh_cookie(token: &str, max_age_secs: u64) -> Cookie<'static> {
 /// Build the `axiam_csrf` JS-readable cookie (per D-07, D-09).
 ///
 /// - `httpOnly(false)` — JavaScript must read this to send `X-CSRF-Token`
-/// - `Secure` — HTTPS only
+/// - `Secure` — controlled by `cookie_secure`; must be `true` in production
 /// - `SameSite::Strict` — no cross-site sending
 /// - `path("/")` — all paths; lifetime matches the access token
-pub fn csrf_cookie(token: &str, max_age_secs: u64) -> Cookie<'static> {
+///
+/// `cookie_secure` should be read from `AuthConfig::cookie_secure` (D-18).
+pub fn csrf_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cookie<'static> {
     Cookie::build(COOKIE_CSRF, token.to_owned())
         .http_only(false)
-        .secure(true)
+        .secure(cookie_secure)
         .same_site(SameSite::Strict)
         .path("/")
         .max_age(Duration::seconds(max_age_secs as i64))
         .finish()
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cookie_secure_true_sets_secure_attribute() {
+        let c = access_cookie("tok", 900, true);
+        assert!(c.secure().unwrap_or(false), "expected Secure=true");
+
+        let c = refresh_cookie("tok", 86400, true);
+        assert!(c.secure().unwrap_or(false), "expected Secure=true");
+
+        let c = csrf_cookie("tok", 900, true);
+        assert!(c.secure().unwrap_or(false), "expected Secure=true");
+    }
+
+    #[test]
+    fn cookie_secure_false_omits_secure_attribute() {
+        let c = access_cookie("tok", 900, false);
+        assert!(
+            !c.secure().unwrap_or(true),
+            "expected Secure=false for HTTP dev"
+        );
+
+        let c = refresh_cookie("tok", 86400, false);
+        assert!(
+            !c.secure().unwrap_or(true),
+            "expected Secure=false for HTTP dev"
+        );
+
+        let c = csrf_cookie("tok", 900, false);
+        assert!(
+            !c.secure().unwrap_or(true),
+            "expected Secure=false for HTTP dev"
+        );
+    }
 }
 
 /// Clear the `axiam_access` cookie (Max-Age=0, per D-08).

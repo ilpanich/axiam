@@ -15,7 +15,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 - [x] **Phase 3: RBAC Enforcement** - Wire authorization engine to every endpoint with default-deny and admin bootstrap (completed 2026-05-29)
 - [x] **Phase 4: Federation Verification & Session Security** - Cryptographically verify federation tokens and enforce session lifecycle (completed 2026-05-29)
 - [x] **Phase 5: Email Delivery & GDPR Compliance** - Wire email service to auth flows and implement data subject rights (completed 2026-06-02)
-- [ ] **Phase 6: CI/CD & Infrastructure Hardening** - Add security scanning to CI and harden Docker/K8s configurations
+- [x] **Phase 6: CI/CD & Infrastructure Hardening** - Add security scanning to CI and harden Docker/K8s configurations (completed 2026-06-07)
 - [ ] **Phase 7: Compliance Verification & Test Closure** - Verify OWASP ASVS, OAuth2 RFC, OIDC conformance and close remaining test gaps
 
 ## Phase Details
@@ -233,7 +233,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 06-02-PLAN.md — release.yml build→scan→push→sign reorder with trivy image gate (D-06, D-07) — depends on 06-03
-- [ ] 06-04-PLAN.md — Frontend build hardening (sourcemap/SRI) + route↔openapi parity test + dev cookie Secure flag (D-15, D-17, D-18) — depends on 06-01
+- [x] 06-04-PLAN.md — Frontend build hardening (sourcemap/SRI) + route↔openapi parity test + dev cookie Secure flag (D-15, D-17, D-18) — depends on 06-01
 
 ### Scope
 
@@ -298,7 +298,7 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 | 3. RBAC Enforcement | 5/5 | Complete   | 2026-05-29 |
 | 4. Federation Verification & Session Security | 6/6 | Complete   | 2026-05-29 |
 | 5. Email Delivery & GDPR Compliance | 5/5 | Complete   | 2026-06-02 |
-| 6. CI/CD & Infrastructure Hardening | 4/5 | In Progress|  |
+| 6. CI/CD & Infrastructure Hardening | 5/5 | Complete   | 2026-06-07 |
 | 7. Compliance Verification & Test Closure | 0/0 | Not started | - |
 
 ---

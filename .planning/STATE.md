@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: "Completed 06-03-PLAN.md (checkpoint: human-verify)"
-last_updated: "2026-06-04T14:47:28.492Z"
-last_activity: 2026-06-04
+status: verifying
+stopped_at: "Completed 06-04-PLAN.md"
+last_updated: "2026-06-07T10:44:55.355Z"
+last_activity: 2026-06-07
 progress:
   total_phases: 7
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 31
-  completed_plans: 30
-  percent: 71
+  completed_plans: 31
+  percent: 86
 ---
 
 # Project State
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 Phase: 06 (ci-cd-infrastructure-hardening) — EXECUTING
 Plan: 5 of 5
 Next: Phase 05 (email-delivery-gdpr-compliance) — NOT STARTED (needs planning)
-Status: Ready to execute
-Last activity: 2026-06-04
+Status: Phase complete — ready for verification
+Last activity: 2026-06-07
 
-Progress: [██████████] 97%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -107,6 +107,9 @@ Recent decisions affecting current work:
 - [Phase ?]: Distroless cc-debian12:nonroot for server runtime with SAML .so COPY'd from builder (D-08)
 - [Phase ?]: axiam-server healthcheck subcommand replaces curl probe in distroless containers (D-09)
 - [Phase ?]: All Dockerfile base images digest-pinned; license labels corrected to Apache-2.0 (D-04/D-10)
+- [Phase 06-04]: cookie_secure config-driven via AuthConfig serde default_true() — AXIAM__AUTH__COOKIE_SECURE=false in dev compose; default true in prod (D-18)
+- [Phase 06-04]: Route↔OpenAPI parity test uses three-category model: ROUTE_PERMISSION_MAP + PUBLIC_PATHS + AUTHENTICATED_SELF_SERVICE_PATHS (jwt-auth, no named permission) (D-15)
+- [Phase 06-04]: vite-plugin-sri3 uses named export { sri } not default export — import corrected; SRI SHA-384 hashes in dist/index.html, sourcemap:false (D-17)
 
 ### Pending Todos
 
@@ -126,6 +129,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-04T14:47:28.479Z
+Last session: 2026-06-07T10:44:55.339Z
 Stopped at: Completed 06-03-PLAN.md (checkpoint: human-verify)
 Resume file: None

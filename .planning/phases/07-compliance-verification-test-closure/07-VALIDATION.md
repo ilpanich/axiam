@@ -2,7 +2,7 @@
 phase: 7
 slug: compliance-verification-test-closure
 status: draft
-nyquist_compliant: false
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-06-07
 ---
@@ -89,11 +89,11 @@ New test files / infra that must exist before downstream tasks can be validated:
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references (new test files + gRPC client-stub infra + E2E CI service)
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 120s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify (Plan 04 reordered: live stack first, spec rewrites verified by a real Playwright run, not only tsc/grep)
+- [x] Wave 0 covers all MISSING references (new test files + gRPC client-stub infra + E2E CI service)
+- [x] No watch-mode flags
+- [x] Feedback latency < 120s (per-crate cargo test; E2E job is the separate behavioral gate)
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** nyquist-compliant (revision: Plan 04 Nyquist gap closed — live-stack-first + behavioral Playwright verify)

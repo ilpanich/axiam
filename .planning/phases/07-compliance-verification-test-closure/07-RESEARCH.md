@@ -892,27 +892,31 @@ This is a verification/test-closure phase with no rename/refactor. No runtime st
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **gRPC client stub approach — feature flag vs separate crate**
    - What we know: `build_client(false)` in production; tests need client stubs
    - What's unclear: Whether tonic-prost-build 0.14 supports feature-conditional client generation
    - Recommendation: Planner should prototype the feature-flag approach first; fall back to raw-message approach if blocked
+   - **RESOLVED:** Feature-flag approach. `build.rs` sets `build_client(std::env::var("CARGO_FEATURE_CLIENT").is_ok())` behind a new `client` feature; tests run `--features client`. This is the chosen path in Plan 03 Task 1. Fallback (separate `axiam-api-grpc-tests` crate with its own `build.rs`) stays documented in Plan 03 Task 1 if A2 (tonic-prost-build honoring `CARGO_FEATURE_CLIENT`) proves false at execution.
 
 2. **DeviceAuthService reject cases — how to simulate expired cert in tests**
    - What we know: `DeviceAuthService::authenticate` checks `cert.not_after > now`
    - What's unclear: Whether test repos support inserting certs with arbitrary `not_after` values
    - Recommendation: Use `SurrealCertificateRepository::create(StoreCertificate {..., not_after: Utc::now() - Duration::days(1)})` — Surreal Mem has no datetime validation
+   - **RESOLVED:** Use `SurrealCertificateRepository::create(StoreCertificate { ..., not_after: Utc::now() - Duration::days(1) })`. Surreal Mem does no datetime validation, so a past `not_after` is accepted at insert and `DeviceAuthService::authenticate` exercises the expired-cert reject path when it re-checks `not_after > now`. This is the expired-cert fixture for the mTLS reject case in Plan 01.
 
 3. **OIDC alg:none at HTTP layer vs service layer**
    - What we know: Service layer (`req5_oidc_e2e.rs`) already tests alg:none rejection
    - What's unclear: Whether the HTTP `/oauth2/token` endpoint with OIDC scope also exercises this path
    - Recommendation: Cite service test as evidence; add HTTP test only if a separate code path exists
+   - **RESOLVED:** Cite the existing service-layer test `crates/axiam-server/tests/req5_oidc_e2e.rs::oidc_rejects_alg_none` as the alg:none evidence. Source inspection of `crates/axiam-api-rest/src/handlers/oauth2.rs` confirms `/oauth2/token` issues AXIAM-signed tokens and has NO separate external-`id_token` algorithm-verification code path, so no duplicate HTTP-layer alg:none test is added. Add an HTTP-layer test ONLY if a distinct `/oauth2/token` OIDC code path is later introduced.
 
 4. **Frontend seeded DB — bootstrap vs migration script**
    - What we know: `AXIAM__BOOTSTRAP_ADMIN_EMAIL` env var seeds first admin
    - What's unclear: Whether RBAC fixtures (roles, permissions) auto-seed or require explicit test setup
    - Recommendation: Check `axiam-server/src/startup.rs` for seed logic; if roles/permissions don't auto-seed, add a CI fixture script
+   - **RESOLVED:** A CI fixture script is required. Source inspection (`crates/axiam-server/src/main.rs:240-280`) shows `axiam_db::seed_permissions` runs ONLY for orgs/tenants that already exist; a fresh Mem DB has none, and there is NO env-driven auto-bootstrap (no `AXIAM__BOOTSTRAP_ADMIN_EMAIL` consumer in `main.rs`/config). The org+tenant+admin+`super-admin` role (full permissions) is created ONLY by an HTTP POST to `/api/v1/admin/bootstrap` (`crates/axiam-api-rest/src/handlers/bootstrap.rs:48-168`). So the E2E CI job MUST run a fixture step that POSTs to `/api/v1/admin/bootstrap` (org slug, tenant slug, admin email/password) before Playwright, giving `loginAsAdmin` a real org/tenant/admin with RBAC permissions. NOTE: corrects the earlier assumption that `AXIAM__BOOTSTRAP_ADMIN_EMAIL/PASSWORD` env vars alone seed the admin — they do not.
 
 ---
 

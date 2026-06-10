@@ -193,6 +193,88 @@ Close critical testing gaps in security-sensitive crates.
 
 ---
 
+## Audit Remediation (post-beta tranche)
+
+> Source: `claude_dev/remediation-plan.md`, derived from `claude_dev/code-review.md`
+> (`CQ-B01..B44`, `CQ-F01..F35`) and `claude_dev/security-review.md` (`SEC-002..SEC-057`),
+> both at commit `d69323b`. These requirements open after the v1.0-beta milestone and are
+> executed wave-by-wave with a green-build gate between waves.
+
+## REQ-12: Build Integrity (Wave 0)
+
+**Priority:** Blocker | **Source:** code-review CQ-B37
+
+`axiam-server` must compile and the CI build must pass under `-D warnings`. Blocks all
+subsequent remediation waves.
+
+### Acceptance Criteria
+- [ ] `cargo build -p axiam-server` succeeds (uuid/chrono/serde_json moved to `[dependencies]`, direct `sha2` dep added)
+- [ ] `cleanup.rs` imports `sha2::{Digest, Sha256}` (not `rsa::sha2::{...}`); unused `rsa` dep dropped if now unused
+- [ ] CI `build` job passes `-p axiam-server` including `-D warnings` (12 warnings in `req5_*/req7_*/cleanup_task` tests cleared)
+
+---
+
+## REQ-13: Critical Security Remediation (Wave 1)
+
+**Priority:** Critical | **Source:** SEC-002, SEC-003, SEC-044/CQ-F27, CQ-F28, SEC-045/SEC-017
+
+Close cross-tenant data exposure and broken authentication lifecycle defects.
+
+### Acceptance Criteria
+- [ ] Cross-org IDOR closed: org-nested routes (orgs/tenants/CA certs) return 403 when `org_id != user.org_id`; org create/list restricted to system-admin; cross-org negative tests pass
+- [ ] gRPC authenticated: Tonic interceptor validates bearer JWT / mTLS identity; tenant_id/subject_id derived from verified claims; public gRPC ingress removed; interceptor accept/reject tests added
+- [ ] All six frontend auth flows call real backend endpoints via a typed `auth.ts` service (reset, reset-confirm, verify-email, resend, change-password, MFA enroll/confirm); frontend↔OpenAPI contract test gates in CI
+- [ ] Silent refresh succeeds (CSRF token attached, skip-list narrowed); boot refresh attempted once before declaring unauthenticated
+- [ ] Federation client secrets decrypted at use and encrypted on create/update; secret never serialized; OIDC login succeeds after restart/backfill
+
+---
+
+## REQ-14: High Security Remediation (Wave 2)
+
+**Priority:** High | **Source:** CQ-B01/B02/B03/B04/B05/B06/B07/B08/B09/B30/B38/B40, CQ-F01..F08, SEC-005/007/008/010/011/012/017/033/039/056
+
+Resolve high-severity correctness, async-safety, tenant-isolation, and protocol-hardening defects. *Foundational first:* single hashing path + pepper (CQ-B09/B01) and `load_key_from_env` extraction (CQ-B43, enables SEC-012).
+
+### Acceptance Criteria
+- [ ] One password-hashing path with pepper (repo-layer hasher deleted); REST-created user logs in with pepper set
+- [ ] Argon2 hash/verify and PKI keygen/sign run in `spawn_blocking` behind a bounding semaphore
+- [ ] Tenant settings persist sparse overrides merged against org baseline at read time; baseline change propagates
+- [ ] Tenant-scoped edge mutations (role/permission) verify both endpoints belong to tenant and run in transactions; resource hierarchy rejects cycles/orphans and drops depth-50 truncation
+- [ ] GDPR purge/export correctness (re-selectable on failure, complete export, paginated audit, Failed status); SAML protocol checks (InResponseTo/Destination/Conditions/XSW); TOTP replay rejected; pagination clamped; 5xx errors generic; PKI fails fast on missing key; AMQP DLQ parity; migration idempotent/transactional
+- [ ] Frontend High items fixed (real `user.id`, ConfirmDialog label, debounce cleanup, useQuery search, logout clears store, eslint+`tsc -b` in CI, org settings save, no fabricated tenant status)
+
+---
+
+## REQ-15: Medium Security Remediation (Wave 3)
+
+**Priority:** Medium | **Source:** CQ-B10..B26/B39/B41/B43, CQ-F09..F19/F29/F30/F31, SEC-016/019/020/022/023/024/025/026/028/031/032/046/047/048/049/050/051/052/053/054/055
+
+Consolidate repo/DTO patterns, add transport limits, and harden auth/infra surfaces.
+
+### Acceptance Criteria
+- [ ] Shared repo helpers + request DTOs; index/duplicate violations map to 409; OAuth2/gRPC error mapping + message-size/timeout/concurrency/TLS limits correct
+- [ ] Webhook SSRF re-resolves and pins IP at delivery; rate limits on `/auth/mfa/*` + `/oauth2/introspect|revoke`; AMQP authz/mail messages authenticated/scoped; mTLS verifies chain to tenant/org CA; S256 PKCE enforced
+- [ ] Auth hardening: dummy-Argon2 on user-not-found, atomic failed-login increment, reset-to-current blocked, CSRF on `/api/v1` CRUD, permission enforcement keyed off `ROUTE_PERMISSION_MAP`, bootstrap transactional + gated, self-update strips `status` + gates email change, logout revokes caller's own session
+- [ ] k8s/nginx hardened: `AXIAM__` env keys + secrets, receiver-side NetworkPolicies + PSA restricted, `/oauth2/*` + `/.well-known` proxy locations, backend ports unpublished, prod compose default creds removed
+- [ ] Frontend medium items: toast + `getApiErrorMessage` on all mutations, form validation, resource parent picker excludes descendants, federation edit locks type, pagination `placeholderData`, shared components/hooks, route guards + friendly 403, login handles `mfa_setup_required`/`mfa_required`
+
+---
+
+## REQ-16: Low / Trivial Remediation (Wave 4)
+
+**Priority:** Low | **Source:** CQ-B27..B36/B42, CQ-F20..F35, SEC-036/037/040/041/043/057
+
+Close remaining cleanup, dead-code, dependency, i18n, and minor security-polish findings.
+
+### Acceptance Criteria
+- [ ] Backend cleanup: shared `client_ip`/`user_agent` helper, NotificationDispatcher wired or removed, logged error handling (no silent `let _ =`/`.ok()`), typed errors, `cargo machete` dep pruning + `rand` consolidation, HIBP on sync change-password, audit-drop metric, seeder version/hash skip
+- [ ] SEC-040 deny-overrides cascade implemented or CLAUDE.md wording corrected; encrypted blobs no longer `Debug`-derived/hydrated on list paths; GitHub Actions pinned by commit SHA
+- [ ] Frontend trivial items: dead `Placeholder.tsx` removed, unused radix deps removed, password-policy checker on admin-create+bootstrap, safe DataTable row key, i18n / no hardcoded `en-US`, `CSS.escape` in ResourceTree, `_retry` guard + escaped cookie regex, bootstrap 404 handling, StrictMode double-fetch fixed
+- [ ] Secrets cleared from React state on modal close; reset/verify tokens stripped from URL via `history.replaceState`; no full Axios error/email logging on ForgotPasswordPage
+- [ ] Final whole-effort verification green: `cargo build/clippy -D warnings/test --workspace`, `cargo audit`/`cargo-deny`, `npm audit`, frontend `lint && tsc -b && vitest`, Playwright e2e gating in CI; manual smoke (login→MFA→reset/verify/change-pw→GDPR→federation-after-restart→cross-org 403→gRPC-no-creds rejected)
+
+---
+
 ## Dependency Map
 
 ```
@@ -224,6 +306,11 @@ REQ-11 (Testing) ──────────── runs after each REQ as ver
 | REQ-9 | Phase 6 | Complete |
 | REQ-10 | Phase 6 | Complete |
 | REQ-11 | Phase 7 | Complete |
+| REQ-12 | Phase 8 | Pending |
+| REQ-13 | Phase 9 | Pending |
+| REQ-14 | Phase 10 | Pending |
+| REQ-15 | Phase 11 | Pending |
+| REQ-16 | Phase 12 | Pending |
 
 ---
-*Last updated: 2026-03-30*
+*Last updated: 2026-06-10 (audit-remediation tranche REQ-12..16 added)*

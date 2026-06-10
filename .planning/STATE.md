@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: milestone_complete
-stopped_at: Milestone complete (Phase 07 was final phase)
-last_updated: 2026-06-07T16:23:21.339Z
-last_activity: 2026-06-07
+status: executing
+stopped_at: Completed 07-03-PLAN.md
+last_updated: "2026-06-10T20:11:03.724Z"
+last_activity: 2026-06-10 -- Phase 08 planning complete
 progress:
-  total_phases: 7
+  total_phases: 12
   completed_phases: 7
-  total_plans: 36
+  total_plans: 37
   completed_plans: 36
-  percent: 100
+  percent: 58
 ---
 
 # Project State
@@ -21,17 +21,17 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Milestone complete
+**Current focus:** Audit remediation (Phases 8–12) — close all findings from claude_dev/remediation-plan.md
 
 ## Current Position
 
-Phase: 07
+Phase: 08
 Plan: Not started
-Next: Phase 05 (email-delivery-gdpr-compliance) — NOT STARTED (needs planning)
-Status: Milestone complete
-Last activity: 2026-06-07
+Next: Phase 08 (build-unblock, Wave 0 / CQ-B37) — NOT STARTED (needs planning: `/gsd:plan-phase 8`)
+Status: Ready to execute
+Last activity: 2026-06-10 -- Phase 08 planning complete
 
-Progress: [██████████] 100%
+Progress: [█████▊····] 58% (7/12 phases)
 
 ## Performance Metrics
 
@@ -77,6 +77,17 @@ Progress: [██████████] 100%
 | Phase 07-compliance-verification-test-closure P05 | 40 | 2 tasks | 3 files |
 
 ## Accumulated Context
+
+### Roadmap Evolution
+
+- 2026-06-10 — Audit-remediation tranche added (5 phases) from `claude_dev/remediation-plan.md` (audits at commit `d69323b`). Mapped wave→phase, kept on branch `feature/full-review` (not the plan's `claude/stoic-dirac-12opcw`, and not a fresh fork off stale main):
+  - Phase 8: Build Unblock (Wave 0 — CQ-B37) — REQ-12
+  - Phase 9: Critical Remediation (Wave 1) — REQ-13
+  - Phase 10: High Remediation (Wave 2) — REQ-14
+  - Phase 11: Medium Remediation (Wave 3) — REQ-15
+  - Phase 12: Low/Trivial Remediation (Wave 4) — REQ-16
+- Sequential, green-build gated (8→9→10→11→12). Per-finding atomic commits happen during execute-phase.
+- Note: `gsd-sdk phase.add` mis-numbered (returned 100) because the `99-followups/` sentinel dir inflates its `max+1` counter; phases were authored directly as `08`–`12` instead.
 
 ### Decisions
 

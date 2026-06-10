@@ -298,11 +298,131 @@ Plans:
 
 ---
 
+### Phase 8: Build Unblock (Wave 0)
+
+**Goal**: `axiam-server` compiles and the CI build job passes under `-D warnings`, unblocking every subsequent remediation wave
+**Depends on**: Phase 7 (foundational — BLOCKS all of Waves 1–4)
+**Requirements**: REQ-12
+**Success Criteria** (what must be TRUE):
+
+  1. `cargo build -p axiam-server` succeeds (uuid/chrono/serde_json moved from `[dev-dependencies]` to `[dependencies]` with `workspace = true`; direct `sha2 = { workspace = true }` added)
+  2. `cleanup.rs:260,399` import `sha2::{Digest, Sha256}` instead of `rsa::sha2::{...}`; `rsa` dropped from binary deps if now unused
+  3. The CI `build` job fails on `-p axiam-server` at the current tip and goes green after the fix
+  4. The 12 warnings in `req5_*/req7_*/cleanup_task` tests are cleared so `-D warnings` passes
+
+**Plans**: TBD (run `/gsd:plan-phase 8`)
+
+### Scope
+
+- `crates/axiam-server/Cargo.toml` dependency relocation + `sha2` direct dep
+- `crates/axiam-server/src/cleanup.rs` import fix
+- Warning cleanup in server test modules
+
+---
+
+### Phase 9: Critical Remediation (Wave 1)
+
+**Goal**: Close cross-tenant data exposure and broken authentication lifecycle defects (SEC-002, SEC-003, SEC-044/CQ-F27, CQ-F28, SEC-045/SEC-017)
+**Depends on**: Phase 8 (green-build gate — Wave 0 must pass before Wave 1)
+**Requirements**: REQ-13
+**Success Criteria** (what must be TRUE):
+
+  1. Cross-org IDOR closed: org-nested routes (orgs/tenants/CA certs) return 403 when `org_id != user.org_id`; org create/list restricted to system-admin; cross-org negative tests pass
+  2. gRPC authenticated: Tonic interceptor validates bearer JWT / mTLS identity; tenant_id/subject_id derived from verified claims; public gRPC ingress removed; interceptor accept/reject tests added
+  3. All six frontend auth flows call real backend endpoints via a typed `auth.ts` service (reset, reset-confirm, verify-email, resend, change-password, MFA enroll/confirm); frontend↔OpenAPI contract test gates in CI
+  4. Silent refresh succeeds (CSRF token attached, skip-list narrowed); boot refresh attempted once before declaring unauthenticated
+  5. Federation client secrets decrypted at use and encrypted on create/update; secret never serialized; OIDC login succeeds after restart/backfill
+
+**Plans**: TBD (run `/gsd:plan-phase 9`)
+
+### Scope
+
+- `handlers/organizations.rs`, `tenants.rs`, `ca_certificates.rs` — org-ownership checks (reuse `settings.rs:43` pattern) + cross-org negative tests
+- `axiam-api-grpc` — Tonic auth interceptor; `k8s/ingress.yml` remove public gRPC exposure
+- `frontend/src/services/auth.ts` + 6 auth pages rewired to real routes; frontend↔OpenAPI contract test
+- `lib/api.ts`, `hooks/useAuthInit.ts`, `lib/fetchCurrentUser.ts` — silent/boot refresh fix
+- `OidcFederationService`/`SamlFederationService`, `repository/federation_config.rs`, `models/federation.rs` — secret decrypt-at-use + encrypt-at-rest
+
+---
+
+### Phase 10: High Remediation (Wave 2)
+
+**Goal**: Resolve high-severity correctness, async-safety, tenant-isolation, and protocol-hardening defects. *Foundational first:* single hashing path + pepper (CQ-B09/B01) and `load_key_from_env` extraction (CQ-B43, enables SEC-012)
+**Depends on**: Phase 9 (green-build gate)
+**Requirements**: REQ-14
+**Success Criteria** (what must be TRUE):
+
+  1. One password-hashing path with pepper (repo-layer hasher deleted); REST-created user logs in with pepper set
+  2. Argon2 hash/verify and PKI keygen/sign run in `spawn_blocking` behind a bounding semaphore
+  3. Tenant settings persist sparse overrides merged against org baseline at read time; baseline change propagates
+  4. Tenant-scoped edge mutations (role/permission) verify both endpoints belong to tenant and run in transactions; resource hierarchy rejects cycles/orphans and drops depth-50 truncation
+  5. GDPR purge/export correctness (re-selectable on failure, complete export, paginated audit, Failed status); SAML protocol checks (InResponseTo/Destination/Conditions/XSW); TOTP replay rejected; pagination clamped; 5xx errors generic; PKI fails fast on missing key; AMQP DLQ parity; migration idempotent/transactional
+  6. Frontend High items fixed (real `user.id`, ConfirmDialog label, debounce cleanup, useQuery search, logout clears store, eslint+`tsc -b` in CI, org settings save, no fabricated tenant status)
+
+**Plans**: TBD (run `/gsd:plan-phase 10`)
+
+### Scope
+
+- `axiam-auth/password.rs`, `db/repository/user.rs`, `main.rs` — single hashing path + pepper
+- `auth/service.rs`, `policy.rs`, `axiam-pki/*` — `spawn_blocking` + semaphore for Argon2/PKI
+- `repository/settings.rs`, `role.rs`, `permission.rs`, `resource.rs` — tenant isolation + hierarchy
+- `cleanup.rs`, `handlers/gdpr.rs`, `axiam-federation/saml.rs`, `totp.rs`, `core/repository.rs`, `api-rest/error.rs`, `axiam-pki`, `amqp/*`, `schema.rs` — correctness + hardening
+- Frontend High: `PgpKeysPage`, `ConfirmDialog`, `AuditLogsPage`, `RoleDetailPage`/`GroupDetailPage`, `Topbar`, `ci.yml`, `OrganizationDetailPage`, `TenantsPage`
+
+---
+
+### Phase 11: Medium Remediation (Wave 3)
+
+**Goal**: Consolidate repo/DTO patterns, add transport limits, and harden auth/infra surfaces (CQ-B10..B26/B39/B41/B43, CQ-F09..F19/F29..F31, SEC-016/019/020/022..026/028/031/032/046..055)
+**Depends on**: Phase 10 (green-build gate)
+**Requirements**: REQ-15
+**Success Criteria** (what must be TRUE):
+
+  1. Shared repo helpers + request DTOs; index/duplicate violations map to 409; OAuth2/gRPC error mapping + message-size/timeout/concurrency/TLS limits correct
+  2. Webhook SSRF re-resolves and pins IP at delivery; rate limits on `/auth/mfa/*` + `/oauth2/introspect|revoke`; AMQP authz/mail messages authenticated/scoped; mTLS verifies chain to tenant/org CA; S256 PKCE enforced
+  3. Auth hardening: dummy-Argon2 on user-not-found, atomic failed-login increment, reset-to-current blocked, CSRF on `/api/v1` CRUD, permission enforcement keyed off `ROUTE_PERMISSION_MAP`, bootstrap transactional + gated, self-update strips `status` + gates email change, logout revokes caller's own session
+  4. k8s/nginx hardened: `AXIAM__` env keys + secrets, receiver-side NetworkPolicies + PSA restricted, `/oauth2/*` + `/.well-known` proxy locations, backend ports unpublished, prod compose default creds removed
+  5. Frontend medium items: toast + `getApiErrorMessage` on all mutations, form validation, resource parent picker excludes descendants, federation edit locks type, pagination `placeholderData`, shared components/hooks, route guards + friendly 403, login handles `mfa_setup_required`/`mfa_required`
+
+**Plans**: TBD (run `/gsd:plan-phase 11`)
+
+### Scope
+
+- Backend Medium (CQ-B10..B26/B39/B41/B43): shared repo helpers, DTOs, OAuth2/gRPC limits, JSON body limits, webhook AMQP, federation discovery cache, tests, `load_key_from_env`/`AppState` extraction
+- Security Medium (SEC-016..055): nginx/k8s hardening, webhook SSRF, rate limits, AMQP auth, mTLS chain, S256 PKCE, dummy-Argon2, CSRF scope, permission middleware, bootstrap, self-update, logout, JWKS caps, compose creds
+- Frontend Medium (CQ-F09..F19/F29..F31): toast/error handling, validation, resource picker, federation edit, pagination, shared components, route guards, login MFA states
+
+---
+
+### Phase 12: Low / Trivial Remediation (Wave 4)
+
+**Goal**: Close remaining cleanup, dead-code, dependency, i18n, and minor security-polish findings, then run whole-effort verification (CQ-B27..B36/B42, CQ-F20..F35, SEC-036/037/040/041/043/057)
+**Depends on**: Phase 11 (green-build gate)
+**Requirements**: REQ-16
+**Success Criteria** (what must be TRUE):
+
+  1. Backend cleanup: shared `client_ip`/`user_agent` helper, NotificationDispatcher wired or removed, logged error handling (no silent `let _ =`/`.ok()`), typed errors, `cargo machete` dep pruning + `rand` consolidation, HIBP on sync change-password, audit-drop metric, seeder version/hash skip
+  2. SEC-040 deny-overrides cascade implemented or CLAUDE.md wording corrected; encrypted blobs no longer `Debug`-derived/hydrated on list paths; GitHub Actions pinned by commit SHA
+  3. Frontend trivial items: dead `Placeholder.tsx` removed, unused radix deps removed, password-policy checker on admin-create+bootstrap, safe DataTable row key, i18n / no hardcoded `en-US`, `CSS.escape` in ResourceTree, `_retry` guard + escaped cookie regex, bootstrap 404 handling, StrictMode double-fetch fixed
+  4. Secrets cleared from React state on modal close; reset/verify tokens stripped from URL via `history.replaceState`; no full Axios error/email logging on ForgotPasswordPage
+  5. Final whole-effort verification green: `cargo build/clippy -D warnings/test --workspace`, `cargo audit`/`cargo-deny`, `npm audit`, frontend `lint && tsc -b && vitest`, Playwright e2e gating in CI; manual smoke (login→MFA→reset/verify/change-pw→GDPR→federation-after-restart→cross-org 403→gRPC-no-creds rejected)
+
+**Plans**: TBD (run `/gsd:plan-phase 12`)
+
+### Scope
+
+- Backend Low (CQ-B27..B36/B42, SEC-040/043/057): service composition, shared helpers, dead-code removal, typed errors, dep pruning, HIBP, metrics, seeder, deny-overrides, Debug-derive removal, Actions SHA-pinning
+- Frontend Low (CQ-F20..F35, SEC-036/037/041): dead-code/dep removal, password-policy checker, DataTable key, i18n, `CSS.escape`, refresh `_retry` guard, bootstrap 404, StrictMode fix, secret clearing, URL token stripping, log redaction
+- Final whole-effort verification + manual smoke
+
+---
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12
 Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (see dependency map).
+Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-build gate between waves.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -313,6 +433,11 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 | 5. Email Delivery & GDPR Compliance | 5/5 | Complete   | 2026-06-02 |
 | 6. CI/CD & Infrastructure Hardening | 5/5 | Complete   | 2026-06-07 |
 | 7. Compliance Verification & Test Closure | 5/5 | Complete   | 2026-06-07 |
+| 8. Build Unblock (Wave 0) | 0/0 | Pending | — |
+| 9. Critical Remediation (Wave 1) | 0/0 | Pending | — |
+| 10. High Remediation (Wave 2) | 0/0 | Pending | — |
+| 11. Medium Remediation (Wave 3) | 0/0 | Pending | — |
+| 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |
 
 ---
 
@@ -331,8 +456,13 @@ Note: Phases 4 and 6 can run in parallel with Phase 3 and Phase 5 respectively (
 | REQ-9 | Phase 6 | CI/CD Security Hardening |
 | REQ-10 | Phase 6 | Infrastructure Hardening |
 | REQ-11 | Phase 7 | Testing Gaps |
+| REQ-12 | Phase 8 | Build Integrity (Wave 0) |
+| REQ-13 | Phase 9 | Critical Security Remediation (Wave 1) |
+| REQ-14 | Phase 10 | High Security Remediation (Wave 2) |
+| REQ-15 | Phase 11 | Medium Security Remediation (Wave 3) |
+| REQ-16 | Phase 12 | Low / Trivial Remediation (Wave 4) |
 
-**Coverage: 11/11 requirements mapped (100%)**
+**Coverage: 16/16 requirements mapped (100%)**
 
 ---
 
@@ -347,4 +477,9 @@ Phase 1 (Cookie Auth) -----> Phase 2 (Headers/Rate Limit) -----> Phase 3 (RBAC) 
                                                                                                v
                                                                                   Phase 7 (Compliance/Tests)
                                                                                   [depends on ALL phases]
+                                                                                               |
+                                                                                               v
+              Audit-remediation tranche (sequential, green-build gate between waves):
+              Phase 8 (Build Unblock / W0) -> Phase 9 (Critical / W1) -> Phase 10 (High / W2)
+                  -> Phase 11 (Medium / W3) -> Phase 12 (Low / W4)
 ```

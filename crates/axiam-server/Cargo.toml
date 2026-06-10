@@ -33,6 +33,11 @@ hex = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 surrealdb = { workspace = true }
+# Used by src/cleanup.rs (library source), so these must be prod deps, not dev-only (REQ-12).
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [features]
 # SAML SP support, forwarded to the api-rest and federation crates (→ samael).
@@ -49,11 +54,8 @@ axiam-federation = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 surrealdb-types = "3"
 tokio-test = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
 base64 = { workspace = true }
 jsonwebtoken = { workspace = true }
-serde_json = { workspace = true }
 wiremock = "0.6"
 rsa = { version = "0.9", features = ["sha2"] }
 actix-rt = { workspace = true }

@@ -257,7 +257,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
 
         // Derive email hash for anonymize_user from tenant+user IDs (original email
         // is no longer accessible at purge time — user already marked deletion_pending).
-        use rsa::sha2::{Digest, Sha256};
+        use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(tenant_id.as_bytes());
         h.update(user_id.as_bytes());
@@ -396,7 +396,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         // (d) Generate single-use 24h download token (D-13).
         let raw_download_token = Uuid::new_v4().to_string();
         let token_hash = {
-            use rsa::sha2::{Digest, Sha256};
+            use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
             h.update(raw_download_token.as_bytes());
             hex::encode(h.finalize())

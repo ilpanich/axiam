@@ -1,311 +1,260 @@
-# AXIAM — Full Security Review
+# AXIAM — Full Security Review (updated re-assessment)
 
-- **Date**: 2026-06-09
-- **Scope**: Entire repository at commit `6f2676d` — all 13 Rust crates, React frontend, proto definitions, docker/, k8s/, dependency audit (`cargo audit`, `npm audit`).
-- **Method**: Manual line-level review of all security-relevant code (auth, oauth2, federation, pki, authz, db layer, REST/gRPC/AMQP surface, frontend auth/token handling), full route-table enumeration of the REST API, plus automated dependency scanning. Each finding was verified against the actual code; file:line references point at the evidence.
-- **Companion document**: [`code-review.md`](code-review.md) — code-quality findings. Items that are both quality and security issues are cross-referenced.
+- **Date**: 2026-06-09 (update of the 2026-06-09 review done at `6f2676d`)
+- **Scope**: Entire repository at commit `d69323b` (merge of the Phase 01–06 remediation work: cookie-based auth, RBAC enforcement, federation signature verification, GDPR/email delivery, deployment hardening — 51 commits, ~52k insertions since the previous review).
+- **Method**: Per-finding re-verification of all 43 previous findings (`SEC-001`…`SEC-043`) against the current code, line-level review of all security-relevant new code (extractors/auth.rs cookie auth, middleware/csrf.rs, middleware/authz.rs + permissions.rs, handlers/bootstrap.rs, handlers/gdpr.rs + GDPR repos, federation oidc/saml/jwks_cache/secrets, email_config, mail consumer, cleanup task, docker/k8s/CI), plus `cargo audit`-equivalent lockfile checks, `npm audit`, and full route-table inspection.
+- **Companion document**: [`code-review.md`](code-review.md). The top blocking item — **the server binary does not compile at this commit** — is tracked there as **CQ-B37** and gates every fix below.
 
-Finding IDs (`SEC-NNN`) are stable — use them to drive and track remediation.
+Finding IDs are stable. Statuses: ✅ FIXED (verified), 🔶 PARTIAL (core improved, residual risk listed), ❌ OPEN (unchanged or equivalent). New findings continue the sequence at SEC-044.
 
 ---
 
 ## Executive summary
 
-The codebase shows strong security *primitives* (Argon2id at OWASP parameters, EdDSA JWTs with no alg-confusion, AES-256-GCM with fresh nonces, hashed single-use refresh tokens, constant-time secret comparisons, parameterized SurrealQL everywhere — **no injection found**), but the *enforcement layer is not wired up*. The most severe theme: the authorization engine exists and is tested, yet **no REST handler calls it**, organizations/tenants endpoints don't even check ownership, and gRPC has no authentication at all while being publicly ingressed. Federation (SAML + OIDC) currently performs **no signature verification**, and an MFA-challenge JWT is accepted as a full access token. Until SEC-001…SEC-006 are fixed, any authenticated user is effectively a global administrator, and federation is an authentication bypass.
+The remediation wave was real and well-aimed: **RBAC is now enforced on every REST handler** (SEC-001 fixed, with negative tests), **OIDC/SAML federation now verifies signatures** (JWKS + xmlsec, fail-closed, with tampered-fixture tests), the **MFA-challenge-as-access-token bypass is closed**, **WebAuthn fails closed**, **password reset revokes sessions**, tokens moved out of `sessionStorage` into **httpOnly SameSite=Strict cookies with CSRF double-submit on the auth scope**, security headers + CSP/HSTS landed in nginx and middleware, dependency advisories were cleared and **CI now gates audit/deny/trivy/npm-audit**.
 
-| Severity | Count |
-|---|---|
-| Critical | 6 |
-| High | 12 |
-| Medium | 15 |
-| Low | 10 |
+What remains, in order of severity:
+
+1. **Two of the original criticals are still exploitable.** Organizations/tenants/CA endpoints check *permissions* but never that the caller belongs to the path `org_id` — cross-organization IDOR stands (SEC-002). gRPC still has **no authentication** and is still publicly ingressed (SEC-003).
+2. **A new class of "wired-but-broken" issues.** The frontend's password-reset/forgot/verify-email/change-password/MFA-setup flows call endpoints that don't exist (SEC-044); silent token refresh is blocked by the CSRF middleware it doesn't know about (CQ-F28); the federation secret-at-rest pipeline encrypts on backfill but **never decrypts at use and blanks the plaintext**, breaking OIDC login after the first restart (SEC-045); the k8s manifests set env vars with the wrong prefix so production config is silently ignored (SEC-052).
+3. **Tenant-isolation gaps below the handler layer** — role/permission edge mutations still ignore `tenant_id` (SEC-007).
+4. Unfinished hygiene: zero-key PKI fallback (SEC-012), unbounded pagination (SEC-010), error-detail leakage (SEC-011), TOTP replay (SEC-008), webhook SSRF (SEC-019), frontend logout still client-side (SEC-015).
+
+### Current finding counts (active = OPEN + PARTIAL)
+
+| Severity | Active | Of which new this round |
+|---|---|---|
+| Critical | 2 | 0 |
+| High | 10 | 2 |
+| Medium | 24 | 11 |
+| Low | 7 | 1 |
+
+14 previous findings verified **fixed** (see the Resolved table at the end).
 
 ### Top remediation priorities (suggested order)
 
-1. **SEC-001 / SEC-002 / SEC-003** — wire RBAC into REST, fix org/tenant IDOR, authenticate gRPC (the management plane is currently open to any token holder).
-2. **SEC-004 / SEC-005** — implement OIDC JWKS + SAML XML-signature verification, or hard-disable federation endpoints until done.
-3. **SEC-006** — add `token_use`/`aud` claims and enforce them in `decode_access_token` (MFA bypass).
-4. **SEC-007** — tenant-scope the role/permission RELATE repository methods.
-5. **SEC-012 / SEC-017 / SEC-018** — stop the zero-key fallback and plaintext secrets at rest / in API responses.
-6. **SEC-013 / SEC-029** — dependency upgrades (`lettre`, `axios`, `react-router`, `vite`).
+1. **CQ-B37** — make the server compile again (dev-deps vs cleanup.rs); nothing ships until this is green.
+2. **SEC-002** — add the `path.org_id == user.org_id` check (the settings.rs pattern) to organizations/tenants/ca_certificates; **SEC-003** — gRPC auth interceptor + remove public ingress.
+3. **SEC-044 / CQ-F27 / CQ-F28** — repair the broken frontend auth flows and the CSRF-blocked refresh (auth lifecycle is currently non-functional past the happy path).
+4. **SEC-045** — wire federation secret decryption into the OIDC callback and encrypt on create/update.
+5. **SEC-007** (tenant-scope edge mutations), **SEC-012** (zero-key), **SEC-010/SEC-011** (clamp pagination, generic 5xx bodies).
+6. **SEC-052 / SEC-053** — fix k8s env prefixes/secrets and NetworkPolicy receiver rules (the k8s deployment cannot work as committed).
 
 ---
 
-## Critical findings
+## Critical findings (active)
 
-### SEC-001 [CRITICAL] No authorization (RBAC) enforced on any REST handler
-- **File**: `crates/axiam-api-rest/src/handlers/*.rs` (all of users.rs, roles.rs, groups.rs, permissions.rs, resources.rs, certificates.rs, service_accounts.rs, webhooks.rs, …); unused guard at `crates/axiam-api-rest/src/authz.rs:67-113`
-- **Category**: AuthZ / Privilege escalation
-- **Issue**: Every handler requires only `AuthenticatedUser` (a valid JWT). The `RequirePermission`/`AuthzChecker` infrastructure exists and is unit-tested, but a grep across `handlers/` shows it is never invoked; `AuthorizationEngine` is built in `main.rs` but only wired to gRPC/AMQP — `AuthzData` is never inserted into the REST app.
-- **Impact**: Any user with a valid JWT can create/delete users, create roles, **assign any role (including admin roles) to themselves** via `POST /api/v1/roles/{role_id}/users {user_id: <self>}`, grant permissions, mint certificates, read audit logs, manage webhooks — complete privilege escalation within the tenant.
-- **Fix**: Insert `web::Data<Arc<dyn AuthzChecker>>` into the REST app and call `RequirePermission::new(action, resource).check(&user, authz).await?` at the top of every state-changing/sensitive handler. Add negative tests asserting a non-privileged user is denied. Re-enable `reset_mfa` (auth.rs:465) once done.
+### SEC-002 [CRITICAL] 🔶 PARTIAL — Cross-organization IDOR on organizations / tenants / CA-certificates endpoints
+- **File**: `crates/axiam-api-rest/src/handlers/organizations.rs:74-137`, `tenants.rs:143-220`, `ca_certificates.rs:28-128`
+- **What changed**: Handlers now run `RequirePermission` checks (`organizations:get/update/delete`, etc.) and tenants verifies `tenant.organization_id == path.org_id`.
+- **What remains**: **No handler compares the caller's `org_id` (JWT) to the path `org_id`** — grep for `user.org_id` in all three modules returns nothing. A user with `organizations:get`/`tenants:*` in org A can read/update/delete org B, manage org B's tenants, and manage org B's CA certificates. The correct pattern already exists in `settings.rs:38`.
+- **Fix**: `if path.org_id != user.org_id { return 403/404 }` on every org-nested route (or scope the authz resource to the org). Restrict org create/list to system admins. Add cross-org negative tests.
 
-### SEC-002 [CRITICAL] Cross-organization / cross-tenant IDOR on organizations & tenants endpoints
-- **File**: `crates/axiam-api-rest/src/handlers/organizations.rs:24-116`, `crates/axiam-api-rest/src/handlers/tenants.rs:49-187`; same pattern in `ca_certificates.rs` (no `org_id` comparison)
-- **Category**: IDOR / Broken object-level authorization
-- **Issue**: Both modules bind the caller as `_user: AuthenticatedUser` (extracted then **ignored**) and operate purely on path IDs. Tenants only validate `tenant.organization_id == path.org_id`, never that the caller belongs to `org_id`. Contrast with `settings.rs:38`, which does the check correctly.
-- **Impact**: Any authenticated user from any tenant can list **all organizations**, read/update/delete **any organization**, create/read/update/delete **any tenant in any org**, and manage other orgs' CA certificates — full multi-tenant isolation breach.
-- **Fix**: Enforce `path.org_id == user.org_id` (as settings.rs does) plus an org-admin permission check (depends on SEC-001). Restrict org creation/listing to system administrators.
-
-### SEC-003 [CRITICAL] gRPC services have no authentication and are exposed via public ingress
-- **File**: `crates/axiam-api-grpc/src/server.rs:39-44` (no interceptor); `k8s/ingress.yml:36-62` (public `grpc.axiam.example.com`)
-- **Category**: AuthN / Authorization bypass
-- **Issue**: `Server::builder().add_service(...).serve(addr)` with no JWT/mTLS interceptor. `UserServiceImpl::get_user` and `validate_credentials` take `tenant_id` straight from the request with no caller identity; `CheckAccess`/`BatchCheckAccess` trust request-supplied `tenant_id`/`subject_id`.
-- **Impact**: Anyone who can reach the gRPC endpoint can read any user in any tenant, brute-force passwords via `ValidateCredentials` (which checks lockout but never increments it — see SEC-026/CQ cross-ref), and query authorization decisions for any tenant/subject.
-- **Fix**: Add a Tonic auth interceptor that validates the bearer JWT (or mTLS identity) and derives `tenant_id` from verified claims. Remove gRPC from the public ingress; keep it mesh-internal with mTLS.
-
-### SEC-004 [CRITICAL] OIDC federation accepts ID tokens with NO signature verification
-- **File**: `crates/axiam-federation/src/oidc.rs:284-295, 398-425`
-- **Category**: AuthN / Federation
-- **Evidence**: `// TODO(T19.6): Implement JWKS-based JWT signature verification` followed by `decode_id_token_claims`, which just base64-decodes the payload. nonce/exp/aud are checked; the signature is not.
-- **Impact**: Full authentication bypass via federation — anyone who can reach the callback can forge a token with any `sub`/`email` (matching `aud=client_id` and the expected `nonce`) and AXIAM will provision/link a local user as that identity.
-- **Fix**: Fetch JWKS from `discovery.jwks_uri`, verify the JWT signature (RS256/ES256/EdDSA per IdP) with `jsonwebtoken` using `set_issuer`/`set_audience`, validate `iss` against the discovery `issuer`. Fail closed; gate any insecure decode behind an explicit dev-only flag. Until then, disable the federation login endpoints.
-
-### SEC-005 [CRITICAL] SAML assertions accepted with NO XML signature verification
-- **File**: `crates/axiam-federation/src/saml.rs:354-362`; SP metadata advertises `WantAssertionsSigned="false"` at saml.rs:468
-- **Category**: AuthN / Federation
-- **Issue**: After a `TODO(T19.7)` warning, the code checks only `Status == Success`, `Conditions` (NotBefore/NotOnOrAfter), and audience, then provisions the user. No verification that the Response/Assertion is signed by the configured IdP.
-- **Impact**: Anyone who can POST to the ACS endpoint can craft a SAML Response with an arbitrary `NameID` and matching `AudienceRestriction` (the SP entity ID is the public `client_id`) and be authenticated as any user.
-- **Fix**: Validate the enveloped XML signature against the IdP's X.509 cert from metadata (samael supports this); reject unsigned assertions; validate `InResponseTo`, `Recipient`, `Destination`, and `SubjectConfirmation` NotOnOrAfter; set `WantAssertionsSigned="true"`.
-
-### SEC-006 [CRITICAL] MFA-challenge token is accepted as a full access token (MFA bypass)
-- **File**: `crates/axiam-auth/src/service.rs:666-689, 720-761`; `crates/axiam-auth/src/token.rs:192-208`; `crates/axiam-auth/src/webauthn.rs:320-339`
-- **Category**: Token handling / AuthN
-- **Issue**: All internal JWTs (access, MFA challenge, MFA setup, WebAuthn state) are signed with the same Ed25519 key and share `iss`. Purpose separation relies on a manual `purpose` claim check — but `decode_access_token` does not check it. The MFA challenge token carries `sub`/`tenant_id`/`org_id`/`exp`/`iat`/`iss`, so it deserializes cleanly into `AccessTokenClaims` (the extra `purpose` field is ignored; `scope` is optional) and passes `validate_access_token`.
-- **Impact**: A user who passes only the password step (before TOTP/WebAuthn) receives a challenge token that the API auth middleware accepts as a full access token → MFA bypass.
-- **Fix**: Add a `token_use` (or `aud`) claim to **every** token type and enforce it on decode: `decode_access_token` must require `token_use == "access"`; challenge/setup/webauthn decoders must require theirs. Add regression tests that each non-access token is rejected by the REST auth extractor.
+### SEC-003 [CRITICAL] ❌ OPEN — gRPC services have no authentication and are exposed via public ingress
+- **File**: `crates/axiam-api-grpc/src/server.rs:51-57` (only a rate-limit layer was added — `middleware/rate_limit.rs`); `k8s/ingress.yml` still exposes `grpc.axiam.example.com → :50051`
+- **Issue**: No JWT/mTLS interceptor; `CheckAccess`/`BatchCheckAccess`/`UserService` still trust request-supplied `tenant_id`/`subject_id`. Anyone reaching the endpoint reads any user, brute-forces `ValidateCredentials` (which still never increments lockout — SEC-026b), and queries authz decisions for any tenant.
+- **Fix**: Tonic interceptor validating bearer JWT or mTLS identity; derive `tenant_id` from verified claims; remove from public ingress (mesh-internal + mTLS).
 
 ---
 
-## High findings
+## High findings (active)
 
-### SEC-007 [HIGH] Cross-tenant role assignment & permission grants — repository methods ignore `tenant_id`
-- **File**: `crates/axiam-db/src/repository/role.rs:320-376, 477-532`; `crates/axiam-db/src/repository/permission.rs:314-417`
-- **Category**: Tenant isolation
-- **Issue**: `assign_to_user`, `assign_to_group`, `grant_to_role`, `grant_to_role_with_scopes`, `revoke_from_role`, `unassign_*` all take `_tenant_id` (unused) and `RELATE`/`DELETE` edges by raw UUIDs with no verification that the user/group/role/permission/scope belong to the calling tenant. The REST handler passes `user.tenant_id`, but role_id (path) and user_id (body) are attacker-controlled. Contrast: `group.rs::add_member` (350-383) **does** verify both sides; `certificate.rs::bind_to_service_account` verifies via `THROW`.
-- **Impact**: A tenant-A admin can create or delete role-assignment/permission-grant edges involving tenant-B entities — cross-tenant privilege manipulation and denial of access.
-- **Fix**: Apply the `add_member` verification pattern (or a tenant-guarded subquery / `THROW` inside the statement) to every edge-mutating method. Add tenant-isolation tests for each.
+### SEC-005 [HIGH→ was CRITICAL] 🔶 PARTIAL — SAML: signature verification landed; protocol checks still missing
+- **File**: `crates/axiam-federation/src/saml.rs`
+- **Fixed**: `verify_signature` (saml.rs:513-527) fails closed via `samael::crypto::verify_signed_xml` against the configured IdP cert; missing cert → `ConfigIncomplete`; Conditions NotBefore/NotOnOrAfter (383-398) and AudienceRestriction (401-412) validated; **assertion-ID replay protection** with UNIQUE index (`saml_assertion_replay`, schema.rs:392-400, repo + cleanup sweep); tampered/unsigned fixture tests + `req5_saml_e2e.rs`.
+- **Still missing**: `InResponseTo` never checked (unsolicited responses accepted); `Destination`/`Recipient`/`SubjectConfirmationData` not validated; SP metadata still advertises `WantAssertionsSigned="false"` / `AuthnRequestsSigned="false"` (saml.rs:487-488); no explicit XSW defense — the code verifies *a* signature in the document then consumes `response.assertion` without binding the signed element to the consumed one; assertions with no `Conditions` block are accepted.
+- **Fix**: Validate InResponseTo against issued request IDs; check Destination/Recipient/SubjectConfirmation; require Conditions; set `WantAssertionsSigned="true"`; bind the verified signature reference to the consumed assertion (XSW).
 
-### SEC-008 [HIGH] No replay protection on TOTP codes
-- **File**: `crates/axiam-auth/src/totp.rs:76-95`; `crates/axiam-auth/src/service.rs:287-296`
-- **Category**: AuthN / MFA
-- **Issue**: `check_current` with skew=1 (~90 s window); nothing records that a code/step was consumed.
-- **Impact**: A code observed in transit (phishing proxy, shoulder-surf, replayed request) can be reused within the window — MFA bypass.
-- **Fix**: Persist the last successfully used TOTP step (or code hash) per user and reject same-or-earlier steps (RFC 6238 §5.2).
+### SEC-007 [HIGH] ❌ OPEN — Cross-tenant role assignment & permission grants: edge methods still ignore `tenant_id`
+- **File**: `crates/axiam-db/src/repository/role.rs:320,345,477,502`; `permission.rs:314,333` (+ `grant_to_role_with_scopes`)
+- **Issue**: All still take `_tenant_id` (unused) and `RELATE`/`DELETE` edges by raw UUIDs; handlers do no pre-flight ownership check on path/body IDs. A caller with `roles:assign`/`permissions:grant` can create or destroy cross-tenant edges. The correct pattern exists in `group.rs::add_member` and `certificate.rs::bind_to_service_account`.
+- **Fix**: Verify both sides belong to the tenant (subquery/`THROW`) in every edge mutation; add tenant-isolation tests per method.
 
-### SEC-009 [HIGH] WebAuthn `finish_authentication` does not bind the asserting credential to the user
-- **File**: `crates/axiam-auth/src/webauthn.rs:230-268`
-- **Category**: AuthN / MFA
-- **Issue**: After `finish_passkey_authentication`, the code looks up the credential in the user's list only to update `last_used_at`; when no credential matches, the function **still returns `Ok((user_id, org_id))`** — the identity comes from the state token, not the matched credential.
-- **Impact**: Violates fail-closed; if any caller ever starts a ceremony with a broader credential set (or on future refactors), an assertion from one user's key could authenticate as another.
-- **Fix**: Require the matched credential to exist and belong to `user_id`; return an error on `None`. Derive the authenticated identity from the stored credential.
+### SEC-008 [HIGH] ❌ OPEN — No replay protection on TOTP codes
+- **File**: `crates/axiam-auth/src/totp.rs:70`; `service.rs:316,425`
+- **Issue**: `check_current` with skew 1 (~90 s window); no consumed-step persistence anywhere (user model unchanged). Codes are replayable within the window.
+- **Fix**: Persist last-used TOTP step per user; reject same-or-earlier steps (RFC 6238 §5.2).
 
-### SEC-010 [HIGH] Unbounded pagination `limit` — DoS on every list endpoint
-- **File**: `crates/axiam-core/src/repository.rs:44-58`; used unclamped in all repos (e.g. `user.rs:455-459`, `role.rs:297`, `audit.rs:308`)
-- **Category**: DoS / Input validation
-- **Issue**: `limit: u64` from the query string flows straight to `LIMIT $limit` with no maximum.
-- **Impact**: `GET /api/v1/users?limit=100000000` forces the DB to materialize huge result sets — memory/CPU exhaustion, repeatable by any authenticated user on every list endpoint.
-- **Fix**: Clamp `limit` (e.g. max 200, reject 0) centrally in `Pagination` deserialization/constructor.
+### SEC-010 [HIGH] ❌ OPEN — Unbounded pagination `limit` — DoS on every list endpoint
+- **File**: `crates/axiam-core/src/repository.rs:49-63` (`limit: u64`, default 50, **no clamp**); flows to `LIMIT $limit` in every repo
+- **Fix**: Clamp centrally (max ~200, reject 0) in `Pagination` deserialization. Unchanged since last review.
 
-### SEC-011 [HIGH] Internal error details leaked in HTTP responses
-- **File**: `crates/axiam-api-rest/src/error.rs:53-69`; feeding from `crates/axiam-db/src/error.rs` and `crates/axiam-auth/src/error.rs:104`
-- **Category**: Info disclosure
-- **Issue**: `message: self.0.to_string()` serializes the full error `Display` for `Database(_)`, `Crypto(_)`, `Internal(_)`, `Certificate(_)` — SurrealDB engine/query text, crypto library detail, internal messages all reach the client.
-- **Impact**: Leaks schema/query internals and crypto state, aiding attackers.
-- **Fix**: For 5xx categories return a generic message; log details server-side with `tracing` only.
+### SEC-011 [HIGH] ❌ OPEN — Internal error details leaked in HTTP responses
+- **File**: `crates/axiam-api-rest/src/error.rs:72-75` — the `error` code is now genericized to `"internal_error"`, but `message: self.0.to_string()` still serializes full `Database/Crypto/Internal/Certificate` detail into 5xx bodies.
+- **Fix**: Generic message for 5xx; `tracing` for detail. Also closes SEC-039.
 
-### SEC-012 [HIGH] PKI encryption key silently falls back to an all-zero key
-- **File**: `crates/axiam-server/src/main.rs:129-134`; `crates/axiam-pki/src/ca.rs:84`
-- **Category**: Crypto / Secrets at rest
-- **Issue**: When `AXIAM__PKI__ENCRYPTION_KEY` is unset, the server logs a warning claiming "CA certificate generation will fail" and substitutes `[0u8; 32]`. axiam-pki has no zero-key guard — generation succeeds, and CA/PGP private keys are AES-256-GCM-encrypted with a publicly known constant key.
-- **Impact**: All CA/PGP private keys "encrypted at rest" are trivially decryptable by anyone with DB access; the operator was told the feature would fail, so the misconfiguration goes unnoticed.
-- **Fix**: Make `PkiConfig.encryption_key` an `Option` and **fail at startup** (or at the service call) when unset. Never substitute a constant key.
+### SEC-012 [HIGH] ❌ OPEN — PKI encryption key still silently falls back to an all-zero key
+- **File**: `crates/axiam-server/src/main.rs:335-353` (still substitutes `[0u8; 32]` with only a warning); no zero-key guard in axiam-pki (`ca.rs:147`)
+- **Fix**: Fail at startup when unset; never substitute a constant key. (Note: federation/MFA/email keys got proper `Option<[u8;32]>` handling — apply the same pattern.)
 
-### SEC-013 [HIGH] Rust dependency vulnerabilities (`cargo audit`: 7 advisories)
-- **File**: `Cargo.lock`
-- **Category**: Supply chain
-- **Issue / inventory**:
-  - `lettre 0.11.19` — **RUSTSEC-2026-0141 (critical 9.1)**: TLS hostname verification disabled with Boring TLS backend → upgrade to ≥0.11.22. (Verify which TLS backend AXIAM compiles; upgrade regardless.)
-  - `hickory-proto 0.25.2` — RUSTSEC-2026-0119 (O(n²) CPU exhaustion, fix ≥0.26.1) and RUSTSEC-2026-0118 (unbounded loop, no fix yet).
-  - `rustls-webpki 0.103.10` — RUSTSEC-2026-0098/0099 (name-constraint bypasses), RUSTSEC-2026-0104 (panic in CRL parsing) → upgrade ≥0.103.13.
-  - `rsa 0.9.10` — RUSTSEC-2023-0071 Marvin timing side-channel (no fix; document residual risk where RSA-4096 certs are used).
-  - Warnings: `atomic-polyfill`, `bincode 2.0.1` unmaintained; `rand` 0.8/0.9/0.10 RUSTSEC-2026-0097 unsoundness with custom loggers (three duplicate `rand` majors in tree — consolidate).
-- **Fix**: Bump `lettre`, `hickory-proto`, `rustls-webpki`; add `cargo audit`/`cargo deny` to CI so this is gated continuously.
+### SEC-015 [HIGH] 🔶 PARTIAL — Logout: backend complete, frontend never calls it
+- **Fixed**: `POST /api/v1/auth/logout` (handlers/auth.rs:364-375) invalidates the session and clears all three cookies; refresh-token revocation is complete server-side.
+- **Open**: `frontend/src/components/layout/Topbar.tsx:86-89` still only does `clearAuth(); navigate("/login")`. With cookie auth this is now **worse than before**: the httpOnly cookies survive, so a page reload re-authenticates via `useAuthInit` — logout is effectively a no-op on shared machines. react-query cache also survives (CQ-F05).
+- **Fix**: Call the logout endpoint + `queryClient.clear()` in `handleLogout` and on the 401-refresh-failure path. (Also see SEC-051 for the logout body `session_id` IDOR.)
 
-### SEC-014 [HIGH] Frontend: access token persisted in `sessionStorage` with no CSP anywhere
-- **File**: `frontend/src/stores/auth.ts:52-61`; `frontend/index.html`; `docker/nginx.conf:20-24`
-- **Category**: Token storage / XSS defense-in-depth
-- **Issue**: The bearer token is persisted via zustand `persist` into `sessionStorage` (`axiam-auth` key). Neither index.html nor nginx sets `Content-Security-Policy`; nginx ships the deprecated `X-XSS-Protection` and no HSTS.
-- **Impact**: Any XSS foothold (including a compromised npm dependency) exfiltrates a valid **IAM admin** bearer token with one line of JS; there is no compensating CSP layer.
-- **Fix**: Keep the access token in memory only and re-establish sessions via the httpOnly refresh cookie + silent `/auth/refresh` on load. Regardless, add a strict CSP (`default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'`), `Strict-Transport-Security`, and `Permissions-Policy` in nginx; drop `X-XSS-Protection`.
+### SEC-017 [HIGH] 🔶 PARTIAL — Federation IdP `client_secret`: backfill encryption landed, but create/update still plaintext and responses fixed
+- **Fixed**: Boot-time backfill encrypts legacy rows (secrets.rs:108-188, AES-256-GCM, key version, audit trail; tests `federation_secret_backfill.rs`, `req5_secret_at_rest.rs`); API responses now use `FederationConfigResponse` which omits the secret.
+- **Open**: `federation_config.rs:184-186,248-251` (`TODO T19.8`) — **create/update still write plaintext**, so every new/edited config is plaintext at rest until the next restart's backfill; core model still has no `#[serde(skip_serializing)]` (models/federation.rs:26-27); frontend still declares/pre-fills `client_secret` (services/federation.ts:15, FederationPage.tsx:334) — currently inert only because it calls a non-existent endpoint (CQ-F27).
+- **Fix**: Encrypt at create/update; `skip_serializing` on the model; make the UI field write-only. **And see SEC-045 — the decrypt side is unwired.**
 
-### SEC-015 [HIGH] Logout is client-side only — refresh token never revoked
-- **File**: `frontend/src/components/layout/Topbar.tsx:86-89`; `frontend/src/lib/api.ts:111`
-- **Category**: Session management
-- **Issue**: "Sign out" only clears the zustand store; `POST /auth/logout` is never called anywhere (grep: zero references). The server-stored refresh token and the httpOnly cookie remain valid.
-- **Impact**: On a shared machine, anyone after "logout" can hit `POST /auth/refresh` (cookie sent automatically) and obtain a fresh access token — logout does not terminate the session.
-- **Fix**: Call `/auth/logout` (revoke + clear cookie) in `handleLogout` and in the 401-refresh-failure path; also clear the react-query cache (see code review FE-005).
+### SEC-044 [HIGH] 🆕 — Frontend security flows call endpoints that do not exist (reset / forgot / verify-email / change-password / MFA setup / resend-verification)
+- **File**: `frontend/src/pages/auth/ForgotPasswordPage.tsx:15`, `ResetPasswordPage.tsx:22`, `VerifyEmailPage.tsx:20`, `profile/ChangePasswordPage.tsx:22`, `profile/MfaManagementPage.tsx:44,49`, `profile/ProfilePage.tsx:52`; backend routes live under `/api/v1/auth/*` (`server.rs:58-140`) with different names/methods/shapes (`/auth/forgot-password` vs `/api/v1/auth/reset`, GET `/auth/verify-email` vs POST `/api/v1/auth/verify-email` requiring `tenant_id`, `{code}` vs `{totp_code}`, …). Neither the vite proxy nor nginx forwards the legacy `/auth/*` XHR paths (vite.config.ts deliberately lists some as "SPA routes").
+- **Impact**: Password reset, email verification, password change, MFA enrollment and resend-verification are all silently dead; verify-email shows a **false "Email verified!" success** from the SPA fallback (subsumes **SEC-030**, still open). In an IAM product these are security-recovery paths.
+- **Fix**: Move all of these into the typed services layer with the real `/api/v1/auth/*` paths/methods/bodies; add a CI contract test against the OpenAPI document (the backend already has route↔OpenAPI parity tests — mirror that on the frontend).
 
-### SEC-016 [HIGH] Production nginx does not proxy `/auth/*` or `/oauth2*` — invites insecure workarounds
-- **File**: `docker/nginx.conf:50-61`; compare `frontend/vite.config.ts:13-27`; `docker/docker-compose.prod.yml` publishes `8080:8080`
-- **Category**: Deployment
-- **Issue**: The SPA calls `/auth/login`, `/auth/refresh`, `/auth/mfa/*`, `/oauth2/*` same-origin; production nginx proxies only `/api`. Auth flows are broken in the shipped image, and the prod compose already exposes the backend directly on plain-HTTP :8080 — the natural "fix" operators will reach for, which breaks cookie same-origin assumptions and bypasses nginx security headers.
-- **Fix**: Add `location ^~ /auth/ { proxy_pass ...; }` and `location ^~ /oauth2 { ... }` blocks mirroring the Vite proxy rules (keeping the SPA-only `/auth/...` pages served by the SPA); stop publishing the backend port in prod compose.
-
-### SEC-017 [HIGH] Federation IdP `client_secret` stored in plaintext, serialized into API responses, and pre-filled in the UI
-- **File**: `crates/axiam-db/src/repository/federation_config.rs:162-164, 226-229` (`TODO(T19.8)`); `crates/axiam-core` federation model (`client_secret: String`, plain `Serialize`); `frontend/src/services/federation.ts:12-17`; `frontend/src/pages/federation/FederationPage.tsx:331-336`
-- **Category**: Secrets at rest / Info disclosure
-- **Issue**: The upstream IdP OAuth client secret is written to SurrealDB as cleartext and the domain type has no `#[serde(skip_serializing)]`, so GET/list endpoints return it; the frontend then pre-fills it into an `<input type="password">` (readable via devtools, present in every list response and the React Query cache). This contradicts the write-only/reveal-once pattern used for service accounts/OAuth2 clients/webhooks.
-- **Impact**: Harvesting these secrets enables impersonation of AXIAM against upstream IdPs — cross-domain SSO compromise.
-- **Fix**: Encrypt at rest (planned AES-256-GCM), add `#[serde(skip_serializing)]`, never return the secret on GET (masked placeholder), make the frontend field write-only ("leave blank to keep current").
-
-### SEC-018 [HIGH] SMTP/email-provider secrets serialize into API responses; promised at-rest encryption not implemented
-- **File**: `crates/axiam-core/src/models/email.rs:30-48, 78-91`
-- **Category**: Secrets at rest / Info disclosure
-- **Issue**: `SmtpConfig.password` and `ApiProviderConfig.api_key` are plain `String`s with plain `Serialize` and comments claiming "stored encrypted at rest by the DB layer" — but no `EmailConfigRepository` implementation exists in axiam-db, and `EmailConfig` (which embeds the provider) derives full `Serialize`, so any endpoint returning it exposes the credentials in cleartext JSON.
-- **Fix**: `#[serde(skip_serializing)]` on both fields; implement the at-rest encryption the comments promise before persisting.
+### SEC-045 [HIGH] 🆕 — Federation secret-at-rest pipeline is never decrypted at use; backfill blanks the plaintext → OIDC federation breaks after first restart
+- **File**: `crates/axiam-federation/src/secrets.rs:75-91` (`decrypt_client_secret_or_legacy` has **zero non-test call sites**); `oidc.rs:286-294` passes `&config.client_secret` (legacy plaintext column) to the token exchange; backfill sets `client_secret = ''` after encrypting (`federation_config.rs:401-411`)
+- **Impact**: After the first restart with `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` set, every backfilled OIDC config sends an empty `client_secret` to the IdP — federation login fails; the only *working* state is plaintext-at-rest. Security control that disables the feature it protects.
+- **Fix**: Plumb the federation key into the OIDC/SAML services and resolve the secret via `decrypt_client_secret_or_legacy` in `handle_callback`; encrypt on create/update (closes the SEC-017 remainder); add an e2e test that exercises login *after* backfill.
 
 ---
 
-## Medium findings
+## Medium findings (active)
 
-### SEC-019 [MEDIUM] Webhook SSRF protection bypassable via DNS-resolved hostnames
-- **File**: `crates/axiam-api-rest/src/handlers/webhooks.rs:244-329`
-- **Issue**: Private-range checks only apply to literal IPs; a hostname resolving to `169.254.169.254`/`10.x` passes validation, and resolution happens later at delivery time (DNS rebinding unguarded). Partially mitigated by `redirect::Policy::none()` + 10 s timeout.
-- **Fix**: Resolve at delivery time and re-check every resolved IP against `is_global_ip`; pin the validated address for the actual connection.
+### SEC-016 [MEDIUM→ was HIGH] 🔶 PARTIAL — nginx: `/api` proxied; `/oauth2` + discovery still not; backend ports still published
+- **Fixed**: Auth now lives under `/api/v1/auth`, which nginx proxies (`docker/nginx.conf:61-67`); prod compose requires JWT keys from env and documents itself as local-testing-only.
+- **Open**: `/oauth2/*` and `/.well-known/openid-configuration` still hit the SPA fallback; `docker-compose.prod.yml:17-19` still publishes 8090/50051 plain-HTTP on the host.
+- **Fix**: Add `/oauth2` + `/.well-known` proxy locations; stop publishing backend ports.
 
-### SEC-020 [MEDIUM] No IP-level rate limiting on auth/MFA/token endpoints
-- **File**: `crates/axiam-server/src/main.rs:247-285`
-- **Issue**: Per-account lockout exists (5 attempts, exponential backoff), but `/auth/login`, `/auth/mfa/verify`, `/oauth2/token`, `/oauth2/introspect` have no per-IP throttling — credential stuffing across many accounts and MFA guessing are unbounded.
-- **Fix**: Add `actix-governor` (or similar) on `/auth/*` and `/oauth2/token|introspect`; confirm MFA verify attempts count toward lockout.
+### SEC-019 [MEDIUM] ❌ OPEN — Webhook SSRF protection bypassable via DNS-resolved hostnames
+- **File**: `handlers/webhooks.rs:264-296` (literal-IP + hostname denylist at registration only); delivery (`webhook.rs:75-83`) does no resolution-time check. Redirects now disabled (good).
+- **Fix**: Resolve at delivery time, re-check every IP against the private-range list, pin the validated address.
 
-### SEC-021 [MEDIUM] REST API responses lack security headers
-- **File**: `crates/axiam-api-rest/src/server.rs:495-509`; `docker/nginx.conf:55` (`/api` location adds none)
-- **Fix**: `DefaultHeaders` middleware with HSTS, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` on sensitive responses; replicate on the nginx `/api` location.
+### SEC-020 [MEDIUM] 🔶 PARTIAL — IP rate limiting added, but with coverage and keying gaps (see SEC-048)
+- **Fixed**: actix-governor on `/auth/login`, `/auth/reset`, `/auth/password/change`, `/oauth2/token`, user register, federation public, GDPR endpoints (`server.rs:64-247`).
+- **Open**: `/auth/mfa/*` (TOTP brute-force unthrottled — pairs with SEC-008), `/oauth2/introspect`, `/oauth2/revoke` uncovered; keying/distribution weaknesses are SEC-048.
 
-### SEC-022 [MEDIUM] AMQP authz consumer fully trusts queue messages
-- **File**: `crates/axiam-amqp/src/authz_consumer.rs:62-90`
-- **Issue**: Any producer with broker access can request authz decisions for any tenant/subject; no signature/claims binding. Dev/prod compose ships `axiam:axiam` broker creds (SEC-023).
-- **Fix**: Authenticate/authorize messages (signed payloads or per-tenant queues with broker ACLs); document the broker trust boundary.
+### SEC-022 [MEDIUM] ❌ OPEN — AMQP authz consumer fully trusts queue messages
+- **File**: `authz_consumer.rs:62-92` — unchanged; any broker client gets authz decisions for any tenant. The same trust model was **repeated** in the new mail consumer (SEC-055).
+- **Fix**: Signed payloads or per-tenant queues + broker ACLs; document the broker trust boundary.
 
-### SEC-023 [MEDIUM] Deployment: hardcoded weak credentials; debug logging in production configmap
-- **File**: `docker/docker-compose.prod.yml:24-29, 70-71` (SurrealDB `root/root`, RabbitMQ `axiam/axiam`); `docker/docker-compose.dev.yml:8, 22-23`; `k8s/server/configmap.yml:16` (`RUST_LOG: "info,axiam=debug"`)
-- **Fix**: Inject credentials via secrets/env; set `RUST_LOG=info` (or `warn`) in production.
+### SEC-023 [MEDIUM] 🔶 PARTIAL — Deployment credentials/logging
+- **Fixed**: k8s secrets are blank placeholders; prod compose `RUST_LOG` now `axiam=info`; JWT keys env-required.
+- **Open**: prod compose still ships SurrealDB `root/root` and RabbitMQ `axiam/axiam` (`docker-compose.prod.yml:30-32,102,121-122`); `k8s/server/configmap.yml` still sets `RUST_LOG: "info,axiam=debug"`.
 
-### SEC-024 [MEDIUM] mTLS device auth: global fingerprint lookup with no tenant/CA binding
-- **File**: `crates/axiam-pki/src/mtls.rs:35-77`; `crates/axiam-db/src/repository/certificate.rs:382-403, 440-460`
-- **Issue**: Identity is keyed purely on a global fingerprint match; tenant comes from whatever row matches; chain validation is delegated entirely to the proxy; no check that the cert was issued by the tenant's own CA. `get_bound_service_account`/`get_by_fingerprint_global` are deliberately cross-tenant — callers must re-scope.
-- **Fix**: Verify issuer chains to the tenant/org CA in addition to fingerprint; scope lookups by expected tenant where possible; document the proxy trust dependency loudly.
+### SEC-024 [MEDIUM] ❌ OPEN — mTLS device auth: global fingerprint lookup, no tenant/CA chain binding
+- **File**: `axiam-pki/src/mtls.rs:35-77` — unchanged in substance. (`org_id` resolution by the caller is now documented and done at `handlers/auth.rs:532-542`.)
+- **Fix**: Verify the presented cert chains to the tenant/org CA, not just fingerprint match; document the proxy trust dependency.
 
-### SEC-025 [MEDIUM] PKCE not enforced for the authorization-code grant
-- **File**: `crates/axiam-oauth2/src/authorize.rs:105-126`; `crates/axiam-oauth2/src/token.rs:184-224`
-- **Issue**: PKCE is validated only when the client volunteers it; there is no public-client concept. Stated standard is "Authorization Code + PKCE"; OAuth 2.1 mandates PKCE.
-- **Fix**: Require `code_challenge` (S256) for the authorization_code grant — at minimum for public clients, ideally for all.
+### SEC-025 [MEDIUM] ❌ OPEN — PKCE still not enforced for the authorization-code grant
+- **File**: `authorize.rs:106-125`, `token.rs:217` — verified only if volunteered; all clients are confidential (secret-authenticated), which mitigates today, but OAuth 2.1 and any future public client require mandatory S256.
 
-### SEC-026 [MEDIUM] Username enumeration via login timing; gRPC path never increments lockout
-- **File**: `crates/axiam-auth/src/service.rs:159-193`; `crates/axiam-api-grpc/src/services/user.rs:113-131`
-- **Issue**: (a) Unknown users return immediately while existing users incur an Argon2 verification (~tens of ms) — a timing oracle. (b) gRPC `ValidateCredentials` checks `locked_until` but never records failed attempts — an unmetered brute-force path (compounded by SEC-003).
-- **Fix**: Dummy Argon2 verification on user-not-found; route gRPC credential checks through the same failed-login accounting as REST.
+### SEC-026 [MEDIUM] ❌ OPEN — (a) login timing oracle; (b) gRPC `ValidateCredentials` never increments lockout
+- **File**: `service.rs:188-201` (no dummy Argon2 on user-not-found); `axiam-api-grpc/src/services/user.rs:140-141` (reads `locked_until`, never records failures — unmetered brute force, compounded by SEC-003).
 
-### SEC-027 [MEDIUM] Password reset does not invalidate existing sessions
-- **File**: `crates/axiam-auth/src/password_reset.rs:190` (`TODO(T19)`)
-- **Issue**: After a successful reset (the recovery path for a compromised account), all existing sessions/refresh tokens remain valid — the attacker keeps access.
-- **Fix**: Invalidate all sessions and revoke refresh tokens on reset completion.
+### SEC-028 [MEDIUM] ❌ OPEN — Reset to the same current password still passes; initial password never enters history
+- **File**: `password_reset.rs:182-209` (history check excludes the live `password_hash`, which is appended after); user creation seeds no history. Reuse of *rotated* passwords is correctly blocked.
 
-### SEC-028 [MEDIUM] Password reset allows reusing the current password; initial password never enters history
-- **File**: `crates/axiam-auth/src/password_reset.rs:160-187`; `crates/axiam-auth/src/policy.rs:231-266`
-- **Issue**: `check_history` compares only `password_history` rows; the current `password_hash` is appended only after the check, and the signup password is never recorded — "reset to the same password" always passes.
-- **Fix**: Include `user.password_hash` in the candidate set; record the initial hash at user creation.
+### SEC-030 [MEDIUM] ❌ OPEN — Verify-email false success (now an endpoint/method mismatch; subsumed by SEC-044)
+- Backend is now `POST /api/v1/auth/verify-email` (good), but the page still GETs the unproxied legacy path → SPA 200 → false success in dev **and** prod. Tokens are never consumed.
 
-### SEC-029 [MEDIUM] Frontend dependency vulnerabilities (`npm audit`: 4 high, 3 moderate)
-- **File**: `frontend/package.json` / `package-lock.json`
-- **Issue / inventory**: `axios` (large advisory set incl. prototype-pollution credential-injection chains), `react-router 7.x < 7.14.2` (**high** — vendored turbo-stream deserialization RCE GHSA-49rj-9fvp-4h2h, open redirect), `vite 8.0.0-8.0.4` (high — dev-server file read/path traversal), `follow-redirects`, `postcss`, `brace-expansion`. All have fixes via `npm audit fix`.
-- **Fix**: Run `npm audit fix`, commit the lockfile, and add `npm audit --audit-level=high` to CI.
+### SEC-031 [MEDIUM] ❌ OPEN — Webhook HMAC `secret` plaintext at rest, exclusion from responses only conventional
+- **File**: core `Webhook.secret` still plain `Serialize`; `WebhookResponse` convention only.
 
-### SEC-030 [MEDIUM] Email verification shows a false "Email verified!" success
-- **File**: `frontend/src/pages/auth/VerifyEmailPage.tsx:19-21, 49-50`; `frontend/vite.config.ts:18`; `docker/nginx.conf`
-- **Issue**: The page GETs `/auth/verify-email?token=...`, but that path is excluded from the dev proxy and not proxied by prod nginx — the SPA fallback returns `index.html` with HTTP 200, so the UI claims success while the backend never saw the token.
-- **Impact**: False security state in an identity product; verification-gated controls remain ineffective while the UI says otherwise.
-- **Fix**: Route the call through a proxied path (prefer `POST`), and validate response content, not just status.
+### SEC-032 [MEDIUM] ❌ OPEN — Failed-login counter still non-atomic read-modify-write
+- **File**: `service.rs` `record_failed_login` writes an absolute value computed from the login-start read; no atomic `+= 1` repo method exists.
 
-### SEC-031 [MEDIUM] Webhook HMAC `secret` plaintext at rest and only conventionally excluded from responses
-- **File**: `crates/axiam-db/src/repository/webhook.rs:18-44, 120-128`; core `Webhook.secret` derives `Serialize` (doc comment promises "never returned" but nothing enforces it)
-- **Fix**: `#[serde(skip_serializing)]` on `Webhook::secret`; consider envelope encryption at rest.
+### SEC-033 [MEDIUM] ❌ OPEN — Tenant settings snapshot still freezes org security baselines
+- **File**: `settings.rs` handler stores the merged row (`repository/settings.rs:482-491`); `get_effective_settings` (:524-542) re-merges by diffing the stored row against the **current** org baseline — so a field whose snapshot equals the *old* org value becomes a phantom override the moment the org changes it. Org policy changes (MFA enforcement included) still don't propagate. Storage must become sparse overrides (`Option` fields) merged at read time.
 
-### SEC-032 [MEDIUM] Failed-login counter uses non-atomic read-modify-write — lockout weakened under concurrency
-- **File**: `crates/axiam-auth/src/service.rs:763-793`
-- **Issue**: Counter read at login start, written back as an absolute value — concurrent failed attempts (exactly the brute-force scenario) lose increments.
-- **Fix**: Atomic `UPDATE user SET failed_login_attempts += 1 ... RETURN AFTER` repository method; compute lockout from the returned value.
+### SEC-046 [MEDIUM] 🆕 — CSRF double-submit middleware not applied to the main `/api/v1` scope
+- **File**: `server.rs:58-60` (CsrfMiddleware on `/api/v1/auth` and `/oauth2` only); the `/api/v1` CRUD scope (:197-198) has only AuthzMiddleware.
+- **Impact**: All cookie-authenticated state-changing CRUD relies solely on `SameSite=Strict`. The frontend already sends `X-CSRF-Token` on all mutations — enforcing it API-wide is a free defense-in-depth win.
 
-### SEC-033 [MEDIUM] Tenant settings snapshot freezes org security baselines (MFA enforcement included)
-- **File**: `crates/axiam-api-rest/src/handlers/settings.rs:134-149`; `crates/axiam-db/src/repository/settings.rs:524-542`
-- **Issue**: `PUT /settings` persists the *merged* org-baseline+overrides row. When the org later tightens its baseline (e.g. enforces MFA — consumed by `login` via auth.rs:155-160), tenants that ever saved settings keep the stale values: the diff-based re-merge logic cannot distinguish overrides from stale baseline copies.
-- **Impact**: Org-level security policy changes silently fail to propagate to tenants.
-- **Fix**: Persist only the sparse override set (`Option` fields) and merge against the live org baseline at read time. (Cross-ref: code review CQ-003.)
+### SEC-047 [MEDIUM] 🆕 — Authorization is fail-open by construction; stale PUBLIC_PATHS entry
+- **File**: `middleware/authz.rs:102-136` checks only credential *presence*; the real check is the per-handler `RequirePermission` call — a forgotten line = silent bypass with no compile/test failure. Nothing verifies the permission **literal a handler checks** matches `ROUTE_PERMISSION_MAP` (the parity tests check route coverage, not handler behavior). `permissions.rs:197` lists `"/api/v1/auth/register"` as public though no such route exists — a latent unauthenticated route if ever added.
+- **Fix**: Enforce permissions in middleware keyed off `ROUTE_PERMISSION_MAP` (single chokepoint), or add a test that exercises every mapped route with a zero-permission user and asserts 403; remove the stale public path.
 
----
+### SEC-048 [MEDIUM] 🆕 — Rate limiting keyed on client-controlled `X-Forwarded-For`, per-replica in-memory
+- **File**: `extractors/rate_limit.rs:23-29` — takes the **leftmost** XFF value with no trusted-proxy validation → spoofable per request unless the ingress overwrites XFF; counters are per-process (multiply by replicas, reset on restart).
+- **Fix**: Rightmost-untrusted-hop extraction (configurable trusted-proxy count); shared store for multi-replica; document the ingress XFF requirement loudly.
 
-## Low findings
+### SEC-049 [MEDIUM] 🆕 — Bootstrap endpoint: TOCTOU race and ungated when env var unset
+- **File**: `handlers/bootstrap.rs:77-171` — the "already initialized" check and admin creation are not atomic (two concurrent first-run requests can both create admins); the `AXIAM_BOOTSTRAP_ADMIN_EMAIL` gate applies only if set — if unset, **any** caller can create the first super-admin on a fresh deployment.
+- **Fix**: Single conditional/transactional create; require the env gate (or one-time setup token) unconditionally.
 
-### SEC-034 [LOW] Audit logs readable by any authenticated tenant user; system audit log readable by everyone
-- **File**: `crates/axiam-api-rest/src/handlers/audit.rs:22-59`
-- **Fix**: Gate behind an `audit:read` permission (depends on SEC-001); restrict `list_system` to system admins.
+### SEC-050 [MEDIUM] 🆕 — Self-service user update can set own `status` → email-verification bypass
+- **File**: `handlers/users.rs:209-231` — `is_own_resource` skips the `users:update` permission check, but `UpdateUserRequest` includes `status`; a `PendingVerification` user (24 h login grace) can PUT `status: "Active"` and bypass verification permanently; email change requires no re-verification.
+- **Fix**: Strip `status` (and gate email changes behind re-verification) on the self-service path.
 
-### SEC-035 [LOW] Tenant update mass-assignment surface
-- **File**: `crates/axiam-api-rest/src/handlers/tenants.rs:139-155` (raw `UpdateTenant` body); pattern repeated where core domain `Update*` structs bind directly to JSON (certificates, groups, etc.)
-- **Fix**: Explicit request DTOs; never deserialize ownership fields (org/tenant ids) from bodies. (Cross-ref CQ-024.)
+### SEC-051 [MEDIUM] 🆕 — Logout accepts an arbitrary `session_id` from the request body (same-tenant session revocation IDOR)
+- **File**: `handlers/auth.rs:364-369` — revokes `body.session_id` scoped to tenant but not to `user.user_id`.
+- **Fix**: Revoke the caller's own session (JWT `jti`), or verify the target session belongs to the caller.
 
-### SEC-036 [LOW] Revealed secrets/private keys retained in React state after modal close
-- **File**: `frontend/src/pages/certificates/CertificatesPage.tsx:345-351` (same in PgpKeysPage, ServiceAccountsPage, OAuth2ClientsPage, WebhooksPage)
-- **Fix**: Clear secret state in `onClose` (the `EncryptDataModal` in PgpKeysPage already does this correctly).
+### SEC-052 [MEDIUM] 🆕 — k8s manifests use the wrong env prefix; config silently ignored; no JWT keys in any manifest
+- **File**: `k8s/server/configmap.yml` + `secret.yml` ship `AXIAM_DB__URL`-style keys (single underscore); the server reads `Environment::with_prefix("AXIAM").separator("__")` → `AXIAM__DB__URL` (`main.rs:628`). All values are silently ignored and in-code defaults win; no `AXIAM__AUTH__JWT_*` entries exist anywhere in k8s.
+- **Fix**: Rename to `AXIAM__…`; add JWT/encryption key entries to the secret; add a startup log of the effective (redacted) config so this class of failure is visible.
 
-### SEC-037 [LOW] Reset/verification tokens persist in URL history and server logs
-- **File**: `frontend/src/pages/auth/ResetPasswordPage.tsx:39-40`; `VerifyEmailPage.tsx:34-35`
-- **Fix**: `history.replaceState` to strip `?token=` after capture; submit the verify token via POST body.
+### SEC-053 [MEDIUM] 🆕 — NetworkPolicies internally inconsistent; PSA not enforced
+- **File**: `k8s/network-policy/*` — default-deny covers all pods, `server-egress.yml` allows server→DB/MQ, but **no policy allows ingress to the SurrealDB/RabbitMQ pods** and there is **no egress policy for the frontend** — the policies as committed break the deployment (inviting wholesale deletion of default-deny). `0.0.0.0/0:443` egress leaves cluster CIDR exclusions as TODOs; no SMTP egress. `k8s/namespace.yml` sets PSA `warn`/`audit` only, no `enforce`.
+- **Fix**: Add receiver-side ingress policies for DB/MQ and a frontend egress policy; test with a kind/minikube e2e; enable `enforce: restricted` once green.
 
-### SEC-038 [LOW] CSRF posture of `/auth/refresh` depends on unverified cookie attributes
-- **File**: `frontend/src/lib/api.ts:87-91`
-- **Issue**: Bearer-token APIs are CSRF-safe; the only ambient-credential endpoint is `POST /auth/refresh`, which a cross-site page can trigger blind (rotation → session desync/DoS at worst).
-- **Fix**: Confirm the backend sets `SameSite=Lax/Strict`, `Path=/auth/refresh`, and add an `Origin` check on the refresh endpoint.
+### SEC-054 [MEDIUM] 🆕 — JWKS fetch: no body-size cap, no private-IP guard
+- **File**: `crates/axiam-federation/src/jwks_cache.rs:198-212` — `.json::<JwkSet>()` buffers unbounded (discovery enforces 256 KiB; JWKS enforces nothing); SSRF posture rests on redirects-disabled + HTTPS-scheme check only — an admin-supplied discovery document can point JWKS at internal HTTPS hosts.
+- **Fix**: Cap the body before parse; consider resolving + filtering private ranges (same work as SEC-019).
 
-### SEC-039 [LOW] Crypto library error detail propagates toward clients
-- **File**: `crates/axiam-auth/src/error.rs:104` (`AuthError::Crypto(msg)` → `AxiamError::Crypto(msg)`), e.g. token.rs:69, totp.rs:23/46
-- **Fix**: Subsumed by SEC-011's generic-5xx-message fix; log detail server-side only.
+### SEC-055 [MEDIUM] 🆕 — Mail consumer trusts queue messages; GDPR ExportReady mail can never deliver
+- **File**: `crates/axiam-amqp/src/mail_consumer.rs:96-120` — `org_id`/`tenant_id`/`to_address`/`template_context` straight from the queue: broker access = relay arbitrary mail through any org's SMTP credentials (SEC-022 pattern repeated). Separately, `cleanup.rs:417-431` enqueues ExportReady with `org_id: Uuid::nil()` and `to_address: ""` claiming the consumer resolves them — it doesn't (mail_consumer.rs:97,117), so export-ready notifications are undeliverable.
+- **Fix**: Authenticate/scope queue messages; make the consumer resolve recipient/org from `user_id`+`tenant_id` (or fix the producer); add a delay to the "backoff" republish (currently immediate).
 
-### SEC-040 [LOW] AuthZ engine is additive-only — documented "override" cascade absent
-- **File**: `crates/axiam-authz/src/engine.rs:81-171`
-- **Issue**: CLAUDE.md says parent role assignments cascade "unless overridden", but no deny/override mechanism exists — purely additive allow with default deny. Not an escalation bug; operators expecting deny-overrides will mis-model permissions.
-- **Fix**: Implement explicit deny/override precedence or update the documented model to "purely additive".
-
-### SEC-041 [LOW] Full Axios error object logged to console on the enumeration-sensitive forgot-password page
-- **File**: `frontend/src/pages/auth/ForgotPasswordPage.tsx:43`
-- **Fix**: Log nothing or only `err.message`/status.
-
-### SEC-042 [LOW] Route protection is client-side only with no role gating in the UI
-- **File**: `frontend/src/components/layout/AppLayout.tsx:21-23`
-- **Issue**: A forged `sessionStorage` entry renders the full admin shell. Acceptable **only** once the backend enforces authz on every endpoint (SEC-001); currently the backend does not, making this consequential.
-- **Fix**: Fix SEC-001 first; longer-term fetch the user's permissions to gate UI sections.
-
-### SEC-043 [LOW] CA/PGP encrypted key blobs hydrated on reads and exposed in `Debug`
-- **File**: `crates/axiam-db/src/repository/ca_certificate.rs:97-137`; `pgp_key.rs:110-145`
-- **Issue**: Ciphertext only (and `skip_serializing` is present), but `Debug` derives could put blobs into logs; list endpoints don't need the field at all.
-- **Fix**: Redacting `Debug` impl; skip hydration on list paths.
+### SEC-056 [MEDIUM] 🆕 — GDPR pipeline gaps: download race, missed tables, unrecoverable partial purge, silently incomplete exports
+- **File**: `handlers/gdpr.rs:214-246` — export download is check-then-act (two concurrent requests with the same single-use token can both receive plaintext; needs an atomic conditional UPDATE). `cleanup.rs:228-334` — the Art. 17 purge never deletes `webauthn_credential` or `password_history` rows; `anonymize_user` clears the purge flags *before* the erasure proof is written, so a failure there permanently strands the deletion (never re-selected). `cleanup.rs:462-549` — export aggregation swallows section failures with `unwrap_or_default()` and hardcodes `sessions/assignments/group_memberships/webauthn_credentials: []` while attesting `schema_version: "1.0"` — legally attested Art. 15 exports can be silently incomplete.
+- **Fix**: Atomic download consumption; add the missed tables to the purge; order purge steps so failure is re-selectable (or transactional); fail (or mark) exports when a section query fails; include the placeholder sections for real.
+- (Positive: authz on GDPR endpoints is sound — self-or-permission checks, tenant-scoped single-use download tokens, INSERT-only audit pseudonymization resolving the deletion-vs-retention conflict.)
 
 ---
 
-## Positive observations (verified)
+## Low findings (active)
 
-- **No SurrealQL injection found**: every query binds user-controlled values via `$param`; `format!` interpolation is limited to server-generated `Uuid`s in `RELATE` and compile-time column-name constants.
-- Argon2id at OWASP parameters (m=19456 KiB, t=2, p=1) with per-hash salts and optional pepper; password reset flow is enumeration-safe and rate-limited.
-- EdDSA-only JWT encode/decode (no alg confusion, no `none`), issuer + required-claims enforcement.
-- AES-256-GCM used correctly (fresh random 12-byte nonce per encryption, nonce prepended) for TOTP secrets, CA keys, PGP keys, WebAuthn state.
-- Refresh/auth/reset/verification tokens: 32-byte CSPRNG, stored as SHA-256 hashes, single-use with rotation; atomic `UPDATE ... WHERE used=false` consumption (race-safe).
-- OAuth2: constant-time client-secret and PKCE comparisons; redirect_uri validated against the registered set before any redirectable error; PKCE verified before code consumption; introspection enforces tenant + client ownership.
-- Tenant-scoped entities (users/roles/groups/webhooks/certs/audit) consistently take `tenant_id` from the validated JWT, never from the request.
-- Audit table is append-only via schema permissions; email templating HTML-escapes and strips CR/LF from headers (no header injection); SMTP enforces TLS.
-- Frontend: zero XSS sinks (no `dangerouslySetInnerHTML`/`eval`/`innerHTML`/`target="_blank"` issues); refresh token httpOnly; solid 401-refresh queueing; reveal-once secret UX; no `VITE_` secret baking; unprivileged nginx image.
-- Containers: non-root user, `readOnlyRootFilesystem`, resource limits, TLS ingress with ssl-redirect; k8s secret manifests intentionally blank.
+### SEC-036 [LOW] ❌ OPEN — Revealed secrets retained in React state after modal close
+- `CertificatesPage.tsx:347`, OAuth2ClientsPage:564, ServiceAccountsPage:519, WebhooksPage:550, PgpKeysPage:471 — close handlers never clear the secret.
+
+### SEC-037 [LOW] ❌ OPEN — Reset/verification tokens persist in URL history
+- No `history.replaceState` anywhere in `frontend/src`; `ResetPasswordPage.tsx:40`, `VerifyEmailPage.tsx:34-35`.
+
+### SEC-039 [LOW] ❌ OPEN — Crypto error detail propagates toward clients
+- `axiam-auth/src/error.rs:104`; closes with SEC-011.
+
+### SEC-040 [LOW] ❌ OPEN — AuthZ engine additive-only vs documented "override" cascade
+- `engine.rs` purely additive / default-deny; CLAUDE.md wording unchanged. Implement deny-overrides or fix the docs.
+
+### SEC-041 [LOW] ❌ OPEN — Full Axios error logged on the enumeration-sensitive forgot-password page
+- `ForgotPasswordPage.tsx:43` (logs config + submitted email).
+
+### SEC-043 [LOW] 🔶 PARTIAL — CA/PGP encrypted blobs
+- `skip_serializing` added on both models (fixed the JSON exposure). Remaining: derived `Debug` still prints blobs; list paths still hydrate the encrypted column.
+
+### SEC-057 [LOW] 🆕 — GitHub Actions pinned by mutable tags, not SHAs
+- `ci.yml`/`release.yml` use `@v4`/`@v0.36.0`/`@stable` refs. Otherwise both workflows are strong (least-privilege permissions, scan-before-push, cosign + provenance). Pin by SHA; note hadolint `no-fail: true` and Trivy config-scan `exit-code: 0` are advisory-only by choice.
+
+---
+
+## Resolved findings (verified this round)
+
+| ID | Was | Verified fix |
+|---|---|---|
+| SEC-001 | CRITICAL — no RBAC on REST | `RequirePermission` called in every handler; `AuthzData` wired (`main.rs:563`); route↔permission map asserted complete (`rbac_test.rs:493`); negative tests (401/403/self-service). Residual architecture risk → SEC-047. |
+| SEC-004 | CRITICAL — OIDC no signature verification | Full JWKS verification: raw-header `alg=none` rejection, per-config alg allow-list (HS*/none unmappable), `set_issuer`/`set_audience`, required claims, kid-miss refetch, mandatory nonce from server-side login state (public flow). Tests incl. wiremock e2e + clock-skew. Residuals: legacy authenticated callback takes nonce from body (handlers/federation.rs:510-529); JWKS size cap → SEC-054; API can't set `allowed_algorithms` → CQ-B40 (fail-closed). |
+| SEC-006 | CRITICAL — MFA-challenge token = access token | Separate claim structs (challenge/setup/webauthn lack `jti`, carry `purpose`; access requires `jti` + audience narrowing in `extractors/auth.rs:256-294`). Recommend: explicit regression test + retire the `allow_missing_aud_as_user` back-compat flag after rollout. |
+| SEC-009 | HIGH — WebAuthn cross-credential Ok | Ceremony state built only from the user's own passkeys; library rejects foreign assertions; no silent-Ok path (webauthn.rs:206-247). |
+| SEC-013 | HIGH — cargo audit advisories | lettre 0.11.22, hickory-proto 0.26.1, rustls-webpki 0.103.13 upgraded; residuals (rsa Marvin, bincode, atomic-polyfill) explicitly ignored with reasons + review dates in `deny.toml:7-26`; CI gates `cargo audit` + `cargo-deny`. Three `rand` majors remain (warn-only) → CQ-B34. |
+| SEC-014 | HIGH — token in sessionStorage, no CSP | Access token now httpOnly `axiam_access` cookie (Secure, SameSite=Strict); store holds no tokens, no `persist`; nginx ships CSP/HSTS/nosniff/Referrer-Policy/Permissions-Policy, X-XSS-Protection dropped; backend `SecurityHeadersMiddleware` + tests. Nit: middleware itself lacks HSTS — relevant where the k8s ingress routes `/api` straight to the server. |
+| SEC-018 | HIGH — SMTP/API-key secrets | `email_config.rs` encrypts (AES-256-GCM, split nonce/ciphertext, key version); no handler exposes EmailConfig. Residual: model fields still lack `skip_serializing` (one future handler from a leak); plaintext backfill is detect-and-warn only (TODO T19.22). |
+| SEC-021 | MEDIUM — no API security headers | `SecurityHeadersMiddleware` app-wide + integration tests; nginx inherits. |
+| SEC-027 | MEDIUM — reset didn't revoke sessions | `confirm_reset` invalidates sessions + revokes refresh tokens; regression test `password_reset_revokes_sessions.rs`. |
+| SEC-029 | MEDIUM — npm vulnerabilities | `npm audit`: **0 vulnerabilities** (axios 1.17.0, react-router 7.16.0, vite 8.0.16); CI gates `npm audit --audit-level=high`. |
+| SEC-034 | LOW — audit logs world-readable | Non-admins auto-scoped to own entries; `list_system` requires `audit_logs:list_system`. |
+| SEC-035 | LOW — tenant mass-assignment | `UpdateTenant` reduced to name/slug/metadata; users use a dedicated DTO (`password_hash` skip-deserialized). Residual `status` exposure → SEC-050. |
+| SEC-038 | LOW — refresh CSRF posture | Refresh accepted only from httpOnly cookie, `SameSite=Strict`, `Path=/api/v1/auth/refresh`, CSRF double-submit enforced + rotated, constant-time compare. Functional regression: the SPA's silent refresh doesn't send the CSRF header → CQ-F28. |
+| SEC-042 | LOW — client-side-only route protection | Acceptable now that backend RBAC enforces (SEC-001); residual depends on SEC-002/007. UI-side permission gating is sidebar-only → CQ-F30. |
+
+---
+
+## Positive observations (verified this round)
+
+- Previous positives re-confirmed: parameterized SurrealQL everywhere (no injection found in new code either, including GDPR/email/federation repos), Argon2id at OWASP parameters, EdDSA-only JWTs, AES-256-GCM with fresh nonces (now also: federation secrets, email secrets, GDPR export blobs), hashed single-use tokens, constant-time comparisons.
+- New: CSRF double-submit implementation is textbook (32-byte CSPRNG, constant-time compare, rotation on login/refresh); cookie attributes correct incl. scoped refresh path; `crypto.rs` (AES-GCM + HMAC pseudonym) is clean; SAML replay store uses a UNIQUE index with transactional consume; federation login state is server-side and single-use; GDPR endpoints have correct authz and single-use tenant-scoped download tokens; seeder ships **no credentials**; CI: fmt + clippy `-D warnings` + tests against real SurrealDB/RabbitMQ + cargo audit/deny + npm audit + hadolint + trivy, release does scan-before-push with cosign signing and provenance; Dockerfiles distroless/digest-pinned/non-root; deployment securityContexts restricted-profile.
 
 ## Coverage notes
 
-Fully read: all of axiam-auth, axiam-oauth2, axiam-federation, axiam-pki, axiam-authz, axiam-db (all 27 repositories + schema), axiam-core models/errors, axiam-email, axiam-amqp consumers, axiam-audit middleware, axiam-server main.rs, REST route table + extractors + the majority of handlers, gRPC server + services, all of docker/ and k8s/, and 100 % of frontend/src auth/secret-handling code (remaining CRUD pages exhaustively pattern-scanned for sink classes). Follow-up deep-dives recommended (lower-confidence areas): `handlers/oauth2.rs`/`oauth2_clients.rs` fine detail, `webauthn.rs` REST handlers, CI workflows in `.github/`.
+All 43 prior findings re-verified against `d69323b` with file:line evidence; all new security-relevant code read (auth extractors, csrf/authz middleware, permissions map, bootstrap, gdpr + repos, federation oidc/saml/jwks/secrets/cert, email_config, mail consumer/publisher, cleanup, seeder, main.rs composition, docker/, k8s/, CI workflows). Lower-confidence areas for a future pass: samael's xmlsec verification internals (XSW), SurrealDB transaction-isolation assumptions in `federation_login_state::consume_by_state`, and the OAuth2 handlers' fine detail (unchanged since last round). Build prerequisites for local verification: `protoc`, `libxml2-dev`, `libxmlsec1-dev` (samael), or `--no-default-features` to drop SAML.

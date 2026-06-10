@@ -273,7 +273,7 @@ async fn legacy_token_without_aud_accepted_when_flag_true() {
     let (db, org_id, tenant_id, user_id) = setup_db().await;
     let mut auth = test_auth_config();
     auth.allow_missing_aud_as_user = true;
-    let app = test_app!(db, auth.clone());
+    let _app = test_app!(db, auth.clone());
 
     // Issue a token with no aud (legacy pre-Phase-4 behaviour).
     // We build the token via issue_access_token with aud="", then rely on the

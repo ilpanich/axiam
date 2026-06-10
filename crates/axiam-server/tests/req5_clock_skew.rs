@@ -71,7 +71,7 @@ fn sign_jwt(payload: &serde_json::Value, key: &EncodingKey) -> String {
 
 async fn make_svc(
     keys: &TestKeys,
-    cache: Arc<JwksCache>,
+    _cache: Arc<JwksCache>,
 ) -> (MockServer, OidcDiscoveryDocument, String) {
     let server = MockServer::start().await;
     let issuer = server.uri();

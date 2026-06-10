@@ -15,11 +15,10 @@ use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::{OidcDiscoveryDocument, OidcFederationService};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{Duration as CDuration, Utc};
+use chrono::Duration as CDuration;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::EncodeRsaPrivateKey;
-use rsa::pkcs8::EncodePublicKey;
 use rsa::traits::PublicKeyParts;
 use serde_json::json;
 use uuid::Uuid;
@@ -473,7 +472,7 @@ async fn oidc_happy_path() {
 /// T-REQ-5-11: stale JWKS served when IdP is unreachable (D-03).
 #[tokio::test]
 async fn oidc_jwks_served_stale_on_idp_outage() {
-    use axiam_federation::jwks_cache::{JwksCacheEntry, JwksCacheMap, STALE_WINDOW};
+    use axiam_federation::jwks_cache::JwksCacheEntry;
     use chrono::Utc;
     use jsonwebtoken::jwk::{Jwk, JwkSet};
 

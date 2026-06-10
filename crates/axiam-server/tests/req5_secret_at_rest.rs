@@ -13,8 +13,6 @@ use axiam_db::{SurrealAuditLogRepository, SurrealFederationConfigRepository, run
 use axiam_federation::secrets::{
     current_key_version, decrypt_client_secret, migrate_plaintext_federation_secrets,
 };
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use surrealdb_types::SurrealValue;
@@ -42,7 +40,7 @@ async fn read_secret_row(
     tenant_id: Uuid,
     config_id: Uuid,
 ) -> SecretRow {
-    let mut result = db
+    let result = db
         .query(
             "SELECT client_secret, client_secret_nonce, \
              client_secret_ciphertext, client_secret_key_version \

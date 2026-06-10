@@ -8,7 +8,6 @@
 //! `cleanup_expired` methods that `CleanupTask` calls, and the watch-shutdown
 //! logic is verified via a standalone tokio task that mimics CleanupTask behaviour.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use axiam_core::repository::{AssertionReplayRepository, FederationLoginStateRepository};

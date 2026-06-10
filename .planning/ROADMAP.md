@@ -433,7 +433,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 5. Email Delivery & GDPR Compliance | 5/5 | Complete   | 2026-06-02 |
 | 6. CI/CD & Infrastructure Hardening | 5/5 | Complete   | 2026-06-07 |
 | 7. Compliance Verification & Test Closure | 5/5 | Complete   | 2026-06-07 |
-| 8. Build Unblock (Wave 0) | 0/0 | Pending | — |
+| 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
 | 9. Critical Remediation (Wave 1) | 0/0 | Pending | — |
 | 10. High Remediation (Wave 2) | 0/0 | Pending | — |
 | 11. Medium Remediation (Wave 3) | 0/0 | Pending | — |

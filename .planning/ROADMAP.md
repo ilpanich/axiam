@@ -340,7 +340,14 @@ Plans:
   4. Silent refresh succeeds (CSRF token attached, skip-list narrowed); boot refresh attempted once before declaring unauthenticated
   5. Federation client secrets decrypted at use and encrypted on create/update; secret never serialized; OIDC login succeeds after restart/backfill
 
-**Plans**: TBD (run `/gsd:plan-phase 9`)
+**Plans**: 5 plans
+
+Plans:
+- [ ] 09-01-PLAN.md — Cross-org IDOR guards (orgs/tenants/CA certs) + system-admin restriction + cross-org 403 tests (SEC-002)
+- [ ] 09-02-PLAN.md — gRPC Tonic auth interceptor + remove public gRPC ingress + accept/reject tests (SEC-003)
+- [ ] 09-03-PLAN.md — Typed auth.ts service + rewire 6 auth pages + Playwright contract test (SEC-044/CQ-F27)
+- [ ] 09-04-PLAN.md — Silent/boot refresh CSRF fix + narrowed skip-list + CSRF contract test (CQ-F28)
+- [ ] 09-05-PLAN.md — Federation secret decrypt-at-use/encrypt-on-write/never-serialize + post-restart login test (SEC-045/SEC-017)
 
 ### Scope
 

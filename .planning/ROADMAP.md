@@ -343,11 +343,16 @@ Plans:
 **Plans**: 5 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 09-01-PLAN.md — Cross-org IDOR guards (orgs/tenants/CA certs) + system-admin restriction + cross-org 403 tests (SEC-002)
 - [ ] 09-02-PLAN.md — gRPC Tonic auth interceptor + remove public gRPC ingress + accept/reject tests (SEC-003)
 - [ ] 09-03-PLAN.md — Typed auth.ts service + rewire 6 auth pages + Playwright contract test (SEC-044/CQ-F27)
-- [ ] 09-04-PLAN.md — Silent/boot refresh CSRF fix + narrowed skip-list + CSRF contract test (CQ-F28)
 - [ ] 09-05-PLAN.md — Federation secret decrypt-at-use/encrypt-on-write/never-serialize + post-restart login test (SEC-045/SEC-017)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 09-04-PLAN.md — Silent/boot refresh CSRF fix + narrowed skip-list + CSRF contract test (CQ-F28)
 
 ### Scope
 

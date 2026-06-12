@@ -11,6 +11,7 @@ use axiam_core::repository::{
 use tonic::transport::Server;
 
 use crate::config::GrpcConfig;
+use crate::middleware::auth::AuthInterceptor;
 use crate::middleware::rate_limit::build_grpc_governor_layer;
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
 use crate::proto::token_service_server::TokenServiceServer;
@@ -44,7 +45,10 @@ where
 
     let governor_layer = build_grpc_governor_layer(grpc_config.grpc_authz_per_sec);
 
-    let authz_svc = AuthorizationServiceServer::new(AuthorizationServiceImpl::new(engine));
+    let authz_svc = AuthorizationServiceServer::with_interceptor(
+        AuthorizationServiceImpl::new(engine),
+        AuthInterceptor::new(auth_config.clone()),
+    );
     let user_svc = UserServiceServer::new(UserServiceImpl::new(user_repo, auth_config.clone()));
     let token_svc = TokenServiceServer::new(TokenServiceImpl::new(auth_config));
 

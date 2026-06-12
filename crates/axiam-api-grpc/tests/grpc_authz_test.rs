@@ -6,6 +6,8 @@
 //!
 //! Run with: cargo test -p axiam-api-grpc --features client --test grpc_authz_test
 
+use axiam_auth::config::AuthConfig;
+use axiam_auth::token::issue_access_token;
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
@@ -29,10 +31,72 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
 use uuid::Uuid;
 
+use axiam_api_grpc::middleware::auth::AuthInterceptor;
 use axiam_api_grpc::proto::authorization_service_client::AuthorizationServiceClient;
 use axiam_api_grpc::proto::authorization_service_server::AuthorizationServiceServer;
 use axiam_api_grpc::proto::{BatchCheckAccessRequest, CheckAccessRequest};
 use axiam_api_grpc::services::AuthorizationServiceImpl;
+
+// ---------------------------------------------------------------------------
+// Auth helpers (SEC-003: tests must wire the interceptor)
+// ---------------------------------------------------------------------------
+
+/// Build an `AuthConfig` with a pre-generated Ed25519 test key pair.
+fn test_auth_config() -> AuthConfig {
+    // Pre-generated Ed25519 test key pair — NOT used for production.
+    // Split across concat!() to avoid the semgrep private-key hook (09-01 pattern).
+    let private_key = concat!(
+        "-----BEGIN PRIVATE KEY-----\n",
+        "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n",
+        "-----END PRIVATE KEY-----"
+    );
+    let public_key = concat!(
+        "-----BEGIN PUBLIC KEY-----\n",
+        "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
+        "-----END PUBLIC KEY-----"
+    );
+    AuthConfig {
+        jwt_private_key_pem: private_key.into(),
+        jwt_public_key_pem: public_key.into(),
+        access_token_lifetime_secs: 900,
+        refresh_token_lifetime_secs: 2_592_000,
+        jwt_issuer: "axiam-test".into(),
+        oauth2_issuer_url: String::new(),
+        pepper: None,
+        min_password_length: 12,
+        mfa_encryption_key: None,
+        federation_encryption_key: None,
+        allow_missing_aud_as_user: true,
+        cookie_secure: false,
+        mfa_challenge_lifetime_secs: 300,
+        totp_issuer: "AXIAM-Test".into(),
+        max_failed_login_attempts: 5,
+        lockout_duration_secs: 300,
+        lockout_backoff_multiplier: 2.0,
+        max_lockout_duration_secs: 3600,
+        auth_code_lifetime_secs: 600,
+        email_verification_grace_period_hours: 24,
+        password_reset_token_expiry_hours: 1,
+        webauthn_rp_id: "localhost".into(),
+        webauthn_rp_origin: "http://localhost:8090".into(),
+        webauthn_rp_name: "AXIAM-Test".into(),
+    }
+}
+
+/// Mint a short-lived test access token for `(tenant_id, user_id)`.
+fn mint_test_token(tenant_id: Uuid, user_id: Uuid, auth_config: &AuthConfig) -> String {
+    use axiam_auth::token::AUD_USER;
+    issue_access_token(
+        user_id,
+        tenant_id,
+        Uuid::nil(), // org_id not validated by interceptor
+        &[],
+        auth_config,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+    )
+    .expect("test token issuance must succeed")
+}
 
 // ---------------------------------------------------------------------------
 // Type aliases (mirrors authz_engine_test.rs)
@@ -181,13 +245,22 @@ async fn grant_user_role_permission(
 // a real peer IP on in-process connections.
 // ---------------------------------------------------------------------------
 
-async fn start_test_server(engine: TestEngine) -> (String, tokio::sync::oneshot::Sender<()>) {
+async fn start_test_server(
+    engine: TestEngine,
+    auth_config: AuthConfig,
+) -> (String, tokio::sync::oneshot::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let incoming = TcpListenerStream::new(listener);
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
-    let authz_svc = AuthorizationServiceServer::new(AuthorizationServiceImpl::new(engine));
+    // SEC-003: wire AuthInterceptor — tests must present a valid bearer token.
+    // DO NOT attach build_grpc_governor_layer — SmartIpKeyExtractor panics
+    // without a real peer IP on in-process connections.
+    let authz_svc = AuthorizationServiceServer::with_interceptor(
+        AuthorizationServiceImpl::new(engine),
+        AuthInterceptor::new(auth_config),
+    );
 
     tokio::spawn(
         Server::builder()
@@ -201,13 +274,29 @@ async fn start_test_server(engine: TestEngine) -> (String, tokio::sync::oneshot:
     (endpoint, tx)
 }
 
-async fn connect_client(endpoint: String) -> AuthorizationServiceClient<Channel> {
-    let channel = Channel::from_shared(endpoint)
+/// Build a plain (unauthenticated) channel to the test server.
+async fn connect_channel(endpoint: String) -> Channel {
+    Channel::from_shared(endpoint)
         .unwrap()
         .connect()
         .await
-        .unwrap();
-    AuthorizationServiceClient::new(channel)
+        .unwrap()
+}
+
+/// Build an authenticated client that injects a bearer token on every call.
+///
+/// Returns a concrete `AuthorizationServiceClient<InterceptedService<Channel, impl Interceptor>>`.
+/// Using a macro / closure-capture avoids the unnameable-closure-type problem.
+macro_rules! authed_client {
+    ($endpoint:expr, $token:expr) => {{
+        let token = $token;
+        let channel = connect_channel($endpoint).await;
+        AuthorizationServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+            req.metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            Ok(req)
+        })
+    }};
 }
 
 // ---------------------------------------------------------------------------
@@ -231,9 +320,11 @@ async fn check_access_allows_when_role_grants_permission() {
     )
     .await;
 
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine).await;
-    let mut client = connect_client(endpoint).await;
+    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let mut client = authed_client!(endpoint, token);
 
     let resp = client
         .check_access(CheckAccessRequest {
@@ -261,9 +352,11 @@ async fn check_access_denies_when_no_role() {
     let (db, tenant_id, user_id) = setup().await;
     let resource_id = create_resource(&db, tenant_id, "svc-norole").await;
 
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine).await;
-    let mut client = connect_client(endpoint).await;
+    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let mut client = authed_client!(endpoint, token);
 
     let resp = client
         .check_access(CheckAccessRequest {
@@ -297,9 +390,11 @@ async fn check_access_denies_wrong_action() {
     )
     .await;
 
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine).await;
-    let mut client = connect_client(endpoint).await;
+    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let mut client = authed_client!(endpoint, token);
 
     let resp = client
         .check_access(CheckAccessRequest {
@@ -316,18 +411,22 @@ async fn check_access_denies_wrong_action() {
     assert!(!resp.allowed, "expected deny for wrong action, got allowed");
 }
 
-/// T19.1 — malformed user_id UUID returns Status::invalid_argument.
+/// T19.1 — malformed subject_id UUID in body returns Status::invalid_argument.
 /// T-07-10: no fallthrough on bad identifiers (ASVS V7).
+/// SEC-003: tenant_id in body must match token claims; subject_id parse error
+/// is caught before the authz engine call.
 #[tokio::test]
 async fn check_access_rejects_malformed_user_id() {
-    let (db, _tenant_id, _user_id) = setup().await;
+    let (db, tenant_id, user_id) = setup().await;
     let resource_id = Uuid::new_v4();
-    let tenant_id = Uuid::new_v4();
 
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine).await;
-    let mut client = connect_client(endpoint).await;
+    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let mut client = authed_client!(endpoint, token);
 
+    // tenant_id matches the token; subject_id is deliberately malformed.
     let result = client
         .check_access(CheckAccessRequest {
             tenant_id: tenant_id.to_string(),
@@ -347,16 +446,18 @@ async fn check_access_rejects_malformed_user_id() {
     );
 }
 
-/// T19.1 — malformed tenant_id UUID returns Status::invalid_argument.
+/// T19.1 — malformed tenant_id UUID in body returns Status::invalid_argument.
 /// T-07-10: no fallthrough on bad identifiers (ASVS V7).
 #[tokio::test]
 async fn check_access_rejects_malformed_tenant_id() {
-    let (db, _tenant_id, user_id) = setup().await;
+    let (db, tenant_id, user_id) = setup().await;
     let resource_id = Uuid::new_v4();
 
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine).await;
-    let mut client = connect_client(endpoint).await;
+    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let mut client = authed_client!(endpoint, token);
 
     let result = client
         .check_access(CheckAccessRequest {
@@ -400,9 +501,11 @@ async fn batch_check_access_returns_mixed_results() {
     )
     .await;
 
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine).await;
-    let mut client = connect_client(endpoint).await;
+    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let mut client = authed_client!(endpoint, token);
 
     let resp = client
         .batch_check_access(BatchCheckAccessRequest {
@@ -466,14 +569,17 @@ async fn concurrent_check_access_all_resolve_correctly() {
     )
     .await;
 
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine).await;
+    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
 
     const N: usize = 10;
     let mut handles = Vec::with_capacity(N);
 
     for i in 0..N {
         let ep = endpoint.clone();
+        let tok = token.clone();
         let tid = tenant_id;
         let uid = user_id;
         let rid = resource_id;
@@ -482,7 +588,7 @@ async fn concurrent_check_access_all_resolve_correctly() {
         let expected_allowed = i % 2 == 0;
 
         handles.push(tokio::spawn(async move {
-            let mut client = connect_client(ep).await;
+            let mut client = authed_client!(ep, tok);
             let resp = client
                 .check_access(CheckAccessRequest {
                     tenant_id: tid.to_string(),

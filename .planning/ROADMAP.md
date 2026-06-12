@@ -347,7 +347,7 @@ Plans:
 
 - [x] 09-01-PLAN.md — Cross-org IDOR guards (orgs/tenants/CA certs) + system-admin restriction + cross-org 403 tests (SEC-002)
 - [x] 09-02-PLAN.md — gRPC Tonic auth interceptor + remove public gRPC ingress + accept/reject tests (SEC-003)
-- [ ] 09-03-PLAN.md — Typed auth.ts service + rewire 6 auth pages + Playwright contract test (SEC-044/CQ-F27)
+- [x] 09-03-PLAN.md — Typed auth.ts service + rewire 6 auth pages + Playwright contract test (SEC-044/CQ-F27)
 - [ ] 09-05-PLAN.md — Federation secret decrypt-at-use/encrypt-on-write/never-serialize + post-restart login test (SEC-045/SEC-017)
 
 **Wave 2** *(blocked on Wave 1 completion)*
@@ -453,7 +453,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 6. CI/CD & Infrastructure Hardening | 5/5 | Complete   | 2026-06-07 |
 | 7. Compliance Verification & Test Closure | 5/5 | Complete   | 2026-06-07 |
 | 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
-| 9. Critical Remediation (Wave 1) | 2/5 | In Progress|  |
+| 9. Critical Remediation (Wave 1) | 3/5 | In Progress|  |
 | 10. High Remediation (Wave 2) | 0/0 | Pending | — |
 | 11. Medium Remediation (Wave 3) | 0/0 | Pending | — |
 | 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |

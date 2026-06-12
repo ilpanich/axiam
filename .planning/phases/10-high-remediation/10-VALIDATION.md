@@ -42,7 +42,7 @@ created: 2026-06-12
 |------|-------|-------|
 | 1 | 10-01, 10-06 | Foundational hashing+pepper (gate); frontend (independent) |
 | 2 | 10-02 | load_key_from_env + PKI fail-fast (shares main.rs with 10-01) |
-| 3 | 10-03, 10-04 | async-safety + tenant isolation; data-correctness (no file overlap → parallel) |
+| 3 | 10-03, 10-04 | async-safety + tenant isolation; data-correctness. Both depend on 10-01+10-02 (Wave A green gate); no file overlap with each other → parallel within wave 3 |
 | 4 | 10-05 | protocol hardening (shares schema.rs w/10-04, service.rs w/10-03) |
 
 ---

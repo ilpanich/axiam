@@ -841,24 +841,24 @@ WAVE B (parallel after Wave A green; group into 3 plans)
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Orphan resource delete — block or re-home?**
+1. **Orphan resource delete — block or re-home?** — RESOLVED: block delete when children exist (return Validation/409); planned in 10-03 Task 3.
    - What we know: `resource.rs:257-277` deletes resources without checking for children.
    - What's unclear: Should deleting a resource with children be blocked (safest), or should children be re-parented to the deleted resource's parent?
    - Recommendation: Block delete (return 409 Conflict). Re-homing adds complexity and UI changes. Flag for user confirmation at discuss-phase if needed.
 
-2. **Tenant status field for TenantsPage (CQ-F08)**
+2. **Tenant status field for TenantsPage (CQ-F08)** — RESOLVED: `axiam-core/src/models/tenant.rs` and the frontend `Tenant` interface have NO `status` field → remove the Status column (do not fabricate); planned in 10-06 Task 1.
    - What we know: `TenantsPage` shows fabricated "Active" status. The `Tenant` model may or may not have a `status` field.
    - What's unclear: Does `axiam-core/src/models/tenant.rs` expose `status`? If not, should the column be removed or a status field added?
    - Recommendation: Check at plan time. If no status field: remove the column. If status exists but is not mapped to frontend Tenant type: add it.
 
-3. **Semaphore size for CQ-B02**
+3. **Semaphore size for CQ-B02** — RESOLVED: hardcode `Semaphore::new(4)` this phase; configurability deferred to Phase 11; planned in 10-03 Task 1.
    - What we know: 4 is a common default for CPU-bound work.
    - What's unclear: Should it be configurable via `AuthConfig`/`PkiConfig`? Or hardcoded?
    - Recommendation: Hardcode `4` initially; add a config field in Phase 11 if operators need tuning.
 
-4. **`samael::AuthnRequest.id` storage for InResponseTo (SEC-005)**
+4. **`samael::AuthnRequest.id` storage for InResponseTo (SEC-005)** — RESOLVED: `samael::schema::Response.in_response_to: Option<String>` and `.destination: Option<String>` are confirmed present (samael 0.0.19); InResponseTo/Destination checks are feasible; planned in 10-05 Task 3.
    - What we know: `authn_request.id` is generated at `saml.rs:254` but not stored.
    - What's unclear: Does `samael::schema::Response` have an `in_response_to` field accessible via the Rust type?
    - Recommendation: Verify samael schema at plan time with `grep -r "in_response_to" crates/axiam-federation/`.
@@ -942,11 +942,12 @@ WAVE B (parallel after Wave A green; group into 3 plans)
 | SAML field availability | MEDIUM | samael schema field `in_response_to` not directly read — verify at plan time |
 | Tenant model status field | MEDIUM | `axiam-core/models/tenant.rs` not read — verify at plan time for CQ-F08 |
 
-### Open Questions
+### Open Questions (RESOLVED)
 
-1. Block or re-home children on resource delete? (product decision — conservative default: block)
-2. `samael::schema::Response.in_response_to` field accessibility — verify at plan time
-3. `Tenant` model `status` field existence — verify at plan time for CQ-F08
+1. Block or re-home children on resource delete? — RESOLVED: block (conservative default); planned in 10-03 Task 3.
+2. `samael::schema::Response.in_response_to` field accessibility — RESOLVED: confirmed present (also `.destination`) in samael 0.0.19; planned in 10-05 Task 3.
+3. `Tenant` model `status` field existence for CQ-F08 — RESOLVED: no `status` field exists (backend model or frontend interface) → remove the Status column; planned in 10-06 Task 1.
+4. Semaphore size — RESOLVED: hardcode 4 this phase; planned in 10-03 Task 1.
 
 ### Ready for Planning
 

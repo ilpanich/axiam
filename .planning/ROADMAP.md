@@ -18,7 +18,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 - [x] **Phase 6: CI/CD & Infrastructure Hardening** - Add security scanning to CI and harden Docker/K8s configurations (completed 2026-06-07)
 - [x] **Phase 7: Compliance Verification & Test Closure** - Verify OWASP ASVS, OAuth2 RFC, OIDC conformance and close remaining test gaps (completed 2026-06-07)
 - [x] **Phase 8: Build Unblock (Wave 0)** - Make `axiam-server` compile and pass CI `-D warnings` (completed 2026-06-10)
-- [ ] **Phase 9: Critical Remediation (Wave 1)** - Close cross-tenant IDOR, gRPC auth, frontend auth flows, silent refresh, federation secret encryption
+- [x] **Phase 9: Critical Remediation (Wave 1)** - Close cross-tenant IDOR, gRPC auth, frontend auth flows, silent refresh, federation secret encryption (completed 2026-06-12)
 - [ ] **Phase 10: High Remediation (Wave 2)** - Hashing/pepper, async-safe crypto, tenant isolation, GDPR/SAML/TOTP correctness, frontend High items
 - [ ] **Phase 11: Medium Remediation (Wave 3)** - Repo/DTO consolidation, transport limits, auth/infra hardening, frontend Medium items
 - [ ] **Phase 12: Low / Trivial Remediation (Wave 4)** - Cleanup, dead-code, dep pruning, i18n, security polish + whole-effort verification
@@ -352,7 +352,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 09-04-PLAN.md — Silent/boot refresh CSRF fix + narrowed skip-list + CSRF contract test (CQ-F28)
+- [x] 09-04-PLAN.md — Silent/boot refresh CSRF fix + narrowed skip-list + CSRF contract test (CQ-F28)
 
 ### Scope
 
@@ -453,7 +453,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 6. CI/CD & Infrastructure Hardening | 5/5 | Complete   | 2026-06-07 |
 | 7. Compliance Verification & Test Closure | 5/5 | Complete   | 2026-06-07 |
 | 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
-| 9. Critical Remediation (Wave 1) | 4/5 | In Progress|  |
+| 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
 | 10. High Remediation (Wave 2) | 0/0 | Pending | — |
 | 11. Medium Remediation (Wave 3) | 0/0 | Pending | — |
 | 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |

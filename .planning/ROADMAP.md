@@ -378,7 +378,14 @@ Plans:
   5. GDPR purge/export correctness (re-selectable on failure, complete export, paginated audit, Failed status); SAML protocol checks (InResponseTo/Destination/Conditions/XSW); TOTP replay rejected; pagination clamped; 5xx errors generic; PKI fails fast on missing key; AMQP DLQ parity; migration idempotent/transactional
   6. Frontend High items fixed (real `user.id`, ConfirmDialog label, debounce cleanup, useQuery search, logout clears store, eslint+`tsc -b` in CI, org settings save, no fabricated tenant status)
 
-**Plans**: TBD (run `/gsd:plan-phase 10`)
+**Plans**: 6 plans in 4 waves
+
+- [ ] 10-01-PLAN.md — single password-hashing path + pepper wiring (CQ-B09/B01) [wave 1]
+- [ ] 10-02-PLAN.md — load_key_from_env extraction + PKI fail-fast (CQ-B43, SEC-012) [wave 2]
+- [ ] 10-03-PLAN.md — async-safe crypto + tenant edge isolation + resource hierarchy (CQ-B02/B07/B08) [wave 3]
+- [ ] 10-04-PLAN.md — sparse settings, migrations, AMQP DLQ, GDPR correctness (CQ-B03/B05/B06/B38) [wave 3]
+- [ ] 10-05-PLAN.md — pagination clamp, generic 5xx, TOTP replay, SAML hardening, federation API (SEC-005/008/010/011, CQ-B30/B33/B40) [wave 4]
+- [ ] 10-06-PLAN.md — frontend High items + CI lint/tsc gate (CQ-F01..F08) [wave 1]
 
 ### Scope
 

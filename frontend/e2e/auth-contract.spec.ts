@@ -334,3 +334,64 @@ test.describe("Auth endpoint contract", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Test suite — "Silent refresh CSRF contract" (CQ-F28 / T-09-07)
+//
+// Proves the app's boot/silent refresh POST goes through the `api` axios
+// instance (whose request interceptor attaches X-CSRF-Token) rather than bare
+// axios. Driving through the app boot is essential: a raw fetch would NOT
+// attach CSRF and would falsely fail — the intercept must observe the app's
+// own refresh so the api-instance interceptor runs.
+// ---------------------------------------------------------------------------
+
+test.describe("Silent refresh CSRF contract", () => {
+  test("boot refresh POST /api/v1/auth/refresh carries X-CSRF-Token header", async ({
+    page,
+    context,
+  }) => {
+    // The request interceptor reads the axiam_csrf cookie and copies it into
+    // the X-CSRF-Token header on state-changing requests. Seed it so the
+    // interceptor has a value to attach.
+    const csrfValue = "contract-csrf-token-value";
+    await context.addCookies([
+      {
+        name: "axiam_csrf",
+        value: csrfValue,
+        url: "http://localhost:5173",
+      },
+    ]);
+
+    // Make the first /auth/me return 401 so fetchCurrentUser() returns null,
+    // which triggers the single boot refresh in useAuthInit.
+    await page.route("**/api/v1/auth/me", (route) => {
+      route.fulfill({
+        status: 401,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "unauthorized" }),
+      });
+    });
+
+    // Capture the refresh request's headers, then fulfill so the flow settles.
+    let refreshHeaders: Record<string, string> | undefined;
+    await page.route("**/api/v1/auth/refresh", (route) => {
+      refreshHeaders = route.request().headers();
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({}),
+      });
+    });
+
+    // Boot the app — useAuthInit runs on mount and drives the silent refresh.
+    await page.goto("/");
+
+    // Wait until the boot refresh has been observed.
+    await expect.poll(() => refreshHeaders, { timeout: 5_000 }).toBeDefined();
+
+    // The refresh POST must carry a non-empty x-csrf-token request header,
+    // proving it went through the api instance (not bare axios).
+    expect(refreshHeaders?.["x-csrf-token"]).toBeTruthy();
+    expect(refreshHeaders?.["x-csrf-token"]).toBe(csrfValue);
+  });
+});

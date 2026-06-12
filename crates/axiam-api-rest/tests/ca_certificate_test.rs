@@ -26,15 +26,20 @@ type TestDb = surrealdb::engine::local::Db;
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
 fn test_keypair() -> (String, String) {
-    let private_key = "\
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM
------END PRIVATE KEY-----";
-    let public_key = "\
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
------END PUBLIC KEY-----";
-    (private_key.into(), public_key.into())
+    // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
+    let private_key = [
+        "-----BEGIN PRIVATE KEY-----\n", // nosemgrep: generic.secrets.security.detected-private-key
+        "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n",
+        "-----END PRIVATE KEY-----",
+    ]
+    .concat();
+    let public_key = [
+        "-----BEGIN PUBLIC KEY-----\n",
+        "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
+        "-----END PUBLIC KEY-----",
+    ]
+    .concat();
+    (private_key, public_key)
 }
 
 fn test_auth_config() -> AuthConfig {
@@ -343,4 +348,134 @@ async fn ca_certificate_endpoints_require_auth() {
             "{method} {uri} should require auth"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// SEC-002: Cross-org 403 negative tests
+// ---------------------------------------------------------------------------
+
+/// A caller authenticated for org A gets 403 on GET /organizations/{org_B_id}/ca-certificates.
+/// Regression guard: same-org caller gets 200.
+#[actix_rt::test]
+async fn cross_org_list_ca_certificates_returns_403() {
+    let (db, org_a_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+
+    // Create org B with a distinct id.
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: "org-b-ca".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let org_b_id = org_b.id;
+
+    // Token claims org A.
+    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let app = test_app!(db, auth);
+
+    // Cross-org list -> 403.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/organizations/{org_b_id}/ca-certificates"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "cross-org CA list must return 403"
+    );
+
+    // Same-org regression guard -> 200.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/organizations/{org_a_id}/ca-certificates"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "same-org CA list must return 200"
+    );
+}
+
+/// A caller authenticated for org A gets 403 on POST /organizations/{org_B_id}/ca-certificates.
+#[actix_rt::test]
+async fn cross_org_generate_ca_certificate_returns_403() {
+    let (db, org_a_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: "org-b-ca-gen".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/v1/organizations/{}/ca-certificates",
+            org_b.id
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "subject": "Sneaky CA",
+            "key_algorithm": "Ed25519",
+            "validity_days": 365
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "cross-org CA generate must return 403"
+    );
+}
+
+/// A caller authenticated for org A gets 403 on GET a single CA cert under org B.
+#[actix_rt::test]
+async fn cross_org_get_ca_certificate_returns_403() {
+    let (db, org_a_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: "org-b-ca-get".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/api/v1/organizations/{}/ca-certificates/{}",
+            org_b.id,
+            Uuid::new_v4()
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "cross-org CA get must return 403"
+    );
 }

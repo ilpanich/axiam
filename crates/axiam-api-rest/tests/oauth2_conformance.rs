@@ -257,7 +257,11 @@ async fn do_authorize(
     }
 
     let resp = do_authorize_raw(app, token, &uri).await;
-    assert_eq!(resp.status().as_u16(), 302, "authorize must redirect with 302");
+    assert_eq!(
+        resp.status().as_u16(),
+        302,
+        "authorize must redirect with 302"
+    );
 
     let location = resp
         .headers()
@@ -353,12 +357,7 @@ async fn pkce_plain_method_rejected() {
     // Expect either an error redirect (302 with error=) or a direct 400.
     // Per RFC 7636 §4.2: server MUST NOT issue a code for an unsupported method.
     if resp.status().as_u16() == 302 {
-        let location = resp
-            .headers()
-            .get("Location")
-            .unwrap()
-            .to_str()
-            .unwrap();
+        let location = resp.headers().get("Location").unwrap().to_str().unwrap();
         assert!(
             location.contains("error="),
             "plain method redirect must contain error param, got: {location}"
@@ -421,8 +420,7 @@ async fn pkce_verifier_too_short_rejected() {
     );
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(
-        body["error"],
-        "invalid_grant",
+        body["error"], "invalid_grant",
         "short verifier must produce invalid_grant"
     );
 }
@@ -465,8 +463,7 @@ async fn pkce_verifier_too_long_rejected() {
     );
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(
-        body["error"],
-        "invalid_grant",
+        body["error"], "invalid_grant",
         "long verifier must produce invalid_grant"
     );
 }
@@ -515,8 +512,7 @@ async fn invalid_client_returns_www_authenticate_header() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(
-        body["error"],
-        "invalid_client",
+        body["error"], "invalid_client",
         "error body must be invalid_client"
     );
 }
@@ -624,8 +620,7 @@ async fn refresh_token_bound_to_original_client() {
     );
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(
-        body["error"],
-        "invalid_grant",
+        body["error"], "invalid_grant",
         "cross-client refresh must return invalid_grant"
     );
 }

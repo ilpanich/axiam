@@ -362,10 +362,8 @@ async fn id_token_iss_matches_discovery_issuer() {
 
     // OIDC Core §3.1.3.7: iss in id_token MUST match issuer in discovery doc
     assert_eq!(
-        claims["iss"],
-        discovery["issuer"],
+        claims["iss"], discovery["issuer"],
         "id_token iss ({}) must match discovery issuer ({})",
-        claims["iss"],
-        discovery["issuer"]
+        claims["iss"], discovery["issuer"]
     );
 }

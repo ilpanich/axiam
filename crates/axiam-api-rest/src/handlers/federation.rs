@@ -39,6 +39,7 @@ use axiam_db::{
     SurrealFederationLoginStateRepository, SurrealOrganizationRepository,
     SurrealRefreshTokenRepository, SurrealSessionRepository, SurrealTenantRepository,
 };
+use axiam_federation::secrets::{current_key_version, encrypt_client_secret};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -210,6 +211,7 @@ pub async fn create<C: Connection>(
     user: AuthenticatedUser,
     authz: AuthzData,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<CreateFederationConfigRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("federation:create", Uuid::nil())
@@ -238,6 +240,22 @@ pub async fn create<C: Connection>(
         _ => return Err(validation_err("protocol must be 'OidcConnect' or 'Saml'")),
     };
 
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
+    // Encrypt the client_secret before any DB write (SEC-045).
+    // Plaintext never reaches the DB layer.
+    let (nonce_b64, ciphertext_b64) =
+        encrypt_client_secret(&enc_key, &req.client_secret).map_err(|e| {
+            AxiamApiError(AxiamError::Internal(format!(
+                "failed to encrypt federation secret: {e}"
+            )))
+        })?;
+
+    // Store with empty legacy plaintext (field required by schema; nulled by set_encrypted_secret).
     let config = repo
         .create(CreateFederationConfig {
             tenant_id: user.tenant_id,
@@ -245,10 +263,23 @@ pub async fn create<C: Connection>(
             protocol,
             metadata_url: req.metadata_url,
             client_id: req.client_id,
-            client_secret: req.client_secret,
+            client_secret: String::new(), // plaintext never stored
             attribute_map: req.attribute_map,
         })
         .await?;
+
+    // Write the encrypted secret columns (overwrites the empty plaintext row).
+    repo.set_encrypted_secret(
+        user.tenant_id,
+        config.id,
+        nonce_b64,
+        ciphertext_b64,
+        current_key_version(),
+    )
+    .await?;
+
+    // Reload to return the canonical state (with ciphertext set, plaintext empty).
+    let config = repo.get_by_id(user.tenant_id, config.id).await?;
 
     Ok(HttpResponse::Created().json(FederationConfigResponse::from(config)))
 }
@@ -334,6 +365,7 @@ pub async fn update<C: Connection>(
     authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<UpdateFederationConfigRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("federation:update", Uuid::nil())
@@ -363,6 +395,12 @@ pub async fn update<C: Connection>(
         return Err(validation_err("metadata_url must not be empty"));
     }
 
+    // If the caller is rotating the client_secret, encrypt it before storage
+    // (SEC-045). Plaintext never reaches the DB layer.
+    let new_secret_plaintext = req.client_secret.clone();
+
+    // Update non-secret fields via the standard update path (client_secret = None means
+    // "no change to secret columns").
     let config = repo
         .update(
             user.tenant_id,
@@ -371,12 +409,38 @@ pub async fn update<C: Connection>(
                 provider: req.provider,
                 metadata_url: req.metadata_url,
                 client_id: req.client_id,
-                client_secret: req.client_secret,
+                client_secret: None, // handled separately below
                 attribute_map: req.attribute_map,
                 enabled: req.enabled,
             },
         )
         .await?;
+
+    // If a new secret was provided, encrypt and store it now.
+    if let Some(ref plaintext) = new_secret_plaintext {
+        let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+            AxiamApiError(AxiamError::Validation {
+                message: "federation encryption key not configured".into(),
+            })
+        })?;
+        let (nonce_b64, ciphertext_b64) =
+            encrypt_client_secret(&enc_key, plaintext).map_err(|e| {
+                AxiamApiError(AxiamError::Internal(format!(
+                    "failed to encrypt federation secret: {e}"
+                )))
+            })?;
+        repo.set_encrypted_secret(
+            user.tenant_id,
+            config.id,
+            nonce_b64,
+            ciphertext_b64,
+            current_key_version(),
+        )
+        .await?;
+    }
+
+    // Reload to return canonical state.
+    let config = repo.get_by_id(user.tenant_id, config.id).await?;
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
 }
 
@@ -438,6 +502,7 @@ pub async fn oidc_authorize<C: Connection>(
     user_repo: web::Data<SurrealUserRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     jwks_cache: web::Data<Arc<JwksCache>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<OidcAuthorizeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -452,12 +517,19 @@ pub async fn oidc_authorize<C: Connection>(
         return Err(validation_err("nonce must not be empty"));
     }
 
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
     let service = OidcFederationService::new(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
         (**http_client).clone(),
         Arc::clone(&jwks_cache),
+        enc_key,
     );
 
     let auth_url = service
@@ -497,6 +569,7 @@ pub async fn oidc_callback<C: Connection>(
     user_repo: web::Data<SurrealUserRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     jwks_cache: web::Data<Arc<JwksCache>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<OidcCallbackRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -511,12 +584,19 @@ pub async fn oidc_callback<C: Connection>(
         return Err(validation_err("nonce must not be empty"));
     }
 
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
     let service = OidcFederationService::new(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
         (**http_client).clone(),
         Arc::clone(&jwks_cache),
+        enc_key,
     );
 
     let result = service
@@ -992,6 +1072,7 @@ pub async fn oidc_start_public<C: Connection>(
     login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     jwks_cache: web::Data<Arc<JwksCache>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<OidcStartRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -1042,6 +1123,12 @@ pub async fn oidc_start_public<C: Connection>(
     let nonce = random_base64url();
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
 
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
     // Build OIDC authorize URL via the verified service.
     let service = OidcFederationService::new(
         (**config_repo).clone(),
@@ -1049,6 +1136,7 @@ pub async fn oidc_start_public<C: Connection>(
         (**user_repo).clone(),
         (**http_client).clone(),
         Arc::clone(&jwks_cache),
+        enc_key,
     );
 
     let auth_url = service
@@ -1138,6 +1226,12 @@ pub async fn oidc_callback_public<C: Connection>(
     let expected_nonce = login_state.nonce.clone();
     let spa_redirect_uri = login_state.redirect_uri.clone();
 
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
     // Run the verified OIDC flow (04-02): code exchange + ID token
     // signature + iss/aud/exp/nonce validation.
     let service = OidcFederationService::new(
@@ -1146,6 +1240,7 @@ pub async fn oidc_callback_public<C: Connection>(
         (**user_repo).clone(),
         (**http_client).clone(),
         Arc::clone(&jwks_cache),
+        enc_key,
     );
 
     // The redirect_uri we pass to the IdP token endpoint is the AXIAM ACS

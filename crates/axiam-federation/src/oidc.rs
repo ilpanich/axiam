@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::error::FederationError;
 use crate::jwks_cache::JwksCache;
+use crate::secrets::decrypt_client_secret_or_legacy;
 use crate::validate_metadata_url;
 
 /// Minimal OIDC Discovery document fields we care about.
@@ -90,6 +91,8 @@ pub struct OidcFederationService<FC, FL, UR> {
     http_client: reqwest::Client,
     /// Process-wide JWKS cache (D-01/D-02/D-03).
     cache: Arc<JwksCache>,
+    /// AES-256-GCM key for decrypting the federation client_secret at use-time (SEC-045).
+    encryption_key: [u8; 32],
 }
 
 impl<FC, FL, UR> OidcFederationService<FC, FL, UR>
@@ -105,6 +108,7 @@ where
         user_repo: UR,
         http_client: reqwest::Client,
         cache: Arc<JwksCache>,
+        encryption_key: [u8; 32],
     ) -> Self {
         Self {
             federation_config_repo,
@@ -112,6 +116,7 @@ where
             user_repo,
             http_client,
             cache,
+            encryption_key,
         }
     }
 
@@ -282,6 +287,17 @@ where
 
         let discovery = self.discover(metadata_url).await?;
 
+        // Decrypt the client secret at use-time (SEC-045 / D-10..D-13).
+        // Supports both encrypted rows (post-backfill) and legacy plaintext
+        // rows (brief deploy window before backfill runs).
+        let client_secret = decrypt_client_secret_or_legacy(
+            &self.encryption_key,
+            config.client_secret_nonce.as_deref(),
+            config.client_secret_ciphertext.as_deref(),
+            &config.client_secret,
+        )
+        .map_err(|_| FederationError::ConfigIncomplete)?;
+
         // Exchange authorization code for tokens.
         let token_response = self
             .exchange_code(
@@ -289,7 +305,7 @@ where
                 code,
                 redirect_uri,
                 &config.client_id,
-                &config.client_secret,
+                &client_secret,
             )
             .await?;
 

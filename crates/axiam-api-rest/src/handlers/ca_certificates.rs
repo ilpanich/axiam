@@ -36,6 +36,16 @@ pub async fn generate<C: Connection>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let org_id = path.into_inner();
+
+    // Authorization: only allow access to certificates in the caller's own org.
+    if org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+            },
+        ));
+    }
+
     let mut input = body.into_inner();
     input.organization_id = org_id;
     let result = service.generate(input).await?;
@@ -68,6 +78,16 @@ pub async fn list<C: Connection>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let org_id = path.into_inner();
+
+    // Authorization: only allow access to certificates in the caller's own org.
+    if org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+            },
+        ));
+    }
+
     let result = service.list(org_id, pagination.into_inner()).await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -96,6 +116,16 @@ pub async fn get<C: Connection>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let (org_id, id) = path.into_inner();
+
+    // Authorization: only allow access to certificates in the caller's own org.
+    if org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+            },
+        ));
+    }
+
     let result = service.get(org_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -124,6 +154,16 @@ pub async fn revoke<C: Connection>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let (org_id, id) = path.into_inner();
+
+    // Authorization: only allow revoking certificates in the caller's own org.
+    if org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+            },
+        ));
+    }
+
     service.revoke(org_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
 }

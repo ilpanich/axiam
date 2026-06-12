@@ -59,6 +59,16 @@ pub async fn create<C: Connection>(
     RequirePermission::new("tenants:create", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+
+    // Authorization: only allow creating tenants under the caller's own org.
+    if path.org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+            },
+        ));
+    }
+
     let req = body.into_inner();
     let input = CreateTenant {
         organization_id: path.org_id,
@@ -109,6 +119,16 @@ pub async fn list<C: Connection>(
     RequirePermission::new("tenants:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+
+    // Authorization: only allow listing tenants under the caller's own org.
+    if path.org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+            },
+        ));
+    }
+
     let result = repo
         .list_by_organization(path.org_id, query.into_inner())
         .await?;
@@ -139,6 +159,16 @@ pub async fn get<C: Connection>(
     RequirePermission::new("tenants:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+
+    // Authorization: reject cross-org probing before touching the DB.
+    if path.org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+            },
+        ));
+    }
+
     let tenant = repo.get_by_id(path.tenant_id).await?;
     if tenant.organization_id != path.org_id {
         return Err(AxiamError::NotFound {
@@ -176,6 +206,16 @@ pub async fn update<C: Connection>(
     RequirePermission::new("tenants:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+
+    // Authorization: reject cross-org probing before touching the DB.
+    if path.org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+            },
+        ));
+    }
+
     let existing = repo.get_by_id(path.tenant_id).await?;
     if existing.organization_id != path.org_id {
         return Err(AxiamError::NotFound {
@@ -212,6 +252,16 @@ pub async fn delete<C: Connection>(
     RequirePermission::new("tenants:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+
+    // Authorization: reject cross-org probing before touching the DB.
+    if path.org_id != user.org_id {
+        return Err(AxiamApiError(
+            axiam_core::error::AxiamError::AuthorizationDenied {
+                reason: "cannot access a different organization".into(),
+            },
+        ));
+    }
+
     let existing = repo.get_by_id(path.tenant_id).await?;
     if existing.organization_id != path.org_id {
         return Err(AxiamError::NotFound {

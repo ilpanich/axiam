@@ -14,9 +14,12 @@ const api: AxiosInstance = axios.create({
   withCredentials: true, // Send cookies on ALL requests
 });
 
-// Parse a named cookie from document.cookie string
-function getCookie(name: string): string | null {
-  const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+// Parse the axiam_csrf cookie from document.cookie string.
+// Hardcoded regex avoids ReDoS (CWE-1333) from dynamic RegExp construction.
+function getCookie(name: "axiam_csrf"): string | null {
+  const AXIAM_CSRF_RE = /(?:^|;\s*)axiam_csrf=([^;]*)/;
+  if (name !== "axiam_csrf") return null;
+  const match = document.cookie.match(AXIAM_CSRF_RE);
   return match ? decodeURIComponent(match[1]) : null;
 }
 
@@ -56,6 +59,13 @@ function processQueue(error: unknown) {
   failedQueue = [];
 }
 
+// Endpoints that must never trigger a silent refresh (avoids infinite loops)
+const SKIP_REFRESH = [
+  "/api/v1/auth/refresh",
+  "/api/v1/auth/login",
+  "/api/v1/auth/logout",
+];
+
 // Response interceptor: handle 401 with silent cookie-based refresh (per D-14)
 api.interceptors.response.use(
   (response: AxiosResponse) => response,
@@ -68,14 +78,14 @@ api.interceptors.response.use(
       return Promise.reject(error);
     }
 
-    // Skip refresh for auth endpoints (login, refresh itself, etc.)
-    const isAuthRoute = originalRequest.url?.includes("/auth/");
+    // Skip refresh for login, logout, and the refresh endpoint itself
+    const isSkipRefresh = SKIP_REFRESH.some((u) => originalRequest.url?.includes(u));
     const isAuthenticated = useAuthStore.getState().isAuthenticated;
 
     if (
       error.response?.status === 401 &&
       !originalRequest._retry &&
-      !isAuthRoute &&
+      !isSkipRefresh &&
       isAuthenticated
     ) {
       if (isRefreshing) {
@@ -88,12 +98,8 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        // Cookie-based refresh — cookies sent automatically, no token in body
-        await axios.post(
-          "/api/v1/auth/refresh",
-          {},
-          { withCredentials: true }
-        );
+        // Cookie-based refresh via the api instance so X-CSRF-Token is attached (CQ-F28)
+        await api.post("/api/v1/auth/refresh", {});
         // New cookies set by server response — no store update needed
         processQueue(null);
         return api(originalRequest);

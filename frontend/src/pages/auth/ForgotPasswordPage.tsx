@@ -1,19 +1,11 @@
 import { useActionState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Loader2, Mail, CheckCircle2 } from "lucide-react";
-import api from "@/lib/api";
+import { authService } from "@/services/auth";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-
-// ---------------------------------------------------------------------------
-// API helper
-// ---------------------------------------------------------------------------
-
-async function forgotPassword(email: string): Promise<void> {
-  await api.post("/auth/forgot-password", { email });
-}
 
 // ---------------------------------------------------------------------------
 // Action state type
@@ -36,7 +28,7 @@ export function ForgotPasswordPage() {
       const email = (formData.get("email") as string).trim();
       let internalError = false;
       try {
-        await forgotPassword(email);
+        await authService.requestPasswordReset(email);
       } catch (err) {
         // Intentionally swallow errors to prevent user enumeration.
         // We always show the same success message regardless of outcome.

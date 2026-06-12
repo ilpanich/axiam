@@ -1,7 +1,7 @@
 import { useState, useActionState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
-import api from "@/lib/api";
+import { authService } from "@/services/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,19 +10,12 @@ import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/Passwor
 import type { AxiosError } from "axios";
 
 // ---------------------------------------------------------------------------
-// API helper
+// API error response type
 // ---------------------------------------------------------------------------
 
 interface ErrorResponse {
   message?: string;
   error?: string;
-}
-
-async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
-  await api.post("/auth/change-password", {
-    current_password: currentPassword,
-    new_password: newPassword,
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +55,7 @@ export function ChangePasswordPage() {
       }
 
       try {
-        await changePassword(currentPassword, newPw);
+        await authService.changePassword(currentPassword, newPw);
         return { error: null, success: true };
       } catch (err) {
         const axiosErr = err as AxiosError<ErrorResponse>;

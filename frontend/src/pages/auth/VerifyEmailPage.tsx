@@ -1,23 +1,19 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { CheckCircle2, AlertCircle, Loader2, MailOpen } from "lucide-react";
-import api from "@/lib/api";
+import { authService } from "@/services/auth";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/auth";
 import type { AxiosError } from "axios";
 
 // ---------------------------------------------------------------------------
-// API helper
+// API error response type
 // ---------------------------------------------------------------------------
 
 interface ErrorResponse {
   message?: string;
   error?: string;
-}
-
-async function verifyEmail(token: string): Promise<void> {
-  await api.get(`/auth/verify-email?token=${encodeURIComponent(token)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -46,7 +42,7 @@ export function VerifyEmailPage() {
     async function doVerify() {
       setVerifyState("loading");
       try {
-        await verifyEmail(token!);
+        await authService.verifyEmail(token!);
         if (!cancelled) setVerifyState("success");
       } catch (err) {
         if (cancelled) return;

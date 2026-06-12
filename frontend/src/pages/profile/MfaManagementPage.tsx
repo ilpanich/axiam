@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Shield, Trash2, Loader2, AlertCircle, Copy, Check, KeyRound, Fingerprint } from "lucide-react";
 import api from "@/lib/api";
+import { authService } from "@/services/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -40,14 +41,6 @@ async function deleteMfaMethod(id: string): Promise<void> {
   await api.delete(`/api/v1/users/me/mfa-methods/${id}`);
 }
 
-async function setupTotp(): Promise<TotpSetupResponse> {
-  const res = await api.post<TotpSetupResponse>("/auth/mfa/setup");
-  return res.data;
-}
-
-async function confirmTotp(code: string): Promise<void> {
-  await api.post("/auth/mfa/confirm", { code });
-}
 
 // ---------------------------------------------------------------------------
 // Method type badge
@@ -267,7 +260,7 @@ export function MfaManagementPage() {
   });
 
   const setupMutation = useMutation({
-    mutationFn: setupTotp,
+    mutationFn: authService.enrollMfa,
     onSuccess: (data) => {
       setTotpSetupData(data);
       setTotpConfirmError(null);
@@ -276,7 +269,7 @@ export function MfaManagementPage() {
   });
 
   const confirmMutation = useMutation({
-    mutationFn: confirmTotp,
+    mutationFn: authService.confirmMfa,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mfaMethods"] });
       setTotpDialogOpen(false);

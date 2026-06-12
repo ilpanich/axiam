@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { User, Lock, Shield, CheckCircle2, AlertCircle, Pencil, X, Loader2 } from "lucide-react";
 import api from "@/lib/api";
+import { authService } from "@/services/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,10 +47,6 @@ async function getCurrentUser(): Promise<UserProfile> {
 async function updateProfile(data: UpdateProfilePayload): Promise<UserProfile> {
   const res = await api.put<UserProfile>("/api/v1/users/me", data);
   return res.data;
-}
-
-async function resendVerification(): Promise<void> {
-  await api.post("/auth/resend-verification");
 }
 
 async function getMfaMethods(): Promise<MfaMethod[]> {
@@ -106,7 +103,7 @@ export function ProfilePage() {
   });
 
   const resendMutation = useMutation({
-    mutationFn: resendVerification,
+    mutationFn: authService.resendVerification,
     onSuccess: () => {
       setVerificationMessage("Verification email sent. Please check your inbox.");
     },

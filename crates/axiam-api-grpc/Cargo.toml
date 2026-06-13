@@ -11,7 +11,7 @@ rust-version.workspace = true
 axiam-core = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-auth = { workspace = true }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["tls-ring"] }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }

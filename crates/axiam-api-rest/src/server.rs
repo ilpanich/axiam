@@ -22,10 +22,16 @@ use crate::openapi::api_doc;
 /// Each call creates an independent in-memory store — never share configs
 /// between endpoints with different limits (that would merge their counters).
 fn build_governor(requests_per_min: u32) -> Governor<XForwardedForKeyExtractor, NoOpMiddleware> {
+    // SEC-048: trusted_hops=0 default; override via AXIAM__RATE_LIMIT__TRUSTED_HOPS
+    // when running behind a single ingress/nginx layer (set to 1).
+    let trusted_hops: usize = std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let config = GovernorConfigBuilder::default()
         .requests_per_minute(requests_per_min as u64)
         .burst_size(requests_per_min)
-        .key_extractor(XForwardedForKeyExtractor)
+        .key_extractor(XForwardedForKeyExtractor::with_trusted_hops(trusted_hops))
         .finish()
         .expect("valid governor config");
     Governor::new(&config)
@@ -67,25 +73,31 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
             .route("/me", web::get().to(handlers::auth::me::<C>))
-            .route(
-                "/mfa/enroll",
-                web::post().to(handlers::auth::enroll_mfa::<C>),
+            // SEC-020: MFA endpoints rate-limited to prevent brute-force/enumeration.
+            .service(
+                web::resource("/mfa/enroll")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::enroll_mfa::<C>)),
             )
-            .route(
-                "/mfa/confirm",
-                web::post().to(handlers::auth::confirm_mfa::<C>),
+            .service(
+                web::resource("/mfa/confirm")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::confirm_mfa::<C>)),
             )
-            .route(
-                "/mfa/verify",
-                web::post().to(handlers::auth::verify_mfa::<C>),
+            .service(
+                web::resource("/mfa/verify")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::verify_mfa::<C>)),
             )
-            .route(
-                "/mfa/setup/enroll",
-                web::post().to(handlers::auth::setup_enroll_mfa::<C>),
+            .service(
+                web::resource("/mfa/setup/enroll")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::setup_enroll_mfa::<C>)),
             )
-            .route(
-                "/mfa/setup/confirm",
-                web::post().to(handlers::auth::setup_confirm_mfa::<C>),
+            .service(
+                web::resource("/mfa/setup/confirm")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::setup_confirm_mfa::<C>)),
             )
             .route("/device", web::post().to(handlers::auth::device_auth::<C>))
             .route(
@@ -186,10 +198,17 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
                     .wrap(build_governor(rate_limit_cfg.token_per_min))
                     .route(web::post().to(handlers::oauth2::token::<C>)),
             )
-            .route("/revoke", web::post().to(handlers::oauth2::revoke::<C>))
-            .route(
-                "/introspect",
-                web::post().to(handlers::oauth2::introspect::<C>),
+            // SEC-020: revoke and introspect rate-limited to prevent DoS via token flooding
+            // and token probing attacks.
+            .service(
+                web::resource("/revoke")
+                    .wrap(build_governor(rate_limit_cfg.revoke_per_min))
+                    .route(web::post().to(handlers::oauth2::revoke::<C>)),
+            )
+            .service(
+                web::resource("/introspect")
+                    .wrap(build_governor(rate_limit_cfg.introspect_per_min))
+                    .route(web::post().to(handlers::oauth2::introspect::<C>)),
             )
             .route("/jwks", web::get().to(handlers::oauth2::jwks))
             .route("/userinfo", web::get().to(handlers::oauth2::userinfo::<C>)),

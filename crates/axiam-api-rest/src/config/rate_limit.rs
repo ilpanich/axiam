@@ -15,6 +15,15 @@ pub struct RateLimitConfig {
     pub token_per_min: u32,
     /// Max password-reset requests per minute per IP (default: 3).
     pub password_reset_per_min: u32,
+    /// Max MFA requests per minute per IP (default: 5).
+    /// Covers /auth/mfa/enroll, /confirm, /verify, /setup/enroll, /setup/confirm (SEC-020).
+    pub mfa_per_min: u32,
+    /// Max oauth2/introspect requests per minute per IP (default: 10).
+    /// SEC-020: introspect endpoint rate-limited to prevent token probing.
+    pub introspect_per_min: u32,
+    /// Max oauth2/revoke requests per minute per IP (default: 10).
+    /// SEC-020: revoke endpoint rate-limited to prevent DoS via token flooding.
+    pub revoke_per_min: u32,
 }
 
 impl Default for RateLimitConfig {
@@ -24,6 +33,9 @@ impl Default for RateLimitConfig {
             register_per_min: 5,
             token_per_min: 20,
             password_reset_per_min: 3,
+            mfa_per_min: 5,
+            introspect_per_min: 10,
+            revoke_per_min: 10,
         }
     }
 }
@@ -38,5 +50,11 @@ impl RateLimitConfig {
             self.password_reset_per_min >= 1,
             "password_reset_per_min must be >= 1"
         );
+        assert!(self.mfa_per_min >= 1, "mfa_per_min must be >= 1");
+        assert!(
+            self.introspect_per_min >= 1,
+            "introspect_per_min must be >= 1"
+        );
+        assert!(self.revoke_per_min >= 1, "revoke_per_min must be >= 1");
     }
 }

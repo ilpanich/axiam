@@ -1,4 +1,20 @@
-//! Rate-limit key extractor using X-Forwarded-For header (per D-02).
+//! Rate-limit key extractor using X-Forwarded-For header (per D-02, SEC-048).
+//!
+//! SEC-048: The extractor selects the *rightmost untrusted* hop from the
+//! X-Forwarded-For header to prevent IP-spoofing based rate-limit evasion.
+//! The `trusted_hops` value should equal the number of trusted reverse-proxy
+//! hops (e.g. 1 for a single nginx/ingress in front of the server).
+//!
+//! Example:
+//!   X-Forwarded-For: <attacker-ip>, <real-client-ip>, <trusted-proxy-ip>
+//!   trusted_hops = 1 → selects <real-client-ip> (skip 1 from right)
+//!
+//! Falls back to the direct peer address when the header is absent, unparseable,
+//! or has fewer hops than `trusted_hops`.
+//!
+//! **nginx/ingress requirement**: The upstream proxy MUST append the real client
+//! IP to X-Forwarded-For (not inject it at position 0) for this to be effective.
+//! With `proxy_add_x_forwarded_for` in nginx this is the default behaviour.
 
 use actix_governor::governor::NotUntil;
 use actix_governor::governor::clock::{Clock, DefaultClock, QuantaInstant};
@@ -10,10 +26,32 @@ use std::net::IpAddr;
 
 /// Extracts client IP from X-Forwarded-For header, falls back to peer address.
 ///
-/// Per D-02: use the leftmost non-private IP in X-Forwarded-For, falling back
-/// to the direct peer address when the header is absent or unparseable.
+/// `trusted_hops` controls how many rightmost entries in the XFF header to skip
+/// (they come from trusted proxies). A value of 0 uses the leftmost entry
+/// (original behaviour); 1 skips 1 trusted hop from the right.
 #[derive(Debug, Clone)]
-pub struct XForwardedForKeyExtractor;
+pub struct XForwardedForKeyExtractor {
+    /// Number of trusted reverse-proxy hops to skip from the right of
+    /// the X-Forwarded-For list. Set to the number of load-balancers/
+    /// ingress proxies between the client and this server.
+    ///
+    /// Default: 0 (use leftmost; compatible with previous behaviour).
+    pub trusted_hops: usize,
+}
+
+impl Default for XForwardedForKeyExtractor {
+    fn default() -> Self {
+        Self { trusted_hops: 0 }
+    }
+}
+
+impl XForwardedForKeyExtractor {
+    /// Create an extractor that uses the rightmost-untrusted hop.
+    /// `trusted_hops` = number of trusted proxy entries from the right.
+    pub fn with_trusted_hops(trusted_hops: usize) -> Self {
+        Self { trusted_hops }
+    }
+}
 
 impl KeyExtractor for XForwardedForKeyExtractor {
     type Key = IpAddr;
@@ -22,10 +60,20 @@ impl KeyExtractor for XForwardedForKeyExtractor {
     fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
         if let Some(forwarded_for) = req.headers().get("X-Forwarded-For")
             && let Ok(val) = forwarded_for.to_str()
-            && let Some(first) = val.split(',').next()
-            && let Ok(ip) = first.trim().parse::<IpAddr>()
         {
-            return Ok(ip);
+            let hops: Vec<&str> = val.split(',').map(str::trim).collect();
+            // Select the rightmost-untrusted hop.
+            // hops = [client, proxy1, ..., trusted_proxy]
+            // trusted_hops=1 → index = len - 1 - 1 = len - 2
+            let idx = if self.trusted_hops < hops.len() {
+                hops.len() - 1 - self.trusted_hops
+            } else {
+                // Fewer hops than expected: fall through to peer address.
+                0
+            };
+            if let Ok(ip) = hops[idx].parse::<IpAddr>() {
+                return Ok(ip);
+            }
         }
         req.peer_addr()
             .map(|addr| addr.ip())

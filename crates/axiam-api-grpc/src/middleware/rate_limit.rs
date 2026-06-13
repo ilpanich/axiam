@@ -34,10 +34,13 @@ pub type GrpcGovernorLayer =
 pub fn build_grpc_governor_layer(authz_per_sec: u32) -> GrpcGovernorLayer {
     assert!(authz_per_sec >= 1, "grpc_authz_per_sec must be >= 1");
 
+    // CQ-B44: was `.per_second(1).burst_size(authz_per_sec)` — the hardcoded
+    // `per_second(1)` meant the rate was 1 req/s regardless of `authz_per_sec`.
+    // Fixed: replenish `authz_per_sec` tokens per second with 2× burst.
     let config = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(1)
-            .burst_size(authz_per_sec)
+            .per_second(authz_per_sec as u64)
+            .burst_size(authz_per_sec * 2)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
             .expect("valid GovernorConfig for gRPC rate limiter"),

@@ -1,4 +1,5 @@
 import { createBrowserRouter, Navigate } from "react-router-dom";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { LoginPage } from "@/pages/LoginPage";
 import { BootstrapPage } from "@/pages/BootstrapPage";
@@ -69,34 +70,44 @@ export const router = createBrowserRouter([
         handle: { crumb: "Dashboard" },
       },
       {
-        path: "organizations",
-        element: <OrganizationsPage />,
-        handle: { crumb: "Organizations" },
+        element: <ProtectedRoute permission="organizations:list" />,
+        children: [
+          {
+            path: "organizations",
+            element: <OrganizationsPage />,
+            handle: { crumb: "Organizations" },
+          },
+          {
+            path: "organizations/:orgId",
+            element: <OrganizationDetailPage />,
+            handle: { crumb: "Organization Details" },
+          },
+          {
+            path: "organizations/:orgId/tenants/:tenantId",
+            element: <TenantDetailPage />,
+            handle: { crumb: "Tenant Details" },
+          },
+          {
+            path: "tenants",
+            element: <TenantsPage />,
+            handle: { crumb: "Tenants" },
+          },
+        ],
       },
       {
-        path: "organizations/:orgId",
-        element: <OrganizationDetailPage />,
-        handle: { crumb: "Organization Details" },
-      },
-      {
-        path: "organizations/:orgId/tenants/:tenantId",
-        element: <TenantDetailPage />,
-        handle: { crumb: "Tenant Details" },
-      },
-      {
-        path: "tenants",
-        element: <TenantsPage />,
-        handle: { crumb: "Tenants" },
-      },
-      {
-        path: "users",
-        element: <UsersPage />,
-        handle: { crumb: "Users" },
-      },
-      {
-        path: "users/:userId",
-        element: <UserDetailPage />,
-        handle: { crumb: "User Details" },
+        element: <ProtectedRoute permission="users:list" />,
+        children: [
+          {
+            path: "users",
+            element: <UsersPage />,
+            handle: { crumb: "Users" },
+          },
+          {
+            path: "users/:userId",
+            element: <UserDetailPage />,
+            handle: { crumb: "User Details" },
+          },
+        ],
       },
       {
         path: "groups",
@@ -149,9 +160,14 @@ export const router = createBrowserRouter([
         handle: { crumb: "OAuth2 Clients" },
       },
       {
-        path: "audit-logs",
-        element: <AuditLogsPage />,
-        handle: { crumb: "Audit Logs" },
+        element: <ProtectedRoute permission="audit_logs:list" />,
+        children: [
+          {
+            path: "audit-logs",
+            element: <AuditLogsPage />,
+            handle: { crumb: "Audit Logs" },
+          },
+        ],
       },
       {
         path: "notification-rules",

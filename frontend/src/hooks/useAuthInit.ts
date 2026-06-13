@@ -16,6 +16,7 @@ import api from "@/lib/api";
 export function useAuthInit() {
   const setUser = useAuthStore((s) => s.setUser);
   const clearAuth = useAuthStore((s) => s.clearAuth);
+  const setTenantContext = useAuthStore((s) => s.setTenantContext);
   const setInitializing = useAuthStore((s) => s.setInitializing);
 
   useEffect(() => {
@@ -39,6 +40,12 @@ export function useAuthInit() {
 
       if (user) {
         setUser(user);
+        // CQ-F29: Restore tenantSlug/orgSlug from /auth/me response so the
+        // tenant context survives a hard reload. Slugs come from the backend,
+        // not fabricated client-side (ASVS V4 / T-11-05-CTX).
+        if (user.tenantSlug && user.orgSlug) {
+          setTenantContext(user.tenantSlug, user.orgSlug);
+        }
       } else {
         clearAuth();
       }
@@ -48,5 +55,5 @@ export function useAuthInit() {
     return () => {
       cancelled = true;
     };
-  }, [setUser, clearAuth, setInitializing]);
+  }, [setUser, clearAuth, setTenantContext, setInitializing]);
 }

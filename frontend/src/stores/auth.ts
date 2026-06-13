@@ -5,6 +5,9 @@ export interface AuthUser {
   username: string;
   email: string;
   permissions: string[];
+  /** Restored from /auth/me for slug-based tenant context (CQ-F29). */
+  tenantSlug?: string;
+  orgSlug?: string;
 }
 
 interface AuthState {

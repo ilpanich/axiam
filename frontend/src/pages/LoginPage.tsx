@@ -101,6 +101,16 @@ export function LoginPage() {
         return;
       }
 
+      // CQ-F31: MFA setup required — navigate to setup flow with setup_token.
+      // This happens when the user's account requires MFA but they haven't
+      // enrolled yet (mfa_setup_required returned from backend).
+      if (data.mfa_setup_required) {
+        navigate("/profile/mfa", {
+          state: { setup_token: data.setup_token },
+        });
+        return;
+      }
+
       if (data.user) {
         // Re-fetch via /auth/me so the store is populated with the
         // permissions array — login response does not include it.

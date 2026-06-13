@@ -51,3 +51,15 @@ export function formatDateTime(iso: string): string {
     timeStyle: "short",
   }).format(new Date(iso));
 }
+
+/**
+ * Converts a string to a URL/slug-safe format.
+ * E.g. "My Organization" -> "my-organization"
+ */
+export function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}

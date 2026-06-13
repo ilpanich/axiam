@@ -267,7 +267,7 @@ function GenerateFields({
 export function PgpKeysPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const { user } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
   const currentUserId = user?.id ?? "";
 
   const { data: pgpKeys = [], isLoading } = useQuery({

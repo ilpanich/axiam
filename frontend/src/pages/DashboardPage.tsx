@@ -174,7 +174,9 @@ function QuickAction({ icon, label, to, iconColor }: QuickActionProps) {
 // ─── Dashboard page ───────────────────────────────────────────────────────────
 
 export function DashboardPage() {
-  const { user, tenantSlug, orgSlug } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
+  const tenantSlug = useAuthStore((s) => s.tenantSlug);
+  const orgSlug = useAuthStore((s) => s.orgSlug);
 
   // CQ-F10: query keys align with CRUD page invalidations so dashboard counts
   // refresh after create/update/delete on the respective list pages.

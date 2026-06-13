@@ -14,9 +14,12 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { Loader2, Plus, Trash2, Unlink } from "lucide-react";
 import { formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
+import { roleService, type Role } from "@/services/roles";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ─── Section card ─────────────────────────────────────────────────────────────
 
@@ -106,6 +109,7 @@ function EditGroupForm({
 export function GroupDetailPage() {
   const { groupId } = useParams<{ groupId: string }>();
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   // ─── Group query ──────────────────────────────────────────────────────────────
   const {
@@ -196,6 +200,26 @@ export function GroupDetailPage() {
   function handleMemberAdded() {
     void queryClient.invalidateQueries({ queryKey: ["group-members", groupId] });
   }
+
+  // ─── Group roles (CQ-F18) ─────────────────────────────────────────────────────
+  const { data: groupRoles = [], isLoading: rolesLoading } = useQuery({
+    queryKey: ["group-roles", groupId],
+    queryFn: () => roleService.listByGroup(groupId!),
+    enabled: !!groupId,
+  });
+
+  const [unassignRole, setUnassignRole] = useState<Role | null>(null);
+
+  const unassignRoleMutation = useMutation({
+    mutationFn: (rId: string) => roleService.unassignFromGroup(rId, groupId!),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["group-roles", groupId] });
+      setUnassignRole(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
+    },
+  });
 
   // ─── Members table columns ────────────────────────────────────────────────────
   const memberColumns: Column<User>[] = [
@@ -291,6 +315,39 @@ export function GroupDetailPage() {
         />
       </SectionCard>
 
+      {/* ── Section 3: Roles ── */}
+      <SectionCard title="Assigned Roles">
+        {rolesLoading ? (
+          <div className="flex items-center justify-center py-6">
+            <Loader2 size={20} className="animate-spin text-primary/60" />
+          </div>
+        ) : groupRoles.length === 0 ? (
+          <p className="text-sm text-muted-foreground text-center py-4">
+            No roles assigned to this group.
+          </p>
+        ) : (
+          <ul className="divide-y divide-white/5">
+            {groupRoles.map((role) => (
+              <li key={role.id} className="flex items-center justify-between py-2.5 px-1">
+                <div>
+                  <p className="text-sm font-medium text-foreground/90">{role.name}</p>
+                  {role.description && (
+                    <p className="text-xs text-muted-foreground">{role.description}</p>
+                  )}
+                </div>
+                <button
+                  aria-label={`Unassign role ${role.name}`}
+                  onClick={() => setUnassignRole(role)}
+                  className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                >
+                  <Unlink size={14} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </SectionCard>
+
       {/* Edit dialog */}
       <FormDialog
         open={editOpen}
@@ -333,6 +390,16 @@ export function GroupDetailPage() {
           await groupService.addMember(groupId!, user.id);
           handleMemberAdded();
         }}
+      />
+
+      {/* Unassign role confirm */}
+      <ConfirmDialog
+        open={unassignRole !== null}
+        onClose={() => setUnassignRole(null)}
+        onConfirm={() => unassignRole && unassignRoleMutation.mutate(unassignRole.id)}
+        title="Unassign Role"
+        description={`Remove role "${unassignRole?.name}" from this group?`}
+        isLoading={unassignRoleMutation.isPending}
       />
     </div>
   );

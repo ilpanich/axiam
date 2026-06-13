@@ -22,12 +22,8 @@ interface UserProfile {
   email_verified: boolean;
 }
 
-interface MfaMethod {
-  id: string;
-  method_type: string;
-  name: string;
-  created_at: string;
-}
+// CQ-F17: use canonical MfaMethod type from services/users.ts
+import type { MfaMethod } from "@/services/users";
 
 interface UpdateProfilePayload {
   display_name?: string;

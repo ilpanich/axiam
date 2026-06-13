@@ -15,12 +15,9 @@ import type { AxiosError } from "axios";
 // Types & API helpers
 // ---------------------------------------------------------------------------
 
-export interface MfaMethod {
-  id: string;
-  method_type: string;
-  name: string;
-  created_at: string;
-}
+// CQ-F17: use canonical MfaMethod type from services/users.ts
+import type { MfaMethod } from "@/services/users";
+export type { MfaMethod };
 
 interface TotpSetupResponse {
   secret: string;

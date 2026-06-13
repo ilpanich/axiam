@@ -9,7 +9,9 @@ import {
   permissionService,
   type Permission,
 } from "@/services/permissions";
-import { groupService, type Group } from "@/services/users";
+import { groupService, type Group, type User } from "@/services/users";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -424,6 +426,7 @@ type AssignmentTab = "users" | "groups";
 export function RoleDetailPage() {
   const { roleId } = useParams<{ roleId: string }>();
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   // ─── Role query ────────────────────────────────────────────────────────────
   const {
@@ -523,6 +526,44 @@ export function RoleDetailPage() {
   const [assignmentTab, setAssignmentTab] = useState<AssignmentTab>("users");
   const [assignUserOpen, setAssignUserOpen] = useState(false);
   const [assignGroupOpen, setAssignGroupOpen] = useState(false);
+
+  // ─── Assigned users/groups ─────────────────────────────────────────────────
+  const { data: assignedUsers = [], isLoading: usersLoading } = useQuery({
+    queryKey: ["role-users", roleId],
+    queryFn: () => roleService.listUsers(roleId!),
+    enabled: !!roleId,
+  });
+
+  const { data: assignedGroups = [], isLoading: groupsLoading } = useQuery({
+    queryKey: ["role-groups", roleId],
+    queryFn: () => roleService.listGroups(roleId!),
+    enabled: !!roleId,
+  });
+
+  const [unassignUser, setUnassignUser] = useState<User | null>(null);
+  const [unassignGroup, setUnassignGroup] = useState<Group | null>(null);
+
+  const unassignUserMutation = useMutation({
+    mutationFn: (userId: string) => roleService.unassignFromUser(roleId!, userId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["role-users", roleId] });
+      setUnassignUser(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
+    },
+  });
+
+  const unassignGroupMutation = useMutation({
+    mutationFn: (gId: string) => roleService.unassignFromGroup(roleId!, gId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["role-groups", roleId] });
+      setUnassignGroup(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
+    },
+  });
 
   // ─── Permissions table columns ─────────────────────────────────────────────
   const permissionColumns: Column<Permission>[] = [
@@ -677,25 +718,60 @@ export function RoleDetailPage() {
         </div>
 
         {assignmentTab === "users" && (
-          <div className="py-4 text-sm text-muted-foreground text-center">
-            <p>
-              Use "Assign User" to grant this role to a user directly.
-            </p>
-            <p className="mt-1 text-xs opacity-60">
-              Assigned users are visible on each user's detail page.
-            </p>
-          </div>
+          usersLoading ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader2 size={20} className="animate-spin text-primary/60" />
+            </div>
+          ) : assignedUsers.length === 0 ? (
+            <div className="py-4 text-sm text-muted-foreground text-center">
+              <p>No users assigned. Use "Assign User" to grant this role.</p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-white/5">
+              {assignedUsers.map((u) => (
+                <li key={u.id} className="flex items-center justify-between py-2.5 px-1">
+                  <div>
+                    <p className="text-sm font-medium text-foreground/90">{u.display_name ?? u.username}</p>
+                    <p className="text-xs text-muted-foreground">{u.email}</p>
+                  </div>
+                  <button
+                    aria-label={`Unassign ${u.username}`}
+                    onClick={() => setUnassignUser(u)}
+                    className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <Unlink size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
         )}
 
         {assignmentTab === "groups" && (
-          <div className="py-4 text-sm text-muted-foreground text-center">
-            <p>
-              Use "Assign Group" to grant this role to all members of a group.
-            </p>
-            <p className="mt-1 text-xs opacity-60">
-              Assigned groups are visible on each group's detail page.
-            </p>
-          </div>
+          groupsLoading ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader2 size={20} className="animate-spin text-primary/60" />
+            </div>
+          ) : assignedGroups.length === 0 ? (
+            <div className="py-4 text-sm text-muted-foreground text-center">
+              <p>No groups assigned. Use "Assign Group" to grant this role.</p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-white/5">
+              {assignedGroups.map((g) => (
+                <li key={g.id} className="flex items-center justify-between py-2.5 px-1">
+                  <p className="text-sm font-medium text-foreground/90">{g.name}</p>
+                  <button
+                    aria-label={`Unassign group ${g.name}`}
+                    onClick={() => setUnassignGroup(g)}
+                    className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <Unlink size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
         )}
       </SectionCard>
 
@@ -748,7 +824,7 @@ export function RoleDetailPage() {
         actionLabel="Assign"
         onAction={async (user) => {
           await roleService.assignToUser(roleId!, user.id);
-          void queryClient.invalidateQueries({ queryKey: ["role", roleId] });
+          void queryClient.invalidateQueries({ queryKey: ["role-users", roleId] });
         }}
       />
 
@@ -758,8 +834,29 @@ export function RoleDetailPage() {
         onClose={() => setAssignGroupOpen(false)}
         roleId={roleId!}
         onAssigned={() => {
+          void queryClient.invalidateQueries({ queryKey: ["role-groups", roleId] });
           setAssignGroupOpen(false);
         }}
+      />
+
+      {/* Unassign user confirm */}
+      <ConfirmDialog
+        open={unassignUser !== null}
+        onClose={() => setUnassignUser(null)}
+        onConfirm={() => unassignUser && unassignUserMutation.mutate(unassignUser.id)}
+        title="Unassign User"
+        description={`Remove this role from "${unassignUser?.display_name ?? unassignUser?.username}"?`}
+        isLoading={unassignUserMutation.isPending}
+      />
+
+      {/* Unassign group confirm */}
+      <ConfirmDialog
+        open={unassignGroup !== null}
+        onClose={() => setUnassignGroup(null)}
+        onConfirm={() => unassignGroup && unassignGroupMutation.mutate(unassignGroup.id)}
+        title="Unassign Group"
+        description={`Remove this role from group "${unassignGroup?.name}"?`}
+        isLoading={unassignGroupMutation.isPending}
       />
     </div>
   );

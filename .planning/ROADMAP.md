@@ -20,7 +20,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 - [x] **Phase 8: Build Unblock (Wave 0)** - Make `axiam-server` compile and pass CI `-D warnings` (completed 2026-06-10)
 - [x] **Phase 9: Critical Remediation (Wave 1)** - Close cross-tenant IDOR, gRPC auth, frontend auth flows, silent refresh, federation secret encryption (completed 2026-06-12)
 - [x] **Phase 10: High Remediation (Wave 2)** - Hashing/pepper, async-safe crypto, tenant isolation, GDPR/SAML/TOTP correctness, frontend High items (completed 2026-06-13)
-- [ ] **Phase 11: Medium Remediation (Wave 3)** - Repo/DTO consolidation, transport limits, auth/infra hardening, frontend Medium items
+- [x] **Phase 11: Medium Remediation (Wave 3)** - Repo/DTO consolidation, transport limits, auth/infra hardening, frontend Medium items (completed 2026-06-13)
 - [ ] **Phase 12: Low / Trivial Remediation (Wave 4)** - Cleanup, dead-code, dep pruning, i18n, security polish + whole-effort verification
 
 > Audit-remediation tranche (Phases 8–12) added 2026-06-10 from `claude_dev/remediation-plan.md`; sequential with a green-build gate between waves.
@@ -425,7 +425,7 @@ Plans:
 
 **Wave 3** *(after 11-02 — shares server.rs)*
 
-- [ ] 11-03-PLAN.md — Dummy-Argon2, atomic failed-login, reset-to-current block, CSRF on /api/v1, permission map + register gating, transactional bootstrap, self-update strip, logout ownership (SEC-026/028/032/046/047/049/050/051, CQ-B12)
+- [x] 11-03-PLAN.md — Dummy-Argon2, atomic failed-login, reset-to-current block, CSRF on /api/v1, permission map + register gating, transactional bootstrap, self-update strip, logout ownership (SEC-026/028/032/046/047/049/050/051, CQ-B12)
 
 > Deferred to Phase 12 (surfaced during planning, developer-confirmed): CQ-B13 (AuthZ N+1 batching), CQ-B16 (org/tenant delete cascade), CQ-B23 OIDC discovery-cache portion (JWKS body cap done here), CQ-B24 broad pki/grpc test backfill (mtls_chain done here), CQ-F19 (verify-email StrictMode single-fire — folds into Phase 9 SEC-044). CQ-B43 AppState refactor deferred to Phase 12 per research.
 
@@ -479,7 +479,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
 | 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
 | 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
-| 11. Medium Remediation (Wave 3) | 4/5 | In Progress|  |
+| 11. Medium Remediation (Wave 3) | 5/5 | Complete   | 2026-06-13 |
 | 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |
 
 ---

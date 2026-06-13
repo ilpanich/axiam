@@ -89,6 +89,7 @@ See `.planning/REQUIREMENTS.md` for detailed REQ-IDs.
 AXIAM has completed 16 development phases with a working backend and frontend. However, several security-critical features were deferred to Phase 19 during development to keep phases focused. Before releasing to beta users, all deferred security items must be resolved. The existing Phase 18 (Hardening & Compliance) and Phase 19 (Deferred Improvements) from the original roadmap are being consolidated into this focused hardening milestone.
 
 **Current state:**
+- Audit-remediation phases 8–10 complete. Phase 10 (REQ-14, High severity) landed: single Argon2id password-hashing path with pepper, async-safe crypto (spawn_blocking + bounding semaphore), tenant-isolated transactional role/permission edges + resource-hierarchy integrity, sparse tenant settings, idempotent/transactional migrations, AMQP DLQ parity, GDPR purge re-selectability + complete/paginated export, pagination clamp, generic 5xx bodies, TOTP replay rejection, SAML protocol checks, PKI fail-fast (no zero-key fallback), and 8 frontend High items + a frontend lint/tsc CI gate. 3 live/CI-only items (SAML-ON, AMQP DLQ routing, GDPR export completeness) tracked in 10-HUMAN-UAT.md.
 - 13 Rust workspace crates, ~139 tests (heavy REST integration bias)
 - React 19 + Vite + Tailwind frontend with ~20 admin pages
 - Zero tests for: axiam-pki, axiam-authz, axiam-federation, axiam-api-grpc
@@ -135,4 +136,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-07 after Phase 7 completion — final milestone phase; compliance verification and test closure complete (2 human-UAT items tracked in 07-HUMAN-UAT.md).*
+*Last updated: 2026-06-13 after Phase 10 completion — REQ-14 high-severity remediation (6/6 plans, verified in code); 3 live-verification items tracked in 10-HUMAN-UAT.md.*

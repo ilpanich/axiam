@@ -50,6 +50,9 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     // as /login). Without these, a forgotten-password reset is CSRF-blocked (403).
     "/api/v1/auth/reset",
     "/api/v1/auth/reset/confirm",
+    // Bootstrap is a one-time endpoint called before any session exists.
+    // It is protected by the AXIAM_BOOTSTRAP_ADMIN_EMAIL env gate instead (D-10).
+    "/api/v1/admin/bootstrap",
 ];
 
 /// Path prefixes that are exempt from CSRF validation (OAuth2).

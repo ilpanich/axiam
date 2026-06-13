@@ -264,17 +264,44 @@ pub async fn update<C: Connection>(
     body: web::Json<UpdateUserRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let target_id = path.into_inner();
-    if !is_own_resource(&user, target_id) {
+    let self_update = is_own_resource(&user, target_id);
+    if !self_update {
         RequirePermission::new("users:update", Uuid::nil())
             .check(&user, authz.get_ref().as_ref())
             .await?;
     }
     let req = body.into_inner();
+
+    // SEC-050: Self-update guards:
+    // 1. Strip `status` — a user cannot change their own account status.
+    // 2. Gate email change — if the new email differs from the stored one,
+    //    mark the address unverified so it cannot be used until re-verified.
+    let effective_status = if self_update { None } else { req.status };
+
+    // Load the current email to detect email changes on self-update.
+    let email_changed_for_self = if self_update {
+        if let Some(ref new_email) = req.email {
+            let current = repo.get_by_id(user.tenant_id, target_id).await?;
+            new_email != &current.email
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     let input = UpdateUser {
         username: req.username,
         email: req.email,
-        status: req.status,
+        status: effective_status,
         metadata: req.metadata,
+        // SEC-050: on email change by self, clear email_verified_at so the
+        // new address must be re-verified before it is considered valid.
+        email_verified_at: if email_changed_for_self {
+            Some(None) // explicitly set to None (requires the Option<Option<T>> pattern)
+        } else {
+            None // no change
+        },
         ..Default::default()
     };
     let updated = repo.update(user.tenant_id, target_id, input).await?;

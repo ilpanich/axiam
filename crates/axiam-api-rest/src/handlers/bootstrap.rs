@@ -4,8 +4,8 @@
 //! After the first admin is created, this endpoint returns 404 (per D-09).
 
 use actix_web::{HttpResponse, web};
+use axiam_auth::password;
 use axiam_core::error::AxiamError;
-use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     OrganizationRepository, Pagination, RoleRepository, TenantRepository, UserRepository,
 };
@@ -149,30 +149,60 @@ pub async fn bootstrap<C: Connection>(
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
-    // 6. Create the admin user (password is hashed by the repository).
-    let user = user_repo
-        .create(CreateUser {
-            tenant_id: req.tenant_id,
-            username: req.username,
-            email: req.email,
-            password: req.password,
-            metadata: None,
-        })
-        .await?;
+    // 6+7. SEC-049: create admin user and assign super-admin role atomically.
+    //
+    // Using a single BEGIN/COMMIT transaction so that no partial state
+    // (user created but role not assigned) can result from a mid-flight error.
+    // Password hashing is Argon2id and must happen before the transaction.
+    //
+    // SurrealDB v3 quirk: BEGIN TRANSACTION occupies result slot 0;
+    // the first statement result is at .take(1). (See MEMORY.md)
+    let user_id = Uuid::new_v4();
+    let user_id_str = user_id.to_string();
+    let role_id_str = seed_result.super_admin_role_id.to_string();
+    let tenant_id_str = req.tenant_id.to_string();
 
-    // 7. Assign super-admin role to the new user.
-    role_repo
-        .assign_to_user(
-            req.tenant_id,
-            user.id,
-            seed_result.super_admin_role_id,
-            None,
-        )
-        .await?;
+    let password_hash = password::hash_password(&req.password, None)
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+
+    // Build transaction: CREATE user + RELATE user→role in one atomic block.
+    // The RELATE uses backtick record IDs (required when type::record() is not
+    // supported inside RELATE per SurrealDB v3 quirk).
+    let txn_query = format!(
+        "BEGIN TRANSACTION; \
+         CREATE type::record('user', $user_id) SET \
+           tenant_id = $tenant_id, \
+           username = $username, email = $email, \
+           password_hash = $password_hash, \
+           status = 'Active', \
+           mfa_enabled = false, \
+           failed_login_attempts = 0, \
+           last_failed_login_at = NONE, \
+           locked_until = NONE, \
+           email_verified_at = NONE, \
+           metadata = {{}}; \
+         RELATE user:`{user_id_str}` -> has_role -> role:`{role_id_str}` \
+           SET resource_id = NONE; \
+         COMMIT TRANSACTION"
+    );
+
+    let result = db
+        .query(txn_query)
+        .bind(("user_id", user_id_str.clone()))
+        .bind(("tenant_id", tenant_id_str))
+        .bind(("username", req.username))
+        .bind(("email", req.email))
+        .bind(("password_hash", password_hash))
+        .await
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+
+    result
+        .check()
+        .map_err(|e| AxiamApiError(AxiamError::Internal(format!("bootstrap transaction: {e}"))))?;
 
     // 8. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
     Ok(HttpResponse::Created().json(BootstrapResponse {
         message: "Admin user created. Login via /api/v1/auth/login.".into(),
-        user_id: user.id,
+        user_id,
     }))
 }

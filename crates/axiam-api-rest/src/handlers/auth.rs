@@ -366,6 +366,14 @@ pub async fn logout<C: Connection>(
     svc: web::Data<AuthSvc<C>>,
     body: web::Json<LogoutRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    // SEC-051: a caller may only revoke their own session (JWT jti must match).
+    // Rejecting cross-session revocation prevents session fixation attacks where
+    // an authenticated user deletes another user's active session.
+    if body.session_id != user.session_id {
+        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
+            reason: "cannot revoke another user's session".into(),
+        }));
+    }
     svc.logout(user.tenant_id, body.session_id).await?;
     Ok(HttpResponse::NoContent()
         .cookie(clear_access_cookie())

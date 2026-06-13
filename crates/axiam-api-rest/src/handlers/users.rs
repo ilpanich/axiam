@@ -1,6 +1,9 @@
 //! User management endpoints (tenant-scoped via JWT).
 
 use actix_web::{HttpRequest, HttpResponse, web};
+use axiam_auth::policy::check_complexity;
+use axiam_core::error::AxiamError;
+use axiam_core::models::settings::PasswordPolicy;
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
 use axiam_db::SurrealUserRepository;
@@ -12,6 +15,39 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission, is_own_resource};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+
+// -----------------------------------------------------------------------
+// Input validation helpers (CQ-B26)
+// -----------------------------------------------------------------------
+
+/// Validate email format: must contain exactly one '@' with non-empty local
+/// and domain parts, and the domain must contain at least one '.'.
+fn validate_email_format(email: &str) -> Result<(), AxiamError> {
+    let mut parts = email.splitn(2, '@');
+    let local = parts.next().unwrap_or("");
+    let domain = parts.next().unwrap_or("");
+    if local.is_empty() || domain.is_empty() || !domain.contains('.') {
+        return Err(AxiamError::Validation {
+            message: "email must be a valid email address".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Minimum password policy applied at user-create time (CQ-B26).
+///
+/// The tenant's full policy (HIBP, history) is enforced by AuthService
+/// at login.  This guard ensures obviously weak passwords are rejected
+/// at the API boundary without requiring the full policy infrastructure.
+const MINIMUM_PASSWORD_POLICY: PasswordPolicy = PasswordPolicy {
+    min_length: 8,
+    require_uppercase: false,
+    require_lowercase: false,
+    require_digits: false,
+    require_symbols: false,
+    password_history_count: 0,
+    hibp_check_enabled: false,
+};
 
 // -----------------------------------------------------------------------
 // Request / response types
@@ -106,6 +142,20 @@ pub async fn create<C: Connection>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
+
+    // CQ-B26: validate email format and password complexity before insert.
+    validate_email_format(&req.email)?;
+    let pw_violations = check_complexity(&req.password, &MINIMUM_PASSWORD_POLICY);
+    if !pw_violations.is_empty() {
+        let details: Vec<String> = pw_violations
+            .iter()
+            .map(|v| v.to_string())
+            .collect();
+        return Err(AxiamApiError(AxiamError::PasswordPolicy {
+            message: details.join("; "),
+        }));
+    }
+
     let input = CreateUser {
         tenant_id: user.tenant_id,
         username: req.username,

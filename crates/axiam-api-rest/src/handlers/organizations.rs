@@ -4,6 +4,7 @@ use actix_web::{HttpResponse, web};
 use axiam_core::models::organization::{CreateOrganization, Organization, UpdateOrganization};
 use axiam_core::repository::{OrganizationRepository, PaginatedResult, Pagination, RoleRepository};
 use axiam_db::{SurrealOrganizationRepository, SurrealRoleRepository};
+use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -11,12 +12,29 @@ use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
+// -----------------------------------------------------------------------
+// Request types (CQ-B25)
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateOrganizationRequest {
+    pub name: String,
+    pub slug: String,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateOrganizationRequest {
+    pub name: Option<String>,
+    pub slug: Option<String>,
+}
+
 /// `POST /api/v1/organizations`
 #[utoipa::path(
     post,
     path = "/api/v1/organizations",
     tag = "organizations",
-    request_body = CreateOrganization,
+    request_body = CreateOrganizationRequest,
     responses(
         (status = 201, description = "Organization created", body = Organization),
     ),
@@ -27,7 +45,7 @@ pub async fn create<C: Connection>(
     authz: AuthzData,
     repo: web::Data<SurrealOrganizationRepository<C>>,
     role_repo: web::Data<SurrealRoleRepository<C>>,
-    body: web::Json<CreateOrganization>,
+    body: web::Json<CreateOrganizationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("organizations:create", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
@@ -46,7 +64,13 @@ pub async fn create<C: Connection>(
         ));
     }
 
-    let org = repo.create(body.into_inner()).await?;
+    let req = body.into_inner();
+    let input = CreateOrganization {
+        name: req.name,
+        slug: req.slug,
+        metadata: req.metadata,
+    };
+    let org = repo.create(input).await?;
     Ok(HttpResponse::Created().json(org))
 }
 
@@ -131,7 +155,7 @@ pub async fn get<C: Connection>(
     path = "/api/v1/organizations/{org_id}",
     tag = "organizations",
     params(("org_id" = Uuid, Path, description = "Organization ID")),
-    request_body = UpdateOrganization,
+    request_body = UpdateOrganizationRequest,
     responses(
         (status = 200, description = "Organization updated", body = Organization),
         (status = 404, description = "Organization not found"),
@@ -143,7 +167,7 @@ pub async fn update<C: Connection>(
     authz: AuthzData,
     repo: web::Data<SurrealOrganizationRepository<C>>,
     path: web::Path<Uuid>,
-    body: web::Json<UpdateOrganization>,
+    body: web::Json<UpdateOrganizationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("organizations:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
@@ -159,7 +183,13 @@ pub async fn update<C: Connection>(
         ));
     }
 
-    let org = repo.update(org_id, body.into_inner()).await?;
+    let req = body.into_inner();
+    let input = UpdateOrganization {
+        name: req.name,
+        slug: req.slug,
+        metadata: None,
+    };
+    let org = repo.update(org_id, input).await?;
     Ok(HttpResponse::Ok().json(org))
 }
 

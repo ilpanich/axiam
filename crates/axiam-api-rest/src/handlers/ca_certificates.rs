@@ -1,10 +1,13 @@
 //! CA certificate management endpoints.
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::certificate::{CaCertificate, CreateCaCertificate, GeneratedCaCertificate};
+use axiam_core::models::certificate::{
+    CaCertificate, CreateCaCertificate, GeneratedCaCertificate, KeyAlgorithm,
+};
 use axiam_core::repository::{PaginatedResult, Pagination};
 use axiam_db::SurrealCaCertificateRepository;
 use axiam_pki::CaService;
+use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -12,13 +15,25 @@ use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 
+// -----------------------------------------------------------------------
+// Request types (CQ-B25)
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateCaCertificateRequest {
+    pub subject: String,
+    pub key_algorithm: KeyAlgorithm,
+    /// Validity duration in days.
+    pub validity_days: u32,
+}
+
 /// `POST /api/v1/organizations/{org_id}/ca-certificates`
 #[utoipa::path(
     post,
     path = "/api/v1/organizations/{org_id}/ca-certificates",
     tag = "ca-certificates",
     params(("org_id" = Uuid, Path, description = "Organization ID")),
-    request_body = CreateCaCertificate,
+    request_body = CreateCaCertificateRequest,
     responses(
         (status = 201, description = "CA certificate generated",
          body = GeneratedCaCertificate),
@@ -30,7 +45,7 @@ pub async fn generate<C: Connection>(
     authz: AuthzData,
     path: web::Path<Uuid>,
     service: web::Data<CaService<SurrealCaCertificateRepository<C>>>,
-    body: web::Json<CreateCaCertificate>,
+    body: web::Json<CreateCaCertificateRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("ca_certificates:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
@@ -46,8 +61,13 @@ pub async fn generate<C: Connection>(
         ));
     }
 
-    let mut input = body.into_inner();
-    input.organization_id = org_id;
+    let req = body.into_inner();
+    let input = CreateCaCertificate {
+        organization_id: org_id,
+        subject: req.subject,
+        key_algorithm: req.key_algorithm,
+        validity_days: req.validity_days,
+    };
     let result = service.generate(input).await?;
     Ok(HttpResponse::Created().json(result))
 }

@@ -25,6 +25,12 @@ pub struct CreatePermissionRequest {
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdatePermissionRequest {
+    pub action: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct GrantPermissionRequest {
     pub permission_id: Uuid,
     #[serde(default)]
@@ -130,7 +136,7 @@ pub async fn get<C: Connection>(
     path = "/api/v1/permissions/{permission_id}",
     tag = "permissions",
     params(("permission_id" = Uuid, Path, description = "Permission ID")),
-    request_body = UpdatePermission,
+    request_body = UpdatePermissionRequest,
     responses(
         (status = 200, description = "Permission updated", body = Permission),
         (status = 404, description = "Permission not found"),
@@ -142,13 +148,18 @@ pub async fn update<C: Connection>(
     authz: AuthzData,
     repo: web::Data<SurrealPermissionRepository<C>>,
     path: web::Path<Uuid>,
-    body: web::Json<UpdatePermission>,
+    body: web::Json<UpdatePermissionRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("permissions:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    let req = body.into_inner();
+    let input = UpdatePermission {
+        action: req.action,
+        description: req.description,
+    };
     let permission = repo
-        .update(user.tenant_id, path.into_inner(), body.into_inner())
+        .update(user.tenant_id, path.into_inner(), input)
         .await?;
     Ok(HttpResponse::Ok().json(permission))
 }

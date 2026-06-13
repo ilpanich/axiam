@@ -38,6 +38,12 @@ pub struct CreateScopeRequest {
     pub description: String,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateScopeRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
 // -----------------------------------------------------------------------
 // Handlers
 // -----------------------------------------------------------------------
@@ -145,7 +151,7 @@ pub async fn get<C: Connection>(
         ("resource_id" = Uuid, Path, description = "Resource ID"),
         ("scope_id" = Uuid, Path, description = "Scope ID"),
     ),
-    request_body = UpdateScope,
+    request_body = UpdateScopeRequest,
     responses(
         (status = 200, description = "Scope updated", body = Scope),
         (status = 404, description = "Scope not found"),
@@ -157,7 +163,7 @@ pub async fn update<C: Connection>(
     authz: AuthzData,
     repo: web::Data<SurrealScopeRepository<C>>,
     path: web::Path<ScopePath>,
-    body: web::Json<UpdateScope>,
+    body: web::Json<UpdateScopeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
@@ -170,8 +176,13 @@ pub async fn update<C: Connection>(
         }
         .into());
     }
+    let req = body.into_inner();
+    let input = UpdateScope {
+        name: req.name,
+        description: req.description,
+    };
     let scope = repo
-        .update(user.tenant_id, path.scope_id, body.into_inner())
+        .update(user.tenant_id, path.scope_id, input)
         .await?;
     Ok(HttpResponse::Ok().json(scope))
 }

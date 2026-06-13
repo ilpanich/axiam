@@ -2,12 +2,13 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::pgp_key::{
-    CreatePgpKey, EncryptRequest, EncryptedExport, GeneratedPgpKey, PgpKey, SignAuditBatchRequest,
-    SignedAuditBatch,
+    CreatePgpKey, EncryptRequest, EncryptedExport, GeneratedPgpKey, PgpKey, PgpKeyAlgorithm,
+    PgpKeyPurpose, SignAuditBatchRequest, SignedAuditBatch,
 };
 use axiam_core::repository::{AuditLogRepository, PaginatedResult, Pagination};
 use axiam_db::{SurrealAuditLogRepository, SurrealPgpKeyRepository};
 use axiam_pki::PgpService;
+use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -15,12 +16,25 @@ use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 
+// -----------------------------------------------------------------------
+// Request types (CQ-B25)
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreatePgpKeyRequest {
+    pub name: String,
+    pub purpose: PgpKeyPurpose,
+    pub algorithm: PgpKeyAlgorithm,
+    /// Email for the OpenPGP User ID.
+    pub email: String,
+}
+
 /// `POST /api/v1/pgp-keys`
 #[utoipa::path(
     post,
     path = "/api/v1/pgp-keys",
     tag = "pgp-keys",
-    request_body = CreatePgpKey,
+    request_body = CreatePgpKeyRequest,
     responses(
         (status = 201, description = "PGP key generated",
          body = GeneratedPgpKey),
@@ -31,13 +45,19 @@ pub async fn generate<C: Connection>(
     user: AuthenticatedUser,
     authz: AuthzData,
     service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
-    body: web::Json<CreatePgpKey>,
+    body: web::Json<CreatePgpKeyRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("pgp_keys:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let mut input = body.into_inner();
-    input.tenant_id = user.tenant_id;
+    let req = body.into_inner();
+    let input = CreatePgpKey {
+        tenant_id: user.tenant_id,
+        name: req.name,
+        purpose: req.purpose,
+        algorithm: req.algorithm,
+        email: req.email,
+    };
     let result = service.generate(input).await?;
     Ok(HttpResponse::Created().json(result))
 }

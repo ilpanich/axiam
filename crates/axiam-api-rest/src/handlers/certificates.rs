@@ -2,7 +2,8 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::certificate::{
-    BindCertificate, Certificate, CreateCertificate, GeneratedCertificate,
+    BindCertificate, Certificate, CreateCertificate, GeneratedCertificate, KeyAlgorithm,
+    CertificateType,
 };
 use axiam_core::repository::{
     CertificateRepository, PaginatedResult, Pagination, TenantRepository,
@@ -11,6 +12,7 @@ use axiam_db::{
     SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealTenantRepository,
 };
 use axiam_pki::CertService;
+use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -18,12 +20,27 @@ use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 
+// -----------------------------------------------------------------------
+// Request / response types (CQ-B25)
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateCertificateRequest {
+    pub issuer_ca_id: Uuid,
+    pub subject: String,
+    pub cert_type: CertificateType,
+    pub key_algorithm: KeyAlgorithm,
+    /// Validity duration in days.
+    pub validity_days: u32,
+    pub metadata: Option<serde_json::Value>,
+}
+
 /// `POST /api/v1/certificates`
 #[utoipa::path(
     post,
     path = "/api/v1/certificates",
     tag = "certificates",
-    request_body = CreateCertificate,
+    request_body = CreateCertificateRequest,
     responses(
         (status = 201, description = "Certificate generated",
          body = GeneratedCertificate),
@@ -37,13 +54,21 @@ pub async fn generate<C: Connection>(
         CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
     >,
     tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    body: web::Json<CreateCertificate>,
+    body: web::Json<CreateCertificateRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let mut input = body.into_inner();
-    input.tenant_id = user.tenant_id;
+    let req = body.into_inner();
+    let input = CreateCertificate {
+        tenant_id: user.tenant_id,
+        issuer_ca_id: req.issuer_ca_id,
+        subject: req.subject,
+        cert_type: req.cert_type,
+        key_algorithm: req.key_algorithm,
+        validity_days: req.validity_days,
+        metadata: req.metadata,
+    };
 
     // Read tenant-level max_certificate_validity_days from metadata
     let tenant = tenant_repo.get_by_id(user.tenant_id).await?;

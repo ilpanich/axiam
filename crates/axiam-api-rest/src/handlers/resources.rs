@@ -24,6 +24,14 @@ pub struct CreateResourceRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateResourceRequest {
+    pub name: Option<String>,
+    pub resource_type: Option<String>,
+    pub parent_id: Option<Option<Uuid>>,
+    pub metadata: Option<serde_json::Value>,
+}
+
 // -----------------------------------------------------------------------
 // Handlers — CRUD
 // -----------------------------------------------------------------------
@@ -115,7 +123,7 @@ pub async fn get<C: Connection>(
     path = "/api/v1/resources/{resource_id}",
     tag = "resources",
     params(("resource_id" = Uuid, Path, description = "Resource ID")),
-    request_body = UpdateResource,
+    request_body = UpdateResourceRequest,
     responses(
         (status = 200, description = "Resource updated", body = Resource),
         (status = 404, description = "Resource not found"),
@@ -127,13 +135,20 @@ pub async fn update<C: Connection>(
     authz: AuthzData,
     repo: web::Data<SurrealResourceRepository<C>>,
     path: web::Path<Uuid>,
-    body: web::Json<UpdateResource>,
+    body: web::Json<UpdateResourceRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("resources:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    let req = body.into_inner();
+    let input = UpdateResource {
+        name: req.name,
+        resource_type: req.resource_type,
+        parent_id: req.parent_id,
+        metadata: req.metadata,
+    };
     let resource = repo
-        .update(user.tenant_id, path.into_inner(), body.into_inner())
+        .update(user.tenant_id, path.into_inner(), input)
         .await?;
     Ok(HttpResponse::Ok().json(resource))
 }

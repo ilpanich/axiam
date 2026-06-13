@@ -1,12 +1,10 @@
 //! SurrealDB implementation of [`UserRepository`].
 //!
-//! Password hashing uses Argon2id with OWASP-recommended parameters
-//! (memory: 19 MiB, iterations: 2, parallelism: 1). Salt is randomly
-//! generated per hash. An optional pepper (server-side secret) can be
-//! provided at construction time.
+//! Password hashing is delegated entirely to `axiam_auth::password::hash_password`
+//! (Argon2id, OWASP-recommended parameters). An optional pepper (server-side
+//! secret) can be provided at construction time via `with_pepper`.
 
-use argon2::password_hash::SaltString;
-use argon2::{Argon2, PasswordHasher};
+use axiam_auth::password;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
@@ -145,33 +143,6 @@ struct CountRow {
     total: u64,
 }
 
-/// Hash a password with Argon2id using OWASP-recommended parameters.
-///
-/// If a pepper is provided, it is prepended to the password before
-/// hashing. The salt is randomly generated for each call.
-fn hash_password(password: &str, pepper: Option<&str>) -> Result<String, DbError> {
-    // OWASP ASVS recommended: m=19456 (19 MiB), t=2, p=1
-    let params = argon2::Params::new(19456, 2, 1, None)
-        .map_err(|e| DbError::Migration(format!("argon2 params error: {e}")))?;
-    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-
-    let peppered: String;
-    let input = match pepper {
-        Some(p) => {
-            peppered = format!("{p}{password}");
-            peppered.as_bytes()
-        }
-        None => password.as_bytes(),
-    };
-
-    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
-    let hash = argon2
-        .hash_password(input, &salt)
-        .map_err(|e| DbError::Migration(format!("password hash error: {e}")))?;
-
-    Ok(hash.to_string())
-}
-
 /// SurrealDB implementation of the User repository.
 pub struct SurrealUserRepository<C: Connection> {
     db: Surreal<C>,
@@ -207,7 +178,8 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
 
-        let password_hash = hash_password(&input.password, self.pepper.as_deref())?;
+        let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let metadata = input
             .metadata
@@ -518,7 +490,8 @@ impl<C: Connection> SurrealUserRepository<C> {
         let consent_id = Uuid::new_v4().to_string();
         let tenant_id_str = input.tenant_id.to_string();
 
-        let password_hash = hash_password(&input.password, self.pepper.as_deref())?;
+        let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let metadata = input
             .metadata
@@ -711,7 +684,7 @@ impl<C: Connection> SurrealUserRepository<C> {
 ///
 /// Public for use by the auth layer.
 pub fn verify_password(password: &str, hash: &str, pepper: Option<&str>) -> Result<bool, DbError> {
-    use argon2::PasswordVerifier;
+    use argon2::{Argon2, PasswordVerifier};
 
     let peppered: String;
     let input = match pepper {

@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 axiam-core = { workspace = true }
+axiam-auth = { workspace = true }
 argon2 = { workspace = true }
 surrealdb = { workspace = true }
 surrealdb-types = "3"

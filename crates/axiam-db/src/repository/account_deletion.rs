@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::parse_uuid;
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -48,12 +49,9 @@ fn parse_status(s: &str) -> Result<AccountDeletionStatus, DbError> {
 
 impl AccountDeletionRowWithId {
     fn try_into_domain(self) -> Result<AccountDeletion, DbError> {
-        let id = Uuid::parse_str(&self.record_id)
-            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
-        let user_id = Uuid::parse_str(&self.user_id)
-            .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
+        let id = parse_uuid(&self.record_id, "record_id")?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
+        let user_id = parse_uuid(&self.user_id, "user_id")?;
         Ok(AccountDeletion {
             id,
             tenant_id,

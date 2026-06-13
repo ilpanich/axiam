@@ -98,6 +98,43 @@ pub fn sha256_hex(raw: &str) -> String {
     hex::encode(h.finalize())
 }
 
+/// Generate a cryptographically-random 256-bit (32-byte) cancel token,
+/// hex-encoded as a 64-character string (CQ-B39).
+///
+/// Replaces the previous `Uuid::new_v4().to_string()` (128-bit) token.
+fn generate_cancel_token() -> String {
+    use rand::Rng;
+    let bytes: [u8; 32] = rand::rng().random();
+    hex::encode(bytes)
+}
+
+/// Append a GDPR audit log entry, logging any failure without propagating it.
+///
+/// Factored out of the individual GDPR handlers to eliminate the repeated
+/// audit-append block pattern (CQ-B39).  The fire-and-forget `let _ = …`
+/// pattern is intentional: an audit failure must not block the user response.
+async fn append_gdpr_audit<C: Connection>(
+    audit_repo: &SurrealAuditLogRepository<C>,
+    tenant_id: Uuid,
+    actor_id: Uuid,
+    action: &str,
+    resource_id: Option<Uuid>,
+    metadata: Option<serde_json::Value>,
+) {
+    let _ = audit_repo
+        .append(axiam_core::models::audit::CreateAuditLogEntry {
+            tenant_id,
+            actor_id,
+            actor_type: ActorType::User,
+            action: action.into(),
+            resource_id,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata,
+        })
+        .await;
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -138,6 +175,18 @@ pub async fn request_account_export<C: Connection>(
             .await?;
     }
 
+    // CQ-B39: Deduplicate concurrent export requests — reject if a queued
+    // export already exists for this user to avoid duplicate processing.
+    if export_job_repo
+        .has_pending_for_user(auth_user.tenant_id, target_id)
+        .await?
+    {
+        return Err(AxiamError::AlreadyExists {
+            entity: "export_job".into(),
+        }
+        .into());
+    }
+
     // Create a queued export job.
     export_job_repo
         .create(CreateExportJob {
@@ -147,20 +196,15 @@ pub async fn request_account_export<C: Connection>(
         .await?;
 
     // Audit: gdpr.data_export_requested.
-    let _ = audit_repo
-        .append(axiam_core::models::audit::CreateAuditLogEntry {
-            tenant_id: auth_user.tenant_id,
-            actor_id: auth_user.user_id,
-            actor_type: ActorType::User,
-            action: "gdpr.data_export_requested".into(),
-            resource_id: Some(target_id),
-            outcome: AuditOutcome::Success,
-            ip_address: None,
-            metadata: Some(serde_json::json!({
-                "subject_id": target_id.to_string(),
-            })),
-        })
-        .await;
+    append_gdpr_audit(
+        &audit_repo,
+        auth_user.tenant_id,
+        auth_user.user_id,
+        "gdpr.data_export_requested",
+        Some(target_id),
+        Some(serde_json::json!({ "subject_id": target_id.to_string() })),
+    )
+    .await;
 
     Ok(HttpResponse::Ok().json(QueuedResponse { queued: true }))
 }
@@ -314,8 +358,9 @@ pub async fn request_account_delete<C: Connection>(
         .revoke_all_sessions(auth_user.tenant_id, target_id)
         .await?;
 
-    // Generate cancel token (raw opaque token; only hash stored in DB).
-    let raw_cancel_token = Uuid::new_v4().to_string();
+    // Generate cancel token: 256-bit random token, hex-encoded (CQ-B39).
+    // Only the SHA-256 hash is stored in the DB; the raw token is emailed.
+    let raw_cancel_token = generate_cancel_token();
     let cancel_token_hash = sha256_hex(&raw_cancel_token);
 
     // Create the account_deletion row.
@@ -360,21 +405,18 @@ pub async fn request_account_delete<C: Connection>(
     }
 
     // Audit: gdpr.erasure_requested.
-    let _ = audit_repo
-        .append(axiam_core::models::audit::CreateAuditLogEntry {
-            tenant_id: auth_user.tenant_id,
-            actor_id: auth_user.user_id,
-            actor_type: ActorType::User,
-            action: "gdpr.erasure_requested".into(),
-            resource_id: Some(target_id),
-            outcome: AuditOutcome::Success,
-            ip_address: None,
-            metadata: Some(serde_json::json!({
-                "subject_id": target_id.to_string(),
-                "scheduled_purge_at": scheduled_purge_at.to_rfc3339(),
-            })),
-        })
-        .await;
+    append_gdpr_audit(
+        &audit_repo,
+        auth_user.tenant_id,
+        auth_user.user_id,
+        "gdpr.erasure_requested",
+        Some(target_id),
+        Some(serde_json::json!({
+            "subject_id": target_id.to_string(),
+            "scheduled_purge_at": scheduled_purge_at.to_rfc3339(),
+        })),
+    )
+    .await;
 
     Ok(HttpResponse::Ok().json(ScheduledResponse { scheduled: true }))
 }

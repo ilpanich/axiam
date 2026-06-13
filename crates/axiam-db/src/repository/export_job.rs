@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::parse_uuid;
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -56,12 +57,9 @@ fn parse_status(s: &str) -> Result<ExportJobStatus, DbError> {
 
 impl ExportJobRowWithId {
     fn try_into_domain(self) -> Result<ExportJob, DbError> {
-        let id = Uuid::parse_str(&self.record_id)
-            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
-        let user_id = Uuid::parse_str(&self.user_id)
-            .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
+        let id = parse_uuid(&self.record_id, "record_id")?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
+        let user_id = parse_uuid(&self.user_id, "user_id")?;
         Ok(ExportJob {
             id,
             tenant_id,
@@ -96,6 +94,39 @@ impl<C: Connection> Clone for SurrealExportJobRepository<C> {
 impl<C: Connection> SurrealExportJobRepository<C> {
     pub fn new(db: Surreal<C>) -> Self {
         Self { db }
+    }
+
+    /// Return true if the user already has a queued or in-flight export job
+    /// (status = 'queued').  Used by the GDPR handler to prevent duplicate
+    /// concurrent export requests (CQ-B39).
+    pub async fn has_pending_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<bool> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT count() AS total FROM export_job \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                 AND status IN ['queued'] \
+                 GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        #[derive(Debug, surrealdb_types::SurrealValue)]
+        struct CountRow {
+            total: u64,
+        }
+
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        let count = rows.into_iter().next().map(|r| r.total).unwrap_or(0);
+        Ok(count > 0)
     }
 }
 

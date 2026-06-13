@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, parse_uuid};
 
 #[derive(Debug, SurrealValue)]
 struct RoleRow {
@@ -33,10 +34,8 @@ struct RoleRowWithId {
 
 impl RoleRowWithId {
     fn try_into_role(self) -> Result<Role, DbError> {
-        let id = Uuid::parse_str(&self.record_id)
-            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let id = parse_uuid(&self.record_id, "record_id")?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
         Ok(Role {
             id,
             tenant_id,
@@ -47,11 +46,6 @@ impl RoleRowWithId {
             updated_at: self.updated_at,
         })
     }
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 /// Row for querying has_role edges with the role data joined in.
@@ -69,16 +63,13 @@ struct RoleAssignmentRow {
 
 impl RoleAssignmentRow {
     fn try_into_assignment(self) -> Result<RoleAssignment, DbError> {
-        let id = Uuid::parse_str(&self.record_id)
-            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let id = parse_uuid(&self.record_id, "record_id")?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
         let resource_id = self
             .resource_id
             .as_deref()
-            .map(Uuid::parse_str)
-            .transpose()
-            .map_err(|e| DbError::Migration(format!("invalid resource UUID: {e}")))?;
+            .map(|s| parse_uuid(s, "resource_id"))
+            .transpose()?;
         Ok(RoleAssignment {
             role: Role {
                 id,

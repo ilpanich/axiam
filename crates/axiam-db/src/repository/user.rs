@@ -14,6 +14,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, parse_uuid};
 
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
@@ -89,8 +90,7 @@ fn status_to_string(s: &UserStatus) -> &'static str {
 
 impl UserRow {
     fn into_user(self, id: Uuid) -> Result<User, DbError> {
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
         Ok(User {
             id,
             tenant_id,
@@ -116,10 +116,8 @@ impl UserRow {
 
 impl UserRowWithId {
     fn try_into_user(self) -> Result<User, DbError> {
-        let id = Uuid::parse_str(&self.record_id)
-            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let id = parse_uuid(&self.record_id, "record_id")?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
         Ok(User {
             id,
             tenant_id,
@@ -141,12 +139,6 @@ impl UserRowWithId {
             updated_at: self.updated_at,
         })
     }
-}
-
-/// Row struct for count queries.
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 /// SurrealDB implementation of the User repository.

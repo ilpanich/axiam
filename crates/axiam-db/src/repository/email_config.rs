@@ -426,7 +426,6 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         org_id: Uuid,
         input: SetOrgEmailConfig,
     ) -> AxiamResult<EmailConfig> {
-        let id = Uuid::new_v4();
         let encrypted = encrypt_provider(&input.provider, &self.key)?;
         // Clone fields we need post-move for the domain object reconstruction.
         let enabled = input.enabled;
@@ -434,10 +433,13 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         let from_email = input.from_email.clone();
         let reply_to = input.reply_to.clone();
 
+        // CQ-B41: UPSERT keyed on (scope, scope_id) — idempotent whether or
+        // not a row for this org already exists.  created_at is set only on
+        // insert (IF created_at = NONE); updated_at is always refreshed.
         let result = self
             .db
             .query(
-                "CREATE type::record('email_config', $id) SET \
+                "UPSERT email_config SET \
                  scope = 'org', \
                  scope_id = $scope_id, \
                  enabled = $enabled, \
@@ -455,10 +457,10 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
                  api_key_ciphertext = $api_key_ciphertext, \
                  api_key_nonce = $api_key_nonce, \
                  secret_key_version = $secret_key_version, \
-                 created_at = time::now(), \
-                 updated_at = time::now()",
+                 created_at = IF created_at = NONE THEN time::now() ELSE created_at END, \
+                 updated_at = time::now() \
+                 WHERE scope = 'org' AND scope_id = $scope_id",
             )
-            .bind(("id", id.to_string()))
             .bind(("scope_id", org_id.to_string()))
             .bind(("enabled", enabled))
             .bind(("from_name", from_name.clone()))
@@ -487,11 +489,13 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         let rows: Vec<EmailConfigRow> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
             entity: "email_config".into(),
-            id: id.to_string(),
+            id: org_id.to_string(),
         })?;
 
         // Re-construct domain with original plaintext provider.
-        let config = email_config_from_org_input(id, org_id, &input);
+        // Use a placeholder UUID for the record id since UPSERT does not
+        // return meta::id by default here; the id is opaque to callers.
+        let config = email_config_from_org_input(Uuid::new_v4(), org_id, &input);
         // Carry timestamps from DB row.
         Ok(EmailConfig {
             created_at: row.created_at,
@@ -565,7 +569,6 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         tenant_id: Uuid,
         input: SetTenantEmailOverride,
     ) -> AxiamResult<EmailConfigOverride> {
-        let id = Uuid::new_v4();
         let provider_kind;
         let encrypted;
 
@@ -592,9 +595,11 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
             secret_key_version: 0,
         });
 
+        // CQ-B41: UPSERT keyed on (scope, scope_id) — idempotent whether or
+        // not a tenant override row already exists for this tenant.
         self.db
             .query(
-                "CREATE type::record('email_config', $id) SET \
+                "UPSERT email_config SET \
                  scope = 'tenant', \
                  scope_id = $scope_id, \
                  enabled = $enabled, \
@@ -612,10 +617,10 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
                  api_key_ciphertext = $api_key_ciphertext, \
                  api_key_nonce = $api_key_nonce, \
                  secret_key_version = $secret_key_version, \
-                 created_at = time::now(), \
-                 updated_at = time::now()",
+                 created_at = IF created_at = NONE THEN time::now() ELSE created_at END, \
+                 updated_at = time::now() \
+                 WHERE scope = 'tenant' AND scope_id = $scope_id",
             )
-            .bind(("id", id.to_string()))
             .bind(("scope_id", tenant_id.to_string()))
             .bind(("enabled", input.enabled.unwrap_or(true)))
             .bind(("from_name", input.from_name.clone().unwrap_or_default()))

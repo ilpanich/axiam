@@ -132,6 +132,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "federation_login_state_request_id",
         sql: SCHEMA_V18,
     },
+    Migration {
+        version: 19,
+        name: "edge_unique_indexes",
+        sql: SCHEMA_V19,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1030,6 +1035,34 @@ const SCHEMA_V18: &str = "\
 -- Add SAML AuthnRequest ID to federation_login_state (SEC-005/REQ-14 AC-5).
 DEFINE FIELD IF NOT EXISTS request_id ON TABLE federation_login_state \
     TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v19 — unique (in, out) indexes on edge tables (CQ-B17)
+// -----------------------------------------------------------------------
+//
+// Without unique constraints, duplicate edges (e.g. user → role assigned
+// twice) could be silently inserted.  A duplicate edge now surfaces as a
+// SurrealDB unique-index violation which the repository layer maps to
+// DbError::AlreadyExists → AxiamError::AlreadyExists → HTTP 409 (ASVS V5).
+
+const SCHEMA_V19: &str = "\
+-- Unique (in, out) composite indexes for all edge tables (CQ-B17).
+-- IF NOT EXISTS guards idempotent re-runs.
+DEFINE INDEX IF NOT EXISTS idx_has_tenant_unique \
+    ON TABLE has_tenant FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_member_of_unique \
+    ON TABLE member_of FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_has_role_unique \
+    ON TABLE has_role FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_grants_unique \
+    ON TABLE grants FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_on_resource_unique \
+    ON TABLE on_resource FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_child_of_unique \
+    ON TABLE child_of FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_signed_by_unique \
+    ON TABLE signed_by FIELDS in, out UNIQUE;
 ";
 
 // -----------------------------------------------------------------------

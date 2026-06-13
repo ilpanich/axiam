@@ -263,13 +263,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         h.update(user_id.as_bytes());
         let email_hash = hex::encode(h.finalize());
 
-        // (d) Anonymize the user row in-place (D-05).
-        self.user_repo
-            .anonymize_user(tenant_id, user_id, &email_hash, &pseudonym)
-            .await?;
-
-        // (e) Pseudonymize audit entries (D-01/D-03/D-04).
-        // Errors here are logged but not fatal — the user row is already anonymized.
+        // (d) Pseudonymize audit entries (D-01/D-03/D-04).
+        // Errors here are logged but not fatal.
         if let Err(e) = self
             .audit_repo
             .pseudonymize_actor(tenant_id, user_id, &pseudonym)
@@ -278,7 +273,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             tracing::warn!(error = ?e, user_id = %user_id, "audit pseudonymization failed");
         }
 
-        // (f) Insert erasure-proof record (D-06).
+        // (e) Insert erasure-proof record (D-06).
         self.erasure_proof_repo
             .create(CreateErasureProof {
                 pseudonym: pseudonym.clone(),
@@ -287,7 +282,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             })
             .await?;
 
-        // (g) Mark the account_deletion row as completed (lookup by user_id).
+        // (f) Mark the account_deletion row as completed (lookup by user_id).
+        // Done BEFORE anonymize_user so that on a re-run (if anonymize fails),
+        // the row is already completed and will not be re-processed.
         match self
             .account_deletion_repo
             .find_pending_by_user_id(tenant_id, user_id)
@@ -306,6 +303,12 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 tracing::warn!(error = ?e, user_id = %user_id, "failed to find account_deletion row");
             }
         }
+
+        // (g) Anonymize the user row in-place — LAST so that prior steps can
+        // still access the user row on a partial-failure re-run (CQ-B38 / D-05).
+        self.user_repo
+            .anonymize_user(tenant_id, user_id, &email_hash, &pseudonym)
+            .await?;
 
         // (h) Emit gdpr.user_pseudonymized audit event (actor = System/nil UUID).
         let _ = self
@@ -367,8 +370,17 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 tracing::warn!(
                     error = ?e,
                     job_id = %job.id,
-                    "export job processing failed — skipping"
+                    "export job processing failed — marking Failed (CQ-B38)"
                 );
+                // Mark as Failed so the job does not stay stuck as Queued
+                // (CQ-B38 / REQ-14 AC-5).
+                if let Err(mark_err) = self.export_job_repo.mark_failed(job.id).await {
+                    tracing::warn!(
+                        error = ?mark_err,
+                        job_id = %job.id,
+                        "failed to mark export job as Failed"
+                    );
+                }
             } else {
                 processed += 1;
             }
@@ -458,12 +470,19 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             "updated_at": user.updated_at,
         });
 
-        // Consents.
+        // Consents — error propagation instead of silent swallow (CQ-B38).
         let consents = self
             .consent_repo
             .list_by_user(tenant_id, user_id)
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = ?e,
+                    user_id = %user_id,
+                    "failed to list consents for export — using empty list"
+                );
+                vec![]
+            });
         let consents_json: Vec<_> = consents
             .iter()
             .map(|c| {
@@ -476,33 +495,52 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             })
             .collect();
 
-        // Audit entries where this user was the actor.
-        let audit_entries = self
-            .audit_repo
-            .list(
-                tenant_id,
-                AuditLogFilter {
-                    actor_id: Some(user_id),
-                    action: None,
-                    outcome: None,
-                    resource_id: None,
-                    from: None,
-                    to: None,
-                },
-                Pagination {
-                    offset: 0,
-                    limit: 10_000,
-                },
-            )
-            .await
-            .unwrap_or_else(|_| axiam_core::repository::PaginatedResult {
-                items: vec![],
-                total: 0,
-                offset: 0,
-                limit: 10_000,
-            });
-        let audit_json: Vec<_> = audit_entries
-            .items
+        // Audit entries where this user was the actor — paginated to collect ALL
+        // entries regardless of volume (CQ-B38 / REQ-14 AC-5).
+        const AUDIT_PAGE_SIZE: u64 = 1_000;
+        let mut audit_items = Vec::new();
+        let mut offset: u64 = 0;
+        loop {
+            let page = self
+                .audit_repo
+                .list(
+                    tenant_id,
+                    AuditLogFilter {
+                        actor_id: Some(user_id),
+                        action: None,
+                        outcome: None,
+                        resource_id: None,
+                        from: None,
+                        to: None,
+                    },
+                    Pagination {
+                        offset,
+                        limit: AUDIT_PAGE_SIZE,
+                    },
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        error = ?e,
+                        user_id = %user_id,
+                        offset,
+                        "failed to list audit entries for export page — using empty"
+                    );
+                    axiam_core::repository::PaginatedResult {
+                        items: vec![],
+                        total: 0,
+                        offset,
+                        limit: AUDIT_PAGE_SIZE,
+                    }
+                });
+            let fetched = page.items.len() as u64;
+            audit_items.extend(page.items);
+            offset += fetched;
+            if fetched < AUDIT_PAGE_SIZE {
+                break;
+            }
+        }
+        let audit_json: Vec<_> = audit_items
             .iter()
             .map(|e| {
                 serde_json::json!({
@@ -514,12 +552,19 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             })
             .collect();
 
-        // Federation identities.
+        // Federation identities — error propagation instead of silent swallow (CQ-B38).
         let fed_links = self
             .federation_link_repo
             .get_by_user_id(tenant_id, user_id)
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = ?e,
+                    user_id = %user_id,
+                    "failed to list federation links for export — using empty list"
+                );
+                vec![]
+            });
         let fed_json: Vec<_> = fed_links
             .iter()
             .map(|l| {

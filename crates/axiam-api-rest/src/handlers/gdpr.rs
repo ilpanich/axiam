@@ -241,9 +241,16 @@ pub async fn download_account_export<C: Connection>(
     let plaintext_bytes = decrypt_separate(key, &nonce, &ciphertext)
         .map_err(|e| AxiamError::Internal(format!("export decrypt failed: {e}")))?;
 
-    // Mark downloaded + delete blob (D-13: single-use, delete-on-download).
-    export_job_repo.mark_downloaded(job.id).await?;
-    export_job_repo.delete(job.id).await?;
+    // Atomic single-use consume: UPDATE WHERE status = 'ready' + DELETE.
+    // If 0 rows were updated the token was already consumed (TOCTTOU-safe,
+    // D-13 / CQ-B38 / REQ-14 AC-5).
+    let consumed = export_job_repo.consume_ready_and_delete(job.id).await?;
+    if !consumed {
+        return Err(AxiamError::AuthorizationDenied {
+            reason: "export token already consumed".into(),
+        }
+        .into());
+    }
 
     let plaintext = String::from_utf8(plaintext_bytes)
         .map_err(|e| AxiamError::Internal(format!("export UTF-8 decode: {e}")))?;

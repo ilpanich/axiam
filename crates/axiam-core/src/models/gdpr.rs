@@ -86,6 +86,8 @@ pub enum ExportJobStatus {
     Ready,
     Downloaded,
     Expired,
+    /// Processing failed; the job may be re-queued for retry (CQ-B38/REQ-14 AC-5).
+    Failed,
 }
 
 /// A GDPR Art. 15 data-export job.

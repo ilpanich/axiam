@@ -1354,6 +1354,17 @@ pub trait ExportJobRepository: Send + Sync {
     /// Mark a job as downloaded (single-use consumed).
     fn mark_downloaded(&self, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
+    /// Atomically consume a Ready export job: update status to 'downloaded'
+    /// only if the current status is 'ready', then delete the row.
+    ///
+    /// Returns `true` if the job was successfully consumed (status was 'ready'),
+    /// `false` if it was already consumed or in a different state (TOCTTOU-safe,
+    /// CQ-B38 / REQ-14 AC-5).
+    fn consume_ready_and_delete(&self, id: Uuid) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Mark a job as failed (processing error; may be retried — CQ-B38/REQ-14 AC-5).
+    fn mark_failed(&self, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
     /// Delete an expired or downloaded job and its file.
     fn delete(&self, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 }

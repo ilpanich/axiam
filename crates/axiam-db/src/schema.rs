@@ -987,8 +987,12 @@ DEFINE FIELD OVERWRITE kind ON TABLE email_template TYPE string
 // tenants that did not explicitly override that field.
 
 const SCHEMA_V16: &str = "\
+-- Add sparse override mask to security_settings (CQ-B03 / REQ-14 AC-3).
 DEFINE FIELD IF NOT EXISTS overrides_json ON TABLE security_settings \
     TYPE option<string>;
+-- Extend export_job status ASSERT to include 'failed' (CQ-B38 / REQ-14 AC-5).
+DEFINE FIELD OVERWRITE status ON TABLE export_job TYPE string \
+    ASSERT $value IN ['queued', 'ready', 'downloaded', 'expired', 'failed'];
 ";
 
 // -----------------------------------------------------------------------

@@ -47,6 +47,7 @@ fn parse_status(s: &str) -> Result<ExportJobStatus, DbError> {
         "ready" => Ok(ExportJobStatus::Ready),
         "downloaded" => Ok(ExportJobStatus::Downloaded),
         "expired" => Ok(ExportJobStatus::Expired),
+        "failed" => Ok(ExportJobStatus::Failed),
         other => Err(DbError::Migration(format!(
             "unknown export_job status: {other}"
         ))),
@@ -222,6 +223,52 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
     async fn mark_downloaded(&self, id: Uuid) -> AxiamResult<()> {
         self.db
             .query("UPDATE type::record('export_job', $id) SET status = 'downloaded'")
+            .bind(("id", id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn consume_ready_and_delete(&self, id: Uuid) -> AxiamResult<bool> {
+        // Atomically mark as downloaded only if currently 'ready' (CQ-B38).
+        // The WHERE clause prevents the TOCTTOU race on the two-step
+        // mark_downloaded + delete sequence.
+        let mut result = self
+            .db
+            .query(
+                "UPDATE type::record('export_job', $id) \
+                 SET status = 'downloaded' \
+                 WHERE status = 'ready'",
+            )
+            .bind(("id", id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let updated: Vec<ExportJobRow> = result.take(0).map_err(DbError::from)?;
+        if updated.is_empty() {
+            // Status was not 'ready' — already consumed or in wrong state.
+            return Ok(false);
+        }
+
+        // Delete the row now that it is marked downloaded.
+        self.db
+            .query("DELETE type::record('export_job', $id)")
+            .bind(("id", id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        Ok(true)
+    }
+
+    async fn mark_failed(&self, id: Uuid) -> AxiamResult<()> {
+        self.db
+            .query("UPDATE type::record('export_job', $id) SET status = 'failed'")
             .bind(("id", id.to_string()))
             .await
             .map_err(DbError::from)?

@@ -93,8 +93,13 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             AxiamError::Certificate("CA certificate has no stored private key".into())
         })?;
 
-        // Decrypt the CA private key.
-        let ca_private_key_pem = decrypt_private_key(&encrypted_key, &self.config.encryption_key)?;
+        // Decrypt the CA private key — encryption key must be present (SEC-012).
+        let enc_key = self.config.encryption_key.ok_or_else(|| {
+            AxiamError::Internal(
+                "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable".into(),
+            )
+        })?;
+        let ca_private_key_pem = decrypt_private_key(&encrypted_key, &enc_key)?;
         let ca_key_pair = KeyPair::from_pem(&ca_private_key_pem)
             .map_err(|e| AxiamError::Certificate(format!("invalid CA private key: {e}")))?;
 

@@ -12,18 +12,14 @@ use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+pub use crate::config::PkiConfig;
+
 /// Maximum validity for CA certificates: 20 years (7300 days).
 ///
 /// Aligns with NIST SP 800-57 Part 1 Rev 5 recommendations for root CA
 /// certificate lifetimes. Values above this are rejected to prevent
 /// chrono/time overflow and to enforce security best practice.
 pub const MAX_CA_VALIDITY_DAYS: u32 = 7300;
-
-/// PKI configuration — holds the AES-256-GCM key for encrypting CA private keys.
-#[derive(Clone)]
-pub struct PkiConfig {
-    pub encryption_key: [u8; 32],
-}
 
 /// Service for CA certificate operations.
 #[derive(Clone)]
@@ -80,8 +76,12 @@ impl<R: CaCertificateRepository> CaService<R> {
         let public_cert_pem = cert.pem();
         let fingerprint = compute_fingerprint(cert.der());
 
-        let encrypted_private_key =
-            encrypt_private_key(private_key_pem.as_bytes(), &self.config.encryption_key)?;
+        let enc_key = self.config.encryption_key.ok_or_else(|| {
+            AxiamError::Internal(
+                "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable".into(),
+            )
+        })?;
+        let encrypted_private_key = encrypt_private_key(private_key_pem.as_bytes(), &enc_key)?;
 
         let store = StoreCaCertificate {
             organization_id: input.organization_id,

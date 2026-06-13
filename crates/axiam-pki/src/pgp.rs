@@ -53,12 +53,19 @@ impl<R: PgpKeyRepository> PgpService<R> {
 
         let fingerprint = hex::encode(public_key.fingerprint());
 
-        // Encrypt private key for storage (only for AuditSigning)
+        // Encrypt private key for storage (only for AuditSigning).
+        // Encryption key must be present for non-export keys (SEC-012).
         let is_export = input.purpose == PgpKeyPurpose::Export;
         let encrypted_private_key = if !is_export {
+            let enc_key = self.config.encryption_key.ok_or_else(|| {
+                AxiamError::Internal(
+                    "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable"
+                        .into(),
+                )
+            })?;
             Some(encrypt_private_key(
                 private_key_armored.as_bytes(),
-                &self.config.encryption_key,
+                &enc_key,
             )?)
         } else {
             None
@@ -118,7 +125,12 @@ impl<R: PgpKeyRepository> PgpService<R> {
             .as_ref()
             .ok_or_else(|| AxiamError::Crypto("signing key has no encrypted private key".into()))?;
 
-        let private_key_pem = decrypt_private_key(encrypted_pk, &self.config.encryption_key)?;
+        let enc_key = self.config.encryption_key.ok_or_else(|| {
+            AxiamError::Internal(
+                "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable".into(),
+            )
+        })?;
+        let private_key_pem = decrypt_private_key(encrypted_pk, &enc_key)?;
         let private_key_armored = String::from_utf8(private_key_pem)
             .map_err(|e| AxiamError::Crypto(format!("invalid UTF-8 in private key: {e}")))?;
 

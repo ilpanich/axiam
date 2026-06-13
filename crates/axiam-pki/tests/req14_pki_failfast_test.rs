@@ -25,7 +25,9 @@ async fn setup_db() -> Surreal<TestDb> {
 async fn ca_generate_without_key_errors() {
     let db = setup_db().await;
     let repo = SurrealCaCertificateRepository::new(db);
-    let config = PkiConfig { encryption_key: None };
+    let config = PkiConfig {
+        encryption_key: None,
+    };
     let svc = CaService::new(repo, config);
 
     let result = svc

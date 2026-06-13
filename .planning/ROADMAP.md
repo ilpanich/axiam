@@ -19,7 +19,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 - [x] **Phase 7: Compliance Verification & Test Closure** - Verify OWASP ASVS, OAuth2 RFC, OIDC conformance and close remaining test gaps (completed 2026-06-07)
 - [x] **Phase 8: Build Unblock (Wave 0)** - Make `axiam-server` compile and pass CI `-D warnings` (completed 2026-06-10)
 - [x] **Phase 9: Critical Remediation (Wave 1)** - Close cross-tenant IDOR, gRPC auth, frontend auth flows, silent refresh, federation secret encryption (completed 2026-06-12)
-- [ ] **Phase 10: High Remediation (Wave 2)** - Hashing/pepper, async-safe crypto, tenant isolation, GDPR/SAML/TOTP correctness, frontend High items
+- [x] **Phase 10: High Remediation (Wave 2)** - Hashing/pepper, async-safe crypto, tenant isolation, GDPR/SAML/TOTP correctness, frontend High items (completed 2026-06-13)
 - [ ] **Phase 11: Medium Remediation (Wave 3)** - Repo/DTO consolidation, transport limits, auth/infra hardening, frontend Medium items
 - [ ] **Phase 12: Low / Trivial Remediation (Wave 4)** - Cleanup, dead-code, dep pruning, i18n, security polish + whole-effort verification
 
@@ -384,7 +384,7 @@ Plans:
 - [x] 10-02-PLAN.md — load_key_from_env extraction + PKI fail-fast (CQ-B43, SEC-012) [wave 2]
 - [x] 10-03-PLAN.md — async-safe crypto + tenant edge isolation + resource hierarchy (CQ-B02/B07/B08) [wave 3]
 - [x] 10-04-PLAN.md — sparse settings, migrations, AMQP DLQ, GDPR correctness (CQ-B03/B05/B06/B38) [wave 3]
-- [ ] 10-05-PLAN.md — pagination clamp, generic 5xx, TOTP replay, SAML hardening, federation API (SEC-005/008/010/011, CQ-B30/B33/B40) [wave 4]
+- [x] 10-05-PLAN.md — pagination clamp, generic 5xx, TOTP replay, SAML hardening, federation API (SEC-005/008/010/011, CQ-B30/B33/B40) [wave 4]
 - [x] 10-06-PLAN.md — frontend High items + CI lint/tsc gate (CQ-F01..F08) [wave 1]
 
 ### Scope
@@ -461,7 +461,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 7. Compliance Verification & Test Closure | 5/5 | Complete   | 2026-06-07 |
 | 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
 | 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
-| 10. High Remediation (Wave 2) | 5/6 | In Progress|  |
+| 10. High Remediation (Wave 2) | 6/6 | Complete   | 2026-06-13 |
 | 11. Medium Remediation (Wave 3) | 0/0 | Pending | — |
 | 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |
 

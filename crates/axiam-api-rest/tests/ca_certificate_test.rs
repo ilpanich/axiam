@@ -56,7 +56,7 @@ fn test_auth_config() -> AuthConfig {
 /// Test-only PKI encryption key (32 zero bytes) — not a real key.
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
-        encryption_key: [0u8; 32], // gitleaks:allow
+        encryption_key: Some([0u8; 32]), // gitleaks:allow
     }
 }
 
@@ -125,6 +125,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(CaService::new(
                     SurrealCaCertificateRepository::new($db.clone()),
                     test_pki_config(),
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
                 )))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>

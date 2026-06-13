@@ -21,6 +21,7 @@ use axiam_db::repository::{
     SurrealTenantRepository, SurrealUserRepository,
 };
 use chrono::{Duration, Utc};
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -189,6 +190,7 @@ async fn login_happy_path() {
         fed_repo,
         refresh_token_repo,
         config.clone(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let result = login_alice(&svc, tenant_id, org_id).await;
@@ -213,6 +215,7 @@ async fn login_by_email() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let result = svc
@@ -240,6 +243,7 @@ async fn login_wrong_password() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let err = svc
@@ -271,6 +275,7 @@ async fn login_user_not_found() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let err = svc
@@ -312,6 +317,7 @@ async fn login_locked_user() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let err = svc
@@ -361,6 +367,7 @@ async fn login_inactive_user() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let err = svc
@@ -397,6 +404,7 @@ async fn logout_invalidates_session() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let login_out = login_alice(&svc, tenant_id, org_id).await;
@@ -418,6 +426,7 @@ async fn refresh_happy_path() {
         fed_repo,
         refresh_token_repo,
         config.clone(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let login_out = login_alice(&svc, tenant_id, org_id).await;
@@ -451,6 +460,7 @@ async fn refresh_replay_attack_fails() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let login_out = login_alice(&svc, tenant_id, org_id).await;
@@ -490,6 +500,7 @@ async fn refresh_invalid_token_fails() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let err = svc
@@ -518,6 +529,7 @@ async fn refresh_locked_user_fails() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let login_out = login_alice(&svc, tenant_id, org_id).await;
@@ -587,6 +599,7 @@ async fn revoke_all_sessions() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let login1 = login_alice(&svc, tenant_id, org_id).await;
@@ -633,6 +646,7 @@ async fn mfa_enroll_and_confirm() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Step 1: enroll — get secret + URI.
@@ -670,6 +684,7 @@ async fn mfa_login_challenge_flow() {
         fed_repo,
         refresh_token_repo,
         config.clone(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Enroll and confirm MFA.
@@ -738,6 +753,7 @@ async fn mfa_wrong_code_rejected() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Enroll + confirm.
@@ -800,6 +816,7 @@ async fn mfa_confirm_wrong_code_rejected() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     svc.enroll_mfa(tenant_id, user_id).await.unwrap();
@@ -822,6 +839,7 @@ async fn login_without_mfa_still_returns_success() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let result = svc
@@ -878,6 +896,7 @@ async fn failed_login_increments_counter() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     bad_login(&svc, tenant_id, org_id).await;
@@ -902,6 +921,7 @@ async fn account_locks_after_max_attempts() {
         fed_repo,
         refresh_token_repo,
         config,
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     for _ in 0..3 {
@@ -940,6 +960,7 @@ async fn lockout_expires_allows_login() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Manually set locked_until in the past.
@@ -972,6 +993,7 @@ async fn successful_login_resets_counter() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Fail twice.
@@ -1002,6 +1024,7 @@ async fn exponential_backoff_increases_lockout() {
         fed_repo,
         refresh_token_repo,
         config,
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // 3 failures → first lockout (60s * 2^0 = 60s).
@@ -1102,6 +1125,7 @@ async fn login_mfa_enforced_no_mfa_configured_returns_setup_required() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let result = svc
@@ -1138,6 +1162,7 @@ async fn login_mfa_enforced_mfa_already_configured_returns_mfa_challenge() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Enable MFA first.
@@ -1177,6 +1202,7 @@ async fn login_mfa_not_enforced_no_mfa_returns_success() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     let result = svc
@@ -1208,6 +1234,7 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Create a federation config + link so the user is "federated".
@@ -1267,6 +1294,7 @@ async fn enroll_mfa_with_setup_token_succeeds() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Login with MFA enforced to get a setup_token.
@@ -1304,6 +1332,7 @@ async fn confirm_mfa_with_setup_token_returns_login_tokens() {
         fed_repo,
         refresh_token_repo,
         config.clone(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Step 1: Login with enforcement → get setup_token.
@@ -1355,6 +1384,7 @@ async fn reset_mfa_clears_state_and_revokes_sessions() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Enable MFA and create a session.
@@ -1454,6 +1484,7 @@ async fn login_after_reset_requires_setup_again() {
         fed_repo,
         refresh_token_repo,
         test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
     );
 
     // Enable MFA, then reset it.

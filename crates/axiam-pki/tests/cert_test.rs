@@ -40,8 +40,9 @@ async fn cert_generate_against_active_ca_succeeds() {
     let org_id = uuid::Uuid::new_v4();
     let tenant_id = uuid::Uuid::new_v4();
 
-    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config());
-    let svc_cert = CertService::new(ca_repo, cert_repo, test_pki_config());
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config(), sem.clone());
+    let svc_cert = CertService::new(ca_repo, cert_repo, test_pki_config(), sem);
 
     let ca = svc_ca
         .generate(CreateCaCertificate {
@@ -97,8 +98,9 @@ async fn cert_generate_rejects_revoked_ca() {
     let org_id = uuid::Uuid::new_v4();
     let tenant_id = uuid::Uuid::new_v4();
 
-    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config());
-    let svc_cert = CertService::new(ca_repo.clone(), cert_repo, test_pki_config());
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config(), sem.clone());
+    let svc_cert = CertService::new(ca_repo.clone(), cert_repo, test_pki_config(), sem);
 
     let ca = svc_ca
         .generate(CreateCaCertificate {
@@ -161,7 +163,11 @@ async fn cert_generate_rejects_expired_ca() {
     let temp_config = Cfg {
         encryption_key: Some([0u8; 32]), // gitleaks:allow
     };
-    let svc_ca_temp = CaService::new(ca_repo.clone(), temp_config);
+    let svc_ca_temp = CaService::new(
+        ca_repo.clone(),
+        temp_config,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
     let real_ca = svc_ca_temp
         .generate(CreateCaCertificate {
             organization_id: org_id,
@@ -189,7 +195,12 @@ async fn cert_generate_rejects_expired_ca() {
         .await
         .expect("direct CA row creation must succeed");
 
-    let svc_cert = CertService::new(ca_repo, cert_repo, test_pki_config());
+    let svc_cert = CertService::new(
+        ca_repo,
+        cert_repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
 
     let result = svc_cert
         .generate(

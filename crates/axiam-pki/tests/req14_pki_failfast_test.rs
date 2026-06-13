@@ -28,7 +28,11 @@ async fn ca_generate_without_key_errors() {
     let config = PkiConfig {
         encryption_key: None,
     };
-    let svc = CaService::new(repo, config);
+    let svc = CaService::new(
+        repo,
+        config,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
 
     let result = svc
         .generate(CreateCaCertificate {
@@ -59,7 +63,11 @@ async fn ca_generate_with_key_ok() {
     let config = PkiConfig {
         encryption_key: Some([0u8; 32]), // gitleaks:allow
     };
-    let svc = CaService::new(repo, config);
+    let svc = CaService::new(
+        repo,
+        config,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
 
     let result = svc
         .generate(CreateCaCertificate {

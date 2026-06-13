@@ -244,7 +244,19 @@ pub async fn check_history<R: PasswordHistoryRepository>(
 
     let mut violations = Vec::new();
     for (idx, entry) in entries.iter().enumerate() {
-        match verify_password(password, &entry.password_hash, pepper) {
+        // CPU-bound Argon2 verify runs in spawn_blocking (CQ-B02).
+        let pw_owned = password.to_string();
+        let hash_owned = entry.password_hash.clone();
+        let pepper_owned = pepper.map(str::to_string);
+        let entry_id = entry.id;
+        let result = tokio::task::spawn_blocking(move || {
+            verify_password(&pw_owned, &hash_owned, pepper_owned.as_deref())
+        })
+        .await
+        .map_err(|e| {
+            AxiamError::Internal(format!("spawn_blocking join error in history check: {e}"))
+        })?;
+        match result {
             Ok(true) => {
                 violations.push(PolicyViolation::ReusedPassword { position: idx + 1 });
                 // One match is enough — stop early.
@@ -254,7 +266,7 @@ pub async fn check_history<R: PasswordHistoryRepository>(
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    entry_id = %entry.id,
+                    %entry_id,
                     "Error verifying password history entry; skipping"
                 );
                 continue;

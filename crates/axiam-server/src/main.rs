@@ -309,12 +309,18 @@ async fn main() -> std::io::Result<()> {
     // A separate refresh-token repo instance for AuthService (used by
     // revoke_all_sessions / revoke_all_sessions_except on password change and reset).
     let auth_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
+    // Single shared bounding semaphore for all CPU-bound crypto operations (CQ-B02 / REQ-14 AC-2).
+    // Limits concurrent Argon2 and PKI keygen/sign operations to 4 to prevent DoS via
+    // runtime thread starvation. Constructed once, cloned (Arc) into each service.
+    let crypto_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+
     let auth_service = AuthService::new(
         user_repo.clone(),
         session_repo.clone(),
         federation_link_repo_for_auth,
         auth_refresh_token_repo,
         config.auth.clone(),
+        Arc::clone(&crypto_semaphore),
     );
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(db.client().clone());
@@ -335,10 +341,19 @@ async fn main() -> std::io::Result<()> {
         encryption_key: load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY"),
     };
     let cert_repo = SurrealCertificateRepository::new(db.client().clone());
-    let ca_service = CaService::new(ca_cert_repo.clone(), pki_config.clone());
+    let ca_service = CaService::new(
+        ca_cert_repo.clone(),
+        pki_config.clone(),
+        Arc::clone(&crypto_semaphore),
+    );
     let pgp_repo = SurrealPgpKeyRepository::new(db.client().clone());
-    let pgp_service = PgpService::new(pgp_repo, pki_config.clone());
-    let cert_service = CertService::new(ca_cert_repo, cert_repo.clone(), pki_config);
+    let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore));
+    let cert_service = CertService::new(
+        ca_cert_repo,
+        cert_repo.clone(),
+        pki_config,
+        Arc::clone(&crypto_semaphore),
+    );
     let device_auth_service = DeviceAuthService::new(cert_repo.clone());
     let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
     let webhook_delivery =

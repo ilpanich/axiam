@@ -139,6 +139,7 @@ macro_rules! test_app_with_auth {
                     SurrealFederationLinkRepository::new($db.clone()),
                     SurrealRefreshTokenRepository::new($db.clone()),
                     $auth.clone(),
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
                 )))
                 .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealOrganizationRepository::new(

@@ -29,7 +29,11 @@ fn test_pki_config() -> PkiConfig {
 async fn ca_generate_ed25519_returns_valid_pem_and_fingerprint() {
     let db = setup_db().await;
     let repo = SurrealCaCertificateRepository::new(db);
-    let svc = CaService::new(repo, test_pki_config());
+    let svc = CaService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
 
     let result = svc
         .generate(CreateCaCertificate {
@@ -63,7 +67,11 @@ async fn ca_generate_ed25519_returns_valid_pem_and_fingerprint() {
 async fn ca_generate_rejects_zero_validity() {
     let db = setup_db().await;
     let repo = SurrealCaCertificateRepository::new(db);
-    let svc = CaService::new(repo, test_pki_config());
+    let svc = CaService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
 
     let result = svc
         .generate(CreateCaCertificate {
@@ -81,7 +89,11 @@ async fn ca_generate_rejects_zero_validity() {
 async fn ca_generate_rejects_validity_above_max() {
     let db = setup_db().await;
     let repo = SurrealCaCertificateRepository::new(db);
-    let svc = CaService::new(repo, test_pki_config());
+    let svc = CaService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
 
     let result = svc
         .generate(CreateCaCertificate {

@@ -18,6 +18,8 @@ use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
 use pgp::types::{KeyDetails, KeyVersion, Password};
 use rand_core::OsRng;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::PkiConfig;
@@ -27,11 +29,17 @@ use crate::PkiConfig;
 pub struct PgpService<R> {
     repo: R,
     config: PkiConfig,
+    /// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
+    crypto_semaphore: Arc<Semaphore>,
 }
 
 impl<R: PgpKeyRepository> PgpService<R> {
-    pub fn new(repo: R, config: PkiConfig) -> Self {
-        Self { repo, config }
+    pub fn new(repo: R, config: PkiConfig, crypto_semaphore: Arc<Semaphore>) -> Self {
+        Self {
+            repo,
+            config,
+            crypto_semaphore,
+        }
     }
 
     /// Generate an OpenPGP keypair.
@@ -40,18 +48,33 @@ impl<R: PgpKeyRepository> PgpService<R> {
     /// - **Export**: does NOT store the private key; returns it once.
     pub async fn generate(&self, input: CreatePgpKey) -> AxiamResult<GeneratedPgpKey> {
         let user_id = format!("{} <{}>", input.name, input.email);
-        let secret_key = generate_keypair(&input.algorithm, &user_id)?;
-        let public_key = secret_key.to_public_key();
 
-        let private_key_armored: String = secret_key
-            .to_armored_string(ArmorOptions::default())
-            .map_err(|e| AxiamError::Crypto(format!("failed to armor private key: {e}")))?;
+        // CPU-bound PGP keygen runs in spawn_blocking behind semaphore (CQ-B02).
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
 
-        let public_key_armored: String = public_key
-            .to_armored_string(ArmorOptions::default())
-            .map_err(|e| AxiamError::Crypto(format!("failed to armor public key: {e}")))?;
+        let algorithm = input.algorithm.clone();
+        let (private_key_armored, public_key_armored, fingerprint) =
+            tokio::task::spawn_blocking(move || -> AxiamResult<(String, String, String)> {
+                let secret_key = generate_keypair(&algorithm, &user_id)?;
+                let public_key = secret_key.to_public_key();
 
-        let fingerprint = hex::encode(public_key.fingerprint());
+                let private_key_armored: String = secret_key
+                    .to_armored_string(ArmorOptions::default())
+                    .map_err(|e| AxiamError::Crypto(format!("failed to armor private key: {e}")))?;
+
+                let public_key_armored: String = public_key
+                    .to_armored_string(ArmorOptions::default())
+                    .map_err(|e| AxiamError::Crypto(format!("failed to armor public key: {e}")))?;
+
+                let fingerprint = hex::encode(public_key.fingerprint());
+                Ok((private_key_armored, public_key_armored, fingerprint))
+            })
+            .await
+            .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??;
 
         // Encrypt private key for storage (only for AuditSigning).
         // Encryption key must be present for non-export keys (SEC-012).
@@ -134,30 +157,41 @@ impl<R: PgpKeyRepository> PgpService<R> {
         let private_key_armored = String::from_utf8(private_key_pem)
             .map_err(|e| AxiamError::Crypto(format!("invalid UTF-8 in private key: {e}")))?;
 
-        let (secret_key, _) = SignedSecretKey::from_string(&private_key_armored)
-            .map_err(|e| AxiamError::Crypto(format!("failed to parse private key: {e}")))?;
+        // CPU-bound PGP signing runs in spawn_blocking behind semaphore (CQ-B02).
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
 
         // Serialize entries to JSON
         let entry_ids: Vec<Uuid> = entries.iter().map(|e| e.id).collect();
+        let entry_ids_clone = entry_ids.clone();
         let data = serde_json::to_vec(&entries)
             .map_err(|e| AxiamError::Crypto(format!("failed to serialize entries: {e}")))?;
 
-        // Sign the data using MessageBuilder
-        let mut msg_builder = MessageBuilder::from_bytes("audit-batch", data);
-        msg_builder.sign(
-            &secret_key.primary_key,
-            Password::default(),
-            HashAlgorithm::Sha256,
-        );
-        let signed_msg = msg_builder
-            .to_armored_string(OsRng, ArmorOptions::default())
-            .map_err(|e| AxiamError::Crypto(format!("failed to sign data: {e}")))?;
+        let signed_msg = tokio::task::spawn_blocking(move || -> AxiamResult<String> {
+            let (secret_key, _) = SignedSecretKey::from_string(&private_key_armored)
+                .map_err(|e| AxiamError::Crypto(format!("failed to parse private key: {e}")))?;
+
+            let mut msg_builder = MessageBuilder::from_bytes("audit-batch", data);
+            msg_builder.sign(
+                &secret_key.primary_key,
+                Password::default(),
+                HashAlgorithm::Sha256,
+            );
+            msg_builder
+                .to_armored_string(OsRng, ArmorOptions::default())
+                .map_err(|e| AxiamError::Crypto(format!("failed to sign data: {e}")))
+        })
+        .await
+        .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??;
 
         Ok(SignedAuditBatch {
             batch_id: Uuid::new_v4(),
             tenant_id,
             signing_key_id: signing_key.id,
-            entry_ids,
+            entry_ids: entry_ids_clone,
             signature_armored: signed_msg,
             signed_at: Utc::now(),
         })

@@ -55,7 +55,11 @@ async fn pgp_sign_audit_batch_and_verify_roundtrip() {
     let tenant_id = uuid::Uuid::new_v4();
 
     let repo = SurrealPgpKeyRepository::new(db);
-    let svc = PgpService::new(repo, test_pki_config());
+    let svc = PgpService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
 
     // Generate an AuditSigning key (Ed25519Legacy — signing only)
     let generated = svc
@@ -119,7 +123,11 @@ async fn pgp_rejects_ed25519_for_encryption() {
     let tenant_id = uuid::Uuid::new_v4();
 
     let repo = SurrealPgpKeyRepository::new(db);
-    let svc = PgpService::new(repo, test_pki_config());
+    let svc = PgpService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
 
     // Generate an Ed25519 Export key
     let generated = svc
@@ -160,7 +168,11 @@ async fn pgp_rsa4096_export_key_encrypts_successfully() {
     let tenant_id = uuid::Uuid::new_v4();
 
     let repo = SurrealPgpKeyRepository::new(db);
-    let svc = PgpService::new(repo, test_pki_config());
+    let svc = PgpService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
 
     // Generate an Rsa4096 Export key
     let generated = svc

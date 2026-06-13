@@ -13,6 +13,9 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
 use crate::config::AuthConfig;
 use crate::error::AuthError;
 use crate::token::AUD_USER;
@@ -155,6 +158,9 @@ pub struct AuthService<
     federation_repo: F,
     refresh_token_repo: T,
     config: AuthConfig,
+    /// Bounding semaphore (CQ-B02): limits concurrent Argon2 operations to prevent
+    /// CPU-bound crypto from starving the Tokio async runtime under login bursts.
+    crypto_semaphore: Arc<Semaphore>,
 }
 
 impl<
@@ -170,6 +176,7 @@ impl<
         federation_repo: F,
         refresh_token_repo: T,
         config: AuthConfig,
+        crypto_semaphore: Arc<Semaphore>,
     ) -> Self {
         Self {
             user_repo,
@@ -177,6 +184,7 @@ impl<
             federation_repo,
             refresh_token_repo,
             config,
+            crypto_semaphore,
         }
     }
 
@@ -208,12 +216,20 @@ impl<
             return Err(AuthError::InvalidCredentials.into());
         }
 
-        // 3. Verify password.
-        let valid = password::verify_password(
-            &input.password,
-            &user.password_hash,
-            self.config.pepper.as_deref(),
-        )
+        // 3. Verify password — CPU-bound Argon2id runs in spawn_blocking behind semaphore (CQ-B02).
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let pw_owned = input.password.clone();
+        let hash_owned = user.password_hash.clone();
+        let pepper_owned = self.config.pepper.clone();
+        let valid = tokio::task::spawn_blocking(move || {
+            password::verify_password(&pw_owned, &hash_owned, pepper_owned.as_deref())
+        })
+        .await
+        .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
         .map_err(|e| AxiamError::Crypto(e.to_string()))?;
 
         if !valid {
@@ -619,12 +635,20 @@ impl<
     ) -> AxiamResult<()> {
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
 
-        // 1. Verify current password.
-        let valid = password::verify_password(
-            current_password,
-            &user.password_hash,
-            self.config.pepper.as_deref(),
-        )
+        // 1. Verify current password — CPU-bound, run in spawn_blocking behind semaphore (CQ-B02).
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let pw_owned = current_password.to_string();
+        let hash_owned = user.password_hash.clone();
+        let pepper_owned = self.config.pepper.clone();
+        let valid = tokio::task::spawn_blocking(move || {
+            password::verify_password(&pw_owned, &hash_owned, pepper_owned.as_deref())
+        })
+        .await
+        .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
         .map_err(|e| AxiamError::Crypto(e.to_string()))?;
 
         if !valid {

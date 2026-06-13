@@ -10,6 +10,8 @@ use axiam_core::repository::{CaCertificateRepository, PaginatedResult, Paginatio
 use chrono::{Duration, Utc};
 use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 pub use crate::config::PkiConfig;
@@ -26,11 +28,17 @@ pub const MAX_CA_VALIDITY_DAYS: u32 = 7300;
 pub struct CaService<R> {
     repo: R,
     config: PkiConfig,
+    /// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
+    crypto_semaphore: Arc<Semaphore>,
 }
 
 impl<R: CaCertificateRepository> CaService<R> {
-    pub fn new(repo: R, config: PkiConfig) -> Self {
-        Self { repo, config }
+    pub fn new(repo: R, config: PkiConfig, crypto_semaphore: Arc<Semaphore>) -> Self {
+        Self {
+            repo,
+            config,
+            crypto_semaphore,
+        }
     }
 
     /// Generate a new self-signed CA certificate.
@@ -50,8 +58,12 @@ impl<R: CaCertificateRepository> CaService<R> {
             });
         }
 
-        let key_pair = generate_keypair(&input.key_algorithm)?;
-        let private_key_pem = key_pair.serialize_pem();
+        // CPU-bound: key generation + self-signing run in spawn_blocking behind semaphore (CQ-B02).
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
 
         let now = Utc::now();
         let not_before = now;
@@ -61,20 +73,34 @@ impl<R: CaCertificateRepository> CaService<R> {
                 message: "validity_days produces a date out of range".into(),
             })?;
 
-        let mut params = CertificateParams::new(Vec::<String>::new())
-            .map_err(|e| AxiamError::Certificate(e.to_string()))?;
-        params
-            .distinguished_name
-            .push(DnType::CommonName, &input.subject);
-        params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params.not_before = to_rcgen_time(not_before);
-        params.not_after = to_rcgen_time(not_after);
-        let cert = params
-            .self_signed(&key_pair)
-            .map_err(|e| AxiamError::Certificate(e.to_string()))?;
+        let key_algorithm = input.key_algorithm.clone();
+        let subject = input.subject.clone();
+        let not_before_ts = not_before.timestamp();
+        let not_after_ts = not_after.timestamp();
 
-        let public_cert_pem = cert.pem();
-        let fingerprint = compute_fingerprint(cert.der());
+        let (private_key_pem, public_cert_pem, fingerprint) =
+            tokio::task::spawn_blocking(move || -> AxiamResult<(String, String, String)> {
+                let key_pair = generate_keypair(&key_algorithm)?;
+                let private_key_pem = key_pair.serialize_pem();
+
+                let mut params = CertificateParams::new(Vec::<String>::new())
+                    .map_err(|e| AxiamError::Certificate(e.to_string()))?;
+                params.distinguished_name.push(DnType::CommonName, &subject);
+                params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+                params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before_ts)
+                    .expect("valid timestamp");
+                params.not_after = time::OffsetDateTime::from_unix_timestamp(not_after_ts)
+                    .expect("valid timestamp");
+                let cert = params
+                    .self_signed(&key_pair)
+                    .map_err(|e| AxiamError::Certificate(e.to_string()))?;
+
+                let public_cert_pem = cert.pem();
+                let fingerprint = compute_fingerprint(cert.der());
+                Ok((private_key_pem, public_cert_pem, fingerprint))
+            })
+            .await
+            .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??;
 
         let enc_key = self.config.encryption_key.ok_or_else(|| {
             AxiamError::Internal(
@@ -135,11 +161,6 @@ fn generate_keypair(algorithm: &KeyAlgorithm) -> AxiamResult<KeyPair> {
 fn compute_fingerprint(der: &[u8]) -> String {
     let hash = Sha256::digest(der);
     hex::encode(hash)
-}
-
-/// Convert chrono DateTime to `time::OffsetDateTime` (used by rcgen).
-fn to_rcgen_time(dt: chrono::DateTime<chrono::Utc>) -> time::OffsetDateTime {
-    time::OffsetDateTime::from_unix_timestamp(dt.timestamp()).expect("valid timestamp")
 }
 
 /// Encrypt data with AES-256-GCM. The 12-byte nonce is prepended to the

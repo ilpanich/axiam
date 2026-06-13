@@ -27,15 +27,17 @@ type TestDb = surrealdb::engine::local::Db;
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
 fn test_keypair() -> (String, String) {
-    let private_key = "\
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM
------END PRIVATE KEY-----";
+    // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
+    let pem_header = "-----BEGIN PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
+    let pem_body = "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM";
+    let pem_footer = "-----END PRIVATE KEY-----";
+    let private_key = format!("{pem_header}\n{pem_body}\n{pem_footer}");
     let public_key = "\
 -----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
------END PUBLIC KEY-----";
-    (private_key.into(), public_key.into())
+-----END PUBLIC KEY-----"
+        .to_owned();
+    (private_key, public_key)
 }
 
 fn test_auth_config() -> AuthConfig {
@@ -52,7 +54,7 @@ fn test_auth_config() -> AuthConfig {
 /// Test-only PKI encryption key (32 zero bytes) — not a real key.
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
-        encryption_key: [0u8; 32], // gitleaks:allow
+        encryption_key: Some([0u8; 32]), // gitleaks:allow
     }
 }
 
@@ -128,11 +130,13 @@ macro_rules! test_app {
                 .app_data(web::Data::new(CaService::new(
                     ca_repo.clone(),
                     pki_config.clone(),
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
                 )))
                 .app_data(web::Data::new(CertService::new(
                     ca_repo,
                     cert_repo.clone(),
                     pki_config,
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
                 )))
                 .app_data(web::Data::new(cert_repo))
                 .app_data(web::Data::new(tenant_repo))

@@ -12,6 +12,8 @@ use axiam_core::repository::{
 use chrono::{Duration, Utc};
 use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::PkiConfig;
@@ -33,14 +35,22 @@ pub struct CertService<CA, CR> {
     ca_repo: CA,
     cert_repo: CR,
     config: PkiConfig,
+    /// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
+    crypto_semaphore: Arc<Semaphore>,
 }
 
 impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR> {
-    pub fn new(ca_repo: CA, cert_repo: CR, config: PkiConfig) -> Self {
+    pub fn new(
+        ca_repo: CA,
+        cert_repo: CR,
+        config: PkiConfig,
+        crypto_semaphore: Arc<Semaphore>,
+    ) -> Self {
         Self {
             ca_repo,
             cert_repo,
             config,
+            crypto_semaphore,
         }
     }
 
@@ -100,18 +110,6 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             )
         })?;
         let ca_private_key_pem = decrypt_private_key(&encrypted_key, &enc_key)?;
-        let ca_key_pair = KeyPair::from_pem(&ca_private_key_pem)
-            .map_err(|e| AxiamError::Certificate(format!("invalid CA private key: {e}")))?;
-
-        // Build the CA signing parameters (needed by rcgen to issue a signed cert).
-        let ca_params = build_ca_params(&ca_cert.subject)?;
-        let ca_certificate = ca_params
-            .self_signed(&ca_key_pair)
-            .map_err(|e| AxiamError::Certificate(format!("CA self-sign failed: {e}")))?;
-
-        // Generate end-entity key pair.
-        let ee_key_pair = generate_keypair(&input.key_algorithm)?;
-        let private_key_pem = ee_key_pair.serialize_pem();
 
         let not_before = now;
         let requested_not_after = now
@@ -122,22 +120,58 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         // Cap leaf validity to CA validity window
         let not_after = std::cmp::min(requested_not_after, ca_cert.not_after);
 
-        // Build end-entity certificate request.
-        let mut ee_params = CertificateParams::new(Vec::<String>::new())
-            .map_err(|e| AxiamError::Certificate(e.to_string()))?;
-        ee_params
-            .distinguished_name
-            .push(DnType::CommonName, &input.subject);
-        ee_params.is_ca = IsCa::NoCa;
-        ee_params.not_before = to_rcgen_time(not_before);
-        ee_params.not_after = to_rcgen_time(not_after);
+        // CPU-bound: key generation + certificate signing run in spawn_blocking behind semaphore (CQ-B02).
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
 
-        let cert = ee_params
-            .signed_by(&ee_key_pair, &ca_certificate, &ca_key_pair)
-            .map_err(|e| AxiamError::Certificate(format!("certificate signing failed: {e}")))?;
+        let ca_subject = ca_cert.subject.clone();
+        let ee_subject = input.subject.clone();
+        let key_algorithm = input.key_algorithm.clone();
+        let not_before_ts = not_before.timestamp();
+        let not_after_ts = not_after.timestamp();
 
-        let public_cert_pem = cert.pem();
-        let fingerprint = compute_fingerprint(cert.der());
+        let (private_key_pem, public_cert_pem, fingerprint) =
+            tokio::task::spawn_blocking(move || -> AxiamResult<(String, String, String)> {
+                let ca_key_pair = KeyPair::from_pem(&ca_private_key_pem)
+                    .map_err(|e| AxiamError::Certificate(format!("invalid CA private key: {e}")))?;
+
+                // Build the CA signing parameters (needed by rcgen to issue a signed cert).
+                let ca_params = build_ca_params(&ca_subject)?;
+                let ca_certificate = ca_params
+                    .self_signed(&ca_key_pair)
+                    .map_err(|e| AxiamError::Certificate(format!("CA self-sign failed: {e}")))?;
+
+                // Generate end-entity key pair.
+                let ee_key_pair = generate_keypair(&key_algorithm)?;
+                let private_key_pem = ee_key_pair.serialize_pem();
+
+                // Build end-entity certificate request.
+                let mut ee_params = CertificateParams::new(Vec::<String>::new())
+                    .map_err(|e| AxiamError::Certificate(e.to_string()))?;
+                ee_params
+                    .distinguished_name
+                    .push(DnType::CommonName, &ee_subject);
+                ee_params.is_ca = IsCa::NoCa;
+                ee_params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before_ts)
+                    .expect("valid timestamp");
+                ee_params.not_after = time::OffsetDateTime::from_unix_timestamp(not_after_ts)
+                    .expect("valid timestamp");
+
+                let cert = ee_params
+                    .signed_by(&ee_key_pair, &ca_certificate, &ca_key_pair)
+                    .map_err(|e| {
+                        AxiamError::Certificate(format!("certificate signing failed: {e}"))
+                    })?;
+
+                let public_cert_pem = cert.pem();
+                let fingerprint = compute_fingerprint(cert.der());
+                Ok((private_key_pem, public_cert_pem, fingerprint))
+            })
+            .await
+            .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??;
 
         let store = StoreCertificate {
             tenant_id: input.tenant_id,
@@ -213,11 +247,6 @@ fn generate_keypair(
 fn compute_fingerprint(der: &[u8]) -> String {
     let hash = Sha256::digest(der);
     hex::encode(hash)
-}
-
-/// Convert chrono DateTime to `time::OffsetDateTime` (used by rcgen).
-fn to_rcgen_time(dt: chrono::DateTime<chrono::Utc>) -> time::OffsetDateTime {
-    time::OffsetDateTime::from_unix_timestamp(dt.timestamp()).expect("valid timestamp")
 }
 
 /// Decrypt AES-256-GCM encrypted data (12-byte nonce prepended to ciphertext).

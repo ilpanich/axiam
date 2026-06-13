@@ -46,7 +46,8 @@ async fn mtls_authenticate_valid_cert_returns_device_identity() {
 
     // 1. Generate a CA
     let ca_repo = SurrealCaCertificateRepository::new(db.clone());
-    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config());
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config(), sem.clone());
     let ca = svc_ca
         .generate(CreateCaCertificate {
             organization_id: org_id,
@@ -59,7 +60,7 @@ async fn mtls_authenticate_valid_cert_returns_device_identity() {
 
     // 2. Issue a leaf cert
     let cert_repo = SurrealCertificateRepository::new(db.clone());
-    let svc_cert = CertService::new(ca_repo, cert_repo.clone(), test_pki_config());
+    let svc_cert = CertService::new(ca_repo, cert_repo.clone(), test_pki_config(), sem);
     let leaf = svc_cert
         .generate(
             org_id,
@@ -118,7 +119,8 @@ async fn mtls_rejects_unknown_fingerprint() {
     // Generate a CA and a cert — but do NOT register the leaf cert in the DB.
     // We generate a cert locally, get its PEM, then authenticate against an empty cert table.
     let ca_repo = SurrealCaCertificateRepository::new(db.clone());
-    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config());
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config(), sem.clone());
     let ca = svc_ca
         .generate(CreateCaCertificate {
             organization_id: org_id,
@@ -134,7 +136,7 @@ async fn mtls_rejects_unknown_fingerprint() {
     other_db.use_ns("test").use_db("test").await.unwrap();
     axiam_db::run_migrations(&other_db).await.unwrap();
     let other_ca_repo = SurrealCaCertificateRepository::new(other_db.clone());
-    let svc_ca2 = CaService::new(other_ca_repo.clone(), test_pki_config());
+    let svc_ca2 = CaService::new(other_ca_repo.clone(), test_pki_config(), sem.clone());
     let ca2 = svc_ca2
         .generate(CreateCaCertificate {
             organization_id: org_id,
@@ -146,7 +148,7 @@ async fn mtls_rejects_unknown_fingerprint() {
         .expect("second CA generation must succeed");
 
     let other_cert_repo = SurrealCertificateRepository::new(other_db);
-    let svc_cert2 = CertService::new(other_ca_repo, other_cert_repo, test_pki_config());
+    let svc_cert2 = CertService::new(other_ca_repo, other_cert_repo, test_pki_config(), sem);
     let leaf_not_registered = svc_cert2
         .generate(
             org_id,
@@ -295,7 +297,8 @@ async fn mtls_rejects_revoked_cert() {
 
     // Generate a CA and a leaf cert
     let ca_repo = SurrealCaCertificateRepository::new(db.clone());
-    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config());
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let svc_ca = CaService::new(ca_repo.clone(), test_pki_config(), sem.clone());
     let ca = svc_ca
         .generate(CreateCaCertificate {
             organization_id: org_id,
@@ -307,7 +310,7 @@ async fn mtls_rejects_revoked_cert() {
         .expect("CA must be created");
 
     let cert_repo = SurrealCertificateRepository::new(db.clone());
-    let svc_cert = CertService::new(ca_repo, cert_repo.clone(), test_pki_config());
+    let svc_cert = CertService::new(ca_repo, cert_repo.clone(), test_pki_config(), sem);
     let leaf = svc_cert
         .generate(
             org_id,

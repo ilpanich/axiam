@@ -150,6 +150,7 @@ fn make_auth_service(
         SurrealFederationLinkRepository::new(db.clone()),
         SurrealRefreshTokenRepository::new(db.clone()),
         auth.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
     )
 }
 

@@ -159,7 +159,7 @@ async fn cert_generate_rejects_expired_ca() {
     // then stored with a backdated not_after so CertService sees it as expired.
     use axiam_pki::ca::PkiConfig as Cfg;
     let temp_config = Cfg {
-        encryption_key: [0u8; 32],
+        encryption_key: Some([0u8; 32]), // gitleaks:allow
     };
     let svc_ca_temp = CaService::new(ca_repo.clone(), temp_config);
     let real_ca = svc_ca_temp

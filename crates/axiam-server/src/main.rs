@@ -328,25 +328,11 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to build WebauthnService");
     let mfa_method_service = MfaMethodService::new(user_repo.clone(), webauthn_cred_repo);
 
-    // PKI service — encryption key for CA private keys.
-    let pki_config = {
-        let key = if let Ok(hex_key) = std::env::var("AXIAM__PKI__ENCRYPTION_KEY") {
-            let bytes = hex::decode(&hex_key).expect(
-                "AXIAM__PKI__ENCRYPTION_KEY must be a 64-char hex string (32 bytes / 256 bits)",
-            );
-            let key: [u8; 32] = bytes
-                .try_into()
-                .expect("AXIAM__PKI__ENCRYPTION_KEY must be exactly 32 bytes (256 bits)");
-            key
-        } else {
-            tracing::warn!(
-                "AXIAM__PKI__ENCRYPTION_KEY not set — CA certificate generation will fail"
-            );
-            [0u8; 32]
-        };
-        PkiConfig {
-            encryption_key: key,
-        }
+    // PKI service — encryption key for CA private keys (SEC-012).
+    // Absent key → None; operations that encrypt private key material will fail fast
+    // with a clear error rather than silently using an all-zero key.
+    let pki_config = PkiConfig {
+        encryption_key: load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY"),
     };
     let cert_repo = SurrealCertificateRepository::new(db.client().clone());
     let ca_service = CaService::new(ca_cert_repo.clone(), pki_config.clone());

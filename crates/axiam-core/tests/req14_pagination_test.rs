@@ -44,6 +44,9 @@ fn pagination_limit_at_min() {
 /// construction must still work and may use any value the code needs.
 #[test]
 fn pagination_direct_construction_unaffected() {
-    let p = Pagination { offset: 0, limit: 500 };
+    let p = Pagination {
+        offset: 0,
+        limit: 500,
+    };
     assert_eq!(p.limit, 500, "direct struct construction is not clamped");
 }

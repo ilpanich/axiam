@@ -4,8 +4,8 @@
 //! the JSON body.  Small static bodies are available synchronously via
 //! `actix_web::body::to_bytes` which internally polls a `Bytes` body.
 
-use actix_web::{body::to_bytes, ResponseError};
 use actix_rt::System;
+use actix_web::{ResponseError, body::to_bytes};
 use axiam_api_rest::error::AxiamApiError;
 use axiam_core::error::AxiamError;
 

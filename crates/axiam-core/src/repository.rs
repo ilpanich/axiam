@@ -3,7 +3,7 @@
 //! All repository operations are async. Tenant-scoped repositories
 //! require a `tenant_id` parameter to enforce data isolation.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::error::AxiamResult;
@@ -45,11 +45,24 @@ use crate::models::{
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
 };
 
+/// Clamp a pagination limit to [1, 200] at deserialization time.
+///
+/// Prevents resource exhaustion from unbounded page requests (SEC-010/CQ-B30).
+/// Direct struct construction is unaffected — only the serde path clamps.
+fn clamp_pagination_limit<'de, D>(de: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = u64::deserialize(de)?;
+    Ok(raw.max(1).min(200))
+}
+
 /// Pagination parameters for list queries.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(default)]
 pub struct Pagination {
     pub offset: u64,
+    #[serde(deserialize_with = "clamp_pagination_limit")]
     pub limit: u64,
 }
 

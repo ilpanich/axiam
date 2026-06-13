@@ -1,12 +1,10 @@
 //! REQ-14 AC-3/AC-5 — sparse tenant settings propagation and idempotent migrations.
 
+use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::settings::{SetOrgSettings, SetTenantOverride, system_defaults};
 use axiam_core::models::tenant::CreateTenant;
-use axiam_core::models::organization::CreateOrganization;
 use axiam_core::repository::{OrganizationRepository, SettingsRepository, TenantRepository};
-use axiam_db::{
-    SurrealOrganizationRepository, SurrealSettingsRepository, SurrealTenantRepository,
-};
+use axiam_db::{SurrealOrganizationRepository, SurrealSettingsRepository, SurrealTenantRepository};
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -49,11 +47,14 @@ async fn settings_baseline_propagates() {
     // Set org baseline: pw_min_length = 10, mfa_enforced = false.
     let defaults = system_defaults();
     settings_repo
-        .set_org_settings(org.id, SetOrgSettings {
-            min_length: 10,
-            mfa_enforced: false,
-            ..defaults
-        })
+        .set_org_settings(
+            org.id,
+            SetOrgSettings {
+                min_length: 10,
+                mfa_enforced: false,
+                ..defaults
+            },
+        )
         .await
         .unwrap();
 
@@ -72,11 +73,14 @@ async fn settings_baseline_propagates() {
     // Change org baseline for field Y (pw_min_length) from 10 → 12.
     let defaults2 = system_defaults();
     settings_repo
-        .set_org_settings(org.id, SetOrgSettings {
-            min_length: 12, // changed baseline
-            mfa_enforced: false,
-            ..defaults2
-        })
+        .set_org_settings(
+            org.id,
+            SetOrgSettings {
+                min_length: 12, // changed baseline
+                mfa_enforced: false,
+                ..defaults2
+            },
+        )
         .await
         .unwrap();
 
@@ -128,7 +132,13 @@ async fn store_effective_propagates_baseline() {
     // Set org baseline: pw_min_length = 10.
     let d1 = system_defaults();
     settings_repo
-        .set_org_settings(org.id, SetOrgSettings { min_length: 10, ..d1 })
+        .set_org_settings(
+            org.id,
+            SetOrgSettings {
+                min_length: 10,
+                ..d1
+            },
+        )
         .await
         .unwrap();
 
@@ -152,7 +162,13 @@ async fn store_effective_propagates_baseline() {
     // Now change org baseline: pw_min_length = 14.
     let d2 = system_defaults();
     settings_repo
-        .set_org_settings(org.id, SetOrgSettings { min_length: 14, ..d2 })
+        .set_org_settings(
+            org.id,
+            SetOrgSettings {
+                min_length: 14,
+                ..d2
+            },
+        )
         .await
         .unwrap();
 
@@ -166,7 +182,10 @@ async fn store_effective_propagates_baseline() {
         "store_effective_tenant_settings must not snapshot stale org fields (CQ-B03)"
     );
     // Override still preserved.
-    assert!(effective.mfa.mfa_enforced, "mfa_enforced override must persist");
+    assert!(
+        effective.mfa.mfa_enforced,
+        "mfa_enforced override must persist"
+    );
 }
 
 /// CQ-B06: Migrations run twice without error (idempotent + transactional).

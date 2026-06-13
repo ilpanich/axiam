@@ -14,6 +14,7 @@ use crate::error::DbError;
 // Migration tracking
 // -----------------------------------------------------------------------
 
+/// DDL for the migration-tracking table (idempotent — all IF NOT EXISTS).
 const MIGRATION_TABLE_DDL: &str = "\
 DEFINE TABLE IF NOT EXISTS _migration SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON TABLE _migration TYPE int;
@@ -22,6 +23,9 @@ DEFINE FIELD IF NOT EXISTS applied_at ON TABLE _migration TYPE datetime \
     DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_migration_version ON TABLE _migration \
     COLUMNS version UNIQUE;
+DEFINE TABLE IF NOT EXISTS _migration_lock SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS locked_at ON TABLE _migration_lock TYPE datetime \
+    DEFAULT time::now();
 ";
 
 #[derive(Debug, SurrealValue)]
@@ -112,6 +116,11 @@ static MIGRATIONS: &[Migration] = &[
         version: 15,
         name: "phase5_email_gdpr",
         sql: SCHEMA_V15,
+    },
+    Migration {
+        version: 16,
+        name: "sparse_tenant_settings",
+        sql: SCHEMA_V16,
     },
 ];
 
@@ -968,20 +977,53 @@ DEFINE FIELD OVERWRITE kind ON TABLE email_template TYPE string
 ";
 
 // -----------------------------------------------------------------------
+// Schema v16 — sparse tenant settings (CQ-B03 / REQ-14 AC-3)
+// -----------------------------------------------------------------------
+//
+// Adds an `overrides_json` column to `security_settings` to persist only
+// the fields explicitly overridden by a tenant.  Org rows leave this
+// column `NONE`.  The repository uses it at read time instead of
+// diff-against-org so that an org baseline change propagates correctly to
+// tenants that did not explicitly override that field.
+
+const SCHEMA_V16: &str = "\
+DEFINE FIELD IF NOT EXISTS overrides_json ON TABLE security_settings \
+    TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------
 
 /// Run all pending migrations against the given SurrealDB client.
 ///
-/// Creates a `_migration` tracking table on first run, then applies
-/// each migration whose version exceeds the current maximum.
-/// All DEFINE statements are idempotent so re-running is safe.
+/// Creates `_migration` and `_migration_lock` tracking tables on first run,
+/// then applies each pending migration atomically: the schema DDL and the
+/// version-record INSERT are wrapped in a single `BEGIN TRANSACTION …
+/// COMMIT TRANSACTION` so that a mid-step failure leaves the row
+/// re-selectable (CQ-B06 / REQ-14 AC-5).
+///
+/// The `_migration_lock` record (`CREATE IF NOT EXISTS`) guards concurrent
+/// startup — only one process may hold the lock at a time.  The record is
+/// removed once migrations complete.
 pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbError> {
-    // Ensure migration tracking table exists (idempotent).
+    // Ensure migration-tracking tables exist (all DDL is IF NOT EXISTS).
     db.query(MIGRATION_TABLE_DDL)
         .await?
         .check()
         .map_err(|e| DbError::Migration(e.to_string()))?;
+
+    // Acquire a startup lock so that concurrent instances do not race on
+    // schema application.  UPSERT with a deterministic record ID is
+    // idempotent — if a lock record already exists this is a no-op.
+    db.query(
+        "BEGIN TRANSACTION; \
+         UPSERT _migration_lock:`startup` SET locked_at = time::now(); \
+         COMMIT TRANSACTION",
+    )
+    .await?
+    .check()
+    .map_err(|e| DbError::Migration(format!("failed to acquire _migration_lock: {e}")))?;
 
     // Determine current schema version.
     let mut result = db
@@ -997,26 +1039,28 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
                 name = migration.name,
                 "Applying migration"
             );
-            db.query(migration.sql).await?.check().map_err(|e| {
-                DbError::Migration(format!(
-                    "Migration v{} '{}' failed: {}",
-                    migration.version, migration.name, e,
-                ))
-            })?;
 
-            // Record the applied migration.
-            db.query(
-                "CREATE _migration SET version = $version, \
-                 name = $name",
-            )
-            .bind(("version", migration.version))
-            .bind(("name", migration.name))
-            .await?
-            .check()
-            .map_err(|e| {
+            // Wrap the schema DDL and the version-record INSERT in a single
+            // transaction (CQ-B06).  If the DDL succeeds but the INSERT
+            // fails, the whole block is rolled back and the migration will
+            // be retried on the next startup.
+            //
+            // SurrealDB v3 transaction slot offset: BEGIN = slot 0, first
+            // statement = slot 1, … (MEMORY.md).  We don't take() from the
+            // result; we only call .check() to surface errors.
+            let txn = format!(
+                "BEGIN TRANSACTION;\n\
+                 {};\n\
+                 CREATE _migration SET version = {v}, name = '{n}';\n\
+                 COMMIT TRANSACTION",
+                migration.sql,
+                v = migration.version,
+                n = migration.name,
+            );
+            db.query(&txn).await?.check().map_err(|e| {
                 DbError::Migration(format!(
-                    "Failed to record migration v{}: {}",
-                    migration.version, e,
+                    "Migration v{} '{}' failed (transaction rolled back): {}",
+                    migration.version, migration.name, e,
                 ))
             })?;
 
@@ -1026,6 +1070,12 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
             );
         }
     }
+
+    // Release the startup lock now that migrations are complete.
+    db.query("DELETE _migration_lock:`startup`")
+        .await?
+        .check()
+        .map_err(|e| DbError::Migration(format!("failed to release migration lock: {e}")))?;
 
     Ok(())
 }

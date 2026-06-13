@@ -172,6 +172,18 @@ async fn main() -> std::io::Result<()> {
     // Clamp cleanup interval to 60..=3600 seconds (T-04-35).
     config.cleanup_interval_secs = config.cleanup_interval_secs.clamp(60, 3600);
 
+    // Load auth pepper from env (REQ-14 AC-1). Plain string — no hex decode.
+    // The pepper is prepended to passwords before Argon2id hashing/verification.
+    // SECURITY: do NOT log the pepper value.
+    if let Ok(value) = std::env::var("AXIAM__AUTH__PEPPER") {
+        config.auth.pepper = Some(value);
+        tracing::info!("Auth pepper loaded");
+    } else {
+        tracing::info!(
+            "AXIAM__AUTH__PEPPER not set — password hashing will proceed without a pepper"
+        );
+    }
+
     // Load allow_missing_aud_as_user override (bool, default true).
     // The serde default already sets it to true; this allows an operator to
     // explicitly disable the back-compat window via env var.
@@ -293,7 +305,10 @@ async fn main() -> std::io::Result<()> {
     let db_handle = db.client().clone();
     let org_repo = SurrealOrganizationRepository::new(db.client().clone());
     let tenant_repo = SurrealTenantRepository::new(db.client().clone());
-    let user_repo = SurrealUserRepository::new(db.client().clone());
+    let user_repo = SurrealUserRepository::with_pepper(
+        db.client().clone(),
+        config.auth.pepper.clone().unwrap_or_default(),
+    );
     let group_repo = SurrealGroupRepository::new(db.client().clone());
     let role_repo = SurrealRoleRepository::new(db.client().clone());
     let permission_repo = SurrealPermissionRepository::new(db.client().clone());

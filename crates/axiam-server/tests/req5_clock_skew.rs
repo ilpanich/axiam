@@ -114,6 +114,7 @@ async fn make_oidc_svc(
         axiam_db::SurrealUserRepository::new(db.clone()),
         http_client,
         cache,
+        [0u8; 32], // gitleaks:allow
     )
 }
 

@@ -380,7 +380,7 @@ Plans:
 
 **Plans**: 6 plans in 4 waves
 
-- [ ] 10-01-PLAN.md — single password-hashing path + pepper wiring (CQ-B09/B01) [wave 1]
+- [x] 10-01-PLAN.md — single password-hashing path + pepper wiring (CQ-B09/B01) [wave 1]
 - [ ] 10-02-PLAN.md — load_key_from_env extraction + PKI fail-fast (CQ-B43, SEC-012) [wave 2]
 - [ ] 10-03-PLAN.md — async-safe crypto + tenant edge isolation + resource hierarchy (CQ-B02/B07/B08) [wave 3]
 - [ ] 10-04-PLAN.md — sparse settings, migrations, AMQP DLQ, GDPR correctness (CQ-B03/B05/B06/B38) [wave 3]
@@ -461,7 +461,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 7. Compliance Verification & Test Closure | 5/5 | Complete   | 2026-06-07 |
 | 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
 | 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
-| 10. High Remediation (Wave 2) | 0/0 | Pending | — |
+| 10. High Remediation (Wave 2) | 1/6 | In Progress|  |
 | 11. Medium Remediation (Wave 3) | 0/0 | Pending | — |
 | 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |
 

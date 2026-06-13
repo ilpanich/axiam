@@ -5,6 +5,7 @@ import { useAuthStore } from "@/stores/auth";
 import { Loader2 } from "lucide-react";
 import { router } from "./router";
 import { queryClient } from "@/lib/queryClient";
+import { Toaster } from "@/components/Toaster";
 
 // Public routes registered in `./router`:
 //   - /login               — sign-in flow
@@ -35,6 +36,7 @@ function App() {
       <AuthGate>
         <RouterProvider router={router} />
       </AuthGate>
+      <Toaster />
     </QueryClientProvider>
   );
 }

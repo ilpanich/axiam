@@ -17,6 +17,8 @@ import { Label } from "@/components/ui/label";
 import { List, Network, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ─── Resource type badge ──────────────────────────────────────────────────────
 
@@ -67,7 +69,24 @@ function ResourceFormFields({
   allResources,
   excludeId,
 }: ResourceFormFieldsProps) {
-  const availableParents = allResources.filter((r) => r.id !== excludeId);
+  // CQ-F12: exclude the resource itself and all its descendants to prevent cycles.
+  function getDescendantIds(rootId: string): Set<string> {
+    const ids = new Set<string>([rootId]);
+    const queue = [rootId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const r of allResources) {
+        if (r.parent_id === current && !ids.has(r.id)) {
+          ids.add(r.id);
+          queue.push(r.id);
+        }
+      }
+    }
+    return ids;
+  }
+
+  const excludedIds = excludeId ? getDescendantIds(excludeId) : new Set<string>();
+  const availableParents = allResources.filter((r) => !excludedIds.has(r.id));
 
   return (
     <>
@@ -161,6 +180,7 @@ type ViewMode = "tree" | "list";
 
 export function ResourcesPage() {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [viewMode, setViewMode] = useState<ViewMode>("tree");
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
 
@@ -193,9 +213,9 @@ export function ResourcesPage() {
       resetCreateForm();
     },
     onError: (err: unknown) => {
-      setCreateError(
-        err instanceof Error ? err.message : "Failed to create resource."
-      );
+      const msg = getApiErrorMessage(err);
+      setCreateError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -254,9 +274,9 @@ export function ResourcesPage() {
       setEditResource(null);
     },
     onError: (err: unknown) => {
-      setEditError(
-        err instanceof Error ? err.message : "Failed to update resource."
-      );
+      const msg = getApiErrorMessage(err);
+      setEditError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -304,6 +324,9 @@ export function ResourcesPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["resources"] });
       setDeleteResource(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
 

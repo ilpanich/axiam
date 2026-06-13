@@ -18,6 +18,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Eye, Lock, LockOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ─── Locked Badge ─────────────────────────────────────────────────────────────
 
@@ -219,6 +221,7 @@ function EditUserFields({
 export function UsersPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   // ─── Pagination + search + filter state ─────────────────────────────────────
   const [page, setPage] = useState(1);
@@ -228,6 +231,7 @@ export function UsersPage() {
   const { data, isLoading } = useQuery({
     queryKey: ["users", page, search],
     queryFn: () => userService.list(page, 20, search),
+    placeholderData: (prev) => prev,
   });
 
   const users = data?.items ?? [];
@@ -260,9 +264,9 @@ export function UsersPage() {
       resetCreateForm();
     },
     onError: (err: unknown) => {
-      setCreateError(
-        err instanceof Error ? err.message : "Failed to create user."
-      );
+      const msg = getApiErrorMessage(err);
+      setCreateError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -306,9 +310,9 @@ export function UsersPage() {
       setEditUser(null);
     },
     onError: (err: unknown) => {
-      setEditError(
-        err instanceof Error ? err.message : "Failed to update user."
-      );
+      const msg = getApiErrorMessage(err);
+      setEditError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -346,6 +350,9 @@ export function UsersPage() {
       void queryClient.invalidateQueries({ queryKey: ["users"] });
       setDeleteUser(null);
     },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
+    },
   });
 
   // ─── Unlock state ─────────────────────────────────────────────────────────────
@@ -356,6 +363,9 @@ export function UsersPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["users"] });
       setUserToUnlock(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
 

@@ -17,6 +17,8 @@ import { Label } from "@/components/ui/label";
 import { ShieldPlus } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 function isExpiringSoon(expiresAt: string): boolean {
   const diff = new Date(expiresAt).getTime() - Date.now();
@@ -124,6 +126,7 @@ function GenerateFields({
 
 export function CertificatesPage() {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   const { data: certificates = [], isLoading } = useQuery({
     queryKey: ["certificates"],
@@ -154,9 +157,9 @@ export function CertificatesPage() {
       setSecretOpen(true);
     },
     onError: (err: unknown) => {
-      setGenerateError(
-        err instanceof Error ? err.message : "Failed to generate certificate."
-      );
+      const msg = getApiErrorMessage(err);
+      setGenerateError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -202,6 +205,9 @@ export function CertificatesPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["certificates"] });
       setRevokeTarget(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
 

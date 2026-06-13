@@ -19,6 +19,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Eye, KeyRound, Lock } from "lucide-react";
 
 import { formatDate } from "@/lib/utils";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -264,6 +266,7 @@ function GenerateFields({
 
 export function PgpKeysPage() {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const { user } = useAuthStore();
   const currentUserId = user?.id ?? "";
 
@@ -295,9 +298,9 @@ export function PgpKeysPage() {
       setSecretOpen(true);
     },
     onError: (err: unknown) => {
-      setGenerateError(
-        err instanceof Error ? err.message : "Failed to generate PGP key."
-      );
+      const msg = getApiErrorMessage(err);
+      setGenerateError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -325,6 +328,9 @@ export function PgpKeysPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["pgp-keys"] });
       setRevokeTarget(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
 

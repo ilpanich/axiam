@@ -17,6 +17,8 @@ import { Label } from "@/components/ui/label";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ─── Action badge ─────────────────────────────────────────────────────────────
 
@@ -172,6 +174,7 @@ function PermissionFormFields({
 
 export function PermissionsPage() {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   const { data: permissions = [], isLoading } = useQuery({
     queryKey: ["permissions"],
@@ -207,9 +210,9 @@ export function PermissionsPage() {
       resetCreateForm();
     },
     onError: (err: unknown) => {
-      setCreateError(
-        err instanceof Error ? err.message : "Failed to create permission."
-      );
+      const msg = getApiErrorMessage(err);
+      setCreateError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -268,9 +271,9 @@ export function PermissionsPage() {
       setEditPermission(null);
     },
     onError: (err: unknown) => {
-      setEditError(
-        err instanceof Error ? err.message : "Failed to update permission."
-      );
+      const msg = getApiErrorMessage(err);
+      setEditError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -320,6 +323,9 @@ export function PermissionsPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["permissions"] });
       setDeletePermission(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
 

@@ -176,26 +176,28 @@ function QuickAction({ icon, label, to, iconColor }: QuickActionProps) {
 export function DashboardPage() {
   const { user, tenantSlug, orgSlug } = useAuthStore();
 
+  // CQ-F10: query keys align with CRUD page invalidations so dashboard counts
+  // refresh after create/update/delete on the respective list pages.
   const results = useQueries({
     queries: [
       {
-        queryKey: ["dashboard-users"],
+        queryKey: ["users", 1, ""],
         queryFn: () => userService.list(1, 1, ""),
       },
       {
-        queryKey: ["dashboard-groups"],
+        queryKey: ["groups"],
         queryFn: () => groupService.list(),
       },
       {
-        queryKey: ["dashboard-roles"],
+        queryKey: ["roles"],
         queryFn: () => roleService.list(),
       },
       {
-        queryKey: ["dashboard-certs"],
+        queryKey: ["certificates"],
         queryFn: () => certificateService.list(),
       },
       {
-        queryKey: ["dashboard-audit"],
+        queryKey: ["audit-logs"],
         queryFn: () => auditService.list({ page: 1, per_page: 8 }),
       },
     ],

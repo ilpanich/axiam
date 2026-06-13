@@ -18,6 +18,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { cn, formatDate } from "@/lib/utils";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ─── Type badge ───────────────────────────────────────────────────────────────
 
@@ -92,6 +94,7 @@ interface CreateFieldsProps {
   onScopesChange: (v: string) => void;
   error?: string;
   idPrefix: string;
+  isEditMode?: boolean;
 }
 
 function CreateFields({
@@ -119,6 +122,7 @@ function CreateFields({
   onScopesChange,
   error,
   idPrefix,
+  isEditMode = false,
 }: CreateFieldsProps) {
   return (
     <>
@@ -140,13 +144,16 @@ function CreateFields({
           id={`${idPrefix}-type`}
           value={type}
           onChange={(e) => onTypeChange(e.target.value as "saml" | "oidc")}
+          disabled={isEditMode}
           className={cn(
             "w-full rounded-md px-3 py-2 text-sm",
             "bg-white/5 border border-primary/20 text-foreground",
             "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
             "transition-colors duration-200",
+            isEditMode && "opacity-60 cursor-not-allowed",
           )}
           aria-label="Provider type"
+          title={isEditMode ? "Provider type cannot be changed after creation" : undefined}
         >
           <option value="saml" className="bg-[#0d0d2b] text-foreground">
             SAML
@@ -155,6 +162,11 @@ function CreateFields({
             OIDC (OpenID Connect)
           </option>
         </select>
+        {isEditMode && (
+          <p className="text-xs text-muted-foreground">
+            Provider type cannot be changed after creation.
+          </p>
+        )}
       </div>
 
       <div className="space-y-2">
@@ -380,6 +392,7 @@ function parseScopes(raw: string): string[] {
 
 export function FederationPage() {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   const { data: providers = [], isLoading } = useQuery({
     queryKey: ["federation-providers"],
@@ -412,11 +425,9 @@ export function FederationPage() {
       createForm.reset();
     },
     onError: (err: unknown) => {
-      createForm.setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to create federation provider.",
-      );
+      const msg = getApiErrorMessage(err);
+      createForm.setError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -492,11 +503,9 @@ export function FederationPage() {
       setEditProvider(null);
     },
     onError: (err: unknown) => {
-      editForm.setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to update federation provider.",
-      );
+      const msg = getApiErrorMessage(err);
+      editForm.setError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -553,6 +562,9 @@ export function FederationPage() {
         queryKey: ["federation-providers"],
       });
       setDeleteProvider(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -800,6 +812,7 @@ export function FederationPage() {
           onScopesChange={editForm.setScopes}
           error={editForm.error}
           idPrefix="edit"
+          isEditMode={true}
         />
         {/* Status toggle only in edit */}
         <ToggleField

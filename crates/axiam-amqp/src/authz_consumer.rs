@@ -172,10 +172,12 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
                 error!(error = %e, delivery_tag = tag, "Failed to ack delivery");
             }
         } else {
+            // requeue: false — dead-letter the poison message instead of
+            // hot-looping (CQ-B05 / REQ-14 AC-5).
             let _ = delivery
                 .acker
                 .nack(BasicNackOptions {
-                    requeue: true,
+                    requeue: false,
                     ..BasicNackOptions::default()
                 })
                 .await;

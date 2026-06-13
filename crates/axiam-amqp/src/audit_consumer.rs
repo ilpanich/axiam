@@ -135,9 +135,17 @@ where
             error!(
                 error = %e,
                 delivery_tag = tag,
-                "Failed to persist audit event"
+                "Failed to persist audit event, nacking (dead-letter)"
             );
-            let _ = delivery.acker.nack(BasicNackOptions::default()).await;
+            // requeue: false — dead-letter the message instead of silently
+            // dropping it or requeuing (CQ-B05 / REQ-14 AC-5).
+            let _ = delivery
+                .acker
+                .nack(BasicNackOptions {
+                    requeue: false,
+                    ..BasicNackOptions::default()
+                })
+                .await;
             continue;
         }
 

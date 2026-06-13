@@ -421,7 +421,7 @@ Plans:
 
 **Wave 2** *(after 11-01)*
 
-- [ ] 11-02-PLAN.md — Webhook SSRF+secret encrypt, mTLS chain, CertService dedup, gRPC/OAuth2 limits, MFA/oauth2 rate limits, XFF hop, Ed25519 parse-once, AMQP HMAC, JWKS cap (SEC-019/020/022/024/025/031/048/054/055, CQ-B14/B15/B18/B19/B20/B44)
+- [x] 11-02-PLAN.md — Webhook SSRF+secret encrypt, mTLS chain, CertService dedup, gRPC/OAuth2 limits, MFA/oauth2 rate limits, XFF hop, Ed25519 parse-once, AMQP HMAC, JWKS cap (SEC-019/020/022/024/025/031/048/054/055, CQ-B14/B15/B18/B19/B20/B44)
 
 **Wave 3** *(after 11-02 — shares server.rs)*
 
@@ -479,7 +479,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
 | 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
 | 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
-| 11. Medium Remediation (Wave 3) | 3/5 | In Progress|  |
+| 11. Medium Remediation (Wave 3) | 4/5 | In Progress|  |
 | 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |
 
 ---

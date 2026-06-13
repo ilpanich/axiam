@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 11-05-PLAN.md
-last_updated: "2026-06-13T16:33:29.976Z"
+stopped_at: Completed 11-02-PLAN.md
+last_updated: "2026-06-13T17:51:50.790Z"
 last_activity: 2026-06-13
 progress:
   total_phases: 12
   completed_phases: 10
   total_plans: 53
-  completed_plans: 51
+  completed_plans: 52
   percent: 83
 ---
 
@@ -26,12 +26,12 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 11 (medium-remediation) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Next: Execute Phase 10 — `/gsd:execute-phase 10` (run `/clear` first)
 Status: Ready to execute
 Last activity: 2026-06-13
 
-Progress: [██████████] 96%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -85,6 +85,7 @@ Progress: [██████████] 96%
 | Phase 10 P05 | 7200 | 3 tasks | 19 files |
 | Phase 11-medium-remediation P11-01 | 60m | 3 tasks | 17 files |
 | Phase 11 P05 | 391 | 3 tasks | 22 files |
+| Phase 11 P11-02 | 120 | 4 tasks | 21 files |
 
 ## Accumulated Context
 
@@ -151,6 +152,8 @@ Recent decisions affecting current work:
 - [Phase ?]: Module-level singleton dispatch for toast avoids React context overhead
 - [Phase ?]: ProtectedRoute extracted to components/ to satisfy react-refresh ESLint rule; backend RBAC remains authoritative
 - [Phase ?]: BFS traversal for resource descendant exclusion prevents circular picks in hierarchy picker
+- [Phase 11]: 11-02: Ed25519 parse-once cached in AuthConfig (axiam-auth) not axiam-oauth2 — the real PEM-parse site (CQ-B14)
+- [Phase 11]: 11-02: mTLS chain verify fails closed when issuing CA cannot be resolved (SEC-024)
 
 ### Pending Todos
 
@@ -170,6 +173,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-13T16:33:29.962Z
-Stopped at: Completed 11-05-PLAN.md
+Last session: 2026-06-13T17:51:29.439Z
+Stopped at: Completed 11-02-PLAN.md
 Resume file: None

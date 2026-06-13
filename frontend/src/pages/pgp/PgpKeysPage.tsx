@@ -5,6 +5,7 @@ import {
   type PgpKey,
   type GeneratePgpKeyPayload,
 } from "@/services/pgp";
+import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -263,9 +264,8 @@ function GenerateFields({
 
 export function PgpKeysPage() {
   const queryClient = useQueryClient();
-
-  // Current user id placeholder — in production this would come from auth store
-  const currentUserId = "current-user";
+  const { user } = useAuthStore();
+  const currentUserId = user?.id ?? "";
 
   const { data: pgpKeys = [], isLoading } = useQuery({
     queryKey: ["pgp-keys"],
@@ -504,6 +504,7 @@ export function PgpKeysPage() {
         title="Revoke PGP Key"
         description={`Are you sure you want to revoke the key "${revokeTarget?.fingerprint}"? This action cannot be undone.`}
         isLoading={revokeMutation.isPending}
+        confirmLabel="Revoke"
       />
     </div>
   );

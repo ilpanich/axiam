@@ -5,6 +5,7 @@ import axios, {
   type AxiosError,
 } from "axios";
 import { useAuthStore } from "@/stores/auth";
+import { queryClient } from "@/lib/queryClient";
 
 const api: AxiosInstance = axios.create({
   baseURL: "/",
@@ -105,6 +106,7 @@ api.interceptors.response.use(
         return api(originalRequest);
       } catch (refreshError) {
         processQueue(refreshError);
+        queryClient.clear();
         useAuthStore.getState().clearAuth();
         window.location.href = "/login";
         return Promise.reject(refreshError);

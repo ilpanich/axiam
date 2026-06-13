@@ -42,6 +42,7 @@ function buildPolicyRules(
   return rules;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function checkPasswordPolicy(
   password: string,
   minLength = 12,

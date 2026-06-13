@@ -89,6 +89,7 @@ function TotpSetupDialog({
 
   useEffect(() => {
     if (open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCode("");
       setCopied(false);
       setTimeout(() => inputRef.current?.focus(), 100);
@@ -421,6 +422,7 @@ export function MfaManagementPage() {
         title="Remove MFA Method"
         description={`Remove "${deleteTarget?.name ?? "this method"}"? You can re-add it later.`}
         isLoading={deleteMutation.isPending}
+        confirmLabel="Remove"
       />
 
       {/* TOTP Setup Dialog */}

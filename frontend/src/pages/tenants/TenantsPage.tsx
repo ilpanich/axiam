@@ -13,7 +13,6 @@ import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { StatusBadge } from "@/components/StatusBadge";
 import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -373,11 +372,6 @@ export function TenantsPage() {
           {row.org_name}
         </span>
       ),
-    },
-    {
-      key: "status",
-      header: "Status",
-      render: () => <StatusBadge status="active" />,
     },
     {
       key: "created_at",

@@ -21,6 +21,12 @@ use crate::error::AuthError;
 use crate::token::AUD_USER;
 use crate::{password, token, totp};
 
+/// Constant Argon2id hash of "dummy" used for timing equalization on
+/// user-not-found (SEC-026). Must be a valid Argon2 PHC string so that
+/// `verify_password` executes the full Argon2 computation.
+const DUMMY_HASH: &str =
+    "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaasfNiu6f6WSz0n28";
+
 // -----------------------------------------------------------------------
 // Input / output types
 // -----------------------------------------------------------------------
@@ -201,11 +207,28 @@ impl<
             .await
         {
             Ok(u) => u,
-            Err(AxiamError::NotFound { .. }) => self
-                .user_repo
-                .get_by_email(input.tenant_id, &input.username_or_email)
-                .await
-                .map_err(|_| AuthError::InvalidCredentials)?,
+            Err(AxiamError::NotFound { .. }) => {
+                match self
+                    .user_repo
+                    .get_by_email(input.tenant_id, &input.username_or_email)
+                    .await
+                {
+                    Ok(u) => u,
+                    Err(AxiamError::NotFound { .. }) => {
+                        // SEC-026: timing equalization — run a dummy Argon2 verify so
+                        // user-not-found takes the same time as wrong-password (ASVS V2).
+                        let _permit = self.crypto_semaphore.acquire().await.ok();
+                        let pepper_owned = self.config.pepper.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            password::verify_password("dummy", DUMMY_HASH, pepper_owned.as_deref())
+                        })
+                        .await;
+                        return Err(AuthError::InvalidCredentials.into());
+                    }
+                    // CQ-B12: propagate real DB errors instead of swallowing them.
+                    Err(e) => return Err(e),
+                }
+            }
             Err(e) => return Err(e),
         };
 
@@ -666,6 +689,21 @@ impl<
             return Err(AuthError::InvalidCredentials.into());
         }
 
+        // 1b. SEC-028: Block reset to current password — reject if new password
+        //     matches the stored hash. Runs in spawn_blocking (CPU-bound Argon2).
+        let new_pw_owned = new_password.to_string();
+        let current_hash_owned = user.password_hash.clone();
+        let pepper_owned2 = self.config.pepper.clone();
+        let is_same = tokio::task::spawn_blocking(move || {
+            password::verify_password(&new_pw_owned, &current_hash_owned, pepper_owned2.as_deref())
+        })
+        .await
+        .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
+        .map_err(|e| AxiamError::Crypto(e.to_string()))?;
+        if is_same {
+            return Err(AuthError::PasswordReusedCurrent.into());
+        }
+
         // 2. Evaluate new password against policy.
         let check = crate::policy::evaluate_password(
             new_password,
@@ -997,31 +1035,15 @@ impl<
         tenant_id: Uuid,
         user: &axiam_core::models::user::User,
     ) -> AxiamResult<()> {
-        let new_count = user.failed_login_attempts + 1;
-        let now = Utc::now();
-
-        let locked_until = if new_count >= self.config.max_failed_login_attempts {
-            let exponent = (new_count - self.config.max_failed_login_attempts) as f64;
-            let duration_secs = (self.config.lockout_duration_secs as f64
-                * self.config.lockout_backoff_multiplier.powf(exponent))
-            .min(self.config.max_lockout_duration_secs as f64)
-                as i64;
-            Some(Some(now + Duration::seconds(duration_secs)))
-        } else {
-            None
-        };
-
-        let mut update = UpdateUser {
-            failed_login_attempts: Some(new_count),
-            last_failed_login_at: Some(Some(now)),
-            ..Default::default()
-        };
-        if let Some(lu) = locked_until {
-            update.locked_until = Some(lu);
-        }
-
-        self.user_repo.update(tenant_id, user.id, update).await?;
-        Ok(())
+        // SEC-032: atomic increment — single SurrealQL UPDATE avoids TOCTOU race.
+        self.user_repo
+            .increment_failed_logins(
+                tenant_id,
+                user.id,
+                self.config.max_failed_login_attempts,
+                self.config.lockout_duration_secs as i64,
+            )
+            .await
     }
 
     async fn reset_failed_logins(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {

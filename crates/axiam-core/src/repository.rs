@@ -173,6 +173,18 @@ pub trait UserRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<User>>> + Send;
+
+    /// Atomically increment the failed-login counter (SEC-032).
+    ///
+    /// Avoids read-modify-write TOCTOU by delegating the increment to the DB
+    /// layer via a single `UPDATE ... SET field += 1` statement.
+    fn increment_failed_logins(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        lockout_threshold: u32,
+        lockout_duration_secs: i64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 pub trait RoleRepository: Send + Sync {

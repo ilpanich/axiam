@@ -1511,3 +1511,102 @@ async fn login_after_reset_requires_setup_again() {
         "expected MfaSetupRequired after reset, got {result:?}"
     );
 }
+
+// -----------------------------------------------------------------------
+// T2.x — change_password: reset-to-current rejected (SEC-028)
+// -----------------------------------------------------------------------
+
+/// SEC-028: changing to the same password is rejected with Validation error.
+#[tokio::test]
+async fn change_password_rejects_reuse_of_current() {
+    use axiam_core::models::settings::PasswordPolicy;
+    use axiam_db::repository::SurrealPasswordHistoryRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let config = test_config();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config.clone(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    // Get a valid session so we have a session_id for change_password.
+    let out = login_alice(&svc, tenant_id, org_id).await;
+    let policy = PasswordPolicy {
+        min_length: 12,
+        require_uppercase: false,
+        require_lowercase: false,
+        require_digits: false,
+        require_symbols: false,
+        password_history_count: 0,
+        hibp_check_enabled: false,
+    };
+    let history_repo = SurrealPasswordHistoryRepository::new(db.clone());
+
+    // Attempting to change to the *same* password must fail.
+    let err = svc
+        .change_password(
+            tenant_id,
+            user_id,
+            out.session_id,
+            "correct-horse-battery",
+            "correct-horse-battery",
+            &policy,
+            &history_repo,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, AxiamError::Validation { .. }),
+        "reset-to-current must return Validation error, got: {err:?}"
+    );
+}
+
+/// Changing to a *new* password succeeds (baseline, regression guard).
+#[tokio::test]
+async fn change_password_new_password_succeeds() {
+    use axiam_core::models::settings::PasswordPolicy;
+    use axiam_db::repository::SurrealPasswordHistoryRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let config = test_config();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        config.clone(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let out = login_alice(&svc, tenant_id, org_id).await;
+    let policy = PasswordPolicy {
+        min_length: 12,
+        require_uppercase: false,
+        require_lowercase: false,
+        require_digits: false,
+        require_symbols: false,
+        password_history_count: 0,
+        hibp_check_enabled: false,
+    };
+    let history_repo = SurrealPasswordHistoryRepository::new(db.clone());
+
+    // A different, policy-compliant password must succeed.
+    svc.change_password(
+        tenant_id,
+        user_id,
+        out.session_id,
+        "correct-horse-battery",
+        "NewStrongPassword123!",
+        &policy,
+        &history_repo,
+    )
+    .await
+    .expect("changing to a new password should succeed");
+}

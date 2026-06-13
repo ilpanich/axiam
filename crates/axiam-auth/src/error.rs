@@ -67,6 +67,9 @@ pub enum AuthError {
 
     #[error("cryptography error: {0}")]
     Crypto(String),
+
+    #[error("new password must differ from the current password")]
+    PasswordReusedCurrent,
 }
 
 impl From<AuthError> for AxiamError {
@@ -102,6 +105,9 @@ impl From<AuthError> for AxiamError {
                 reason: err.to_string(),
             },
             AuthError::Crypto(msg) => AxiamError::Crypto(msg),
+            AuthError::PasswordReusedCurrent => AxiamError::Validation {
+                message: err.to_string(),
+            },
         }
     }
 }

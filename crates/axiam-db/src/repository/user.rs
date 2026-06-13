@@ -480,6 +480,39 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             limit: pagination.limit,
         })
     }
+
+    async fn increment_failed_logins(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        lockout_threshold: u32,
+        lockout_duration_secs: i64,
+    ) -> AxiamResult<()> {
+        let user_id_str = user_id.to_string();
+        let tenant_id_str = tenant_id.to_string();
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) \
+                 SET \
+                   failed_login_attempts += 1, \
+                   last_failed_login_at = time::now(), \
+                   locked_until = IF (failed_login_attempts >= $threshold) \
+                     THEN time::now() + duration::secs($lockout_secs) \
+                     ELSE locked_until \
+                   END, \
+                   updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id_str))
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("threshold", lockout_threshold))
+            .bind(("lockout_secs", lockout_duration_secs))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

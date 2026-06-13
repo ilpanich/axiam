@@ -1016,11 +1016,28 @@ mod tests {
         async fn delete(&self, _: Uuid, _: Uuid) -> axiam_core::error::AxiamResult<()> {
             unimplemented!()
         }
+        async fn update_totp_step(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: u64,
+        ) -> axiam_core::error::AxiamResult<()> {
+            unimplemented!()
+        }
         async fn list(
             &self,
             _: Uuid,
             _: Pagination,
         ) -> axiam_core::error::AxiamResult<PaginatedResult<User>> {
+            unimplemented!()
+        }
+        async fn increment_failed_logins(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: u32,
+            _: i64,
+        ) -> axiam_core::error::AxiamResult<()> {
             unimplemented!()
         }
     }

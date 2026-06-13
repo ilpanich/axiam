@@ -15,8 +15,10 @@ services:
       dockerfile: docker/Dockerfile.server
     container_name: axiam-server
     ports:
-      - "8090:8090"   # REST API
-      - "50051:50051" # gRPC
+      # SEC-016: 8090 is published for local dev/testing only.
+      # In production (k8s), the server is ClusterIP-only — remove this mapping.
+      - "8090:8090"   # REST API — local-testing only; unpublish in production k8s
+      - "50051:50051" # gRPC — local-testing only; unpublish in production k8s
     # NOTE on naming: load_config() in crates/axiam-server/src/main.rs calls
     # `.with_prefix("AXIAM").separator("__")` without `.prefix_separator(_)`,
     # so config-rs 0.15 uses `__` as BOTH the prefix separator and the nested
@@ -28,11 +30,14 @@ services:
       # Passing a websocket URL scheme makes the SDK try to resolve the scheme
       # as a hostname and fail with a confusing DNS error.
       AXIAM__DB__URL: "surrealdb:8000"
-      AXIAM__DB__USERNAME: "root"
-      AXIAM__DB__PASSWORD: "root"
+      # SEC-023: No literal default credentials. Run `just prod-up` which sources
+      # docker/.secrets/db_credentials before starting compose.
+      AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?SurrealDB username required - run 'just prod-up' or export AXIAM__DB__USERNAME}"
+      AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?SurrealDB password required - run 'just prod-up' or export AXIAM__DB__PASSWORD}"
       AXIAM__DB__NAMESPACE: "axiam"
       AXIAM__DB__DATABASE: "axiam"
-      AXIAM__AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
+      # SEC-023: AMQP URL must not embed literal credentials.
+      AXIAM__AMQP__URL: "amqp://${RABBITMQ_DEFAULT_USER:?RabbitMQ username required}:${RABBITMQ_DEFAULT_PASS:?RabbitMQ password required}@rabbitmq:5672"
       AXIAM__SERVER__HOST: "0.0.0.0"
       AXIAM__GRPC__HOST: "0.0.0.0"
       # JWT signing keys — provided by `just prod-up` from docker/.secrets/jwt_ed25519*.pem.
@@ -99,7 +104,7 @@ services:
     # Persist the datastore on the mounted volume. Without a PATH arg the
     # default is `memory`, which leaves the volume untouched and wipes all
     # state on every container restart.
-    command: start --user root --pass root --log info surrealkv:/data/axiam.db
+    command: start --user ${AXIAM__DB__USERNAME:?SurrealDB username required} --pass ${AXIAM__DB__PASSWORD:?SurrealDB password required} --log info surrealkv:/data/axiam.db
     volumes:
       - surrealdb-data:/data
     healthcheck:
@@ -118,8 +123,9 @@ services:
     image: rabbitmq:4-management-alpine
     container_name: axiam-rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: axiam
-      RABBITMQ_DEFAULT_PASS: axiam
+      # SEC-023: No literal default credentials.
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:?RabbitMQ username required - run 'just prod-up' or export RABBITMQ_DEFAULT_USER}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:?RabbitMQ password required - run 'just prod-up' or export RABBITMQ_DEFAULT_PASS}"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:

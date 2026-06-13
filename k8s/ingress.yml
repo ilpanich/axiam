@@ -25,6 +25,22 @@ spec:
                 name: axiam-server
                 port:
                   number: 8090
+          # SEC-016: OAuth2 authorization server endpoints
+          - path: /oauth2
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 8090
+          # SEC-016: OIDC/OAuth2 discovery endpoints (/.well-known/openid-configuration etc.)
+          - path: /.well-known
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 8090
           - path: /
             pathType: Prefix
             backend:

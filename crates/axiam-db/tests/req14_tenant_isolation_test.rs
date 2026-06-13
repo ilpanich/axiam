@@ -36,33 +36,6 @@ async fn setup_db() -> Surreal<Db> {
     db
 }
 
-async fn create_tenant(db: &Surreal<Db>, org_id: uuid::Uuid, slug: &str) -> uuid::Uuid {
-    let org_repo = SurrealOrganizationRepository::new(db.clone());
-    let tenant_repo = SurrealTenantRepository::new(db.clone());
-    let org = org_repo
-        .create(CreateOrganization {
-            name: slug.to_string(),
-            slug: slug.to_string(),
-            metadata: None,
-        })
-        .await
-        .unwrap_or_else(|_| {
-            // org may already exist — fetch via setup
-            panic!("org create failed for slug {slug}")
-        });
-    let _ = org_id; // org_id provided but we create a new one here
-    let tenant = tenant_repo
-        .create(CreateTenant {
-            organization_id: org.id,
-            name: format!("Tenant {slug}"),
-            slug: slug.to_string(),
-            metadata: None,
-        })
-        .await
-        .unwrap();
-    tenant.id
-}
-
 /// Create org + two tenants. Returns (org_id, tenant_a_id, tenant_b_id).
 async fn setup_two_tenants(db: &Surreal<Db>) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid) {
     let org_repo = SurrealOrganizationRepository::new(db.clone());

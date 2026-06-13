@@ -416,7 +416,7 @@ Plans:
 **Wave 1**
 
 - [x] 11-01-PLAN.md — Shared repo helpers + AlreadyExists→409 + edge indexes + email_config UPSERT + GDPR handler cleanup + request DTOs (CQ-B10/B11/B12/B17/B25/B26/B39/B41)
-- [ ] 11-04-PLAN.md — k8s AXIAM__ env keys + PSA restricted + receiver NetworkPolicies + nginx/ingress oauth2/.well-known proxy + prod compose creds (SEC-016/023/052/053)
+- [x] 11-04-PLAN.md — k8s AXIAM__ env keys + PSA restricted + receiver NetworkPolicies + nginx/ingress oauth2/.well-known proxy + prod compose creds (SEC-016/023/052/053)
 - [ ] 11-05-PLAN.md — Frontend medium: toast/getApiErrorMessage, validation, resource picker, federation edit lock, pagination, shared components/hooks/types, route guards+403, login MFA branches, slug restore (CQ-F09..F18/F29/F30/F31)
 
 **Wave 2** *(after 11-01)*
@@ -479,7 +479,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
 | 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
 | 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
-| 11. Medium Remediation (Wave 3) | 1/5 | In Progress|  |
+| 11. Medium Remediation (Wave 3) | 2/5 | In Progress|  |
 | 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |
 
 ---

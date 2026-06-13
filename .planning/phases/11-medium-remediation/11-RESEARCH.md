@@ -813,17 +813,22 @@ pod-security.kubernetes.io/enforce-version: v1.29
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **CQ-B43 AppState module:** The finding says "replace ~45 `app_data` registrations" with an `AppState` struct. Is this in scope for Phase 11 or deferred to Phase 12? The `load_key_from_env` part is already done (main.rs). The 45-registration refactor is large and carries regression risk — recommend descoping to Phase 12 unless the finding is blocking.
+   - **RESOLVED:** Deferred to Phase 12 per ROADMAP deferred list. `load_key_from_env` already satisfied (Phase 10); the 45-registration refactor is out of Phase 11 scope.
 
 2. **SEC-022 AMQP: signed payloads vs per-tenant queues:** Per-tenant queues require RabbitMQ vhost/ACL config that is not currently provisioned. Signed HMAC payloads are simpler and implementable in-process. Recommend signed payloads for Phase 11; per-tenant queues as a Phase 12 enhancement.
+   - **RESOLVED:** Signed HMAC payloads chosen — implemented in plan 11-02 (AMQP authz/mail message authentication). Per-tenant queues deferred to Phase 12.
 
 3. **CQ-B12 — real DB error propagation:** `auth/service.rs:200` — "propagate real DB errors on the email fallback." Currently swallowed silently. This is a one-line fix; include in the auth-hardening plan.
+   - **RESOLVED:** Included in plan 11-03 (auth hardening) — real DB errors propagated on the email fallback path.
 
 4. **CQ-B22 — Webhook via AMQP with persistence:** The finding says "Webhook delivery via AMQP with persistence + emit events from handlers (or remove until wired)." This is significant scope — adding an AMQP queue for webhook delivery is a new consumer. Recommend deferring to Phase 12 unless SEC-019 (SSRF) blocks on this. The SSRF fix can be applied to the existing HTTP delivery path.
+   - **RESOLVED:** Deferred to Phase 12. The SEC-019 SSRF fix is applied to the existing HTTP delivery path in plan 11-02, independent of the AMQP webhook consumer.
 
 5. **CQ-B23 — Federation OIDC cache + 256 KiB cap:** The `axiam-federation/src/jwks_cache.rs` body cap (SEC-054) is straightforward; the OIDC discovery cache is a separate cache concern. SEC-054 is in Wave 3 scope; OIDC discovery cache (CQ-B23) may be Wave 3 or 4 depending on remediation plan assignment. The finding is listed in Wave 3 in `remediation-plan.md`.
+   - **RESOLVED:** SEC-054 JWKS body cap implemented in plan 11-02. The OIDC discovery-cache portion of CQ-B23 deferred to Phase 12 per ROADMAP deferred list.
 
 ---
 

@@ -232,6 +232,29 @@ pub fn csrf_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cooki
         .finish()
 }
 
+/// Clear the `axiam_access` cookie (Max-Age=0, per D-08).
+pub fn clear_access_cookie() -> Cookie<'static> {
+    let mut c = Cookie::build(COOKIE_ACCESS, "").path("/").finish();
+    c.make_removal();
+    c
+}
+
+/// Clear the `axiam_refresh` cookie.
+pub fn clear_refresh_cookie() -> Cookie<'static> {
+    let mut c = Cookie::build(COOKIE_REFRESH, "")
+        .path("/api/v1/auth/refresh")
+        .finish();
+    c.make_removal();
+    c
+}
+
+/// Clear the `axiam_csrf` cookie.
+pub fn clear_csrf_cookie() -> Cookie<'static> {
+    let mut c = Cookie::build(COOKIE_CSRF, "").path("/").finish();
+    c.make_removal();
+    c
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -272,27 +295,4 @@ mod tests {
             "expected Secure=false for HTTP dev"
         );
     }
-}
-
-/// Clear the `axiam_access` cookie (Max-Age=0, per D-08).
-pub fn clear_access_cookie() -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_ACCESS, "").path("/").finish();
-    c.make_removal();
-    c
-}
-
-/// Clear the `axiam_refresh` cookie.
-pub fn clear_refresh_cookie() -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_REFRESH, "")
-        .path("/api/v1/auth/refresh")
-        .finish();
-    c.make_removal();
-    c
-}
-
-/// Clear the `axiam_csrf` cookie.
-pub fn clear_csrf_cookie() -> Cookie<'static> {
-    let mut c = Cookie::build(COOKIE_CSRF, "").path("/").finish();
-    c.make_removal();
-    c
 }

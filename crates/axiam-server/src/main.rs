@@ -42,6 +42,30 @@ fn default_cleanup_interval_secs() -> u64 {
     300
 }
 
+/// Load a 32-byte AES-256-GCM key (or pepper) from an environment variable.
+///
+/// The variable must contain a 64-character lowercase-hex string (256 bits).
+/// - Returns `Some(key)` on success.
+/// - Panics with a clear message if the variable is set but malformed or wrong length.
+/// - Returns `None` (with a `warn` log) when the variable is absent.
+fn load_key_from_env(name: &str) -> Option<[u8; 32]> {
+    match std::env::var(name) {
+        Ok(hex) => {
+            let bytes = hex::decode(&hex).unwrap_or_else(|_| {
+                panic!("{name} must be a 64-char hex string (32 bytes / 256 bits)")
+            });
+            let key: [u8; 32] = bytes
+                .try_into()
+                .unwrap_or_else(|_| panic!("{name} must be exactly 32 bytes (256 bits)"));
+            Some(key)
+        }
+        Err(_) => {
+            tracing::warn!("{name} not set");
+            None
+        }
+    }
+}
+
 /// Top-level configuration aggregating all sub-configs.
 #[derive(Debug, Deserialize)]
 struct AppConfig {
@@ -103,70 +127,28 @@ async fn main() -> std::io::Result<()> {
     let mut config = load_config();
 
     // Load MFA encryption key from env (skipped by serde on AuthConfig).
-    if let Ok(hex) = std::env::var("AXIAM__AUTH__MFA_ENCRYPTION_KEY") {
-        let bytes = hex::decode(&hex).expect(
-            "AXIAM__AUTH__MFA_ENCRYPTION_KEY must be a 64-char hex string (32 bytes / 256 bits)",
-        );
-        let key: [u8; 32] = bytes
-            .try_into()
-            .expect("AXIAM__AUTH__MFA_ENCRYPTION_KEY must be exactly 32 bytes (256 bits)");
-        config.auth.mfa_encryption_key = Some(key);
+    config.auth.mfa_encryption_key = load_key_from_env("AXIAM__AUTH__MFA_ENCRYPTION_KEY");
+    if config.auth.mfa_encryption_key.is_some() {
         tracing::info!("MFA encryption key loaded");
-    } else {
-        tracing::warn!(
-            "AXIAM__AUTH__MFA_ENCRYPTION_KEY not set — MFA enrollment will be unavailable"
-        );
     }
 
     // Load federation encryption key from env (skipped by serde on AuthConfig).
-    if let Ok(hex) = std::env::var("AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY") {
-        let bytes = hex::decode(&hex).expect(
-            "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY must be a 64-char hex string (32 bytes / 256 bits)",
-        );
-        let key: [u8; 32] = bytes
-            .try_into()
-            .expect("AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY must be exactly 32 bytes (256 bits)");
-        config.auth.federation_encryption_key = Some(key);
+    config.auth.federation_encryption_key =
+        load_key_from_env("AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY");
+    if config.auth.federation_encryption_key.is_some() {
         tracing::info!("Federation encryption key loaded");
-    } else {
-        tracing::warn!(
-            "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY not set \
-             — federation create/use will fail at runtime"
-        );
     }
 
     // Load email encryption key from env (D-17).
-    if let Ok(hex) = std::env::var("AXIAM__EMAIL_ENCRYPTION_KEY") {
-        let bytes = hex::decode(&hex).expect(
-            "AXIAM__EMAIL_ENCRYPTION_KEY must be a 64-char hex string (32 bytes / 256 bits)",
-        );
-        let key: [u8; 32] = bytes
-            .try_into()
-            .expect("AXIAM__EMAIL_ENCRYPTION_KEY must be exactly 32 bytes (256 bits)");
-        config.email_encryption_key = Some(key);
+    config.email_encryption_key = load_key_from_env("AXIAM__EMAIL_ENCRYPTION_KEY");
+    if config.email_encryption_key.is_some() {
         tracing::info!("Email encryption key loaded");
-    } else {
-        tracing::warn!(
-            "AXIAM__EMAIL_ENCRYPTION_KEY not set — mail consumer disabled, \
-             email provider secrets unavailable"
-        );
     }
 
     // Load GDPR pseudonym pepper from env (D-02).
-    if let Ok(hex) = std::env::var("AXIAM__GDPR_PSEUDONYM_PEPPER") {
-        let bytes = hex::decode(&hex).expect(
-            "AXIAM__GDPR_PSEUDONYM_PEPPER must be a 64-char hex string (32 bytes / 256 bits)",
-        );
-        let key: [u8; 32] = bytes
-            .try_into()
-            .expect("AXIAM__GDPR_PSEUDONYM_PEPPER must be exactly 32 bytes (256 bits)");
-        config.gdpr_pseudonym_pepper = Some(key);
+    config.gdpr_pseudonym_pepper = load_key_from_env("AXIAM__GDPR_PSEUDONYM_PEPPER");
+    if config.gdpr_pseudonym_pepper.is_some() {
         tracing::info!("GDPR pseudonym pepper loaded");
-    } else {
-        tracing::warn!(
-            "AXIAM__GDPR_PSEUDONYM_PEPPER not set — GDPR user deletion \
-             pseudonymization will be unavailable"
-        );
     }
 
     // Clamp cleanup interval to 60..=3600 seconds (T-04-35).

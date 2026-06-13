@@ -71,6 +71,60 @@ pub fn verify_code(
         .map_err(|e| AuthError::Crypto(format!("TOTP check: {e}")))
 }
 
+/// Verify a TOTP code with replay protection.
+///
+/// Computes the current time-step (`unix_timestamp / 30`) and, if the code
+/// is valid, checks that the step is strictly greater than
+/// `last_used_step.unwrap_or(0)`.  If the step is equal (same window) or
+/// less, the code is rejected even though the HMAC is correct.
+///
+/// Returns `Ok((valid, current_step))` on success.  The caller MUST persist
+/// `current_step` via `user_repo.update_totp_step` when `valid` is `true`.
+///
+/// Per SEC-008 (REQ-14 AC-5).
+pub fn verify_code_with_replay_check(
+    secret_bytes: &[u8],
+    code: &str,
+    issuer: &str,
+    account: &str,
+    last_used_step: Option<u64>,
+) -> Result<(bool, u64), AuthError> {
+    let totp = TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        secret_bytes.to_vec(),
+        Some(issuer.to_string()),
+        account.to_string(),
+    )
+    .map_err(|e| AuthError::Crypto(format!("TOTP init: {e}")))?;
+
+    // Compute current step independently of totp-rs internals.
+    let current_step = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| AuthError::Crypto(format!("system time error: {e}")))?
+        .as_secs()
+        / 30;
+
+    // Check the HMAC.
+    let hmac_valid = totp
+        .check_current(code)
+        .map_err(|e| AuthError::Crypto(format!("TOTP check: {e}")))?;
+
+    if !hmac_valid {
+        return Ok((false, current_step));
+    }
+
+    // Replay check: reject codes from the same or an earlier step.
+    let last = last_used_step.unwrap_or(0);
+    if current_step <= last {
+        return Ok((false, current_step));
+    }
+
+    Ok((true, current_step))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

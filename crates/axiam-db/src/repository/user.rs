@@ -25,6 +25,8 @@ struct UserRow {
     status: String,
     mfa_enabled: bool,
     mfa_secret: Option<String>,
+    /// Last TOTP step that was successfully verified (SEC-008/REQ-14 AC-5).
+    totp_last_used_step: Option<u64>,
     failed_login_attempts: u32,
     last_failed_login_at: Option<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
@@ -49,6 +51,8 @@ struct UserRowWithId {
     status: String,
     mfa_enabled: bool,
     mfa_secret: Option<String>,
+    /// Last TOTP step that was successfully verified (SEC-008/REQ-14 AC-5).
+    totp_last_used_step: Option<u64>,
     failed_login_attempts: u32,
     last_failed_login_at: Option<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
@@ -96,6 +100,7 @@ impl UserRow {
             status: parse_status(&self.status)?,
             mfa_enabled: self.mfa_enabled,
             mfa_secret: self.mfa_secret,
+            totp_last_used_step: self.totp_last_used_step,
             failed_login_attempts: self.failed_login_attempts,
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
@@ -124,6 +129,7 @@ impl UserRowWithId {
             status: parse_status(&self.status)?,
             mfa_enabled: self.mfa_enabled,
             mfa_secret: self.mfa_secret,
+            totp_last_used_step: self.totp_last_used_step,
             failed_login_attempts: self.failed_login_attempts,
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
@@ -319,6 +325,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         if input.mfa_secret.is_some() {
             sets.push("mfa_secret = $mfa_secret");
         }
+        if input.totp_last_used_step.is_some() {
+            sets.push("totp_last_used_step = $totp_last_used_step");
+        }
         if input.failed_login_attempts.is_some() {
             sets.push("failed_login_attempts = $failed_login_attempts");
         }
@@ -367,6 +376,10 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             // mfa_secret is Option<Option<String>>: Some(Some(v)) = set, Some(None) = clear
             builder = builder.bind(("mfa_secret", mfa_secret));
         }
+        if let Some(totp_last_used_step) = input.totp_last_used_step {
+            // totp_last_used_step is Option<Option<u64>>: Some(Some(v)) = set, Some(None) = clear
+            builder = builder.bind(("totp_last_used_step", totp_last_used_step));
+        }
         if let Some(failed_login_attempts) = input.failed_login_attempts {
             builder = builder.bind(("failed_login_attempts", failed_login_attempts));
         }
@@ -410,6 +423,21 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?;
 
+        Ok(())
+    }
+
+    async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<()> {
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 totp_last_used_step = $step, updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("step", step))
+            .await
+            .map_err(DbError::from)?;
         Ok(())
     }
 

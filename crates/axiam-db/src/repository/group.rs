@@ -98,6 +98,8 @@ impl MemberRow {
             status: parse_status(&self.status)?,
             mfa_enabled: self.mfa_enabled,
             mfa_secret: self.mfa_secret,
+            // Group queries do not fetch TOTP step — safe default.
+            totp_last_used_step: None,
             failed_login_attempts: self.failed_login_attempts,
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,

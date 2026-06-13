@@ -329,16 +329,22 @@ impl<
             .ok_or_else(|| AuthError::Crypto("MFA encryption key not configured".into()))?;
 
         let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
-        let valid = totp::verify_code(
+        let (valid, used_step) = totp::verify_code_with_replay_check(
             &secret_bytes,
             &input.totp_code,
             &self.config.totp_issuer,
             &user.email,
+            user.totp_last_used_step,
         )?;
 
         if !valid {
             return Err(AuthError::MfaInvalidCode.into());
         }
+
+        // Persist the used step to prevent replay within this window (SEC-008).
+        self.user_repo
+            .update_totp_step(tenant_id, user_id, used_step)
+            .await?;
 
         // 3. Create session and issue tokens.
         self.create_session_and_tokens(
@@ -438,24 +444,28 @@ impl<
             .ok_or(AuthError::MfaNotEnrolled)?;
 
         let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
-        let valid = totp::verify_code(
+        // confirm_mfa is enrollment confirmation — replay check uses no prior step
+        // (first use during enrollment), but we set used_step for consistency.
+        let (valid, used_step) = totp::verify_code_with_replay_check(
             &secret_bytes,
             totp_code,
             &self.config.totp_issuer,
             &user.email,
+            user.totp_last_used_step,
         )?;
 
         if !valid {
             return Err(AuthError::MfaInvalidCode.into());
         }
 
-        // Activate MFA.
+        // Activate MFA and record last-used step.
         self.user_repo
             .update(
                 tenant_id,
                 user_id,
                 UpdateUser {
                     mfa_enabled: Some(true),
+                    totp_last_used_step: Some(Some(used_step)),
                     ..Default::default()
                 },
             )

@@ -122,6 +122,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "sparse_tenant_settings",
         sql: SCHEMA_V16,
     },
+    Migration {
+        version: 17,
+        name: "totp_replay_prevention",
+        sql: SCHEMA_V17,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -993,6 +998,20 @@ DEFINE FIELD IF NOT EXISTS overrides_json ON TABLE security_settings \
 -- Extend export_job status ASSERT to include 'failed' (CQ-B38 / REQ-14 AC-5).
 DEFINE FIELD OVERWRITE status ON TABLE export_job TYPE string \
     ASSERT $value IN ['queued', 'ready', 'downloaded', 'expired', 'failed'];
+";
+
+// -----------------------------------------------------------------------
+// Schema v17 — TOTP replay prevention (SEC-008 / REQ-14 AC-5)
+// -----------------------------------------------------------------------
+//
+// Adds `totp_last_used_step` to the `user` table.  The field records the
+// last TOTP time-step that was accepted so that codes cannot be replayed
+// within the same 30-second window.
+
+const SCHEMA_V17: &str = "\
+-- Add TOTP replay prevention step counter to user table (SEC-008/REQ-14 AC-5).
+DEFINE FIELD IF NOT EXISTS totp_last_used_step ON TABLE user \
+    TYPE option<int>;
 ";
 
 // -----------------------------------------------------------------------

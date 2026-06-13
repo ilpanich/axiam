@@ -157,6 +157,17 @@ pub trait UserRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<User>> + Send;
     /// Soft-delete: sets status to Inactive.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Persist the last-used TOTP step after a successful verification.
+    ///
+    /// Called by `AuthService` after a TOTP code is accepted to prevent replay
+    /// within the same time window (SEC-008 / REQ-14 AC-5).
+    fn update_totp_step(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        step: u64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,

@@ -43,10 +43,16 @@ fn totp_replay_rejected() {
         "test@test.com",
         None, // no last_used_step
     );
-    assert!(result.is_ok(), "first verification should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "first verification should succeed: {result:?}"
+    );
     let (valid, used_step) = result.unwrap();
     assert!(valid, "first verification should return true");
-    assert_eq!(used_step, current_step, "used step should match current step");
+    assert_eq!(
+        used_step, current_step,
+        "used step should match current step"
+    );
 
     // Replay the same code with the same step → rejected.
     let replay_result = totp::verify_code_with_replay_check(
@@ -56,7 +62,10 @@ fn totp_replay_rejected() {
         "test@test.com",
         Some(used_step), // last_used_step = step just used
     );
-    assert!(replay_result.is_ok(), "replay check should not error: {replay_result:?}");
+    assert!(
+        replay_result.is_ok(),
+        "replay check should not error: {replay_result:?}"
+    );
     let (replay_valid, _) = replay_result.unwrap();
     assert!(!replay_valid, "replayed code in same step must be rejected");
 }
@@ -85,9 +94,15 @@ fn totp_new_step_accepted() {
         "test@test.com",
         Some(old_step), // last used was 2 steps ago
     );
-    assert!(result.is_ok(), "verify with old step should not error: {result:?}");
+    assert!(
+        result.is_ok(),
+        "verify with old step should not error: {result:?}"
+    );
     let (valid, used_step) = result.unwrap();
-    assert!(valid, "code from current step should be accepted when last_used < current");
+    assert!(
+        valid,
+        "code from current step should be accepted when last_used < current"
+    );
     assert_eq!(used_step, current_step);
 }
 

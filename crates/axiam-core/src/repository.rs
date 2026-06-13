@@ -850,6 +850,13 @@ pub trait CaCertificateRepository: Send + Sync {
         organization_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<CaCertificate>>> + Send;
+    /// Look up a CA certificate by its record ID without requiring the
+    /// organization ID. Used internally by mTLS chain verification
+    /// (SEC-024) where the issuer_ca_id is already known from the leaf cert.
+    fn get_by_issuer_id(
+        &self,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<CaCertificate>> + Send;
 }
 
 pub trait CertificateRepository: Send + Sync {

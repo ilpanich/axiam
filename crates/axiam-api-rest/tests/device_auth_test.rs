@@ -122,7 +122,8 @@ macro_rules! test_app {
         let cert_repo = SurrealCertificateRepository::new($db.clone());
         let tenant_repo = SurrealTenantRepository::new($db.clone());
         let sa_repo = SurrealServiceAccountRepository::new($db.clone());
-        let device_auth_service = DeviceAuthService::new(cert_repo.clone());
+        let device_auth_service =
+            DeviceAuthService::new(cert_repo.clone(), ca_repo.clone());
         let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
         test::init_service(
             App::new()

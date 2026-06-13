@@ -124,7 +124,7 @@ macro_rules! test_app {
         let sa_repo = SurrealServiceAccountRepository::new($db.clone());
         let audit_repo = SurrealAuditLogRepository::new($db.clone());
         let pgp_repo = SurrealPgpKeyRepository::new($db.clone());
-        let device_auth_service = DeviceAuthService::new(cert_repo.clone());
+        let device_auth_service = DeviceAuthService::new(cert_repo.clone(), ca_repo.clone());
         let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
         let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), sem.clone());
         test::init_service(

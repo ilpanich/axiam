@@ -354,7 +354,10 @@ async fn main() -> std::io::Result<()> {
         pki_config,
         Arc::clone(&crypto_semaphore),
     );
-    let device_auth_service = DeviceAuthService::new(cert_repo.clone());
+    // SEC-024: DeviceAuthService now holds a CA repo for chain verification.
+    // SurrealCaCertificateRepository is cloned; each clone shares the underlying Surreal<C>.
+    let device_auth_service =
+        DeviceAuthService::new(cert_repo.clone(), SurrealCaCertificateRepository::new(db.client().clone()));
     let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
     // SEC-031: Webhook secrets stored AES-256-GCM encrypted using the same PKI
     // encryption key. Falls back to an all-zero key if env var is absent so the

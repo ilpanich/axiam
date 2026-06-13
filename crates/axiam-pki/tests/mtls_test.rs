@@ -94,8 +94,9 @@ async fn mtls_authenticate_valid_cert_returns_device_identity() {
         .await
         .expect("cert binding must succeed");
 
-    // 4. Authenticate
-    let svc_auth = DeviceAuthService::new(cert_repo);
+    // 4. Authenticate (SEC-024: pass CA repo for chain verification)
+    let ca_repo2 = SurrealCaCertificateRepository::new(db.clone());
+    let svc_auth = DeviceAuthService::new(cert_repo, ca_repo2);
     let identity = svc_auth
         .authenticate(&leaf.certificate.public_cert_pem)
         .await
@@ -168,7 +169,8 @@ async fn mtls_rejects_unknown_fingerprint() {
 
     // Use the main (empty-cert-table) DB to authenticate
     let cert_repo_main = SurrealCertificateRepository::new(db.clone());
-    let svc_auth = DeviceAuthService::new(cert_repo_main);
+    let ca_repo_main = SurrealCaCertificateRepository::new(db.clone());
+    let svc_auth = DeviceAuthService::new(cert_repo_main, ca_repo_main);
 
     // The fingerprint is unknown in the main DB — must reject
     let result = svc_auth
@@ -269,8 +271,9 @@ async fn mtls_rejects_expired_cert() {
         .await
         .expect("storing expired cert must succeed");
 
-    // Authenticate — DeviceAuthService checks status (Active ✓) then not_after
-    let svc_auth = DeviceAuthService::new(cert_repo);
+    // Authenticate — DeviceAuthService checks status (Active ✓) then not_after (fails here)
+    let ca_repo2 = SurrealCaCertificateRepository::new(db.clone());
+    let svc_auth = DeviceAuthService::new(cert_repo, ca_repo2);
     let result = svc_auth.authenticate(&cert_pem).await;
 
     assert!(result.is_err(), "expired cert must be rejected");
@@ -334,7 +337,8 @@ async fn mtls_rejects_revoked_cert() {
         .await
         .expect("revoke must succeed");
 
-    let svc_auth = DeviceAuthService::new(cert_repo);
+    let ca_repo2 = SurrealCaCertificateRepository::new(db.clone());
+    let svc_auth = DeviceAuthService::new(cert_repo, ca_repo2);
     let result = svc_auth
         .authenticate(&leaf.certificate.public_cert_pem)
         .await;

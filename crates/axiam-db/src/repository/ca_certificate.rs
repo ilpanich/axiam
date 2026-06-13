@@ -305,4 +305,24 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
             limit: pagination.limit,
         })
     }
+
+    async fn get_by_issuer_id(&self, id: Uuid) -> AxiamResult<CaCertificate> {
+        let result = self
+            .db
+            .query("SELECT * FROM type::record('ca_certificate', $id)")
+            .bind(("id", id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let row: Option<CaCertificateRow> = result.take(0).map_err(DbError::from)?;
+        let row = row.ok_or_else(|| DbError::NotFound {
+            entity: "ca_certificate".into(),
+            id: id.to_string(),
+        })?;
+
+        Ok(row.into_entry(id)?)
+    }
 }

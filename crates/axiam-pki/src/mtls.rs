@@ -1,26 +1,35 @@
-//! mTLS device authentication — validates client certificates via fingerprint lookup.
+//! mTLS device authentication — validates client certificates via fingerprint
+//! lookup and verifies the full chain to the tenant/org CA.
 //!
-//! CA chain validation is delegated to the TLS-terminating reverse proxy.
-//! This module verifies the certificate is known, active, not expired,
-//! and bound to a service account.
+//! SEC-024: After the fingerprint lookup, the client cert is cryptographically
+//! verified against the CA cert returned by the `CaCertificateRepository`.
+//! If no active CA cert exists the call fails closed — a cert with a matching
+//! fingerprint but NOT signed by the tenant CA is rejected.
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{CertificateStatus, DeviceIdentity};
-use axiam_core::repository::CertificateRepository;
+use axiam_core::repository::{CaCertificateRepository, CertificateRepository};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use x509_parser::pem::parse_x509_pem;
+use x509_parser::prelude::parse_x509_certificate;
 
 /// Service for mTLS device certificate authentication.
 #[derive(Clone)]
-pub struct DeviceAuthService<CR> {
+pub struct DeviceAuthService<CR, CCR> {
     cert_repo: CR,
+    /// Repository for CA certificates — used to verify the client cert chain
+    /// (SEC-024). When `None`, chain verification is skipped (legacy path).
+    ca_cert_repo: CCR,
 }
 
-impl<CR: CertificateRepository> DeviceAuthService<CR> {
-    pub fn new(cert_repo: CR) -> Self {
-        Self { cert_repo }
+impl<CR: CertificateRepository, CCR: CaCertificateRepository> DeviceAuthService<CR, CCR> {
+    pub fn new(cert_repo: CR, ca_cert_repo: CCR) -> Self {
+        Self {
+            cert_repo,
+            ca_cert_repo,
+        }
     }
 
     /// Authenticate a device by its PEM-encoded client certificate.
@@ -28,7 +37,8 @@ impl<CR: CertificateRepository> DeviceAuthService<CR> {
     /// 1. Parse PEM and compute SHA-256 fingerprint
     /// 2. Look up certificate by fingerprint (global, cross-tenant)
     /// 3. Validate status (Active) and expiry
-    /// 4. Resolve the bound service account
+    /// 4. Verify certificate chain to the tenant/org CA (SEC-024)
+    /// 5. Resolve the bound service account
     ///
     /// Returns a [`DeviceIdentity`] with the service account and tenant.
     /// The caller is responsible for resolving `org_id` from the tenant.
@@ -58,6 +68,41 @@ impl<CR: CertificateRepository> DeviceAuthService<CR> {
                 "certificate is expired or not yet valid".into(),
             ));
         }
+
+        // SEC-024: Verify the client cert chain to the issuing CA.
+        // Fails closed: if no CA is found for the issuer, authentication is denied.
+        let ca_cert = self
+            .ca_cert_repo
+            .get_by_issuer_id(cert.issuer_ca_id)
+            .await
+            .map_err(|_| {
+                AxiamError::Certificate(
+                    "no CA certificate found for the issuing authority — chain verify failed"
+                        .into(),
+                )
+            })?;
+
+        // Parse the CA PEM to obtain the public key.
+        let (_, ca_pem_obj) = parse_x509_pem(ca_cert.public_cert_pem.as_bytes()).map_err(|e| {
+            AxiamError::Certificate(format!("invalid CA certificate PEM: {e}"))
+        })?;
+        let (_, ca_x509) = parse_x509_certificate(&ca_pem_obj.contents)
+            .map_err(|e| AxiamError::Certificate(format!("failed to parse CA certificate: {e}")))?;
+
+        // Parse the client cert DER (already extracted from PEM above).
+        let (_, client_x509) = parse_x509_certificate(&pem_obj.contents)
+            .map_err(|e| {
+                AxiamError::Certificate(format!("failed to parse client certificate: {e}"))
+            })?;
+
+        // Cryptographic chain verify — reject if the client cert was not signed by the CA.
+        client_x509
+            .verify_signature(Some(ca_x509.public_key()))
+            .map_err(|_| {
+                AxiamError::Certificate(
+                    "certificate chain verify failed — client cert not signed by tenant CA".into(),
+                )
+            })?;
 
         // Resolve bound service account
         let sa_id = self

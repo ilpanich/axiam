@@ -202,6 +202,23 @@ jobs:
       # compliance evidence (D-10, T19.1, T19.2 / SC#4).
       - run: cargo test -p axiam-api-grpc --features client --test grpc_authz_test
 
+  frontend-quality:
+    name: Frontend Lint + Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend lint and type-check
+        working-directory: frontend
+        run: npm run lint && npx tsc -b
+
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest

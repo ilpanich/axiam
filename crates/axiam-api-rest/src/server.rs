@@ -215,6 +215,8 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
     );
     let api_scope = web::scope("/api/v1")
             .wrap(AuthzMiddleware)
+            .wrap(CsrfMiddleware) // SEC-046: CSRF protection on all /api/v1 CRUD routes
+            .app_data(web::JsonConfig::default().limit(65_536)) // CQ-B21: body size limit
             .service(
                 web::resource("/organizations")
                     .route(web::post().to(handlers::organizations::create::<C>))

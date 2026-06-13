@@ -194,7 +194,7 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // access credential — `AuthzMiddleware` would otherwise 401 it before the
     // handler runs, making token rotation impossible.
     "/api/v1/auth/refresh",
-    "/api/v1/auth/register",
+    // SEC-047: /api/v1/auth/register removed from public paths — registration is now gated.
     "/api/v1/auth/device",
     "/api/v1/auth/mfa/verify",
     "/api/v1/auth/mfa/setup/enroll",

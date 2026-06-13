@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, X } from "lucide-react";
 import { auditService, type AuditLog, type AuditFilters } from "@/services/audit";
@@ -203,6 +203,14 @@ export function AuditLogsPage() {
   const [actorTimer, setActorTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
   const [actionTimer, setActionTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
 
+  // Clear pending debounce timers on unmount to prevent state updates after unmount
+  useEffect(() => {
+    return () => {
+      if (actorTimer) clearTimeout(actorTimer);
+      if (actionTimer) clearTimeout(actionTimer);
+    };
+  }, [actorTimer, actionTimer]);
+
   function handleActorChange(v: string) {
     setActorInput(v);
     if (actorTimer) clearTimeout(actorTimer);
@@ -239,6 +247,10 @@ export function AuditLogsPage() {
   }
 
   function clearFilters() {
+    if (actorTimer) clearTimeout(actorTimer);
+    if (actionTimer) clearTimeout(actionTimer);
+    setActorTimer(null);
+    setActionTimer(null);
     setActorInput("");
     setActorDebounced("");
     setActionInput("");

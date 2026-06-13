@@ -535,6 +535,7 @@ export function ServiceAccountsPage() {
         title="Rotate Client Secret"
         description={`Are you sure you want to rotate the secret for "${rotateAccount?.name}"? The current secret will be immediately invalidated.`}
         isLoading={rotateMutation.isPending}
+        confirmLabel="Rotate"
       />
 
       {/* Delete confirm */}

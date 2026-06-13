@@ -360,6 +360,7 @@ export function CertificatesPage() {
         title="Revoke Certificate"
         description={`Are you sure you want to revoke the certificate for "${revokeTarget?.common_name}"? This action cannot be undone.`}
         isLoading={revokeMutation.isPending}
+        confirmLabel="Revoke"
       />
     </div>
   );

@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -628,11 +628,11 @@ function SettingsTab({ orgId }: { orgId: string }) {
 
   const [form, setForm] = useState<SecuritySettings>({});
 
-  // Sync form with loaded settings
-  const syncedRef = { current: false };
-  if (settings && !syncedRef.current) {
-    syncedRef.current = true;
-  }
+  // Initialize form from loaded settings (runs when settings first load or org changes)
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (settings) setForm(settings);
+  }, [settings]);
 
   const updateMutation = useMutation({
     mutationFn: (payload: SecuritySettings) =>

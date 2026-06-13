@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -9,10 +9,11 @@ import {
   permissionService,
   type Permission,
 } from "@/services/permissions";
-import { userService, groupService, type User, type Group } from "@/services/users";
+import { groupService, type Group } from "@/services/users";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { UserSearchDialog } from "@/components/UserSearchDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -248,179 +249,6 @@ function GrantPermissionDialog({
                     </li>
                   );
                 })}
-              </ul>
-            )}
-          </div>
-        </div>
-
-        <div className="flex justify-end pt-4 border-t border-primary/10">
-          <Button variant="ghost" onClick={handleClose}>
-            Done
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Assign User dialog ───────────────────────────────────────────────────────
-
-interface AssignUserDialogProps {
-  open: boolean;
-  onClose: () => void;
-  roleId: string;
-  onAssigned: () => void;
-}
-
-function AssignUserDialog({
-  open,
-  onClose,
-  roleId,
-  onAssigned,
-}: AssignUserDialogProps) {
-  const [searchTerm, setSearchTerm] = useState("");
-  const [results, setResults] = useState<User[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [assigningId, setAssigningId] = useState<string | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  function handleSearchChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const term = e.target.value;
-    setSearchTerm(term);
-
-    if (debounceRef.current !== null) clearTimeout(debounceRef.current);
-    if (!term.trim()) {
-      setResults([]);
-      return;
-    }
-    debounceRef.current = setTimeout(async () => {
-      setSearching(true);
-      try {
-        const data = await userService.list(1, 20, term.trim());
-        setResults(data.items);
-      } catch {
-        setResults([]);
-      } finally {
-        setSearching(false);
-      }
-    }, 300);
-  }
-
-  async function handleAssign(user: User) {
-    setAssigningId(user.id);
-    try {
-      await roleService.assignToUser(roleId, user.id);
-      onAssigned();
-      setResults((prev) => prev.filter((u) => u.id !== user.id));
-    } catch {
-      // silently ignore
-    } finally {
-      setAssigningId(null);
-    }
-  }
-
-  function handleClose() {
-    setSearchTerm("");
-    setResults([]);
-    onClose();
-  }
-
-  if (!open) return null;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      aria-modal="true"
-      role="dialog"
-      aria-labelledby="assign-user-title"
-    >
-      <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={handleClose}
-        aria-hidden="true"
-      />
-      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[80vh]">
-        <div className="flex items-center justify-between pb-4 border-b border-primary/10">
-          <h2
-            id="assign-user-title"
-            className="text-lg font-semibold text-foreground"
-          >
-            Assign User
-          </h2>
-          <button
-            onClick={handleClose}
-            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-none focus:ring-2 focus:ring-primary/40"
-            aria-label="Close dialog"
-          >
-            ✕
-          </button>
-        </div>
-
-        <div className="py-4 flex flex-col gap-3 overflow-hidden">
-          <div className="relative">
-            <Search
-              size={15}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none"
-              aria-hidden="true"
-            />
-            <input
-              type="search"
-              value={searchTerm}
-              onChange={handleSearchChange}
-              placeholder="Search users…"
-              aria-label="Search users"
-              className={cn(
-                "h-9 w-full rounded-md pl-9 pr-3 text-sm",
-                "bg-white/5 border border-primary/20 text-foreground",
-                "placeholder:text-muted-foreground",
-                "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
-                "transition-colors duration-200"
-              )}
-            />
-          </div>
-
-          <div className="overflow-y-auto flex-1 min-h-[120px] max-h-60 rounded-md border border-white/5">
-            {searching ? (
-              <div className="flex items-center justify-center py-6">
-                <Loader2 size={20} className="animate-spin text-primary/60" />
-              </div>
-            ) : !searchTerm ? (
-              <p className="text-sm text-muted-foreground text-center py-6">
-                Type to search for users.
-              </p>
-            ) : results.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-6">
-                No users found.
-              </p>
-            ) : (
-              <ul>
-                {results.map((user) => (
-                  <li
-                    key={user.id}
-                    className="flex items-center justify-between px-3 py-2.5 hover:bg-white/5 border-b border-white/5 last:border-0"
-                  >
-                    <div>
-                      <p className="text-sm font-medium text-foreground/90">
-                        {user.display_name ?? user.username}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {user.email}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => handleAssign(user)}
-                      disabled={assigningId === user.id}
-                      className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-primary/20 text-primary hover:bg-primary/30 transition-colors disabled:opacity-50"
-                    >
-                      {assigningId === user.id ? (
-                        <Loader2 size={12} className="animate-spin" />
-                      ) : (
-                        <Plus size={12} />
-                      )}
-                      Assign
-                    </button>
-                  </li>
-                ))}
               </ul>
             )}
           </div>
@@ -913,11 +741,15 @@ export function RoleDetailPage() {
       />
 
       {/* Assign user dialog */}
-      <AssignUserDialog
+      <UserSearchDialog
         open={assignUserOpen}
         onClose={() => setAssignUserOpen(false)}
-        roleId={roleId!}
-        onAssigned={() => {}}
+        title="Assign User"
+        actionLabel="Assign"
+        onAction={async (user) => {
+          await roleService.assignToUser(roleId!, user.id);
+          void queryClient.invalidateQueries({ queryKey: ["role", roleId] });
+        }}
       />
 
       {/* Assign group dialog */}

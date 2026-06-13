@@ -410,7 +410,24 @@ Plans:
   4. k8s/nginx hardened: `AXIAM__` env keys + secrets, receiver-side NetworkPolicies + PSA restricted, `/oauth2/*` + `/.well-known` proxy locations, backend ports unpublished, prod compose default creds removed
   5. Frontend medium items: toast + `getApiErrorMessage` on all mutations, form validation, resource parent picker excludes descendants, federation edit locks type, pagination `placeholderData`, shared components/hooks, route guards + friendly 403, login handles `mfa_setup_required`/`mfa_required`
 
-**Plans**: TBD (run `/gsd:plan-phase 11`)
+**Plans**: 5 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 11-01-PLAN.md — Shared repo helpers + AlreadyExists→409 + edge indexes + email_config UPSERT + GDPR handler cleanup + request DTOs (CQ-B10/B11/B12/B17/B25/B26/B39/B41)
+- [ ] 11-04-PLAN.md — k8s AXIAM__ env keys + PSA restricted + receiver NetworkPolicies + nginx/ingress oauth2/.well-known proxy + prod compose creds (SEC-016/023/052/053)
+- [ ] 11-05-PLAN.md — Frontend medium: toast/getApiErrorMessage, validation, resource picker, federation edit lock, pagination, shared components/hooks/types, route guards+403, login MFA branches, slug restore (CQ-F09..F18/F29/F30/F31)
+
+**Wave 2** *(after 11-01)*
+
+- [ ] 11-02-PLAN.md — Webhook SSRF+secret encrypt, mTLS chain, CertService dedup, gRPC/OAuth2 limits, MFA/oauth2 rate limits, XFF hop, Ed25519 parse-once, AMQP HMAC, JWKS cap (SEC-019/020/022/024/025/031/048/054/055, CQ-B14/B15/B18/B19/B20/B44)
+
+**Wave 3** *(after 11-02 — shares server.rs)*
+
+- [ ] 11-03-PLAN.md — Dummy-Argon2, atomic failed-login, reset-to-current block, CSRF on /api/v1, permission map + register gating, transactional bootstrap, self-update strip, logout ownership (SEC-026/028/032/046/047/049/050/051, CQ-B12)
+
+> Deferred to Phase 12 (surfaced during planning, developer-confirmed): CQ-B13 (AuthZ N+1 batching), CQ-B16 (org/tenant delete cascade), CQ-B23 OIDC discovery-cache portion (JWKS body cap done here), CQ-B24 broad pki/grpc test backfill (mtls_chain done here), CQ-F19 (verify-email StrictMode single-fire — folds into Phase 9 SEC-044). CQ-B43 AppState refactor deferred to Phase 12 per research.
 
 ### Scope
 
@@ -462,7 +479,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
 | 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
 | 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
-| 11. Medium Remediation (Wave 3) | 0/0 | Pending | — |
+| 11. Medium Remediation (Wave 3) | 0/5 | Planned | — |
 | 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |
 
 ---

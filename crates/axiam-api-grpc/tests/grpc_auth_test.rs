@@ -89,6 +89,8 @@ fn test_auth_config() -> AuthConfig {
         webauthn_rp_id: "localhost".into(),
         webauthn_rp_origin: "http://localhost:8090".into(),
         webauthn_rp_name: "AXIAM-Test".into(),
+        jwt_encoding_key: None,
+        jwt_decoding_key: None,
     }
 }
 

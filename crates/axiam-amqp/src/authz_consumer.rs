@@ -12,16 +12,22 @@ use lapin::{BasicProperties, Channel, Confirmation};
 use tracing::{error, info, warn};
 
 use crate::connection::queues;
-use crate::messages::{AuthzRequest, AuthzResponse};
+use crate::messages::{AuthzRequest, AuthzResponse, verify_payload};
 
 /// Start consuming authorization requests from the `axiam.authz.request` queue.
 ///
 /// Each message is deserialized, evaluated through the authorization engine,
 /// and the result is published to `axiam.authz.response`. Messages are
 /// acknowledged on success or nacked on failure.
+///
+/// SEC-022: When `signing_key` is `Some`, the `hmac_signature` in each
+/// `AuthzRequest` is verified before processing. Messages with an invalid
+/// or missing signature are nacked. When `None`, signatures are not required
+/// (migration / development mode) but a warning is logged.
 pub async fn start_authz_consumer<R, P, Res, S, G>(
     channel: Channel,
     engine: AuthorizationEngine<R, P, Res, S, G>,
+    signing_key: Option<Vec<u8>>,
 ) where
     R: RoleRepository + 'static,
     P: PermissionRepository + 'static,
@@ -59,7 +65,7 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
         let tag = delivery.delivery_tag;
 
         // Deserialize request.
-        let request: AuthzRequest = match serde_json::from_slice(&delivery.data) {
+        let mut request: AuthzRequest = match serde_json::from_slice(&delivery.data) {
             Ok(r) => r,
             Err(e) => {
                 warn!(
@@ -77,6 +83,34 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
                 continue;
             }
         };
+
+        // SEC-022: Verify HMAC signature when a signing key is configured.
+        if let Some(ref key) = signing_key {
+            // Extract the signature before building the canonical form (signature = None).
+            let received_sig = request.hmac_signature.take();
+
+            // Canonical payload has hmac_signature = None to reproduce what was signed.
+            let canonical_bytes =
+                serde_json::to_vec(&request).unwrap_or_else(|_| delivery.data.clone());
+
+            let valid = received_sig.as_deref().map_or(false, |sig| {
+                verify_payload(key, &canonical_bytes, sig)
+            });
+
+            if !valid {
+                warn!(
+                    delivery_tag = tag,
+                    "AuthzRequest HMAC verification failed — nacking (SEC-022)"
+                );
+                let _ = delivery.acker.nack(BasicNackOptions {
+                    requeue: false,
+                    ..BasicNackOptions::default()
+                }).await;
+                continue;
+            }
+        } else {
+            warn!("AMQP signing key not configured — AuthzRequest signatures not verified (SEC-022)");
+        }
 
         let correlation_id = request.correlation_id;
 

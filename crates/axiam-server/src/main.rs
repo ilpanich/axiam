@@ -151,6 +151,14 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("GDPR pseudonym pepper loaded");
     }
 
+    // CQ-B14: Parse Ed25519 JWT keys once at startup and cache them in the
+    // AuthConfig so per-request token issuance/verification skips PEM parsing.
+    config
+        .auth
+        .resolve_keys()
+        .expect("Failed to parse JWT Ed25519 keys — check AXIAM__AUTH__JWT_*_KEY_PEM");
+    tracing::info!("JWT Ed25519 keys parsed and cached (CQ-B14)");
+
     // Clamp cleanup interval to 60..=3600 seconds (T-04-35).
     config.cleanup_interval_secs = config.cleanup_interval_secs.clamp(60, 3600);
 
@@ -439,8 +447,24 @@ async fn main() -> std::io::Result<()> {
         scope_repo.clone(),
         group_repo.clone(),
     );
+    // SEC-022: Decode AMQP signing key (hex) for HMAC message verification.
+    let amqp_signing_key: Option<Vec<u8>> = config
+        .amqp
+        .signing_key
+        .as_deref()
+        .and_then(|hex| {
+            hex::decode(hex).map_err(|e| {
+                tracing::warn!(error = %e, "AXIAM__AMQP__SIGNING_KEY is not valid hex — ignoring");
+            }).ok()
+        });
+    if amqp_signing_key.is_some() {
+        tracing::info!("AMQP signing key loaded (SEC-022)");
+    } else {
+        tracing::warn!("AMQP signing key not configured — messages will not be HMAC-verified (SEC-022)");
+    }
+    let amqp_signing_key_clone = amqp_signing_key.clone();
     tokio::spawn(async move {
-        axiam_amqp::authz_consumer::start_authz_consumer(amqp_channel, amqp_engine).await;
+        axiam_amqp::authz_consumer::start_authz_consumer(amqp_channel, amqp_engine, amqp_signing_key_clone).await;
         tracing::error!("AMQP authz consumer exited — shutting down process");
         std::process::exit(1);
     });
@@ -466,7 +490,7 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to create AMQP audit consumer channel");
     let amqp_audit_repo = audit_repo.clone();
     tokio::spawn(async move {
-        axiam_amqp::audit_consumer::start_audit_consumer(audit_channel, amqp_audit_repo).await;
+        axiam_amqp::audit_consumer::start_audit_consumer(audit_channel, amqp_audit_repo, amqp_signing_key).await;
         tracing::error!("AMQP audit consumer exited — shutting down process");
         std::process::exit(1);
     });
@@ -482,8 +506,9 @@ async fn main() -> std::io::Result<()> {
         let mail_email_config_repo =
             SurrealEmailConfigRepository::new(db_handle.clone(), email_key);
         let mail_audit_repo = audit_repo.clone();
+        let mail_user_repo = user_repo.clone();
         tokio::spawn(async move {
-            axiam_amqp::start_mail_consumer(mail_channel, mail_email_config_repo, mail_audit_repo)
+            axiam_amqp::start_mail_consumer(mail_channel, mail_email_config_repo, mail_audit_repo, mail_user_repo)
                 .await;
             tracing::error!("AMQP mail consumer exited — shutting down process");
             std::process::exit(1);

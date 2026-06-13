@@ -1,5 +1,8 @@
 //! Authentication configuration.
 
+use std::sync::Arc;
+
+use jsonwebtoken::{DecodingKey, EncodingKey};
 use serde::Deserialize;
 
 fn default_true() -> bool {
@@ -75,6 +78,16 @@ pub struct AuthConfig {
     pub webauthn_rp_origin: String,
     /// WebAuthn Relying Party display name.
     pub webauthn_rp_name: String,
+    /// CQ-B14: Pre-parsed Ed25519 signing key. Populated once at startup via
+    /// `resolve_keys()`. When `Some`, token-issue functions skip PEM re-parsing.
+    /// When `None`, they fall back to parsing from `jwt_private_key_pem`.
+    #[serde(skip)]
+    pub jwt_encoding_key: Option<Arc<EncodingKey>>,
+    /// CQ-B14: Pre-parsed Ed25519 verification key. Populated once at startup via
+    /// `resolve_keys()`. When `Some`, token-verify functions skip PEM re-parsing.
+    /// When `None`, they fall back to parsing from `jwt_public_key_pem`.
+    #[serde(skip)]
+    pub jwt_decoding_key: Option<Arc<DecodingKey>>,
 }
 
 impl AuthConfig {
@@ -90,6 +103,21 @@ impl AuthConfig {
         } else {
             self.oauth2_issuer_url.trim_end_matches('/')
         }
+    }
+
+    /// CQ-B14: Parse Ed25519 keys from PEM once and cache in `Arc`.
+    ///
+    /// Call this once at startup after loading config from environment.
+    /// After this returns `Ok(())`, all token functions skip per-call PEM
+    /// parsing and use the cached keys instead.
+    pub fn resolve_keys(&mut self) -> Result<(), String> {
+        let enc = EncodingKey::from_ed_pem(self.jwt_private_key_pem.as_bytes())
+            .map_err(|e| format!("invalid JWT private key PEM: {e}"))?;
+        let dec = DecodingKey::from_ed_pem(self.jwt_public_key_pem.as_bytes())
+            .map_err(|e| format!("invalid JWT public key PEM: {e}"))?;
+        self.jwt_encoding_key = Some(Arc::new(enc));
+        self.jwt_decoding_key = Some(Arc::new(dec));
+        Ok(())
     }
 }
 
@@ -120,6 +148,8 @@ impl Default for AuthConfig {
             webauthn_rp_id: "localhost".into(),
             webauthn_rp_origin: "http://localhost:8090".into(),
             webauthn_rp_name: "AXIAM".into(),
+            jwt_encoding_key: None,
+            jwt_decoding_key: None,
         }
     }
 }

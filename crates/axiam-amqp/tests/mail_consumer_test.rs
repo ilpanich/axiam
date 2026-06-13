@@ -12,7 +12,7 @@ use axiam_core::models::email::{ProviderConfig, SetOrgEmailConfig, SmtpConfig};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, EmailConfigRepository, Pagination,
 };
-use axiam_db::{SurrealAuditLogRepository, SurrealEmailConfigRepository};
+use axiam_db::{SurrealAuditLogRepository, SurrealEmailConfigRepository, SurrealUserRepository};
 use chrono::Utc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
@@ -90,9 +90,10 @@ async fn delivery_failure_first_attempt_returns_retry_needed() {
 
     let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let user_repo = SurrealUserRepository::new(db.clone());
 
     let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
-    let outcome = send_with_retry_and_audit(&msg, &email_repo, &audit_repo)
+    let outcome = send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo)
         .await
         .unwrap();
 
@@ -115,12 +116,13 @@ async fn exhausted_retries_writes_delivery_failed_audit_without_recipient() {
 
     let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let user_repo = SurrealUserRepository::new(db.clone());
 
     // Set attempt_count to MAX_RETRIES - 1 so this is the exhausting attempt.
     let mut msg = make_msg(MailType::PasswordReset, org_id, tenant_id, MAX_RETRIES - 1);
     msg.user_id = user_id;
 
-    let outcome = send_with_retry_and_audit(&msg, &email_repo, &audit_repo)
+    let outcome = send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo)
         .await
         .unwrap();
 
@@ -182,9 +184,10 @@ async fn missing_email_config_returns_send_error() {
     let db = setup_db().await;
     let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let user_repo = SurrealUserRepository::new(db.clone());
 
     let msg = make_msg(MailType::PasswordReset, Uuid::new_v4(), Uuid::new_v4(), 0);
-    let result = send_with_retry_and_audit(&msg, &email_repo, &audit_repo).await;
+    let result = send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo).await;
 
     assert!(
         result.is_err(),

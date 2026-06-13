@@ -14,6 +14,9 @@ axiam-audit = { workspace = true }
 axiam-email = { workspace = true }
 chrono = { workspace = true }
 futures-lite = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 lapin = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

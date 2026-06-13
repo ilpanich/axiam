@@ -94,11 +94,18 @@ pub fn issue_access_token(
         scope,
     };
 
-    let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-        .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
 
     let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, &key)
+    jsonwebtoken::encode(&header, &claims, key)
         .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
 }
 
@@ -135,11 +142,18 @@ pub fn issue_client_credentials_token(
         scope,
     };
 
-    let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-        .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
 
     let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, &key)
+    jsonwebtoken::encode(&header, &claims, key)
         .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
 }
 
@@ -212,11 +226,18 @@ pub fn issue_id_token(
         },
     };
 
-    let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-        .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
 
     let header = Header::new(Algorithm::EdDSA);
-    jsonwebtoken::encode(&header, &claims, &key)
+    jsonwebtoken::encode(&header, &claims, key)
         .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
 }
 
@@ -231,8 +252,15 @@ pub fn decode_access_token(
     token: &str,
     config: &AuthConfig,
 ) -> Result<AccessTokenClaims, AuthError> {
-    let key = DecodingKey::from_ed_pem(config.jwt_public_key_pem.as_bytes())
-        .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
+    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &DecodingKey = if let Some(ref cached) = config.jwt_decoding_key {
+        cached.as_ref()
+    } else {
+        owned = DecodingKey::from_ed_pem(config.jwt_public_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
+        &owned
+    };
 
     let mut validation = Validation::new(Algorithm::EdDSA);
     validation.set_issuer(&[config.effective_issuer()]);
@@ -244,7 +272,7 @@ pub fn decode_access_token(
     validation.set_audience(&[AUD_USER, AUD_M2M]);
     validation.leeway = 60;
 
-    jsonwebtoken::decode::<AccessTokenClaims>(token, &key, &validation)
+    jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation)
         .map(|data| data.claims)
         .map_err(|e| match e.kind() {
             jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
@@ -310,10 +338,7 @@ mod tests {
     fn test_keypair() -> (String, String) {
         // Use a pre-generated Ed25519 test key pair (PEM).
         // Generated with: openssl genpkey -algorithm Ed25519
-        let private_key = "\
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM
------END PRIVATE KEY-----";
+        let private_key = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n-----END PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
 
         let public_key = "\
 -----BEGIN PUBLIC KEY-----
@@ -350,6 +375,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             webauthn_rp_id: "localhost".into(),
             webauthn_rp_origin: "http://localhost:8090".into(),
             webauthn_rp_name: "AXIAM-Test".into(),
+            jwt_encoding_key: None,
+            jwt_decoding_key: None,
         }
     }
 

@@ -14,7 +14,7 @@ use crate::connection::queues;
 use crate::messages::{MailType, OutboundMailMessage};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::email_template::TemplateKind;
-use axiam_core::repository::{AuditLogRepository, EmailConfigRepository};
+use axiam_core::repository::{AuditLogRepository, EmailConfigRepository, UserRepository};
 use axiam_email::service::EmailService;
 use axiam_email::template::{TemplateContext, render_email, resolve_template};
 use futures_lite::StreamExt;
@@ -83,14 +83,22 @@ fn build_template_context(ctx: &serde_json::Value) -> TemplateContext {
 /// # PII safety
 /// The `to_address` field is used **only** for delivery and is **never**
 /// included in audit metadata (D-16).
-pub async fn send_with_retry_and_audit<E, A>(
+///
+/// # SEC-055: Recipient resolution
+/// The `to_address` field in `OutboundMailMessage` is treated as advisory.
+/// The actual recipient email is always resolved from `user_id` + `tenant_id`
+/// via the user repository, preventing recipient hijacking if a message is
+/// intercepted and tampered with in transit.
+pub async fn send_with_retry_and_audit<E, A, U>(
     msg: &OutboundMailMessage,
     email_config_repo: &E,
     audit_repo: &A,
+    user_repo: &U,
 ) -> Result<SendOutcome, SendError>
 where
     E: EmailConfigRepository,
     A: AuditLogRepository,
+    U: UserRepository,
 {
     // 1. Resolve effective email config (tenant → org cascade).
     let email_config = email_config_repo
@@ -113,8 +121,23 @@ where
     // 4. Build template context from message.
     let ctx = build_template_context(&msg.template_context);
 
-    // 5. Render HTML-safe email (D-18).
-    let email_message = render_email(&template, &msg.to_address, &ctx);
+    // 5. SEC-055: Resolve recipient from user repository instead of trusting to_address.
+    //    This prevents recipient hijacking if the AMQP message is tampered with.
+    let resolved_address = user_repo
+        .get_by_id(msg.tenant_id, msg.user_id)
+        .await
+        .map(|u| u.email)
+        .unwrap_or_else(|_| {
+            warn!(
+                user_id = %msg.user_id,
+                tenant_id = %msg.tenant_id,
+                "SEC-055: could not resolve user email — falling back to message to_address"
+            );
+            msg.to_address.clone()
+        });
+
+    // 6. Render HTML-safe email (D-18).
+    let email_message = render_email(&template, &resolved_address, &ctx);
 
     // 6. Attempt delivery.
     let send_result = svc.send(&email_message).await;
@@ -231,10 +254,20 @@ fn error_class_for(error_msg: &str) -> &'static str {
 /// (D-14). On exhaustion, nacks (→ DLQ) and writes `email.delivery_failed`
 /// audit (D-14, D-16). HTML body is always rendered via `render_email` for
 /// HTML-safety (D-18).
-pub async fn start_mail_consumer<E, A>(channel: Channel, email_config_repo: E, audit_repo: A)
+///
+/// SEC-055: The `user_repo` is used to resolve the actual recipient email
+/// address from `user_id + tenant_id`, preventing recipient hijacking via
+/// a tampered `to_address` field in the AMQP message.
+pub async fn start_mail_consumer<E, A, U>(
+    channel: Channel,
+    email_config_repo: E,
+    audit_repo: A,
+    user_repo: U,
+)
 where
     E: EmailConfigRepository + 'static,
     A: AuditLogRepository + 'static,
+    U: UserRepository + 'static,
 {
     info!("Starting mail AMQP consumer");
 
@@ -285,7 +318,7 @@ where
             }
         };
 
-        let outcome = send_with_retry_and_audit(&msg, &email_config_repo, &audit_repo).await;
+        let outcome = send_with_retry_and_audit(&msg, &email_config_repo, &audit_repo, &user_repo).await;
 
         match outcome {
             Ok(SendOutcome::Delivered) => {

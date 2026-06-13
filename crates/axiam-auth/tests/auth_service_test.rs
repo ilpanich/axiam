@@ -27,10 +27,7 @@ use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 /// Pre-generated Ed25519 test key pair (PEM).
-const TEST_PRIVATE_KEY: &str = "\
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM
------END PRIVATE KEY-----";
+const TEST_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n-----END PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
 
 const TEST_PUBLIC_KEY: &str = "\
 -----BEGIN PUBLIC KEY-----
@@ -66,6 +63,8 @@ fn test_config() -> AuthConfig {
         webauthn_rp_id: "localhost".into(),
         webauthn_rp_origin: "http://localhost:8090".into(),
         webauthn_rp_name: "AXIAM-Test".into(),
+        jwt_encoding_key: None,
+        jwt_decoding_key: None,
     }
 }
 

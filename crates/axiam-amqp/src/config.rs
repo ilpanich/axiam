@@ -14,6 +14,12 @@ pub struct AmqpConfig {
     pub reconnect_delay_ms: u64,
     /// Maximum number of connection retries before giving up.
     pub max_retries: u32,
+    /// HMAC-SHA256 signing key for authenticating AMQP message payloads (SEC-022/055).
+    /// Set via `AXIAM__AMQP__SIGNING_KEY` (hex-encoded 32-byte key).
+    /// When `None`, signatures are accepted but not required (migration mode).
+    /// In production this MUST be set; consumers log a warning if absent.
+    #[serde(default)]
+    pub signing_key: Option<String>,
 }
 
 impl Default for AmqpConfig {
@@ -23,6 +29,7 @@ impl Default for AmqpConfig {
             prefetch_count: 10,
             reconnect_delay_ms: 5000,
             max_retries: 5,
+            signing_key: None,
         }
     }
 }

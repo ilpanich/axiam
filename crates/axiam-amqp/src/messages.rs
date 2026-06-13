@@ -3,15 +3,58 @@
 //! `MailType` and `OutboundMailMessage` are defined in `axiam-core::models::mail`
 //! so that crates which cannot depend on `axiam-amqp` (e.g. `axiam-audit`) can
 //! still build outbound mail messages.  They are re-exported here for convenience.
+//!
+//! SEC-022/055: `AuthzRequest` and `AuditEventMessage` carry an HMAC-SHA256
+//! signature over the serialized payload body. Publishers set it; consumers
+//! verify it. The signing key is a per-tenant AMQP signing secret.
+//!
+//! SEC-055: The `to_address` field in `OutboundMailMessage` is treated as
+//! advisory; the actual recipient is always resolved server-side from
+//! `user_id` + `tenant_id` to prevent recipient hijacking.
 
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use axiam_core::models::mail::{MailType, OutboundMailMessage};
 
+type HmacSha256 = Hmac<Sha256>;
+
+// ---------------------------------------------------------------------------
+// HMAC helpers (SEC-022)
+// ---------------------------------------------------------------------------
+
+/// Compute HMAC-SHA256 of the JSON-serialized message payload.
+///
+/// The `hmac_signature` field must be set to `None` (or absent) before
+/// serializing `payload_json` — otherwise the signature is over a message
+/// that includes a placeholder signature, making verification impossible.
+/// Use [`sign_payload`] to produce the canonical JSON before signing.
+pub fn sign_payload(key: &[u8], payload_json: &[u8]) -> String {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(payload_json);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Verify an HMAC-SHA256 signature over the canonical payload bytes.
+///
+/// Returns `true` if the signature matches. Uses constant-time comparison
+/// internally (via the `hmac` crate's `verify_slice`).
+pub fn verify_payload(key: &[u8], payload_json: &[u8], signature_hex: &str) -> bool {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(payload_json);
+    let expected = hex::decode(signature_hex).unwrap_or_default();
+    mac.verify_slice(&expected).is_ok()
+}
+
+// ---------------------------------------------------------------------------
+// Message types
+// ---------------------------------------------------------------------------
+
 /// Authorization check request received from `axiam.authz.request`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AuthzRequest {
     /// Caller-provided ID to correlate request with response.
     pub correlation_id: Uuid,
@@ -19,8 +62,14 @@ pub struct AuthzRequest {
     pub subject_id: Uuid,
     pub action: String,
     pub resource_id: Uuid,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// HMAC-SHA256 of the JSON-serialized message body (this field set to null).
+    /// Computed with the per-tenant AMQP signing key (SEC-022).
+    /// Consumer MUST verify this before processing. Missing signature is
+    /// acceptable during a rolling deployment but should be rejected in strict mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac_signature: Option<String>,
 }
 
 /// Authorization decision published to `axiam.authz.response`.
@@ -35,19 +84,22 @@ pub struct AuthzResponse {
 /// Audit event received from external services via `axiam.audit.events`.
 ///
 /// Maps directly to `CreateAuditLogEntry` from `axiam-core`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AuditEventMessage {
     pub tenant_id: Uuid,
     pub actor_id: Uuid,
     pub actor_type: String,
     pub action: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
     pub outcome: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_address: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// HMAC-SHA256 of the JSON-serialized message body (SEC-022/055).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac_signature: Option<String>,
 }
 
 /// Notification event published to `axiam.notifications`.
@@ -127,5 +179,64 @@ mod tests {
             serde_json::to_string(&MailType::ExportReady).unwrap(),
             r#""export_ready""#
         );
+    }
+
+    // SEC-022: HMAC sign/verify round-trip
+    #[test]
+    fn amqp_hmac_sign_verify_round_trip() {
+        let key = b"test-amqp-signing-key";
+        let payload = b"{\"tenant_id\":\"...\",\"action\":\"read\"}";
+        let sig = sign_payload(key, payload);
+        assert!(!sig.is_empty());
+        assert!(verify_payload(key, payload, &sig), "valid signature must verify");
+    }
+
+    #[test]
+    fn amqp_hmac_wrong_key_fails_verify() {
+        let key1 = b"key-one";
+        let key2 = b"key-two";
+        let payload = b"some-payload";
+        let sig = sign_payload(key1, payload);
+        assert!(!verify_payload(key2, payload, &sig), "wrong key must not verify");
+    }
+
+    #[test]
+    fn amqp_hmac_tampered_payload_fails_verify() {
+        let key = b"hmac-key";
+        let payload = b"original-payload";
+        let tampered = b"tampered-payload";
+        let sig = sign_payload(key, payload);
+        assert!(!verify_payload(key, tampered, &sig), "tampered payload must not verify");
+    }
+
+    // SEC-022: AuthzRequest carries hmac_signature field
+    #[test]
+    fn authz_request_hmac_signature_serializes_when_present() {
+        let req = AuthzRequest {
+            correlation_id: Uuid::nil(),
+            tenant_id: Uuid::nil(),
+            subject_id: Uuid::nil(),
+            action: "read".into(),
+            resource_id: Uuid::nil(),
+            scope: None,
+            hmac_signature: Some("abc123".into()),
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(json.contains("hmac_signature"), "hmac_signature must be in JSON when Some");
+    }
+
+    #[test]
+    fn authz_request_hmac_signature_omitted_when_none() {
+        let req = AuthzRequest {
+            correlation_id: Uuid::nil(),
+            tenant_id: Uuid::nil(),
+            subject_id: Uuid::nil(),
+            action: "read".into(),
+            resource_id: Uuid::nil(),
+            scope: None,
+            hmac_signature: None,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(!json.contains("hmac_signature"), "hmac_signature must be omitted when None");
     }
 }

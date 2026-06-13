@@ -195,7 +195,58 @@ impl Default for JwksCache {
 // Private helper
 // ---------------------------------------------------------------------------
 
+/// Maximum JWKS response body size: 512 KiB.
+///
+/// SEC-054: Prevents a malicious or misconfigured IdP from sending an
+/// unbounded response that exhausts server memory. A legitimate JWKS
+/// document with a dozen keys is typically < 10 KiB.
+const MAX_JWKS_BODY_BYTES: usize = 512 * 1024;
+
+/// Returns `true` for IP addresses that must not be contacted as JWKS endpoints.
+///
+/// SEC-054: Prevents SSRF via malicious JWKS URL pointing to internal services.
+fn is_private_jwks_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_broadcast()
+                || v4.is_unspecified()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xffc0 == 0xfe80) // link-local fe80::/10
+                || (v6.segments()[0] & 0xfe00 == 0xfc00) // unique-local fc00::/7
+        }
+    }
+}
+
+/// Validate that the JWKS URL does not resolve to a private/loopback IP (SEC-054).
+async fn validate_jwks_url(jwks_uri: &str) -> Result<(), FederationError> {
+    let parsed = url::Url::parse(jwks_uri)
+        .map_err(|_| FederationError::JwksFetchFailed("invalid JWKS URL".into()))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| FederationError::JwksFetchFailed("JWKS URL has no host".into()))?;
+    let port = parsed.port_or_known_default().unwrap_or(443);
+
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| FederationError::JwksFetchFailed(format!("JWKS host resolution failed: {e}")))?;
+
+    for addr in addrs {
+        if is_private_jwks_ip(addr.ip()) {
+            return Err(FederationError::JwksFetchFailed(format!(
+                "SSRF blocked: JWKS URL '{jwks_uri}' resolves to a private/loopback IP"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn fetch_jwks(http: &reqwest::Client, jwks_uri: &str) -> Result<JwkSet, FederationError> {
+    // SEC-054: Block JWKS URLs that resolve to private/loopback IPs.
+    validate_jwks_url(jwks_uri).await?;
+
     let response = http
         .get(jwks_uri)
         .timeout(Duration::from_secs(5))
@@ -203,11 +254,25 @@ async fn fetch_jwks(http: &reqwest::Client, jwks_uri: &str) -> Result<JwkSet, Fe
         .await
         .map_err(|e| FederationError::JwksFetchFailed(format!("HTTP request failed: {e}")))?;
 
-    response
+    let response = response
         .error_for_status()
-        .map_err(|e| FederationError::JwksFetchFailed(format!("IdP returned error: {e}")))?
-        .json::<JwkSet>()
+        .map_err(|e| FederationError::JwksFetchFailed(format!("IdP returned error: {e}")))?;
+
+    // SEC-054: Cap the response body size before parsing JSON.
+    let body_bytes = response
+        .bytes()
         .await
+        .map_err(|e| FederationError::JwksFetchFailed(format!("Failed to read JWKS body: {e}")))?;
+
+    if body_bytes.len() > MAX_JWKS_BODY_BYTES {
+        return Err(FederationError::JwksFetchFailed(format!(
+            "JWKS response body too large: {} bytes (max {})",
+            body_bytes.len(),
+            MAX_JWKS_BODY_BYTES
+        )));
+    }
+
+    serde_json::from_slice::<JwkSet>(&body_bytes)
         .map_err(|e| FederationError::JwksFetchFailed(format!("Failed to parse JWKS: {e}")))
 }
 

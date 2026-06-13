@@ -10,11 +10,10 @@
 //!   3. Reject: issuer CA not found (no-CA case) → fails closed
 
 use axiam_core::models::certificate::{
-    CertificateStatus, CertificateType, CreateCaCertificate, CreateCertificate, KeyAlgorithm,
-    StoreCertificate,
+    CertificateType, CreateCaCertificate, CreateCertificate, KeyAlgorithm, StoreCertificate,
 };
 use axiam_core::models::service_account::CreateServiceAccount;
-use axiam_core::repository::{CaCertificateRepository, CertificateRepository, ServiceAccountRepository};
+use axiam_core::repository::{CertificateRepository, ServiceAccountRepository};
 use axiam_db::repository::{
     SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealServiceAccountRepository,
 };

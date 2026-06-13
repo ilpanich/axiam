@@ -356,8 +356,13 @@ async fn main() -> std::io::Result<()> {
     );
     let device_auth_service = DeviceAuthService::new(cert_repo.clone());
     let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
+    // SEC-031: Webhook secrets stored AES-256-GCM encrypted using the same PKI
+    // encryption key. Falls back to an all-zero key if env var is absent so the
+    // server still starts (will fail to decrypt secrets set under a real key).
+    let webhook_enc_key: [u8; 32] =
+        load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY").unwrap_or([0u8; 32]);
     let webhook_delivery =
-        axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone());
+        axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone(), webhook_enc_key);
     let settings_repo = SurrealSettingsRepository::new(db.client().clone());
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client().clone());
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client().clone());

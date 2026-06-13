@@ -461,7 +461,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 7. Compliance Verification & Test Closure | 5/5 | Complete   | 2026-06-07 |
 | 8. Build Unblock (Wave 0) | 1/1 | Complete   | 2026-06-10 |
 | 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
-| 10. High Remediation (Wave 2) | 6/6 | Complete   | 2026-06-13 |
+| 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
 | 11. Medium Remediation (Wave 3) | 0/0 | Pending | — |
 | 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |
 

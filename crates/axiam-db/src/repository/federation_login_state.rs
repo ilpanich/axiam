@@ -26,6 +26,9 @@ struct FederationLoginStateRow {
     federation_config_id: String,
     redirect_uri: String,
     expires_at: DateTime<Utc>,
+    /// SAML AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).
+    /// Empty string for OIDC flows where no request ID is tracked.
+    request_id: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -62,7 +65,8 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
                  tenant_id = $tenant_id, \
                  federation_config_id = $config_id, \
                  redirect_uri = $redirect_uri, \
-                 expires_at = $expires_at",
+                 expires_at = $expires_at, \
+                 request_id = $request_id",
             )
             .bind(("id", row_id))
             .bind(("state", row.state.clone()))
@@ -71,6 +75,7 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
             .bind(("config_id", row.federation_config_id.to_string()))
             .bind(("redirect_uri", row.redirect_uri.clone()))
             .bind(("expires_at", row.expires_at))
+            .bind(("request_id", row.request_id.clone()))
             .await
             .map_err(DbError::from)?;
 
@@ -104,7 +109,7 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
             .query(
                 "BEGIN TRANSACTION; \
                  LET $row = (SELECT state, nonce, tenant_id, federation_config_id, \
-                               redirect_uri, expires_at \
+                               redirect_uri, expires_at, request_id \
                              FROM federation_login_state \
                              WHERE state = $state LIMIT 1); \
                  DELETE federation_login_state WHERE state = $state; \
@@ -135,6 +140,7 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
                     federation_config_id,
                     redirect_uri: row.redirect_uri,
                     expires_at: row.expires_at,
+                    request_id: row.request_id.unwrap_or_default(),
                 };
 
                 // Check expiry in Rust — row was deleted; returning None here

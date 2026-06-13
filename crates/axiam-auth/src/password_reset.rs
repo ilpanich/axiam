@@ -447,6 +447,8 @@ mod tests {
                 client_id: "google-client-id".into(),
                 client_secret: "google-secret".into(),
                 attribute_map: None,
+                idp_signing_cert_pem: None,
+                allowed_algorithms: None,
             })
             .await
             .unwrap();

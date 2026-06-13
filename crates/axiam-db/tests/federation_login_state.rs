@@ -27,6 +27,7 @@ fn fresh_row() -> FederationLoginState {
         federation_config_id: Uuid::new_v4(),
         redirect_uri: "https://app.example.com/callback".into(),
         expires_at: Utc::now() + Duration::minutes(10),
+        request_id: String::new(),
     }
 }
 

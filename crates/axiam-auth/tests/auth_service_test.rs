@@ -1248,6 +1248,8 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
             client_id: "test-client-id".into(),
             client_secret: "test-client-secret".into(),
             attribute_map: None,
+            idp_signing_cert_pem: None,
+            allowed_algorithms: None,
         })
         .await
         .unwrap();

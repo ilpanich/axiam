@@ -25,6 +25,7 @@ uuid = { workspace = true }
 samael = { workspace = true, optional = true }
 flate2 = { workspace = true }
 x509-parser = { workspace = true }
+pem = { workspace = true }
 
 [features]
 # SAML Service Provider support. Pulls in `samael` (and transitively its
@@ -39,3 +40,4 @@ saml = ["dep:samael"]
 
 [dev-dependencies]
 rcgen = { workspace = true }
+base64 = { workspace = true }

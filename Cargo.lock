@@ -950,6 +950,7 @@ dependencies = [
  "chrono",
  "flate2",
  "jsonwebtoken",
+ "pem",
  "rcgen",
  "reqwest 0.12.28",
  "samael",

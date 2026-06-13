@@ -160,6 +160,10 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         let protocol = protocol_to_string(&input.protocol);
         let attribute_map = input.attribute_map.unwrap_or_else(|| serde_json::json!({}));
 
+        let allowed_algorithms = input
+            .allowed_algorithms
+            .unwrap_or_else(|| vec!["RS256".to_string()]);
+
         let result = self
             .db
             .query(
@@ -171,6 +175,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  client_id = $client_id, \
                  client_secret = $client_secret, \
                  attribute_map = $attribute_map, \
+                 idp_signing_cert_pem = $idp_signing_cert_pem, \
+                 allowed_algorithms = $allowed_algorithms, \
                  enabled = true, \
                  created_at = time::now(), \
                  updated_at = time::now()",
@@ -185,6 +191,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             // storage (same pattern as MFA secrets and CA private keys).
             .bind(("client_secret", input.client_secret))
             .bind(("attribute_map", attribute_map))
+            .bind(("idp_signing_cert_pem", input.idp_signing_cert_pem))
+            .bind(("allowed_algorithms", allowed_algorithms))
             .await
             .map_err(DbError::from)?;
 
@@ -257,6 +265,20 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         if let Some(enabled) = input.enabled {
             set_clauses.push("enabled = $enabled".into());
             binds.push(("enabled".into(), serde_json::json!(enabled)));
+        }
+        if let Some(ref idp_signing_cert_pem) = input.idp_signing_cert_pem {
+            set_clauses.push("idp_signing_cert_pem = $idp_signing_cert_pem".into());
+            binds.push((
+                "idp_signing_cert_pem".into(),
+                serde_json::json!(idp_signing_cert_pem),
+            ));
+        }
+        if let Some(ref allowed_algorithms) = input.allowed_algorithms {
+            set_clauses.push("allowed_algorithms = $allowed_algorithms".into());
+            binds.push((
+                "allowed_algorithms".into(),
+                serde_json::json!(allowed_algorithms),
+            ));
         }
 
         let sql = format!(

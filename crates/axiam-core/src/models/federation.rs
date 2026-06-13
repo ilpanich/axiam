@@ -59,6 +59,10 @@ pub struct CreateFederationConfig {
     pub client_id: String,
     pub client_secret: String,
     pub attribute_map: Option<serde_json::Value>,
+    /// PEM-encoded X.509 cert used to verify SAML assertions (CQ-B40/REQ-14 AC-5).
+    pub idp_signing_cert_pem: Option<String>,
+    /// JWT signing algorithms accepted from this IdP (CQ-B40/REQ-14 AC-5).
+    pub allowed_algorithms: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -69,6 +73,10 @@ pub struct UpdateFederationConfig {
     pub client_secret: Option<String>,
     pub attribute_map: Option<serde_json::Value>,
     pub enabled: Option<bool>,
+    /// PEM-encoded X.509 cert used to verify SAML assertions (CQ-B40/REQ-14 AC-5).
+    pub idp_signing_cert_pem: Option<Option<String>>,
+    /// JWT signing algorithms accepted from this IdP (CQ-B40/REQ-14 AC-5).
+    pub allowed_algorithms: Option<Vec<String>>,
 }
 
 /// Tracks the link between an AXIAM user and their external IdP identity.

@@ -127,6 +127,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "totp_replay_prevention",
         sql: SCHEMA_V17,
     },
+    Migration {
+        version: 18,
+        name: "federation_login_state_request_id",
+        sql: SCHEMA_V18,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1012,6 +1017,19 @@ const SCHEMA_V17: &str = "\
 -- Add TOTP replay prevention step counter to user table (SEC-008/REQ-14 AC-5).
 DEFINE FIELD IF NOT EXISTS totp_last_used_step ON TABLE user \
     TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v18 — SAML InResponseTo / Destination tracking (SEC-005/REQ-14 AC-5)
+// -----------------------------------------------------------------------
+//
+// Adds `request_id` to `federation_login_state` to track the SAML
+// AuthnRequest ID so the ACS handler can verify InResponseTo.
+
+const SCHEMA_V18: &str = "\
+-- Add SAML AuthnRequest ID to federation_login_state (SEC-005/REQ-14 AC-5).
+DEFINE FIELD IF NOT EXISTS request_id ON TABLE federation_login_state \
+    TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

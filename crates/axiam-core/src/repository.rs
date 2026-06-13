@@ -54,7 +54,7 @@ where
     D: Deserializer<'de>,
 {
     let raw = u64::deserialize(de)?;
-    Ok(raw.max(1).min(200))
+    Ok(raw.clamp(1, 200))
 }
 
 /// Pagination parameters for list queries.
@@ -766,6 +766,11 @@ pub struct FederationLoginState {
     /// SPA post-login destination (NOT the AXIAM ACS/callback URL).
     pub redirect_uri: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// SAML AuthnRequest ID (SAML only; empty string for OIDC).
+    ///
+    /// Stored at SAML login-start time so the ACS handler can verify
+    /// `Response.InResponseTo` matches the request ID (SEC-005/REQ-14 AC-5).
+    pub request_id: String,
 }
 
 /// Repository for first-time SSO login state rows.

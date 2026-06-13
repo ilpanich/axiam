@@ -444,28 +444,29 @@ impl<
             .ok_or(AuthError::MfaNotEnrolled)?;
 
         let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
-        // confirm_mfa is enrollment confirmation — replay check uses no prior step
-        // (first use during enrollment), but we set used_step for consistency.
-        let (valid, used_step) = totp::verify_code_with_replay_check(
+        // confirm_mfa is enrollment confirmation only — use plain verify_code (no
+        // replay tracking).  Replay protection (SEC-008) applies to login via
+        // verify_mfa, not to enrollment confirmation.
+        let valid = totp::verify_code(
             &secret_bytes,
             totp_code,
             &self.config.totp_issuer,
             &user.email,
-            user.totp_last_used_step,
         )?;
 
         if !valid {
             return Err(AuthError::MfaInvalidCode.into());
         }
 
-        // Activate MFA and record last-used step.
+        // Activate MFA.  totp_last_used_step is intentionally NOT set here:
+        // the user must complete a full login (verify_mfa) for replay tracking
+        // to begin.
         self.user_repo
             .update(
                 tenant_id,
                 user_id,
                 UpdateUser {
                     mfa_enabled: Some(true),
-                    totp_last_used_step: Some(Some(used_step)),
                     ..Default::default()
                 },
             )

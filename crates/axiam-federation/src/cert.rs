@@ -4,26 +4,26 @@
 //! from PEM (admin-friendly) to DER (required by `samael::crypto::verify_signed_xml`).
 //! Also called at federation config create/update time to reject garbage PEMs early.
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-
 use crate::error::FederationError;
 
 /// Decode a PEM-encoded X.509 certificate to raw DER bytes.
 ///
-/// Strips `-----BEGIN CERTIFICATE-----` / `-----END CERTIFICATE-----` header and
-/// footer lines (and any whitespace-only lines), then base64-decodes the body.
+/// Uses the `pem` crate's parser to correctly handle multi-block PEM files,
+/// line endings, and label validation (must be `CERTIFICATE`).
 ///
 /// Returns `Err(FederationError::InvalidIdpCert)` on any decode failure.
-pub fn pem_cert_to_der(pem: &str) -> Result<Vec<u8>, FederationError> {
-    let body: String = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----") && !l.trim().is_empty())
-        .collect();
+pub fn pem_cert_to_der(pem_str: &str) -> Result<Vec<u8>, FederationError> {
+    let parsed = ::pem::parse(pem_str)
+        .map_err(|e| FederationError::InvalidIdpCert(format!("PEM parse failed: {e}")))?;
 
-    STANDARD
-        .decode(body.trim())
-        .map_err(|e| FederationError::InvalidIdpCert(format!("base64 decode failed: {e}")))
+    if parsed.tag() != "CERTIFICATE" {
+        return Err(FederationError::InvalidIdpCert(format!(
+            "expected PEM label CERTIFICATE, got {}",
+            parsed.tag()
+        )));
+    }
+
+    Ok(parsed.contents().to_vec())
 }
 
 /// Validate that a PEM string contains a syntactically valid X.509 certificate.
@@ -82,6 +82,7 @@ mod tests {
 
     #[test]
     fn non_cert_pem_rejected() {
+        use base64::Engine;
         // Valid base64 of random bytes — not a certificate.
         let fake_pem = format!(
             "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",

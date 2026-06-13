@@ -61,6 +61,11 @@ pub struct SamlAuthnRequestResult {
     pub binding: String,
     /// Relay state passed through the SSO flow.
     pub relay_state: Option<String>,
+    /// The AuthnRequest ID (`_<uuid>` format).
+    ///
+    /// Callers MUST store this in `FederationLoginState.request_id` so the
+    /// ACS handler can verify `Response.InResponseTo` (SEC-005/REQ-14 AC-5).
+    pub request_id: String,
 }
 
 /// Claims extracted from a SAML assertion.
@@ -250,8 +255,9 @@ where
 
         let idp = self.fetch_idp_metadata(metadata_url).await?;
 
+        let authn_request_id = format!("_{}", Uuid::new_v4());
         let authn_request = AuthnRequest {
-            id: format!("_{}", Uuid::new_v4()),
+            id: authn_request_id.clone(),
             version: "2.0".into(),
             issue_instant: Utc::now(),
             destination: Some(idp.sso_url.clone()),
@@ -309,6 +315,7 @@ where
             saml_request,
             binding: idp.sso_binding,
             relay_state,
+            request_id: authn_request_id,
         })
     }
 
@@ -316,12 +323,20 @@ where
     ///
     /// Decodes, parses, validates the response, extracts the assertion
     /// claims, and provisions or links the local user.
+    ///
+    /// `expected_request_id` — if `Some`, checked against `Response.InResponseTo`
+    /// (SEC-005/REQ-14 AC-5).  Pass the ID stored in `FederationLoginState.request_id`.
+    ///
+    /// `expected_destination` — if `Some` and non-empty, checked against
+    /// `Response.Destination` (SEC-005/REQ-14 AC-5).
     pub async fn handle_saml_response(
         &self,
         tenant_id: Uuid,
         config_id: Uuid,
         saml_response_b64: &str,
         _relay_state: Option<&str>,
+        expected_request_id: Option<&str>,
+        expected_destination: Option<&str>,
     ) -> Result<FederationCallbackResult, FederationError> {
         let config = self
             .federation_config_repo
@@ -362,6 +377,50 @@ where
         //   - The digest or signature value does not verify
         self.verify_signature(xml.as_bytes(), &config)?;
 
+        // Step 1a — Protocol binding checks (SEC-005/REQ-14 AC-5).
+        // These run after signature verification so we only check authentic responses.
+
+        // InResponseTo: reject unsolicited responses when a request ID is available.
+        if let Some(expected_id) = expected_request_id {
+            if !expected_id.is_empty() {
+                match response.in_response_to.as_deref() {
+                    None => {
+                        return Err(FederationError::SamlResponseFailed(
+                            "SAML Response missing InResponseTo (unsolicited response rejected)"
+                                .into(),
+                        ));
+                    }
+                    Some(actual_id) if actual_id != expected_id => {
+                        return Err(FederationError::SamlResponseFailed(format!(
+                            "SAML Response InResponseTo mismatch: expected {expected_id}, \
+                             got {actual_id}"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Destination: reject responses not addressed to this ACS URL.
+        if let Some(expected_dest) = expected_destination {
+            if !expected_dest.is_empty() {
+                match response.destination.as_deref() {
+                    None => {
+                        return Err(FederationError::SamlResponseFailed(
+                            "SAML Response missing Destination".into(),
+                        ));
+                    }
+                    Some(actual_dest) if actual_dest != expected_dest => {
+                        return Err(FederationError::SamlResponseFailed(format!(
+                            "SAML Response Destination mismatch: expected {expected_dest}, \
+                             got {actual_dest}"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Validate status.
         let status = response.status.as_ref().ok_or_else(|| {
             FederationError::SamlResponseFailed("SAML Response missing Status element".into())
@@ -379,8 +438,16 @@ where
             FederationError::SamlResponseFailed("SAML Response missing Assertion".into())
         })?;
 
-        // Validate conditions if present.
-        if let Some(conditions) = &assertion.conditions {
+        // Validate conditions — REQUIRED (SEC-005/REQ-14 AC-5).
+        // An assertion without a Conditions block has no validity window and no
+        // audience restriction, so it must be rejected to prevent XSW attacks.
+        let conditions = assertion.conditions.as_ref().ok_or_else(|| {
+            FederationError::SamlResponseFailed(
+                "Assertion missing required Conditions element".into(),
+            )
+        })?;
+
+        {
             let now = Utc::now();
             if let Some(not_before) = conditions.not_before
                 && now < not_before
@@ -415,12 +482,10 @@ where
         // Step 3 — Assertion replay protection (D-09).
         // Record the assertion ID in saml_assertion_replay. Returns
         // ReplayDetected on UNIQUE violation (same tenant_id + assertion_id).
-        // Use NotOnOrAfter as the row TTL; fall back to 1 hour from now if
-        // the assertion has no Conditions block.
-        let replay_expires_at = assertion
-            .conditions
-            .as_ref()
-            .and_then(|c| c.not_on_or_after)
+        // Use NotOnOrAfter as the row TTL (Conditions is now required above;
+        // fall back to 1 hour from now if NotOnOrAfter is not set).
+        let replay_expires_at = conditions
+            .not_on_or_after
             .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(1));
 
         self.replay_repo
@@ -479,13 +544,15 @@ where
         let sp_entity_id = xml_escape(&config.client_id);
         let acs_escaped = xml_escape(acs_url);
 
+        // SEC-005/REQ-14 AC-5: advertise that we require signed assertions and
+        // signed authn requests so compliant IdPs enforce these controls.
         Ok(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
     entityID="{sp_entity_id}">
   <md:SPSSODescriptor
-      AuthnRequestsSigned="false"
-      WantAssertionsSigned="false"
+      AuthnRequestsSigned="true"
+      WantAssertionsSigned="true"
       protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
     <md:NameIDFormat>{NAMEID_FORMAT_PERSISTENT}</md:NameIDFormat>
     <md:AssertionConsumerService

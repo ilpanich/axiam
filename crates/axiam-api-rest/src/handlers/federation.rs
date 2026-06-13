@@ -65,6 +65,12 @@ pub struct CreateFederationConfigRequest {
     pub client_secret: String,
     /// Maps external IdP attributes to AXIAM user fields.
     pub attribute_map: Option<serde_json::Value>,
+    /// PEM-encoded X.509 certificate for verifying SAML assertions or
+    /// OIDC signatures (CQ-B40/REQ-14 AC-5).  Required for SAML configs.
+    pub idp_signing_cert_pem: Option<String>,
+    /// Accepted JWT signing algorithms (OIDC) or signature algorithms (SAML).
+    /// Defaults to `["RS256"]` when not provided (CQ-B40/REQ-14 AC-5).
+    pub allowed_algorithms: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -75,6 +81,11 @@ pub struct UpdateFederationConfigRequest {
     pub client_secret: Option<String>,
     pub attribute_map: Option<serde_json::Value>,
     pub enabled: Option<bool>,
+    /// PEM-encoded X.509 certificate for verifying SAML assertions
+    /// (CQ-B40/REQ-14 AC-5).  `Some(None)` clears the stored cert.
+    pub idp_signing_cert_pem: Option<Option<String>>,
+    /// Accepted signature algorithms (CQ-B40/REQ-14 AC-5).
+    pub allowed_algorithms: Option<Vec<String>>,
 }
 
 /// Federation config response -- omits client_secret.
@@ -240,6 +251,13 @@ pub async fn create<C: Connection>(
         _ => return Err(validation_err("protocol must be 'OidcConnect' or 'Saml'")),
     };
 
+    // Validate IdP signing cert PEM before storage so garbage certs are
+    // rejected at upload rather than at assertion-verification time (CQ-B40).
+    if let Some(ref pem) = req.idp_signing_cert_pem {
+        axiam_federation::cert::validate_pem_cert(pem)
+            .map_err(|e| validation_err(format!("idp_signing_cert_pem is invalid: {e}")))?;
+    }
+
     let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
         AxiamApiError(AxiamError::Validation {
             message: "federation encryption key not configured".into(),
@@ -265,6 +283,8 @@ pub async fn create<C: Connection>(
             client_id: req.client_id,
             client_secret: String::new(), // plaintext never stored
             attribute_map: req.attribute_map,
+            idp_signing_cert_pem: req.idp_signing_cert_pem,
+            allowed_algorithms: req.allowed_algorithms,
         })
         .await?;
 
@@ -395,6 +415,12 @@ pub async fn update<C: Connection>(
         return Err(validation_err("metadata_url must not be empty"));
     }
 
+    // Validate new IdP signing cert PEM if provided (CQ-B40).
+    if let Some(Some(ref pem)) = req.idp_signing_cert_pem {
+        axiam_federation::cert::validate_pem_cert(pem)
+            .map_err(|e| validation_err(format!("idp_signing_cert_pem is invalid: {e}")))?;
+    }
+
     // If the caller is rotating the client_secret, encrypt it before storage
     // (SEC-045). Plaintext never reaches the DB layer.
     let new_secret_plaintext = req.client_secret.clone();
@@ -412,6 +438,8 @@ pub async fn update<C: Connection>(
                 client_secret: None, // handled separately below
                 attribute_map: req.attribute_map,
                 enabled: req.enabled,
+                idp_signing_cert_pem: req.idp_signing_cert_pem,
+                allowed_algorithms: req.allowed_algorithms,
             },
         )
         .await?;
@@ -835,6 +863,8 @@ pub async fn saml_acs<C: Connection>(
             req.config_id,
             &req.saml_response,
             req.relay_state.as_deref(),
+            None, // no request ID available in the authenticated ACS path
+            None, // no expected destination in the authenticated ACS path
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -1159,6 +1189,7 @@ pub async fn oidc_start_public<C: Connection>(
             federation_config_id: b.federation_config_id,
             redirect_uri: b.redirect_uri,
             expires_at,
+            request_id: String::new(), // OIDC — no request ID
         })
         .await?;
 
@@ -1392,6 +1423,7 @@ pub async fn saml_login_public<C: Connection>(
         .map_err(axiam_core::error::AxiamError::from)?;
 
     // Persist state row (nonce = "" for SAML — unused but required by schema).
+    // Store the AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).
     login_state_repo
         .insert(&axiam_core::repository::FederationLoginState {
             state: state.clone(),
@@ -1400,6 +1432,7 @@ pub async fn saml_login_public<C: Connection>(
             federation_config_id: b.federation_config_id,
             redirect_uri: b.redirect_uri,
             expires_at,
+            request_id: result.request_id.clone(),
         })
         .await?;
 
@@ -1482,6 +1515,11 @@ pub async fn saml_acs_public<C: Connection>(
             config_id,
             &b.saml_response_b64,
             Some(&b.relay_state),
+            // Pass stored request_id for InResponseTo check (SEC-005/REQ-14 AC-5).
+            Some(login_state.request_id.as_str()),
+            // Destination check: pass empty string (ACS URL not available here;
+            // callers that know the ACS URL should pass it explicitly).
+            None,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;

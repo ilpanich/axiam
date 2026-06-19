@@ -364,8 +364,10 @@ async fn main() -> std::io::Result<()> {
     );
     // SEC-024: DeviceAuthService now holds a CA repo for chain verification.
     // SurrealCaCertificateRepository is cloned; each clone shares the underlying Surreal<C>.
-    let device_auth_service =
-        DeviceAuthService::new(cert_repo.clone(), SurrealCaCertificateRepository::new(db.client().clone()));
+    let device_auth_service = DeviceAuthService::new(
+        cert_repo.clone(),
+        SurrealCaCertificateRepository::new(db.client().clone()),
+    );
     let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
     // SEC-031: Webhook secrets stored AES-256-GCM encrypted using the same PKI
     // encryption key. Falls back to an all-zero key if env var is absent so the
@@ -448,11 +450,8 @@ async fn main() -> std::io::Result<()> {
         group_repo.clone(),
     );
     // SEC-022: Decode AMQP signing key (hex) for HMAC message verification.
-    let amqp_signing_key: Option<Vec<u8>> = config
-        .amqp
-        .signing_key
-        .as_deref()
-        .and_then(|hex| {
+    let amqp_signing_key: Option<Vec<u8>> =
+        config.amqp.signing_key.as_deref().and_then(|hex| {
             hex::decode(hex).map_err(|e| {
                 tracing::warn!(error = %e, "AXIAM__AMQP__SIGNING_KEY is not valid hex — ignoring");
             }).ok()
@@ -460,21 +459,30 @@ async fn main() -> std::io::Result<()> {
     if amqp_signing_key.is_some() {
         tracing::info!("AMQP signing key loaded (SEC-022)");
     } else {
-        tracing::warn!("AMQP signing key not configured — messages will not be HMAC-verified (SEC-022)");
+        tracing::warn!(
+            "AMQP signing key not configured — messages will not be HMAC-verified (SEC-022)"
+        );
     }
     let amqp_signing_key_clone = amqp_signing_key.clone();
     tokio::spawn(async move {
-        axiam_amqp::authz_consumer::start_authz_consumer(amqp_channel, amqp_engine, amqp_signing_key_clone).await;
+        axiam_amqp::authz_consumer::start_authz_consumer(
+            amqp_channel,
+            amqp_engine,
+            amqp_signing_key_clone,
+        )
+        .await;
         tracing::error!("AMQP authz consumer exited — shutting down process");
         std::process::exit(1);
     });
 
     // Create notification publisher (available for services to emit events).
+    // CQ-B29: publisher created but not yet wired into app_data — see comment at
+    // app_data registration site. Prefixed with _ to suppress unused-variable warning.
     let notif_channel = amqp
         .create_publisher_channel()
         .await
         .expect("Failed to create AMQP notification channel");
-    let notification_publisher = axiam_amqp::NotificationPublisher::new(notif_channel);
+    let _notification_publisher = axiam_amqp::NotificationPublisher::new(notif_channel);
 
     // Publisher channel for outbound mail (password-reset, email-verify, etc.)
     let mail_pub_channel = amqp
@@ -490,7 +498,12 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to create AMQP audit consumer channel");
     let amqp_audit_repo = audit_repo.clone();
     tokio::spawn(async move {
-        axiam_amqp::audit_consumer::start_audit_consumer(audit_channel, amqp_audit_repo, amqp_signing_key).await;
+        axiam_amqp::audit_consumer::start_audit_consumer(
+            audit_channel,
+            amqp_audit_repo,
+            amqp_signing_key,
+        )
+        .await;
         tracing::error!("AMQP audit consumer exited — shutting down process");
         std::process::exit(1);
     });
@@ -508,8 +521,13 @@ async fn main() -> std::io::Result<()> {
         let mail_audit_repo = audit_repo.clone();
         let mail_user_repo = user_repo.clone();
         tokio::spawn(async move {
-            axiam_amqp::start_mail_consumer(mail_channel, mail_email_config_repo, mail_audit_repo, mail_user_repo)
-                .await;
+            axiam_amqp::start_mail_consumer(
+                mail_channel,
+                mail_email_config_repo,
+                mail_audit_repo,
+                mail_user_repo,
+            )
+            .await;
             tracing::error!("AMQP mail consumer exited — shutting down process");
             std::process::exit(1);
         });
@@ -608,7 +626,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(auth_service.clone()))
             .app_data(web::Data::new(webauthn_service.clone()))
             .app_data(web::Data::new(mfa_method_service.clone()))
-            .app_data(web::Data::new(notification_publisher.clone()))
+            // CQ-B29: NotificationPublisher removed from app_data — no handler extracts it;
+            // wiring NotificationDispatcher requires rule_repo + mail_publisher in the
+            // audit worker (deferred to Phase 19).
+            // .app_data(web::Data::new(notification_publisher.clone()))
             .app_data(web::Data::new(mail_outbound_publisher.clone()))
             .app_data(web::Data::new(session_repo.clone()))
             .app_data(web::Data::new(session_validator.clone()))

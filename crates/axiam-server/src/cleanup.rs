@@ -244,7 +244,14 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         {
             Ok(links) => {
                 for link in links {
-                    let _ = self.federation_link_repo.delete(tenant_id, link.id).await;
+                    if let Err(e) = self.federation_link_repo.delete(tenant_id, link.id).await {
+                        tracing::warn!(
+                            error = %e,
+                            %tenant_id,
+                            link_id = %link.id,
+                            "cleanup: failed to delete expired federation link; will retry next cycle"
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -291,10 +298,18 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             .await
         {
             Ok(Some(deletion)) => {
-                let _ = self
+                if let Err(e) = self
                     .account_deletion_repo
                     .mark_completed(tenant_id, deletion.id)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        %tenant_id,
+                        deletion_id = %deletion.id,
+                        "cleanup: failed to mark account_deletion completed"
+                    );
+                }
             }
             Ok(None) => {
                 tracing::debug!(user_id = %user_id, "no pending account_deletion row found at purge time");
@@ -311,7 +326,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             .await?;
 
         // (h) Emit gdpr.user_pseudonymized audit event (actor = System/nil UUID).
-        let _ = self
+        if let Err(e) = self
             .audit_repo
             .append(CreateAuditLogEntry {
                 tenant_id,
@@ -325,7 +340,14 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                     "pseudonym": pseudonym,
                 })),
             })
-            .await;
+            .await
+        {
+            tracing::error!(
+                error = %e,
+                %tenant_id,
+                "cleanup: failed to emit gdpr.user_pseudonymized audit event (GDPR legally significant)"
+            );
+        }
 
         tracing::info!(
             pseudonym = %pseudonym,

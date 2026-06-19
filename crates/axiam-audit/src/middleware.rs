@@ -16,7 +16,6 @@ use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
 use tokio::sync::mpsc;
-use tracing::warn;
 use uuid::Uuid;
 
 /// Paths that should not generate audit entries.
@@ -52,10 +51,10 @@ impl AuditMiddleware {
 async fn audit_worker<A: AuditLogRepository>(mut rx: mpsc::Receiver<CreateAuditLogEntry>, repo: A) {
     while let Some(entry) = rx.recv().await {
         if let Err(e) = repo.append(entry).await {
-            warn!(error = %e, "Failed to write audit log entry");
+            tracing::warn!(error = %e, "Failed to write audit log entry");
         }
     }
-    warn!("Audit worker channel closed — no more entries will be written");
+    tracing::warn!("Audit worker channel closed — no more entries will be written");
 }
 
 impl<S, B> Transform<S, ServiceRequest> for AuditMiddleware
@@ -159,7 +158,12 @@ where
             };
 
             if tx.try_send(entry).is_err() {
-                warn!("Audit channel full — dropping audit entry for {method} {path}");
+                tracing::error!(
+                    audit_dropped = true,
+                    method = %method,
+                    path = %path,
+                    "Audit channel full — entry dropped. Investigate CHANNEL_CAPACITY."
+                );
             }
 
             result

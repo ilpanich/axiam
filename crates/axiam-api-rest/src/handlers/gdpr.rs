@@ -112,7 +112,9 @@ fn generate_cancel_token() -> String {
 ///
 /// Factored out of the individual GDPR handlers to eliminate the repeated
 /// audit-append block pattern (CQ-B39).  The fire-and-forget `let _ = …`
-/// pattern is intentional: an audit failure must not block the user response.
+/// pattern is intentional: an audit failure must not block the user response,
+/// but failures are logged at `error!` level since GDPR audit trails are legally
+/// significant (CQ-B31 / T-12-01).
 async fn append_gdpr_audit<C: Connection>(
     audit_repo: &SurrealAuditLogRepository<C>,
     tenant_id: Uuid,
@@ -121,7 +123,7 @@ async fn append_gdpr_audit<C: Connection>(
     resource_id: Option<Uuid>,
     metadata: Option<serde_json::Value>,
 ) {
-    let _ = audit_repo
+    if let Err(e) = audit_repo
         .append(axiam_core::models::audit::CreateAuditLogEntry {
             tenant_id,
             actor_id,
@@ -132,7 +134,14 @@ async fn append_gdpr_audit<C: Connection>(
             ip_address: None,
             metadata,
         })
-        .await;
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            %tenant_id,
+            "gdpr: failed to write audit log for GDPR request (legally significant)"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

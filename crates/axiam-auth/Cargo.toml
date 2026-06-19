@@ -29,7 +29,7 @@ base64 = { workspace = true }
 aes-gcm = { workspace = true }
 url = { workspace = true }
 webauthn-rs = { workspace = true }
-webauthn-rs-proto = { workspace = true }
+# webauthn-rs-proto: removed — only webauthn-rs is used directly in axiam-auth; types come through webauthn-rs re-exports
 
 [dev-dependencies]
 axiam-db = { workspace = true }

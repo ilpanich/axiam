@@ -22,6 +22,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 aes-gcm = { workspace = true }
 rand = { workspace = true }
+# Required: pgp/rsa crate uses rand_core 0.6 CryptoRng; do not upgrade until upstream
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = { workspace = true }
 pgp = { workspace = true }

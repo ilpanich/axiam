@@ -551,11 +551,17 @@ where
         // avoid orphaned entries; then surface the appropriate error.
         if let Err(revoke_err) = self.refresh_token_repo.revoke(tenant_id, &token_hash).await {
             // Best-effort: delete the newly-created token so it
-            // doesn't linger as an orphan. Ignore cleanup errors.
-            let _ = self
+            // doesn't linger as an orphan.
+            if let Err(cleanup_err) = self
                 .refresh_token_repo
                 .revoke(tenant_id, &new_refresh_hash)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    error = %cleanup_err,
+                    "token: failed to revoke orphaned refresh token; token may linger"
+                );
+            }
 
             return if matches!(revoke_err, AxiamError::NotFound { .. }) {
                 Err(OAuth2Error::InvalidGrant(

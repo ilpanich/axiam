@@ -474,7 +474,7 @@ export function PgpKeysPage() {
       {/* Private key reveal — shown once after generation */}
       <SecretRevealModal
         open={secretOpen}
-        onClose={() => setSecretOpen(false)}
+        onClose={() => { setSecretOpen(false); setPrivateKeyArmor(""); }}
         title="PGP Key Generated"
         description="Your PGP key pair has been generated. Save the private key now — it will not be shown again."
         secrets={[

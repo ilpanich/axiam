@@ -516,7 +516,7 @@ export function ServiceAccountsPage() {
       {/* Secret reveal */}
       <SecretRevealModal
         open={secretModalOpen}
-        onClose={() => setSecretModalOpen(false)}
+        onClose={() => { setSecretModalOpen(false); setRevealedClientId(""); setRevealedSecret(""); setSecretModalTitle(""); setSecretModalDesc(""); }}
         title={secretModalTitle}
         description={secretModalDesc}
         secrets={[

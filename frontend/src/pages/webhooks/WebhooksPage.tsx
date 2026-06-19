@@ -547,7 +547,7 @@ export function WebhooksPage() {
       {/* Auto-generated secret reveal */}
       <SecretRevealModal
         open={secretOpen}
-        onClose={() => setSecretOpen(false)}
+        onClose={() => { setSecretOpen(false); setRevealedSecret(""); }}
         title="Webhook Created"
         description="Your webhook has been created. Save the secret now — it will not be shown again."
         secrets={[

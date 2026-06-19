@@ -350,7 +350,7 @@ export function CertificatesPage() {
       {/* Private key reveal — shown once after generation */}
       <SecretRevealModal
         open={secretOpen}
-        onClose={() => setSecretOpen(false)}
+        onClose={() => { setSecretOpen(false); setPrivateKeyPem(""); }}
         title="Certificate Generated"
         description="Your certificate has been generated. Save the private key now — it will not be shown again."
         secrets={[{ label: "Private Key (PEM)", value: privateKeyPem, mono: true }]}

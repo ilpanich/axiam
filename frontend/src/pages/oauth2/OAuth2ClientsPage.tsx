@@ -561,7 +561,7 @@ export function OAuth2ClientsPage() {
       {/* Client secret reveal */}
       <SecretRevealModal
         open={secretModalOpen}
-        onClose={() => setSecretModalOpen(false)}
+        onClose={() => { setSecretModalOpen(false); setRevealedClientId(""); setRevealedSecret(""); }}
         title="OAuth2 Client Created"
         description="Your confidential OAuth2 client has been created. Save the secret now — it will not be shown again."
         secrets={[

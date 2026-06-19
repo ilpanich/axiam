@@ -37,7 +37,7 @@ export function formatRelativeTime(dateStr: string): string {
  * Formats an ISO date string as a medium-length date, e.g. "Jan 15, 2026"
  */
 export function formatDate(iso: string): string {
-  return new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(
     new Date(iso)
   );
 }
@@ -46,7 +46,7 @@ export function formatDate(iso: string): string {
  * Formats an ISO date string as date + time, e.g. "Jan 15, 2026, 10:30 AM"
  */
 export function formatDateTime(iso: string): string {
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(iso));

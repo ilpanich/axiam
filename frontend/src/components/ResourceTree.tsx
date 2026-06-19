@@ -78,7 +78,7 @@ interface TreeNodeRowProps {
 }
 
 function focusNodeById(id: string) {
-  const el = document.querySelector<HTMLElement>(`[data-tree-node-id="${id}"]`);
+  const el = document.querySelector<HTMLElement>(`[data-tree-node-id="${CSS.escape(id)}"]`);
   el?.focus();
 }
 

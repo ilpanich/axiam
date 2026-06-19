@@ -439,8 +439,11 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         // Use a deterministic record ID derived from org_id to avoid
         // SurrealDB v3 auto-generated ULID IDs which fail UUID parsing in
         // the SDK response deserialization.
-        let record_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("email_config:org:{org_id}").as_bytes())
-            .to_string();
+        let record_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("email_config:org:{org_id}").as_bytes(),
+        )
+        .to_string();
         let result = self
             .db
             .query(
@@ -605,9 +608,11 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         // Use a deterministic record ID derived from tenant_id to avoid
         // SurrealDB v3 auto-generated ULID IDs which fail UUID parsing in
         // the SDK response deserialization.
-        let tenant_record_id =
-            Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("email_config:tenant:{tenant_id}").as_bytes())
-                .to_string();
+        let tenant_record_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("email_config:tenant:{tenant_id}").as_bytes(),
+        )
+        .to_string();
         self.db
             .query(
                 "UPSERT type::record('email_config', $record_id) SET \

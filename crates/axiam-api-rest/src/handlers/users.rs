@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission, is_own_resource};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::client_info::{client_ip, user_agent};
 
 // -----------------------------------------------------------------------
 // Input validation helpers (CQ-B26)
@@ -147,10 +148,7 @@ pub async fn create<C: Connection>(
     validate_email_format(&req.email)?;
     let pw_violations = check_complexity(&req.password, &MINIMUM_PASSWORD_POLICY);
     if !pw_violations.is_empty() {
-        let details: Vec<String> = pw_violations
-            .iter()
-            .map(|v| v.to_string())
-            .collect();
+        let details: Vec<String> = pw_violations.iter().map(|v| v.to_string()).collect();
         return Err(AxiamApiError(AxiamError::PasswordPolicy {
             message: details.join("; "),
         }));
@@ -165,15 +163,8 @@ pub async fn create<C: Connection>(
     };
 
     // Capture IP and User-Agent for the Art. 7 proof-of-consent record.
-    let ip_address = http_req
-        .connection_info()
-        .realip_remote_addr()
-        .map(|s| s.to_string());
-    let user_agent = http_req
-        .headers()
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let ip_address = client_ip(&http_req);
+    let user_agent = user_agent(&http_req);
 
     // The user and its terms_of_service consent are written in one transaction:
     // a consent failure rolls back user creation, so a user can never exist

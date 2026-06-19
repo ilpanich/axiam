@@ -26,6 +26,7 @@ use crate::authz::{AuthzData, RequirePermission, is_own_resource};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::cert_auth::CertificateAuthenticated;
+use crate::extractors::client_info::{client_ip, user_agent};
 use crate::middleware::csrf::{
     access_cookie, clear_access_cookie, clear_csrf_cookie, clear_refresh_cookie, csrf_cookie,
     generate_csrf_token, refresh_cookie,
@@ -160,23 +161,6 @@ pub struct MeResponse {
 pub struct ChangePasswordRequest {
     pub current_password: String,
     pub new_password: String,
-}
-
-// -----------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------
-
-fn client_ip(req: &HttpRequest) -> Option<String> {
-    req.connection_info()
-        .realip_remote_addr()
-        .map(|s| s.to_string())
-}
-
-fn user_agent(req: &HttpRequest) -> Option<String> {
-    req.headers()
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
 }
 
 /// Build an `HttpResponse` that sets all three auth cookies and returns

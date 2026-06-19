@@ -310,7 +310,7 @@ REQ-11 (Testing) ──────────── runs after each REQ as ver
 | REQ-13 | Phase 9 | Complete |
 | REQ-14 | Phase 10 | Complete |
 | REQ-15 | Phase 11 | Complete |
-| REQ-16 | Phase 12 | Pending |
+| REQ-16 | Phase 12 | Complete |
 
 ---
 *Last updated: 2026-06-10 (audit-remediation tranche REQ-12..16 added)*

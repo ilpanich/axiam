@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Completed 11-02-PLAN.md
-last_updated: "2026-06-19T13:31:52.940Z"
+stopped_at: Completed 13-02-PLAN.md (Phase 13 code-complete; live bootstrap-local + 12-HUMAN-UAT smoke pending a running server)
+last_updated: "2026-06-19T13:35:00.000Z"
 last_activity: 2026-06-19
 progress:
   total_phases: 13
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 13 (surrealdb-connection-resilience) — NEW (durable fix for the stale-connection bug found during Phase 12 smoke)
-Plan: not yet planned
-Next: Plan Phase 13 — `/gsd:plan-phase 13`
-Status: Phase 12 complete (5/5; manual smoke deferred to 12-HUMAN-UAT.md, blocked on Phase 13)
+Phase: 13 (surrealdb-connection-resilience) — CODE-COMPLETE (2/2 plans; verifier 5/5 must-haves; status human_needed only for the deferred live smoke)
+Plan: 2 of 2 complete
+Next: Run the live validation — `just dev-up` → `just run-local` → `just bootstrap-local`, then walk 12-HUMAN-UAT.md (11 items)
+Status: All planned phases complete (13/13). Remaining work is the human-verify smoke (12-HUMAN-UAT.md), unblocked by Phase 13.
 Last activity: 2026-06-19
 
 Progress: [██████████] 100%

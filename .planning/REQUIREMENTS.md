@@ -275,6 +275,21 @@ Close remaining cleanup, dead-code, dependency, i18n, and minor security-polish 
 
 ---
 
+## REQ-17: SurrealDB Connection Resilience
+
+**Priority:** High | **Source:** Phase-12 manual-smoke debugging (root-caused live; SurrealDB Rust SDK issue #5750)
+
+The server's SurrealDB WebSocket connection must never silently lose its `use_ns`/`use_db` selection after an idle reconnect (which routes queries to the empty default namespace and returns "not found" on records that exist). The documented local first-run seed path must work end-to-end.
+
+### Acceptance Criteria
+- [x] `DbManager` keeps the active ns/db across reconnects (background guard re-issues `use_ns`/`use_db` on a detected `session::ns()`/`session::db()` mismatch)
+- [x] `health_check` asserts the connection is bound to the expected ns/db (returns `DbError::SessionMismatch` on wrong ns/db), not just socket liveness
+- [x] A regression test reproduces the unselected-session → NotFound failure and asserts re-selection succeeds (fails without the guard)
+- [x] `scripts/e2e-bootstrap.sh` seeds the database the server reads (`db=main`) and drops the non-existent `is_active` tenant field; `just bootstrap-local` provides a one-command local first-run
+- [ ] Deferred Phase-12 manual smoke (`12-HUMAN-UAT.md`, 11 items) executed against a live env (human-verify; requires `just run-local`)
+
+---
+
 ## Dependency Map
 
 ```
@@ -311,6 +326,7 @@ REQ-11 (Testing) ──────────── runs after each REQ as ver
 | REQ-14 | Phase 10 | Complete |
 | REQ-15 | Phase 11 | Complete |
 | REQ-16 | Phase 12 | Complete |
+| REQ-17 | Phase 13 | Complete (code) — live smoke deferred to 12-HUMAN-UAT |
 
 ---
-*Last updated: 2026-06-10 (audit-remediation tranche REQ-12..16 added)*
+*Last updated: 2026-06-19 (Phase 13 REQ-17 — SurrealDB connection resilience — added)*

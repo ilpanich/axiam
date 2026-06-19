@@ -137,6 +137,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "edge_unique_indexes",
         sql: SCHEMA_V19,
     },
+    Migration {
+        version: 20,
+        name: "seeder_state",
+        sql: SCHEMA_V20,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1063,6 +1068,24 @@ DEFINE INDEX IF NOT EXISTS idx_child_of_unique \
     ON TABLE child_of FIELDS in, out UNIQUE;
 DEFINE INDEX IF NOT EXISTS idx_signed_by_unique \
     ON TABLE signed_by FIELDS in, out UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v20 — seeder_state (CQ-B42 hash-guard skip)
+// -----------------------------------------------------------------------
+//
+// Persists the sha256 hash of the permission registry per tenant so that
+// repeated restarts with an unchanged registry skip the UPSERT storm.
+
+const SCHEMA_V20: &str = "\
+-- =======================================================================
+-- Seeder state (tenant scope) — hash-guard for permission seeder (CQ-B42)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS seeder_state SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE seeder_state TYPE string;
+DEFINE FIELD IF NOT EXISTS hash ON TABLE seeder_state TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE seeder_state TYPE datetime
+    DEFAULT time::now();
 ";
 
 // -----------------------------------------------------------------------

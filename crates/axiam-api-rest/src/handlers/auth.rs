@@ -732,6 +732,7 @@ pub async fn change_password<C: Connection>(
     settings_repo: web::Data<SurrealSettingsRepository<C>>,
     tenant_repo: web::Data<SurrealTenantRepository<C>>,
     history_repo: web::Data<SurrealPasswordHistoryRepository<C>>,
+    http_client: web::Data<reqwest::Client>, // CQ-B35: for HIBP breach check
     body: web::Json<ChangePasswordRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use axiam_core::repository::{SettingsRepository, TenantRepository};
@@ -758,6 +759,7 @@ pub async fn change_password<C: Connection>(
         &body.new_password,
         &settings.password,
         history_repo.as_ref(),
+        Some(http_client.as_ref()),
     )
     .await?;
 

@@ -95,6 +95,27 @@ impl<C: Connection> SurrealRoleRepository<C> {
     pub fn new(db: Surreal<C>) -> Self {
         Self { db }
     }
+
+    /// Look up a single role by name within a tenant (CQ-B42: replaces list()+scan pattern).
+    pub async fn get_by_name(&self, tenant_id: Uuid, name: &str) -> AxiamResult<Option<Role>> {
+        let tenant_str = tenant_id.to_string();
+        let mut result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM role \
+                 WHERE tenant_id = $tenant_id AND name = $name LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_str))
+            .bind(("name", name.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RoleRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .next()
+            .map(|row| row.try_into_role().map_err(AxiamError::from))
+            .transpose()
+    }
 }
 
 impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {

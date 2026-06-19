@@ -4,14 +4,26 @@
 //! under concurrent startup (per D-07). A deterministic UUID derived from
 //! `namespace = tenant_id` + `name = action` ensures the same record is
 //! always targeted on subsequent restarts — true idempotency via UPSERT.
+//!
+//! CQ-B42: a sha256 hash of the registry is persisted in `seeder_state` per
+//! tenant. On startup, if the hash matches the stored value the UPSERT loop is
+//! skipped entirely, eliminating the O(n×95) boot storm on unchanged systems.
 
 use axiam_core::models::role::CreateRole;
 use axiam_core::repository::{Pagination, PermissionRepository, RoleRepository};
+use sha2::{Digest, Sha256};
 use surrealdb::{Connection, Surreal};
+use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::repository::{SurrealPermissionRepository, SurrealRoleRepository};
+
+/// Row struct for reading a seeder_state record.
+#[derive(SurrealValue)]
+pub struct SeederStateRow {
+    pub hash: String,
+}
 
 /// Result returned by [`seed_default_roles`].
 pub struct SeedRolesResult {
@@ -39,6 +51,41 @@ pub async fn seed_permissions<C: Connection>(
     tenant_id: Uuid,
     registry: &[(&str, &str)],
 ) -> Result<(), DbError> {
+    // CQ-B42: compute sha256 hash of the registry to guard against UPSERT storm.
+    let registry_hash = {
+        let mut h = Sha256::new();
+        for (action, desc) in registry {
+            h.update(action.as_bytes());
+            h.update(b"|");
+            h.update(desc.as_bytes());
+        }
+        hex::encode(h.finalize())
+    };
+
+    // Derive a stable per-tenant record ID for seeder_state.
+    let state_id = Uuid::new_v5(&tenant_id, b"seeder_state").to_string();
+
+    // Check existing seeder_state; skip UPSERT loop if hash is unchanged.
+    let existing: Vec<SeederStateRow> = db
+        .query("SELECT hash FROM type::record('seeder_state', $id)")
+        .bind(("id", state_id.clone()))
+        .await
+        .map_err(|e| DbError::Migration(format!("seeder_state read failed: {e}")))?
+        .take(0)
+        .map_err(|e| DbError::Migration(format!("seeder_state take failed: {e}")))?;
+
+    if existing
+        .first()
+        .map(|r| r.hash.as_str())
+        .is_some_and(|h| h == registry_hash.as_str())
+    {
+        tracing::debug!(
+            %tenant_id,
+            "seed_permissions: registry hash unchanged — skipping UPSERT storm (CQ-B42)"
+        );
+        return Ok(());
+    }
+
     for (action, description) in registry {
         // Deterministic UUID: same tenant + action always produces same ID.
         let id = Uuid::new_v5(&tenant_id, action.as_bytes());
@@ -64,6 +111,21 @@ pub async fn seed_permissions<C: Connection>(
         .check()
         .map_err(|e| DbError::Migration(format!("seed_permissions UPSERT check failed: {e}")))?;
     }
+
+    // Persist the new hash so subsequent restarts can skip this tenant.
+    let tenant_str = tenant_id.to_string();
+    db.query(
+        "UPSERT type::record('seeder_state', $id) SET \
+         tenant_id = $tenant_id, hash = $hash, updated_at = time::now()",
+    )
+    .bind(("id", state_id))
+    .bind(("tenant_id", tenant_str))
+    .bind(("hash", registry_hash))
+    .await
+    .map_err(|e| DbError::Migration(format!("seeder_state upsert failed: {e}")))?
+    .check()
+    .map_err(|e| DbError::Migration(format!("seeder_state upsert check: {e}")))?;
+
     Ok(())
 }
 

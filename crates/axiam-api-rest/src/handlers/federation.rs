@@ -551,6 +551,8 @@ pub async fn oidc_authorize<C: Connection>(
         })
     })?;
 
+    // TODO(T19): AppState refactor — CQ-B27/CQ-B43 deferred (per-request service rebuild;
+    // OidcFederationService constructed here instead of once at startup).
     let service = OidcFederationService::new(
         (**config_repo).clone(),
         (**link_repo).clone(),

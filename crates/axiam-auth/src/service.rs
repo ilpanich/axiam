@@ -666,6 +666,7 @@ impl<
         new_password: &str,
         policy: &PasswordPolicy,
         history_repo: &H,
+        http_client: Option<&reqwest::Client>, // CQ-B35: pass through to HIBP check
     ) -> AxiamResult<()> {
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
 
@@ -712,7 +713,7 @@ impl<
             tenant_id,
             user_id,
             history_repo,
-            None, // no HIBP client in the sync change-password path
+            http_client,
         )
         .await?;
 

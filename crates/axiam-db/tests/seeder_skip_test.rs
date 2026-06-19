@@ -123,7 +123,8 @@ async fn seeder_re_seeds_when_registry_changed() {
     assert_eq!(
         count,
         REGISTRY_CHANGED.len(),
-        "after re-seed: expected {} permissions", REGISTRY_CHANGED.len()
+        "after re-seed: expected {} permissions",
+        REGISTRY_CHANGED.len()
     );
 
     let hash_v2 = read_seeder_hash(&db, tenant_id)

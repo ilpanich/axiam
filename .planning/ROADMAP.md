@@ -450,7 +450,14 @@ Plans:
   4. Secrets cleared from React state on modal close; reset/verify tokens stripped from URL via `history.replaceState`; no full Axios error/email logging on ForgotPasswordPage
   5. Final whole-effort verification green: `cargo build/clippy -D warnings/test --workspace`, `cargo audit`/`cargo-deny`, `npm audit`, frontend `lint && tsc -b && vitest`, Playwright e2e gating in CI; manual smoke (login→MFA→reset/verify/change-pw→GDPR→federation-after-restart→cross-org 403→gRPC-no-creds rejected)
 
-**Plans**: TBD (run `/gsd:plan-phase 12`)
+**Plans**: 5 plans
+
+Plans:
+- [ ] 12-01-PLAN.md — Backend cleanup: shared client_ip/user_agent, NotificationDispatcher, logged errors, typed errors, dep pruning, HIBP on change-password, audit-drop metric, seeder hash-skip (CQ-B28/29/31/33/34/35/36/42)
+- [ ] 12-02-PLAN.md — Backend security polish: mfa_secret Debug-redact + list projection, RBAC additive-only doc fix, GitHub Actions SHA-pinning (SEC-043/040/057)
+- [ ] 12-03-PLAN.md — Frontend trivial: dead Placeholder.tsx, radix dep prune, password-policy checker, DataTable key, i18n, CSS.escape, _retry guard, bootstrap 404, StrictMode (CQ-F20..F35)
+- [ ] 12-04-PLAN.md — Frontend security: clear revealed secrets on modal close, strip URL tokens, redact ForgotPassword log (SEC-036/037/041)
+- [ ] 12-05-PLAN.md — Final whole-effort verification gate: workspace build/clippy/test + audit/deny/npm-audit + frontend + Playwright e2e (CI) + manual smoke
 
 ### Scope
 
@@ -480,7 +487,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
 | 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
 | 11. Medium Remediation (Wave 3) | 5/5 | Complete    | 2026-06-13 |
-| 12. Low / Trivial Remediation (Wave 4) | 0/0 | Pending | — |
+| 12. Low / Trivial Remediation (Wave 4) | 0/5 | Pending | — |
 
 ---
 

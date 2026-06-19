@@ -23,15 +23,23 @@ export function useAuthInit() {
   const initialized = useRef(false);
 
   useEffect(() => {
-    // CQ-F35: fire boot fetch exactly once even under StrictMode double-mount.
+    // CQ-F35: the useRef guard is the SINGLE de-dup mechanism for the boot
+    // fetch. Refs persist across React 18 StrictMode's unmount/remount, so the
+    // second mount returns here and no duplicate /auth/me fires.
+    //
+    // Do NOT add a `cancelled`-on-cleanup flag back: under StrictMode the first
+    // init() would be cancelled by its own cleanup while this guard blocks any
+    // replacement init(), so neither setUser nor clearAuth runs and
+    // isInitializing stays true forever (permanent loading spinner — the
+    // regression this comment guards against). init() must always run to
+    // completion; setUser/clearAuth clears isInitializing exactly once. Writing
+    // to the global store after a StrictMode unmount is harmless (it is not
+    // component-local state).
     if (initialized.current) return;
     initialized.current = true;
 
-    let cancelled = false;
-
     async function init() {
       let user = await fetchCurrentUser();
-      if (cancelled) return;
 
       // Access cookie expired but refresh cookie may still be valid:
       // attempt exactly one boot refresh before declaring unauthenticated.
@@ -42,7 +50,6 @@ export function useAuthInit() {
         } catch {
           // Genuinely unauthenticated — fall through to clearAuth.
         }
-        if (cancelled) return;
       }
 
       if (user) {
@@ -59,10 +66,5 @@ export function useAuthInit() {
     }
 
     init();
-    return () => {
-      cancelled = true;
-    };
-    // CQ-F35: setInitializing removed from dep array — it is never called inside
-    // the effect body, so including it only caused StrictMode to re-run the effect.
   }, [setUser, clearAuth, setTenantContext]);
 }

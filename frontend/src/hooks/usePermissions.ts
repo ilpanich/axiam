@@ -11,8 +11,13 @@ import { useAuthStore } from "@/stores/auth";
  *   every check — consumers should combine with `isLoading` to avoid
  *   flashing disabled UI during boot.
  */
+
+// CQ-F33: module-level stable empty array — avoids a new array reference on
+// every render when the user has no permissions, preserving React.memo equality.
+const EMPTY_PERMISSIONS: string[] = [];
+
 export function usePermissions() {
-  const permissions = useAuthStore((s) => s.user?.permissions ?? []);
+  const permissions = useAuthStore((s) => s.user?.permissions ?? EMPTY_PERMISSIONS);
   const isLoading = useAuthStore((s) => s.isInitializing);
 
   const can = (permission: string): boolean => {

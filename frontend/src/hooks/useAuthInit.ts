@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useAuthStore } from "@/stores/auth";
 import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
 import api from "@/lib/api";
@@ -17,9 +17,16 @@ export function useAuthInit() {
   const setUser = useAuthStore((s) => s.setUser);
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const setTenantContext = useAuthStore((s) => s.setTenantContext);
-  const setInitializing = useAuthStore((s) => s.setInitializing);
+  // CQ-F35: useRef once-guard prevents a second HTTP request under React 18
+  // StrictMode (which mounts effects twice in development). The cancelled flag
+  // still handles concurrent response handling from a single invocation.
+  const initialized = useRef(false);
 
   useEffect(() => {
+    // CQ-F35: fire boot fetch exactly once even under StrictMode double-mount.
+    if (initialized.current) return;
+    initialized.current = true;
+
     let cancelled = false;
 
     async function init() {
@@ -55,5 +62,7 @@ export function useAuthInit() {
     return () => {
       cancelled = true;
     };
-  }, [setUser, clearAuth, setTenantContext, setInitializing]);
+    // CQ-F35: setInitializing removed from dep array — it is never called inside
+    // the effect body, so including it only caused StrictMode to re-run the effect.
+  }, [setUser, clearAuth, setTenantContext]);
 }

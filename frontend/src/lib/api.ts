@@ -89,13 +89,16 @@ api.interceptors.response.use(
       !isSkipRefresh &&
       isAuthenticated
     ) {
+      // CQ-F32: set _retry BEFORE the isRefreshing queue check and refresh call so
+      // a 401 on the replayed request cannot trigger a second refresh cycle.
+      originalRequest._retry = true;
+
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject });
         }).then(() => api(originalRequest));
       }
 
-      originalRequest._retry = true;
       isRefreshing = true;
 
       try {

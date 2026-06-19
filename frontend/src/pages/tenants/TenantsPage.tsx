@@ -184,13 +184,13 @@ export function TenantsPage() {
   const [search, setSearch] = useState("");
 
   // ─── Fetch organizations (for select & name mapping) ───────────────────────
-  const { data: organizations = [] } = useQuery({
+  const { data: organizations = [], isLoading: isLoadingOrgs } = useQuery({
     queryKey: ["organizations"],
     queryFn: () => orgService.list(),
   });
 
   // ─── Fetch tenants across all organizations ────────────────────────────────
-  const { data: tenants = [], isLoading } = useQuery({
+  const { data: tenants = [], isLoading: isLoadingTenants } = useQuery({
     queryKey: ["tenants", organizations.map((o) => o.id)],
     queryFn: async () => {
       if (organizations.length === 0) return [];
@@ -450,7 +450,7 @@ export function TenantsPage() {
       <DataTable
         columns={columns}
         data={filteredTenants}
-        isLoading={isLoading}
+        isLoading={isLoadingOrgs || isLoadingTenants}
         emptyMessage="No tenants found."
       />
 

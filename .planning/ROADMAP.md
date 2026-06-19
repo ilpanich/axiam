@@ -488,7 +488,7 @@ Plans:
   5. The deferred Phase-12 manual smoke (`12-HUMAN-UAT.md`, 11 items) is unblocked and can be executed.
 
 **Plans**: 2 plans (Wave 1, parallel — no file overlap)
-- [ ] 13-01-PLAN.md — DbManager reconnect resilience: ns/db keepalive guard + asserting health_check + regression test
+- [x] 13-01-PLAN.md — DbManager reconnect resilience: ns/db keepalive guard + asserting health_check + regression test
 - [ ] 13-02-PLAN.md — First-run seed repair: e2e-bootstrap.sh db-name/is_active fix + `just bootstrap-local`
 
 ### Scope
@@ -521,7 +521,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
 | 11. Medium Remediation (Wave 3) | 5/5 | Complete    | 2026-06-13 |
 | 12. Low / Trivial Remediation (Wave 4) | 5/5 | Complete   | 2026-06-19 |
-| 13. SurrealDB Connection Resilience | 0/? | Planned | |
+| 13. SurrealDB Connection Resilience | 1/2 | In Progress|  |
 
 ---
 

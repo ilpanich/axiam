@@ -11,7 +11,7 @@ rust-version.workspace = true
 axiam-core = { workspace = true }
 axiam-auth = { workspace = true }
 argon2 = { workspace = true }
-surrealdb = { workspace = true }
+surrealdb = { workspace = true, features = ["protocol-http"] }
 surrealdb-types = "3"
 serde = { workspace = true }
 serde_json = { workspace = true }

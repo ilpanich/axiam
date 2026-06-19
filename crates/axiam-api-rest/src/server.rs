@@ -6,7 +6,7 @@ use actix_governor::GovernorConfigBuilder;
 use actix_governor::governor::middleware::NoOpMiddleware;
 use actix_web::http::header;
 use actix_web::web;
-use axiam_db::WsClient;
+use axiam_db::DbClient;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::RateLimitConfig;
@@ -48,9 +48,9 @@ pub fn openapi_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(SwaggerUi::new("/api/docs/{_:.*}").url("/api/docs/openapi.json", api_doc()));
 }
 
-/// Register the API v1 scope with all domain endpoints (production WsClient).
+/// Register the API v1 scope with all domain endpoints (production DbClient).
 pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
-    register_api_v1_routes::<WsClient>(cfg, &RateLimitConfig::default());
+    register_api_v1_routes::<DbClient>(cfg, &RateLimitConfig::default());
 }
 
 /// Register the API v1 scope, generic over the SurrealDB connection type.

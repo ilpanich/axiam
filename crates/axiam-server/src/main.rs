@@ -658,7 +658,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(http_client.clone()))
             .app_data(web::Data::new(jwks_cache.clone()))
             .configure(health_routes)
-            .configure(|cfg| register_api_v1_routes::<axiam_db::WsClient>(cfg, &rl))
+            .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
             .configure(openapi_routes)
     })
     .bind(&bind_addr)?

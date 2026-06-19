@@ -37,4 +37,7 @@ pub use schema::{run_migrations, schema_v1};
 pub use seeder::{SeedRolesResult, SeederStateRow, seed_default_roles, seed_permissions};
 /// Re-export SurrealDB connection types for use in repository type aliases.
 pub use surrealdb::Connection;
-pub use surrealdb::engine::remote::ws::Client as WsClient;
+/// Production SurrealDB client type — the stateless HTTP engine (see `connection.rs`
+/// for why HTTP over WebSocket). Named `DbClient` (engine-neutral) since it is no
+/// longer the WebSocket client.
+pub use surrealdb::engine::remote::http::Client as DbClient;

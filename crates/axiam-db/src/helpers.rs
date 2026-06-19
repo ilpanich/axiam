@@ -82,8 +82,7 @@ mod tests {
 
     #[test]
     fn take_first_or_not_found_empty_returns_not_found() {
-        let result: Result<i32, DbError> =
-            take_first_or_not_found(vec![], "user", "abc");
+        let result: Result<i32, DbError> = take_first_or_not_found(vec![], "user", "abc");
         let err = result.unwrap_err();
         match err {
             DbError::NotFound { entity, id } => {
@@ -96,8 +95,7 @@ mod tests {
 
     #[test]
     fn take_first_or_not_found_non_empty_returns_first() {
-        let result: Result<i32, DbError> =
-            take_first_or_not_found(vec![1, 2, 3], "x", "y");
+        let result: Result<i32, DbError> = take_first_or_not_found(vec![1, 2, 3], "x", "y");
         assert_eq!(result.unwrap(), 1);
     }
 

@@ -181,9 +181,7 @@ pub async fn update<C: Connection>(
         name: req.name,
         description: req.description,
     };
-    let scope = repo
-        .update(user.tenant_id, path.scope_id, input)
-        .await?;
+    let scope = repo.update(user.tenant_id, path.scope_id, input).await?;
     Ok(HttpResponse::Ok().json(scope))
 }
 

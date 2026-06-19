@@ -150,9 +150,9 @@ macro_rules! test_app {
                     SurrealUserRepository::new($db.clone()),
                     SurrealWebauthnCredentialRepository::new($db.clone()),
                 )))
-                .app_data(
-                    web::Data::new(Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>),
-                )
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
@@ -161,7 +161,10 @@ macro_rules! test_app {
     };
 }
 
-fn extract_cookie_value<B>(resp: &actix_web::dev::ServiceResponse<B>, name: &str) -> Option<String> {
+fn extract_cookie_value<B>(
+    resp: &actix_web::dev::ServiceResponse<B>,
+    name: &str,
+) -> Option<String> {
     resp.response()
         .cookies()
         .find(|c: &actix_web::cookie::Cookie| c.name() == name)
@@ -249,10 +252,7 @@ async fn csrf_crud_put_with_token_not_403() {
         .uri(&format!("/api/v1/users/{user_id}"))
         .insert_header((
             "Cookie",
-            cookie_header(&[
-                ("axiam_access", &access_token),
-                ("axiam_csrf", &csrf_token),
-            ]),
+            cookie_header(&[("axiam_access", &access_token), ("axiam_csrf", &csrf_token)]),
         ))
         .insert_header(("X-CSRF-Token", csrf_token.clone()))
         .set_json(serde_json::json!({ "username": "new-name" }))

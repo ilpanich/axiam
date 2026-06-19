@@ -99,11 +99,7 @@ impl<C: Connection> SurrealExportJobRepository<C> {
     /// Return true if the user already has a queued or in-flight export job
     /// (status = 'queued').  Used by the GDPR handler to prevent duplicate
     /// concurrent export requests (CQ-B39).
-    pub async fn has_pending_for_user(
-        &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-    ) -> AxiamResult<bool> {
+    pub async fn has_pending_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<bool> {
         let mut result = self
             .db
             .query(

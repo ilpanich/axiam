@@ -2,8 +2,8 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::certificate::{
-    BindCertificate, Certificate, CreateCertificate, GeneratedCertificate, KeyAlgorithm,
-    CertificateType,
+    BindCertificate, Certificate, CertificateType, CreateCertificate, GeneratedCertificate,
+    KeyAlgorithm,
 };
 use axiam_core::repository::{
     CertificateRepository, PaginatedResult, Pagination, TenantRepository,

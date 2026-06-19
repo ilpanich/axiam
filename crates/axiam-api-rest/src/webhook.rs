@@ -6,8 +6,8 @@
 //! SEC-031: The webhook secret is stored AES-256-GCM encrypted; it is decrypted
 //! in memory for HMAC computation and never serialised in API responses.
 
-use axiam_core::repository::WebhookRepository;
 use axiam_auth::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
+use axiam_core::repository::WebhookRepository;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::net::IpAddr;
@@ -374,7 +374,10 @@ mod tests {
         let key = [0x42u8; 32];
         let secret = "super-secret-hmac-key";
         let encrypted = encrypt_webhook_secret(&key, secret).expect("encrypt");
-        assert_ne!(encrypted, secret, "encrypted value must differ from plaintext");
+        assert_ne!(
+            encrypted, secret,
+            "encrypted value must differ from plaintext"
+        );
 
         let decrypted_bytes = aes256gcm_decrypt(&key, &encrypted).expect("decrypt");
         let decrypted = String::from_utf8(decrypted_bytes).expect("utf8");

@@ -221,10 +221,7 @@ mod tests {
     }
 
     impl OAuth2ClientRepository for MockClientRepo {
-        async fn create(
-            &self,
-            _input: CreateOAuth2Client,
-        ) -> AxiamResult<(OAuth2Client, String)> {
+        async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
             unimplemented!()
         }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
@@ -346,14 +343,19 @@ mod tests {
         let client = make_client(true); // public
         let tenant_id = client.tenant_id;
         let svc = AuthorizeService::new(
-            MockClientRepo { client: client.clone() },
+            MockClientRepo {
+                client: client.clone(),
+            },
             MockCodeRepo,
             300,
         );
         let req = make_authorize_request(tenant_id, &client, None);
         let result = svc.authorize(req).await;
 
-        assert!(result.is_err(), "public client without PKCE must be rejected");
+        assert!(
+            result.is_err(),
+            "public client without PKCE must be rejected"
+        );
         assert!(
             matches!(result.unwrap_err(), OAuth2Error::InvalidRequest(_)),
             "error must be InvalidRequest"
@@ -366,12 +368,18 @@ mod tests {
         let client = make_client(true); // public
         let tenant_id = client.tenant_id;
         let svc = AuthorizeService::new(
-            MockClientRepo { client: client.clone() },
+            MockClientRepo {
+                client: client.clone(),
+            },
             MockCodeRepo,
             300,
         );
         // Provide a valid S256 code_challenge (any base64url string is syntactically valid here)
-        let req = make_authorize_request(tenant_id, &client, Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"));
+        let req = make_authorize_request(
+            tenant_id,
+            &client,
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
+        );
         let result = svc.authorize(req).await;
 
         assert!(
@@ -387,7 +395,9 @@ mod tests {
         let client = make_client(false); // confidential
         let tenant_id = client.tenant_id;
         let svc = AuthorizeService::new(
-            MockClientRepo { client: client.clone() },
+            MockClientRepo {
+                client: client.clone(),
+            },
             MockCodeRepo,
             300,
         );

@@ -29,7 +29,7 @@ use std::net::IpAddr;
 /// `trusted_hops` controls how many rightmost entries in the XFF header to skip
 /// (they come from trusted proxies). A value of 0 uses the leftmost entry
 /// (original behaviour); 1 skips 1 trusted hop from the right.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct XForwardedForKeyExtractor {
     /// Number of trusted reverse-proxy hops to skip from the right of
     /// the X-Forwarded-For list. Set to the number of load-balancers/
@@ -39,11 +39,6 @@ pub struct XForwardedForKeyExtractor {
     pub trusted_hops: usize,
 }
 
-impl Default for XForwardedForKeyExtractor {
-    fn default() -> Self {
-        Self { trusted_hops: 0 }
-    }
-}
 
 impl XForwardedForKeyExtractor {
     /// Create an extractor that uses the rightmost-untrusted hop.

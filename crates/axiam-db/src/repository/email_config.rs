@@ -436,10 +436,15 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         // CQ-B41: UPSERT keyed on (scope, scope_id) — idempotent whether or
         // not a row for this org already exists.  created_at is set only on
         // insert (IF created_at = NONE); updated_at is always refreshed.
+        // Use a deterministic record ID derived from org_id to avoid
+        // SurrealDB v3 auto-generated ULID IDs which fail UUID parsing in
+        // the SDK response deserialization.
+        let record_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("email_config:org:{org_id}").as_bytes())
+            .to_string();
         let result = self
             .db
             .query(
-                "UPSERT email_config SET \
+                "UPSERT type::record('email_config', $record_id) SET \
                  scope = 'org', \
                  scope_id = $scope_id, \
                  enabled = $enabled, \
@@ -458,9 +463,9 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
                  api_key_nonce = $api_key_nonce, \
                  secret_key_version = $secret_key_version, \
                  created_at = IF created_at = NONE THEN time::now() ELSE created_at END, \
-                 updated_at = time::now() \
-                 WHERE scope = 'org' AND scope_id = $scope_id",
+                 updated_at = time::now()",
             )
+            .bind(("record_id", record_id))
             .bind(("scope_id", org_id.to_string()))
             .bind(("enabled", enabled))
             .bind(("from_name", from_name.clone()))
@@ -597,9 +602,15 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
 
         // CQ-B41: UPSERT keyed on (scope, scope_id) — idempotent whether or
         // not a tenant override row already exists for this tenant.
+        // Use a deterministic record ID derived from tenant_id to avoid
+        // SurrealDB v3 auto-generated ULID IDs which fail UUID parsing in
+        // the SDK response deserialization.
+        let tenant_record_id =
+            Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("email_config:tenant:{tenant_id}").as_bytes())
+                .to_string();
         self.db
             .query(
-                "UPSERT email_config SET \
+                "UPSERT type::record('email_config', $record_id) SET \
                  scope = 'tenant', \
                  scope_id = $scope_id, \
                  enabled = $enabled, \
@@ -618,9 +629,9 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
                  api_key_nonce = $api_key_nonce, \
                  secret_key_version = $secret_key_version, \
                  created_at = IF created_at = NONE THEN time::now() ELSE created_at END, \
-                 updated_at = time::now() \
-                 WHERE scope = 'tenant' AND scope_id = $scope_id",
+                 updated_at = time::now()",
             )
+            .bind(("record_id", tenant_record_id))
             .bind(("scope_id", tenant_id.to_string()))
             .bind(("enabled", input.enabled.unwrap_or(true)))
             .bind(("from_name", input.from_name.clone().unwrap_or_default()))

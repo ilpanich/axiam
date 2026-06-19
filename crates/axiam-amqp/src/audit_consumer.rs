@@ -92,7 +92,7 @@ where
             let received_sig = msg.hmac_signature.take();
             let canonical_bytes =
                 serde_json::to_vec(&msg).unwrap_or_else(|_| delivery.data.clone());
-            let valid = received_sig.as_deref().map_or(false, |sig| {
+            let valid = received_sig.as_deref().is_some_and(|sig| {
                 verify_payload(key, &canonical_bytes, sig)
             });
             if !valid {

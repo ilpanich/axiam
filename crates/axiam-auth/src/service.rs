@@ -657,6 +657,7 @@ impl<
     /// 4. Store old hash in password history.
     /// 5. Revoke all sessions except the caller's current session.
     /// 6. Emit audit log entry.
+    #[allow(clippy::too_many_arguments)] // CQ-B35: http_client param added for HIBP check
     pub async fn change_password<H: PasswordHistoryRepository>(
         &self,
         tenant_id: Uuid,

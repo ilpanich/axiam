@@ -485,7 +485,9 @@ Plans:
   4. A repeatable local first-run path exists (e.g. `just bootstrap-local`) that seeds org+tenant+admin against the `run-local` server.
   5. The deferred Phase-12 manual smoke (`12-HUMAN-UAT.md`, 11 items) is unblocked and can be executed.
 
-**Plans**: TBD (to be created via `/gsd:plan-phase 13`)
+**Plans**: 2 plans (Wave 1, parallel — no file overlap)
+- [ ] 13-01-PLAN.md — DbManager reconnect resilience: ns/db keepalive guard + asserting health_check + regression test
+- [ ] 13-02-PLAN.md — First-run seed repair: e2e-bootstrap.sh db-name/is_active fix + `just bootstrap-local`
 
 ### Scope
 

@@ -17,7 +17,11 @@ use crate::error::DbError;
 use crate::helpers::{CountRow, parse_uuid};
 
 /// DB-side row struct for queries where the UUID is already known.
-#[derive(Debug, SurrealValue)]
+///
+/// NOTE: `Debug` is manually implemented below to redact `mfa_secret` and
+/// `totp_last_used_step` (SEC-043 — AES-256-GCM ciphertext must not leak into
+/// logs or debug output).
+#[derive(SurrealValue)]
 struct UserRow {
     tenant_id: String,
     username: String,
@@ -41,8 +45,40 @@ struct UserRow {
     updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for UserRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserRow")
+            .field("tenant_id", &self.tenant_id)
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("status", &self.status)
+            .field("mfa_enabled", &self.mfa_enabled)
+            // SEC-043: never log the AES-256-GCM-encrypted MFA secret.
+            .field("mfa_secret", &self.mfa_secret.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "totp_last_used_step",
+                &self.totp_last_used_step.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("failed_login_attempts", &self.failed_login_attempts)
+            .field("last_failed_login_at", &self.last_failed_login_at)
+            .field("locked_until", &self.locked_until)
+            .field("email_verified_at", &self.email_verified_at)
+            .field("deletion_pending", &self.deletion_pending)
+            .field("scheduled_purge_at", &self.scheduled_purge_at)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish_non_exhaustive()
+    }
+}
+
 /// DB-side row struct that includes the record ID via `meta::id(id)`.
-#[derive(Debug, SurrealValue)]
+///
+/// Used by the list path only — `mfa_secret` and `totp_last_used_step` are
+/// intentionally absent (SEC-043: explicit column projection in the list query
+/// excludes these fields so they are never hydrated into list responses).
+/// NOTE: `Debug` is manually implemented below to prevent future accidental
+/// re-addition of those fields from leaking ciphertext into logs.
+#[derive(SurrealValue)]
 struct UserRowWithId {
     record_id: String,
     tenant_id: String,
@@ -51,9 +87,6 @@ struct UserRowWithId {
     password_hash: String,
     status: String,
     mfa_enabled: bool,
-    mfa_secret: Option<String>,
-    /// Last TOTP step that was successfully verified (SEC-008/REQ-14 AC-5).
-    totp_last_used_step: Option<u64>,
     failed_login_attempts: u32,
     last_failed_login_at: Option<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
@@ -65,6 +98,34 @@ struct UserRowWithId {
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for UserRowWithId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserRowWithId")
+            .field("record_id", &self.record_id)
+            .field("tenant_id", &self.tenant_id)
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("status", &self.status)
+            .field("mfa_enabled", &self.mfa_enabled)
+            // SEC-043: mfa_secret and totp_last_used_step are excluded from
+            // the list projection entirely; note their absence explicitly.
+            .field("mfa_secret", &"[REDACTED — excluded from list projection]")
+            .field(
+                "totp_last_used_step",
+                &"[REDACTED — excluded from list projection]",
+            )
+            .field("failed_login_attempts", &self.failed_login_attempts)
+            .field("last_failed_login_at", &self.last_failed_login_at)
+            .field("locked_until", &self.locked_until)
+            .field("email_verified_at", &self.email_verified_at)
+            .field("deletion_pending", &self.deletion_pending)
+            .field("scheduled_purge_at", &self.scheduled_purge_at)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish_non_exhaustive()
+    }
 }
 
 fn parse_status(s: &str) -> Result<UserStatus, DbError> {
@@ -126,8 +187,10 @@ impl UserRowWithId {
             password_hash: self.password_hash,
             status: parse_status(&self.status)?,
             mfa_enabled: self.mfa_enabled,
-            mfa_secret: self.mfa_secret,
-            totp_last_used_step: self.totp_last_used_step,
+            // SEC-043: mfa_secret and totp_last_used_step are excluded from
+            // the list projection — always None on this path.
+            mfa_secret: None,
+            totp_last_used_step: None,
             failed_login_attempts: self.failed_login_attempts,
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
@@ -455,7 +518,17 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let mut result = self
             .db
             .query(
-                "SELECT meta::id(id) AS record_id, * FROM user \
+                // SEC-043: explicit column projection — mfa_secret and
+                // totp_last_used_step are intentionally excluded so they are
+                // never hydrated into list responses.
+                "SELECT meta::id(id) AS record_id, \
+                        tenant_id, username, email, password_hash, status, \
+                        mfa_enabled, \
+                        failed_login_attempts, last_failed_login_at, \
+                        locked_until, email_verified_at, \
+                        deletion_pending, scheduled_purge_at, \
+                        metadata, created_at, updated_at \
+                 FROM user \
                  WHERE tenant_id = $tenant_id \
                  ORDER BY created_at ASC \
                  LIMIT $limit START $offset",

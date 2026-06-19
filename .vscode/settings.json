@@ -1,0 +1,9 @@
+{
+  // AXIAM's `saml` feature (on by default) pulls samael → xmlsec, which fails to
+  // build against incompatible system libxml2 (e.g. Arch 2.15.x) with a bindgen
+  // usize-overflow (E0080). Build/check without default features locally so
+  // rust-analyzer matches `just run-local` / `cargo ... --no-default-features`
+  // and the two stop thrashing the shared target/ lock. SAML is validated in CI/Docker.
+  "rust-analyzer.cargo.noDefaultFeatures": true,
+  "rust-analyzer.check.noDefaultFeatures": true
+}

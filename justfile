@@ -41,9 +41,35 @@ fmt:
 # Run all checks (fmt + clippy + test)
 check: fmt-check lint test
 
-# Run the AXIAM server
+# Run the AXIAM server (saml-on; needs a compatible system libxml2 — CI/Docker)
 run:
     RUST_LOG=axiam=debug cargo run --bin axiam-server
+
+# Run axiam-server without saml (local dev on Arch/incompatible libxml2; OIDC still works).
+# Self-contained: generates a local-only Ed25519 JWT keypair on first run (shared
+# with prod-up, gitignored under docker/.secrets/), points AMQP at the dev-up
+# RabbitMQ creds, and disables Secure cookies so auth works over http://localhost.
+# Requires `just dev-up` (SurrealDB + RabbitMQ) running first.
+run-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SECRETS_DIR="docker/.secrets"
+    PRIV="$SECRETS_DIR/jwt_ed25519.pem"
+    PUB="$SECRETS_DIR/jwt_ed25519.pub.pem"
+    if [[ ! -f "$PRIV" || ! -f "$PUB" ]]; then
+        echo "→ Generating Ed25519 JWT keypair in $SECRETS_DIR/ (first-run only)"
+        mkdir -p "$SECRETS_DIR"
+        openssl genpkey -algorithm ed25519 -out "$PRIV"
+        openssl pkey -in "$PRIV" -pubout -out "$PUB"
+        chmod 600 "$PRIV"
+    fi
+    export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(cat "$PRIV")"
+    export AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(cat "$PUB")"
+    # D-18: cookies must work over plain http://localhost in local dev. NEVER false in prod.
+    export AXIAM__AUTH__COOKIE_SECURE="false"
+    # dev-up RabbitMQ runs as axiam/axiam with the default guest user disabled.
+    export AXIAM__AMQP__URL="${AXIAM__AMQP__URL:-amqp://axiam:axiam@localhost:5672}"
+    RUST_LOG="${RUST_LOG:-axiam=debug}" cargo run --bin axiam-server --no-default-features
 
 # Start frontend dev server
 frontend-dev:

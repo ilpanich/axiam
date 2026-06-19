@@ -22,8 +22,10 @@ ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
 ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-Test@Admin123!}"
 AXIAM_URL="${AXIAM_URL:-http://localhost:8090}"
 SURREAL_URL="${SURREAL_URL:-http://localhost:8000}"
+# Must match the database name the server reads (DbConfig default: "main").
+AXIAM_DB="${AXIAM__DB__DATABASE:-main}"
 
-echo "[e2e-bootstrap] org=${ORG_SLUG} tenant=${TENANT_SLUG} email=${ADMIN_EMAIL}"
+echo "[e2e-bootstrap] org=${ORG_SLUG} tenant=${TENANT_SLUG} email=${ADMIN_EMAIL} db=${AXIAM_DB}"
 
 # ---------------------------------------------------------------------------
 # Step 1: Wait for AXIAM server to be ready
@@ -70,7 +72,7 @@ SURREAL_RESPONSE=$(curl -sf \
   -H "Accept: application/json" \
   -H "Content-Type: text/plain" \
   -H "surreal-ns: axiam" \
-  -H "surreal-db: axiam" \
+  -H "surreal-db: ${AXIAM_DB}" \
   -u "root:root" \
   --data-binary "
 CREATE type::record('organization', '${ORG_ID}') SET
@@ -85,7 +87,6 @@ CREATE type::record('tenant', '${TENANT_ID}') SET
   name = 'E2E Default Tenant',
   slug = '${TENANT_SLUG}',
   metadata = {},
-  is_active = true,
   created_at = time::now(),
   updated_at = time::now();
 " 2>&1) || {

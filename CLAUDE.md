@@ -40,6 +40,7 @@ AXIAM is a **multi-tenant** system. Organizations are top-level entities contain
 - Certificate-based authentication (mTLS for IoT devices)
 - gRPC for low-latency authz checks in service mesh
 - AMQP for async/deferred authz decisions
+- RBAC engine is additive-only (allow-wins, default-deny); there is no explicit deny-override mechanism in v1.0-beta (SEC-040; deny-override cascade deferred to post-v1.0-beta)
 
 ## Project Structure (Cargo Workspace)
 

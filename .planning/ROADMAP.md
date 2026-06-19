@@ -21,7 +21,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 - [x] **Phase 9: Critical Remediation (Wave 1)** - Close cross-tenant IDOR, gRPC auth, frontend auth flows, silent refresh, federation secret encryption (completed 2026-06-12)
 - [x] **Phase 10: High Remediation (Wave 2)** - Hashing/pepper, async-safe crypto, tenant isolation, GDPR/SAML/TOTP correctness, frontend High items (completed 2026-06-13)
 - [x] **Phase 11: Medium Remediation (Wave 3)** - Repo/DTO consolidation, transport limits, auth/infra hardening, frontend Medium items (completed 2026-06-13)
-- [ ] **Phase 12: Low / Trivial Remediation (Wave 4)** - Cleanup, dead-code, dep pruning, i18n, security polish + whole-effort verification
+- [x] **Phase 12: Low / Trivial Remediation (Wave 4)** - Cleanup, dead-code, dep pruning, i18n, security polish + whole-effort verification (completed 2026-06-19)
 
 > Audit-remediation tranche (Phases 8–12) added 2026-06-10 from `claude_dev/remediation-plan.md`; sequential with a green-build gate between waves.
 
@@ -462,7 +462,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 12-05-PLAN.md — Final whole-effort verification gate: workspace build/clippy/test + audit/deny/npm-audit + frontend + Playwright e2e (CI) + manual smoke
+- [x] 12-05-PLAN.md — Final whole-effort verification gate: workspace build/clippy/test + audit/deny/npm-audit + frontend + Playwright e2e (CI) + manual smoke
 
 ### Scope
 
@@ -492,7 +492,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 9. Critical Remediation (Wave 1) | 5/5 | Complete   | 2026-06-12 |
 | 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
 | 11. Medium Remediation (Wave 3) | 5/5 | Complete    | 2026-06-13 |
-| 12. Low / Trivial Remediation (Wave 4) | 4/5 | In Progress|  |
+| 12. Low / Trivial Remediation (Wave 4) | 5/5 | Complete   | 2026-06-19 |
 
 ---
 

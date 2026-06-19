@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 11-02-PLAN.md
-last_updated: "2026-06-19T09:03:17.157Z"
+stopped_at: Completed 12-05-PLAN.md (Phase 12 done; manual smoke deferred to 12-HUMAN-UAT.md)
+last_updated: "2026-06-19T12:15:00.000Z"
 last_activity: 2026-06-19
 progress:
-  total_phases: 12
-  completed_phases: 11
+  total_phases: 13
+  completed_phases: 12
   total_plans: 58
-  completed_plans: 57
+  completed_plans: 58
   percent: 92
 ---
 
@@ -21,17 +21,17 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 12 — low-remediation
+**Current focus:** Phase 13 — surrealdb-connection-resilience
 
 ## Current Position
 
-Phase: 12 (low-remediation) — EXECUTING
-Plan: 5 of 5
-Next: Execute Phase 10 — `/gsd:execute-phase 10` (run `/clear` first)
-Status: Ready to execute
+Phase: 13 (surrealdb-connection-resilience) — NEW (durable fix for the stale-connection bug found during Phase 12 smoke)
+Plan: not yet planned
+Next: Plan Phase 13 — `/gsd:plan-phase 13`
+Status: Phase 12 complete (5/5; manual smoke deferred to 12-HUMAN-UAT.md, blocked on Phase 13)
 Last activity: 2026-06-19
 
-Progress: [██████████] 98%
+Progress: [█████████░] 92%
 
 ## Performance Metrics
 

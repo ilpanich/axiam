@@ -1557,6 +1557,7 @@ async fn change_password_rejects_reuse_of_current() {
             "correct-horse-battery",
             &policy,
             &history_repo,
+            None, // no HIBP client in tests
         )
         .await
         .unwrap_err();
@@ -1606,6 +1607,7 @@ async fn change_password_new_password_succeeds() {
         "NewStrongPassword123!",
         &policy,
         &history_repo,
+        None, // no HIBP client in tests
     )
     .await
     .expect("changing to a new password should succeed");

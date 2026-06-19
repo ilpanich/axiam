@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -33,11 +34,9 @@ export interface GenerateCertificateResponse {
 
 export const certificateService = {
   list: (): Promise<Certificate[]> =>
-    // Backend returns PaginatedResult ({ items, total, offset, limit }), not a bare
-    // array — unwrap .items (guarded so a shape change can't crash callers' .filter/.map).
     api
-      .get<{ items: Certificate[] }>("/api/v1/certificates")
-      .then((r) => r.data.items ?? []),
+      .get<Certificate[] | { items: Certificate[] }>("/api/v1/certificates")
+      .then((r) => unwrapList(r.data)),
 
   generate: (
     payload: GenerateCertificatePayload

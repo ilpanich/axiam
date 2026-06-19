@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -57,7 +58,9 @@ const BASE = "/api/v1/federation/providers";
 
 export const federationService = {
   getAll: (): Promise<FederationProvider[]> =>
-    api.get<FederationProvider[]>(BASE).then((r) => r.data),
+    api
+      .get<FederationProvider[] | { items: FederationProvider[] }>(BASE)
+      .then((r) => unwrapList(r.data)),
 
   create: (data: CreateProviderRequest): Promise<FederationProvider> =>
     api.post<FederationProvider>(BASE, data).then((r) => r.data),

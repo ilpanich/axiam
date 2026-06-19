@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -92,8 +93,8 @@ export const userService = {
 
   listMfaMethods: (userId: string): Promise<MfaMethod[]> =>
     api
-      .get<MfaMethod[]>(`/api/v1/users/${userId}/mfa-methods`)
-      .then((r) => r.data),
+      .get<MfaMethod[] | { items: MfaMethod[] }>(`/api/v1/users/${userId}/mfa-methods`)
+      .then((r) => unwrapList(r.data)),
 
   deleteMfaMethod: (userId: string, methodId: string): Promise<void> =>
     api
@@ -111,8 +112,9 @@ export const userService = {
 
 export const groupService = {
   list: (): Promise<Group[]> =>
-    // Backend returns PaginatedResult ({ items, ... }), not a bare array — unwrap .items.
-    api.get<{ items: Group[] }>("/api/v1/groups").then((r) => r.data.items ?? []),
+    api
+      .get<Group[] | { items: Group[] }>("/api/v1/groups")
+      .then((r) => unwrapList(r.data)),
 
   get: (groupId: string): Promise<Group> =>
     api.get<Group>(`/api/v1/groups/${groupId}`).then((r) => r.data),
@@ -130,8 +132,8 @@ export const groupService = {
 
   listMembers: (groupId: string): Promise<User[]> =>
     api
-      .get<User[]>(`/api/v1/groups/${groupId}/members`)
-      .then((r) => r.data),
+      .get<User[] | { items: User[] }>(`/api/v1/groups/${groupId}/members`)
+      .then((r) => unwrapList(r.data)),
 
   addMember: (groupId: string, userId: string): Promise<void> =>
     api

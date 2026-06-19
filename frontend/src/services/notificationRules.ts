@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -32,8 +33,8 @@ export interface UpdateNotificationRulePayload {
 export const notificationRuleService = {
   list: (): Promise<NotificationRule[]> =>
     api
-      .get<NotificationRule[]>("/api/v1/notification-rules")
-      .then((r) => r.data),
+      .get<NotificationRule[] | { items: NotificationRule[] }>("/api/v1/notification-rules")
+      .then((r) => unwrapList(r.data)),
 
   create: (payload: CreateNotificationRulePayload): Promise<NotificationRule> =>
     api

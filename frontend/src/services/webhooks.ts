@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -101,7 +102,9 @@ export const WEBHOOK_EVENT_GROUPS: ReadonlyArray<{
 
 export const webhookService = {
   list: (): Promise<Webhook[]> =>
-    api.get<Webhook[]>("/api/v1/webhooks").then((r) => r.data),
+    api
+      .get<Webhook[] | { items: Webhook[] }>("/api/v1/webhooks")
+      .then((r) => unwrapList(r.data)),
 
   create: (payload: CreateWebhookPayload): Promise<CreateWebhookResponse> =>
     api

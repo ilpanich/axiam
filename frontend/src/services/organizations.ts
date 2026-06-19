@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -68,7 +69,9 @@ export interface GenerateCaCertPayload {
 
 export const orgService = {
   list: (): Promise<Organization[]> =>
-    api.get<Organization[]>("/api/v1/organizations").then((r) => r.data),
+    api
+      .get<Organization[] | { items: Organization[] }>("/api/v1/organizations")
+      .then((r) => unwrapList(r.data)),
 
   get: (orgId: string): Promise<Organization> =>
     api.get<Organization>(`/api/v1/organizations/${orgId}`).then((r) => r.data),
@@ -95,8 +98,8 @@ export const orgService = {
 export const tenantService = {
   list: (orgId: string): Promise<Tenant[]> =>
     api
-      .get<Tenant[]>(`/api/v1/organizations/${orgId}/tenants`)
-      .then((r) => r.data),
+      .get<Tenant[] | { items: Tenant[] }>(`/api/v1/organizations/${orgId}/tenants`)
+      .then((r) => unwrapList(r.data)),
 
   get: (orgId: string, tenantId: string): Promise<Tenant> =>
     api
@@ -131,8 +134,10 @@ export const tenantService = {
 export const caCertService = {
   list: (orgId: string): Promise<CaCertificate[]> =>
     api
-      .get<CaCertificate[]>(`/api/v1/organizations/${orgId}/ca-certificates`)
-      .then((r) => r.data),
+      .get<CaCertificate[] | { items: CaCertificate[] }>(
+        `/api/v1/organizations/${orgId}/ca-certificates`
+      )
+      .then((r) => unwrapList(r.data)),
 
   generate: (
     orgId: string,

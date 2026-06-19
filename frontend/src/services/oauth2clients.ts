@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -61,7 +62,9 @@ export type OAuth2Scope = (typeof OAUTH2_SCOPES)[number];
 
 export const oauth2ClientService = {
   list: (): Promise<OAuth2Client[]> =>
-    api.get<OAuth2Client[]>("/api/v1/oauth2-clients").then((r) => r.data),
+    api
+      .get<OAuth2Client[] | { items: OAuth2Client[] }>("/api/v1/oauth2-clients")
+      .then((r) => unwrapList(r.data)),
 
   create: (payload: CreateOAuth2ClientPayload): Promise<CreateOAuth2ClientResponse> =>
     api

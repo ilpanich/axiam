@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -24,7 +25,9 @@ export type UpdatePermissionPayload = Partial<CreatePermissionPayload>;
 
 export const permissionService = {
   list: (): Promise<Permission[]> =>
-    api.get<Permission[]>("/api/v1/permissions").then((r) => r.data),
+    api
+      .get<Permission[] | { items: Permission[] }>("/api/v1/permissions")
+      .then((r) => unwrapList(r.data)),
 
   get: (permissionId: string): Promise<Permission> =>
     api

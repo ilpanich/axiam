@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 import type { Permission } from "@/services/permissions";
 import type { User } from "@/services/users";
 import type { Group } from "@/services/users";
@@ -25,8 +26,9 @@ export type UpdateRolePayload = Partial<CreateRolePayload>;
 
 export const roleService = {
   list: (): Promise<Role[]> =>
-    // Backend returns PaginatedResult ({ items, ... }), not a bare array — unwrap .items.
-    api.get<{ items: Role[] }>("/api/v1/roles").then((r) => r.data.items ?? []),
+    api
+      .get<Role[] | { items: Role[] }>("/api/v1/roles")
+      .then((r) => unwrapList(r.data)),
 
   get: (roleId: string): Promise<Role> =>
     api.get<Role>(`/api/v1/roles/${roleId}`).then((r) => r.data),
@@ -44,8 +46,8 @@ export const roleService = {
 
   listPermissions: (roleId: string): Promise<Permission[]> =>
     api
-      .get<Permission[]>(`/api/v1/roles/${roleId}/permissions`)
-      .then((r) => r.data),
+      .get<Permission[] | { items: Permission[] }>(`/api/v1/roles/${roleId}/permissions`)
+      .then((r) => unwrapList(r.data)),
 
   grantPermission: (roleId: string, permissionId: string): Promise<void> =>
     api
@@ -62,7 +64,9 @@ export const roleService = {
   // ─── User assignment ──────────────────────────────────────────────────────
 
   listUsers: (roleId: string): Promise<User[]> =>
-    api.get<User[]>(`/api/v1/roles/${roleId}/users`).then((r) => r.data),
+    api
+      .get<User[] | { items: User[] }>(`/api/v1/roles/${roleId}/users`)
+      .then((r) => unwrapList(r.data)),
 
   assignToUser: (roleId: string, userId: string): Promise<void> =>
     api
@@ -77,11 +81,15 @@ export const roleService = {
   // ─── Group assignment ─────────────────────────────────────────────────────
 
   listGroups: (roleId: string): Promise<Group[]> =>
-    api.get<Group[]>(`/api/v1/roles/${roleId}/groups`).then((r) => r.data),
+    api
+      .get<Group[] | { items: Group[] }>(`/api/v1/roles/${roleId}/groups`)
+      .then((r) => unwrapList(r.data)),
 
   /** List roles assigned to a group. */
   listByGroup: (groupId: string): Promise<Role[]> =>
-    api.get<Role[]>(`/api/v1/groups/${groupId}/roles`).then((r) => r.data),
+    api
+      .get<Role[] | { items: Role[] }>(`/api/v1/groups/${groupId}/roles`)
+      .then((r) => unwrapList(r.data)),
 
   assignToGroup: (roleId: string, groupId: string): Promise<void> =>
     api

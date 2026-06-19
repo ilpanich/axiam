@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -43,7 +44,9 @@ const BASE = "/api/v1/service-accounts";
 
 export const serviceAccountService = {
   getAll: (): Promise<ServiceAccount[]> =>
-    api.get<ServiceAccount[]>(BASE).then((r) => r.data),
+    api
+      .get<ServiceAccount[] | { items: ServiceAccount[] }>(BASE)
+      .then((r) => unwrapList(r.data)),
 
   create: (
     data: CreateServiceAccountRequest,

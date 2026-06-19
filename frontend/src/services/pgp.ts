@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -48,7 +49,9 @@ export interface SignAuditBatchResponse {
 
 export const pgpService = {
   list: (): Promise<PgpKey[]> =>
-    api.get<PgpKey[]>("/api/v1/pgp-keys").then((r) => r.data),
+    api
+      .get<PgpKey[] | { items: PgpKey[] }>("/api/v1/pgp-keys")
+      .then((r) => unwrapList(r.data)),
 
   generate: (payload: GeneratePgpKeyPayload): Promise<GeneratePgpKeyResponse> =>
     api

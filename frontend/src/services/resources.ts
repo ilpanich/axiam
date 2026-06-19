@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -24,7 +25,9 @@ export type UpdateResourcePayload = Partial<CreateResourcePayload>;
 
 export const resourceService = {
   list: (): Promise<Resource[]> =>
-    api.get<Resource[]>("/api/v1/resources").then((r) => r.data),
+    api
+      .get<Resource[] | { items: Resource[] }>("/api/v1/resources")
+      .then((r) => unwrapList(r.data)),
 
   get: (resourceId: string): Promise<Resource> =>
     api
@@ -49,6 +52,6 @@ export const resourceService = {
 
   listChildren: (resourceId: string): Promise<Resource[]> =>
     api
-      .get<Resource[]>(`/api/v1/resources/${resourceId}/children`)
-      .then((r) => r.data),
+      .get<Resource[] | { items: Resource[] }>(`/api/v1/resources/${resourceId}/children`)
+      .then((r) => unwrapList(r.data)),
 };

@@ -25,7 +25,8 @@ export type UpdateRolePayload = Partial<CreateRolePayload>;
 
 export const roleService = {
   list: (): Promise<Role[]> =>
-    api.get<Role[]>("/api/v1/roles").then((r) => r.data),
+    // Backend returns PaginatedResult ({ items, ... }), not a bare array — unwrap .items.
+    api.get<{ items: Role[] }>("/api/v1/roles").then((r) => r.data.items ?? []),
 
   get: (roleId: string): Promise<Role> =>
     api.get<Role>(`/api/v1/roles/${roleId}`).then((r) => r.data),

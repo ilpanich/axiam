@@ -33,7 +33,11 @@ export interface GenerateCertificateResponse {
 
 export const certificateService = {
   list: (): Promise<Certificate[]> =>
-    api.get<Certificate[]>("/api/v1/certificates").then((r) => r.data),
+    // Backend returns PaginatedResult ({ items, total, offset, limit }), not a bare
+    // array — unwrap .items (guarded so a shape change can't crash callers' .filter/.map).
+    api
+      .get<{ items: Certificate[] }>("/api/v1/certificates")
+      .then((r) => r.data.items ?? []),
 
   generate: (
     payload: GenerateCertificatePayload

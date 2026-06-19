@@ -111,7 +111,8 @@ export const userService = {
 
 export const groupService = {
   list: (): Promise<Group[]> =>
-    api.get<Group[]>("/api/v1/groups").then((r) => r.data),
+    // Backend returns PaginatedResult ({ items, ... }), not a bare array — unwrap .items.
+    api.get<{ items: Group[] }>("/api/v1/groups").then((r) => r.data.items ?? []),
 
   get: (groupId: string): Promise<Group> =>
     api.get<Group>(`/api/v1/groups/${groupId}`).then((r) => r.data),

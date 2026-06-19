@@ -61,8 +61,10 @@ export function ResetPasswordPage() {
 
       try {
         await authService.confirmPasswordReset(token, newPw);
+        window.history.replaceState({}, document.title, window.location.pathname);
         return { error: null, success: true };
       } catch (err) {
+        window.history.replaceState({}, document.title, window.location.pathname);
         const axiosErr = err as AxiosError<ErrorResponse>;
         const msg =
           axiosErr.response?.data?.message ??

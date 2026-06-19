@@ -43,8 +43,10 @@ export function VerifyEmailPage() {
       setVerifyState("loading");
       try {
         await authService.verifyEmail(token!);
+        window.history.replaceState({}, document.title, window.location.pathname);
         if (!cancelled) setVerifyState("success");
       } catch (err) {
+        window.history.replaceState({}, document.title, window.location.pathname);
         if (cancelled) return;
         const axiosErr = err as AxiosError<ErrorResponse>;
         const msg =

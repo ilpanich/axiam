@@ -453,10 +453,15 @@ Plans:
 **Plans**: 5 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 12-01-PLAN.md — Backend cleanup: shared client_ip/user_agent, NotificationDispatcher, logged errors, typed errors, dep pruning, HIBP on change-password, audit-drop metric, seeder hash-skip (CQ-B28/29/31/33/34/35/36/42)
 - [ ] 12-02-PLAN.md — Backend security polish: mfa_secret Debug-redact + list projection, RBAC additive-only doc fix, GitHub Actions SHA-pinning (SEC-043/040/057)
 - [ ] 12-03-PLAN.md — Frontend trivial: dead Placeholder.tsx, radix dep prune, password-policy checker, DataTable key, i18n, CSS.escape, _retry guard, bootstrap 404, StrictMode (CQ-F20..F35)
 - [ ] 12-04-PLAN.md — Frontend security: clear revealed secrets on modal close, strip URL tokens, redact ForgotPassword log (SEC-036/037/041)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 12-05-PLAN.md — Final whole-effort verification gate: workspace build/clippy/test + audit/deny/npm-audit + frontend + Playwright e2e (CI) + manual smoke
 
 ### Scope

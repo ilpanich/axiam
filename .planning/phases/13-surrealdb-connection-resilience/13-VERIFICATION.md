@@ -10,6 +10,20 @@ human_verification:
     why_human: "Requires a running server (just run-local), live SurrealDB (just dev-up), and a human walking multi-step browser/gRPC flows; cannot automate with grep or cargo"
 ---
 
+> ⚠️ **SUPERSEDED — this verification was a FALSE-GREEN (corrected 2026-06-19).**
+> The original 13-01 fix (WebSocket keepalive guard + `session::ns()`/`session::db()`
+> assertion in `health_check`) did NOT work in practice: a running server still
+> returned "organization not found" on seeded records a fresh connection finds, and
+> `/ready` falsely 503'd. The kv-mem `reconnect_regression` test passed without
+> reproducing a real Ws reconnect (it flipped ns on a clone), and `session::ns()`
+> returns `None` on a healthy SDK connection — so the guard churned and the check
+> was meaningless. **Real fix (commit `2c83186`): switch `DbManager` to the stateless
+> SurrealDB HTTP engine** — ns/db/auth are sent per request, so there is no session
+> to lose on reconnect (eliminates SDK #5750). Guard + `SessionMismatch` + the
+> false-green test were removed. The 5/5 table below refers to the superseded WS
+> approach; the live `just bootstrap-local` + `12-HUMAN-UAT.md` smoke is the true
+> verification and is now expected to pass with the HTTP engine.
+
 # Phase 13: SurrealDB Connection Resilience — Verification Report
 
 **Phase Goal:** Eliminate the silent stale-connection failure where the server's SurrealDB WebSocket connection loses its use_ns/use_db selection after an idle reconnect and queries the empty default namespace; repair the local first-run seed path; unblock the deferred Phase-12 smoke.

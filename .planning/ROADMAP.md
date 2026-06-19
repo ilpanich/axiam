@@ -472,6 +472,30 @@ Plans:
 
 ---
 
+### Phase 13: SurrealDB Connection Resilience
+
+**Goal**: Eliminate the silent stale-connection failure mode where the server's SurrealDB WebSocket connection loses its `use_ns`/`use_db` selection after an idle reconnect and then queries the empty default namespace — surfacing as confusing "not found" on records that exist. Also repair the documented first-run seed path so local bootstrap works end-to-end.
+**Depends on**: Phase 12 (found during the Phase-12 manual smoke)
+**Requirements**: REQ-17
+**Success Criteria** (what must be TRUE):
+
+  1. After a forced/simulated WebSocket reconnect, the connection still operates against `ns=axiam`/`db=main` (no silent fallback to the default `main`/`main` namespace); a regression test reproduces the reconnect and asserts post-reconnect reads succeed.
+  2. `DbManager` re-establishes ns/db selection on reconnect (re-select guard, reconnect hook, or health-check that re-issues `USE NS … DB …`), and `health_check` verifies the active namespace/database rather than just liveness.
+  3. `scripts/e2e-bootstrap.sh` seeds into the same database the server reads (correct the hardcoded `surreal-db: axiam` vs server `db=main` mismatch), so the documented first-run flow produces a working admin end-to-end; tenant CREATE no longer sets the removed `is_active` field.
+  4. A repeatable local first-run path exists (e.g. `just bootstrap-local`) that seeds org+tenant+admin against the `run-local` server.
+  5. The deferred Phase-12 manual smoke (`12-HUMAN-UAT.md`, 11 items) is unblocked and can be executed.
+
+**Plans**: TBD (to be created via `/gsd:plan-phase 13`)
+
+### Scope
+
+- DB connection resilience in `crates/axiam-db` (`connection.rs` `DbManager`): reconnect-safe ns/db selection + health verification
+- Regression test reproducing the idle-reconnect → wrong-namespace failure
+- First-run seed repair: `scripts/e2e-bootstrap.sh` db-name + schema drift; optional `just bootstrap-local` helper
+- Unblock and (optionally) execute the deferred Phase-12 smoke (`12-HUMAN-UAT.md`)
+
+---
+
 ## Progress
 
 **Execution Order:**
@@ -493,6 +517,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
 | 11. Medium Remediation (Wave 3) | 5/5 | Complete    | 2026-06-13 |
 | 12. Low / Trivial Remediation (Wave 4) | 5/5 | Complete   | 2026-06-19 |
+| 13. SurrealDB Connection Resilience | 0/? | Planned | |
 
 ---
 
@@ -516,8 +541,9 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | REQ-14 | Phase 10 | High Security Remediation (Wave 2) |
 | REQ-15 | Phase 11 | Medium Security Remediation (Wave 3) |
 | REQ-16 | Phase 12 | Low / Trivial Remediation (Wave 4) |
+| REQ-17 | Phase 13 | SurrealDB Connection Resilience (post-remediation bug fix) |
 
-**Coverage: 16/16 requirements mapped (100%)**
+**Coverage: 17/17 requirements mapped (100%)**
 
 ---
 

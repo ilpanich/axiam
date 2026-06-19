@@ -29,10 +29,10 @@ export function ForgotPasswordPage() {
       let internalError = false;
       try {
         await authService.requestPasswordReset(email);
-      } catch (err) {
+      } catch {
         // Intentionally swallow errors to prevent user enumeration.
         // We always show the same success message regardless of outcome.
-        console.warn("[ForgotPassword] request failed:", err);
+        console.warn("[ForgotPassword] reset request failed (details redacted for privacy)");
         internalError = true;
       }
       return { submitted: true, internalError };

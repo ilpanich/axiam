@@ -6,6 +6,7 @@ import type { AxiosError } from "axios";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import api from "@/lib/api";
 
@@ -57,6 +58,11 @@ export function BootstrapPage() {
       !password.trim()
     ) {
       setFormError("All fields are required.");
+      return;
+    }
+
+    if (!checkPasswordPolicy(password)) {
+      setFormError("Password does not meet the requirements.");
       return;
     }
 
@@ -209,6 +215,11 @@ export function BootstrapPage() {
               autoComplete="new-password"
               required
             />
+            {password.length > 0 && (
+              <div className="mt-2">
+                <PasswordPolicyChecker password={password} />
+              </div>
+            )}
           </div>
         </div>
 

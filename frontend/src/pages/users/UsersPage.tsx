@@ -16,6 +16,7 @@ import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
 import { Eye, Lock, LockOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { useToast } from "@/hooks/useToast";
@@ -140,6 +141,11 @@ function CreateUserFields({
           required
           autoComplete="new-password"
         />
+        {password.length > 0 && (
+          <div className="mt-2">
+            <PasswordPolicyChecker password={password} />
+          </div>
+        )}
       </div>
       <div className="space-y-2">
         <Label htmlFor="user-display-name">Display Name</Label>
@@ -284,6 +290,10 @@ export function UsersPage() {
     setCreateError("");
     if (!createUsername.trim() || !createEmail.trim() || !createPassword) {
       setCreateError("Username, email, and password are required.");
+      return;
+    }
+    if (!checkPasswordPolicy(createPassword)) {
+      setCreateError("Password does not meet the requirements.");
       return;
     }
     createMutation.mutate({

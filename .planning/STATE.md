@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 11-02-PLAN.md
-last_updated: "2026-06-19T15:50:03.557Z"
+stopped_at: Completed 14-01-PLAN.md (Phase 14 code-complete; live 12-HUMAN-UAT smoke pending a rebuilt run-local)
+last_updated: "2026-06-19T16:05:00.000Z"
 last_activity: 2026-06-19
 progress:
-  total_phases: 13
-  completed_phases: 13
-  total_plans: 60
-  completed_plans: 60
+  total_phases: 14
+  completed_phases: 14
+  total_plans: 61
+  completed_plans: 61
   percent: 100
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 13 — surrealdb-connection-resilience
+**Current focus:** Phase 14 — frontend-list-contract (complete)
 
 ## Current Position
 
-Phase: 13 (surrealdb-connection-resilience) — CODE-COMPLETE (2/2 plans; verifier 5/5 must-haves; status human_needed only for the deferred live smoke)
-Plan: 2 of 2 complete
-Next: Run the live validation — `just dev-up` → `just run-local` → `just bootstrap-local`, then walk 12-HUMAN-UAT.md (11 items)
-Status: Phase complete — ready for verification
+Phase: 14 (frontend-list-contract) — CODE-COMPLETE (1/1 plan; unwrapList helper across all list services; lint + tsc green)
+Plan: 1 of 1 complete
+Next: Rebuild + run the live validation — `just dev-up` → `just run-local` → `just bootstrap-local`, then walk 12-HUMAN-UAT.md (11 items). The dashboard + all list pages should now render.
+Status: All planned phases complete (14/14). Remaining work is the human-verify smoke (12-HUMAN-UAT.md).
 Last activity: 2026-06-19
 
 Progress: [██████████] 100%

@@ -327,6 +327,7 @@ REQ-11 (Testing) ──────────── runs after each REQ as ver
 | REQ-15 | Phase 11 | Complete |
 | REQ-16 | Phase 12 | Complete |
 | REQ-17 | Phase 13 | Complete (code) — live smoke deferred to 12-HUMAN-UAT |
+| REQ-18 | Phase 14 | Complete (code) — frontend list-contract alignment; live smoke deferred to 12-HUMAN-UAT |
 
 ---
-*Last updated: 2026-06-19 (Phase 13 REQ-17 — SurrealDB connection resilience — added)*
+*Last updated: 2026-06-19 (Phase 14 REQ-18 — frontend list-contract alignment — added)*

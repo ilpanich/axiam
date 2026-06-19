@@ -22,7 +22,7 @@ AXIAM has completed 16 development phases with a working backend and frontend. T
 - [x] **Phase 10: High Remediation (Wave 2)** - Hashing/pepper, async-safe crypto, tenant isolation, GDPR/SAML/TOTP correctness, frontend High items (completed 2026-06-13)
 - [x] **Phase 11: Medium Remediation (Wave 3)** - Repo/DTO consolidation, transport limits, auth/infra hardening, frontend Medium items (completed 2026-06-13)
 - [x] **Phase 12: Low / Trivial Remediation (Wave 4)** - Cleanup, dead-code, dep pruning, i18n, security polish + whole-effort verification (completed 2026-06-19)
-- [ ] **Phase 13: SurrealDB Connection Resilience** - Reconnect-safe ns/db selection + ns/db-asserting health check; first-run seed repair; unblocks deferred Phase-12 smoke
+- [x] **Phase 13: SurrealDB Connection Resilience** - Reconnect-safe ns/db selection + ns/db-asserting health check; first-run seed repair; unblocks deferred Phase-12 smoke (completed 2026-06-19)
 
 > Audit-remediation tranche (Phases 8–12) added 2026-06-10 from `claude_dev/remediation-plan.md`; sequential with a green-build gate between waves.
 > Phase 13 added 2026-06-19 — durable fix for the SurrealDB stale-connection bug found during the Phase-12 manual smoke.
@@ -489,7 +489,7 @@ Plans:
 
 **Plans**: 2 plans (Wave 1, parallel — no file overlap)
 - [x] 13-01-PLAN.md — DbManager reconnect resilience: ns/db keepalive guard + asserting health_check + regression test
-- [ ] 13-02-PLAN.md — First-run seed repair: e2e-bootstrap.sh db-name/is_active fix + `just bootstrap-local`
+- [x] 13-02-PLAN.md — First-run seed repair: e2e-bootstrap.sh db-name/is_active fix + `just bootstrap-local`
 
 ### Scope
 
@@ -521,7 +521,7 @@ Audit-remediation tranche (Phases 8–12) is strictly sequential with a green-bu
 | 10. High Remediation (Wave 2) | 6/6 | Complete    | 2026-06-13 |
 | 11. Medium Remediation (Wave 3) | 5/5 | Complete    | 2026-06-13 |
 | 12. Low / Trivial Remediation (Wave 4) | 5/5 | Complete   | 2026-06-19 |
-| 13. SurrealDB Connection Resilience | 1/2 | In Progress|  |
+| 13. SurrealDB Connection Resilience | 2/2 | Complete   | 2026-06-19 |
 
 ---
 

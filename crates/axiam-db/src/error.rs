@@ -16,6 +16,18 @@ pub enum DbError {
 
     #[error("Record already exists: {entity}")]
     AlreadyExists { entity: String },
+
+    #[error(
+        "SurrealDB session points to wrong namespace/database: \
+         expected ns={expected_ns} db={expected_db}, \
+         got ns={actual_ns:?} db={actual_db:?}"
+    )]
+    SessionMismatch {
+        expected_ns: String,
+        expected_db: String,
+        actual_ns: Option<String>,
+        actual_db: Option<String>,
+    },
 }
 
 impl From<DbError> for AxiamError {

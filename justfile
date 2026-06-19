@@ -118,3 +118,16 @@ prod-down:
 # Stop production-like stack and remove volumes
 prod-clean:
     docker compose -f docker/docker-compose.prod.yml down -v
+
+# Requires: `just dev-up` (SurrealDB on :8000) + `just run-local` (AXIAM on :8090).
+# Defaults: E2E_ORG_SLUG=test-org, E2E_TENANT_SLUG=default, E2E_ADMIN_EMAIL=admin@axiam.dev
+# Override E2E_*, AXIAM_URL, SURREAL_URL, AXIAM__DB__DATABASE env vars as needed.
+# Seed org+tenant+admin against the run-local server; unblocks 12-HUMAN-UAT smoke.
+bootstrap-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export AXIAM_URL="${AXIAM_URL:-http://localhost:8090}"
+    export SURREAL_URL="${SURREAL_URL:-http://localhost:8000}"
+    # Must match the database run-local targets (DbConfig default: main).
+    export AXIAM__DB__DATABASE="${AXIAM__DB__DATABASE:-main}"
+    bash scripts/e2e-bootstrap.sh

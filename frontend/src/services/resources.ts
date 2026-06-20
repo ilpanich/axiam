@@ -1,6 +1,27 @@
 import api from "@/lib/api";
 import { unwrapList } from "@/services/_pagination";
 
+// ─── Resource types ───────────────────────────────────────────────────────────
+
+/** Selectable standard resource types (the backend stores any string). */
+export const STANDARD_RESOURCE_TYPES = [
+  "api",
+  "service",
+  "dataset",
+  "endpoint",
+  "iot_device",
+] as const;
+
+/** Human-readable labels for type values whose raw form reads poorly. */
+export const RESOURCE_TYPE_LABELS: Record<string, string> = {
+  iot_device: "IoT Device",
+};
+
+/** Display label for a resource type (falls back to the raw value). */
+export function resourceTypeLabel(type: string): string {
+  return RESOURCE_TYPE_LABELS[type] ?? type;
+}
+
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
 export interface Resource {

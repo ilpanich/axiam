@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   resourceService,
+  resourceTypeLabel,
+  STANDARD_RESOURCE_TYPES,
   type Resource,
   type CreateResourcePayload,
   type UpdateResourcePayload,
@@ -25,14 +27,10 @@ import { getApiErrorMessage } from "@/lib/apiError";
 function ResourceTypeBadge({ type }: { type: string }) {
   return (
     <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider bg-white/5 text-muted-foreground border border-white/10">
-      {type}
+      {resourceTypeLabel(type)}
     </span>
   );
 }
-
-// ─── Standard resource types ──────────────────────────────────────────────────
-
-const STANDARD_TYPES = ["api", "service", "dataset", "endpoint"] as const;
 
 // ─── Resource form fields ─────────────────────────────────────────────────────
 
@@ -115,9 +113,9 @@ function ResourceFormFields({
             "transition-colors duration-200"
           )}
         >
-          {STANDARD_TYPES.map((t) => (
+          {STANDARD_RESOURCE_TYPES.map((t) => (
             <option key={t} value={t}>
-              {t}
+              {resourceTypeLabel(t)}
             </option>
           ))}
           <option value="custom">custom…</option>
@@ -283,7 +281,7 @@ export function ResourcesPage() {
   function openEdit(resource: Resource) {
     setEditResource(resource);
     setEditName(resource.name);
-    const isStandard = (STANDARD_TYPES as readonly string[]).includes(
+    const isStandard = (STANDARD_RESOURCE_TYPES as readonly string[]).includes(
       resource.resource_type
     );
     setEditType(isStandard ? resource.resource_type : "custom");

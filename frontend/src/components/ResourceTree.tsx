@@ -8,7 +8,7 @@ import {
 } from "react";
 import { ChevronRight, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Resource } from "@/services/resources";
+import { resourceTypeLabel, type Resource } from "@/services/resources";
 
 // ─── Tree node type ───────────────────────────────────────────────────────────
 
@@ -45,7 +45,7 @@ function buildTree(resources: Resource[]): TreeNode[] {
 function ResourceTypeBadge({ type }: { type: string }) {
   return (
     <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider bg-white/5 text-muted-foreground border border-white/10">
-      {type}
+      {resourceTypeLabel(type)}
     </span>
   );
 }

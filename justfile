@@ -65,6 +65,24 @@ run-local:
     fi
     export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(cat "$PRIV")"
     export AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(cat "$PUB")"
+    # 32-byte (64-hex-char) AES-256-GCM keys for at-rest secret encryption.
+    # Generated once and persisted (gitignored) so secrets survive restarts.
+    # Without the MFA key, POST /api/v1/auth/mfa/enroll 500s ("MFA encryption
+    # key not configured"); without the federation key, OIDC client secrets
+    # cannot be decrypted at use.
+    gen_hex_key() {
+        local f="$SECRETS_DIR/$1"
+        if [[ ! -f "$f" ]]; then
+            openssl rand -hex 32 > "$f"
+            chmod 600 "$f"
+        fi
+        cat "$f"
+    }
+    export AXIAM__AUTH__MFA_ENCRYPTION_KEY="$(gen_hex_key mfa_enc.hex)"
+    export AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY="$(gen_hex_key federation_enc.hex)"
+    export AXIAM__PKI__ENCRYPTION_KEY="$(gen_hex_key pki_enc.hex)"
+    # Enables the mail consumer + GDPR Art.15 export sweep (both skipped without it).
+    export AXIAM__EMAIL_ENCRYPTION_KEY="$(gen_hex_key email_enc.hex)"
     # D-18: cookies must work over plain http://localhost in local dev. NEVER false in prod.
     export AXIAM__AUTH__COOKIE_SECURE="false"
     # dev-up RabbitMQ runs as axiam/axiam with the default guest user disabled.

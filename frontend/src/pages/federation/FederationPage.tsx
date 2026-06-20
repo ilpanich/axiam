@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, Zap } from "lucide-react";
+import { Plus, Pencil, Trash2 } from "lucide-react";
 import {
   federationService,
-  type FederationProvider,
-  type CreateProviderRequest,
-  type UpdateProviderRequest,
+  type FederationConfig,
+  type FederationProtocol,
+  type CreateFederationConfigRequest,
+  type UpdateFederationConfigRequest,
 } from "@/services/federation";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
@@ -21,19 +22,20 @@ import { cn, formatDate } from "@/lib/utils";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 
-// ─── Type badge ───────────────────────────────────────────────────────────────
+// ─── Protocol badge ─────────────────────────────────────────────────────────
 
-function ProviderTypeBadge({ type }: { type: "saml" | "oidc" }) {
+function ProtocolBadge({ protocol }: { protocol: string }) {
+  const isOidc = protocol === "OidcConnect";
   return (
     <span
       className={cn(
         "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border",
-        type === "saml"
-          ? "bg-purple-500/15 text-purple-400 border-purple-500/30"
-          : "bg-blue-500/15 text-blue-400 border-blue-500/30",
+        isOidc
+          ? "bg-blue-500/15 text-blue-400 border-blue-500/30"
+          : "bg-purple-500/15 text-purple-400 border-purple-500/30",
       )}
     >
-      {type === "saml" ? "SAML" : "OIDC"}
+      {isOidc ? "OIDC" : "SAML"}
     </span>
   );
 }
@@ -64,86 +66,122 @@ function ToggleField({ id, label, checked, onChange }: ToggleFieldProps) {
   );
 }
 
-// ─── Create form fields ───────────────────────────────────────────────────────
+// ─── attribute_map / allowed_algorithms helpers ───────────────────────────────
 
-interface CreateFieldsProps {
-  name: string;
-  type: "saml" | "oidc";
-  domain: string;
-  // SAML
-  metadataUrl: string;
-  entityId: string;
-  ssoUrl: string;
-  certificate: string;
-  // OIDC
-  issuerUrl: string;
+/** Parse an allowed-algorithms input (comma/space separated) into a string[]. */
+function parseAlgorithms(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Validate + parse the attribute_map textarea. Empty input maps to `{}`.
+ * Returns the parsed object, or an `error` string if the JSON is invalid or
+ * not a plain object.
+ */
+function parseAttributeMap(
+  raw: string,
+): { value: Record<string, unknown> } | { error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { value: {} };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return { error: "Attribute map must be valid JSON." };
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed)
+  ) {
+    return { error: "Attribute map must be a JSON object." };
+  }
+  return { value: parsed as Record<string, unknown> };
+}
+
+/** Stringify a server-returned attribute_map for display in the textarea. */
+function stringifyAttributeMap(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object" && Object.keys(value).length === 0) return "";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return "";
+  }
+}
+
+// ─── Config form fields ───────────────────────────────────────────────────────
+
+interface ConfigFieldsProps {
+  provider: string;
+  protocol: FederationProtocol;
   clientId: string;
   clientSecret: string;
-  scopes: string;
+  metadataUrl: string;
+  idpSigningCertPem: string;
+  allowedAlgorithms: string;
+  attributeMap: string;
   // Handlers
-  onNameChange: (v: string) => void;
-  onTypeChange: (v: "saml" | "oidc") => void;
-  onDomainChange: (v: string) => void;
-  onMetadataUrlChange: (v: string) => void;
-  onEntityIdChange: (v: string) => void;
-  onSsoUrlChange: (v: string) => void;
-  onCertificateChange: (v: string) => void;
-  onIssuerUrlChange: (v: string) => void;
+  onProviderChange: (v: string) => void;
+  onProtocolChange: (v: FederationProtocol) => void;
   onClientIdChange: (v: string) => void;
   onClientSecretChange: (v: string) => void;
-  onScopesChange: (v: string) => void;
+  onMetadataUrlChange: (v: string) => void;
+  onIdpSigningCertPemChange: (v: string) => void;
+  onAllowedAlgorithmsChange: (v: string) => void;
+  onAttributeMapChange: (v: string) => void;
   error?: string;
   idPrefix: string;
   isEditMode?: boolean;
 }
 
-function CreateFields({
-  name,
-  type,
-  domain,
-  metadataUrl,
-  entityId,
-  ssoUrl,
-  certificate,
-  issuerUrl,
+function ConfigFields({
+  provider,
+  protocol,
   clientId,
   clientSecret,
-  scopes,
-  onNameChange,
-  onTypeChange,
-  onDomainChange,
-  onMetadataUrlChange,
-  onEntityIdChange,
-  onSsoUrlChange,
-  onCertificateChange,
-  onIssuerUrlChange,
+  metadataUrl,
+  idpSigningCertPem,
+  allowedAlgorithms,
+  attributeMap,
+  onProviderChange,
+  onProtocolChange,
   onClientIdChange,
   onClientSecretChange,
-  onScopesChange,
+  onMetadataUrlChange,
+  onIdpSigningCertPemChange,
+  onAllowedAlgorithmsChange,
+  onAttributeMapChange,
   error,
   idPrefix,
   isEditMode = false,
-}: CreateFieldsProps) {
+}: ConfigFieldsProps) {
+  const isSaml = protocol === "Saml";
   return (
     <>
       <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-name`}>Name *</Label>
+        <Label htmlFor={`${idPrefix}-provider`}>Provider *</Label>
         <Input
-          id={`${idPrefix}-name`}
-          value={name}
-          onChange={(e) => onNameChange(e.target.value)}
-          placeholder="Corporate SSO"
+          id={`${idPrefix}-provider`}
+          value={provider}
+          onChange={(e) => onProviderChange(e.target.value)}
+          placeholder="Okta"
           required
           autoComplete="off"
         />
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-type`}>Type *</Label>
+        <Label htmlFor={`${idPrefix}-protocol`}>Protocol *</Label>
         <select
-          id={`${idPrefix}-type`}
-          value={type}
-          onChange={(e) => onTypeChange(e.target.value as "saml" | "oidc")}
+          id={`${idPrefix}-protocol`}
+          value={protocol}
+          onChange={(e) =>
+            onProtocolChange(e.target.value as FederationProtocol)
+          }
           disabled={isEditMode}
           className={cn(
             "w-full rounded-md px-3 py-2 text-sm",
@@ -152,141 +190,131 @@ function CreateFields({
             "transition-colors duration-200",
             isEditMode && "opacity-60 cursor-not-allowed",
           )}
-          aria-label="Provider type"
-          title={isEditMode ? "Provider type cannot be changed after creation" : undefined}
+          aria-label="Federation protocol"
+          title={
+            isEditMode
+              ? "Protocol cannot be changed after creation"
+              : undefined
+          }
         >
-          <option value="saml" className="bg-[#0d0d2b] text-foreground">
-            SAML
-          </option>
-          <option value="oidc" className="bg-[#0d0d2b] text-foreground">
+          <option value="OidcConnect" className="bg-[#0d0d2b] text-foreground">
             OIDC (OpenID Connect)
+          </option>
+          <option value="Saml" className="bg-[#0d0d2b] text-foreground">
+            SAML
           </option>
         </select>
         {isEditMode && (
           <p className="text-xs text-muted-foreground">
-            Provider type cannot be changed after creation.
+            Protocol cannot be changed after creation.
           </p>
         )}
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-domain`}>Domain *</Label>
+        <Label htmlFor={`${idPrefix}-client-id`}>Client ID *</Label>
         <Input
-          id={`${idPrefix}-domain`}
-          value={domain}
-          onChange={(e) => onDomainChange(e.target.value)}
-          placeholder="example.com"
+          id={`${idPrefix}-client-id`}
+          value={clientId}
+          onChange={(e) => onClientIdChange(e.target.value)}
+          placeholder="your-client-id"
           required
           autoComplete="off"
         />
       </div>
 
-      {/* SAML config fields */}
-      {type === "saml" && (
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-client-secret`}>
+          Client Secret {isEditMode ? "" : "*"}
+        </Label>
+        <Input
+          id={`${idPrefix}-client-secret`}
+          type="password"
+          value={clientSecret}
+          onChange={(e) => onClientSecretChange(e.target.value)}
+          placeholder={
+            isEditMode ? "Leave blank to keep current secret" : "your-client-secret"
+          }
+          autoComplete="new-password"
+        />
+        {isEditMode && (
+          <p className="text-xs text-muted-foreground">
+            Leave blank to keep the existing secret unchanged.
+          </p>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-metadata-url`}>
+          Metadata URL{isSaml ? " (IdP metadata)" : ""}
+        </Label>
+        <Input
+          id={`${idPrefix}-metadata-url`}
+          type="url"
+          value={metadataUrl}
+          onChange={(e) => onMetadataUrlChange(e.target.value)}
+          placeholder={
+            isSaml
+              ? "https://idp.example.com/metadata.xml"
+              : "https://idp.example.com/.well-known/openid-configuration"
+          }
+          autoComplete="off"
+        />
+      </div>
+
+      {/* SAML-only fields */}
+      {isSaml && (
         <>
-          <div className="pt-2 border-t border-primary/10">
-            <p className="text-xs font-semibold uppercase tracking-wider text-primary/70 mb-3">
-              SAML Configuration
-            </p>
-          </div>
           <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-metadata-url`}>Metadata URL</Label>
-            <Input
-              id={`${idPrefix}-metadata-url`}
-              value={metadataUrl}
-              onChange={(e) => onMetadataUrlChange(e.target.value)}
-              placeholder="https://idp.example.com/metadata.xml"
-              autoComplete="off"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-entity-id`}>Entity ID *</Label>
-            <Input
-              id={`${idPrefix}-entity-id`}
-              value={entityId}
-              onChange={(e) => onEntityIdChange(e.target.value)}
-              placeholder="https://idp.example.com"
-              autoComplete="off"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-sso-url`}>SSO URL *</Label>
-            <Input
-              id={`${idPrefix}-sso-url`}
-              value={ssoUrl}
-              onChange={(e) => onSsoUrlChange(e.target.value)}
-              placeholder="https://idp.example.com/sso"
-              autoComplete="off"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-certificate`}>Certificate (PEM)</Label>
+            <Label htmlFor={`${idPrefix}-idp-cert`}>
+              IdP Signing Certificate (PEM)
+            </Label>
             <Textarea
-              id={`${idPrefix}-certificate`}
-              value={certificate}
-              onChange={(e) => onCertificateChange(e.target.value)}
+              id={`${idPrefix}-idp-cert`}
+              value={idpSigningCertPem}
+              onChange={(e) => onIdpSigningCertPemChange(e.target.value)}
               placeholder="-----BEGIN CERTIFICATE-----"
               rows={4}
               className="font-mono text-xs"
             />
+            <p className="text-xs text-muted-foreground">
+              Required for SAML — used to verify signed assertions.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor={`${idPrefix}-allowed-algos`}>
+              Allowed Algorithms
+            </Label>
+            <Input
+              id={`${idPrefix}-allowed-algos`}
+              value={allowedAlgorithms}
+              onChange={(e) => onAllowedAlgorithmsChange(e.target.value)}
+              placeholder="RS256 RS384"
+              autoComplete="off"
+            />
+            <p className="text-xs text-muted-foreground">
+              Comma- or space-separated. Defaults to RS256 when left blank.
+            </p>
           </div>
         </>
       )}
 
-      {/* OIDC config fields */}
-      {type === "oidc" && (
-        <>
-          <div className="pt-2 border-t border-primary/10">
-            <p className="text-xs font-semibold uppercase tracking-wider text-primary/70 mb-3">
-              OIDC Configuration
-            </p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-issuer-url`}>Issuer URL *</Label>
-            <Input
-              id={`${idPrefix}-issuer-url`}
-              value={issuerUrl}
-              onChange={(e) => onIssuerUrlChange(e.target.value)}
-              placeholder="https://accounts.google.com"
-              autoComplete="off"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-client-id`}>Client ID *</Label>
-            <Input
-              id={`${idPrefix}-client-id`}
-              value={clientId}
-              onChange={(e) => onClientIdChange(e.target.value)}
-              placeholder="your-client-id"
-              autoComplete="off"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-client-secret`}>Client Secret *</Label>
-            <Input
-              id={`${idPrefix}-client-secret`}
-              type="password"
-              value={clientSecret}
-              onChange={(e) => onClientSecretChange(e.target.value)}
-              placeholder="your-client-secret"
-              autoComplete="new-password"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}-scopes`}>Scopes</Label>
-            <Input
-              id={`${idPrefix}-scopes`}
-              value={scopes}
-              onChange={(e) => onScopesChange(e.target.value)}
-              placeholder="openid profile email"
-              autoComplete="off"
-            />
-            <p className="text-xs text-muted-foreground">
-              Space-separated list of scopes.
-            </p>
-          </div>
-        </>
-      )}
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-attribute-map`}>
+          Attribute Map (JSON)
+        </Label>
+        <Textarea
+          id={`${idPrefix}-attribute-map`}
+          value={attributeMap}
+          onChange={(e) => onAttributeMapChange(e.target.value)}
+          placeholder={'{\n  "email": "mail",\n  "name": "displayName"\n}'}
+          rows={4}
+          className="font-mono text-xs"
+        />
+        <p className="text-xs text-muted-foreground">
+          Optional JSON object mapping IdP claims to AXIAM attributes.
+        </p>
+      </div>
 
       {error && <p className="text-sm text-destructive">{error}</p>}
     </>
@@ -295,97 +323,69 @@ function CreateFields({
 
 // ─── Form state hook ──────────────────────────────────────────────────────────
 
-function useProviderFormState() {
-  const [name, setName] = useState("");
-  const [type, setType] = useState<"saml" | "oidc">("saml");
-  const [domain, setDomain] = useState("");
-  // SAML
-  const [metadataUrl, setMetadataUrl] = useState("");
-  const [entityId, setEntityId] = useState("");
-  const [ssoUrl, setSsoUrl] = useState("");
-  const [certificate, setCertificate] = useState("");
-  // OIDC
-  const [issuerUrl, setIssuerUrl] = useState("");
+function useConfigFormState() {
+  const [provider, setProvider] = useState("");
+  const [protocol, setProtocol] = useState<FederationProtocol>("OidcConnect");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
-  const [scopes, setScopes] = useState("openid profile email");
-  // Status (edit only)
-  const [isActive, setIsActive] = useState(true);
+  const [metadataUrl, setMetadataUrl] = useState("");
+  const [idpSigningCertPem, setIdpSigningCertPem] = useState("");
+  const [allowedAlgorithms, setAllowedAlgorithms] = useState("");
+  const [attributeMap, setAttributeMap] = useState("");
+  const [enabled, setEnabled] = useState(true);
   const [error, setError] = useState("");
 
   function reset() {
-    setName("");
-    setType("saml");
-    setDomain("");
-    setMetadataUrl("");
-    setEntityId("");
-    setSsoUrl("");
-    setCertificate("");
-    setIssuerUrl("");
+    setProvider("");
+    setProtocol("OidcConnect");
     setClientId("");
     setClientSecret("");
-    setScopes("openid profile email");
-    setIsActive(true);
+    setMetadataUrl("");
+    setIdpSigningCertPem("");
+    setAllowedAlgorithms("");
+    setAttributeMap("");
+    setEnabled(true);
     setError("");
   }
 
-  function load(provider: FederationProvider) {
-    setName(provider.name);
-    setType(provider.type);
-    setDomain(provider.domain);
-    setIsActive(provider.status === "active");
-    if (provider.saml_config) {
-      setMetadataUrl(provider.saml_config.metadata_url);
-      setEntityId(provider.saml_config.entity_id);
-      setSsoUrl(provider.saml_config.sso_url);
-      setCertificate(provider.saml_config.certificate);
-    }
-    if (provider.oidc_config) {
-      setIssuerUrl(provider.oidc_config.issuer_url);
-      setClientId(provider.oidc_config.client_id);
-      setClientSecret(provider.oidc_config.client_secret);
-      setScopes(provider.oidc_config.scopes.join(" "));
-    }
+  function load(config: FederationConfig) {
+    setProvider(config.provider);
+    setProtocol(config.protocol === "Saml" ? "Saml" : "OidcConnect");
+    setClientId(config.client_id);
+    // client_secret is write-only — never returned, so never prefilled.
+    setClientSecret("");
+    setMetadataUrl(config.metadata_url ?? "");
+    setIdpSigningCertPem("");
+    setAllowedAlgorithms("");
+    setAttributeMap(stringifyAttributeMap(config.attribute_map));
+    setEnabled(config.enabled);
     setError("");
   }
 
   return {
-    name,
-    setName,
-    type,
-    setType,
-    domain,
-    setDomain,
-    metadataUrl,
-    setMetadataUrl,
-    entityId,
-    setEntityId,
-    ssoUrl,
-    setSsoUrl,
-    certificate,
-    setCertificate,
-    issuerUrl,
-    setIssuerUrl,
+    provider,
+    setProvider,
+    protocol,
+    setProtocol,
     clientId,
     setClientId,
     clientSecret,
     setClientSecret,
-    scopes,
-    setScopes,
-    isActive,
-    setIsActive,
+    metadataUrl,
+    setMetadataUrl,
+    idpSigningCertPem,
+    setIdpSigningCertPem,
+    allowedAlgorithms,
+    setAllowedAlgorithms,
+    attributeMap,
+    setAttributeMap,
+    enabled,
+    setEnabled,
     error,
     setError,
     reset,
     load,
   };
-}
-
-function parseScopes(raw: string): string[] {
-  return raw
-    .split(/\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
 }
 
 // ─── Main page ────────────────────────────────────────────────────────────────
@@ -394,8 +394,8 @@ export function FederationPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const { data: providers = [], isLoading } = useQuery({
-    queryKey: ["federation-providers"],
+  const { data: configs = [], isLoading } = useQuery({
+    queryKey: ["federation-configs"],
     queryFn: () => federationService.getAll(),
   });
 
@@ -403,23 +403,23 @@ export function FederationPage() {
   const [search, setSearch] = useState("");
 
   const filtered = search
-    ? providers.filter(
-        (p) =>
-          p.name.toLowerCase().includes(search.toLowerCase()) ||
-          p.domain.toLowerCase().includes(search.toLowerCase()),
+    ? configs.filter(
+        (c) =>
+          c.provider.toLowerCase().includes(search.toLowerCase()) ||
+          c.client_id.toLowerCase().includes(search.toLowerCase()),
       )
-    : providers;
+    : configs;
 
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
-  const createForm = useProviderFormState();
+  const createForm = useConfigFormState();
 
   const createMutation = useMutation({
-    mutationFn: (payload: CreateProviderRequest) =>
+    mutationFn: (payload: CreateFederationConfigRequest) =>
       federationService.create(payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["federation-providers"],
+        queryKey: ["federation-configs"],
       });
       setCreateOpen(false);
       createForm.reset();
@@ -434,59 +434,52 @@ export function FederationPage() {
   function handleCreateSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     createForm.setError("");
-    if (!createForm.name.trim()) {
-      createForm.setError("Name is required.");
+
+    if (!createForm.provider.trim()) {
+      createForm.setError("Provider is required.");
       return;
     }
-    if (!createForm.domain.trim()) {
-      createForm.setError("Domain is required.");
+    if (!createForm.clientId.trim()) {
+      createForm.setError("Client ID is required.");
+      return;
+    }
+    if (!createForm.clientSecret.trim()) {
+      createForm.setError("Client Secret is required.");
+      return;
+    }
+    if (createForm.protocol === "Saml" && !createForm.idpSigningCertPem.trim()) {
+      createForm.setError("IdP signing certificate is required for SAML.");
       return;
     }
 
-    const payload: CreateProviderRequest = {
-      name: createForm.name.trim(),
-      type: createForm.type,
-      domain: createForm.domain.trim(),
+    const attrResult = parseAttributeMap(createForm.attributeMap);
+    if ("error" in attrResult) {
+      createForm.setError(attrResult.error);
+      return;
+    }
+
+    const metadataUrl = createForm.metadataUrl.trim();
+    const payload: CreateFederationConfigRequest = {
+      provider: createForm.provider.trim(),
+      protocol: createForm.protocol,
+      client_id: createForm.clientId.trim(),
+      client_secret: createForm.clientSecret,
+      metadata_url: metadataUrl ? metadataUrl : null,
+      attribute_map: attrResult.value,
     };
 
-    if (createForm.type === "saml") {
-      if (!createForm.entityId.trim() || !createForm.ssoUrl.trim()) {
-        createForm.setError("Entity ID and SSO URL are required for SAML.");
-        return;
-      }
-      payload.saml_config = {
-        metadata_url: createForm.metadataUrl.trim(),
-        entity_id: createForm.entityId.trim(),
-        sso_url: createForm.ssoUrl.trim(),
-        certificate: createForm.certificate.trim(),
-      };
-    } else {
-      if (
-        !createForm.issuerUrl.trim() ||
-        !createForm.clientId.trim() ||
-        !createForm.clientSecret.trim()
-      ) {
-        createForm.setError(
-          "Issuer URL, Client ID, and Client Secret are required for OIDC.",
-        );
-        return;
-      }
-      payload.oidc_config = {
-        issuer_url: createForm.issuerUrl.trim(),
-        client_id: createForm.clientId.trim(),
-        client_secret: createForm.clientSecret.trim(),
-        scopes: parseScopes(createForm.scopes),
-      };
+    if (createForm.protocol === "Saml") {
+      payload.idp_signing_cert_pem = createForm.idpSigningCertPem.trim();
+      const algos = parseAlgorithms(createForm.allowedAlgorithms);
+      if (algos.length > 0) payload.allowed_algorithms = algos;
     }
 
     createMutation.mutate(payload);
   }
 
   // ─── Edit state ────────────────────────────────────────────────────────────
-  const [editProvider, setEditProvider] = useState<FederationProvider | null>(
-    null,
-  );
-  const editForm = useProviderFormState();
+  const [editConfig, setEditConfig] = useState<FederationConfig | null>(null);
+  const editForm = useConfigFormState();
 
   const editMutation = useMutation({
     mutationFn: ({
@@ -494,13 +487,13 @@ export function FederationPage() {
       payload,
     }: {
       id: string;
-      payload: UpdateProviderRequest;
+      payload: UpdateFederationConfigRequest;
     }) => federationService.update(id, payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["federation-providers"],
+        queryKey: ["federation-configs"],
       });
-      setEditProvider(null);
+      setEditConfig(null);
     },
     onError: (err: unknown) => {
       const msg = getApiErrorMessage(err);
@@ -509,129 +502,100 @@ export function FederationPage() {
     },
   });
 
-  function openEdit(provider: FederationProvider) {
-    setEditProvider(provider);
-    editForm.load(provider);
+  function openEdit(config: FederationConfig) {
+    setEditConfig(config);
+    editForm.load(config);
   }
 
   function handleEditSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     editForm.setError("");
-    if (!editProvider || !editForm.name.trim()) {
-      editForm.setError("Name is required.");
+
+    if (!editConfig) return;
+    if (!editForm.provider.trim()) {
+      editForm.setError("Provider is required.");
       return;
     }
-    if (!editForm.domain.trim()) {
-      editForm.setError("Domain is required.");
+    if (!editForm.clientId.trim()) {
+      editForm.setError("Client ID is required.");
       return;
     }
 
-    const payload: UpdateProviderRequest = {
-      name: editForm.name.trim(),
-      domain: editForm.domain.trim(),
-      status: editForm.isActive ? "active" : "inactive",
+    const attrResult = parseAttributeMap(editForm.attributeMap);
+    if ("error" in attrResult) {
+      editForm.setError(attrResult.error);
+      return;
+    }
+
+    const metadataUrl = editForm.metadataUrl.trim();
+    const payload: UpdateFederationConfigRequest = {
+      provider: editForm.provider.trim(),
+      client_id: editForm.clientId.trim(),
+      metadata_url: metadataUrl ? metadataUrl : null,
+      attribute_map: attrResult.value,
+      enabled: editForm.enabled,
     };
 
-    if (editForm.type === "saml") {
-      payload.saml_config = {
-        metadata_url: editForm.metadataUrl.trim(),
-        entity_id: editForm.entityId.trim(),
-        sso_url: editForm.ssoUrl.trim(),
-        certificate: editForm.certificate.trim(),
-      };
-    } else {
-      payload.oidc_config = {
-        issuer_url: editForm.issuerUrl.trim(),
-        client_id: editForm.clientId.trim(),
-        client_secret: editForm.clientSecret.trim(),
-        scopes: parseScopes(editForm.scopes),
-      };
+    // client_secret is write-only — only send when the admin entered a new one.
+    if (editForm.clientSecret.trim()) {
+      payload.client_secret = editForm.clientSecret;
     }
 
-    editMutation.mutate({ id: editProvider.id, payload });
+    if (editConfig.protocol === "Saml") {
+      const cert = editForm.idpSigningCertPem.trim();
+      if (cert) payload.idp_signing_cert_pem = cert;
+      const algos = parseAlgorithms(editForm.allowedAlgorithms);
+      if (algos.length > 0) payload.allowed_algorithms = algos;
+    }
+
+    editMutation.mutate({ id: editConfig.id, payload });
   }
 
   // ─── Delete state ──────────────────────────────────────────────────────────
-  const [deleteProvider, setDeleteProvider] =
-    useState<FederationProvider | null>(null);
+  const [deleteConfig, setDeleteConfig] = useState<FederationConfig | null>(
+    null,
+  );
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => federationService.remove(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["federation-providers"],
+        queryKey: ["federation-configs"],
       });
-      setDeleteProvider(null);
+      setDeleteConfig(null);
     },
     onError: (err: unknown) => {
       toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
 
-  // ─── Test connection state ─────────────────────────────────────────────────
-  const [testingId, setTestingId] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<{
-    success: boolean;
-    message: string;
-  } | null>(null);
-
-  const testMutation = useMutation({
-    mutationFn: (id: string) => federationService.testConnection(id),
-    onSuccess: (result) => {
-      setTestResult(result);
-      setTestingId(null);
-    },
-    onError: (err: unknown) => {
-      setTestResult({
-        success: false,
-        message: err instanceof Error ? err.message : "Connection test failed.",
-      });
-      setTestingId(null);
-    },
-  });
-
-  function handleTestConnection(provider: FederationProvider) {
-    setTestingId(provider.id);
-    setTestResult(null);
-    testMutation.mutate(provider.id);
-  }
-
   // ─── Table columns ─────────────────────────────────────────────────────────
-  const columns: Column<FederationProvider>[] = [
+  const columns: Column<FederationConfig>[] = [
     {
-      key: "name",
-      header: "Name",
+      key: "provider",
+      header: "Provider",
       render: (row) => (
-        <span className="font-medium text-foreground/90">{row.name}</span>
+        <span className="font-medium text-foreground/90">{row.provider}</span>
       ),
     },
     {
-      key: "type",
-      header: "Type",
-      render: (row) => <ProviderTypeBadge type={row.type} />,
+      key: "protocol",
+      header: "Protocol",
+      render: (row) => <ProtocolBadge protocol={row.protocol} />,
     },
     {
-      key: "status",
+      key: "enabled",
       header: "Status",
       render: (row) => (
-        <StatusBadge status={row.status === "active" ? "active" : "inactive"} />
+        <StatusBadge status={row.enabled ? "active" : "inactive"} />
       ),
     },
     {
-      key: "domain",
-      header: "Domain",
+      key: "client_id",
+      header: "Client ID",
       render: (row) => (
         <span className="text-sm text-muted-foreground font-mono">
-          {row.domain}
-        </span>
-      ),
-    },
-    {
-      key: "last_sync_at",
-      header: "Last Sync",
-      render: (row) => (
-        <span className="text-sm text-muted-foreground">
-          {row.last_sync_at ? formatDate(row.last_sync_at) : "Never"}
+          {row.client_id}
         </span>
       ),
     },
@@ -647,31 +611,19 @@ export function FederationPage() {
     {
       key: "actions",
       header: "Actions",
-      width: "w-32",
+      width: "w-24",
       render: (row) => (
         <div className="flex items-center gap-1">
           <button
-            aria-label={`Test connection for ${row.name}`}
-            onClick={() => handleTestConnection(row)}
-            disabled={testingId === row.id}
-            className={cn(
-              "p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors",
-              testingId === row.id && "animate-pulse",
-            )}
-            title="Test connection"
-          >
-            <Zap size={14} />
-          </button>
-          <button
-            aria-label={`Edit ${row.name}`}
+            aria-label={`Edit ${row.provider}`}
             onClick={() => openEdit(row)}
             className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
           >
             <Pencil size={14} />
           </button>
           <button
-            aria-label={`Delete ${row.name}`}
-            onClick={() => setDeleteProvider(row)}
+            aria-label={`Delete ${row.provider}`}
+            onClick={() => setDeleteConfig(row)}
             className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
           >
             <Trash2 size={14} />
@@ -694,39 +646,17 @@ export function FederationPage() {
             }}
           >
             <Plus size={16} />
-            New Provider
+            New Config
           </Button>
         }
       />
-
-      {/* Test result banner */}
-      {testResult && (
-        <div
-          className={cn(
-            "mb-4 px-4 py-3 rounded-lg border text-sm flex items-center justify-between",
-            testResult.success
-              ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
-              : "bg-red-500/10 border-red-500/30 text-red-400",
-          )}
-          role="alert"
-        >
-          <span>{testResult.message}</span>
-          <button
-            onClick={() => setTestResult(null)}
-            className="text-xs underline opacity-70 hover:opacity-100"
-            aria-label="Dismiss test result"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
 
       {/* Search */}
       <div className="mb-4">
         <SearchInput
           value={search}
           onChange={setSearch}
-          placeholder="Search providers..."
+          placeholder="Search by provider or client ID..."
           className="max-w-sm"
         />
       </div>
@@ -735,7 +665,7 @@ export function FederationPage() {
         columns={columns}
         data={filtered}
         isLoading={isLoading}
-        emptyMessage="No federation providers configured."
+        emptyMessage="No federation configs defined."
       />
 
       {/* Create dialog */}
@@ -745,34 +675,28 @@ export function FederationPage() {
           setCreateOpen(false);
           createForm.reset();
         }}
-        title="New Federation Provider"
+        title="New Federation Config"
         onSubmit={handleCreateSubmit}
         isLoading={createMutation.isPending}
         submitLabel="Create"
       >
-        <CreateFields
-          name={createForm.name}
-          type={createForm.type}
-          domain={createForm.domain}
-          metadataUrl={createForm.metadataUrl}
-          entityId={createForm.entityId}
-          ssoUrl={createForm.ssoUrl}
-          certificate={createForm.certificate}
-          issuerUrl={createForm.issuerUrl}
+        <ConfigFields
+          provider={createForm.provider}
+          protocol={createForm.protocol}
           clientId={createForm.clientId}
           clientSecret={createForm.clientSecret}
-          scopes={createForm.scopes}
-          onNameChange={createForm.setName}
-          onTypeChange={createForm.setType}
-          onDomainChange={createForm.setDomain}
-          onMetadataUrlChange={createForm.setMetadataUrl}
-          onEntityIdChange={createForm.setEntityId}
-          onSsoUrlChange={createForm.setSsoUrl}
-          onCertificateChange={createForm.setCertificate}
-          onIssuerUrlChange={createForm.setIssuerUrl}
+          metadataUrl={createForm.metadataUrl}
+          idpSigningCertPem={createForm.idpSigningCertPem}
+          allowedAlgorithms={createForm.allowedAlgorithms}
+          attributeMap={createForm.attributeMap}
+          onProviderChange={createForm.setProvider}
+          onProtocolChange={createForm.setProtocol}
           onClientIdChange={createForm.setClientId}
           onClientSecretChange={createForm.setClientSecret}
-          onScopesChange={createForm.setScopes}
+          onMetadataUrlChange={createForm.setMetadataUrl}
+          onIdpSigningCertPemChange={createForm.setIdpSigningCertPem}
+          onAllowedAlgorithmsChange={createForm.setAllowedAlgorithms}
+          onAttributeMapChange={createForm.setAttributeMap}
           error={createForm.error}
           idPrefix="create"
         />
@@ -780,58 +704,52 @@ export function FederationPage() {
 
       {/* Edit dialog */}
       <FormDialog
-        open={editProvider !== null}
-        onClose={() => setEditProvider(null)}
-        title="Edit Federation Provider"
+        open={editConfig !== null}
+        onClose={() => setEditConfig(null)}
+        title="Edit Federation Config"
         onSubmit={handleEditSubmit}
         isLoading={editMutation.isPending}
         submitLabel="Save Changes"
       >
-        <CreateFields
-          name={editForm.name}
-          type={editForm.type}
-          domain={editForm.domain}
-          metadataUrl={editForm.metadataUrl}
-          entityId={editForm.entityId}
-          ssoUrl={editForm.ssoUrl}
-          certificate={editForm.certificate}
-          issuerUrl={editForm.issuerUrl}
+        <ConfigFields
+          provider={editForm.provider}
+          protocol={editForm.protocol}
           clientId={editForm.clientId}
           clientSecret={editForm.clientSecret}
-          scopes={editForm.scopes}
-          onNameChange={editForm.setName}
-          onTypeChange={editForm.setType}
-          onDomainChange={editForm.setDomain}
-          onMetadataUrlChange={editForm.setMetadataUrl}
-          onEntityIdChange={editForm.setEntityId}
-          onSsoUrlChange={editForm.setSsoUrl}
-          onCertificateChange={editForm.setCertificate}
-          onIssuerUrlChange={editForm.setIssuerUrl}
+          metadataUrl={editForm.metadataUrl}
+          idpSigningCertPem={editForm.idpSigningCertPem}
+          allowedAlgorithms={editForm.allowedAlgorithms}
+          attributeMap={editForm.attributeMap}
+          onProviderChange={editForm.setProvider}
+          onProtocolChange={editForm.setProtocol}
           onClientIdChange={editForm.setClientId}
           onClientSecretChange={editForm.setClientSecret}
-          onScopesChange={editForm.setScopes}
+          onMetadataUrlChange={editForm.setMetadataUrl}
+          onIdpSigningCertPemChange={editForm.setIdpSigningCertPem}
+          onAllowedAlgorithmsChange={editForm.setAllowedAlgorithms}
+          onAttributeMapChange={editForm.setAttributeMap}
           error={editForm.error}
           idPrefix="edit"
           isEditMode={true}
         />
-        {/* Status toggle only in edit */}
+        {/* Enabled toggle only in edit */}
         <ToggleField
-          id="edit-fed-active"
-          label="Active"
-          checked={editForm.isActive}
-          onChange={editForm.setIsActive}
+          id="edit-fed-enabled"
+          label="Enabled"
+          checked={editForm.enabled}
+          onChange={editForm.setEnabled}
         />
       </FormDialog>
 
       {/* Delete confirm */}
       <ConfirmDialog
-        open={deleteProvider !== null}
-        onClose={() => setDeleteProvider(null)}
+        open={deleteConfig !== null}
+        onClose={() => setDeleteConfig(null)}
         onConfirm={() =>
-          deleteProvider && deleteMutation.mutate(deleteProvider.id)
+          deleteConfig && deleteMutation.mutate(deleteConfig.id)
         }
-        title="Delete Federation Provider"
-        description={`Are you sure you want to delete "${deleteProvider?.name}"? Users authenticating through this provider will lose SSO access.`}
+        title="Delete Federation Config"
+        description={`Are you sure you want to delete the "${deleteConfig?.provider}" config? Users authenticating through this provider will lose SSO access.`}
         isLoading={deleteMutation.isPending}
       />
     </div>

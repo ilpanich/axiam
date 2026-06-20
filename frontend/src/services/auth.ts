@@ -23,8 +23,10 @@ export interface ConfirmMfaPayload {
 // ─── Response types ───────────────────────────────────────────────────────────
 
 export interface MfaEnrollResponse {
-  secret: string;
-  qr_code_uri: string;
+  /** Base32-encoded TOTP shared secret (backend field: `secret_base32`). */
+  secret_base32: string;
+  /** otpauth:// provisioning URI for QR generation (backend field: `totp_uri`). */
+  totp_uri: string;
 }
 
 // ─── Auth service ─────────────────────────────────────────────────────────────
@@ -50,11 +52,16 @@ export const authService = {
 
   /**
    * Verify an email address via the token from the verification email.
-   * GET /api/v1/auth/verify-email?token=<encoded>
+   * POST /api/v1/auth/verify-email
+   *
+   * Backend `VerifyEmailRequest` requires BOTH `tenant_id` (a UUID) and
+   * `token` (crates/axiam-api-rest/src/handlers/email_verification.rs).
+   * The tenant id must therefore be carried by the verification link
+   * (e.g. as a `tenant_id` query param) — see VerifyEmailPage.
    */
-  verifyEmail: (token: string): Promise<void> =>
+  verifyEmail: (tenantId: string, token: string): Promise<void> =>
     api
-      .get<void>(`/api/v1/auth/verify-email?token=${encodeURIComponent(token)}`)
+      .post<void>("/api/v1/auth/verify-email", { tenant_id: tenantId, token })
       .then(() => undefined),
 
   /**
@@ -76,20 +83,23 @@ export const authService = {
       .then(() => undefined),
 
   /**
-   * Begin TOTP MFA enrollment — returns secret + QR code URI.
-   * POST /api/v1/auth/mfa/setup/enroll
+   * Begin TOTP MFA enrollment for the authenticated user — returns the
+   * shared secret + otpauth URI. Uses the self-service enroll endpoint
+   * (the `/mfa/setup/*` variants require a login-issued setup_token and
+   * are only for the partial-login MFA-setup flow).
+   * POST /api/v1/auth/mfa/enroll
    */
   enrollMfa: (): Promise<MfaEnrollResponse> =>
     api
-      .post<MfaEnrollResponse>("/api/v1/auth/mfa/setup/enroll")
+      .post<MfaEnrollResponse>("/api/v1/auth/mfa/enroll")
       .then((r) => r.data),
 
   /**
    * Confirm TOTP MFA enrollment with a 6-digit code.
-   * POST /api/v1/auth/mfa/setup/confirm
+   * POST /api/v1/auth/mfa/confirm  (body: { totp_code })
    */
   confirmMfa: (code: string): Promise<void> =>
     api
-      .post<void>("/api/v1/auth/mfa/setup/confirm", { code })
+      .post<void>("/api/v1/auth/mfa/confirm", { totp_code: code })
       .then(() => undefined),
 };

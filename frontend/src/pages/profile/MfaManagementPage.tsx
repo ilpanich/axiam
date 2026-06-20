@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Shield, Trash2, Loader2, AlertCircle, Copy, Check, KeyRound, Fingerprint } from "lucide-react";
 import api from "@/lib/api";
 import { authService } from "@/services/auth";
+import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -20,8 +21,8 @@ import type { MfaMethod } from "@/services/users";
 export type { MfaMethod };
 
 interface TotpSetupResponse {
-  secret: string;
-  qr_code_uri: string;
+  secret_base32: string;
+  totp_uri: string;
 }
 
 interface ErrorResponse {
@@ -29,13 +30,17 @@ interface ErrorResponse {
   error?: string;
 }
 
-async function getMfaMethods(): Promise<MfaMethod[]> {
-  const res = await api.get<MfaMethod[]>("/api/v1/users/me/mfa-methods");
-  return res.data;
+// The backend has no `/users/me` alias — MFA methods are addressed by the
+// authenticated user's real id (resolved from the auth store at call sites).
+async function getMfaMethods(userId: string): Promise<MfaMethod[]> {
+  const res = await api.get<MfaMethod[] | { items: MfaMethod[] }>(
+    `/api/v1/users/${userId}/mfa-methods`,
+  );
+  return Array.isArray(res.data) ? res.data : res.data.items;
 }
 
-async function deleteMfaMethod(id: string): Promise<void> {
-  await api.delete(`/api/v1/users/me/mfa-methods/${id}`);
+async function deleteMfaMethod(userId: string, id: string): Promise<void> {
+  await api.delete(`/api/v1/users/${userId}/mfa-methods/${id}`);
 }
 
 
@@ -104,10 +109,10 @@ function TotpSetupDialog({
 
   if (!open || !setupData) return null;
 
-  const isDataUrl = setupData.qr_code_uri.startsWith("data:");
+  const isDataUrl = setupData.totp_uri.startsWith("data:");
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(setupData.secret);
+    await navigator.clipboard.writeText(setupData.secret_base32);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -148,14 +153,16 @@ function TotpSetupDialog({
         <div className="flex flex-col items-center gap-3">
           {isDataUrl ? (
             <img
-              src={setupData.qr_code_uri}
+              src={setupData.totp_uri}
               alt="TOTP QR code — scan with your authenticator app"
               className="h-40 w-40 rounded-lg border border-white/10 bg-white p-1"
             />
           ) : (
             <div className="text-xs text-muted-foreground text-center p-4 bg-white/5 rounded-lg border border-white/10">
-              <p className="font-mono break-all">{setupData.qr_code_uri}</p>
-              <p className="mt-2">Scan this URI with your authenticator app.</p>
+              <p className="font-mono break-all">{setupData.totp_uri}</p>
+              <p className="mt-2">
+                Add this URI to your authenticator app, or enter the key below manually.
+              </p>
             </div>
           )}
         </div>
@@ -165,7 +172,7 @@ function TotpSetupDialog({
           <p className="text-xs text-muted-foreground">Or enter this key manually:</p>
           <div className="flex items-center gap-2">
             <code className="flex-1 text-xs font-mono bg-white/5 border border-white/10 rounded px-3 py-2 text-primary break-all">
-              {setupData.secret}
+              {setupData.secret_base32}
             </code>
             <button
               type="button"
@@ -239,18 +246,20 @@ function TotpSetupDialog({
 
 export function MfaManagementPage() {
   const queryClient = useQueryClient();
+  const userId = useAuthStore((s) => s.user?.id);
   const [deleteTarget, setDeleteTarget] = useState<MfaMethod | null>(null);
   const [totpDialogOpen, setTotpDialogOpen] = useState(false);
   const [totpSetupData, setTotpSetupData] = useState<TotpSetupResponse | null>(null);
   const [totpConfirmError, setTotpConfirmError] = useState<string | null>(null);
 
   const { data: methods = [], isLoading } = useQuery({
-    queryKey: ["mfaMethods"],
-    queryFn: getMfaMethods,
+    queryKey: ["mfaMethods", userId],
+    queryFn: () => getMfaMethods(userId!),
+    enabled: !!userId,
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteMfaMethod(id),
+    mutationFn: (id: string) => deleteMfaMethod(userId!, id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mfaMethods"] });
       setDeleteTarget(null);

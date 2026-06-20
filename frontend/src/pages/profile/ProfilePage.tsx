@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { User, Lock, Shield, CheckCircle2, AlertCircle, Pencil, X, Loader2 } from "lucide-react";
 import api from "@/lib/api";
 import { authService } from "@/services/auth";
+import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,19 +36,23 @@ interface ErrorResponse {
   error?: string;
 }
 
-async function getCurrentUser(): Promise<UserProfile> {
-  const res = await api.get<UserProfile>("/api/v1/users/me");
+// The backend addresses users by their real id — there is no `/users/me`
+// alias — so the authenticated user's id is threaded in from the auth store.
+async function getCurrentUser(userId: string): Promise<UserProfile> {
+  const res = await api.get<UserProfile>(`/api/v1/users/${userId}`);
   return res.data;
 }
 
-async function updateProfile(data: UpdateProfilePayload): Promise<UserProfile> {
-  const res = await api.put<UserProfile>("/api/v1/users/me", data);
+async function updateProfile(userId: string, data: UpdateProfilePayload): Promise<UserProfile> {
+  const res = await api.put<UserProfile>(`/api/v1/users/${userId}`, data);
   return res.data;
 }
 
-async function getMfaMethods(): Promise<MfaMethod[]> {
-  const res = await api.get<MfaMethod[]>("/api/v1/users/me/mfa-methods");
-  return res.data;
+async function getMfaMethods(userId: string): Promise<MfaMethod[]> {
+  const res = await api.get<MfaMethod[] | { items: MfaMethod[] }>(
+    `/api/v1/users/${userId}/mfa-methods`,
+  );
+  return Array.isArray(res.data) ? res.data : res.data.items;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,14 +93,18 @@ export function ProfilePage() {
   const [editing, setEditing] = useState(false);
   const [verificationMessage, setVerificationMessage] = useState<string | null>(null);
 
+  const userId = useAuthStore((s) => s.user?.id);
+
   const { data: profile, isLoading, error: loadError } = useQuery({
-    queryKey: ["currentUser"],
-    queryFn: getCurrentUser,
+    queryKey: ["currentUser", userId],
+    queryFn: () => getCurrentUser(userId!),
+    enabled: !!userId,
   });
 
   const { data: mfaMethods } = useQuery({
-    queryKey: ["mfaMethods"],
-    queryFn: getMfaMethods,
+    queryKey: ["mfaMethods", userId],
+    queryFn: () => getMfaMethods(userId!),
+    enabled: !!userId,
   });
 
   const resendMutation = useMutation({
@@ -114,7 +123,10 @@ export function ProfilePage() {
       const display_name = (formData.get("display_name") as string).trim();
       const email = (formData.get("email") as string).trim();
       try {
-        await updateProfile({ display_name: display_name || undefined, email: email || undefined });
+        await updateProfile(userId!, {
+          display_name: display_name || undefined,
+          email: email || undefined,
+        });
         await queryClient.invalidateQueries({ queryKey: ["currentUser"] });
         setEditing(false);
         return { error: null, success: true };

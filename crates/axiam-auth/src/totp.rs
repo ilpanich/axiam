@@ -181,4 +181,26 @@ mod tests {
         let secret_bytes = secret.to_bytes().unwrap();
         assert!(!verify_code(&secret_bytes, "000000", "AXIAM", "test@test.com").unwrap());
     }
+
+    /// Regression: a TOTP code produced by the SAME base32 secret returned to the
+    /// client (the live enroll path encrypts `Secret::Encoded(base32).to_bytes()`
+    /// and confirm verifies those bytes) must validate. Guards the enroll→confirm
+    /// round-trip end to end (RFC 6238 dynamic-truncation compliant).
+    #[test]
+    fn enroll_base32_roundtrip_confirms() {
+        let (base32, _uri) = generate_enrollment("AXIAM", "admin@axiam.dev").unwrap();
+        let secret_bytes = Secret::Encoded(base32).to_bytes().unwrap();
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes.clone(),
+            Some("AXIAM".into()),
+            "admin@axiam.dev".into(),
+        )
+        .unwrap();
+        let code = totp.generate_current().unwrap();
+        assert!(verify_code(&secret_bytes, &code, "AXIAM", "admin@axiam.dev").unwrap());
+    }
 }

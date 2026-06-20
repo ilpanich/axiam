@@ -13,9 +13,14 @@ use serde::Deserialize;
 use surrealdb::Surreal;
 use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::DbError;
+
+/// Token lifetime applied to the SurrealDB root user at startup (SurrealQL
+/// duration literal). The default is `1h`, which expires mid-process and 401s
+/// every request until restart; `4w` comfortably outlives any normal uptime.
+const ROOT_TOKEN_DURATION: &str = "4w";
 
 /// Configuration for connecting to SurrealDB.
 #[derive(Debug, Clone, Deserialize)]
@@ -65,14 +70,24 @@ impl DbManager {
             "Connecting to SurrealDB (HTTP engine)"
         );
 
-        let db = Surreal::new::<Http>(&config.url).await?;
+        // SurrealDB mints root signin JWTs with a default `DURATION FOR TOKEN 1h`.
+        // The HTTP engine caches that JWT and, once it expires, EVERY request 401s
+        // (login → "invalid credentials"; audit/cleanup writes fail) until the
+        // process restarts. Re-`signin` on an already-authenticated handle is itself
+        // rejected with 401, so a background re-auth loop does NOT recover it.
+        //
+        // Fix: on a short-lived setup handle, extend the root user's token duration,
+        // then open the real connection whose FRESH signin mints a long-lived token.
+        // The token is therefore long-lived for the whole process lifetime and is
+        // shared by every repository clone taken from this handle.
+        Self::extend_root_token_duration(config).await;
 
+        let db = Surreal::new::<Http>(&config.url).await?;
         db.signin(Root {
             username: config.username.clone(),
             password: config.password.clone(),
         })
         .await?;
-
         db.use_ns(&config.namespace)
             .use_db(&config.database)
             .await?;
@@ -80,6 +95,44 @@ impl DbManager {
         info!("Successfully connected to SurrealDB");
 
         Ok(Self { db })
+    }
+
+    /// Best-effort: redefine the root user with a long token duration so the
+    /// connection's cached JWT does not expire mid-process. Failures are logged
+    /// and ignored (the server still starts; it just reverts to the ~1h window).
+    /// Idempotent — safe to run on every startup.
+    async fn extend_root_token_duration(config: &DbConfig) {
+        let setup = match Surreal::new::<Http>(&config.url).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "token-duration setup: connect failed (continuing)");
+                return;
+            }
+        };
+        if let Err(e) = setup
+            .signin(Root {
+                username: config.username.clone(),
+                password: config.password.clone(),
+            })
+            .await
+        {
+            warn!(error = %e, "token-duration setup: signin failed (continuing)");
+            return;
+        }
+        // SurrealQL string-escape the password (single-quoted literal).
+        let escaped_pass = config.password.replace('\\', "\\\\").replace('\'', "\\'");
+        let define_user = format!(
+            "DEFINE USER OVERWRITE {} ON ROOT PASSWORD '{}' ROLES OWNER \
+             DURATION FOR TOKEN {}, FOR SESSION NONE",
+            config.username, escaped_pass, ROOT_TOKEN_DURATION
+        );
+        match setup.query(define_user).await.and_then(|r| r.check()) {
+            Ok(_) => info!(
+                duration = ROOT_TOKEN_DURATION,
+                "Extended SurrealDB root token duration"
+            ),
+            Err(e) => warn!(error = %e, "token-duration setup: DEFINE USER failed (continuing)"),
+        }
     }
 
     /// Returns a reference to the underlying SurrealDB client.
@@ -100,11 +153,7 @@ impl DbManager {
     /// failure mode the previous WebSocket-based `session::ns()` check tried to
     /// catch no longer exists).
     pub async fn health_check(&self) -> Result<(), DbError> {
-        let result = self
-            .db
-            .query("RETURN 1")
-            .await
-            .map_err(DbError::Surreal)?;
+        let result = self.db.query("RETURN 1").await.map_err(DbError::Surreal)?;
         // Surface any statement-level error (HTTP returns 200 even on SQL error).
         result.check().map_err(DbError::Surreal)?;
         Ok(())

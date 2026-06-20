@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Shield, Trash2, Loader2, AlertCircle, Copy, Check, KeyRound, Fingerprint } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import api from "@/lib/api";
 import { authService } from "@/services/auth";
 import { useAuthStore } from "@/stores/auth";
@@ -149,7 +150,8 @@ function TotpSetupDialog({
           </p>
         </div>
 
-        {/* QR code area */}
+        {/* QR code area — backend returns an otpauth:// URI; render it as a
+            scannable QR client-side (it is not a data: image). */}
         <div className="flex flex-col items-center gap-3">
           {isDataUrl ? (
             <img
@@ -158,12 +160,16 @@ function TotpSetupDialog({
               className="h-40 w-40 rounded-lg border border-white/10 bg-white p-1"
             />
           ) : (
-            <div className="text-xs text-muted-foreground text-center p-4 bg-white/5 rounded-lg border border-white/10">
-              <p className="font-mono break-all">{setupData.totp_uri}</p>
-              <p className="mt-2">
-                Add this URI to your authenticator app, or enter the key below manually.
-              </p>
-            </div>
+            <QRCodeSVG
+              value={setupData.totp_uri}
+              size={160}
+              level="M"
+              marginSize={2}
+              bgColor="#ffffff"
+              fgColor="#0a0a0a"
+              title="TOTP QR code — scan with your authenticator app"
+              className="h-44 w-44 rounded-lg border border-white/10 bg-white p-2"
+            />
           )}
         </div>
 

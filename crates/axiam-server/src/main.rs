@@ -22,7 +22,8 @@ use axiam_db::{
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealErasureProofRepository,
     SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
-    SurrealFederationLoginStateRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
+    SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
     SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
@@ -377,6 +378,11 @@ async fn main() -> std::io::Result<()> {
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone(), webhook_enc_key);
     let settings_repo = SurrealSettingsRepository::new(db.client().clone());
+    // Notification-rule repository — required by the notification_rules handlers'
+    // `web::Data<SurrealNotificationRuleRepository>` extractor. Without this
+    // registration every /api/v1/notification-rules request 500s with
+    // "App data is not configured".
+    let notification_rule_repo = SurrealNotificationRuleRepository::new(db.client().clone());
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client().clone());
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client().clone());
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client().clone());
@@ -647,6 +653,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(pgp_service.clone()))
             .app_data(web::Data::new(webhook_repo.clone()))
             .app_data(web::Data::new(webhook_delivery.clone()))
+            .app_data(web::Data::new(notification_rule_repo.clone()))
             .app_data(web::Data::new(oauth2_client_repo.clone()))
             .app_data(web::Data::new(authorize_service.clone()))
             .app_data(web::Data::new(token_service.clone()))

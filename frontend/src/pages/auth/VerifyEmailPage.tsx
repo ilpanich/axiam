@@ -29,20 +29,30 @@ type VerifyState = "idle" | "loading" | "success" | "error" | "no-token";
 export function VerifyEmailPage() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token");
+  // Backend requires the tenant id alongside the token; the verification
+  // link must carry it (e.g. `?token=…&tenant_id=…`). Accept `tenant_id`
+  // or the shorter `tenant` alias.
+  const tenantId = searchParams.get("tenant_id") ?? searchParams.get("tenant");
   const { isAuthenticated } = useAuthStore();
 
-  const [verifyState, setVerifyState] = useState<VerifyState>(token ? "loading" : "no-token");
+  // A link missing either the token or the tenant id is incomplete and
+  // cannot be verified — both are required by the backend.
+  const hasRequiredParams = Boolean(token && tenantId);
+
+  const [verifyState, setVerifyState] = useState<VerifyState>(
+    hasRequiredParams ? "loading" : "no-token"
+  );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!token) return;
+    if (!token || !tenantId) return;
 
     let cancelled = false;
 
     async function doVerify() {
       setVerifyState("loading");
       try {
-        await authService.verifyEmail(token!);
+        await authService.verifyEmail(tenantId!, token!);
         window.history.replaceState({}, document.title, window.location.pathname);
         if (!cancelled) setVerifyState("success");
       } catch (err) {
@@ -62,7 +72,7 @@ export function VerifyEmailPage() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, tenantId]);
 
   return (
     <PublicLayout>

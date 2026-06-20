@@ -68,15 +68,30 @@ export type UpdateGroupPayload = Partial<CreateGroupPayload>;
 // ─── Users service ────────────────────────────────────────────────────────────
 
 export const userService = {
+  /**
+   * List users. The backend paginates via `offset`/`limit` (Pagination is
+   * `#[serde(default)]` offset/limit) and performs NO server-side search,
+   * so `search` is applied client-side to the returned page rather than
+   * sent as an unsupported query param.
+   */
   list: (page = 1, perPage = 20, search = ""): Promise<PaginatedUsers> => {
     const params = new URLSearchParams({
-      page: String(page),
-      per_page: String(perPage),
+      offset: String((page - 1) * perPage),
+      limit: String(perPage),
     });
-    if (search.trim()) params.set("search", search.trim());
     return api
       .get<PaginatedUsers>(`/api/v1/users?${params.toString()}`)
-      .then((r) => r.data);
+      .then((r) => {
+        const term = search.trim().toLowerCase();
+        if (!term) return r.data;
+        const items = r.data.items.filter(
+          (u) =>
+            u.username.toLowerCase().includes(term) ||
+            u.email.toLowerCase().includes(term) ||
+            (u.display_name?.toLowerCase().includes(term) ?? false)
+        );
+        return { ...r.data, items };
+      });
   },
 
   get: (userId: string): Promise<User> =>

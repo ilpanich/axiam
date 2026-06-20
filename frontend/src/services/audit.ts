@@ -15,21 +15,25 @@ export interface AuditLog {
   created_at: string;
 }
 
+/**
+ * Backend `PaginatedResult<AuditLogEntry>` shape.
+ * Source: crates/axiam-core/src/repository.rs (PaginatedResult, Pagination).
+ */
 export interface PaginatedAuditLogs {
-  data: AuditLog[];
+  items: AuditLog[];
   total: number;
-  page: number;
-  per_page: number;
+  offset: number;
+  limit: number;
 }
 
 // ─── Filters ──────────────────────────────────────────────────────────────────
 
 export interface AuditFilters {
-  page?: number;
-  per_page?: number;
+  offset?: number;
+  limit?: number;
   actor_id?: string;
   action?: string;
-  resource?: string;
+  resource_id?: string;
   outcome?: "success" | "failure" | "";
   from?: string;
   to?: string;
@@ -40,11 +44,11 @@ export interface AuditFilters {
 export const auditService = {
   list: (filters: AuditFilters = {}): Promise<PaginatedAuditLogs> => {
     const params = new URLSearchParams();
-    params.set("page", String(filters.page ?? 1));
-    params.set("per_page", String(filters.per_page ?? 20));
+    params.set("offset", String(filters.offset ?? 0));
+    params.set("limit", String(filters.limit ?? 20));
     if (filters.actor_id?.trim()) params.set("actor_id", filters.actor_id.trim());
     if (filters.action?.trim()) params.set("action", filters.action.trim());
-    if (filters.resource?.trim()) params.set("resource", filters.resource.trim());
+    if (filters.resource_id?.trim()) params.set("resource_id", filters.resource_id.trim());
     if (filters.outcome) params.set("outcome", filters.outcome);
     if (filters.from?.trim()) params.set("from", filters.from.trim());
     if (filters.to?.trim()) params.set("to", filters.to.trim());

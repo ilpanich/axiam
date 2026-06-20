@@ -153,8 +153,8 @@ export function LoginPage() {
     setIsLoading(true);
     try {
       const response = await api.post<LoginResponse>("/api/v1/auth/mfa/verify", {
-        code: totpCode,
         challenge_token: mfaChallengeToken,
+        totp_code: totpCode,
       });
 
       const data = response.data;

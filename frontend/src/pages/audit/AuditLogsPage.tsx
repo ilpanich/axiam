@@ -269,8 +269,8 @@ export function AuditLogsPage() {
     to !== "";
 
   const filters: AuditFilters = {
-    page,
-    per_page: PER_PAGE,
+    offset: (page - 1) * PER_PAGE,
+    limit: PER_PAGE,
     actor_id: actorDebounced || undefined,
     action: actionDebounced || undefined,
     outcome: outcome || undefined,
@@ -284,7 +284,7 @@ export function AuditLogsPage() {
     placeholderData: (prev) => prev,
   });
 
-  const logs = data?.data ?? [];
+  const logs = data?.items ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 

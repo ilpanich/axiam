@@ -200,7 +200,7 @@ export function DashboardPage() {
       },
       {
         queryKey: ["audit-logs"],
-        queryFn: () => auditService.list({ page: 1, per_page: 8 }),
+        queryFn: () => auditService.list({ offset: 0, limit: 8 }),
       },
     ],
   });
@@ -346,13 +346,13 @@ export function DashboardPage() {
                   </li>
                 ))}
               </ul>
-            ) : (auditQ.data?.data ?? []).length === 0 ? (
+            ) : (auditQ.data?.items ?? []).length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-6">
                 No activity recorded yet.
               </p>
             ) : (
               <ul aria-label="Recent audit events">
-                {(auditQ.data?.data ?? []).map((log) => (
+                {(auditQ.data?.items ?? []).map((log) => (
                   <ActivityRow key={log.id} log={log} />
                 ))}
               </ul>

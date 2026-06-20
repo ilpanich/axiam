@@ -2,17 +2,19 @@ import api from "@/lib/api";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
+export type AuditOutcome = "Success" | "Failure" | "Denied";
+
 export interface AuditLog {
   id: string;
+  tenant_id: string;
   actor_id: string;
-  actor_username?: string;
+  actor_type: string;
   action: string;
-  resource_type: string;
-  resource_id?: string;
-  outcome: "success" | "failure";
-  ip_address?: string;
-  details?: Record<string, unknown>;
-  created_at: string;
+  resource_id?: string | null;
+  outcome: AuditOutcome;
+  ip_address?: string | null;
+  metadata?: Record<string, unknown> | null;
+  timestamp: string;
 }
 
 /**
@@ -34,7 +36,7 @@ export interface AuditFilters {
   actor_id?: string;
   action?: string;
   resource_id?: string;
-  outcome?: "success" | "failure" | "";
+  outcome?: AuditOutcome | "";
   from?: string;
   to?: string;
 }

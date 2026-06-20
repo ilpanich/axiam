@@ -1,7 +1,12 @@
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, X } from "lucide-react";
-import { auditService, type AuditLog, type AuditFilters } from "@/services/audit";
+import {
+  auditService,
+  type AuditLog,
+  type AuditFilters,
+  type AuditOutcome,
+} from "@/services/audit";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Input } from "@/components/ui/input";
@@ -11,23 +16,21 @@ import { cn, formatDateTime } from "@/lib/utils";
 // ─── Outcome badge ────────────────────────────────────────────────────────────
 
 function OutcomeBadge({ outcome }: { outcome: AuditLog["outcome"] }) {
+  const ok = outcome === "Success";
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium border",
-        outcome === "success"
+        ok
           ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
           : "bg-red-500/15 text-red-400 border-red-500/30"
       )}
     >
       <span
-        className={cn(
-          "w-1.5 h-1.5 rounded-full",
-          outcome === "success" ? "bg-emerald-400" : "bg-red-400"
-        )}
+        className={cn("w-1.5 h-1.5 rounded-full", ok ? "bg-emerald-400" : "bg-red-400")}
         aria-hidden="true"
       />
-      {outcome === "success" ? "Success" : "Failure"}
+      {outcome}
     </span>
   );
 }
@@ -70,12 +73,12 @@ function DetailsExpander({
 interface FilterBarProps {
   actor: string;
   action: string;
-  outcome: "" | "success" | "failure";
+  outcome: "" | AuditOutcome;
   from: string;
   to: string;
   onActorChange: (v: string) => void;
   onActionChange: (v: string) => void;
-  onOutcomeChange: (v: "" | "success" | "failure") => void;
+  onOutcomeChange: (v: "" | AuditOutcome) => void;
   onFromChange: (v: string) => void;
   onToChange: (v: string) => void;
   onClear: () => void;
@@ -132,13 +135,14 @@ function FilterBar({
           id="filter-outcome"
           value={outcome}
           onChange={(e) =>
-            onOutcomeChange(e.target.value as "" | "success" | "failure")
+            onOutcomeChange(e.target.value as "" | AuditOutcome)
           }
           className="h-8 w-full text-sm rounded-md border border-input bg-background/50 px-2 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
         >
           <option value="">All</option>
-          <option value="success">Success</option>
-          <option value="failure">Failure</option>
+          <option value="Success">Success</option>
+          <option value="Failure">Failure</option>
+          <option value="Denied">Denied</option>
         </select>
       </div>
 
@@ -192,7 +196,7 @@ export function AuditLogsPage() {
   // Raw filter inputs (undbounced for actors/actions)
   const [actorInput, setActorInput] = useState("");
   const [actionInput, setActionInput] = useState("");
-  const [outcome, setOutcome] = useState<"" | "success" | "failure">("");
+  const [outcome, setOutcome] = useState<"" | AuditOutcome>("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [page, setPage] = useState(1);
@@ -231,7 +235,7 @@ export function AuditLogsPage() {
     setActionTimer(t);
   }
 
-  function handleOutcomeChange(v: "" | "success" | "failure") {
+  function handleOutcomeChange(v: "" | AuditOutcome) {
     setOutcome(v);
     setPage(1);
   }
@@ -292,11 +296,11 @@ export function AuditLogsPage() {
 
   const columns: Column<AuditLog>[] = [
     {
-      key: "created_at",
+      key: "timestamp",
       header: "Timestamp",
       render: (row) => (
         <span className="text-sm text-foreground/80 whitespace-nowrap">
-          {formatDateTime(row.created_at)}
+          {formatDateTime(row.timestamp)}
         </span>
       ),
     },
@@ -304,9 +308,12 @@ export function AuditLogsPage() {
       key: "actor",
       header: "Actor",
       render: (row) => (
-        <span className="text-sm font-medium truncate block max-w-[140px]" title={row.actor_id}>
-          {row.actor_username ?? row.actor_id}
-        </span>
+        <div className="text-sm max-w-[150px]">
+          <span className="font-medium truncate block" title={row.actor_id}>
+            {row.actor_id}
+          </span>
+          <span className="block text-[11px] text-muted-foreground">{row.actor_type}</span>
+        </div>
       ),
     },
     {
@@ -316,7 +323,7 @@ export function AuditLogsPage() {
         <span
           className={cn(
             "text-sm font-mono",
-            row.outcome === "success" ? "text-blue-400" : "text-red-400"
+            row.outcome === "Success" ? "text-blue-400" : "text-red-400"
           )}
         >
           {row.action}
@@ -326,19 +333,17 @@ export function AuditLogsPage() {
     {
       key: "resource",
       header: "Resource",
-      render: (row) => (
-        <div className="text-sm">
-          <span className="text-foreground/80">{row.resource_type}</span>
-          {row.resource_id && (
-            <span
-              className="block text-xs text-muted-foreground font-mono truncate max-w-[120px]"
-              title={row.resource_id}
-            >
-              {row.resource_id}
-            </span>
-          )}
-        </div>
-      ),
+      render: (row) =>
+        row.resource_id ? (
+          <span
+            className="block text-xs text-muted-foreground font-mono truncate max-w-[120px]"
+            title={row.resource_id}
+          >
+            {row.resource_id}
+          </span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
     },
     {
       key: "outcome",
@@ -357,7 +362,7 @@ export function AuditLogsPage() {
     {
       key: "details",
       header: "Details",
-      render: (row) => <DetailsExpander details={row.details} />,
+      render: (row) => <DetailsExpander details={row.metadata ?? undefined} />,
     },
   ];
 

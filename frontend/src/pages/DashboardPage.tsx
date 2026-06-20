@@ -114,7 +114,7 @@ function ActivityRow({ log }: { log: AuditLog }) {
   return (
     <li className="flex items-start gap-3 py-2.5 border-b border-white/5 last:border-0">
       <div className="mt-0.5 shrink-0">
-        {log.outcome === "success" ? (
+        {log.outcome === "Success" ? (
           <CheckCircle2 size={14} className="text-emerald-400" aria-hidden="true" />
         ) : (
           <XCircle size={14} className="text-red-400" aria-hidden="true" />
@@ -123,15 +123,15 @@ function ActivityRow({ log }: { log: AuditLog }) {
       <div className="flex-1 min-w-0">
         <p className="text-sm text-foreground/90 font-mono truncate">{log.action}</p>
         <p className="text-xs text-muted-foreground truncate">
-          {log.actor_username ?? log.actor_id}
-          {log.resource_type ? ` · ${log.resource_type}` : ""}
+          {log.actor_id}
+          {log.resource_id ? ` · ${log.resource_id}` : ""}
         </p>
       </div>
       <time
         className="text-xs text-muted-foreground shrink-0 whitespace-nowrap"
-        dateTime={log.created_at}
+        dateTime={log.timestamp}
       >
-        {formatRelativeTime(log.created_at)}
+        {formatRelativeTime(log.timestamp)}
       </time>
     </li>
   );

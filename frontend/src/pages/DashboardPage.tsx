@@ -211,13 +211,13 @@ export function DashboardPage() {
   const now = new Date();
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
   const expiringCerts: Certificate[] = (certsQ.data ?? []).filter((c) => {
-    if (c.status !== "active") return false;
-    const expiresAt = new Date(c.expires_at);
+    if (c.status !== "Active") return false;
+    const expiresAt = new Date(c.not_after);
     return expiresAt.getTime() - now.getTime() < thirtyDaysMs;
   });
 
   const activeCertsCount = (certsQ.data ?? []).filter(
-    (c) => c.status === "active"
+    (c) => c.status === "Active"
   ).length;
 
   const certSubLabel =
@@ -301,9 +301,9 @@ export function DashboardPage() {
                   key={cert.id}
                   className="flex items-center justify-between text-xs text-amber-200/80"
                 >
-                  <span className="font-mono truncate">{cert.common_name}</span>
+                  <span className="font-mono truncate">{cert.subject}</span>
                   <span className="ml-4 shrink-0 text-amber-400">
-                    Expires {formatDate(cert.expires_at)}
+                    Expires {formatDate(cert.not_after)}
                   </span>
                 </li>
               ))}

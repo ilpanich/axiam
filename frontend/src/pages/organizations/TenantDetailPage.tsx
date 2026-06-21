@@ -51,7 +51,7 @@ export function TenantDetailPage() {
 
       <PageHeader
         title={isLoading ? "Loading..." : (tenant?.name ?? "Tenant")}
-        description={tenant?.description}
+        description={tenant?.metadata?.description as string | undefined}
         action={
           <Button variant="ghost" size="sm" asChild>
             <Link to={`/organizations/${orgId}`}>
@@ -89,13 +89,13 @@ export function TenantDetailPage() {
                 </code>
               </dd>
             </div>
-            {tenant.description && (
+            {(tenant.metadata?.description as string | undefined) && (
               <div className="flex gap-4">
                 <dt className="w-36 shrink-0 text-sm text-muted-foreground">
                   Description
                 </dt>
                 <dd className="text-sm text-foreground">
-                  {tenant.description}
+                  {tenant.metadata?.description as string}
                 </dd>
               </div>
             )}

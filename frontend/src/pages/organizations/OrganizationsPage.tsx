@@ -142,10 +142,11 @@ export function OrganizationsPage() {
       setCreateError("Name and slug are required.");
       return;
     }
+    const description = createDescription.trim();
     createMutation.mutate({
       name: createName.trim(),
       slug: createSlug.trim(),
-      description: createDescription.trim() || undefined,
+      metadata: description ? { description } : undefined,
     });
   }
 
@@ -179,7 +180,7 @@ export function OrganizationsPage() {
     setEditOrg(org);
     setEditName(org.name);
     setEditSlug(org.slug);
-    setEditDescription(org.description ?? "");
+    setEditDescription((org.metadata?.description as string | undefined) ?? "");
     setEditError("");
   }
 
@@ -191,12 +192,13 @@ export function OrganizationsPage() {
       setEditError("Name and slug are required.");
       return;
     }
+    const description = editDescription.trim();
     editMutation.mutate({
       id: editOrg.id,
       payload: {
         name: editName.trim(),
         slug: editSlug.trim(),
-        description: editDescription.trim() || undefined,
+        metadata: { ...editOrg.metadata, description },
       },
     });
   }
@@ -240,7 +242,9 @@ export function OrganizationsPage() {
       header: "Description",
       render: (row) => (
         <span className="text-muted-foreground text-sm truncate max-w-xs block">
-          {row.description ?? <span className="opacity-40">—</span>}
+          {(row.metadata?.description as string | undefined) ?? (
+            <span className="opacity-40">—</span>
+          )}
         </span>
       ),
     },

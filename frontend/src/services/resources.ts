@@ -24,12 +24,19 @@ export function resourceTypeLabel(type: string): string {
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
+/** Free-form resource metadata. The admin UI stores `description` here. */
+export interface ResourceMetadata {
+  description?: string;
+  [key: string]: unknown;
+}
+
 export interface Resource {
   id: string;
   name: string;
   resource_type: string;
   parent_id?: string;
-  description?: string;
+  /** Backend has no `description` column — it lives under `metadata.description`. */
+  metadata?: ResourceMetadata;
   created_at: string;
 }
 
@@ -37,12 +44,46 @@ export interface CreateResourcePayload {
   name: string;
   resource_type: string;
   parent_id?: string;
+  /** UI-level field; the service routes it into `metadata.description` on the wire. */
   description?: string;
 }
 
-export type UpdateResourcePayload = Partial<CreateResourcePayload>;
+export interface UpdateResourcePayload {
+  name?: string;
+  resource_type?: string;
+  /**
+   * `undefined` = leave parent unchanged; `null` = clear parent (make root).
+   * Backend `parent_id` is `Option<Option<Uuid>>`, so JSON `null` → `Some(None)`.
+   */
+  parent_id?: string | null;
+  description?: string;
+}
+
+/** Wire shape sent to the backend (description folded into metadata). */
+interface ResourceWritePayload {
+  name?: string;
+  resource_type?: string;
+  parent_id?: string | null;
+  metadata?: ResourceMetadata;
+}
 
 // ─── Resources service ────────────────────────────────────────────────────────
+
+/**
+ * Fold the UI-level `description` into a `metadata` object for the wire.
+ * Returns `undefined` when there is nothing to send (so PATCH-style updates
+ * can omit the field entirely).
+ */
+function toWritePayload(
+  payload: CreateResourcePayload | UpdateResourcePayload
+): ResourceWritePayload {
+  const { description, ...rest } = payload as UpdateResourcePayload;
+  const wire: ResourceWritePayload = { ...rest };
+  if (description !== undefined) {
+    wire.metadata = { description };
+  }
+  return wire;
+}
 
 export const resourceService = {
   list: (): Promise<Resource[]> =>
@@ -57,7 +98,7 @@ export const resourceService = {
 
   create: (payload: CreateResourcePayload): Promise<Resource> =>
     api
-      .post<Resource>("/api/v1/resources", payload)
+      .post<Resource>("/api/v1/resources", toWritePayload(payload))
       .then((r) => r.data),
 
   update: (
@@ -65,7 +106,7 @@ export const resourceService = {
     payload: UpdateResourcePayload
   ): Promise<Resource> =>
     api
-      .put<Resource>(`/api/v1/resources/${resourceId}`, payload)
+      .put<Resource>(`/api/v1/resources/${resourceId}`, toWritePayload(payload))
       .then((r) => r.data),
 
   remove: (resourceId: string): Promise<void> =>

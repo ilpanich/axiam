@@ -10,7 +10,6 @@ export interface OAuth2Client {
   redirect_uris: string[];
   grant_types: string[];
   scopes: string[];
-  is_public: boolean;
   created_at: string;
 }
 
@@ -21,7 +20,6 @@ export interface CreateOAuth2ClientPayload {
   redirect_uris: string[];
   grant_types: string[];
   scopes?: string[];
-  is_public?: boolean;
 }
 
 export interface UpdateOAuth2ClientPayload {
@@ -29,13 +27,12 @@ export interface UpdateOAuth2ClientPayload {
   redirect_uris?: string[];
   grant_types?: string[];
   scopes?: string[];
-  is_public?: boolean;
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────
 
-export interface CreateOAuth2ClientResponse {
-  client: OAuth2Client;
+// Client creation returns the client fields plus the one-time plaintext secret.
+export interface CreateOAuth2ClientResponse extends OAuth2Client {
   client_secret: string;
 }
 

@@ -1,6 +1,6 @@
 import api from "@/lib/api";
 import { unwrapList } from "@/services/_pagination";
-import type { Permission } from "@/services/permissions";
+import type { PermissionGrant } from "@/services/permissions";
 import type { User } from "@/services/users";
 import type { Group } from "@/services/users";
 
@@ -16,7 +16,8 @@ export interface Role {
 
 export interface CreateRolePayload {
   name: string;
-  description?: string;
+  /** Required by the backend; send "" (not undefined) when blank. */
+  description: string;
   is_global?: boolean;
 }
 
@@ -44,9 +45,11 @@ export const roleService = {
 
   // ─── Permission management ────────────────────────────────────────────────
 
-  listPermissions: (roleId: string): Promise<Permission[]> =>
+  listPermissions: (roleId: string): Promise<PermissionGrant[]> =>
     api
-      .get<Permission[] | { items: Permission[] }>(`/api/v1/roles/${roleId}/permissions`)
+      .get<PermissionGrant[] | { items: PermissionGrant[] }>(
+        `/api/v1/roles/${roleId}/permissions`
+      )
       .then((r) => unwrapList(r.data)),
 
   grantPermission: (roleId: string, permissionId: string): Promise<void> =>

@@ -17,7 +17,7 @@ import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { cn, formatDate } from "@/lib/utils";
+import { formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -94,48 +94,14 @@ function CheckboxGroup({
   );
 }
 
-// ─── Toggle field ─────────────────────────────────────────────────────────────
-
-interface ToggleFieldProps {
-  id: string;
-  label: string;
-  description?: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}
-
-function ToggleField({ id, label, description, checked, onChange }: ToggleFieldProps) {
-  return (
-    <div className="flex items-start gap-3">
-      <input
-        type="checkbox"
-        id={id}
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="w-4 h-4 mt-0.5 accent-cyan-400 cursor-pointer shrink-0"
-      />
-      <div>
-        <Label htmlFor={id} className="cursor-pointer">
-          {label}
-        </Label>
-        {description && (
-          <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ─── Shared form fields ───────────────────────────────────────────────────────
 
 interface ClientFormFieldsProps {
   name: string;
-  isPublic: boolean;
   grantTypes: string[];
   redirectUris: string;
   scopes: string[];
   onNameChange: (v: string) => void;
-  onIsPublicChange: (v: boolean) => void;
   onGrantTypesChange: (v: string[]) => void;
   onRedirectUrisChange: (v: string) => void;
   onScopesChange: (v: string[]) => void;
@@ -145,12 +111,10 @@ interface ClientFormFieldsProps {
 
 function ClientFormFields({
   name,
-  isPublic,
   grantTypes,
   redirectUris,
   scopes,
   onNameChange,
-  onIsPublicChange,
   onGrantTypesChange,
   onRedirectUrisChange,
   onScopesChange,
@@ -170,14 +134,6 @@ function ClientFormFields({
           autoComplete="off"
         />
       </div>
-
-      <ToggleField
-        id={`${idPrefix}-public`}
-        label="Public Client"
-        description="Public clients (e.g. SPAs, mobile apps) do not have a client secret."
-        checked={isPublic}
-        onChange={onIsPublicChange}
-      />
 
       <CheckboxGroup
         id={`${idPrefix}-grant-types`}
@@ -218,7 +174,6 @@ function ClientFormFields({
 
 function useClientFormState() {
   const [name, setName] = useState("");
-  const [isPublic, setIsPublic] = useState(false);
   const [grantTypes, setGrantTypes] = useState<string[]>(["authorization_code"]);
   const [redirectUris, setRedirectUris] = useState("");
   const [scopes, setScopes] = useState<string[]>(["openid", "profile"]);
@@ -226,7 +181,6 @@ function useClientFormState() {
 
   function reset() {
     setName("");
-    setIsPublic(false);
     setGrantTypes(["authorization_code"]);
     setRedirectUris("");
     setScopes(["openid", "profile"]);
@@ -235,7 +189,6 @@ function useClientFormState() {
 
   function load(client: OAuth2Client) {
     setName(client.name);
-    setIsPublic(client.is_public);
     setGrantTypes(client.grant_types);
     setRedirectUris(client.redirect_uris.join("\n"));
     setScopes(client.scopes);
@@ -245,8 +198,6 @@ function useClientFormState() {
   return {
     name,
     setName,
-    isPublic,
-    setIsPublic,
     grantTypes,
     setGrantTypes,
     redirectUris,
@@ -291,11 +242,9 @@ export function OAuth2ClientsPage() {
       void queryClient.invalidateQueries({ queryKey: ["oauth2-clients"] });
       setCreateOpen(false);
       createForm.reset();
-      if (!resp.client.is_public && resp.client_secret) {
-        setRevealedClientId(resp.client.client_id);
-        setRevealedSecret(resp.client_secret);
-        setSecretModalOpen(true);
-      }
+      setRevealedClientId(resp.client_id);
+      setRevealedSecret(resp.client_secret);
+      setSecretModalOpen(true);
     },
     onError: (err: unknown) => {
       createForm.setError(
@@ -320,7 +269,6 @@ export function OAuth2ClientsPage() {
       redirect_uris: parseUris(createForm.redirectUris),
       grant_types: createForm.grantTypes,
       scopes: createForm.scopes.length > 0 ? createForm.scopes : undefined,
-      is_public: createForm.isPublic,
     };
     createMutation.mutate(payload);
   }
@@ -371,7 +319,6 @@ export function OAuth2ClientsPage() {
         redirect_uris: parseUris(editForm.redirectUris),
         grant_types: editForm.grantTypes,
         scopes: editForm.scopes,
-        is_public: editForm.isPublic,
       },
     });
   }
@@ -418,22 +365,6 @@ export function OAuth2ClientsPage() {
             <GrantTypeBadge key={gt} type={gt} />
           ))}
         </div>
-      ),
-    },
-    {
-      key: "is_public",
-      header: "Type",
-      render: (row) => (
-        <span
-          className={cn(
-            "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border",
-            row.is_public
-              ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
-              : "bg-purple-500/15 text-purple-400 border-purple-500/30"
-          )}
-        >
-          {row.is_public ? "Public" : "Confidential"}
-        </span>
       ),
     },
     {
@@ -519,12 +450,10 @@ export function OAuth2ClientsPage() {
       >
         <ClientFormFields
           name={createForm.name}
-          isPublic={createForm.isPublic}
           grantTypes={createForm.grantTypes}
           redirectUris={createForm.redirectUris}
           scopes={createForm.scopes}
           onNameChange={createForm.setName}
-          onIsPublicChange={createForm.setIsPublic}
           onGrantTypesChange={createForm.setGrantTypes}
           onRedirectUrisChange={createForm.setRedirectUris}
           onScopesChange={createForm.setScopes}
@@ -544,12 +473,10 @@ export function OAuth2ClientsPage() {
       >
         <ClientFormFields
           name={editForm.name}
-          isPublic={editForm.isPublic}
           grantTypes={editForm.grantTypes}
           redirectUris={editForm.redirectUris}
           scopes={editForm.scopes}
           onNameChange={editForm.setName}
-          onIsPublicChange={editForm.setIsPublic}
           onGrantTypesChange={editForm.setGrantTypes}
           onRedirectUrisChange={editForm.setRedirectUris}
           onScopesChange={editForm.setScopes}

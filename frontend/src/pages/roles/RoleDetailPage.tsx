@@ -8,6 +8,7 @@ import {
 import {
   permissionService,
   type Permission,
+  type PermissionGrant,
 } from "@/services/permissions";
 import { groupService, type Group, type User } from "@/services/users";
 import { useToast } from "@/hooks/useToast";
@@ -123,9 +124,10 @@ function GrantPermissionDialog({
     enabled: open,
   });
 
-  const filtered = allPermissions.filter((p) =>
-    p.name.toLowerCase().includes(search.toLowerCase()) ||
-    p.action.toLowerCase().includes(search.toLowerCase())
+  const filtered = allPermissions.filter(
+    (p) =>
+      p.action.toLowerCase().includes(search.toLowerCase()) ||
+      (p.description ?? "").toLowerCase().includes(search.toLowerCase())
   );
 
   async function handleGrant(permission: Permission) {
@@ -218,17 +220,14 @@ function GrantPermissionDialog({
                       className="flex items-center justify-between px-3 py-2.5 hover:bg-white/5 border-b border-white/5 last:border-0"
                     >
                       <div>
-                        <p className="text-sm font-medium text-foreground/90">
-                          {perm.name}
-                        </p>
-                        <div className="flex items-center gap-2 mt-0.5">
+                        <div className="flex items-center gap-2">
                           <ActionBadge action={perm.action} />
-                          {perm.resource_id && (
-                            <span className="text-xs text-muted-foreground">
-                              {perm.resource_id}
-                            </span>
-                          )}
                         </div>
+                        {perm.description && (
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {perm.description}
+                          </p>
+                        )}
                       </div>
                       {alreadyGranted ? (
                         <span className="text-xs text-muted-foreground">
@@ -447,7 +446,14 @@ export function RoleDetailPage() {
       enabled: !!roleId,
     });
 
-  const grantedPermissionIds = new Set(grantedPermissions.map((p) => p.id));
+  const grantedPermissionIds = new Set(
+    grantedPermissions.map((g) => g.permission.id)
+  );
+
+  // Flatten grants to the underlying permissions for the table.
+  const grantedPermissionList: Permission[] = grantedPermissions.map(
+    (g) => g.permission
+  );
 
   // ─── Edit state ────────────────────────────────────────────────────────────
   const [editOpen, setEditOpen] = useState(false);
@@ -568,25 +574,16 @@ export function RoleDetailPage() {
   // ─── Permissions table columns ─────────────────────────────────────────────
   const permissionColumns: Column<Permission>[] = [
     {
-      key: "name",
-      header: "Permission",
-      render: (row) => (
-        <span className="font-medium text-foreground/90">{row.name}</span>
-      ),
-    },
-    {
       key: "action",
-      header: "Action",
+      header: "Permission",
       render: (row) => <ActionBadge action={row.action} />,
     },
     {
-      key: "resource_id",
-      header: "Resource",
+      key: "description",
+      header: "Description",
       render: (row) => (
         <span className="text-muted-foreground text-sm">
-          {row.resource_id ?? (
-            <span className="text-cyan-400/70 text-xs italic">Global</span>
-          )}
+          {row.description ?? <span className="opacity-40">—</span>}
         </span>
       ),
     },
@@ -605,7 +602,7 @@ export function RoleDetailPage() {
       width: "w-16",
       render: (row) => (
         <button
-          aria-label={`Revoke ${row.name}`}
+          aria-label={`Revoke ${row.action}`}
           onClick={() => setRevokePermission(row)}
           className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
           title="Revoke permission"
@@ -676,7 +673,7 @@ export function RoleDetailPage() {
       >
         <DataTable
           columns={permissionColumns}
-          data={grantedPermissions}
+          data={grantedPermissionList}
           isLoading={permissionsLoading}
           emptyMessage="No permissions granted to this role."
         />
@@ -803,7 +800,7 @@ export function RoleDetailPage() {
           revokePermission && revokeMutation.mutate(revokePermission.id)
         }
         title="Revoke Permission"
-        description={`Remove permission "${revokePermission?.name}" from this role?`}
+        description={`Remove permission "${revokePermission?.action}" from this role?`}
         isLoading={revokeMutation.isPending}
       />
 

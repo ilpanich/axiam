@@ -287,7 +287,7 @@ export function ResourcesPage() {
     setEditType(isStandard ? resource.resource_type : "custom");
     setEditCustomType(isStandard ? "" : resource.resource_type);
     setEditParentId(resource.parent_id ?? "");
-    setEditDescription(resource.description ?? "");
+    setEditDescription(resource.metadata?.description ?? "");
     setEditError("");
   }
 
@@ -308,8 +308,9 @@ export function ResourcesPage() {
       payload: {
         name: editName.trim(),
         resource_type: finalType,
-        parent_id: editParentId || undefined,
-        description: editDescription.trim() || undefined,
+        // null (not undefined) clears the parent → backend Some(None) → root.
+        parent_id: editParentId || null,
+        description: editDescription.trim(),
       },
     });
   }
@@ -382,7 +383,7 @@ export function ResourcesPage() {
       header: "Description",
       render: (row) => (
         <span className="text-muted-foreground text-sm">
-          {row.description ?? <span className="opacity-40">—</span>}
+          {row.metadata?.description ?? <span className="opacity-40">—</span>}
         </span>
       ),
     },

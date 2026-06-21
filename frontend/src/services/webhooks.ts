@@ -6,9 +6,8 @@ import { unwrapList } from "@/services/_pagination";
 export interface Webhook {
   id: string;
   url: string;
-  event_types: string[];
-  is_active: boolean;
-  description?: string;
+  events: string[];
+  enabled: boolean;
   created_at: string;
 }
 
@@ -16,25 +15,19 @@ export interface Webhook {
 
 export interface CreateWebhookPayload {
   url: string;
-  event_types: string[];
-  secret?: string;
-  is_active?: boolean;
-  description?: string;
+  events: string[];
+  secret: string;
 }
 
 export interface UpdateWebhookPayload {
   url?: string;
-  event_types?: string[];
-  is_active?: boolean;
-  description?: string;
+  events?: string[];
+  enabled?: boolean;
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────
 
-export interface CreateWebhookResponse {
-  webhook: Webhook;
-  secret?: string;
-}
+export type CreateWebhookResponse = Webhook;
 
 // ─── Available event types ────────────────────────────────────────────────────
 

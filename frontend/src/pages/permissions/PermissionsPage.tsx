@@ -6,7 +6,6 @@ import {
   type CreatePermissionPayload,
   type UpdatePermissionPayload,
 } from "@/services/permissions";
-import { resourceService } from "@/services/resources";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -53,53 +52,28 @@ const STANDARD_ACTIONS = ["read", "write", "delete", "admin"] as const;
 // ─── Permission form fields ───────────────────────────────────────────────────
 
 interface PermissionFormFieldsProps {
-  name: string;
   action: string;
   customAction: string;
-  resourceId: string;
   description: string;
-  onNameChange: (v: string) => void;
   onActionChange: (v: string) => void;
   onCustomActionChange: (v: string) => void;
-  onResourceIdChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
   error?: string;
   idPrefix: string;
 }
 
 function PermissionFormFields({
-  name,
   action,
   customAction,
-  resourceId,
   description,
-  onNameChange,
   onActionChange,
   onCustomActionChange,
-  onResourceIdChange,
   onDescriptionChange,
   error,
   idPrefix,
 }: PermissionFormFieldsProps) {
-  const { data: resources = [] } = useQuery({
-    queryKey: ["resources"],
-    queryFn: () => resourceService.list(),
-  });
-
   return (
     <>
-      <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-name`}>Name *</Label>
-        <Input
-          id={`${idPrefix}-name`}
-          value={name}
-          onChange={(e) => onNameChange(e.target.value)}
-          placeholder="e.g. users:read"
-          required
-          autoComplete="off"
-        />
-      </div>
-
       <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-action`}>Action *</Label>
         <select
@@ -133,28 +107,6 @@ function PermissionFormFields({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-resource`}>Resource</Label>
-        <select
-          id={`${idPrefix}-resource`}
-          value={resourceId}
-          onChange={(e) => onResourceIdChange(e.target.value)}
-          className={cn(
-            "flex h-9 w-full rounded-md px-3 py-1 text-sm",
-            "bg-white/5 border border-primary/20 text-foreground",
-            "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
-            "transition-colors duration-200"
-          )}
-        >
-          <option value="">Global (no resource)</option>
-          {resources.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.name} ({r.resource_type})
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-description`}>Description</Label>
         <Textarea
           id={`${idPrefix}-description`}
@@ -181,23 +133,10 @@ export function PermissionsPage() {
     queryFn: () => permissionService.list(),
   });
 
-  const { data: resources = [] } = useQuery({
-    queryKey: ["resources"],
-    queryFn: () => resourceService.list(),
-  });
-
-  // Helper: resolve resource name from id
-  function resourceName(id?: string): string {
-    if (!id) return "";
-    return resources.find((r) => r.id === id)?.name ?? id;
-  }
-
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
-  const [createName, setCreateName] = useState("");
   const [createAction, setCreateAction] = useState<string>("read");
   const [createCustomAction, setCreateCustomAction] = useState("");
-  const [createResourceId, setCreateResourceId] = useState("");
   const [createDescription, setCreateDescription] = useState("");
   const [createError, setCreateError] = useState("");
 
@@ -217,10 +156,8 @@ export function PermissionsPage() {
   });
 
   function resetCreateForm() {
-    setCreateName("");
     setCreateAction("read");
     setCreateCustomAction("");
-    setCreateResourceId("");
     setCreateDescription("");
     setCreateError("");
   }
@@ -232,29 +169,21 @@ export function PermissionsPage() {
   function handleCreateSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setCreateError("");
-    if (!createName.trim()) {
-      setCreateError("Name is required.");
-      return;
-    }
     const finalAction = resolvedAction(createAction, createCustomAction);
     if (!finalAction) {
       setCreateError("Action is required.");
       return;
     }
     createMutation.mutate({
-      name: createName.trim(),
       action: finalAction,
-      resource_id: createResourceId || undefined,
-      description: createDescription.trim() || undefined,
+      description: createDescription.trim(),
     });
   }
 
   // ─── Edit state ────────────────────────────────────────────────────────────
   const [editPermission, setEditPermission] = useState<Permission | null>(null);
-  const [editName, setEditName] = useState("");
   const [editAction, setEditAction] = useState<string>("read");
   const [editCustomAction, setEditCustomAction] = useState("");
-  const [editResourceId, setEditResourceId] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [editError, setEditError] = useState("");
 
@@ -279,13 +208,11 @@ export function PermissionsPage() {
 
   function openEdit(perm: Permission) {
     setEditPermission(perm);
-    setEditName(perm.name);
     const isStandard = (STANDARD_ACTIONS as readonly string[]).includes(
       perm.action
     );
     setEditAction(isStandard ? perm.action : "custom");
     setEditCustomAction(isStandard ? "" : perm.action);
-    setEditResourceId(perm.resource_id ?? "");
     setEditDescription(perm.description ?? "");
     setEditError("");
   }
@@ -293,8 +220,7 @@ export function PermissionsPage() {
   function handleEditSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setEditError("");
-    if (!editPermission || !editName.trim()) {
-      setEditError("Name is required.");
+    if (!editPermission) {
       return;
     }
     const finalAction = resolvedAction(editAction, editCustomAction);
@@ -305,10 +231,8 @@ export function PermissionsPage() {
     editMutation.mutate({
       id: editPermission.id,
       payload: {
-        name: editName.trim(),
         action: finalAction,
-        resource_id: editResourceId || undefined,
-        description: editDescription.trim() || undefined,
+        description: editDescription.trim(),
       },
     });
   }
@@ -332,29 +256,9 @@ export function PermissionsPage() {
   // ─── Table columns ─────────────────────────────────────────────────────────
   const columns: Column<Permission>[] = [
     {
-      key: "name",
-      header: "Name",
-      render: (row) => (
-        <span className="font-medium text-foreground/90">{row.name}</span>
-      ),
-    },
-    {
       key: "action",
       header: "Action",
       render: (row) => <ActionBadge action={row.action} />,
-    },
-    {
-      key: "resource_id",
-      header: "Resource",
-      render: (row) => (
-        <span className="text-muted-foreground text-sm">
-          {row.resource_id ? (
-            resourceName(row.resource_id)
-          ) : (
-            <span className="text-cyan-400/70 text-xs italic">Global</span>
-          )}
-        </span>
-      ),
     },
     {
       key: "description",
@@ -381,14 +285,14 @@ export function PermissionsPage() {
       render: (row) => (
         <div className="flex items-center gap-1">
           <button
-            aria-label={`Edit ${row.name}`}
+            aria-label={`Edit ${row.action}`}
             onClick={() => openEdit(row)}
             className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
           >
             <Pencil size={14} />
           </button>
           <button
-            aria-label={`Delete ${row.name}`}
+            aria-label={`Delete ${row.action}`}
             onClick={() => setDeletePermission(row)}
             className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
           >
@@ -437,15 +341,11 @@ export function PermissionsPage() {
         submitLabel="Create"
       >
         <PermissionFormFields
-          name={createName}
           action={createAction}
           customAction={createCustomAction}
-          resourceId={createResourceId}
           description={createDescription}
-          onNameChange={setCreateName}
           onActionChange={setCreateAction}
           onCustomActionChange={setCreateCustomAction}
-          onResourceIdChange={setCreateResourceId}
           onDescriptionChange={setCreateDescription}
           error={createError}
           idPrefix="create-perm"
@@ -462,15 +362,11 @@ export function PermissionsPage() {
         submitLabel="Save Changes"
       >
         <PermissionFormFields
-          name={editName}
           action={editAction}
           customAction={editCustomAction}
-          resourceId={editResourceId}
           description={editDescription}
-          onNameChange={setEditName}
           onActionChange={setEditAction}
           onCustomActionChange={setEditCustomAction}
-          onResourceIdChange={setEditResourceId}
           onDescriptionChange={setEditDescription}
           error={editError}
           idPrefix="edit-perm"
@@ -485,7 +381,7 @@ export function PermissionsPage() {
           deletePermission && deleteMutation.mutate(deletePermission.id)
         }
         title="Delete Permission"
-        description={`Are you sure you want to delete "${deletePermission?.name}"? This action cannot be undone.`}
+        description={`Are you sure you want to delete "${deletePermission?.action}"? This action cannot be undone.`}
         isLoading={deleteMutation.isPending}
       />
     </div>

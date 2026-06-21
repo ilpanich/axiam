@@ -5,18 +5,20 @@ import { unwrapList } from "@/services/_pagination";
 
 export interface Permission {
   id: string;
-  name: string;
   action: string;
-  resource_id?: string;
   description?: string;
   created_at: string;
 }
 
+/** A permission together with its scope constraints, as returned by role grants. */
+export interface PermissionGrant {
+  permission: Permission;
+  scope_ids: string[];
+}
+
 export interface CreatePermissionPayload {
-  name: string;
   action: string;
-  resource_id?: string;
-  description?: string;
+  description: string;
 }
 
 export type UpdatePermissionPayload = Partial<CreatePermissionPayload>;

@@ -209,7 +209,7 @@ export function UserDetailPage() {
     if (!user) return;
     setEditEmail(user.email);
     setEditDisplayName(user.display_name ?? "");
-    setEditIsActive(user.is_active);
+    setEditIsActive(user.status === "Active");
     setEditError("");
     setEditOpen(true);
   }
@@ -226,7 +226,7 @@ export function UserDetailPage() {
       payload: {
         email: editEmail.trim(),
         display_name: editDisplayName.trim() || undefined,
-        is_active: editIsActive,
+        status: editIsActive ? "Active" : "Inactive",
       },
     });
   }
@@ -358,7 +358,7 @@ export function UserDetailPage() {
           {user.display_name ?? <span className="opacity-40">—</span>}
         </InfoRow>
         <InfoRow label="Status">
-          <StatusBadge status={user.is_active ? "active" : "inactive"} />
+          <StatusBadge status={user.status === "Active" ? "active" : "inactive"} />
         </InfoRow>
         <InfoRow label="Email Verified">
           {user.email_verified ? (

@@ -176,7 +176,7 @@ export function GroupDetailPage() {
       id: groupId!,
       payload: {
         name: editName.trim(),
-        description: editDescription.trim() || undefined,
+        description: editDescription.trim(),
       },
     });
   }
@@ -240,10 +240,10 @@ export function GroupDetailPage() {
       ),
     },
     {
-      key: "is_active",
+      key: "status",
       header: "Status",
       render: (row) => (
-        <StatusBadge status={row.is_active ? "active" : "inactive"} />
+        <StatusBadge status={row.status === "Active" ? "active" : "inactive"} />
       ),
     },
     {

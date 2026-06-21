@@ -83,12 +83,10 @@ interface CreateUserFieldsProps {
   email: string;
   password: string;
   displayName: string;
-  isActive: boolean;
   onUsernameChange: (v: string) => void;
   onEmailChange: (v: string) => void;
   onPasswordChange: (v: string) => void;
   onDisplayNameChange: (v: string) => void;
-  onIsActiveChange: (v: boolean) => void;
   error?: string;
 }
 
@@ -97,12 +95,10 @@ function CreateUserFields({
   email,
   password,
   displayName,
-  isActive,
   onUsernameChange,
   onEmailChange,
   onPasswordChange,
   onDisplayNameChange,
-  onIsActiveChange,
   error,
 }: CreateUserFieldsProps) {
   return (
@@ -157,12 +153,6 @@ function CreateUserFields({
           autoComplete="off"
         />
       </div>
-      <ToggleField
-        id="user-is-active"
-        label="Active"
-        checked={isActive}
-        onChange={onIsActiveChange}
-      />
       {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
@@ -259,7 +249,6 @@ export function UsersPage() {
   const [createEmail, setCreateEmail] = useState("");
   const [createPassword, setCreatePassword] = useState("");
   const [createDisplayName, setCreateDisplayName] = useState("");
-  const [createIsActive, setCreateIsActive] = useState(true);
   const [createError, setCreateError] = useState("");
 
   const createMutation = useMutation({
@@ -281,7 +270,6 @@ export function UsersPage() {
     setCreateEmail("");
     setCreatePassword("");
     setCreateDisplayName("");
-    setCreateIsActive(true);
     setCreateError("");
   }
 
@@ -301,7 +289,6 @@ export function UsersPage() {
       email: createEmail.trim(),
       password: createPassword,
       display_name: createDisplayName.trim() || undefined,
-      is_active: createIsActive,
     });
   }
 
@@ -330,7 +317,7 @@ export function UsersPage() {
     setEditUser(user);
     setEditEmail(user.email);
     setEditDisplayName(user.display_name ?? "");
-    setEditIsActive(user.is_active);
+    setEditIsActive(user.status === "Active");
     setEditError("");
   }
 
@@ -346,7 +333,7 @@ export function UsersPage() {
       payload: {
         email: editEmail.trim(),
         display_name: editDisplayName.trim() || undefined,
-        is_active: editIsActive,
+        status: editIsActive ? "Active" : "Inactive",
       },
     });
   }
@@ -407,11 +394,11 @@ export function UsersPage() {
       ),
     },
     {
-      key: "is_active",
+      key: "status",
       header: "Status",
       render: (row) => (
         <div className="flex items-center gap-1.5">
-          <StatusBadge status={row.is_active ? "active" : "inactive"} />
+          <StatusBadge status={row.status === "Active" ? "active" : "inactive"} />
           <LockedBadge locked={row.is_locked} />
         </div>
       ),
@@ -581,12 +568,10 @@ export function UsersPage() {
           email={createEmail}
           password={createPassword}
           displayName={createDisplayName}
-          isActive={createIsActive}
           onUsernameChange={setCreateUsername}
           onEmailChange={setCreateEmail}
           onPasswordChange={setCreatePassword}
           onDisplayNameChange={setCreateDisplayName}
-          onIsActiveChange={setCreateIsActive}
           error={createError}
         />
       </FormDialog>

@@ -109,7 +109,8 @@ export function GroupsPage() {
     }
     createMutation.mutate({
       name: createName.trim(),
-      description: createDescription.trim() || undefined,
+      // Backend requires a String; send a (possibly empty) trimmed value.
+      description: createDescription.trim(),
     });
   }
 

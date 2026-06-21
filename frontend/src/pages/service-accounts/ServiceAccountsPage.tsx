@@ -17,7 +17,6 @@ import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { formatDate } from "@/lib/utils";
 
 // ─── Toggle field ─────────────────────────────────────────────────────────────
@@ -50,23 +49,11 @@ function ToggleField({ id, label, checked, onChange }: ToggleFieldProps) {
 
 interface CreateFieldsProps {
   name: string;
-  description: string;
-  roles: string;
   onNameChange: (v: string) => void;
-  onDescriptionChange: (v: string) => void;
-  onRolesChange: (v: string) => void;
   error?: string;
 }
 
-function CreateFields({
-  name,
-  description,
-  roles,
-  onNameChange,
-  onDescriptionChange,
-  onRolesChange,
-  error,
-}: CreateFieldsProps) {
+function CreateFields({ name, onNameChange, error }: CreateFieldsProps) {
   return (
     <>
       <div className="space-y-2">
@@ -80,27 +67,6 @@ function CreateFields({
           autoComplete="off"
         />
       </div>
-      <div className="space-y-2">
-        <Label htmlFor="sa-description">Description</Label>
-        <Textarea
-          id="sa-description"
-          value={description}
-          onChange={(e) => onDescriptionChange(e.target.value)}
-          placeholder="What this service account is used for..."
-          rows={3}
-        />
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor="sa-roles">Roles</Label>
-        <Textarea
-          id="sa-roles"
-          value={roles}
-          onChange={(e) => onRolesChange(e.target.value)}
-          placeholder={"admin\nreader\nwriter"}
-          rows={3}
-        />
-        <p className="text-xs text-muted-foreground">One role per line.</p>
-      </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
@@ -110,20 +76,16 @@ function CreateFields({
 
 interface EditFieldsProps {
   name: string;
-  description: string;
   isActive: boolean;
   onNameChange: (v: string) => void;
-  onDescriptionChange: (v: string) => void;
   onIsActiveChange: (v: boolean) => void;
   error?: string;
 }
 
 function EditFields({
   name,
-  description,
   isActive,
   onNameChange,
-  onDescriptionChange,
   onIsActiveChange,
   error,
 }: EditFieldsProps) {
@@ -140,16 +102,6 @@ function EditFields({
           autoComplete="off"
         />
       </div>
-      <div className="space-y-2">
-        <Label htmlFor="edit-sa-description">Description</Label>
-        <Textarea
-          id="edit-sa-description"
-          value={description}
-          onChange={(e) => onDescriptionChange(e.target.value)}
-          placeholder="What this service account is used for..."
-          rows={3}
-        />
-      </div>
       <ToggleField
         id="edit-sa-active"
         label="Active"
@@ -159,15 +111,6 @@ function EditFields({
       {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function parseRoles(raw: string): string[] {
-  return raw
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
 }
 
 // ─── Main page ────────────────────────────────────────────────────────────────
@@ -194,8 +137,6 @@ export function ServiceAccountsPage() {
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
-  const [createDesc, setCreateDesc] = useState("");
-  const [createRoles, setCreateRoles] = useState("");
   const [createError, setCreateError] = useState("");
 
   // ─── Secret reveal ─────────────────────────────────────────────────────────
@@ -214,7 +155,7 @@ export function ServiceAccountsPage() {
       });
       setCreateOpen(false);
       resetCreateForm();
-      setRevealedClientId(resp.service_account.client_id);
+      setRevealedClientId(resp.client_id);
       setRevealedSecret(resp.client_secret);
       setSecretModalTitle("Service Account Created");
       setSecretModalDesc(
@@ -233,8 +174,6 @@ export function ServiceAccountsPage() {
 
   function resetCreateForm() {
     setCreateName("");
-    setCreateDesc("");
-    setCreateRoles("");
     setCreateError("");
   }
 
@@ -247,18 +186,12 @@ export function ServiceAccountsPage() {
     }
     createMutation.mutate({
       name: createName.trim(),
-      description: createDesc.trim() || undefined,
-      roles:
-        parseRoles(createRoles).length > 0
-          ? parseRoles(createRoles)
-          : undefined,
     });
   }
 
   // ─── Edit state ────────────────────────────────────────────────────────────
   const [editAccount, setEditAccount] = useState<ServiceAccount | null>(null);
   const [editName, setEditName] = useState("");
-  const [editDesc, setEditDesc] = useState("");
   const [editIsActive, setEditIsActive] = useState(true);
   const [editError, setEditError] = useState("");
 
@@ -288,8 +221,7 @@ export function ServiceAccountsPage() {
   function openEdit(sa: ServiceAccount) {
     setEditAccount(sa);
     setEditName(sa.name);
-    setEditDesc(sa.description ?? "");
-    setEditIsActive(sa.status === "active");
+    setEditIsActive(sa.status === "Active");
     setEditError("");
   }
 
@@ -304,8 +236,7 @@ export function ServiceAccountsPage() {
       id: editAccount.id,
       payload: {
         name: editName.trim(),
-        description: editDesc.trim() || undefined,
-        status: editIsActive ? "active" : "disabled",
+        status: editIsActive ? "Active" : "Inactive",
       },
     });
   }
@@ -336,8 +267,10 @@ export function ServiceAccountsPage() {
       void queryClient.invalidateQueries({
         queryKey: ["service-accounts"],
       });
+      // Rotation returns only the new secret; the client_id is unchanged,
+      // so show the rotated account's existing client_id.
+      setRevealedClientId(rotateAccount?.client_id ?? "");
       setRotateAccount(null);
-      setRevealedClientId(resp.client_id);
       setRevealedSecret(resp.client_secret);
       setSecretModalTitle("Secret Rotated");
       setSecretModalDesc(
@@ -372,25 +305,7 @@ export function ServiceAccountsPage() {
       key: "status",
       header: "Status",
       render: (row) => (
-        <StatusBadge status={row.status === "active" ? "active" : "inactive"} />
-      ),
-    },
-    {
-      key: "roles",
-      header: "Roles",
-      render: (row) => (
-        <span className="text-sm text-muted-foreground">
-          {row.roles.length} {row.roles.length === 1 ? "role" : "roles"}
-        </span>
-      ),
-    },
-    {
-      key: "last_used_at",
-      header: "Last Used",
-      render: (row) => (
-        <span className="text-sm text-muted-foreground">
-          {row.last_used_at ? formatDate(row.last_used_at) : "Never"}
-        </span>
+        <StatusBadge status={row.status === "Active" ? "active" : "inactive"} />
       ),
     },
     {
@@ -484,11 +399,7 @@ export function ServiceAccountsPage() {
       >
         <CreateFields
           name={createName}
-          description={createDesc}
-          roles={createRoles}
           onNameChange={setCreateName}
-          onDescriptionChange={setCreateDesc}
-          onRolesChange={setCreateRoles}
           error={createError}
         />
       </FormDialog>
@@ -504,10 +415,8 @@ export function ServiceAccountsPage() {
       >
         <EditFields
           name={editName}
-          description={editDesc}
           isActive={editIsActive}
           onNameChange={setEditName}
-          onDescriptionChange={setEditDesc}
           onIsActiveChange={setEditIsActive}
           error={editError}
         />

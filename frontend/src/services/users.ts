@@ -8,15 +8,34 @@ export interface User {
   username: string;
   email: string;
   display_name?: string;
-  is_active: boolean;
   mfa_enabled: boolean;
   email_verified: boolean;
   created_at: string;
   updated_at: string;
+  /** Backend `UserStatus` enum, serialized PascalCase ("Active", "Inactive", …). */
   status: string;
+  /** Raw backend metadata; `display_name` is routed through this column. */
+  metadata?: Record<string, unknown>;
   is_locked: boolean;
   locked_until: string | null;
   failed_login_attempts: number;
+}
+
+/** Backend `UserResponse` shape (no `display_name` column; it lives in `metadata`). */
+interface UserResponseDto extends Omit<User, "display_name"> {
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Lift `display_name` out of the backend `metadata` blob into a top-level field
+ * so the UI can keep reading `user.display_name` unchanged.
+ */
+function mapUserFromApi(u: UserResponseDto): User {
+  const displayName = u.metadata?.display_name;
+  return {
+    ...u,
+    display_name: typeof displayName === "string" ? displayName : undefined,
+  };
 }
 
 export interface MfaMethod {
@@ -39,14 +58,16 @@ export interface CreateUserPayload {
   username: string;
   email: string;
   password: string;
+  /** UI-only convenience; routed into `metadata.display_name` by the service. */
   display_name?: string;
-  is_active?: boolean;
 }
 
 export interface UpdateUserPayload {
   email?: string;
+  /** UI-only convenience; routed into `metadata.display_name` by the service. */
   display_name?: string;
-  is_active?: boolean;
+  /** Backend `UserStatus`, e.g. "Active" / "Inactive". */
+  status?: string;
 }
 
 // ─── Group models ─────────────────────────────────────────────────────────────
@@ -60,7 +81,8 @@ export interface Group {
 
 export interface CreateGroupPayload {
   name: string;
-  description?: string;
+  /** Backend `CreateGroupRequest.description` is a required String. */
+  description: string;
 }
 
 export type UpdateGroupPayload = Partial<CreateGroupPayload>;
@@ -80,28 +102,52 @@ export const userService = {
       limit: String(perPage),
     });
     return api
-      .get<PaginatedUsers>(`/api/v1/users?${params.toString()}`)
+      .get<{ items: UserResponseDto[]; total: number; offset: number; limit: number }>(
+        `/api/v1/users?${params.toString()}`
+      )
       .then((r) => {
+        const mapped: PaginatedUsers = {
+          ...r.data,
+          items: r.data.items.map(mapUserFromApi),
+        };
         const term = search.trim().toLowerCase();
-        if (!term) return r.data;
-        const items = r.data.items.filter(
+        if (!term) return mapped;
+        const items = mapped.items.filter(
           (u) =>
             u.username.toLowerCase().includes(term) ||
             u.email.toLowerCase().includes(term) ||
             (u.display_name?.toLowerCase().includes(term) ?? false)
         );
-        return { ...r.data, items };
+        return { ...mapped, items };
       });
   },
 
   get: (userId: string): Promise<User> =>
-    api.get<User>(`/api/v1/users/${userId}`).then((r) => r.data),
+    api
+      .get<UserResponseDto>(`/api/v1/users/${userId}`)
+      .then((r) => mapUserFromApi(r.data)),
 
-  create: (payload: CreateUserPayload): Promise<User> =>
-    api.post<User>("/api/v1/users", payload).then((r) => r.data),
+  create: (payload: CreateUserPayload): Promise<User> => {
+    const { display_name, ...rest } = payload;
+    const body = {
+      ...rest,
+      ...(display_name ? { metadata: { display_name } } : {}),
+    };
+    return api
+      .post<UserResponseDto>("/api/v1/users", body)
+      .then((r) => mapUserFromApi(r.data));
+  },
 
-  update: (userId: string, payload: UpdateUserPayload): Promise<User> =>
-    api.put<User>(`/api/v1/users/${userId}`, payload).then((r) => r.data),
+  update: (userId: string, payload: UpdateUserPayload): Promise<User> => {
+    const { display_name, ...rest } = payload;
+    const body = {
+      ...rest,
+      ...(display_name !== undefined ? { metadata: { display_name } } : {}),
+    };
+    return api
+      .put<UserResponseDto>(`/api/v1/users/${userId}`, body)
+      .then((r) => mapUserFromApi(r.data));
+  },
 
   remove: (userId: string): Promise<void> =>
     api.delete(`/api/v1/users/${userId}`).then(() => undefined),
@@ -120,7 +166,9 @@ export const userService = {
     api.post(`/api/v1/users/${userId}/reset-mfa`).then(() => undefined),
 
   unlock: (userId: string): Promise<User> =>
-    api.post<User>(`/api/v1/users/${userId}/unlock`).then((r) => r.data),
+    api
+      .post<UserResponseDto>(`/api/v1/users/${userId}/unlock`)
+      .then((r) => mapUserFromApi(r.data)),
 };
 
 // ─── Groups service ───────────────────────────────────────────────────────────
@@ -135,7 +183,13 @@ export const groupService = {
     api.get<Group>(`/api/v1/groups/${groupId}`).then((r) => r.data),
 
   create: (payload: CreateGroupPayload): Promise<Group> =>
-    api.post<Group>("/api/v1/groups", payload).then((r) => r.data),
+    api
+      .post<Group>("/api/v1/groups", {
+        ...payload,
+        // Backend requires a String; never send undefined/null.
+        description: payload.description ?? "",
+      })
+      .then((r) => r.data),
 
   update: (groupId: string, payload: UpdateGroupPayload): Promise<Group> =>
     api
@@ -147,8 +201,10 @@ export const groupService = {
 
   listMembers: (groupId: string): Promise<User[]> =>
     api
-      .get<User[] | { items: User[] }>(`/api/v1/groups/${groupId}/members`)
-      .then((r) => unwrapList(r.data)),
+      .get<UserResponseDto[] | { items: UserResponseDto[] }>(
+        `/api/v1/groups/${groupId}/members`
+      )
+      .then((r) => unwrapList(r.data).map(mapUserFromApi)),
 
   addMember: (groupId: string, userId: string): Promise<void> =>
     api

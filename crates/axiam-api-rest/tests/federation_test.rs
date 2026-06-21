@@ -17,8 +17,9 @@ use axiam_core::repository::{
     FederationConfigRepository, OrganizationRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealFederationConfigRepository, SurrealFederationLinkRepository,
-    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealAssertionReplayRepository, SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealTenantRepository,
+    SurrealUserRepository,
 };
 use axiam_federation::secrets::decrypt_client_secret_or_legacy;
 use std::sync::Arc;
@@ -142,6 +143,9 @@ macro_rules! test_app {
                     $db.clone(),
                 )))
                 .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
+                .app_data(web::Data::new(SurrealAssertionReplayRepository::new(
+                    $db.clone(),
+                )))
                 .app_data(web::Data::new(
                     reqwest::Client::builder()
                         .redirect(reqwest::redirect::Policy::none())

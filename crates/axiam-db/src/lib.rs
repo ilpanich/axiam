@@ -34,7 +34,10 @@ pub use repository::{
     verify_password,
 };
 pub use schema::{run_migrations, schema_v1};
-pub use seeder::{SeedRolesResult, SeederStateRow, seed_default_roles, seed_permissions};
+pub use seeder::{
+    SeedRolesResult, SeederStateRow, reconcile_default_role_grants, seed_default_roles,
+    seed_permissions,
+};
 /// Re-export SurrealDB connection types for use in repository type aliases.
 pub use surrealdb::Connection;
 /// Production SurrealDB client type — the stateless HTTP engine (see `connection.rs`

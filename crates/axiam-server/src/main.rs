@@ -272,6 +272,19 @@ async fn main() -> std::io::Result<()> {
                 )
                 .await
                 .expect("Failed to seed permissions for tenant");
+                // Back-fill default-role grants for any permissions added to the
+                // registry since this tenant was bootstrapped (bootstrap, which
+                // grants permissions to roles, self-disables after first admin).
+                let backfilled = axiam_db::reconcile_default_role_grants(db.client(), tenant.id)
+                    .await
+                    .expect("Failed to reconcile default role grants for tenant");
+                if backfilled > 0 {
+                    tracing::info!(
+                        tenant = %tenant.id,
+                        grants = backfilled,
+                        "Back-filled {backfilled} missing default-role permission grants"
+                    );
+                }
                 seeded_count += 1;
             }
         }

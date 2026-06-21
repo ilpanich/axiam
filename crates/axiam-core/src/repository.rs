@@ -178,12 +178,26 @@ pub trait UserRepository: Send + Sync {
     ///
     /// Avoids read-modify-write TOCTOU by delegating the increment to the DB
     /// layer via a single `UPDATE ... SET field += 1` statement.
+    ///
+    /// When the new attempt count reaches `lockout_threshold`, the account is
+    /// locked until `now + d`, where `d` grows exponentially with each lockout
+    /// beyond the threshold (brute-force protection, design-document §Security):
+    ///
+    /// ```text
+    /// d = min(base_lockout_secs * backoff_multiplier ^ (new_count - threshold),
+    ///         max_lockout_secs)
+    /// ```
+    ///
+    /// so the first lockout lasts `base_lockout_secs`, the next
+    /// `base * multiplier`, and so on, capped at `max_lockout_secs`.
     fn increment_failed_logins(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
         lockout_threshold: u32,
-        lockout_duration_secs: i64,
+        base_lockout_secs: i64,
+        backoff_multiplier: f64,
+        max_lockout_secs: i64,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 

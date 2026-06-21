@@ -1036,6 +1036,8 @@ mod tests {
             _: Uuid,
             _: u32,
             _: i64,
+            _: f64,
+            _: i64,
         ) -> axiam_core::error::AxiamResult<()> {
             unimplemented!()
         }

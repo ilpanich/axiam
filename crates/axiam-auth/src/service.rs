@@ -1038,12 +1038,16 @@ impl<
         user: &axiam_core::models::user::User,
     ) -> AxiamResult<()> {
         // SEC-032: atomic increment — single SurrealQL UPDATE avoids TOCTOU race.
+        // Lockout duration escalates exponentially per repeated lockout, capped
+        // at max_lockout_duration_secs (brute-force protection).
         self.user_repo
             .increment_failed_logins(
                 tenant_id,
                 user.id,
                 self.config.max_failed_login_attempts,
                 self.config.lockout_duration_secs as i64,
+                self.config.lockout_backoff_multiplier,
+                self.config.max_lockout_duration_secs as i64,
             )
             .await
     }

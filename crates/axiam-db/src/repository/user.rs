@@ -559,18 +559,36 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         tenant_id: Uuid,
         user_id: Uuid,
         lockout_threshold: u32,
-        lockout_duration_secs: i64,
+        base_lockout_secs: i64,
+        backoff_multiplier: f64,
+        max_lockout_secs: i64,
     ) -> AxiamResult<()> {
         let user_id_str = user_id.to_string();
         let tenant_id_str = tenant_id.to_string();
         self.db
             .query(
+                // SurrealDB evaluates each RHS in this SET against the
+                // pre-update document, so `failed_login_attempts` inside the IF
+                // is the OLD count (before `+= 1`). Compare `+ 1` so the lock
+                // fires on the Nth failure (when the new count reaches the
+                // threshold), not the N+1th — otherwise an account gets one
+                // extra guess past the configured limit.
+                //
+                // Lockout duration grows exponentially with each lockout past
+                // the threshold and is capped at $max_secs (brute-force
+                // protection): d = min(base * mult^(new_count - threshold), max).
+                // `duration::from_secs` needs an int, so the float result of the
+                // math is cast with `<int>`. (SurrealDB v3 renamed the duration
+                // constructor; `duration::secs` is now an accessor, not a ctor.)
                 "UPDATE type::record('user', $id) \
                  SET \
                    failed_login_attempts += 1, \
                    last_failed_login_at = time::now(), \
-                   locked_until = IF (failed_login_attempts >= $threshold) \
-                     THEN time::now() + duration::secs($lockout_secs) \
+                   locked_until = IF (failed_login_attempts + 1 >= $threshold) \
+                     THEN time::now() + duration::from_secs(<int> math::min([ \
+                       $base_secs * math::pow($mult, failed_login_attempts + 1 - $threshold), \
+                       $max_secs \
+                     ])) \
                      ELSE locked_until \
                    END, \
                    updated_at = time::now() \
@@ -579,7 +597,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .bind(("id", user_id_str))
             .bind(("tenant_id", tenant_id_str))
             .bind(("threshold", lockout_threshold))
-            .bind(("lockout_secs", lockout_duration_secs))
+            .bind(("base_secs", base_lockout_secs))
+            .bind(("mult", backoff_multiplier))
+            .bind(("max_secs", max_lockout_secs))
             .await
             .map_err(DbError::from)?
             .check()

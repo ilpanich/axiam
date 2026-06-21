@@ -7,38 +7,152 @@ export interface Organization {
   id: string;
   name: string;
   slug: string;
-  description?: string;
+  metadata?: Record<string, unknown>;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface Tenant {
   id: string;
   name: string;
   slug: string;
-  description?: string;
-  org_id: string;
+  metadata?: Record<string, unknown>;
+  organization_id: string;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface CaCertificate {
   id: string;
-  common_name: string;
-  key_type: "RSA4096" | "Ed25519";
-  status: "active" | "revoked" | "inactive";
-  expires_at: string;
-  created_at: string;
+  organization_id: string;
+  subject: string;
+  fingerprint: string;
+  public_cert_pem: string;
+  key_algorithm: "Rsa4096" | "Ed25519";
+  status: "Active" | "Revoked" | "Expired";
+  not_before: string;
+  not_after: string;
 }
 
+// ─── Security settings ─────────────────────────────────────────────────────────
+// GET /organizations/{id}/settings returns the nested `SecuritySettings`.
+// PUT /organizations/{id}/settings requires the flat `SetOrgSettings` where
+// EVERY field is required and all durations are in SECONDS.
+// Source of truth: crates/axiam-core/src/models/settings.rs.
+
+export interface PasswordPolicy {
+  min_length: number;
+  require_uppercase: boolean;
+  require_lowercase: boolean;
+  require_digits: boolean;
+  require_symbols: boolean;
+  password_history_count: number;
+  hibp_check_enabled: boolean;
+}
+
+export interface MfaPolicy {
+  mfa_enforced: boolean;
+  mfa_challenge_lifetime_secs: number;
+}
+
+export interface LockoutPolicy {
+  max_failed_login_attempts: number;
+  lockout_duration_secs: number;
+  lockout_backoff_multiplier: number;
+  max_lockout_duration_secs: number;
+}
+
+export interface TokenPolicy {
+  access_token_lifetime_secs: number;
+  refresh_token_lifetime_secs: number;
+}
+
+export interface EmailVerificationPolicy {
+  email_verification_required: boolean;
+  email_verification_grace_period_hours: number;
+}
+
+export interface CertificatePolicy {
+  default_cert_validity_days: number;
+  max_cert_validity_days: number;
+}
+
+export interface NotificationPolicy {
+  admin_notifications_enabled: boolean;
+}
+
+/** Nested, fully-resolved org security settings (READ shape). */
 export interface SecuritySettings {
-  password_min_length?: number;
-  password_require_uppercase?: boolean;
-  password_require_lowercase?: boolean;
-  password_require_digit?: boolean;
-  password_require_symbol?: boolean;
-  password_history_count?: number;
-  mfa_enforced?: boolean;
-  session_timeout_minutes?: number;
-  certificate_validity_days?: number;
+  id: string;
+  scope: "Org" | "Tenant";
+  scope_id: string;
+  password: PasswordPolicy;
+  mfa: MfaPolicy;
+  lockout: LockoutPolicy;
+  token: TokenPolicy;
+  email: EmailVerificationPolicy;
+  certificate: CertificatePolicy;
+  notification: NotificationPolicy;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Flat org settings input (WRITE shape) — ALL fields required, SECONDS. */
+export interface SetOrgSettings {
+  // Password
+  min_length: number;
+  require_uppercase: boolean;
+  require_lowercase: boolean;
+  require_digits: boolean;
+  require_symbols: boolean;
+  password_history_count: number;
+  hibp_check_enabled: boolean;
+  // MFA
+  mfa_enforced: boolean;
+  mfa_challenge_lifetime_secs: number;
+  // Lockout
+  max_failed_login_attempts: number;
+  lockout_duration_secs: number;
+  lockout_backoff_multiplier: number;
+  max_lockout_duration_secs: number;
+  // Token
+  access_token_lifetime_secs: number;
+  refresh_token_lifetime_secs: number;
+  // Email
+  email_verification_required: boolean;
+  email_verification_grace_period_hours: number;
+  // Certificate
+  default_cert_validity_days: number;
+  max_cert_validity_days: number;
+  // Notification
+  admin_notifications_enabled: boolean;
+}
+
+/** Flatten a nested SecuritySettings into the flat SetOrgSettings input. */
+export function flattenOrgSettings(s: SecuritySettings): SetOrgSettings {
+  return {
+    min_length: s.password.min_length,
+    require_uppercase: s.password.require_uppercase,
+    require_lowercase: s.password.require_lowercase,
+    require_digits: s.password.require_digits,
+    require_symbols: s.password.require_symbols,
+    password_history_count: s.password.password_history_count,
+    hibp_check_enabled: s.password.hibp_check_enabled,
+    mfa_enforced: s.mfa.mfa_enforced,
+    mfa_challenge_lifetime_secs: s.mfa.mfa_challenge_lifetime_secs,
+    max_failed_login_attempts: s.lockout.max_failed_login_attempts,
+    lockout_duration_secs: s.lockout.lockout_duration_secs,
+    lockout_backoff_multiplier: s.lockout.lockout_backoff_multiplier,
+    max_lockout_duration_secs: s.lockout.max_lockout_duration_secs,
+    access_token_lifetime_secs: s.token.access_token_lifetime_secs,
+    refresh_token_lifetime_secs: s.token.refresh_token_lifetime_secs,
+    email_verification_required: s.email.email_verification_required,
+    email_verification_grace_period_hours:
+      s.email.email_verification_grace_period_hours,
+    default_cert_validity_days: s.certificate.default_cert_validity_days,
+    max_cert_validity_days: s.certificate.max_cert_validity_days,
+    admin_notifications_enabled: s.notification.admin_notifications_enabled,
+  };
 }
 
 // ─── Request payloads ─────────────────────────────────────────────────────────
@@ -46,7 +160,7 @@ export interface SecuritySettings {
 export interface CreateOrganizationPayload {
   name: string;
   slug: string;
-  description?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export type UpdateOrganizationPayload = Partial<CreateOrganizationPayload>;
@@ -54,15 +168,21 @@ export type UpdateOrganizationPayload = Partial<CreateOrganizationPayload>;
 export interface CreateTenantPayload {
   name: string;
   slug: string;
-  description?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export type UpdateTenantPayload = Partial<CreateTenantPayload>;
 
 export interface GenerateCaCertPayload {
-  common_name: string;
-  key_type: "RSA4096" | "Ed25519";
+  subject: string;
+  key_algorithm: "Rsa4096" | "Ed25519";
   validity_days: number;
+}
+
+/// Generation response flattens the CA certificate and adds the one-time
+/// PEM-encoded private key (never retrievable again).
+export interface GeneratedCaCertificate extends CaCertificate {
+  private_key_pem: string;
 }
 
 // ─── Organizations service ────────────────────────────────────────────────────
@@ -142,9 +262,9 @@ export const caCertService = {
   generate: (
     orgId: string,
     payload: GenerateCaCertPayload
-  ): Promise<CaCertificate> =>
+  ): Promise<GeneratedCaCertificate> =>
     api
-      .post<CaCertificate>(
+      .post<GeneratedCaCertificate>(
         `/api/v1/organizations/${orgId}/ca-certificates`,
         payload
       )
@@ -166,7 +286,7 @@ export const orgSettingsService = {
 
   update: (
     orgId: string,
-    payload: SecuritySettings
+    payload: SetOrgSettings
   ): Promise<SecuritySettings> =>
     api
       .put<SecuritySettings>(

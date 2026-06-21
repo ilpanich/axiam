@@ -1,48 +1,80 @@
 import api from "@/lib/api";
 import { unwrapList } from "@/services/_pagination";
 
+// ─── Backend enums (PascalCase — serde default, no rename) ──────────────────────
+
+export type PgpKeyAlgorithm = "Rsa4096" | "Ed25519";
+export type PgpKeyPurpose = "AuditSigning" | "Export";
+export type PgpKeyStatus = "Active" | "Revoked";
+
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
+/**
+ * PGP key as serialized by the backend
+ * (`axiam_core::models::pgp_key::PgpKey`). `encrypted_private_key` is
+ * `skip_serializing` server-side and never reaches the client.
+ */
 export interface PgpKey {
   id: string;
-  user_id: string;
-  key_type: string;
+  tenant_id: string;
+  name: string;
+  purpose: PgpKeyPurpose;
+  public_key_armored: string;
   fingerprint: string;
-  description?: string;
-  status: "active" | "revoked";
-  public_key_armor: string;
+  algorithm: PgpKeyAlgorithm;
+  status: PgpKeyStatus;
   created_at: string;
 }
 
 // ─── Request payloads ─────────────────────────────────────────────────────────
 
+/**
+ * Matches `CreatePgpKeyRequest`
+ * (crates/axiam-api-rest/src/handlers/pgp_keys.rs). `tenant_id` is taken
+ * from the authenticated session server-side and must NOT be sent.
+ */
 export interface GeneratePgpKeyPayload {
-  user_id: string;
-  key_type: "Ed25519Legacy" | "RSA4096";
-  description?: string;
+  name: string;
+  email: string;
+  purpose: PgpKeyPurpose;
+  algorithm: PgpKeyAlgorithm;
 }
 
+/** Matches `EncryptRequest` — plaintext is base64-encoded. */
 export interface EncryptPayload {
-  data: string;
+  data_base64: string;
 }
 
+/** Matches `SignAuditBatchRequest`. */
 export interface SignAuditBatchPayload {
-  audit_log_ids: string[];
+  entry_ids: string[];
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────
 
-export interface GeneratePgpKeyResponse {
-  pgp_key: PgpKey;
-  private_key_armor: string;
+/**
+ * Matches `GeneratedPgpKey` (flattened key + optional armored private key).
+ * `private_key_armored` is only present for `Export`-purpose keys; it is
+ * omitted entirely for `AuditSigning` keys.
+ */
+export interface GeneratePgpKeyResponse extends PgpKey {
+  private_key_armored?: string;
 }
 
+/** Matches `EncryptedExport`. */
 export interface EncryptResponse {
-  encrypted: string;
+  recipient_key_id: string;
+  ciphertext_armored: string;
 }
 
+/** Matches `SignedAuditBatch`. */
 export interface SignAuditBatchResponse {
-  signature: string;
+  batch_id: string;
+  tenant_id: string;
+  signing_key_id: string;
+  entry_ids: string[];
+  signature_armored: string;
+  signed_at: string;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────

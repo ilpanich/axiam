@@ -3,8 +3,12 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   certificateService,
   type Certificate,
+  type CertificateStatus,
+  type CertificateType,
+  type KeyAlgorithm,
   type GenerateCertificatePayload,
 } from "@/services/certificates";
+import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -16,67 +20,135 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ShieldPlus } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
-import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 
-function isExpiringSoon(expiresAt: string): boolean {
-  const diff = new Date(expiresAt).getTime() - Date.now();
+/**
+ * Map the backend's PascalCase `CertificateStatus` onto the lowercase
+ * variants accepted by the shared `StatusBadge`. `Expired` has no badge
+ * variant of its own, so it renders with the neutral `inactive` style.
+ */
+function badgeStatus(status: CertificateStatus): "active" | "revoked" | "inactive" {
+  switch (status) {
+    case "Active":
+      return "active";
+    case "Revoked":
+      return "revoked";
+    case "Expired":
+      return "inactive";
+  }
+}
+
+function isExpiringSoon(notAfter: string): boolean {
+  const diff = new Date(notAfter).getTime() - Date.now();
   return diff > 0 && diff < 30 * 24 * 60 * 60 * 1000;
 }
 
 // ─── Generate form fields ─────────────────────────────────────────────────────
 
+interface CaOption {
+  id: string;
+  subject: string;
+}
+
 interface GenerateFieldsProps {
-  commonName: string;
-  keyType: "RSA4096" | "Ed25519";
+  subject: string;
+  certType: CertificateType;
+  keyAlgorithm: KeyAlgorithm;
   validityDays: number;
-  sanDns: string;
-  sanIp: string;
-  onCommonNameChange: (v: string) => void;
-  onKeyTypeChange: (v: "RSA4096" | "Ed25519") => void;
+  issuerCaId: string;
+  caOptions: CaOption[];
+  caLoading: boolean;
+  onSubjectChange: (v: string) => void;
+  onCertTypeChange: (v: CertificateType) => void;
+  onKeyAlgorithmChange: (v: KeyAlgorithm) => void;
   onValidityDaysChange: (v: number) => void;
-  onSanDnsChange: (v: string) => void;
-  onSanIpChange: (v: string) => void;
+  onIssuerCaIdChange: (v: string) => void;
   error?: string;
 }
 
 function GenerateFields({
-  commonName,
-  keyType,
+  subject,
+  certType,
+  keyAlgorithm,
   validityDays,
-  sanDns,
-  sanIp,
-  onCommonNameChange,
-  onKeyTypeChange,
+  issuerCaId,
+  caOptions,
+  caLoading,
+  onSubjectChange,
+  onCertTypeChange,
+  onKeyAlgorithmChange,
   onValidityDaysChange,
-  onSanDnsChange,
-  onSanIpChange,
+  onIssuerCaIdChange,
   error,
 }: GenerateFieldsProps) {
+  const noCas = !caLoading && caOptions.length === 0;
+
   return (
     <>
       <div className="space-y-2">
-        <Label htmlFor="cert-common-name">Common Name *</Label>
+        <Label htmlFor="cert-issuer-ca">Issuing CA *</Label>
+        <select
+          id="cert-issuer-ca"
+          value={issuerCaId}
+          onChange={(e) => onIssuerCaIdChange(e.target.value)}
+          disabled={caLoading || noCas}
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
+        >
+          {caLoading && <option value="">Loading CAs…</option>}
+          {noCas && <option value="">No active CA available</option>}
+          {!caLoading &&
+            caOptions.map((ca) => (
+              <option key={ca.id} value={ca.id}>
+                {ca.subject}
+              </option>
+            ))}
+        </select>
+        {noCas && (
+          <p className="text-sm text-amber-400">
+            Create an organization CA certificate first — certificates must be
+            signed by an active CA.
+          </p>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="cert-subject">Subject *</Label>
         <Input
-          id="cert-common-name"
-          value={commonName}
-          onChange={(e) => onCommonNameChange(e.target.value)}
-          placeholder="api.example.com"
+          id="cert-subject"
+          value={subject}
+          onChange={(e) => onSubjectChange(e.target.value)}
+          placeholder="CN=device-001"
           required
           autoComplete="off"
         />
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="cert-key-type">Key Type</Label>
+        <Label htmlFor="cert-type">Certificate Type</Label>
         <select
-          id="cert-key-type"
-          value={keyType}
-          onChange={(e) => onKeyTypeChange(e.target.value as "RSA4096" | "Ed25519")}
+          id="cert-type"
+          value={certType}
+          onChange={(e) => onCertTypeChange(e.target.value as CertificateType)}
           className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
         >
-          <option value="RSA4096">RSA-4096</option>
+          <option value="User">User</option>
+          <option value="Service">Service</option>
+          <option value="Device">IoT Device</option>
+        </select>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="cert-key-algorithm">Key Algorithm</Label>
+        <select
+          id="cert-key-algorithm"
+          value={keyAlgorithm}
+          onChange={(e) =>
+            onKeyAlgorithmChange(e.target.value as KeyAlgorithm)
+          }
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+        >
+          <option value="Rsa4096">RSA-4096</option>
           <option value="Ed25519">Ed25519</option>
         </select>
       </div>
@@ -93,30 +165,6 @@ function GenerateFields({
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="cert-san-dns">SAN DNS Names (one per line)</Label>
-        <Textarea
-          id="cert-san-dns"
-          value={sanDns}
-          onChange={(e) => onSanDnsChange(e.target.value)}
-          placeholder={"api.example.com\nwww.example.com"}
-          rows={3}
-          className="resize-y"
-        />
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="cert-san-ip">SAN IP Addresses (one per line)</Label>
-        <Textarea
-          id="cert-san-ip"
-          value={sanIp}
-          onChange={(e) => onSanIpChange(e.target.value)}
-          placeholder={"192.168.1.1\n10.0.0.1"}
-          rows={2}
-          className="resize-y"
-        />
-      </div>
-
       {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
@@ -127,19 +175,30 @@ function GenerateFields({
 export function CertificatesPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const orgSlug = useAuthStore((s) => s.orgSlug);
 
   const { data: certificates = [], isLoading } = useQuery({
     queryKey: ["certificates"],
     queryFn: () => certificateService.list(),
   });
 
+  // Active CA certificates available to sign new certs (hard prerequisite).
+  const { data: caCertificates = [], isLoading: caLoading } = useQuery({
+    queryKey: ["ca-certificates", orgSlug],
+    queryFn: () => certificateService.listSigningCas(orgSlug ?? undefined),
+  });
+  const caOptions: CaOption[] = caCertificates.map((ca) => ({
+    id: ca.id,
+    subject: ca.subject,
+  }));
+
   // ─── Generate state ────────────────────────────────────────────────────────
   const [generateOpen, setGenerateOpen] = useState(false);
-  const [commonName, setCommonName] = useState("");
-  const [keyType, setKeyType] = useState<"RSA4096" | "Ed25519">("RSA4096");
+  const [subject, setSubject] = useState("");
+  const [certType, setCertType] = useState<CertificateType>("User");
+  const [keyAlgorithm, setKeyAlgorithm] = useState<KeyAlgorithm>("Rsa4096");
   const [validityDays, setValidityDays] = useState(365);
-  const [sanDns, setSanDns] = useState("");
-  const [sanIp, setSanIp] = useState("");
+  const [issuerCaId, setIssuerCaId] = useState("");
   const [generateError, setGenerateError] = useState("");
 
   // ─── Secret reveal state ───────────────────────────────────────────────────
@@ -164,36 +223,39 @@ export function CertificatesPage() {
   });
 
   function resetGenerateForm() {
-    setCommonName("");
-    setKeyType("RSA4096");
+    setSubject("");
+    setCertType("User");
+    setKeyAlgorithm("Rsa4096");
     setValidityDays(365);
-    setSanDns("");
-    setSanIp("");
+    setIssuerCaId("");
     setGenerateError("");
+  }
+
+  function openGenerate() {
+    resetGenerateForm();
+    // Default to the first active CA, if any.
+    setIssuerCaId(caOptions[0]?.id ?? "");
+    setGenerateOpen(true);
   }
 
   function handleGenerateSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setGenerateError("");
-    if (!commonName.trim()) {
-      setGenerateError("Common name is required.");
+    if (!issuerCaId) {
+      setGenerateError("An active CA certificate is required.");
+      return;
+    }
+    if (!subject.trim()) {
+      setGenerateError("Subject is required.");
       return;
     }
     const payload: GenerateCertificatePayload = {
-      common_name: commonName.trim(),
-      key_type: keyType,
+      issuer_ca_id: issuerCaId,
+      subject: subject.trim(),
+      cert_type: certType,
+      key_algorithm: keyAlgorithm,
       validity_days: validityDays,
     };
-    const dnsLines = sanDns
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const ipLines = sanIp
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (dnsLines.length > 0) payload.san_dns = dnsLines;
-    if (ipLines.length > 0) payload.san_ip = ipLines;
     generateMutation.mutate(payload);
   }
 
@@ -214,53 +276,57 @@ export function CertificatesPage() {
   // ─── Table columns ─────────────────────────────────────────────────────────
   const columns: Column<Certificate>[] = [
     {
-      key: "common_name",
-      header: "Common Name",
+      key: "subject",
+      header: "Subject",
       render: (row) => (
-        <span className="font-medium text-foreground/90">{row.common_name}</span>
+        <span className="font-medium text-foreground/90">{row.subject}</span>
       ),
     },
     {
-      key: "key_type",
-      header: "Key Type",
+      key: "cert_type",
+      header: "Type",
+      render: (row) => (
+        <span className="text-muted-foreground text-sm">{row.cert_type}</span>
+      ),
+    },
+    {
+      key: "key_algorithm",
+      header: "Key Algorithm",
       render: (row) => (
         <code className="text-xs bg-white/5 px-1.5 py-0.5 rounded text-muted-foreground">
-          {row.key_type}
+          {row.key_algorithm}
         </code>
       ),
     },
     {
       key: "status",
       header: "Status",
-      render: (row) => <StatusBadge status={row.status} />,
+      render: (row) => <StatusBadge status={badgeStatus(row.status)} />,
     },
     {
-      key: "expires_at",
+      key: "not_after",
       header: "Expires At",
       render: (row) => (
         <span
           className={cn(
             "text-sm",
-            row.status === "active" && isExpiringSoon(row.expires_at)
+            row.status === "Active" && isExpiringSoon(row.not_after)
               ? "text-amber-400 font-medium"
               : "text-muted-foreground"
           )}
         >
-          {formatDate(row.expires_at)}
+          {formatDate(row.not_after)}
         </span>
       ),
     },
     {
-      key: "serial_number",
-      header: "Serial Number",
+      key: "fingerprint",
+      header: "Fingerprint",
       render: (row) => (
-        <code
-          className="text-xs text-muted-foreground"
-          title={row.serial_number}
-        >
-          {row.serial_number.length > 17
-            ? `${row.serial_number.slice(0, 17)}…`
-            : row.serial_number}
+        <code className="text-xs text-muted-foreground" title={row.fingerprint}>
+          {row.fingerprint.length > 17
+            ? `${row.fingerprint.slice(0, 17)}…`
+            : row.fingerprint}
         </code>
       ),
     },
@@ -279,12 +345,12 @@ export function CertificatesPage() {
       width: "w-24",
       render: (row) => (
         <button
-          aria-label={`Revoke certificate for ${row.common_name}`}
-          disabled={row.status === "revoked"}
+          aria-label={`Revoke certificate for ${row.subject}`}
+          disabled={row.status !== "Active"}
           onClick={() => setRevokeTarget(row)}
           className={cn(
             "px-2.5 py-1 rounded text-xs font-medium border transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40",
-            row.status === "revoked"
+            row.status !== "Active"
               ? "border-white/5 text-muted-foreground/40 cursor-not-allowed"
               : "border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
           )}
@@ -301,12 +367,7 @@ export function CertificatesPage() {
         title="Certificates"
         description="Manage X.509 certificates for users, services, and IoT devices."
         action={
-          <Button
-            onClick={() => {
-              resetGenerateForm();
-              setGenerateOpen(true);
-            }}
-          >
+          <Button onClick={openGenerate}>
             <ShieldPlus size={16} />
             Generate Certificate
           </Button>
@@ -333,16 +394,18 @@ export function CertificatesPage() {
         submitLabel="Generate"
       >
         <GenerateFields
-          commonName={commonName}
-          keyType={keyType}
+          subject={subject}
+          certType={certType}
+          keyAlgorithm={keyAlgorithm}
           validityDays={validityDays}
-          sanDns={sanDns}
-          sanIp={sanIp}
-          onCommonNameChange={setCommonName}
-          onKeyTypeChange={setKeyType}
+          issuerCaId={issuerCaId}
+          caOptions={caOptions}
+          caLoading={caLoading}
+          onSubjectChange={setSubject}
+          onCertTypeChange={setCertType}
+          onKeyAlgorithmChange={setKeyAlgorithm}
           onValidityDaysChange={setValidityDays}
-          onSanDnsChange={setSanDns}
-          onSanIpChange={setSanIp}
+          onIssuerCaIdChange={setIssuerCaId}
           error={generateError}
         />
       </FormDialog>
@@ -350,7 +413,10 @@ export function CertificatesPage() {
       {/* Private key reveal — shown once after generation */}
       <SecretRevealModal
         open={secretOpen}
-        onClose={() => { setSecretOpen(false); setPrivateKeyPem(""); }}
+        onClose={() => {
+          setSecretOpen(false);
+          setPrivateKeyPem("");
+        }}
         title="Certificate Generated"
         description="Your certificate has been generated. Save the private key now — it will not be shown again."
         secrets={[{ label: "Private Key (PEM)", value: privateKeyPem, mono: true }]}
@@ -360,11 +426,9 @@ export function CertificatesPage() {
       <ConfirmDialog
         open={revokeTarget !== null}
         onClose={() => setRevokeTarget(null)}
-        onConfirm={() =>
-          revokeTarget && revokeMutation.mutate(revokeTarget.id)
-        }
+        onConfirm={() => revokeTarget && revokeMutation.mutate(revokeTarget.id)}
         title="Revoke Certificate"
-        description={`Are you sure you want to revoke the certificate for "${revokeTarget?.common_name}"? This action cannot be undone.`}
+        description={`Are you sure you want to revoke the certificate for "${revokeTarget?.subject}"? This action cannot be undone.`}
         isLoading={revokeMutation.isPending}
         confirmLabel="Revoke"
       />

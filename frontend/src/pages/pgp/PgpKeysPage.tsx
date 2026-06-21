@@ -3,9 +3,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   pgpService,
   type PgpKey,
+  type PgpKeyAlgorithm,
+  type PgpKeyPurpose,
+  type PgpKeyStatus,
   type GeneratePgpKeyPayload,
 } from "@/services/pgp";
-import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -28,6 +30,22 @@ function truncateFingerprint(fp: string): string {
   return fp.length > 24 ? `${fp.slice(0, 24)}…` : fp;
 }
 
+/**
+ * Map the backend's PascalCase `PgpKeyStatus` onto the lowercase variants
+ * accepted by the shared `StatusBadge`.
+ */
+function badgeStatus(status: PgpKeyStatus): "active" | "revoked" {
+  return status === "Active" ? "active" : "revoked";
+}
+
+/** UTF-8 safe base64 encoding for the encrypt request body. */
+function toBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
 // ─── View Public Key modal ────────────────────────────────────────────────────
 
 interface ViewPublicKeyModalProps {
@@ -43,10 +61,10 @@ function ViewPublicKeyModal({ open, onClose, pgpKey }: ViewPublicKeyModalProps) 
     if (!pgpKey) return;
     try {
       if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(pgpKey.public_key_armor);
+        await navigator.clipboard.writeText(pgpKey.public_key_armored);
       } else {
         const el = document.createElement("textarea");
-        el.value = pgpKey.public_key_armor;
+        el.value = pgpKey.public_key_armored;
         el.style.position = "fixed";
         el.style.top = "-9999px";
         document.body.appendChild(el);
@@ -111,7 +129,7 @@ function ViewPublicKeyModal({ open, onClose, pgpKey }: ViewPublicKeyModalProps) 
           </div>
           <div className="rounded-md border border-white/10 bg-white/[0.04] p-3 overflow-x-auto">
             <pre className="text-xs text-foreground/80 whitespace-pre-wrap break-all font-mono leading-relaxed">
-              {pgpKey.public_key_armor}
+              {pgpKey.public_key_armored}
             </pre>
           </div>
         </div>
@@ -140,14 +158,14 @@ function EncryptDataModal({ open, onClose, pgpKeyId }: EncryptDataModalProps) {
   const [revealOpen, setRevealOpen] = useState(false);
 
   const encryptMutation = useMutation({
-    mutationFn: ({ id, payload }: { id: string; payload: { data: string } }) =>
-      pgpService.encrypt(id, payload),
+    mutationFn: ({ id, plaintext }: { id: string; plaintext: string }) =>
+      pgpService.encrypt(id, { data_base64: toBase64(plaintext) }),
     onSuccess: (resp) => {
-      setEncryptedResult(resp.encrypted);
+      setEncryptedResult(resp.ciphertext_armored);
       setRevealOpen(true);
     },
     onError: (err: unknown) => {
-      setError(err instanceof Error ? err.message : "Encryption failed.");
+      setError(getApiErrorMessage(err));
     },
   });
 
@@ -158,7 +176,7 @@ function EncryptDataModal({ open, onClose, pgpKeyId }: EncryptDataModalProps) {
       setError("Data is required.");
       return;
     }
-    encryptMutation.mutate({ id: pgpKeyId, payload: { data: data.trim() } });
+    encryptMutation.mutate({ id: pgpKeyId, plaintext: data });
   }
 
   function handleClose() {
@@ -210,50 +228,90 @@ function EncryptDataModal({ open, onClose, pgpKeyId }: EncryptDataModalProps) {
 // ─── Generate form fields ─────────────────────────────────────────────────────
 
 interface GenerateFieldsProps {
-  description: string;
-  keyType: "Ed25519Legacy" | "RSA4096";
-  onDescriptionChange: (v: string) => void;
-  onKeyTypeChange: (v: "Ed25519Legacy" | "RSA4096") => void;
+  name: string;
+  email: string;
+  purpose: PgpKeyPurpose;
+  algorithm: PgpKeyAlgorithm;
+  onNameChange: (v: string) => void;
+  onEmailChange: (v: string) => void;
+  onPurposeChange: (v: PgpKeyPurpose) => void;
+  onAlgorithmChange: (v: PgpKeyAlgorithm) => void;
   error?: string;
 }
 
 function GenerateFields({
-  description,
-  keyType,
-  onDescriptionChange,
-  onKeyTypeChange,
+  name,
+  email,
+  purpose,
+  algorithm,
+  onNameChange,
+  onEmailChange,
+  onPurposeChange,
+  onAlgorithmChange,
   error,
 }: GenerateFieldsProps) {
   return (
     <>
       <div className="space-y-2">
-        <Label htmlFor="pgp-description">Description</Label>
+        <Label htmlFor="pgp-name">Name *</Label>
         <Input
-          id="pgp-description"
-          value={description}
-          onChange={(e) => onDescriptionChange(e.target.value)}
+          id="pgp-name"
+          value={name}
+          onChange={(e) => onNameChange(e.target.value)}
           placeholder="e.g. Audit signing key"
+          required
           autoComplete="off"
         />
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="pgp-key-type">Key Type</Label>
+        <Label htmlFor="pgp-email">Email *</Label>
+        <Input
+          id="pgp-email"
+          type="email"
+          value={email}
+          onChange={(e) => onEmailChange(e.target.value)}
+          placeholder="audit@example.com"
+          required
+          autoComplete="off"
+        />
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="pgp-purpose">Purpose</Label>
         <select
-          id="pgp-key-type"
-          value={keyType}
+          id="pgp-purpose"
+          value={purpose}
+          onChange={(e) => onPurposeChange(e.target.value as PgpKeyPurpose)}
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+        >
+          <option value="AuditSigning">Audit Signing</option>
+          <option value="Export">Export (encryption)</option>
+        </select>
+        <p className="text-xs text-muted-foreground">
+          {purpose === "AuditSigning"
+            ? "Server-side signing key for audit log batches. The private key is stored encrypted and never returned."
+            : "Zero-knowledge export key. The private key is returned once on generation and never stored."}
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="pgp-algorithm">Algorithm</Label>
+        <select
+          id="pgp-algorithm"
+          value={algorithm}
           onChange={(e) =>
-            onKeyTypeChange(e.target.value as "Ed25519Legacy" | "RSA4096")
+            onAlgorithmChange(e.target.value as PgpKeyAlgorithm)
           }
           className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
         >
-          <option value="Ed25519Legacy">Ed25519 (signing only)</option>
-          <option value="RSA4096">RSA-4096 (signing + encryption)</option>
+          <option value="Rsa4096">RSA-4096 (signing + encryption)</option>
+          <option value="Ed25519">Ed25519 (signing only)</option>
         </select>
         <p className="text-xs text-muted-foreground">
-          {keyType === "Ed25519Legacy"
-            ? "Ed25519 supports signing and signature verification only."
-            : "RSA-4096 supports both signing/verification and asymmetric encryption."}
+          {algorithm === "Rsa4096"
+            ? "RSA-4096 supports both signing/verification and asymmetric encryption."
+            : "Ed25519 supports signing and signature verification only."}
         </p>
       </div>
 
@@ -267,8 +325,6 @@ function GenerateFields({
 export function PgpKeysPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const user = useAuthStore((s) => s.user);
-  const currentUserId = user?.id ?? "";
 
   const { data: pgpKeys = [], isLoading } = useQuery({
     queryKey: ["pgp-keys"],
@@ -277,25 +333,30 @@ export function PgpKeysPage() {
 
   // ─── Generate state ────────────────────────────────────────────────────────
   const [generateOpen, setGenerateOpen] = useState(false);
-  const [description, setDescription] = useState("");
-  const [keyType, setKeyType] = useState<"Ed25519Legacy" | "RSA4096">(
-    "Ed25519Legacy"
-  );
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [purpose, setPurpose] = useState<PgpKeyPurpose>("AuditSigning");
+  const [algorithm, setAlgorithm] = useState<PgpKeyAlgorithm>("Rsa4096");
   const [generateError, setGenerateError] = useState("");
 
   // ─── Secret reveal state ───────────────────────────────────────────────────
   const [secretOpen, setSecretOpen] = useState(false);
-  const [privateKeyArmor, setPrivateKeyArmor] = useState("");
+  const [privateKeyArmored, setPrivateKeyArmored] = useState("");
 
   const generateMutation = useMutation({
-    mutationFn: (payload: GeneratePgpKeyPayload) =>
-      pgpService.generate(payload),
+    mutationFn: (payload: GeneratePgpKeyPayload) => pgpService.generate(payload),
     onSuccess: (resp) => {
       void queryClient.invalidateQueries({ queryKey: ["pgp-keys"] });
       setGenerateOpen(false);
       resetGenerateForm();
-      setPrivateKeyArmor(resp.private_key_armor);
-      setSecretOpen(true);
+      // Private key is only returned for Export-purpose keys; for
+      // AuditSigning keys it is omitted, so skip the reveal modal entirely.
+      if (resp.private_key_armored) {
+        setPrivateKeyArmored(resp.private_key_armored);
+        setSecretOpen(true);
+      } else {
+        toast({ description: "PGP key generated." });
+      }
     },
     onError: (err: unknown) => {
       const msg = getApiErrorMessage(err);
@@ -305,18 +366,29 @@ export function PgpKeysPage() {
   });
 
   function resetGenerateForm() {
-    setDescription("");
-    setKeyType("Ed25519Legacy");
+    setName("");
+    setEmail("");
+    setPurpose("AuditSigning");
+    setAlgorithm("Rsa4096");
     setGenerateError("");
   }
 
   function handleGenerateSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setGenerateError("");
+    if (!name.trim()) {
+      setGenerateError("Name is required.");
+      return;
+    }
+    if (!email.trim()) {
+      setGenerateError("Email is required.");
+      return;
+    }
     generateMutation.mutate({
-      user_id: currentUserId,
-      key_type: keyType,
-      description: description.trim() || undefined,
+      name: name.trim(),
+      email: email.trim(),
+      purpose,
+      algorithm,
     });
   }
 
@@ -343,6 +415,13 @@ export function PgpKeysPage() {
   // ─── Table columns ─────────────────────────────────────────────────────────
   const columns: Column<PgpKey>[] = [
     {
+      key: "name",
+      header: "Name",
+      render: (row) => (
+        <span className="font-medium text-foreground/90">{row.name}</span>
+      ),
+    },
+    {
       key: "fingerprint",
       header: "Fingerprint",
       render: (row) => (
@@ -355,27 +434,27 @@ export function PgpKeysPage() {
       ),
     },
     {
-      key: "key_type",
-      header: "Key Type",
+      key: "purpose",
+      header: "Purpose",
       render: (row) => (
-        <code className="text-xs bg-white/5 px-1.5 py-0.5 rounded text-muted-foreground">
-          {row.key_type}
-        </code>
+        <span className="text-muted-foreground text-sm">
+          {row.purpose === "AuditSigning" ? "Audit Signing" : "Export"}
+        </span>
       ),
     },
     {
-      key: "description",
-      header: "Description",
+      key: "algorithm",
+      header: "Algorithm",
       render: (row) => (
-        <span className="text-muted-foreground text-sm">
-          {row.description ?? "—"}
-        </span>
+        <code className="text-xs bg-white/5 px-1.5 py-0.5 rounded text-muted-foreground">
+          {row.algorithm}
+        </code>
       ),
     },
     {
       key: "status",
       header: "Status",
-      render: (row) => <StatusBadge status={row.status} />,
+      render: (row) => <StatusBadge status={badgeStatus(row.status)} />,
     },
     {
       key: "created_at",
@@ -393,18 +472,18 @@ export function PgpKeysPage() {
       render: (row) => (
         <div className="flex items-center gap-1">
           <button
-            aria-label={`View public key for ${row.fingerprint}`}
+            aria-label={`View public key for ${row.name}`}
             onClick={() => setViewKey(row)}
             className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
             title="View Public Key"
           >
             <Eye size={14} />
           </button>
-          {row.key_type === "RSA4096" && (
+          {row.algorithm === "Rsa4096" && (
             <button
-              aria-label={`Encrypt data with ${row.fingerprint}`}
+              aria-label={`Encrypt data with ${row.name}`}
               onClick={() => setEncryptKeyId(row.id)}
-              disabled={row.status === "revoked"}
+              disabled={row.status === "Revoked"}
               className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-purple-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               title="Encrypt Data"
             >
@@ -412,8 +491,8 @@ export function PgpKeysPage() {
             </button>
           )}
           <button
-            aria-label={`Revoke key ${row.fingerprint}`}
-            disabled={row.status === "revoked"}
+            aria-label={`Revoke key ${row.name}`}
+            disabled={row.status === "Revoked"}
             onClick={() => setRevokeTarget(row)}
             className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             title="Revoke"
@@ -463,24 +542,31 @@ export function PgpKeysPage() {
         submitLabel="Generate"
       >
         <GenerateFields
-          description={description}
-          keyType={keyType}
-          onDescriptionChange={setDescription}
-          onKeyTypeChange={setKeyType}
+          name={name}
+          email={email}
+          purpose={purpose}
+          algorithm={algorithm}
+          onNameChange={setName}
+          onEmailChange={setEmail}
+          onPurposeChange={setPurpose}
+          onAlgorithmChange={setAlgorithm}
           error={generateError}
         />
       </FormDialog>
 
-      {/* Private key reveal — shown once after generation */}
+      {/* Private key reveal — shown once after generating an Export key */}
       <SecretRevealModal
         open={secretOpen}
-        onClose={() => { setSecretOpen(false); setPrivateKeyArmor(""); }}
+        onClose={() => {
+          setSecretOpen(false);
+          setPrivateKeyArmored("");
+        }}
         title="PGP Key Generated"
         description="Your PGP key pair has been generated. Save the private key now — it will not be shown again."
         secrets={[
           {
             label: "Private Key (ASCII Armor)",
-            value: privateKeyArmor,
+            value: privateKeyArmored,
             mono: true,
           },
         ]}
@@ -504,11 +590,9 @@ export function PgpKeysPage() {
       <ConfirmDialog
         open={revokeTarget !== null}
         onClose={() => setRevokeTarget(null)}
-        onConfirm={() =>
-          revokeTarget && revokeMutation.mutate(revokeTarget.id)
-        }
+        onConfirm={() => revokeTarget && revokeMutation.mutate(revokeTarget.id)}
         title="Revoke PGP Key"
-        description={`Are you sure you want to revoke the key "${revokeTarget?.fingerprint}"? This action cannot be undone.`}
+        description={`Are you sure you want to revoke the key "${revokeTarget?.name}"? This action cannot be undone.`}
         isLoading={revokeMutation.isPending}
         confirmLabel="Revoke"
       />

@@ -18,9 +18,18 @@ spec:
         app: axiam
         component: frontend
     spec:
+      # Pod-level restricted security context (KSV-0118). nginx-unprivileged
+      # runs as UID/GID 101; container-level contexts below remain authoritative.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: axiam-frontend
-          image: ghcr.io/OWNER/frontend:latest
+          # Pin a concrete tag, not :latest (KSV-0013). Update per release.
+          image: ghcr.io/OWNER/frontend:0.1.0
           ports:
             - name: http
               containerPort: 8080

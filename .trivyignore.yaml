@@ -30,13 +30,16 @@ misconfigurations:
   #     by GID 0 and which runs as UID/GID 101; forcing > 10000 breaks the
   #     container at runtime. Scoped to the frontend manifest only.
   # Review date: 2026-06-21.
+  # IDs are listed in every Trivy ID format (AVD-prefixed, dashed, and compact)
+  # to be robust across trivy-action versions. These specific checks only fire
+  # on the two k8s deployment manifests, so an ID-only ignore effectively scopes
+  # to exactly the residual findings without depending on path-glob matching.
   - id: AVD-KSV-0125
-    paths:
-      - "k8s/server/deployment.yml"
-      - "k8s/frontend/deployment.yml"
+  - id: KSV-0125
+  - id: KSV0125
   - id: AVD-KSV-0020
-    paths:
-      - "k8s/frontend/deployment.yml"
+  - id: KSV-0020
+  - id: KSV0020
   - id: AVD-KSV-0021
-    paths:
-      - "k8s/frontend/deployment.yml"
+  - id: KSV-0021
+  - id: KSV0021

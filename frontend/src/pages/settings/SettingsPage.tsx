@@ -14,8 +14,8 @@ import {
 } from "lucide-react";
 import {
   settingsService,
-  type SystemSettings,
-  type UpdateSettingsPayload,
+  type SecuritySettings,
+  type TenantSettingsOverride,
 } from "@/services/settings";
 import { PageHeader } from "@/components/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,22 +24,91 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 
-// ─── Defaults for when API returns partial data ──────────────────────────────
+// ─── Flat editable view-model (minutes where presented as minutes) ────────────
+// The backend stores token/lockout/mfa durations in SECONDS. We present the
+// long-lived ones in friendlier units (minutes/days) and convert on save.
+// Every field here maps 1:1 to a backend SecuritySettings/TenantSettingsOverride
+// field — no invented keys.
 
-const DEFAULT_SETTINGS: SystemSettings = {
-  password_min_length: 12,
-  password_complexity_enabled: true,
-  max_failed_login_attempts: 5,
-  account_lockout_duration_minutes: 30,
-  access_token_lifetime_minutes: 15,
-  refresh_token_lifetime_days: 7,
-  max_concurrent_sessions: 5,
-  mfa_required: false,
-  mfa_totp_enabled: true,
-  mfa_webauthn_enabled: false,
-  email_notifications_enabled: true,
-  webhook_notifications_enabled: false,
-};
+interface SettingsForm {
+  // Password
+  min_length: number;
+  require_uppercase: boolean;
+  require_lowercase: boolean;
+  require_digits: boolean;
+  require_symbols: boolean;
+  password_history_count: number;
+  hibp_check_enabled: boolean;
+  // MFA
+  mfa_enforced: boolean;
+  mfa_challenge_lifetime_min: number; // backend: mfa_challenge_lifetime_secs
+  // Lockout
+  max_failed_login_attempts: number;
+  lockout_duration_min: number; // backend: lockout_duration_secs
+  // Token
+  access_token_lifetime_min: number; // backend: access_token_lifetime_secs
+  refresh_token_lifetime_days: number; // backend: refresh_token_lifetime_secs
+  // Email
+  email_verification_required: boolean;
+  // Certificate
+  default_cert_validity_days: number;
+  // Notification
+  admin_notifications_enabled: boolean;
+}
+
+const SECS_PER_MIN = 60;
+const SECS_PER_DAY = 86_400;
+
+function toForm(s: SecuritySettings): SettingsForm {
+  return {
+    min_length: s.password.min_length,
+    require_uppercase: s.password.require_uppercase,
+    require_lowercase: s.password.require_lowercase,
+    require_digits: s.password.require_digits,
+    require_symbols: s.password.require_symbols,
+    password_history_count: s.password.password_history_count,
+    hibp_check_enabled: s.password.hibp_check_enabled,
+    mfa_enforced: s.mfa.mfa_enforced,
+    mfa_challenge_lifetime_min: Math.round(
+      s.mfa.mfa_challenge_lifetime_secs / SECS_PER_MIN
+    ),
+    max_failed_login_attempts: s.lockout.max_failed_login_attempts,
+    lockout_duration_min: Math.round(
+      s.lockout.lockout_duration_secs / SECS_PER_MIN
+    ),
+    access_token_lifetime_min: Math.round(
+      s.token.access_token_lifetime_secs / SECS_PER_MIN
+    ),
+    refresh_token_lifetime_days: Math.round(
+      s.token.refresh_token_lifetime_secs / SECS_PER_DAY
+    ),
+    email_verification_required: s.email.email_verification_required,
+    default_cert_validity_days: s.certificate.default_cert_validity_days,
+    admin_notifications_enabled: s.notification.admin_notifications_enabled,
+  };
+}
+
+/** Convert the full form into a flat TenantSettingsOverride (seconds). */
+function toOverride(f: SettingsForm): TenantSettingsOverride {
+  return {
+    min_length: f.min_length,
+    require_uppercase: f.require_uppercase,
+    require_lowercase: f.require_lowercase,
+    require_digits: f.require_digits,
+    require_symbols: f.require_symbols,
+    password_history_count: f.password_history_count,
+    hibp_check_enabled: f.hibp_check_enabled,
+    mfa_enforced: f.mfa_enforced,
+    mfa_challenge_lifetime_secs: f.mfa_challenge_lifetime_min * SECS_PER_MIN,
+    max_failed_login_attempts: f.max_failed_login_attempts,
+    lockout_duration_secs: f.lockout_duration_min * SECS_PER_MIN,
+    access_token_lifetime_secs: f.access_token_lifetime_min * SECS_PER_MIN,
+    refresh_token_lifetime_secs: f.refresh_token_lifetime_days * SECS_PER_DAY,
+    email_verification_required: f.email_verification_required,
+    default_cert_validity_days: f.default_cert_validity_days,
+    admin_notifications_enabled: f.admin_notifications_enabled,
+  };
+}
 
 // ─── Toggle checkbox component ───────────────────────────────────────────────
 
@@ -85,7 +154,7 @@ function ToggleField({
   );
 }
 
-// ─── Number field for view / edit mode ───────────────────────────────────────
+// ─── Display helpers ─────────────────────────────────────────────────────────
 
 interface NumberDisplayProps {
   label: string;
@@ -130,7 +199,7 @@ function BooleanDisplay({ label, enabled }: BooleanDisplayProps) {
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
-  const [formOverrides, setFormOverrides] = useState<Partial<SystemSettings>>({});
+  const [formOverrides, setFormOverrides] = useState<Partial<SettingsForm>>({});
   const [feedback, setFeedback] = useState<{
     type: "success" | "error";
     message: string;
@@ -145,14 +214,14 @@ export function SettingsPage() {
     queryFn: settingsService.getSettings,
   });
 
-  // Derive form state from query data + local overrides (no useEffect needed)
-  const form = useMemo<SystemSettings>(
-    () => ({ ...DEFAULT_SETTINGS, ...settings, ...formOverrides }),
-    [settings, formOverrides]
-  );
+  // Derive form state from query data + local overrides (no useEffect needed).
+  const form = useMemo<SettingsForm | null>(() => {
+    if (!settings) return null;
+    return { ...toForm(settings), ...formOverrides };
+  }, [settings, formOverrides]);
 
   const updateMutation = useMutation({
-    mutationFn: (payload: UpdateSettingsPayload) =>
+    mutationFn: (payload: TenantSettingsOverride) =>
       settingsService.updateSettings(payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({
@@ -177,16 +246,17 @@ export function SettingsPage() {
     },
   });
 
-  function setField<K extends keyof SystemSettings>(
+  function setField<K extends keyof SettingsForm>(
     key: K,
-    value: SystemSettings[K]
+    value: SettingsForm[K]
   ) {
     setFormOverrides((prev) => ({ ...prev, [key]: value }));
   }
 
   function handleSave() {
+    if (!form) return;
     setFeedback(null);
-    updateMutation.mutate(form);
+    updateMutation.mutate(toOverride(form));
   }
 
   function handleCancel() {
@@ -202,17 +272,21 @@ export function SettingsPage() {
 
   // ── Loading state ────────────────────────────────────────────────────────
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 className="animate-spin text-primary" size={32} />
-      </div>
-    );
+  if (isLoading || !form) {
+    if (loadError) {
+      // fall through to error block below
+    } else {
+      return (
+        <div className="flex items-center justify-center py-24">
+          <Loader2 className="animate-spin text-primary" size={32} />
+        </div>
+      );
+    }
   }
 
   // ── Error state ──────────────────────────────────────────────────────────
 
-  if (loadError) {
+  if (loadError || !form) {
     return (
       <div
         role="alert"
@@ -234,7 +308,7 @@ export function SettingsPage() {
     <div className="space-y-6 max-w-3xl">
       <PageHeader
         title="Settings"
-        description="Configure system-wide security policies, session management, and notification preferences."
+        description="Configure tenant security policies. Values may only be made more restrictive than the organization baseline."
         action={
           !editing ? (
             <Button variant="outline" size="sm" onClick={handleEdit}>
@@ -264,52 +338,130 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* ── Security Policies ──────────────────────────────────────────── */}
+      {/* ── Password Policy ────────────────────────────────────────────── */}
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
-            <Shield
-              size={18}
-              className="text-primary"
-              aria-hidden="true"
-            />
-            <CardTitle className="text-base">
-              Security Policies
-            </CardTitle>
+            <Shield size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">Password Policy</CardTitle>
           </div>
         </CardHeader>
         <CardContent>
           {editing ? (
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="password_min_length">
-                  Password minimum length
-                </Label>
+                <Label htmlFor="min_length">Password minimum length</Label>
                 <Input
-                  id="password_min_length"
+                  id="min_length"
                   type="number"
                   min={8}
                   max={128}
-                  value={data.password_min_length}
+                  value={data.min_length}
                   onChange={(e) =>
-                    setField(
-                      "password_min_length",
-                      Number(e.target.value)
-                    )
+                    setField("min_length", Number(e.target.value))
                   }
                 />
               </div>
 
               <ToggleField
-                id="password_complexity_enabled"
-                label="Require password complexity"
-                description="Enforce uppercase, lowercase, digit, and symbol requirements."
-                checked={data.password_complexity_enabled}
-                onChange={(v) =>
-                  setField("password_complexity_enabled", v)
-                }
+                id="require_uppercase"
+                label="Require uppercase letter"
+                checked={data.require_uppercase}
+                onChange={(v) => setField("require_uppercase", v)}
+              />
+              <ToggleField
+                id="require_lowercase"
+                label="Require lowercase letter"
+                checked={data.require_lowercase}
+                onChange={(v) => setField("require_lowercase", v)}
+              />
+              <ToggleField
+                id="require_digits"
+                label="Require digit"
+                checked={data.require_digits}
+                onChange={(v) => setField("require_digits", v)}
+              />
+              <ToggleField
+                id="require_symbols"
+                label="Require symbol"
+                checked={data.require_symbols}
+                onChange={(v) => setField("require_symbols", v)}
+              />
+              <ToggleField
+                id="hibp_check_enabled"
+                label="Check passwords against breach database (HIBP)"
+                description="Reject passwords known to be compromised."
+                checked={data.hibp_check_enabled}
+                onChange={(v) => setField("hibp_check_enabled", v)}
               />
 
+              <div className="space-y-2">
+                <Label htmlFor="password_history_count">
+                  Password history count
+                </Label>
+                <Input
+                  id="password_history_count"
+                  type="number"
+                  min={0}
+                  max={50}
+                  value={data.password_history_count}
+                  onChange={(e) =>
+                    setField(
+                      "password_history_count",
+                      Number(e.target.value)
+                    )
+                  }
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <NumberDisplay
+                label="Password minimum length"
+                value={data.min_length}
+                unit="characters"
+              />
+              <BooleanDisplay
+                label="Require uppercase"
+                enabled={data.require_uppercase}
+              />
+              <BooleanDisplay
+                label="Require lowercase"
+                enabled={data.require_lowercase}
+              />
+              <BooleanDisplay
+                label="Require digit"
+                enabled={data.require_digits}
+              />
+              <BooleanDisplay
+                label="Require symbol"
+                enabled={data.require_symbols}
+              />
+              <BooleanDisplay
+                label="HIBP breach check"
+                enabled={data.hibp_check_enabled}
+              />
+              <NumberDisplay
+                label="Password history count"
+                value={data.password_history_count}
+                unit="passwords"
+              />
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Lockout & Tokens ───────────────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <Clock size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">Lockout & Tokens</CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {editing ? (
+            <div className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="max_failed_login_attempts">
                   Max failed login attempts
@@ -330,80 +482,34 @@ export function SettingsPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="account_lockout_duration_minutes">
+                <Label htmlFor="lockout_duration_min">
                   Account lockout duration (minutes)
                 </Label>
                 <Input
-                  id="account_lockout_duration_minutes"
+                  id="lockout_duration_min"
                   type="number"
                   min={1}
                   max={1440}
-                  value={data.account_lockout_duration_minutes}
+                  value={data.lockout_duration_min}
                   onChange={(e) =>
-                    setField(
-                      "account_lockout_duration_minutes",
-                      Number(e.target.value)
-                    )
+                    setField("lockout_duration_min", Number(e.target.value))
                   }
                 />
               </div>
-            </div>
-          ) : (
-            <div className="grid gap-4 sm:grid-cols-2">
-              <NumberDisplay
-                label="Password minimum length"
-                value={data.password_min_length}
-                unit="characters"
-              />
-              <BooleanDisplay
-                label="Password complexity"
-                enabled={data.password_complexity_enabled}
-              />
-              <NumberDisplay
-                label="Max failed login attempts"
-                value={data.max_failed_login_attempts}
-                unit="attempts"
-              />
-              <NumberDisplay
-                label="Account lockout duration"
-                value={data.account_lockout_duration_minutes}
-                unit="minutes"
-              />
-            </div>
-          )}
-        </CardContent>
-      </Card>
 
-      {/* ── Session Management ─────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <Clock
-              size={18}
-              className="text-primary"
-              aria-hidden="true"
-            />
-            <CardTitle className="text-base">
-              Session Management
-            </CardTitle>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {editing ? (
-            <div className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="access_token_lifetime_minutes">
+                <Label htmlFor="access_token_lifetime_min">
                   Access token lifetime (minutes)
                 </Label>
                 <Input
-                  id="access_token_lifetime_minutes"
+                  id="access_token_lifetime_min"
                   type="number"
                   min={1}
                   max={1440}
-                  value={data.access_token_lifetime_minutes}
+                  value={data.access_token_lifetime_min}
                   onChange={(e) =>
                     setField(
-                      "access_token_lifetime_minutes",
+                      "access_token_lifetime_min",
                       Number(e.target.value)
                     )
                   }
@@ -428,42 +534,28 @@ export function SettingsPage() {
                   }
                 />
               </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="max_concurrent_sessions">
-                  Max concurrent sessions
-                </Label>
-                <Input
-                  id="max_concurrent_sessions"
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={data.max_concurrent_sessions}
-                  onChange={(e) =>
-                    setField(
-                      "max_concurrent_sessions",
-                      Number(e.target.value)
-                    )
-                  }
-                />
-              </div>
             </div>
           ) : (
             <div className="grid gap-4 sm:grid-cols-2">
               <NumberDisplay
+                label="Max failed login attempts"
+                value={data.max_failed_login_attempts}
+                unit="attempts"
+              />
+              <NumberDisplay
+                label="Account lockout duration"
+                value={data.lockout_duration_min}
+                unit="minutes"
+              />
+              <NumberDisplay
                 label="Access token lifetime"
-                value={data.access_token_lifetime_minutes}
+                value={data.access_token_lifetime_min}
                 unit="minutes"
               />
               <NumberDisplay
                 label="Refresh token lifetime"
                 value={data.refresh_token_lifetime_days}
                 unit="days"
-              />
-              <NumberDisplay
-                label="Max concurrent sessions"
-                value={data.max_concurrent_sessions}
-                unit="sessions"
               />
             </div>
           )}
@@ -474,11 +566,7 @@ export function SettingsPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
-            <Smartphone
-              size={18}
-              className="text-primary"
-              aria-hidden="true"
-            />
+            <Smartphone size={18} className="text-primary" aria-hidden="true" />
             <CardTitle className="text-base">MFA Settings</CardTitle>
           </div>
         </CardHeader>
@@ -486,88 +574,51 @@ export function SettingsPage() {
           {editing ? (
             <div className="space-y-4">
               <ToggleField
-                id="mfa_required"
+                id="mfa_enforced"
                 label="Require MFA for all users"
                 description="When enabled, users must configure at least one MFA method to access the system."
-                checked={data.mfa_required}
-                onChange={(v) => setField("mfa_required", v)}
+                checked={data.mfa_enforced}
+                onChange={(v) => setField("mfa_enforced", v)}
               />
-
-              <div className="border-t border-white/5 pt-4">
-                <p className="text-xs text-muted-foreground uppercase tracking-wide mb-3">
-                  Allowed MFA methods
-                </p>
-                <div className="space-y-3">
-                  <ToggleField
-                    id="mfa_totp_enabled"
-                    label="TOTP (Authenticator app)"
-                    description="Time-based one-time passwords via apps like Google Authenticator."
-                    checked={data.mfa_totp_enabled}
-                    onChange={(v) =>
-                      setField("mfa_totp_enabled", v)
-                    }
-                  />
-                  <ToggleField
-                    id="mfa_webauthn_enabled"
-                    label="WebAuthn (Security keys)"
-                    description="Hardware security keys and biometric authenticators."
-                    checked={data.mfa_webauthn_enabled}
-                    onChange={(v) =>
-                      setField("mfa_webauthn_enabled", v)
-                    }
-                  />
-                </div>
+              <div className="space-y-2">
+                <Label htmlFor="mfa_challenge_lifetime_min">
+                  MFA challenge lifetime (minutes)
+                </Label>
+                <Input
+                  id="mfa_challenge_lifetime_min"
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={data.mfa_challenge_lifetime_min}
+                  onChange={(e) =>
+                    setField(
+                      "mfa_challenge_lifetime_min",
+                      Number(e.target.value)
+                    )
+                  }
+                />
               </div>
             </div>
           ) : (
-            <div className="space-y-3">
-              <BooleanDisplay
-                label="MFA required"
-                enabled={data.mfa_required}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <BooleanDisplay label="MFA required" enabled={data.mfa_enforced} />
+              <NumberDisplay
+                label="MFA challenge lifetime"
+                value={data.mfa_challenge_lifetime_min}
+                unit="minutes"
               />
-              <div className="border-t border-white/5 pt-3">
-                <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
-                  Allowed MFA methods
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <Badge
-                    variant={
-                      data.mfa_totp_enabled ? "default" : "secondary"
-                    }
-                  >
-                    TOTP{" "}
-                    {data.mfa_totp_enabled ? "(Active)" : "(Disabled)"}
-                  </Badge>
-                  <Badge
-                    variant={
-                      data.mfa_webauthn_enabled
-                        ? "default"
-                        : "secondary"
-                    }
-                  >
-                    WebAuthn{" "}
-                    {data.mfa_webauthn_enabled
-                      ? "(Active)"
-                      : "(Disabled)"}
-                  </Badge>
-                </div>
-              </div>
             </div>
           )}
         </CardContent>
       </Card>
 
-      {/* ── Notification Preferences ───────────────────────────────────── */}
+      {/* ── Email & Certificates & Notifications ───────────────────────── */}
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
-            <Bell
-              size={18}
-              className="text-primary"
-              aria-hidden="true"
-            />
+            <Bell size={18} className="text-primary" aria-hidden="true" />
             <CardTitle className="text-base">
-              Notification Preferences
+              Email, Certificates & Notifications
             </CardTitle>
           </div>
         </CardHeader>
@@ -575,33 +626,52 @@ export function SettingsPage() {
           {editing ? (
             <div className="space-y-4">
               <ToggleField
-                id="email_notifications_enabled"
-                label="Email notifications"
-                description="Send system alerts and security events via email."
-                checked={data.email_notifications_enabled}
-                onChange={(v) =>
-                  setField("email_notifications_enabled", v)
-                }
+                id="email_verification_required"
+                label="Require email verification"
+                description="Users must verify their email address before full access."
+                checked={data.email_verification_required}
+                onChange={(v) => setField("email_verification_required", v)}
               />
+              <div className="space-y-2">
+                <Label htmlFor="default_cert_validity_days">
+                  Default certificate validity (days)
+                </Label>
+                <Input
+                  id="default_cert_validity_days"
+                  type="number"
+                  min={1}
+                  max={3650}
+                  value={data.default_cert_validity_days}
+                  onChange={(e) =>
+                    setField(
+                      "default_cert_validity_days",
+                      Number(e.target.value)
+                    )
+                  }
+                />
+              </div>
               <ToggleField
-                id="webhook_notifications_enabled"
-                label="Webhook notifications"
-                description="Deliver event payloads to configured webhook endpoints."
-                checked={data.webhook_notifications_enabled}
-                onChange={(v) =>
-                  setField("webhook_notifications_enabled", v)
-                }
+                id="admin_notifications_enabled"
+                label="Admin notifications"
+                description="Send security and system event notifications to admins."
+                checked={data.admin_notifications_enabled}
+                onChange={(v) => setField("admin_notifications_enabled", v)}
               />
             </div>
           ) : (
             <div className="grid gap-4 sm:grid-cols-2">
               <BooleanDisplay
-                label="Email notifications"
-                enabled={data.email_notifications_enabled}
+                label="Email verification required"
+                enabled={data.email_verification_required}
+              />
+              <NumberDisplay
+                label="Default certificate validity"
+                value={data.default_cert_validity_days}
+                unit="days"
               />
               <BooleanDisplay
-                label="Webhook notifications"
-                enabled={data.webhook_notifications_enabled}
+                label="Admin notifications"
+                enabled={data.admin_notifications_enabled}
               />
             </div>
           )}

@@ -15,20 +15,41 @@ import type { AxiosError } from "axios";
 // API helpers (inline, per spec)
 // ---------------------------------------------------------------------------
 
+// Backend UserResponse: there is NO `display_name` column — it lives inside
+// the free-form `metadata` object (key `display_name`, shared with the users
+// admin UI). `email_verified` is serialized directly on UserResponse.
+// Source: crates/axiam-api-rest/src/handlers/users.rs (UserResponse,
+// UpdateUserRequest).
+interface UserMetadata {
+  display_name?: string;
+  [key: string]: unknown;
+}
+
+interface UserResponse {
+  id: string;
+  username: string;
+  email: string;
+  email_verified: boolean;
+  metadata: UserMetadata;
+}
+
+/** View-model with `display_name` projected out of `metadata` for the UI. */
 interface UserProfile {
   id: string;
   username: string;
   email: string;
-  display_name: string | null;
   email_verified: boolean;
+  display_name: string | null;
+  /** Raw metadata, preserved so updates don't clobber other keys. */
+  metadata: UserMetadata;
 }
 
 // CQ-F17: use canonical MfaMethod type from services/users.ts
 import type { MfaMethod } from "@/services/users";
 
 interface UpdateProfilePayload {
-  display_name?: string;
   email?: string;
+  metadata?: UserMetadata;
 }
 
 interface ErrorResponse {
@@ -39,12 +60,25 @@ interface ErrorResponse {
 // The backend addresses users by their real id — there is no `/users/me`
 // alias — so the authenticated user's id is threaded in from the auth store.
 async function getCurrentUser(userId: string): Promise<UserProfile> {
-  const res = await api.get<UserProfile>(`/api/v1/users/${userId}`);
-  return res.data;
+  const res = await api.get<UserResponse>(`/api/v1/users/${userId}`);
+  const u = res.data;
+  const metadata = u.metadata ?? {};
+  return {
+    id: u.id,
+    username: u.username,
+    email: u.email,
+    email_verified: u.email_verified,
+    display_name:
+      typeof metadata.display_name === "string" ? metadata.display_name : null,
+    metadata,
+  };
 }
 
-async function updateProfile(userId: string, data: UpdateProfilePayload): Promise<UserProfile> {
-  const res = await api.put<UserProfile>(`/api/v1/users/${userId}`, data);
+async function updateProfile(
+  userId: string,
+  data: UpdateProfilePayload,
+): Promise<UserResponse> {
+  const res = await api.put<UserResponse>(`/api/v1/users/${userId}`, data);
   return res.data;
 }
 
@@ -123,9 +157,17 @@ export function ProfilePage() {
       const display_name = (formData.get("display_name") as string).trim();
       const email = (formData.get("email") as string).trim();
       try {
+        // display_name has no backend column — persist it inside `metadata`,
+        // merging with existing keys so we don't drop other metadata.
+        const metadata: UserMetadata = { ...(profile?.metadata ?? {}) };
+        if (display_name) {
+          metadata.display_name = display_name;
+        } else {
+          delete metadata.display_name;
+        }
         await updateProfile(userId!, {
-          display_name: display_name || undefined,
           email: email || undefined,
+          metadata,
         });
         await queryClient.invalidateQueries({ queryKey: ["currentUser"] });
         setEditing(false);

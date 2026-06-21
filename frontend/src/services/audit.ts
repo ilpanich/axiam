@@ -41,6 +41,18 @@ export interface AuditFilters {
   to?: string;
 }
 
+// ─── Date helpers ───────────────────────────────────────────────────────────--
+
+/** Bare `YYYY-MM-DD` → RFC3339 start-of-day UTC. Passes other strings through. */
+function toRfc3339Start(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00Z` : value;
+}
+
+/** Bare `YYYY-MM-DD` → RFC3339 end-of-day UTC. Passes other strings through. */
+function toRfc3339End(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:59Z` : value;
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export const auditService = {
@@ -52,8 +64,15 @@ export const auditService = {
     if (filters.action?.trim()) params.set("action", filters.action.trim());
     if (filters.resource_id?.trim()) params.set("resource_id", filters.resource_id.trim());
     if (filters.outcome) params.set("outcome", filters.outcome);
-    if (filters.from?.trim()) params.set("from", filters.from.trim());
-    if (filters.to?.trim()) params.set("to", filters.to.trim());
+    // Backend AuditLogFilter.from/to are RFC3339 datetimes; the UI sends bare
+    // `YYYY-MM-DD` dates. Widen to full-day UTC bounds so a bare date filters
+    // the whole day instead of 400ing.
+    if (filters.from?.trim()) {
+      params.set("from", toRfc3339Start(filters.from.trim()));
+    }
+    if (filters.to?.trim()) {
+      params.set("to", toRfc3339End(filters.to.trim()));
+    }
     return api
       .get<PaginatedAuditLogs>(`/api/v1/audit-logs?${params.toString()}`)
       .then((r) => r.data);

@@ -52,6 +52,7 @@ use crate::handlers;
         handlers::users::get,
         handlers::users::update,
         handlers::users::delete,
+        handlers::users::unlock,
         // Groups
         handlers::groups::create,
         handlers::groups::list,

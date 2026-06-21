@@ -17,3 +17,26 @@ secrets:
       - "crates/axiam-auth/src/token.rs"
       - "crates/axiam-api-rest/src/extractors/auth.rs"
       - "crates/axiam-federation/src/oidc.rs"
+
+misconfigurations:
+  # Residual k8s findings that cannot be fixed by manifest hardening (the HIGH
+  # KSV-0118 pod-securityContext finding WAS fixed in the manifests). These are
+  # structural, not defects, so they are scoped to the specific manifests:
+  #   AVD-KSV-0125 — "untrusted registry": ghcr.io is the project's own GitHub
+  #     Container Registry; Trivy's trusted-registry list is scanner policy, not
+  #     a manifest field. Applies to both deployment manifests.
+  #   AVD-KSV-0020 / AVD-KSV-0021 — runAsUser/runAsGroup must be > 10000: the
+  #     frontend uses nginxinc/nginx-unprivileged, whose writable dirs are owned
+  #     by GID 0 and which runs as UID/GID 101; forcing > 10000 breaks the
+  #     container at runtime. Scoped to the frontend manifest only.
+  # Review date: 2026-06-21.
+  - id: AVD-KSV-0125
+    paths:
+      - "k8s/server/deployment.yml"
+      - "k8s/frontend/deployment.yml"
+  - id: AVD-KSV-0020
+    paths:
+      - "k8s/frontend/deployment.yml"
+  - id: AVD-KSV-0021
+    paths:
+      - "k8s/frontend/deployment.yml"

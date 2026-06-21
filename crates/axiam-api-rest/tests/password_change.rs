@@ -171,6 +171,7 @@ macro_rules! test_app {
                     SurrealUserRepository::new($db.clone()),
                     SurrealWebauthnCredentialRepository::new($db.clone()),
                 )))
+                .app_data(web::Data::new(reqwest::Client::new()))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))

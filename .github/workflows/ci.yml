@@ -158,6 +158,9 @@ jobs:
           format: sarif
           output: trivy-config.sarif
           exit-code: '0'
+          # Scoped suppressions for residual, non-hardenable k8s findings
+          # (untrusted registry / nginx-mandated UID). See .trivyignore.yaml.
+          trivyignores: .trivyignore.yaml
 
       # --- Upload all SARIF results to GitHub Security tab (D-07) ---
       - name: Upload hadolint server SARIF

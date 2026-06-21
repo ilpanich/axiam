@@ -51,8 +51,8 @@ nothing; wrong enum casing / missing required fields → 400s.
 - Pure-invention fields dropped from UI: permission name/resource_id, webhook
   description, oauth2 is_public, service-account roles/description.
 
-## Follow-ups (not blocking)
+## Follow-ups
 
-- CA private key PEM is surfaced for end-entity certs; CA-cert generation
-  private key is returned by backend but not yet surfaced in the CA tab modal.
+- ~~CA-cert generation private key not surfaced~~ — DONE (commit 17a1c0d):
+  reveals `private_key_pem` in `SecretRevealModal`, verified live.
 - PGP section aligned to contract but not exercised live this pass.

@@ -105,8 +105,18 @@ COPY --from=builder /usr/lib/x86_64-linux-gnu/libxml2.so.2 \
 # libltdl (libtool dlopen — xmlsec1 dynamic engine loading)
 COPY --from=builder /usr/lib/x86_64-linux-gnu/libltdl.so.7 \
                     /usr/lib/x86_64-linux-gnu/
+# libxslt (xmlsec1 transitive — XSLT transforms in XML-DSig). Required:
+# the binary's ldd lists libxslt.so.1 via libxmlsec1; distroless/cc has no apt,
+# so without this the loader aborts with "error while loading shared libraries"
+# (exit 127) before the server can boot.
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libxslt.so.1 \
+                    /usr/lib/x86_64-linux-gnu/
 # liblzma (libxml2 transitive — XML compression)
 COPY --from=builder /usr/lib/x86_64-linux-gnu/liblzma.so.5 \
+                    /usr/lib/x86_64-linux-gnu/
+# libz (libxml2 transitive — zlib compression). Also an ldd entry not provided
+# by distroless/cc; missing it likewise aborts the loader with exit 127.
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libz.so.1 \
                     /usr/lib/x86_64-linux-gnu/
 # ICU libs (libxml2 transitive — Unicode normalisation); bookworm ships icu72
 COPY --from=builder /usr/lib/x86_64-linux-gnu/libicuuc.so.72 \

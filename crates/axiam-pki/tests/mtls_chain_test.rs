@@ -68,7 +68,12 @@ async fn mtls_chain_accept_leaf_signed_by_tenant_ca() {
 
     // Issue a leaf cert via CertService (signed by the CA, stored in DB)
     let cert_repo = SurrealCertificateRepository::new(db.clone());
-    let cert_svc = CertService::new(ca_repo.clone(), cert_repo.clone(), test_pki_config(), sem.clone());
+    let cert_svc = CertService::new(
+        ca_repo.clone(),
+        cert_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+    );
     let leaf = cert_svc
         .generate(
             org_id,
@@ -130,16 +135,18 @@ async fn mtls_chain_reject_forged_leaf_with_matching_fingerprint() {
 
     // 1. Generate a self-signed "forged" leaf cert using rcgen directly
     //    (NOT signed by any CA stored in the DB).
-    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519)
-        .expect("keygen must succeed");
-    let mut params = CertificateParams::new(Vec::<String>::new())
-        .expect("params must build");
-    params.distinguished_name.push(DnType::CommonName, "forged-device");
+    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("keygen must succeed");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params must build");
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "forged-device");
     params.is_ca = IsCa::NoCa;
     params.not_before = time::OffsetDateTime::from_unix_timestamp(now.timestamp()).unwrap();
     params.not_after =
         time::OffsetDateTime::from_unix_timestamp(now.timestamp() + 86_400 * 30).unwrap();
-    let forged_cert = params.self_signed(&key_pair).expect("self-sign must succeed");
+    let forged_cert = params
+        .self_signed(&key_pair)
+        .expect("self-sign must succeed");
     let forged_pem = forged_cert.pem();
     let forged_der = forged_cert.der().to_vec();
     let fingerprint = hex::encode(Sha256::digest(&forged_der));
@@ -205,7 +212,9 @@ async fn mtls_chain_reject_when_no_ca_cert_found() {
     // random issuer_ca_id that does NOT exist in the ca_certificate table.
     let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
     let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-    params.distinguished_name.push(DnType::CommonName, "no-ca-device");
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "no-ca-device");
     params.is_ca = IsCa::NoCa;
     params.not_before = time::OffsetDateTime::from_unix_timestamp(now.timestamp()).unwrap();
     params.not_after =
@@ -243,7 +252,9 @@ async fn mtls_chain_reject_when_no_ca_cert_found() {
     assert!(result.is_err(), "no-CA case must fail closed");
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(
-        err_msg.contains("no CA certificate") || err_msg.contains("Certificate") || err_msg.contains("chain verify"),
+        err_msg.contains("no CA certificate")
+            || err_msg.contains("Certificate")
+            || err_msg.contains("chain verify"),
         "error must indicate CA lookup failure, got: {err_msg}"
     );
 }

@@ -14,8 +14,8 @@
 
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use uuid::Uuid;
 
 pub use axiam_core::models::mail::{MailType, OutboundMailMessage};
@@ -188,7 +188,10 @@ mod tests {
         let payload = b"{\"tenant_id\":\"...\",\"action\":\"read\"}";
         let sig = sign_payload(key, payload);
         assert!(!sig.is_empty());
-        assert!(verify_payload(key, payload, &sig), "valid signature must verify");
+        assert!(
+            verify_payload(key, payload, &sig),
+            "valid signature must verify"
+        );
     }
 
     #[test]
@@ -197,7 +200,10 @@ mod tests {
         let key2 = b"key-two";
         let payload = b"some-payload";
         let sig = sign_payload(key1, payload);
-        assert!(!verify_payload(key2, payload, &sig), "wrong key must not verify");
+        assert!(
+            !verify_payload(key2, payload, &sig),
+            "wrong key must not verify"
+        );
     }
 
     #[test]
@@ -206,7 +212,10 @@ mod tests {
         let payload = b"original-payload";
         let tampered = b"tampered-payload";
         let sig = sign_payload(key, payload);
-        assert!(!verify_payload(key, tampered, &sig), "tampered payload must not verify");
+        assert!(
+            !verify_payload(key, tampered, &sig),
+            "tampered payload must not verify"
+        );
     }
 
     // SEC-022: AuthzRequest carries hmac_signature field
@@ -222,7 +231,10 @@ mod tests {
             hmac_signature: Some("abc123".into()),
         };
         let json = serde_json::to_string(&req).expect("serialize");
-        assert!(json.contains("hmac_signature"), "hmac_signature must be in JSON when Some");
+        assert!(
+            json.contains("hmac_signature"),
+            "hmac_signature must be in JSON when Some"
+        );
     }
 
     #[test]
@@ -237,6 +249,9 @@ mod tests {
             hmac_signature: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
-        assert!(!json.contains("hmac_signature"), "hmac_signature must be omitted when None");
+        assert!(
+            !json.contains("hmac_signature"),
+            "hmac_signature must be omitted when None"
+        );
     }
 }

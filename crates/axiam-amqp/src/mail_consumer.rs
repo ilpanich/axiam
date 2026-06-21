@@ -263,8 +263,7 @@ pub async fn start_mail_consumer<E, A, U>(
     email_config_repo: E,
     audit_repo: A,
     user_repo: U,
-)
-where
+) where
     E: EmailConfigRepository + 'static,
     A: AuditLogRepository + 'static,
     U: UserRepository + 'static,
@@ -318,7 +317,8 @@ where
             }
         };
 
-        let outcome = send_with_retry_and_audit(&msg, &email_config_repo, &audit_repo, &user_repo).await;
+        let outcome =
+            send_with_retry_and_audit(&msg, &email_config_repo, &audit_repo, &user_repo).await;
 
         match outcome {
             Ok(SendOutcome::Delivered) => {

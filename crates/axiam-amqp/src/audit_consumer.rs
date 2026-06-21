@@ -92,9 +92,9 @@ where
             let received_sig = msg.hmac_signature.take();
             let canonical_bytes =
                 serde_json::to_vec(&msg).unwrap_or_else(|_| delivery.data.clone());
-            let valid = received_sig.as_deref().is_some_and(|sig| {
-                verify_payload(key, &canonical_bytes, sig)
-            });
+            let valid = received_sig
+                .as_deref()
+                .is_some_and(|sig| verify_payload(key, &canonical_bytes, sig));
             if !valid {
                 warn!(
                     delivery_tag = tag,
@@ -110,7 +110,9 @@ where
                 continue;
             }
         } else {
-            warn!("AMQP signing key not configured — AuditEventMessage signatures not verified (SEC-022/055)");
+            warn!(
+                "AMQP signing key not configured — AuditEventMessage signatures not verified (SEC-022/055)"
+            );
         }
 
         let actor_type = match parse_actor_type(&msg.actor_type) {

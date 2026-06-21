@@ -189,7 +189,10 @@ fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid)> {
     // cookie-based auth, so authenticated browser requests carry the access token
     // as a cookie, not a header — without this fallback every UI action was logged
     // as `System` with a nil tenant_id and never appeared in the tenant audit log.
-    let credentials: String = match req.headers().get("Authorization").and_then(|h| h.to_str().ok())
+    let credentials: String = match req
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
     {
         Some(header) => {
             let header = header.trim();

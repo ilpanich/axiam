@@ -39,7 +39,6 @@ pub struct XForwardedForKeyExtractor {
     pub trusted_hops: usize,
 }
 
-
 impl XForwardedForKeyExtractor {
     /// Create an extractor that uses the rightmost-untrusted hop.
     /// `trusted_hops` = number of trusted proxy entries from the right.

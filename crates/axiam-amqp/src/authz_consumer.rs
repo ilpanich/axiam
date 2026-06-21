@@ -93,23 +93,28 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
             let canonical_bytes =
                 serde_json::to_vec(&request).unwrap_or_else(|_| delivery.data.clone());
 
-            let valid = received_sig.as_deref().is_some_and(|sig| {
-                verify_payload(key, &canonical_bytes, sig)
-            });
+            let valid = received_sig
+                .as_deref()
+                .is_some_and(|sig| verify_payload(key, &canonical_bytes, sig));
 
             if !valid {
                 warn!(
                     delivery_tag = tag,
                     "AuthzRequest HMAC verification failed — nacking (SEC-022)"
                 );
-                let _ = delivery.acker.nack(BasicNackOptions {
-                    requeue: false,
-                    ..BasicNackOptions::default()
-                }).await;
+                let _ = delivery
+                    .acker
+                    .nack(BasicNackOptions {
+                        requeue: false,
+                        ..BasicNackOptions::default()
+                    })
+                    .await;
                 continue;
             }
         } else {
-            warn!("AMQP signing key not configured — AuthzRequest signatures not verified (SEC-022)");
+            warn!(
+                "AMQP signing key not configured — AuthzRequest signatures not verified (SEC-022)"
+            );
         }
 
         let correlation_id = request.correlation_id;

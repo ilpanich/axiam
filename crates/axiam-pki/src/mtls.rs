@@ -83,17 +83,15 @@ impl<CR: CertificateRepository, CCR: CaCertificateRepository> DeviceAuthService<
             })?;
 
         // Parse the CA PEM to obtain the public key.
-        let (_, ca_pem_obj) = parse_x509_pem(ca_cert.public_cert_pem.as_bytes()).map_err(|e| {
-            AxiamError::Certificate(format!("invalid CA certificate PEM: {e}"))
-        })?;
+        let (_, ca_pem_obj) = parse_x509_pem(ca_cert.public_cert_pem.as_bytes())
+            .map_err(|e| AxiamError::Certificate(format!("invalid CA certificate PEM: {e}")))?;
         let (_, ca_x509) = parse_x509_certificate(&ca_pem_obj.contents)
             .map_err(|e| AxiamError::Certificate(format!("failed to parse CA certificate: {e}")))?;
 
         // Parse the client cert DER (already extracted from PEM above).
-        let (_, client_x509) = parse_x509_certificate(&pem_obj.contents)
-            .map_err(|e| {
-                AxiamError::Certificate(format!("failed to parse client certificate: {e}"))
-            })?;
+        let (_, client_x509) = parse_x509_certificate(&pem_obj.contents).map_err(|e| {
+            AxiamError::Certificate(format!("failed to parse client certificate: {e}"))
+        })?;
 
         // Cryptographic chain verify — reject if the client cert was not signed by the CA.
         client_x509

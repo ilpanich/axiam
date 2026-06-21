@@ -323,8 +323,13 @@ pub async fn reconcile_default_role_grants<C: Connection>(
         )
         .await
         .map_err(|e| DbError::Migration(format!("reconcile list roles failed: {e}")))?;
-    let find_role =
-        |name: &str| existing_roles.items.iter().find(|r| r.name == name).map(|r| r.id);
+    let find_role = |name: &str| {
+        existing_roles
+            .items
+            .iter()
+            .find(|r| r.name == name)
+            .map(|r| r.id)
+    };
 
     // Only reconcile tenants bootstrapped with the three default roles.
     let (Some(super_admin_id), Some(admin_id), Some(viewer_id)) = (
@@ -368,7 +373,9 @@ pub async fn reconcile_default_role_grants<C: Connection>(
             perm_repo
                 .grant_to_role(tenant_id, super_admin_id, perm.id)
                 .await
-                .map_err(|e| DbError::Migration(format!("reconcile grant super-admin failed: {e}")))?;
+                .map_err(|e| {
+                    DbError::Migration(format!("reconcile grant super-admin failed: {e}"))
+                })?;
             created += 1;
         }
         // admin gets every permission except admin:bootstrap.

@@ -659,11 +659,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         Ok(roles)
     }
 
-    async fn get_role_user_ids(
-        &self,
-        tenant_id: Uuid,
-        role_id: Uuid,
-    ) -> AxiamResult<Vec<Uuid>> {
+    async fn get_role_user_ids(&self, tenant_id: Uuid, role_id: Uuid) -> AxiamResult<Vec<Uuid>> {
         // Select user IDs directly assigned this role. Selecting FROM `user`
         // naturally excludes group edges (group links never match a user id).
         let mut result = self
@@ -687,11 +683,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
             .collect()
     }
 
-    async fn get_role_group_ids(
-        &self,
-        tenant_id: Uuid,
-        role_id: Uuid,
-    ) -> AxiamResult<Vec<Uuid>> {
+    async fn get_role_group_ids(&self, tenant_id: Uuid, role_id: Uuid) -> AxiamResult<Vec<Uuid>> {
         let mut result = self
             .db
             .query(

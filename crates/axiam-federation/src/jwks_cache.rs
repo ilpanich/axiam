@@ -208,7 +208,10 @@ const MAX_JWKS_BODY_BYTES: usize = 512 * 1024;
 fn is_private_jwks_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_broadcast()
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
                 || v4.is_unspecified()
         }
         std::net::IpAddr::V6(v6) => {
@@ -229,9 +232,9 @@ async fn validate_jwks_url(jwks_uri: &str) -> Result<(), FederationError> {
         .ok_or_else(|| FederationError::JwksFetchFailed("JWKS URL has no host".into()))?;
     let port = parsed.port_or_known_default().unwrap_or(443);
 
-    let addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| FederationError::JwksFetchFailed(format!("JWKS host resolution failed: {e}")))?;
+    let addrs = tokio::net::lookup_host((host, port)).await.map_err(|e| {
+        FederationError::JwksFetchFailed(format!("JWKS host resolution failed: {e}"))
+    })?;
 
     for addr in addrs {
         if is_private_jwks_ip(addr.ip()) {

@@ -79,6 +79,9 @@ pub struct UserResponse {
     pub email: String,
     pub status: UserStatus,
     pub mfa_enabled: bool,
+    /// True when the user's email address has been verified
+    /// (`email_verified_at` is set). Exposed for the admin UI / profile.
+    pub email_verified: bool,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -103,6 +106,7 @@ impl From<User> for UserResponse {
             email: u.email,
             status: u.status,
             mfa_enabled: u.mfa_enabled,
+            email_verified: u.email_verified_at.is_some(),
             metadata: u.metadata,
             created_at: u.created_at,
             updated_at: u.updated_at,

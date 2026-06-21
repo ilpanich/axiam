@@ -27,6 +27,8 @@ pub struct CreateOrganizationRequest {
 pub struct UpdateOrganizationRequest {
     pub name: Option<String>,
     pub slug: Option<String>,
+    /// Free-form metadata (the admin UI stores `description` here).
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// `POST /api/v1/organizations`
@@ -187,7 +189,7 @@ pub async fn update<C: Connection>(
     let input = UpdateOrganization {
         name: req.name,
         slug: req.slug,
-        metadata: None,
+        metadata: req.metadata,
     };
     let org = repo.update(org_id, input).await?;
     Ok(HttpResponse::Ok().json(org))

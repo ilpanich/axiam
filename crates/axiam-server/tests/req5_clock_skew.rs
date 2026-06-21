@@ -126,7 +126,7 @@ async fn make_oidc_svc(
 #[tokio::test]
 async fn oidc_exp_minus_30s_within_leeway() {
     let keys = TestKeys::generate();
-    let cache = Arc::new(JwksCache::new());
+    let cache = Arc::new(JwksCache::new_allow_private_networks());
     let (_server, doc, issuer) = make_svc(&keys, cache.clone()).await;
     let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
@@ -155,7 +155,7 @@ async fn oidc_exp_minus_30s_within_leeway() {
 #[tokio::test]
 async fn oidc_exp_minus_90s_beyond_leeway() {
     let keys = TestKeys::generate();
-    let cache = Arc::new(JwksCache::new());
+    let cache = Arc::new(JwksCache::new_allow_private_networks());
     let (_server, doc, issuer) = make_svc(&keys, cache.clone()).await;
     let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
@@ -184,7 +184,7 @@ async fn oidc_exp_minus_90s_beyond_leeway() {
 #[tokio::test]
 async fn oidc_iat_plus_30s_within_leeway() {
     let keys = TestKeys::generate();
-    let cache = Arc::new(JwksCache::new());
+    let cache = Arc::new(JwksCache::new_allow_private_networks());
     let (_server, doc, issuer) = make_svc(&keys, cache.clone()).await;
     let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());
@@ -215,7 +215,7 @@ async fn oidc_iat_plus_30s_within_leeway() {
 #[tokio::test]
 async fn oidc_iat_plus_90s_beyond_leeway() {
     let keys = TestKeys::generate();
-    let cache = Arc::new(JwksCache::new());
+    let cache = Arc::new(JwksCache::new_allow_private_networks());
     let (_server, doc, issuer) = make_svc(&keys, cache.clone()).await;
     let svc = make_oidc_svc(cache).await;
     let cache_key = (Uuid::new_v4(), Uuid::new_v4());

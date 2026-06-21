@@ -135,7 +135,7 @@ async fn setup(
 
     let doc = discovery(&server.uri(), &issuer);
     let client_id = "test-client".to_string();
-    let cache = Arc::new(JwksCache::new());
+    let cache = Arc::new(JwksCache::new_allow_private_networks());
 
     (server, doc, keys, client_id, cache)
 }
@@ -484,7 +484,7 @@ async fn oidc_jwks_served_stale_on_idp_outage() {
 
     // Manually insert a cache entry with fetched_at = now - 2h
     // (past the 1h TTL but within the 24h stale window, D-03).
-    let cache = Arc::new(JwksCache::new());
+    let cache = Arc::new(JwksCache::new_allow_private_networks());
     let tenant_id = Uuid::new_v4();
     let config_id = Uuid::new_v4();
     let cache_key = (tenant_id, config_id);

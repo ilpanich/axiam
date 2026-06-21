@@ -57,12 +57,29 @@ pub type JwksCacheMap = HashMap<(Uuid, Uuid), JwksCacheEntry>;
 ///
 /// Uses a [`tokio::sync::RwLock`] so it can be shared across async handlers
 /// without blocking the executor.
+///
+/// The second field is the SEC-054 SSRF policy: when `false` (the default and
+/// the only value used in production), JWKS URLs that resolve to a
+/// private/loopback IP are rejected. It is `true` only for integration tests
+/// that serve JWKS from a loopback mock server.
 #[derive(Clone)]
-pub struct JwksCache(pub(crate) Arc<RwLock<JwksCacheMap>>);
+pub struct JwksCache(pub(crate) Arc<RwLock<JwksCacheMap>>, pub(crate) bool);
 
 impl JwksCache {
     pub fn new() -> Self {
-        Self(Arc::new(RwLock::new(HashMap::new())))
+        Self(Arc::new(RwLock::new(HashMap::new())), false)
+    }
+
+    /// Test-only seam: construct a cache that permits JWKS URLs resolving to
+    /// private/loopback IPs, bypassing the SEC-054 SSRF guard.
+    ///
+    /// This exists solely so cross-crate integration tests can point the JWKS
+    /// fetcher at a loopback mock server (e.g. wiremock on `127.0.0.1`). It
+    /// MUST NOT be used in production code — production always constructs via
+    /// [`JwksCache::new`], which keeps the SSRF guard active.
+    #[doc(hidden)]
+    pub fn new_allow_private_networks() -> Self {
+        Self(Arc::new(RwLock::new(HashMap::new())), true)
     }
 
     /// Test-only seam: insert a cache entry directly so integration tests can
@@ -103,7 +120,7 @@ impl JwksCache {
         }
 
         // --- Slow path: attempt a fresh fetch ---
-        match fetch_jwks(http, jwks_uri).await {
+        match fetch_jwks(http, jwks_uri, self.1).await {
             Ok(jwks) => {
                 let mut guard = self.0.write().await;
                 let entry = guard.entry(key).or_insert_with(|| JwksCacheEntry {
@@ -171,7 +188,7 @@ impl JwksCache {
         }
 
         // Perform the fetch.
-        match fetch_jwks(http, jwks_uri).await {
+        match fetch_jwks(http, jwks_uri, self.1).await {
             Ok(jwks) => {
                 let mut guard = self.0.write().await;
                 if let Some(entry) = guard.get_mut(&key) {
@@ -224,7 +241,17 @@ fn is_private_jwks_ip(ip: std::net::IpAddr) -> bool {
 }
 
 /// Validate that the JWKS URL does not resolve to a private/loopback IP (SEC-054).
-async fn validate_jwks_url(jwks_uri: &str) -> Result<(), FederationError> {
+///
+/// When `allow_private_networks` is `true` (integration tests only) the check
+/// is skipped so a loopback mock server can be used. Production always passes
+/// `false`.
+async fn validate_jwks_url(
+    jwks_uri: &str,
+    allow_private_networks: bool,
+) -> Result<(), FederationError> {
+    if allow_private_networks {
+        return Ok(());
+    }
     let parsed = url::Url::parse(jwks_uri)
         .map_err(|_| FederationError::JwksFetchFailed("invalid JWKS URL".into()))?;
     let host = parsed
@@ -246,9 +273,13 @@ async fn validate_jwks_url(jwks_uri: &str) -> Result<(), FederationError> {
     Ok(())
 }
 
-async fn fetch_jwks(http: &reqwest::Client, jwks_uri: &str) -> Result<JwkSet, FederationError> {
+async fn fetch_jwks(
+    http: &reqwest::Client,
+    jwks_uri: &str,
+    allow_private_networks: bool,
+) -> Result<JwkSet, FederationError> {
     // SEC-054: Block JWKS URLs that resolve to private/loopback IPs.
-    validate_jwks_url(jwks_uri).await?;
+    validate_jwks_url(jwks_uri, allow_private_networks).await?;
 
     let response = http
         .get(jwks_uri)

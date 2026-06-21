@@ -40,6 +40,11 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     "/api/v1/auth/password/change",
     // Federation OIDC account-linking (authenticated user, no role permission)
     "/api/v1/federation/oidc/authorize",
+    // Federation SAML SP-initiated AuthnRequest (authenticated user, no role
+    // permission). Only present in the OpenAPI spec when the `saml` feature is
+    // compiled; listing it unconditionally is harmless (no reverse openapi
+    // membership check) and mirrors the SAML entries in PUBLIC_PATHS.
+    "/api/v1/federation/saml/authn-request",
 ];
 
 /// Returns true if `openapi_path` is covered by any `PUBLIC_PATHS` entry.

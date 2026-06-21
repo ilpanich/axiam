@@ -150,26 +150,33 @@ jobs:
           scan-ref: .
           scanners: vuln
           severity: HIGH,CRITICAL
+          # trivy-action writes ALL severities into the SARIF by default
+          # ("Building SARIF report with all severities") — the `severity`
+          # input only gates the table/exit-code. This flag makes the SARIF
+          # honour the filter too, so the code-scanning dashboard isn't flooded
+          # with LOW/MEDIUM advisories that fail the Trivy check.
+          limit-severities-for-sarif: true
           ignore-unfixed: true
           exit-code: '1'
           format: sarif
           output: trivy-fs.sarif
 
       # --- Trivy config scan (Dockerfile/K8s misconfig — advisory, exit 0) ---
-      # Gated to HIGH,CRITICAL: the manifests were hardened to clear the only
-      # HIGH finding (KSV-0118, pod securityContext). The residual MEDIUM/LOW
-      # advisories are structural and non-hardenable — AVD-KSV-0125 (ghcr.io is
-      # the project's own registry; trusted-registry is scanner policy, not a
-      # manifest field) and AVD-KSV-0020/0021 (nginx-unprivileged requires
-      # UID/GID 101). They are intentionally not reported here so the advisory
-      # code-scanning check stays green while real HIGH/CRITICAL regressions
-      # would still surface.
+      # Gated to HIGH,CRITICAL via limit-severities-for-sarif (see fs scan note):
+      # the manifests were hardened to clear the only HIGH finding (KSV-0118, pod
+      # securityContext). The residual MEDIUM/LOW advisories are structural and
+      # non-hardenable — AVD-KSV-0125 (ghcr.io is the project's own registry;
+      # trusted-registry is scanner policy, not a manifest field) and
+      # AVD-KSV-0020/0021 (nginx-unprivileged requires UID/GID 101). They are
+      # intentionally kept out of the SARIF so the advisory code-scanning check
+      # stays green while real HIGH/CRITICAL regressions would still surface.
       - name: Trivy config scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           scan-type: config
           scan-ref: .
           severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
           format: sarif
           output: trivy-config.sarif
           exit-code: '0'

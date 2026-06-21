@@ -71,6 +71,8 @@ use crate::handlers;
         handlers::roles::unassign_from_user,
         handlers::roles::assign_to_group,
         handlers::roles::unassign_from_group,
+        handlers::roles::list_users,
+        handlers::roles::list_groups,
         // Permissions
         handlers::permissions::create,
         handlers::permissions::list,

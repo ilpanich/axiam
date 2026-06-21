@@ -329,6 +329,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
             )
             .service(
                 web::resource("/roles/{role_id}/users")
+                    .route(web::get().to(handlers::roles::list_users::<C>))
                     .route(web::post().to(handlers::roles::assign_to_user::<C>)),
             )
             .service(
@@ -337,6 +338,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
             )
             .service(
                 web::resource("/roles/{role_id}/groups")
+                    .route(web::get().to(handlers::roles::list_groups::<C>))
                     .route(web::post().to(handlers::roles::assign_to_group::<C>)),
             )
             .service(

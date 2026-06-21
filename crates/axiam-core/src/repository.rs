@@ -264,6 +264,20 @@ pub trait RoleRepository: Send + Sync {
         tenant_id: Uuid,
         group_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Role>>> + Send;
+
+    /// Get the IDs of all users directly assigned this role.
+    fn get_role_user_ids(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send;
+
+    /// Get the IDs of all groups directly assigned this role.
+    fn get_role_group_ids(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send;
 }
 
 pub trait PermissionRepository: Send + Sync {

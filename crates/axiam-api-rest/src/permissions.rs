@@ -363,12 +363,14 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/roles/{role_id}", "roles:get"),
     ("PUT", "/api/v1/roles/{role_id}", "roles:update"),
     ("DELETE", "/api/v1/roles/{role_id}", "roles:delete"),
+    ("GET", "/api/v1/roles/{role_id}/users", "roles:get"),
     ("POST", "/api/v1/roles/{role_id}/users", "roles:assign"),
     (
         "DELETE",
         "/api/v1/roles/{role_id}/users/{user_id}",
         "roles:unassign",
     ),
+    ("GET", "/api/v1/roles/{role_id}/groups", "roles:get"),
     ("POST", "/api/v1/roles/{role_id}/groups", "roles:assign"),
     (
         "DELETE",

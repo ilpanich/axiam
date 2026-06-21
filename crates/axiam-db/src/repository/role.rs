@@ -658,4 +658,58 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         Ok(roles)
     }
+
+    async fn get_role_user_ids(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> AxiamResult<Vec<Uuid>> {
+        // Select user IDs directly assigned this role. Selecting FROM `user`
+        // naturally excludes group edges (group links never match a user id).
+        let mut result = self
+            .db
+            .query(
+                "SELECT VALUE meta::id(id) FROM user \
+                 WHERE tenant_id = $tenant_id \
+                 AND id IN (\
+                     SELECT VALUE in FROM has_role \
+                     WHERE out = type::record('role', $role_id)\
+                 )",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("role_id", role_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let ids: Vec<String> = result.take(0).map_err(DbError::from)?;
+        ids.iter()
+            .map(|s| parse_uuid(s, "user_id").map_err(Into::into))
+            .collect()
+    }
+
+    async fn get_role_group_ids(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> AxiamResult<Vec<Uuid>> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT VALUE meta::id(id) FROM group \
+                 WHERE tenant_id = $tenant_id \
+                 AND id IN (\
+                     SELECT VALUE in FROM has_role \
+                     WHERE out = type::record('role', $role_id)\
+                 )",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("role_id", role_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let ids: Vec<String> = result.take(0).map_err(DbError::from)?;
+        ids.iter()
+            .map(|s| parse_uuid(s, "group_id").map_err(Into::into))
+            .collect()
+    }
 }

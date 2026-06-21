@@ -48,6 +48,10 @@ type TestDb = surrealdb::engine::local::Db;
 /// Test-only placeholder password — not a real credential.
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
+/// Arbitrary CSRF double-submit token (SEC-046) — matching `axiam_csrf` cookie
+/// + `X-CSRF-Token` header; the middleware only checks they are equal.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 // -------------------------------------------------------------------------
 // Key / config helpers (same Ed25519 keypair as other integration tests)
 // -------------------------------------------------------------------------
@@ -341,6 +345,8 @@ async fn no_permission_returns_403() {
         .uri("/api/v1/users")
         .peer_addr("127.0.0.1:12345".parse().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "newcomer",
             "email": "newcomer@example.com",
@@ -375,6 +381,8 @@ async fn admin_can_access() {
         .uri("/api/v1/users")
         .peer_addr("127.0.0.1:12345".parse().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -401,6 +409,8 @@ async fn self_service_owner_allowed() {
     let req = test::TestRequest::get()
         .uri(&format!("/api/v1/users/{viewer_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -432,6 +442,8 @@ async fn self_service_nonowner_denied() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/users/{other_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "hijacked"
         }))

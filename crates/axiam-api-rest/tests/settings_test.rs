@@ -21,6 +21,12 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_keypair() -> (String, String) {
     let private_key = "\
 -----BEGIN PRIVATE KEY-----
@@ -158,6 +164,8 @@ async fn set_org_settings_returns_200() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/organizations/{org_id}/settings"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "min_length": 16,
             "require_uppercase": true,
@@ -234,6 +242,8 @@ async fn set_tenant_settings_more_restrictive_ok() {
     let req = test::TestRequest::put()
         .uri("/api/v1/settings")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "min_length": 16,
             "access_token_lifetime_secs": 600,
@@ -266,6 +276,8 @@ async fn set_tenant_settings_less_restrictive_returns_400() {
     let req = test::TestRequest::put()
         .uri("/api/v1/settings")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "min_length": 4,
             "access_token_lifetime_secs": 9999
@@ -296,6 +308,8 @@ async fn get_tenant_settings_reflects_overrides() {
     let req = test::TestRequest::put()
         .uri("/api/v1/settings")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "min_length": 20,
             "mfa_enforced": true

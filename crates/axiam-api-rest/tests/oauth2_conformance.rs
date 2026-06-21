@@ -44,6 +44,13 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+/// `/oauth2/*` endpoints are CSRF-exempt and intentionally receive no token.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 // ---------------------------------------------------------------------------
 // Test scaffolding — mirrors oauth2_flow_test.rs exactly
 // ---------------------------------------------------------------------------
@@ -199,6 +206,8 @@ async fn create_client(
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Conformance Test Client",
             "redirect_uris": [redirect_uri],

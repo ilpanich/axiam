@@ -20,6 +20,12 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_keypair() -> (String, String) {
     // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
     let private_key = [
@@ -133,6 +139,8 @@ async fn create_tenant_returns_201() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/organizations/{org_id}/tenants"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "New Tenant",
             "slug": "new-tenant"
@@ -201,6 +209,8 @@ async fn update_tenant_returns_200() {
             "/api/v1/organizations/{org_id}/tenants/{tenant_id}"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "Updated Tenant" }))
         .to_request();
 
@@ -222,6 +232,8 @@ async fn delete_tenant_returns_204() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/organizations/{org_id}/tenants"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "To Delete",
             "slug": "to-delete"
@@ -236,6 +248,8 @@ async fn delete_tenant_returns_204() {
             "/api/v1/organizations/{org_id}/tenants/{delete_id}"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -316,6 +330,8 @@ async fn cross_org_create_tenant_returns_403() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/organizations/{}/tenants", org_b.id))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Sneaky Tenant",
             "slug": "sneaky-tenant"

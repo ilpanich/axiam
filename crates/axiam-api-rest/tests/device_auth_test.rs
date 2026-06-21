@@ -26,6 +26,12 @@ type TestDb = surrealdb::engine::local::Db;
 /// Test-only placeholder password — not a real credential.
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) and CSRF-exempt requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_keypair() -> (String, String) {
     // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
     let pem_header = "-----BEGIN PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
@@ -160,6 +166,8 @@ macro_rules! generate_ca {
                 $org_id
             ))
             .insert_header(("Authorization", format!("Bearer {}", $token)))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .insert_header(("Content-Type", "application/json"))
             .set_json(serde_json::json!({
                 "subject": "Test CA",
@@ -180,6 +188,8 @@ macro_rules! generate_device_cert {
         let req = test::TestRequest::post()
             .uri("/api/v1/certificates")
             .insert_header(("Authorization", format!("Bearer {}", $token)))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .insert_header(("Content-Type", "application/json"))
             .set_json(serde_json::json!({
                 "issuer_ca_id": $ca_id,
@@ -204,6 +214,8 @@ macro_rules! create_service_account {
         let req = test::TestRequest::post()
             .uri("/api/v1/service-accounts")
             .insert_header(("Authorization", format!("Bearer {}", $token)))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .insert_header(("Content-Type", "application/json"))
             .set_json(serde_json::json!({
                 "name": "iot-gateway"
@@ -256,6 +268,8 @@ async fn device_auth_full_flow() {
             "/api/v1/service-accounts/{sa_id}/bind-certificate"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "certificate_id": cert_id
@@ -326,6 +340,8 @@ async fn bind_certificate_requires_auth() {
             "/api/v1/service-accounts/{}/bind-certificate",
             Uuid::new_v4()
         ))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "certificate_id": Uuid::new_v4().to_string()
@@ -353,6 +369,8 @@ async fn device_auth_revoked_cert_returns_error() {
             "/api/v1/service-accounts/{sa_id}/bind-certificate"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({ "certificate_id": cert_id }))
         .to_request();
@@ -363,6 +381,8 @@ async fn device_auth_revoked_cert_returns_error() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/certificates/{cert_id}/revoke"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);

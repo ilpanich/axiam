@@ -25,6 +25,12 @@ type TestDb = surrealdb::engine::local::Db;
 /// Test-only placeholder password — not a real credential.
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_keypair() -> (String, String) {
     // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
     let private_key = [
@@ -149,6 +155,8 @@ async fn generate_ca_certificate_returns_201_with_private_key() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/organizations/{org_id}/ca-certificates"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "subject": "Test CA",
@@ -192,6 +200,8 @@ async fn list_ca_certificates_returns_paginated_results() {
         let req = test::TestRequest::post()
             .uri(&format!("/api/v1/organizations/{org_id}/ca-certificates"))
             .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .insert_header(("Content-Type", "application/json"))
             .set_json(serde_json::json!({
                 "subject": subject,
@@ -206,6 +216,8 @@ async fn list_ca_certificates_returns_paginated_results() {
     let req = test::TestRequest::get()
         .uri(&format!("/api/v1/organizations/{org_id}/ca-certificates"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -228,6 +240,8 @@ async fn get_ca_certificate_by_id() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/organizations/{org_id}/ca-certificates"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "subject": "My CA",
@@ -245,6 +259,8 @@ async fn get_ca_certificate_by_id() {
             "/api/v1/organizations/{org_id}/ca-certificates/{cert_id}"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
@@ -268,6 +284,8 @@ async fn revoke_ca_certificate() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/organizations/{org_id}/ca-certificates"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "subject": "Revocable CA",
@@ -285,6 +303,8 @@ async fn revoke_ca_certificate() {
             "/api/v1/organizations/{org_id}/ca-certificates/{cert_id}/revoke"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
@@ -298,6 +318,8 @@ async fn revoke_ca_certificate() {
             "/api/v1/organizations/{org_id}/ca-certificates/{cert_id}"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
@@ -339,7 +361,11 @@ async fn ca_certificate_endpoints_require_auth() {
 
     for (method, uri) in endpoints {
         let req = match method {
-            "POST" => test::TestRequest::post().uri(&uri).to_request(),
+            "POST" => test::TestRequest::post()
+                .uri(&uri)
+                .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+                .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+                .to_request(),
             _ => test::TestRequest::get().uri(&uri).to_request(),
         };
         let resp = test::call_service(&app, req).await;
@@ -383,6 +409,8 @@ async fn cross_org_list_ca_certificates_returns_403() {
     let req = test::TestRequest::get()
         .uri(&format!("/api/v1/organizations/{org_b_id}/ca-certificates"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(
@@ -395,6 +423,8 @@ async fn cross_org_list_ca_certificates_returns_403() {
     let req = test::TestRequest::get()
         .uri(&format!("/api/v1/organizations/{org_a_id}/ca-certificates"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(
@@ -430,6 +460,8 @@ async fn cross_org_generate_ca_certificate_returns_403() {
             org_b.id
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "subject": "Sneaky CA",
@@ -472,6 +504,8 @@ async fn cross_org_get_ca_certificate_returns_403() {
             Uuid::new_v4()
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(

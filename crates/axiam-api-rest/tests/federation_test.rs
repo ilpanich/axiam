@@ -48,6 +48,12 @@ fn test_keypair() -> (String, String) {
 /// Test AES-256-GCM encryption key (32 bytes of 0x2a — test-only fixture).
 const TEST_FED_ENC_KEY: [u8; 32] = [0x2a; 32];
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_auth_config() -> AuthConfig {
     let (priv_pem, pub_pem) = test_keypair();
     AuthConfig {
@@ -169,6 +175,8 @@ async fn create_test_config(
     let req = test::TestRequest::post()
         .uri("/api/v1/federation-configs")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "provider": "Google",
             "protocol": "OidcConnect",
@@ -199,6 +207,8 @@ async fn create_federation_config_returns_201() {
     let req = test::TestRequest::post()
         .uri("/api/v1/federation-configs")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "provider": "Google",
             "protocol": "OidcConnect",
@@ -240,6 +250,8 @@ async fn list_federation_configs_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/federation-configs")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "provider": "Okta",
             "protocol": "Saml",
@@ -308,6 +320,8 @@ async fn update_federation_config_returns_200() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/federation-configs/{id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "provider": "Updated Provider",
             "enabled": false
@@ -337,6 +351,8 @@ async fn delete_federation_config_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/federation-configs/{id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -380,6 +396,8 @@ async fn create_federation_config_rejects_invalid_protocol() {
     let req = test::TestRequest::post()
         .uri("/api/v1/federation-configs")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "provider": "Bad Provider",
             "protocol": "InvalidProtocol",
@@ -401,6 +419,8 @@ async fn create_federation_config_without_auth_returns_401() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation-configs")
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "provider": "Google",
             "protocol": "OidcConnect",
@@ -447,6 +467,8 @@ async fn delete_nonexistent_federation_link_returns_404() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/federation-links/{fake_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -468,6 +490,8 @@ async fn create_saml_config(
     let req = test::TestRequest::post()
         .uri("/api/v1/federation-configs")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "provider": "Test SAML IdP",
             "protocol": "Saml",
@@ -523,6 +547,8 @@ async fn saml_authn_request_rejects_empty_acs_url() {
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/authn-request")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "config_id": config_id,
             "acs_url": ""
@@ -547,6 +573,8 @@ async fn saml_acs_rejects_empty_saml_response() {
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/acs")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "config_id": config_id,
             "saml_response": ""
@@ -648,6 +676,8 @@ async fn saml_authn_request_without_auth_returns_401() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/authn-request")
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "config_id": Uuid::new_v4().to_string(),
             "acs_url": "https://example.com/acs"
@@ -837,6 +867,8 @@ async fn oidc_secret_update_rotates_encrypted_secret() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/federation-configs/{id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "client_secret": "new-rotated-secret" }))
         .to_request();
     let resp = test::call_service(&app, req).await;

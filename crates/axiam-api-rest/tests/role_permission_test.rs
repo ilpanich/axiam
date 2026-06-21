@@ -24,6 +24,12 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_keypair() -> (String, String) {
     let private_key = "\
 -----BEGIN PRIVATE KEY-----
@@ -145,6 +151,8 @@ async fn create_role_returns_201() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Admin",
             "description": "Full access",
@@ -172,6 +180,8 @@ async fn list_roles_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Viewer",
             "description": "Read only",
@@ -203,6 +213,8 @@ async fn get_role_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Editor",
             "description": "Can edit",
@@ -236,6 +248,8 @@ async fn update_role_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Old",
             "description": "Old desc",
@@ -249,6 +263,8 @@ async fn update_role_returns_200() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/roles/{role_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "Updated" }))
         .to_request();
 
@@ -270,6 +286,8 @@ async fn delete_role_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "ToDelete",
             "description": "Will be deleted",
@@ -283,6 +301,8 @@ async fn delete_role_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/roles/{role_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -304,6 +324,8 @@ async fn create_permission_returns_201() {
     let req = test::TestRequest::post()
         .uri("/api/v1/permissions")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "action": "read",
             "description": "Read access"
@@ -328,6 +350,8 @@ async fn list_permissions_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/permissions")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "action": "write",
             "description": "Write access"
@@ -363,6 +387,8 @@ async fn grant_permission_to_role_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Admin",
             "description": "Admin role",
@@ -377,6 +403,8 @@ async fn grant_permission_to_role_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/permissions")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "action": "read",
             "description": "Read access"
@@ -390,6 +418,8 @@ async fn grant_permission_to_role_returns_204() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/roles/{role_id}/permissions"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "permission_id": perm_id }))
         .to_request();
 
@@ -409,6 +439,8 @@ async fn list_role_permissions_returns_grants() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Admin",
             "description": "Admin role",
@@ -422,6 +454,8 @@ async fn list_role_permissions_returns_grants() {
     let req = test::TestRequest::post()
         .uri("/api/v1/permissions")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "action": "delete",
             "description": "Delete access"
@@ -434,6 +468,8 @@ async fn list_role_permissions_returns_grants() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/roles/{role_id}/permissions"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "permission_id": perm_id }))
         .to_request();
     test::call_service(&app, req).await;
@@ -465,6 +501,8 @@ async fn revoke_permission_from_role_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Admin",
             "description": "Admin role",
@@ -478,6 +516,8 @@ async fn revoke_permission_from_role_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/permissions")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "action": "write",
             "description": "Write access"
@@ -490,6 +530,8 @@ async fn revoke_permission_from_role_returns_204() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/roles/{role_id}/permissions"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "permission_id": perm_id }))
         .to_request();
     test::call_service(&app, req).await;
@@ -498,6 +540,8 @@ async fn revoke_permission_from_role_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/roles/{role_id}/permissions/{perm_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -520,6 +564,8 @@ async fn assign_role_to_user_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Admin",
             "description": "Admin role",
@@ -534,6 +580,8 @@ async fn assign_role_to_user_returns_204() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/roles/{role_id}/users"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "user_id": user_id }))
         .to_request();
 
@@ -553,6 +601,8 @@ async fn unassign_role_from_user_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Admin",
             "description": "Admin role",
@@ -566,6 +616,8 @@ async fn unassign_role_from_user_returns_204() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/roles/{role_id}/users"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "user_id": user_id }))
         .to_request();
     test::call_service(&app, req).await;
@@ -574,6 +626,8 @@ async fn unassign_role_from_user_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/roles/{role_id}/users/{user_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -605,6 +659,8 @@ async fn assign_role_to_group_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/roles")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Editor",
             "description": "Can edit",
@@ -619,6 +675,8 @@ async fn assign_role_to_group_returns_204() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/roles/{role_id}/groups"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "group_id": group.id }))
         .to_request();
 

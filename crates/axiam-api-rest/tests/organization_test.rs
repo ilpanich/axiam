@@ -25,6 +25,12 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_keypair() -> (String, String) {
     // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
     let private_key = [
@@ -195,6 +201,8 @@ async fn create_organization_returns_201() {
     let req = test::TestRequest::post()
         .uri("/api/v1/organizations")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "New Org",
             "slug": "new-org"
@@ -290,6 +298,8 @@ async fn update_organization_returns_200() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/organizations/{org_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "Updated Org" }))
         .to_request();
 
@@ -325,6 +335,8 @@ async fn delete_organization_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/organizations/{delete_id}"))
         .insert_header(("Authorization", format!("Bearer {delete_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -400,6 +412,8 @@ async fn cross_org_update_organization_returns_403() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/organizations/{}", org_b.id))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "Hacked" }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -430,6 +444,8 @@ async fn cross_org_delete_organization_returns_403() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/organizations/{}", org_b.id))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(
@@ -457,6 +473,8 @@ async fn non_super_admin_create_organization_returns_403() {
     let req = test::TestRequest::post()
         .uri("/api/v1/organizations")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Unauthorized Org",
             "slug": "unauth-org"
@@ -514,6 +532,8 @@ async fn super_admin_create_organization_returns_2xx() {
     let req = test::TestRequest::post()
         .uri("/api/v1/organizations")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Super Admin Org",
             "slug": "super-admin-org"

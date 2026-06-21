@@ -26,6 +26,12 @@ type TestDb = surrealdb::engine::local::Db;
 /// Test-only placeholder password — not a real credential.
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_keypair() -> (String, String) {
     // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
     let pem_header = "-----BEGIN PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
@@ -171,6 +177,8 @@ async fn pgp_key_generate_ed25519() {
     let req = test::TestRequest::post()
         .uri("/api/v1/pgp-keys")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "name": "Audit Signer",
@@ -210,6 +218,8 @@ async fn pgp_key_crud_lifecycle() {
     let req = test::TestRequest::post()
         .uri("/api/v1/pgp-keys")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "name": "Export Key",
@@ -247,6 +257,8 @@ async fn pgp_key_crud_lifecycle() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/pgp-keys/{key_id}/revoke"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
@@ -274,6 +286,8 @@ async fn pgp_key_encrypt_for_export() {
     let req = test::TestRequest::post()
         .uri("/api/v1/pgp-keys")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "name": "Export Key",
@@ -295,6 +309,8 @@ async fn pgp_key_encrypt_for_export() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/pgp-keys/{key_id}/encrypt"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "data_base64": plaintext
@@ -320,6 +336,8 @@ async fn pgp_key_requires_auth() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/pgp-keys")
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "name": "No Auth Key",
@@ -343,6 +361,8 @@ async fn pgp_key_rsa4096_generation() {
     let req = test::TestRequest::post()
         .uri("/api/v1/pgp-keys")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "name": "RSA Export Key",

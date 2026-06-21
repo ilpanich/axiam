@@ -20,6 +20,12 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_keypair() -> (String, String) {
     let private_key = "\
 -----BEGIN PRIVATE KEY-----
@@ -135,6 +141,8 @@ async fn create_user_returns_201() {
         .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "alice",
             "email": "alice@example.com",
@@ -164,6 +172,8 @@ async fn create_user_omits_sensitive_fields() {
         .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "bob",
             "email": "bob@example.com",
@@ -240,6 +250,8 @@ async fn update_user_returns_200() {
         .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{user_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "admin-updated",
             "status": "Active"
@@ -267,6 +279,8 @@ async fn delete_user_returns_204() {
         .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "to-delete",
             "email": "delete@example.com",
@@ -281,6 +295,8 @@ async fn delete_user_returns_204() {
         .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{delete_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -326,6 +342,8 @@ async fn unlock_user_returns_200() {
         .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{user_id}/unlock"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;

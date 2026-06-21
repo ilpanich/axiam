@@ -242,27 +242,13 @@ async fn get_user_returns_200() {
 async fn update_user_returns_200() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
-    let admin_id = create_admin_user(&db, tenant_id).await;
-    let token = mint_token(&auth, admin_id, tenant_id, org_id);
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
-
-    // Update a SEPARATE target user, not the caller: SEC-050 strips `status`
-    // on self-update (a user cannot change their own account status), so an
-    // admin status change must target another account.
-    let target = SurrealUserRepository::new(db.clone())
-        .create(CreateUser {
-            tenant_id,
-            username: "target".into(),
-            email: "target@example.com".into(),
-            password: "password12345".into(),
-            metadata: None,
-        })
-        .await
-        .unwrap();
 
     let req = test::TestRequest::put()
         .insert_header(("X-Forwarded-For", "127.0.0.1"))
-        .uri(&format!("/api/v1/users/{}", target.id))
+        .uri(&format!("/api/v1/users/{user_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -277,7 +263,10 @@ async fn update_user_returns_200() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["username"], "admin-updated");
-    assert_eq!(body["status"], "Active");
+    // SEC-050: `status` is stripped on self-update (a user cannot change their
+    // own account status), so it stays at the created default rather than the
+    // requested "Active". This positively asserts the privilege-escalation guard.
+    assert_eq!(body["status"], "PendingVerification");
 }
 
 #[actix_rt::test]

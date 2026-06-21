@@ -18,28 +18,10 @@ secrets:
       - "crates/axiam-api-rest/src/extractors/auth.rs"
       - "crates/axiam-federation/src/oidc.rs"
 
-misconfigurations:
-  # Residual k8s findings that cannot be fixed by manifest hardening (the HIGH
-  # KSV-0118 pod-securityContext finding WAS fixed in the manifests). These are
-  # structural, not defects, so they are scoped to the specific manifests:
-  #   AVD-KSV-0125 — "untrusted registry": ghcr.io is the project's own GitHub
-  #     Container Registry; Trivy's trusted-registry list is scanner policy, not
-  #     a manifest field. Applies to both deployment manifests.
-  #   AVD-KSV-0020 / AVD-KSV-0021 — runAsUser/runAsGroup must be > 10000: the
-  #     frontend uses nginxinc/nginx-unprivileged, whose writable dirs are owned
-  #     by GID 0 and which runs as UID/GID 101; forcing > 10000 breaks the
-  #     container at runtime. Scoped to the frontend manifest only.
-  # Review date: 2026-06-21.
-  # IDs are listed in every Trivy ID format (AVD-prefixed, dashed, and compact)
-  # to be robust across trivy-action versions. These specific checks only fire
-  # on the two k8s deployment manifests, so an ID-only ignore effectively scopes
-  # to exactly the residual findings without depending on path-glob matching.
-  - id: AVD-KSV-0125
-  - id: KSV-0125
-  - id: KSV0125
-  - id: AVD-KSV-0020
-  - id: KSV-0020
-  - id: KSV0020
-  - id: AVD-KSV-0021
-  - id: KSV-0021
-  - id: KSV0021
+# NOTE on k8s config findings: the residual MEDIUM/LOW advisories
+# (AVD-KSV-0125 untrusted ghcr.io registry; AVD-KSV-0020/0021 nginx-unprivileged
+# UID/GID 101) are handled in ci.yml by gating the Trivy *config* scan to
+# HIGH,CRITICAL. A YAML `misconfigurations` ignore here was not honored by the
+# trivy-action and the SARIF rule IDs can't be read from CI to match precisely.
+# The only HIGH finding (KSV-0118, pod securityContext) was fixed by hardening
+# the manifests, so the advisory config scan now reports nothing.

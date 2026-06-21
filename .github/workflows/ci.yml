@@ -260,8 +260,20 @@ jobs:
         # --build forces the server image to be built from this PR's source code.
         # Using a pre-built registry image (ghcr.io/axiamhq/axiam/server:latest)
         # would produce false-green results on PR branches (W8 — stale image).
-        run: docker compose -f docker/docker-compose.e2e.yml up -d --build --wait
+        run: |
+          # load_config() asserts the JWT signing keypair is non-empty, else the
+          # server panics on startup (exit 101). Generate an ephemeral Ed25519
+          # keypair for this run and pass it through to the server container
+          # (compose substitutes the ${...} refs in docker-compose.e2e.yml).
+          AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(openssl genpkey -algorithm ed25519)"
+          AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(printf '%s' "$AXIAM__AUTH__JWT_PRIVATE_KEY_PEM" | openssl pkey -pubout)"
+          export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM AXIAM__AUTH__JWT_PUBLIC_KEY_PEM
+          docker compose -f docker/docker-compose.e2e.yml up -d --build --wait
         timeout-minutes: 15
+
+      - name: Dump server logs on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.e2e.yml logs axiam-server
 
       - name: Bootstrap E2E fixture (org + tenant + admin)
         run: bash scripts/e2e-bootstrap.sh

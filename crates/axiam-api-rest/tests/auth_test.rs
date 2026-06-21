@@ -1034,10 +1034,14 @@ async fn reset_mfa_requires_authentication() {
     let auth = mfa_auth_config();
     let app = test_app!(db, auth);
 
-    // POST without any cookie → 401.
+    // POST with a valid CSRF double-submit token but NO access cookie. The CSRF
+    // middleware (outermost on /api/v1) passes when cookie == header; the inner
+    // AuthzMiddleware then rejects the missing credential with 401.
     let req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/api/v1/users/{user_id}/reset-mfa"))
+        .insert_header(("Cookie", cookie_header(&[("axiam_csrf", "test-csrf")])))
+        .insert_header(("X-CSRF-Token", "test-csrf"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(
@@ -1104,13 +1108,18 @@ async fn reset_mfa_denied_for_non_admin_returns_403() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     let access_token = extract_cookie_value(&resp, "axiam_access").unwrap();
+    let csrf_token = extract_cookie_value(&resp, "axiam_csrf").unwrap();
 
-    // Reset MFA for the target user — using cookie-based auth.
-    // The /api/v1 scope has no CSRF middleware, so no X-CSRF-Token needed here.
+    // Reset MFA for the target user — cookie-based auth plus the CSRF
+    // double-submit token (the /api/v1 scope is CSRF-protected, SEC-046).
     let req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/api/v1/users/{}/reset-mfa", target.id))
-        .insert_header(("Cookie", format!("axiam_access={access_token}")))
+        .insert_header((
+            "Cookie",
+            cookie_header(&[("axiam_access", &access_token), ("axiam_csrf", &csrf_token)]),
+        ))
+        .insert_header(("X-CSRF-Token", csrf_token.clone()))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(
@@ -1169,11 +1178,16 @@ async fn reset_mfa_allowed_for_admin_returns_204() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     let access_token = extract_cookie_value(&resp, "axiam_access").unwrap();
+    let csrf_token = extract_cookie_value(&resp, "axiam_csrf").unwrap();
 
     let req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/api/v1/users/{}/reset-mfa", target.id))
-        .insert_header(("Cookie", format!("axiam_access={access_token}")))
+        .insert_header((
+            "Cookie",
+            cookie_header(&[("axiam_access", &access_token), ("axiam_csrf", &csrf_token)]),
+        ))
+        .insert_header(("X-CSRF-Token", csrf_token.clone()))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(

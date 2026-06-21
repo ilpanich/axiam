@@ -19,6 +19,16 @@ spec:
         app: axiam
         component: rabbitmq
     spec:
+      # Pod-level restricted security context (KSV-0118). Mirrors the container
+      # context below; fsGroup makes the /var/lib/rabbitmq PVC writable under the
+      # non-root rabbitmq UID (999).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: rabbitmq
           image: rabbitmq:4-management-alpine

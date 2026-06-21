@@ -19,6 +19,15 @@ spec:
         app: axiam
         component: surrealdb
     spec:
+      # Pod-level restricted security context (KSV-0118). Mirrors the container
+      # context below; fsGroup makes the /data PVC writable under the non-root UID.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: surrealdb
           image: surrealdb/surrealdb:v3

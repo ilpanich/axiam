@@ -145,6 +145,9 @@ jobs:
           exit-code: '1'
           format: sarif
           output: trivy-fs.sarif
+          # Scoped suppressions for documented false positives (test-only key
+          # fixtures). See .trivyignore.yaml for the per-path rationale.
+          trivyignores: .trivyignore.yaml
 
       # --- Trivy config scan (Dockerfile/K8s misconfig — advisory, exit 0) ---
       - name: Trivy config scan

@@ -1,0 +1,19 @@
+# Trivy ignore file (YAML format) — scoped suppressions.
+# Docs: https://trivy.dev/latest/docs/configuration/filtering/#by-finding-ids
+#
+# Wired into the "Trivy filesystem scan" step in .github/workflows/ci.yml via
+# the `trivyignores` input. Keep every entry scoped (path-pinned) and documented.
+
+secrets:
+  # Trivy's built-in `private-key` rule (title: "Asymmetric Private Key") flags
+  # the Ed25519 PEM literals embedded in these unit-test modules. They are
+  # throwaway test fixtures (generated with `openssl genpkey -algorithm Ed25519`),
+  # live inside `#[cfg(test)]` blocks, and are explicitly labelled "NOT secret".
+  # They sign tokens only in tests. Real secret detection remains active here via
+  # the dedicated GitGuardian check and Trivy's rule everywhere else in the tree.
+  # Review date: 2026-06-21.
+  - id: private-key
+    paths:
+      - "crates/axiam-auth/src/token.rs"
+      - "crates/axiam-api-rest/src/extractors/auth.rs"
+      - "crates/axiam-federation/src/oidc.rs"

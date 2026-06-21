@@ -79,13 +79,8 @@ async fn insert_saml_config(
     let tenant_id = Uuid::new_v4();
     let config_id = Uuid::new_v4();
 
-    let cert_value = match &idp_signing_cert_pem {
-        Some(pem) => format!("'{pem}'"),
-        None => "NONE".to_string(),
-    };
-
     // Build query dynamically to handle optional cert.
-    let query = if let Some(pem) = &idp_signing_cert_pem {
+    let query = if idp_signing_cert_pem.is_some() {
         format!(
             "CREATE type::record('federation_config', $id) SET \
              tenant_id = $tenant_id, \
@@ -177,6 +172,8 @@ async fn saml_rejects_missing_signing_cert() {
             config_id,
             &fixture_b64("well_signed_response.xml"),
             None,
+            None,
+            None,
         )
         .await;
 
@@ -206,6 +203,8 @@ async fn saml_rejects_tampered_response() {
             tenant_id,
             config_id,
             &fixture_b64("tampered_response.xml"),
+            None,
+            None,
             None,
         )
         .await;
@@ -285,6 +284,8 @@ async fn saml_rejects_expired_not_on_or_after() {
             config_id,
             &STANDARD.encode(expired_xml.as_bytes()),
             None,
+            None,
+            None,
         )
         .await;
 
@@ -320,12 +321,12 @@ async fn saml_rejects_replayed_assertion() {
 
     // First submission: should succeed (or fail for non-xmlsec signature reasons).
     let first = svc
-        .handle_saml_response(tenant_id, config_id, &b64, None)
+        .handle_saml_response(tenant_id, config_id, &b64, None, None, None)
         .await;
 
     // Second submission: must fail with AssertionReplay.
     let second = svc
-        .handle_saml_response(tenant_id, config_id, &b64, None)
+        .handle_saml_response(tenant_id, config_id, &b64, None, None, None)
         .await;
 
     match first {
@@ -401,7 +402,14 @@ async fn saml_clock_skew_documents_current_behaviour() {
     );
 
     let result = svc
-        .handle_saml_response(tenant_id, config_id, &STANDARD.encode(xml.as_bytes()), None)
+        .handle_saml_response(
+            tenant_id,
+            config_id,
+            &STANDARD.encode(xml.as_bytes()),
+            None,
+            None,
+            None,
+        )
         .await;
 
     // Current behaviour: rejected (no leeway). Document this.
@@ -427,6 +435,8 @@ async fn saml_happy_path() {
             tenant_id,
             config_id,
             &fixture_b64("well_signed_response.xml"),
+            None,
+            None,
             None,
         )
         .await;

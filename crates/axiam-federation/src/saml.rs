@@ -381,43 +381,42 @@ where
         // These run after signature verification so we only check authentic responses.
 
         // InResponseTo: reject unsolicited responses when a request ID is available.
-        if let Some(expected_id) = expected_request_id {
-            if !expected_id.is_empty() {
-                match response.in_response_to.as_deref() {
-                    None => {
-                        return Err(FederationError::SamlResponseFailed(
-                            "SAML Response missing InResponseTo (unsolicited response rejected)"
-                                .into(),
-                        ));
-                    }
-                    Some(actual_id) if actual_id != expected_id => {
-                        return Err(FederationError::SamlResponseFailed(format!(
-                            "SAML Response InResponseTo mismatch: expected {expected_id}, \
-                             got {actual_id}"
-                        )));
-                    }
-                    _ => {}
+        if let Some(expected_id) = expected_request_id
+            && !expected_id.is_empty()
+        {
+            match response.in_response_to.as_deref() {
+                None => {
+                    return Err(FederationError::SamlResponseFailed(
+                        "SAML Response missing InResponseTo (unsolicited response rejected)".into(),
+                    ));
                 }
+                Some(actual_id) if actual_id != expected_id => {
+                    return Err(FederationError::SamlResponseFailed(format!(
+                        "SAML Response InResponseTo mismatch: expected {expected_id}, \
+                         got {actual_id}"
+                    )));
+                }
+                _ => {}
             }
         }
 
         // Destination: reject responses not addressed to this ACS URL.
-        if let Some(expected_dest) = expected_destination {
-            if !expected_dest.is_empty() {
-                match response.destination.as_deref() {
-                    None => {
-                        return Err(FederationError::SamlResponseFailed(
-                            "SAML Response missing Destination".into(),
-                        ));
-                    }
-                    Some(actual_dest) if actual_dest != expected_dest => {
-                        return Err(FederationError::SamlResponseFailed(format!(
-                            "SAML Response Destination mismatch: expected {expected_dest}, \
-                             got {actual_dest}"
-                        )));
-                    }
-                    _ => {}
+        if let Some(expected_dest) = expected_destination
+            && !expected_dest.is_empty()
+        {
+            match response.destination.as_deref() {
+                None => {
+                    return Err(FederationError::SamlResponseFailed(
+                        "SAML Response missing Destination".into(),
+                    ));
                 }
+                Some(actual_dest) if actual_dest != expected_dest => {
+                    return Err(FederationError::SamlResponseFailed(format!(
+                        "SAML Response Destination mismatch: expected {expected_dest}, \
+                         got {actual_dest}"
+                    )));
+                }
+                _ => {}
             }
         }
 

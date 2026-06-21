@@ -18,6 +18,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StatusBadge } from "@/components/StatusBadge";
+import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -433,14 +434,22 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
   );
   const [validityDays, setValidityDays] = useState(365);
   const [generateError, setGenerateError] = useState("");
+  // The one-time PEM private key returned on generation (never retrievable again).
+  const [revealedPrivateKey, setRevealedPrivateKey] = useState<string | null>(
+    null
+  );
 
   const generateMutation = useMutation({
     mutationFn: (payload: GenerateCaCertPayload) =>
       caCertService.generate(orgId, payload),
-    onSuccess: () => {
+    onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ca-certificates", orgId] });
       setGenerateOpen(false);
       resetGenerate();
+      // Surface the one-time private key — it is never retrievable again.
+      if (result.private_key_pem) {
+        setRevealedPrivateKey(result.private_key_pem);
+      }
     },
     onError: (err: unknown) => {
       setGenerateError(
@@ -634,6 +643,18 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
         title="Revoke Certificate"
         description={`Are you sure you want to revoke "${revokeCert?.subject}"? This cannot be undone.`}
         isLoading={revokeMutation.isPending}
+      />
+
+      <SecretRevealModal
+        open={revealedPrivateKey !== null}
+        onClose={() => setRevealedPrivateKey(null)}
+        title="CA Certificate Generated"
+        description="Save the CA private key now — it is never shown again and cannot be recovered."
+        secrets={
+          revealedPrivateKey
+            ? [{ label: "Private Key (PEM)", value: revealedPrivateKey }]
+            : []
+        }
       />
     </div>
   );

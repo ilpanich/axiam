@@ -8,7 +8,6 @@ import {
 import {
   permissionService,
   type Permission,
-  type PermissionGrant,
 } from "@/services/permissions";
 import { groupService, type Group, type User } from "@/services/users";
 import { useToast } from "@/hooks/useToast";

@@ -81,21 +81,20 @@ async fn insert_saml_config(
 
     // Build query dynamically to handle optional cert.
     let query = if idp_signing_cert_pem.is_some() {
-        format!(
-            "CREATE type::record('federation_config', $id) SET \
-             tenant_id = $tenant_id, \
-             provider = 'test-saml-idp', \
-             protocol = 'Saml', \
-             metadata_url = 'https://idp.example.com/metadata', \
-             client_id = $client_id, \
-             client_secret = '', \
-             attribute_map = {{}}, \
-             enabled = true, \
-             allowed_algorithms = ['RS256'], \
-             idp_signing_cert_pem = $cert, \
-             created_at = time::now(), \
-             updated_at = time::now()"
-        )
+        "CREATE type::record('federation_config', $id) SET \
+         tenant_id = $tenant_id, \
+         provider = 'test-saml-idp', \
+         protocol = 'Saml', \
+         metadata_url = 'https://idp.example.com/metadata', \
+         client_id = $client_id, \
+         client_secret = '', \
+         attribute_map = {}, \
+         enabled = true, \
+         allowed_algorithms = ['RS256'], \
+         idp_signing_cert_pem = $cert, \
+         created_at = time::now(), \
+         updated_at = time::now()"
+            .to_string()
     } else {
         "CREATE type::record('federation_config', $id) SET \
          tenant_id = $tenant_id, \

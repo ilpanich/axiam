@@ -49,6 +49,12 @@ services:
       AXIAM__DB__USERNAME: root
       AXIAM__DB__PASSWORD: root
       AXIAM__AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
+      # Bind on all interfaces so the published port is reachable from the host
+      # (the in-code default is 127.0.0.1, which only the in-container Docker
+      # healthcheck can reach — the host bootstrap probe to :8090 gets 000).
+      # Mirrors docker-compose.prod.yml.
+      AXIAM__SERVER__HOST: "0.0.0.0"
+      AXIAM__GRPC__HOST: "0.0.0.0"
       RUST_LOG: "${RUST_LOG:-axiam=info}"
       # D-18: cookies work over HTTP in CI/local dev (http://localhost).
       # Default in code is true (prod-safe). NEVER set false in production.

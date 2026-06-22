@@ -1,6 +1,6 @@
 //! SurrealDB implementation of [`PermissionRepository`].
 
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::permission::{
     CreatePermission, Permission, PermissionGrant, UpdatePermission,
 };
@@ -313,39 +313,81 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
     async fn grant_to_role(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         role_id: Uuid,
         permission_id: Uuid,
     ) -> AxiamResult<()> {
         let role_id_str = role_id.to_string();
         let perm_id_str = permission_id.to_string();
 
+        // CQ-B07: verify both endpoints belong to the same tenant before RELATE.
         let query = format!(
-            "RELATE role:`{role_id_str}` -> grants -> \
+            "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+             LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
+             IF array::len($ro) = 0 OR array::len($pe) = 0 {{\
+                 THROW 'cross-tenant edge denied';\
+             }};\
+             RELATE role:`{role_id_str}` -> grants -> \
              permission:`{perm_id_str}` SET scope_ids = NONE;"
         );
 
-        self.db.query(query).await.map_err(DbError::from)?;
+        let result = self
+            .db
+            .query(query)
+            .bind(("tid", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cross-tenant edge denied") {
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "cross-tenant permission grant denied".into(),
+                });
+            }
+            return Err(DbError::Migration(msg).into());
+        }
 
         Ok(())
     }
 
     async fn revoke_from_role(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         role_id: Uuid,
         permission_id: Uuid,
     ) -> AxiamResult<()> {
-        self.db
-            .query(
-                "DELETE grants WHERE \
-                 in = type::record('role', $role_id) AND \
-                 out = type::record('permission', $perm_id)",
-            )
-            .bind(("role_id", role_id.to_string()))
-            .bind(("perm_id", permission_id.to_string()))
+        let role_id_str = role_id.to_string();
+        let perm_id_str = permission_id.to_string();
+
+        // CQ-B07: verify both endpoints belong to the same tenant before DELETE.
+        let query = format!(
+            "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+             LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
+             IF array::len($ro) = 0 OR array::len($pe) = 0 {{\
+                 THROW 'cross-tenant edge denied';\
+             }};\
+             DELETE grants WHERE \
+             in = role:`{role_id_str}` AND \
+             out = permission:`{perm_id_str}`"
+        );
+
+        let result = self
+            .db
+            .query(query)
+            .bind(("tid", tenant_id.to_string()))
             .await
             .map_err(DbError::from)?;
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cross-tenant edge denied") {
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "cross-tenant permission revocation denied".into(),
+                });
+            }
+            return Err(DbError::Migration(msg).into());
+        }
 
         Ok(())
     }

@@ -12,6 +12,8 @@ axiam-core = { workspace = true }
 axiam-db = { workspace = true }
 axiam-auth = { workspace = true }
 axiam-authz = { workspace = true }
+# default-features (=false) inherited from [workspace.dependencies]; the `saml`
+# feature below re-enables SAML across api-rest + federation (on by default).
 axiam-api-rest = { workspace = true }
 axiam-api-grpc = { workspace = true }
 axiam-amqp = { workspace = true }
@@ -25,7 +27,39 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-actix-web = { workspace = true }
+tracing-log = "0.2"
 config = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+surrealdb = { workspace = true }
+# Used by src/cleanup.rs (library source), so these must be prod deps, not dev-only (REQ-12).
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[features]
+# SAML SP support, forwarded to the api-rest and federation crates (→ samael).
+# On by default; `--no-default-features` builds the server without SAML/samael
+# so it compiles on hosts with an incompatible system libxml2 (e.g. Arch 2.15.x).
+default = ["saml"]
+saml = ["axiam-api-rest/saml", "axiam-federation/saml"]
+
+[dev-dependencies]
+axiam-core = { workspace = true }
+axiam-db = { workspace = true }
+axiam-auth = { workspace = true }
+axiam-federation = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }
+surrealdb-types = "3"
+tokio-test = { workspace = true }
+base64 = { workspace = true }
+jsonwebtoken = { workspace = true }
+wiremock = "0.6"
+rsa = { version = "0.9", features = ["sha2"] }
+actix-rt = { workspace = true }
+actix-http = { workspace = true }
+# rsa 0.9 requires a rand_core 0.6 CryptoRng; the workspace `rand` (0.9) ThreadRng
+# does not satisfy it. Use rand_core 0.6 OsRng for RSA test-key generation.
+rand_core = { version = "0.6", features = ["getrandom"] }

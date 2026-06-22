@@ -243,13 +243,16 @@ where
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
 
-        // Issue access token (include scopes from the authorization code)
+        // Issue access token (include scopes from the authorization code).
+        // OAuth2 auth-code flow has no persistent session row — use random jti.
         let access_token = issue_access_token(
             auth_code.user_id,
             tenant_id,
             tenant.organization_id,
             &auth_code.scopes,
             &self.auth_config,
+            uuid::Uuid::new_v4().to_string(),
+            axiam_auth::token::AUD_USER,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -495,7 +498,8 @@ where
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
 
-        // Issue new access token
+        // Issue new access token.
+        // OAuth2 refresh flow has no persistent session row — use random jti.
         let access_token = if let Some(user_id) = stored.user_id {
             issue_access_token(
                 user_id,
@@ -503,6 +507,8 @@ where
                 tenant.organization_id,
                 &stored.scopes,
                 &self.auth_config,
+                uuid::Uuid::new_v4().to_string(),
+                axiam_auth::token::AUD_USER,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         } else {
@@ -545,11 +551,17 @@ where
         // avoid orphaned entries; then surface the appropriate error.
         if let Err(revoke_err) = self.refresh_token_repo.revoke(tenant_id, &token_hash).await {
             // Best-effort: delete the newly-created token so it
-            // doesn't linger as an orphan. Ignore cleanup errors.
-            let _ = self
+            // doesn't linger as an orphan.
+            if let Err(cleanup_err) = self
                 .refresh_token_repo
                 .revoke(tenant_id, &new_refresh_hash)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    error = %cleanup_err,
+                    "token: failed to revoke orphaned refresh token; token may linger"
+                );
+            }
 
             return if matches!(revoke_err, AxiamError::NotFound { .. }) {
                 Err(OAuth2Error::InvalidGrant(

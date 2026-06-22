@@ -38,8 +38,9 @@ pub struct Webhook {
     pub url: String,
     /// Event types this webhook is subscribed to (e.g., `["user.created", "auth.login"]`).
     pub events: Vec<String>,
-    /// HMAC-SHA256 shared secret for signing payloads (stored server-side,
-    /// never returned in API responses).
+    /// HMAC-SHA256 shared secret for signing payloads (stored server-side
+    /// AES-256-GCM encrypted, never returned in API responses).
+    #[serde(skip_serializing)]
     pub secret: String,
     pub enabled: bool,
     pub retry_policy: RetryPolicy,

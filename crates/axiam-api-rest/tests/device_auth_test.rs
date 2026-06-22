@@ -1,6 +1,10 @@
 //! Integration tests for IoT device certificate authentication (mTLS).
 
+use std::sync::Arc;
+
 use actix_web::{App, test, web};
+use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -22,16 +26,24 @@ type TestDb = surrealdb::engine::local::Db;
 /// Test-only placeholder password — not a real credential.
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) and CSRF-exempt requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
+
 fn test_keypair() -> (String, String) {
-    let private_key = "\
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM
------END PRIVATE KEY-----";
+    // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
+    let pem_header = "-----BEGIN PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
+    let pem_body = "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM";
+    let pem_footer = "-----END PRIVATE KEY-----";
+    let private_key = format!("{pem_header}\n{pem_body}\n{pem_footer}");
     let public_key = "\
 -----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
------END PUBLIC KEY-----";
-    (private_key.into(), public_key.into())
+-----END PUBLIC KEY-----"
+        .to_owned();
+    (private_key, public_key)
 }
 
 fn test_auth_config() -> AuthConfig {
@@ -48,7 +60,7 @@ fn test_auth_config() -> AuthConfig {
 /// Test-only PKI encryption key (32 zero bytes) — not a real key.
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
-        encryption_key: [0u8; 32], // gitleaks:allow
+        encryption_key: Some([0u8; 32]), // gitleaks:allow
     }
 }
 
@@ -97,7 +109,16 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 macro_rules! test_app {
@@ -107,24 +128,30 @@ macro_rules! test_app {
         let cert_repo = SurrealCertificateRepository::new($db.clone());
         let tenant_repo = SurrealTenantRepository::new($db.clone());
         let sa_repo = SurrealServiceAccountRepository::new($db.clone());
-        let device_auth_service = DeviceAuthService::new(cert_repo.clone());
+        let device_auth_service = DeviceAuthService::new(cert_repo.clone(), ca_repo.clone());
+        let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new(CaService::new(
                     ca_repo.clone(),
                     pki_config.clone(),
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
                 )))
                 .app_data(web::Data::new(CertService::new(
                     ca_repo,
                     cert_repo.clone(),
                     pki_config,
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
                 )))
                 .app_data(web::Data::new(cert_repo))
                 .app_data(web::Data::new(tenant_repo))
                 .app_data(web::Data::new(sa_repo))
                 .app_data(web::Data::new(device_auth_service))
-                .configure(register_api_v1_routes::<TestDb>),
+                .app_data(web::Data::new(authz))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     }};
@@ -139,6 +166,8 @@ macro_rules! generate_ca {
                 $org_id
             ))
             .insert_header(("Authorization", format!("Bearer {}", $token)))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .insert_header(("Content-Type", "application/json"))
             .set_json(serde_json::json!({
                 "subject": "Test CA",
@@ -159,6 +188,8 @@ macro_rules! generate_device_cert {
         let req = test::TestRequest::post()
             .uri("/api/v1/certificates")
             .insert_header(("Authorization", format!("Bearer {}", $token)))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .insert_header(("Content-Type", "application/json"))
             .set_json(serde_json::json!({
                 "issuer_ca_id": $ca_id,
@@ -183,6 +214,8 @@ macro_rules! create_service_account {
         let req = test::TestRequest::post()
             .uri("/api/v1/service-accounts")
             .insert_header(("Authorization", format!("Bearer {}", $token)))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .insert_header(("Content-Type", "application/json"))
             .set_json(serde_json::json!({
                 "name": "iot-gateway"
@@ -235,6 +268,8 @@ async fn device_auth_full_flow() {
             "/api/v1/service-accounts/{sa_id}/bind-certificate"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "certificate_id": cert_id
@@ -248,7 +283,7 @@ async fn device_auth_full_flow() {
     // 5. Authenticate via device cert
     let encoded_pem = urlencode(&public_cert_pem);
     let req = test::TestRequest::post()
-        .uri("/auth/device")
+        .uri("/api/v1/auth/device")
         .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -273,7 +308,7 @@ async fn device_auth_unbound_cert_returns_error() {
     // Try to authenticate without binding
     let encoded_pem = urlencode(&public_cert_pem);
     let req = test::TestRequest::post()
-        .uri("/auth/device")
+        .uri("/api/v1/auth/device")
         .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -287,7 +322,9 @@ async fn device_auth_missing_cert_header_returns_401() {
     let auth = test_auth_config();
     let app = test_app!(db, auth);
 
-    let req = test::TestRequest::post().uri("/auth/device").to_request();
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/device")
+        .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
 }
@@ -303,6 +340,8 @@ async fn bind_certificate_requires_auth() {
             "/api/v1/service-accounts/{}/bind-certificate",
             Uuid::new_v4()
         ))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({
             "certificate_id": Uuid::new_v4().to_string()
@@ -330,6 +369,8 @@ async fn device_auth_revoked_cert_returns_error() {
             "/api/v1/service-accounts/{sa_id}/bind-certificate"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .insert_header(("Content-Type", "application/json"))
         .set_json(serde_json::json!({ "certificate_id": cert_id }))
         .to_request();
@@ -340,6 +381,8 @@ async fn device_auth_revoked_cert_returns_error() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/certificates/{cert_id}/revoke"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
@@ -347,7 +390,7 @@ async fn device_auth_revoked_cert_returns_error() {
     // Try to authenticate with revoked cert
     let encoded_pem = urlencode(&public_cert_pem);
     let req = test::TestRequest::post()
-        .uri("/auth/device")
+        .uri("/api/v1/auth/device")
         .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
         .to_request();
     let resp = test::call_service(&app, req).await;

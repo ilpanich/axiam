@@ -20,7 +20,7 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 authors = ["AXIAM Contributors"]
-license = "AGPL-3.0-or-later"
+license = "Apache-2.0"
 repository = "https://github.com/emanuele/axiam"
 rust-version = "1.93"
 
@@ -37,6 +37,12 @@ actix-web = "4"
 actix-rt = "2"
 actix-http = "3"
 actix-cors = "0.7"
+actix-governor = "0.10"
+tower_governor = { version = "0.8", features = ["tonic"] }
+governor = "0.10"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+bytes = "1"
 tracing-actix-web = "0.7"
 
 # gRPC
@@ -80,7 +86,7 @@ anyhow = "1"
 
 # Logging & Tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "tracing-log"] }
 
 # Configuration
 config = "0.15"
@@ -91,11 +97,12 @@ utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 
 # PKI / X.509 / OpenPGP
 rcgen = "0.13"
-x509-parser = "0.17"
+x509-parser = { version = "0.17", features = ["verify"] }
 pgp = "0.19"
+pem = "3"
 
 # SAML
-samael = { version = "0.0.19", default-features = false }
+samael = { version = "0.0.19", features = ["xmlsec"] }
 flate2 = "1"
 
 # Email
@@ -112,11 +119,15 @@ axiam-core = { path = "crates/axiam-core" }
 axiam-db = { path = "crates/axiam-db" }
 axiam-auth = { path = "crates/axiam-auth" }
 axiam-authz = { path = "crates/axiam-authz" }
-axiam-api-rest = { path = "crates/axiam-api-rest" }
+# default-features = false so SAML/samael is opt-in: api-rest and axiam-server
+# re-enable it through their own `saml` feature (on by default). This lets the
+# whole workspace build `--no-default-features` on hosts whose system libxml2 is
+# incompatible with samael (e.g. Arch libxml2 2.15.x).
+axiam-api-rest = { path = "crates/axiam-api-rest", default-features = false }
 axiam-api-grpc = { path = "crates/axiam-api-grpc" }
 axiam-amqp = { path = "crates/axiam-amqp" }
 axiam-oauth2 = { path = "crates/axiam-oauth2" }
-axiam-federation = { path = "crates/axiam-federation" }
+axiam-federation = { path = "crates/axiam-federation", default-features = false }
 axiam-audit = { path = "crates/axiam-audit" }
 axiam-email = { path = "crates/axiam-email" }
 axiam-pki = { path = "crates/axiam-pki" }

@@ -9,7 +9,7 @@ use lapin::types::FieldTable;
 use tracing::{error, info, warn};
 
 use crate::connection::queues;
-use crate::messages::AuditEventMessage;
+use crate::messages::{AuditEventMessage, verify_payload};
 
 fn parse_actor_type(s: &str) -> Option<ActorType> {
     match s {
@@ -30,7 +30,12 @@ fn parse_outcome(s: &str) -> Option<AuditOutcome> {
 }
 
 /// Start consuming audit events from `axiam.audit.events` and persisting them.
-pub async fn start_audit_consumer<A>(channel: Channel, audit_repo: A)
+///
+/// SEC-022/055: When `signing_key` is `Some`, the `hmac_signature` in each
+/// `AuditEventMessage` is verified before processing. Messages with an invalid
+/// or missing signature are nacked. When `None`, signatures are not required
+/// (migration / development mode) but a warning is logged.
+pub async fn start_audit_consumer<A>(channel: Channel, audit_repo: A, signing_key: Option<Vec<u8>>)
 where
     A: AuditLogRepository + 'static,
 {
@@ -63,7 +68,7 @@ where
 
         let tag = delivery.delivery_tag;
 
-        let msg: AuditEventMessage = match serde_json::from_slice(&delivery.data) {
+        let mut msg: AuditEventMessage = match serde_json::from_slice(&delivery.data) {
             Ok(m) => m,
             Err(e) => {
                 warn!(
@@ -81,6 +86,34 @@ where
                 continue;
             }
         };
+
+        // SEC-022/055: Verify HMAC signature when a signing key is configured.
+        if let Some(ref key) = signing_key {
+            let received_sig = msg.hmac_signature.take();
+            let canonical_bytes =
+                serde_json::to_vec(&msg).unwrap_or_else(|_| delivery.data.clone());
+            let valid = received_sig
+                .as_deref()
+                .is_some_and(|sig| verify_payload(key, &canonical_bytes, sig));
+            if !valid {
+                warn!(
+                    delivery_tag = tag,
+                    "AuditEventMessage HMAC verification failed — nacking (SEC-022/055)"
+                );
+                let _ = delivery
+                    .acker
+                    .nack(BasicNackOptions {
+                        requeue: false,
+                        ..BasicNackOptions::default()
+                    })
+                    .await;
+                continue;
+            }
+        } else {
+            warn!(
+                "AMQP signing key not configured — AuditEventMessage signatures not verified (SEC-022/055)"
+            );
+        }
 
         let actor_type = match parse_actor_type(&msg.actor_type) {
             Some(t) => t,
@@ -135,9 +168,17 @@ where
             error!(
                 error = %e,
                 delivery_tag = tag,
-                "Failed to persist audit event"
+                "Failed to persist audit event, nacking (dead-letter)"
             );
-            let _ = delivery.acker.nack(BasicNackOptions::default()).await;
+            // requeue: false — dead-letter the message instead of silently
+            // dropping it or requeuing (CQ-B05 / REQ-14 AC-5).
+            let _ = delivery
+                .acker
+                .nack(BasicNackOptions {
+                    requeue: false,
+                    ..BasicNackOptions::default()
+                })
+                .await;
             continue;
         }
 

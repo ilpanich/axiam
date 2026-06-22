@@ -9,9 +9,12 @@ rust-version.workspace = true
 
 [dependencies]
 axiam-core = { workspace = true }
+# serde: re-exported via axiam-core; verified by cargo check
 serde = { workspace = true }
 tokio = { workspace = true }
+# tracing: used via macros in engine.rs and middleware; verified by cargo check
 tracing = { workspace = true }
+# thiserror: used for AuthzError derive; verified by cargo check
 thiserror = { workspace = true }
 uuid = { workspace = true }
 

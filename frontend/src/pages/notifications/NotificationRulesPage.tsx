@@ -3,11 +3,12 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import {
   notificationRuleService,
+  notificationEventLabel,
+  NOTIFICATION_EVENTS,
   type NotificationRule,
   type CreateNotificationRulePayload,
   type UpdateNotificationRulePayload,
 } from "@/services/notificationRules";
-import { WEBHOOK_EVENTS } from "@/services/webhooks";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -71,48 +72,81 @@ function ToggleField({ id, label, checked, onChange }: ToggleFieldProps) {
 // ─── Rule form fields ─────────────────────────────────────────────────────────
 
 interface RuleFormFieldsProps {
-  eventType: string;
+  name: string;
+  events: string[];
   recipientEmails: string;
-  isActive: boolean;
+  enabled: boolean;
   description: string;
-  onEventTypeChange: (v: string) => void;
+  onNameChange: (v: string) => void;
+  onEventsChange: (v: string[]) => void;
   onRecipientEmailsChange: (v: string) => void;
-  onIsActiveChange: (v: boolean) => void;
+  onEnabledChange: (v: boolean) => void;
   onDescriptionChange: (v: string) => void;
   error?: string;
   idPrefix: string;
 }
 
 function RuleFormFields({
-  eventType,
+  name,
+  events,
   recipientEmails,
-  isActive,
+  enabled,
   description,
-  onEventTypeChange,
+  onNameChange,
+  onEventsChange,
   onRecipientEmailsChange,
-  onIsActiveChange,
+  onEnabledChange,
   onDescriptionChange,
   error,
   idPrefix,
 }: RuleFormFieldsProps) {
+  function toggleEvent(value: string, checked: boolean) {
+    if (checked) {
+      onEventsChange(events.includes(value) ? events : [...events, value]);
+    } else {
+      onEventsChange(events.filter((e) => e !== value));
+    }
+  }
+
   return (
     <>
       <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-event-type`}>Event Type *</Label>
-        <select
-          id={`${idPrefix}-event-type`}
-          value={eventType}
-          onChange={(e) => onEventTypeChange(e.target.value)}
-          className="w-full rounded-md border border-input bg-background/50 px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-primary/40"
-          aria-label="Event Type"
+        <Label htmlFor={`${idPrefix}-name`}>Name *</Label>
+        <Input
+          id={`${idPrefix}-name`}
+          value={name}
+          onChange={(e) => onNameChange(e.target.value)}
+          placeholder="e.g. Security alerts"
+          autoComplete="off"
+        />
+      </div>
+
+      <div className="space-y-2">
+        <span className="text-sm font-medium leading-none">Events *</span>
+        <div
+          role="group"
+          aria-label="Events"
+          className="max-h-48 overflow-y-auto rounded-md border border-input bg-background/50 p-3 grid grid-cols-1 sm:grid-cols-2 gap-2"
         >
-          <option value="">Select an event type...</option>
-          {WEBHOOK_EVENTS.map((evt) => (
-            <option key={evt} value={evt}>
-              {evt}
-            </option>
-          ))}
-        </select>
+          {NOTIFICATION_EVENTS.map((evt) => {
+            const checkboxId = `${idPrefix}-evt-${evt.value}`;
+            return (
+              <div key={evt.value} className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id={checkboxId}
+                  checked={events.includes(evt.value)}
+                  onChange={(e) => toggleEvent(evt.value, e.target.checked)}
+                  className="w-4 h-4 accent-cyan-400 cursor-pointer"
+                />
+                <Label htmlFor={checkboxId} className="cursor-pointer text-sm font-normal">
+                  {evt.label}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+        <p className="text-xs text-muted-foreground">Select one or more events.</p>
       </div>
 
       <div className="space-y-2">
@@ -129,10 +163,10 @@ function RuleFormFields({
       </div>
 
       <ToggleField
-        id={`${idPrefix}-active`}
-        label="Active"
-        checked={isActive}
-        onChange={onIsActiveChange}
+        id={`${idPrefix}-enabled`}
+        label="Enabled"
+        checked={enabled}
+        onChange={onEnabledChange}
       />
 
       <div className="space-y-2">
@@ -154,35 +188,40 @@ function RuleFormFields({
 // ─── Form state hook ──────────────────────────────────────────────────────────
 
 function useRuleFormState() {
-  const [eventType, setEventType] = useState("");
+  const [name, setName] = useState("");
+  const [events, setEvents] = useState<string[]>([]);
   const [recipientEmails, setRecipientEmails] = useState("");
-  const [isActive, setIsActive] = useState(true);
+  const [enabled, setEnabled] = useState(true);
   const [description, setDescription] = useState("");
   const [error, setError] = useState("");
 
   function reset() {
-    setEventType("");
+    setName("");
+    setEvents([]);
     setRecipientEmails("");
-    setIsActive(true);
+    setEnabled(true);
     setDescription("");
     setError("");
   }
 
   function load(rule: NotificationRule) {
-    setEventType(rule.event_type);
+    setName(rule.name);
+    setEvents(rule.events);
     setRecipientEmails(rule.recipient_emails.join("\n"));
-    setIsActive(rule.is_active);
+    setEnabled(rule.enabled);
     setDescription(rule.description ?? "");
     setError("");
   }
 
   return {
-    eventType,
-    setEventType,
+    name,
+    setName,
+    events,
+    setEvents,
     recipientEmails,
     setRecipientEmails,
-    isActive,
-    setIsActive,
+    enabled,
+    setEnabled,
     description,
     setDescription,
     error,
@@ -224,8 +263,12 @@ export function NotificationRulesPage() {
   function handleCreateSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     createForm.setError("");
-    if (!createForm.eventType) {
-      createForm.setError("Event type is required.");
+    if (!createForm.name.trim()) {
+      createForm.setError("Name is required.");
+      return;
+    }
+    if (createForm.events.length === 0) {
+      createForm.setError("At least one event is required.");
       return;
     }
     const emailError = validateEmails(createForm.recipientEmails);
@@ -234,10 +277,10 @@ export function NotificationRulesPage() {
       return;
     }
     const payload: CreateNotificationRulePayload = {
-      event_type: createForm.eventType,
+      name: createForm.name.trim(),
+      description: createForm.description.trim(),
+      events: createForm.events,
       recipient_emails: parseEmails(createForm.recipientEmails),
-      is_active: createForm.isActive,
-      description: createForm.description.trim() || undefined,
     };
     createMutation.mutate(payload);
   }
@@ -273,8 +316,13 @@ export function NotificationRulesPage() {
   function handleEditSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     editForm.setError("");
-    if (!editRule || !editForm.eventType) {
-      editForm.setError("Event type is required.");
+    if (!editRule) return;
+    if (!editForm.name.trim()) {
+      editForm.setError("Name is required.");
+      return;
+    }
+    if (editForm.events.length === 0) {
+      editForm.setError("At least one event is required.");
       return;
     }
     const emailError = validateEmails(editForm.recipientEmails);
@@ -285,10 +333,11 @@ export function NotificationRulesPage() {
     editMutation.mutate({
       id: editRule.id,
       payload: {
-        event_type: editForm.eventType,
+        name: editForm.name.trim(),
+        description: editForm.description.trim(),
+        events: editForm.events,
         recipient_emails: parseEmails(editForm.recipientEmails),
-        is_active: editForm.isActive,
-        description: editForm.description.trim() || undefined,
+        enabled: editForm.enabled,
       },
     });
   }
@@ -308,12 +357,30 @@ export function NotificationRulesPage() {
 
   const columns: Column<NotificationRule>[] = [
     {
-      key: "event_type",
-      header: "Event Type",
+      key: "name",
+      header: "Name",
       render: (row) => (
-        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium font-mono bg-purple-500/15 text-purple-400 border border-purple-500/30">
-          {row.event_type}
-        </span>
+        <span className="text-sm font-medium text-foreground">{row.name}</span>
+      ),
+    },
+    {
+      key: "events",
+      header: "Events",
+      render: (row) => (
+        <div className="flex flex-wrap gap-1 max-w-xs">
+          {row.events.length === 0 ? (
+            <span className="text-sm text-muted-foreground">—</span>
+          ) : (
+            row.events.map((evt) => (
+              <span
+                key={evt}
+                className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-500/15 text-purple-400 border border-purple-500/30"
+              >
+                {notificationEventLabel(evt)}
+              </span>
+            ))
+          )}
+        </div>
       ),
     },
     {
@@ -333,10 +400,10 @@ export function NotificationRulesPage() {
       ),
     },
     {
-      key: "is_active",
+      key: "enabled",
       header: "Status",
       render: (row) => (
-        <StatusBadge status={row.is_active ? "active" : "inactive"} />
+        <StatusBadge status={row.enabled ? "active" : "inactive"} />
       ),
     },
     {
@@ -344,7 +411,7 @@ export function NotificationRulesPage() {
       header: "Description",
       render: (row) => (
         <span className="text-sm text-muted-foreground">
-          {row.description ?? "—"}
+          {row.description || "—"}
         </span>
       ),
     },
@@ -364,14 +431,14 @@ export function NotificationRulesPage() {
       render: (row) => (
         <div className="flex items-center gap-1">
           <button
-            aria-label={`Edit rule for ${row.event_type}`}
+            aria-label={`Edit rule ${row.name}`}
             onClick={() => openEdit(row)}
             className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
           >
             <Pencil size={14} />
           </button>
           <button
-            aria-label={`Delete rule for ${row.event_type}`}
+            aria-label={`Delete rule ${row.name}`}
             onClick={() => setDeleteRule(row)}
             className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
           >
@@ -420,13 +487,15 @@ export function NotificationRulesPage() {
         submitLabel="Create"
       >
         <RuleFormFields
-          eventType={createForm.eventType}
+          name={createForm.name}
+          events={createForm.events}
           recipientEmails={createForm.recipientEmails}
-          isActive={createForm.isActive}
+          enabled={createForm.enabled}
           description={createForm.description}
-          onEventTypeChange={createForm.setEventType}
+          onNameChange={createForm.setName}
+          onEventsChange={createForm.setEvents}
           onRecipientEmailsChange={createForm.setRecipientEmails}
-          onIsActiveChange={createForm.setIsActive}
+          onEnabledChange={createForm.setEnabled}
           onDescriptionChange={createForm.setDescription}
           error={createForm.error}
           idPrefix="create"
@@ -443,13 +512,15 @@ export function NotificationRulesPage() {
         submitLabel="Save Changes"
       >
         <RuleFormFields
-          eventType={editForm.eventType}
+          name={editForm.name}
+          events={editForm.events}
           recipientEmails={editForm.recipientEmails}
-          isActive={editForm.isActive}
+          enabled={editForm.enabled}
           description={editForm.description}
-          onEventTypeChange={editForm.setEventType}
+          onNameChange={editForm.setName}
+          onEventsChange={editForm.setEvents}
           onRecipientEmailsChange={editForm.setRecipientEmails}
-          onIsActiveChange={editForm.setIsActive}
+          onEnabledChange={editForm.setEnabled}
           onDescriptionChange={editForm.setDescription}
           error={editForm.error}
           idPrefix="edit"
@@ -464,7 +535,7 @@ export function NotificationRulesPage() {
           deleteRule && deleteMutation.mutate(deleteRule.id)
         }
         title="Delete Notification Rule"
-        description={`Are you sure you want to delete the notification rule for "${deleteRule?.event_type}"? This action cannot be undone.`}
+        description={`Are you sure you want to delete the notification rule "${deleteRule?.name}"? This action cannot be undone.`}
         isLoading={deleteMutation.isPending}
       />
     </div>

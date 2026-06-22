@@ -4,9 +4,13 @@
 //! users through external identity providers (Google, Okta, Azure AD,
 //! Shibboleth, ADFS, etc.).
 
+pub mod cert;
 pub mod error;
+pub mod jwks_cache;
 pub mod oidc;
+#[cfg(feature = "saml")]
 pub mod saml;
+pub mod secrets;
 
 use error::FederationError;
 

@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-surrealdb
+  namespace: axiam
+spec:
+  # SEC-053: Receiver-side ingress policy — restrict SurrealDB to accept
+  # connections only from axiam-server pods (default-deny complement).
+  podSelector:
+    matchLabels:
+      component: surrealdb
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              component: server
+      ports:
+        - protocol: TCP
+          port: 8000

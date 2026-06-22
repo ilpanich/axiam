@@ -19,6 +19,9 @@ pub enum AxiamError {
     #[error("Validation error: {message}")]
     Validation { message: String },
 
+    #[error("Password policy violation: {message}")]
+    PasswordPolicy { message: String },
+
     #[error("Database error: {0}")]
     Database(String),
 
@@ -42,6 +45,9 @@ pub enum AxiamError {
 
     #[error("Rate limit exceeded")]
     RateLimited,
+
+    #[error("SAML assertion replay detected")]
+    ReplayDetected,
 
     #[error("Internal error: {0}")]
     Internal(String),

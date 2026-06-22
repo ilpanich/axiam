@@ -7,10 +7,12 @@
 
 pub mod ca;
 pub mod cert;
+pub mod config;
 pub mod mtls;
 pub mod pgp;
 
-pub use ca::{CaService, MAX_CA_VALIDITY_DAYS, PkiConfig};
+pub use ca::{CaService, MAX_CA_VALIDITY_DAYS};
 pub use cert::{CertService, DEFAULT_LEAF_CERT_VALIDITY_DAYS, MAX_LEAF_CERT_VALIDITY_DAYS};
+pub use config::PkiConfig;
 pub use mtls::DeviceAuthService;
 pub use pgp::PgpService;

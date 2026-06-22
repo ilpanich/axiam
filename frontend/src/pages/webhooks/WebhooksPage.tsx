@@ -12,7 +12,6 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StatusBadge } from "@/components/StatusBadge";
-import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -100,13 +99,9 @@ function ToggleField({ id, label, checked, onChange }: ToggleFieldProps) {
 
 interface CreateWebhookFieldsProps {
   url: string;
-  description: string;
-  isActive: boolean;
   eventTypes: string[];
   secret: string;
   onUrlChange: (v: string) => void;
-  onDescriptionChange: (v: string) => void;
-  onIsActiveChange: (v: boolean) => void;
   onEventTypesChange: (v: string[]) => void;
   onSecretChange: (v: string) => void;
   error?: string;
@@ -114,13 +109,9 @@ interface CreateWebhookFieldsProps {
 
 function CreateWebhookFields({
   url,
-  description,
-  isActive,
   eventTypes,
   secret,
   onUrlChange,
-  onDescriptionChange,
-  onIsActiveChange,
   onEventTypesChange,
   onSecretChange,
   error,
@@ -141,24 +132,6 @@ function CreateWebhookFields({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="wh-description">Description</Label>
-        <Input
-          id="wh-description"
-          value={description}
-          onChange={(e) => onDescriptionChange(e.target.value)}
-          placeholder="Optional description"
-          autoComplete="off"
-        />
-      </div>
-
-      <ToggleField
-        id="wh-is-active"
-        label="Active"
-        checked={isActive}
-        onChange={onIsActiveChange}
-      />
-
-      <div className="space-y-2">
         <Label>Event Types *</Label>
         <div className="rounded-md border border-input bg-background/50 p-3">
           <EventTypeSelector
@@ -174,17 +147,17 @@ function CreateWebhookFields({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="wh-secret">Secret</Label>
+        <Label htmlFor="wh-secret">Secret *</Label>
         <Input
           id="wh-secret"
           value={secret}
           onChange={(e) => onSecretChange(e.target.value)}
-          placeholder="Leave empty to auto-generate"
+          placeholder="Shared secret"
+          required
           autoComplete="off"
         />
         <p className="text-xs text-muted-foreground">
-          Used for HMAC-SHA256 signature verification. Leave blank to
-          auto-generate.
+          Used for HMAC-SHA256 signature verification.
         </p>
       </div>
 
@@ -197,24 +170,20 @@ function CreateWebhookFields({
 
 interface EditWebhookFieldsProps {
   url: string;
-  description: string;
-  isActive: boolean;
+  enabled: boolean;
   eventTypes: string[];
   onUrlChange: (v: string) => void;
-  onDescriptionChange: (v: string) => void;
-  onIsActiveChange: (v: boolean) => void;
+  onEnabledChange: (v: boolean) => void;
   onEventTypesChange: (v: string[]) => void;
   error?: string;
 }
 
 function EditWebhookFields({
   url,
-  description,
-  isActive,
+  enabled,
   eventTypes,
   onUrlChange,
-  onDescriptionChange,
-  onIsActiveChange,
+  onEnabledChange,
   onEventTypesChange,
   error,
 }: EditWebhookFieldsProps) {
@@ -232,21 +201,11 @@ function EditWebhookFields({
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="edit-wh-description">Description</Label>
-        <Input
-          id="edit-wh-description"
-          value={description}
-          onChange={(e) => onDescriptionChange(e.target.value)}
-          placeholder="Optional description"
-        />
-      </div>
-
       <ToggleField
-        id="edit-wh-is-active"
-        label="Active"
-        checked={isActive}
-        onChange={onIsActiveChange}
+        id="edit-wh-enabled"
+        label="Enabled"
+        checked={enabled}
+        onChange={onEnabledChange}
       />
 
       <div className="space-y-2">
@@ -277,27 +236,17 @@ export function WebhooksPage() {
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
   const [createUrl, setCreateUrl] = useState("");
-  const [createDescription, setCreateDescription] = useState("");
-  const [createIsActive, setCreateIsActive] = useState(true);
   const [createEventTypes, setCreateEventTypes] = useState<string[]>([]);
   const [createSecret, setCreateSecret] = useState("");
   const [createError, setCreateError] = useState("");
 
-  // ─── Secret reveal state ───────────────────────────────────────────────────
-  const [secretOpen, setSecretOpen] = useState(false);
-  const [revealedSecret, setRevealedSecret] = useState("");
-
   const createMutation = useMutation({
     mutationFn: (payload: CreateWebhookPayload) =>
       webhookService.create(payload),
-    onSuccess: (resp) => {
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["webhooks"] });
       setCreateOpen(false);
       resetCreateForm();
-      if (resp.secret) {
-        setRevealedSecret(resp.secret);
-        setSecretOpen(true);
-      }
     },
     onError: (err: unknown) => {
       setCreateError(
@@ -308,8 +257,6 @@ export function WebhooksPage() {
 
   function resetCreateForm() {
     setCreateUrl("");
-    setCreateDescription("");
-    setCreateIsActive(true);
     setCreateEventTypes([]);
     setCreateSecret("");
     setCreateError("");
@@ -326,12 +273,14 @@ export function WebhooksPage() {
       setCreateError("Select at least one event type.");
       return;
     }
+    if (!createSecret.trim()) {
+      setCreateError("Secret is required.");
+      return;
+    }
     const payload: CreateWebhookPayload = {
       url: createUrl.trim(),
-      event_types: createEventTypes,
-      is_active: createIsActive,
-      description: createDescription.trim() || undefined,
-      secret: createSecret.trim() || undefined,
+      events: createEventTypes,
+      secret: createSecret.trim(),
     };
     createMutation.mutate(payload);
   }
@@ -339,8 +288,7 @@ export function WebhooksPage() {
   // ─── Edit state ────────────────────────────────────────────────────────────
   const [editWebhook, setEditWebhook] = useState<Webhook | null>(null);
   const [editUrl, setEditUrl] = useState("");
-  const [editDescription, setEditDescription] = useState("");
-  const [editIsActive, setEditIsActive] = useState(true);
+  const [editEnabled, setEditEnabled] = useState(true);
   const [editEventTypes, setEditEventTypes] = useState<string[]>([]);
   const [editError, setEditError] = useState("");
 
@@ -361,9 +309,8 @@ export function WebhooksPage() {
   function openEdit(hook: Webhook) {
     setEditWebhook(hook);
     setEditUrl(hook.url);
-    setEditDescription(hook.description ?? "");
-    setEditIsActive(hook.is_active);
-    setEditEventTypes(hook.event_types);
+    setEditEnabled(hook.enabled);
+    setEditEventTypes(hook.events);
     setEditError("");
   }
 
@@ -378,9 +325,8 @@ export function WebhooksPage() {
       id: editWebhook.id,
       payload: {
         url: editUrl.trim(),
-        event_types: editEventTypes,
-        is_active: editIsActive,
-        description: editDescription.trim() || undefined,
+        events: editEventTypes,
+        enabled: editEnabled,
       },
     });
   }
@@ -411,29 +357,20 @@ export function WebhooksPage() {
       ),
     },
     {
-      key: "event_types",
+      key: "events",
       header: "Events",
       render: (row) => (
         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-500/15 text-purple-400 border border-purple-500/30">
-          {row.event_types.length}{" "}
-          {row.event_types.length === 1 ? "event" : "events"}
+          {row.events.length}{" "}
+          {row.events.length === 1 ? "event" : "events"}
         </span>
       ),
     },
     {
-      key: "is_active",
+      key: "enabled",
       header: "Status",
       render: (row) => (
-        <StatusBadge status={row.is_active ? "active" : "inactive"} />
-      ),
-    },
-    {
-      key: "description",
-      header: "Description",
-      render: (row) => (
-        <span className="text-muted-foreground text-sm">
-          {row.description ?? "—"}
-        </span>
+        <StatusBadge status={row.enabled ? "active" : "inactive"} />
       ),
     },
     {
@@ -509,13 +446,9 @@ export function WebhooksPage() {
       >
         <CreateWebhookFields
           url={createUrl}
-          description={createDescription}
-          isActive={createIsActive}
           eventTypes={createEventTypes}
           secret={createSecret}
           onUrlChange={setCreateUrl}
-          onDescriptionChange={setCreateDescription}
-          onIsActiveChange={setCreateIsActive}
           onEventTypesChange={setCreateEventTypes}
           onSecretChange={setCreateSecret}
           error={createError}
@@ -533,30 +466,14 @@ export function WebhooksPage() {
       >
         <EditWebhookFields
           url={editUrl}
-          description={editDescription}
-          isActive={editIsActive}
+          enabled={editEnabled}
           eventTypes={editEventTypes}
           onUrlChange={setEditUrl}
-          onDescriptionChange={setEditDescription}
-          onIsActiveChange={setEditIsActive}
+          onEnabledChange={setEditEnabled}
           onEventTypesChange={setEditEventTypes}
           error={editError}
         />
       </FormDialog>
-
-      {/* Auto-generated secret reveal */}
-      <SecretRevealModal
-        open={secretOpen}
-        onClose={() => setSecretOpen(false)}
-        title="Webhook Created"
-        description="Your webhook has been created. Save the secret now — it will not be shown again."
-        secrets={[
-          {
-            label: "Webhook Secret (HMAC-SHA256)",
-            value: revealedSecret,
-          },
-        ]}
-      />
 
       {/* Delete confirm */}
       <ConfirmDialog

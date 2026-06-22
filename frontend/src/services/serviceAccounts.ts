@@ -1,39 +1,43 @@
 import api from "@/lib/api";
+import { unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
 export interface ServiceAccount {
   id: string;
+  tenant_id: string;
   name: string;
-  description?: string;
   client_id: string;
-  status: "active" | "disabled";
-  roles: string[];
-  last_used_at?: string;
+  /** Backend `UserStatus` enum, serialized PascalCase ("Active", "Inactive", …). */
+  status: string;
   created_at: string;
   updated_at: string;
 }
 
 export interface CreateServiceAccountRequest {
   name: string;
-  description?: string;
-  roles?: string[];
 }
 
 export interface UpdateServiceAccountRequest {
   name?: string;
-  description?: string;
-  status?: "active" | "disabled";
-  roles?: string[];
+  /** Backend `UserStatus`, e.g. "Active" / "Inactive". */
+  status?: string;
 }
 
+/** Flat response — the secret is shown once at creation. */
 export interface ServiceAccountCreatedResponse {
-  service_account: ServiceAccount;
+  id: string;
+  tenant_id: string;
+  name: string;
+  client_id: string;
   client_secret: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
 }
 
+/** Rotation returns only the new secret; client_id is unchanged. */
 export interface RotateSecretResponse {
-  client_id: string;
   client_secret: string;
 }
 
@@ -43,7 +47,9 @@ const BASE = "/api/v1/service-accounts";
 
 export const serviceAccountService = {
   getAll: (): Promise<ServiceAccount[]> =>
-    api.get<ServiceAccount[]>(BASE).then((r) => r.data),
+    api
+      .get<ServiceAccount[] | { items: ServiceAccount[] }>(BASE)
+      .then((r) => unwrapList(r.data)),
 
   create: (
     data: CreateServiceAccountRequest,

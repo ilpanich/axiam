@@ -1,19 +1,19 @@
-//! Notification dispatcher — matches audit events to notification rules.
+//! Notification dispatcher — matches audit events to notification rules
+//! and enqueues outbound mail messages for each matched recipient (T19.13).
 //!
-//! The dispatcher queries active notification rules for a tenant and
-//! returns the list of matched rules with their recipients. Actual
-//! email delivery is deferred to TODO(T19): wire EmailService +
-//! template resolution + org_id lookup.
+//! The dispatcher calls `mail_publisher.publish(...)` once per matched
+//! (event, recipient) pair.  On publish error the error is logged and
+//! execution continues — fire-and-forget (D-14).
 
 use axiam_core::error::AxiamResult;
+use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::models::notification_rule::NotificationEventType;
-use axiam_core::repository::NotificationRuleRepository;
+use axiam_core::repository::{MailPublisher, NotificationRuleRepository};
+use chrono::Utc;
 use uuid::Uuid;
 
-/// Dispatches audit events to matching notification rules.
-///
-/// Returns the list of matched (event_name, recipient_emails) pairs.
-/// The caller is responsible for actually sending emails.
+/// Dispatches audit events to matching notification rules by enqueuing
+/// one `OutboundMailMessage(Notification)` per matched recipient.
 pub struct NotificationDispatcher<N: NotificationRuleRepository> {
     rule_repo: N,
 }
@@ -24,22 +24,32 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
         Self { rule_repo }
     }
 
-    /// Match an audit event against notification rules and return
-    /// the event names and their recipient lists.
+    /// Match an audit event against notification rules and enqueue one
+    /// `OutboundMailMessage` per matched recipient.
     ///
-    /// Returns an empty vec if no rules match or the action/outcome
-    /// does not map to any known notification event type.
+    /// `tenant_id` and `org_id` are used to populate the mail message
+    /// context so the consumer can resolve the correct email config.
+    ///
+    /// Returns `Ok(enqueued_count)` where count is the number of messages
+    /// successfully handed to `mail_publisher`.  Publish errors are logged
+    /// and do **not** propagate — callers get a successful result even if
+    /// some (or all) enqueue calls fail.
+    ///
+    /// Returns `Ok(0)` if no rules match or the action/outcome does not map
+    /// to any known notification event type.
     pub async fn dispatch(
         &self,
         tenant_id: Uuid,
+        org_id: Uuid,
         action: &str,
         outcome: &str,
-        _actor_id: Option<Uuid>,
-        _details: &str,
-    ) -> AxiamResult<Vec<(String, Vec<String>)>> {
+        actor_id: Option<Uuid>,
+        details: &str,
+        mail_publisher: &impl MailPublisher,
+    ) -> AxiamResult<usize> {
         let event_types = NotificationEventType::from_audit_action(action, outcome);
         if event_types.is_empty() {
-            return Ok(Vec::new());
+            return Ok(0);
         }
 
         // Collect all event type strings and query once (avoids N+1).
@@ -49,25 +59,305 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
             .get_by_events(tenant_id, &event_strings)
             .await?;
 
-        let mut results = Vec::new();
+        let mut enqueued = 0usize;
         for rule in rules {
             if rule.recipient_emails.is_empty() {
                 continue;
             }
-            // Each rule may match multiple event types; report the
-            // first matching event for the result tuple.
-            for event_type in &event_types {
-                let event_str = event_type.to_db_string();
-                if rule.events.contains(event_type) {
-                    results.push((event_str, rule.recipient_emails.clone()));
-                    break;
+            // Find the first matching event type for this rule.
+            let matched_event = event_types
+                .iter()
+                .find(|et| rule.events.contains(*et))
+                .map(|et| et.to_db_string());
+
+            let event_name = match matched_event {
+                Some(name) => name,
+                None => continue,
+            };
+
+            // Enqueue one OutboundMailMessage per recipient.
+            for recipient in &rule.recipient_emails {
+                let msg = OutboundMailMessage {
+                    mail_type: MailType::Notification,
+                    tenant_id,
+                    org_id,
+                    user_id: actor_id.unwrap_or(Uuid::nil()),
+                    to_address: recipient.clone(),
+                    template_context: serde_json::json!({
+                        "event": event_name,
+                        "details": details,
+                        "action": action,
+                        "outcome": outcome,
+                    }),
+                    attempt_count: 0,
+                    enqueued_at: Utc::now(),
+                };
+                match mail_publisher.publish(msg).await {
+                    Ok(()) => {
+                        enqueued += 1;
+                        tracing::debug!(
+                            event = %event_name,
+                            recipient = %recipient,
+                            "notification mail enqueued"
+                        );
+                    }
+                    Err(e) => {
+                        // Fire-and-forget: log and continue (D-14).
+                        tracing::warn!(
+                            error = %e,
+                            event = %event_name,
+                            "failed to enqueue notification mail; skipping recipient"
+                        );
+                    }
                 }
             }
         }
 
-        // TODO(T19): Send actual emails via EmailService with
-        // template resolution and org_id lookup.
+        Ok(enqueued)
+    }
+}
 
-        Ok(results)
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::error::AxiamResult;
+    use axiam_core::models::mail::OutboundMailMessage;
+    use axiam_core::models::notification_rule::{
+        CreateNotificationRule, NotificationEventType, NotificationRule, UpdateNotificationRule,
+    };
+    use axiam_core::repository::{
+        MailPublisher, NotificationRuleRepository, PaginatedResult, Pagination,
+    };
+    use std::sync::{Arc, Mutex};
+
+    // -----------------------------------------------------------------------
+    // Mock rule repository
+    // -----------------------------------------------------------------------
+
+    #[derive(Clone)]
+    struct MockRuleRepo {
+        rules: Arc<Vec<NotificationRule>>,
+    }
+
+    impl MockRuleRepo {
+        fn new(rules: Vec<NotificationRule>) -> Self {
+            Self {
+                rules: Arc::new(rules),
+            }
+        }
+
+        fn empty() -> Self {
+            Self::new(vec![])
+        }
+    }
+
+    impl NotificationRuleRepository for MockRuleRepo {
+        async fn create(&self, _input: CreateNotificationRule) -> AxiamResult<NotificationRule> {
+            unimplemented!("not needed for notification tests")
+        }
+
+        async fn get_by_id(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<NotificationRule> {
+            unimplemented!()
+        }
+
+        async fn list(
+            &self,
+            _tenant_id: Uuid,
+            _pagination: Pagination,
+        ) -> AxiamResult<PaginatedResult<NotificationRule>> {
+            unimplemented!()
+        }
+
+        async fn update(
+            &self,
+            _tenant_id: Uuid,
+            _id: Uuid,
+            _input: UpdateNotificationRule,
+        ) -> AxiamResult<NotificationRule> {
+            unimplemented!()
+        }
+
+        async fn delete(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<()> {
+            unimplemented!()
+        }
+
+        async fn get_by_event(
+            &self,
+            _tenant_id: Uuid,
+            _event_type: &str,
+        ) -> AxiamResult<Vec<NotificationRule>> {
+            unimplemented!()
+        }
+
+        async fn get_by_events(
+            &self,
+            tenant_id: Uuid,
+            event_types: &[String],
+        ) -> AxiamResult<Vec<NotificationRule>> {
+            let _ = (tenant_id, event_types);
+            Ok(self.rules.as_ref().clone())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock mail publisher
+    // -----------------------------------------------------------------------
+
+    #[derive(Clone, Default)]
+    struct RecordingPublisher {
+        sent: Arc<Mutex<Vec<OutboundMailMessage>>>,
+    }
+
+    impl RecordingPublisher {
+        fn new() -> Self {
+            Self {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.sent.lock().unwrap().len()
+        }
+
+        fn messages(&self) -> Vec<OutboundMailMessage> {
+            self.sent.lock().unwrap().clone()
+        }
+    }
+
+    impl MailPublisher for RecordingPublisher {
+        async fn publish(&self, msg: OutboundMailMessage) -> AxiamResult<()> {
+            self.sent.lock().unwrap().push(msg);
+            Ok(())
+        }
+    }
+
+    fn make_rule(recipients: Vec<&str>) -> NotificationRule {
+        NotificationRule {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            name: "test-rule".into(),
+            description: "test rule for notifications".into(),
+            events: vec![NotificationEventType::LoginFailure],
+            recipient_emails: recipients.into_iter().map(|s| s.to_string()).collect(),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
+    /// No matching event types → 0 messages enqueued.
+    #[tokio::test]
+    async fn notification_no_match_returns_zero() {
+        let repo = MockRuleRepo::new(vec![make_rule(vec!["admin@example.com"])]);
+        let dispatcher = NotificationDispatcher::new(repo);
+        let publisher = RecordingPublisher::new();
+
+        // "user.updated" with "success" does not map to LoginFailure.
+        let count = dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "user.updated",
+                "success",
+                None,
+                "details",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+        assert_eq!(publisher.count(), 0);
+    }
+
+    /// Matching event → one message per recipient enqueued with MailType::Notification.
+    #[tokio::test]
+    async fn notification_enqueues_per_recipient() {
+        let rule = make_rule(vec!["alice@example.com", "bob@example.com"]);
+        let repo = MockRuleRepo::new(vec![rule]);
+        let dispatcher = NotificationDispatcher::new(repo);
+        let publisher = RecordingPublisher::new();
+
+        // "POST /auth/login" + "Failure" → LoginFailure event type
+        let count = dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "POST /auth/login",
+                "Failure",
+                Some(Uuid::new_v4()),
+                "too many attempts",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(count, 2, "expected 2 messages (one per recipient)");
+        assert_eq!(publisher.count(), 2);
+
+        let msgs = publisher.messages();
+        assert!(
+            msgs.iter()
+                .all(|m| matches!(m.mail_type, MailType::Notification))
+        );
+        let addresses: Vec<&str> = msgs.iter().map(|m| m.to_address.as_str()).collect();
+        assert!(addresses.contains(&"alice@example.com"));
+        assert!(addresses.contains(&"bob@example.com"));
+    }
+
+    /// Empty recipient list → nothing enqueued.
+    #[tokio::test]
+    async fn notification_empty_recipients_skipped() {
+        let rule = make_rule(vec![]);
+        let repo = MockRuleRepo::new(vec![rule]);
+        let dispatcher = NotificationDispatcher::new(repo);
+        let publisher = RecordingPublisher::new();
+
+        let count = dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "POST /auth/login",
+                "Failure",
+                None,
+                "",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+        assert_eq!(publisher.count(), 0);
+    }
+
+    /// No rules configured → 0 messages enqueued.
+    #[tokio::test]
+    async fn notification_no_rules_returns_zero() {
+        let repo = MockRuleRepo::empty();
+        let dispatcher = NotificationDispatcher::new(repo);
+        let publisher = RecordingPublisher::new();
+
+        let count = dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "POST /auth/login",
+                "Failure",
+                None,
+                "",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
     }
 }

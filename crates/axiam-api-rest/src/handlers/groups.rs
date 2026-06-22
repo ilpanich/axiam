@@ -8,6 +8,7 @@ use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::handlers::users::UserResponse;
@@ -55,9 +56,13 @@ pub struct MemberPath {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealGroupRepository<C>>,
     body: web::Json<CreateGroupRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     let input = CreateGroup {
         tenant_id: user.tenant_id,
@@ -82,9 +87,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealGroupRepository<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, query.into_inner()).await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -103,9 +112,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealGroupRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let group = repo.get_by_id(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::Ok().json(group))
 }
@@ -125,10 +138,14 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealGroupRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateGroup>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let group = repo
         .update(user.tenant_id, path.into_inner(), body.into_inner())
         .await?;
@@ -149,9 +166,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealGroupRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     repo.delete(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -174,10 +195,14 @@ pub async fn delete<C: Connection>(
 )]
 pub async fn add_member<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealGroupRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AddMemberRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:add_member", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     repo.add_member(user.tenant_id, body.user_id, path.into_inner())
         .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -199,10 +224,14 @@ pub async fn add_member<C: Connection>(
 )]
 pub async fn list_members<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealGroupRepository<C>>,
     path: web::Path<Uuid>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:list_members", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo
         .get_members(user.tenant_id, path.into_inner(), query.into_inner())
         .await?;
@@ -231,9 +260,13 @@ pub async fn list_members<C: Connection>(
 )]
 pub async fn remove_member<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealGroupRepository<C>>,
     path: web::Path<MemberPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:remove_member", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let p = path.into_inner();
     repo.remove_member(user.tenant_id, p.user_id, p.group_id)
         .await?;

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -90,9 +91,13 @@ pub struct RotateSecretResponse {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
     body: web::Json<CreateServiceAccountRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("service_accounts:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let input = CreateServiceAccount {
         tenant_id: user.tenant_id,
         name: body.into_inner().name,
@@ -123,9 +128,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("service_accounts:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, query.into_inner()).await?;
     let items: Vec<ServiceAccountResponse> = result
         .items
@@ -154,9 +163,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("service_accounts:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let sa = repo.get_by_id(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::Ok().json(ServiceAccountResponse::from(sa)))
 }
@@ -176,10 +189,14 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateServiceAccount>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("service_accounts:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let sa = repo
         .update(user.tenant_id, path.into_inner(), body.into_inner())
         .await?;
@@ -200,9 +217,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("service_accounts:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     repo.delete(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -221,9 +242,13 @@ pub async fn delete<C: Connection>(
 )]
 pub async fn rotate_secret<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealServiceAccountRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("service_accounts:rotate_secret", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let raw_secret = repo
         .rotate_secret(user.tenant_id, path.into_inner())
         .await?;

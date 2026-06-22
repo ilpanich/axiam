@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, Link, useSearchParams } from "react-router-dom";
 import { useAuthStore } from "@/stores/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { cn } from "@/lib/utils";
 import api from "@/lib/api";
+import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
 import { KeyRound, ChevronRight, Loader2, AlertCircle } from "lucide-react";
 import type { AxiosError } from "axios";
 
@@ -18,14 +19,18 @@ interface OrgTenantData {
 }
 
 interface LoginResponse {
-  access_token?: string;
-  mfa_required?: boolean;
-  mfa_session_token?: string;
   user?: {
     id: string;
     username: string;
     email: string;
   };
+  session_id?: string;
+  expires_in?: number;
+  mfa_required?: boolean;
+  challenge_token?: string;
+  available_methods?: string[];
+  mfa_setup_required?: boolean;
+  setup_token?: string;
 }
 
 interface ErrorResponse {
@@ -35,7 +40,19 @@ interface ErrorResponse {
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const { setTokens, setTenantContext } = useAuthStore();
+  const { setUser, setTenantContext } = useAuthStore();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [bootstrapNotice, setBootstrapNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (searchParams.get("bootstrapped") === "1") {
+      setBootstrapNotice("Admin account created. Sign in to continue.");
+      // Strip the query param so a refresh doesn't re-show the notice.
+      const next = new URLSearchParams(searchParams);
+      next.delete("bootstrapped");
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const [step, setStep] = useState<LoginStep>("org-tenant");
   const [orgTenantData, setOrgTenantData] = useState<OrgTenantData>({
@@ -45,7 +62,7 @@ export function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
-  const [mfaSessionToken, setMfaSessionToken] = useState("");
+  const [mfaChallengeToken, setMfaChallengeToken] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -69,7 +86,7 @@ export function LoginPage() {
 
     setIsLoading(true);
     try {
-      const response = await api.post<LoginResponse>("/auth/login", {
+      const response = await api.post<LoginResponse>("/api/v1/auth/login", {
         username,
         password,
         tenant_slug: orgTenantData.tenantSlug,
@@ -79,20 +96,42 @@ export function LoginPage() {
       const data = response.data;
 
       if (data.mfa_required) {
-        setMfaSessionToken(data.mfa_session_token ?? "");
+        setMfaChallengeToken(data.challenge_token ?? "");
         setStep("mfa");
         return;
       }
 
-      if (data.access_token && data.user) {
-        setTokens(data.access_token, data.user);
+      // CQ-F31: MFA setup required — navigate to setup flow with setup_token.
+      // This happens when the user's account requires MFA but they haven't
+      // enrolled yet (mfa_setup_required returned from backend).
+      if (data.mfa_setup_required) {
+        navigate("/profile/mfa", {
+          state: { setup_token: data.setup_token },
+        });
+        return;
+      }
+
+      if (data.user) {
+        // Re-fetch via /auth/me so the store is populated with the
+        // permissions array — login response does not include it.
+        // Fallback to login payload with empty permissions if /me
+        // fails (e.g., cookies still propagating).
+        const hydrated = await fetchCurrentUser();
+        setUser(hydrated ?? { ...data.user, permissions: [] });
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
         navigate("/dashboard");
-      } else if (!data.mfa_required) {
-        setError("Unexpected server response. Please try again.");
+      } else {
+        setError("Authentication error. Please sign in again.");
+        navigate("/login");
       }
     } catch (err) {
       const axiosErr = err as AxiosError<ErrorResponse>;
+      if (axiosErr.response?.status === 403) {
+        setError(
+          "Request rejected for security reasons. Please refresh the page and try again."
+        );
+        return;
+      }
       const msg =
         axiosErr.response?.data?.message ??
         axiosErr.response?.data?.error ??
@@ -113,21 +152,33 @@ export function LoginPage() {
 
     setIsLoading(true);
     try {
-      const response = await api.post<LoginResponse>("/auth/mfa/verify", {
-        code: totpCode,
-        session_token: mfaSessionToken,
+      const response = await api.post<LoginResponse>("/api/v1/auth/mfa/verify", {
+        challenge_token: mfaChallengeToken,
+        totp_code: totpCode,
       });
 
       const data = response.data;
-      if (data.access_token && data.user) {
-        setTokens(data.access_token, data.user);
+      if (data.user) {
+        // Re-fetch via /auth/me so the store is populated with the
+        // permissions array — login response does not include it.
+        // Fallback to login payload with empty permissions if /me
+        // fails (e.g., cookies still propagating).
+        const hydrated = await fetchCurrentUser();
+        setUser(hydrated ?? { ...data.user, permissions: [] });
         setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
         navigate("/dashboard");
       } else {
-        setError("Unexpected server response. Please try again.");
+        setError("Authentication error. Please sign in again.");
+        navigate("/login");
       }
     } catch (err) {
       const axiosErr = err as AxiosError<ErrorResponse>;
+      if (axiosErr.response?.status === 403) {
+        setError(
+          "Request rejected for security reasons. Please refresh the page and try again."
+        );
+        return;
+      }
       const msg =
         axiosErr.response?.data?.message ??
         axiosErr.response?.data?.error ??
@@ -169,6 +220,16 @@ export function LoginPage() {
       </div>
 
       <div>
+        {/* Bootstrap success notice (?bootstrapped=1) */}
+        {bootstrapNotice && (
+          <div
+            role="status"
+            className="mb-4 flex items-start gap-2 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-primary"
+          >
+            <span>{bootstrapNotice}</span>
+          </div>
+        )}
+
         {/* Error banner */}
         {error && (
           <div

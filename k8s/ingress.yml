@@ -24,7 +24,23 @@ spec:
               service:
                 name: axiam-server
                 port:
-                  number: 8080
+                  number: 8090
+          # SEC-016: OAuth2 authorization server endpoints
+          - path: /oauth2
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 8090
+          # SEC-016: OIDC/OAuth2 discovery endpoints (/.well-known/openid-configuration etc.)
+          - path: /.well-known
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 8090
           - path: /
             pathType: Prefix
             backend:
@@ -32,31 +48,6 @@ spec:
                 name: axiam-frontend
                 port:
                   number: 80
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: axiam-grpc-ingress
-  namespace: axiam
-  labels:
-    app: axiam
-  annotations:
-    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-spec:
-  ingressClassName: nginx
-  tls:
-    - hosts:
-        - grpc.axiam.example.com
-      secretName: axiam-tls
-  rules:
-    - host: grpc.axiam.example.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: axiam-server
-                port:
-                  number: 50051
+
+# SEC-003 (T-09-05): Public gRPC ingress removed — port 50051 is
+# reachable only in-cluster via the ClusterIP service in server/service.yml.

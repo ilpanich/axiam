@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   resourceService,
+  resourceTypeLabel,
+  STANDARD_RESOURCE_TYPES,
   type Resource,
   type CreateResourcePayload,
   type UpdateResourcePayload,
@@ -17,20 +19,18 @@ import { Label } from "@/components/ui/label";
 import { List, Network, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 
 // ─── Resource type badge ──────────────────────────────────────────────────────
 
 function ResourceTypeBadge({ type }: { type: string }) {
   return (
     <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider bg-white/5 text-muted-foreground border border-white/10">
-      {type}
+      {resourceTypeLabel(type)}
     </span>
   );
 }
-
-// ─── Standard resource types ──────────────────────────────────────────────────
-
-const STANDARD_TYPES = ["api", "service", "dataset", "endpoint"] as const;
 
 // ─── Resource form fields ─────────────────────────────────────────────────────
 
@@ -67,7 +67,24 @@ function ResourceFormFields({
   allResources,
   excludeId,
 }: ResourceFormFieldsProps) {
-  const availableParents = allResources.filter((r) => r.id !== excludeId);
+  // CQ-F12: exclude the resource itself and all its descendants to prevent cycles.
+  function getDescendantIds(rootId: string): Set<string> {
+    const ids = new Set<string>([rootId]);
+    const queue = [rootId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const r of allResources) {
+        if (r.parent_id === current && !ids.has(r.id)) {
+          ids.add(r.id);
+          queue.push(r.id);
+        }
+      }
+    }
+    return ids;
+  }
+
+  const excludedIds = excludeId ? getDescendantIds(excludeId) : new Set<string>();
+  const availableParents = allResources.filter((r) => !excludedIds.has(r.id));
 
   return (
     <>
@@ -96,9 +113,9 @@ function ResourceFormFields({
             "transition-colors duration-200"
           )}
         >
-          {STANDARD_TYPES.map((t) => (
+          {STANDARD_RESOURCE_TYPES.map((t) => (
             <option key={t} value={t}>
-              {t}
+              {resourceTypeLabel(t)}
             </option>
           ))}
           <option value="custom">custom…</option>
@@ -161,6 +178,7 @@ type ViewMode = "tree" | "list";
 
 export function ResourcesPage() {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [viewMode, setViewMode] = useState<ViewMode>("tree");
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
 
@@ -193,9 +211,9 @@ export function ResourcesPage() {
       resetCreateForm();
     },
     onError: (err: unknown) => {
-      setCreateError(
-        err instanceof Error ? err.message : "Failed to create resource."
-      );
+      const msg = getApiErrorMessage(err);
+      setCreateError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -254,22 +272,22 @@ export function ResourcesPage() {
       setEditResource(null);
     },
     onError: (err: unknown) => {
-      setEditError(
-        err instanceof Error ? err.message : "Failed to update resource."
-      );
+      const msg = getApiErrorMessage(err);
+      setEditError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
   function openEdit(resource: Resource) {
     setEditResource(resource);
     setEditName(resource.name);
-    const isStandard = (STANDARD_TYPES as readonly string[]).includes(
+    const isStandard = (STANDARD_RESOURCE_TYPES as readonly string[]).includes(
       resource.resource_type
     );
     setEditType(isStandard ? resource.resource_type : "custom");
     setEditCustomType(isStandard ? "" : resource.resource_type);
     setEditParentId(resource.parent_id ?? "");
-    setEditDescription(resource.description ?? "");
+    setEditDescription(resource.metadata?.description ?? "");
     setEditError("");
   }
 
@@ -290,8 +308,9 @@ export function ResourcesPage() {
       payload: {
         name: editName.trim(),
         resource_type: finalType,
-        parent_id: editParentId || undefined,
-        description: editDescription.trim() || undefined,
+        // null (not undefined) clears the parent → backend Some(None) → root.
+        parent_id: editParentId || null,
+        description: editDescription.trim(),
       },
     });
   }
@@ -304,6 +323,9 @@ export function ResourcesPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["resources"] });
       setDeleteResource(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -361,7 +383,7 @@ export function ResourcesPage() {
       header: "Description",
       render: (row) => (
         <span className="text-muted-foreground text-sm">
-          {row.description ?? <span className="opacity-40">—</span>}
+          {row.metadata?.description ?? <span className="opacity-40">—</span>}
         </span>
       ),
     },

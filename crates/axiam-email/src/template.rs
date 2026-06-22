@@ -215,6 +215,45 @@ pub fn builtin_template(kind: TemplateKind) -> EmailTemplate {
              User: {{username}} ({{email}})\n\n\
              Please review the audit log for details.",
         ),
+        // D-09: deletion-cancel link email.
+        TemplateKind::DeletionScheduled => (
+            "Your {{tenant_name}} account deletion has been scheduled",
+            r#"<!DOCTYPE html>
+<html><body>
+<h1>Account Deletion Scheduled</h1>
+<p>Hi {{username}},</p>
+<p>Your <strong>{{tenant_name}}</strong> account is scheduled for deletion
+on <strong>{{expiry_time}}</strong>.</p>
+<p>If you did not request this, <a href="{{action_url}}">click here to cancel</a>
+before that date.</p>
+<p>If you take no action, your account and all associated data will be permanently
+deleted after the grace period.</p>
+</body></html>"#,
+            "Hi {{username}},\n\n\
+             Your {{tenant_name}} account is scheduled for deletion on {{expiry_time}}.\n\n\
+             To cancel, visit: {{action_url}}\n\n\
+             If you take no action, your account and all associated data will be \
+             permanently deleted after the grace period.",
+        ),
+        // D-12: export-ready link email (single-use download link).
+        TemplateKind::ExportReady => (
+            "Your {{tenant_name}} data export is ready",
+            r#"<!DOCTYPE html>
+<html><body>
+<h1>Your Data Export is Ready</h1>
+<p>Hi {{username}},</p>
+<p>Your personal data export for <strong>{{tenant_name}}</strong> is ready.</p>
+<p><a href="{{action_url}}">Download your data</a> — this link expires at
+<strong>{{expiry_time}}</strong> and can only be used once.</p>
+<p>If you did not request this export, please contact your administrator.</p>
+</body></html>"#,
+            "Hi {{username}},\n\n\
+             Your personal data export for {{tenant_name}} is ready.\n\n\
+             Download: {{action_url}}\n\
+             Expires: {{expiry_time}}\n\
+             This is a single-use link.\n\n\
+             If you did not request this export, contact your administrator.",
+        ),
     };
 
     EmailTemplate {

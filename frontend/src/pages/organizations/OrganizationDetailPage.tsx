@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -6,9 +6,10 @@ import {
   caCertService,
   orgSettingsService,
   orgService,
+  flattenOrgSettings,
   type Tenant,
   type CaCertificate,
-  type SecuritySettings,
+  type SetOrgSettings,
   type CreateTenantPayload,
   type GenerateCaCertPayload,
 } from "@/services/organizations";
@@ -17,6 +18,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StatusBadge } from "@/components/StatusBadge";
+import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -180,10 +182,11 @@ function TenantsTab({ orgId }: { orgId: string }) {
       setCreateError("Name and slug are required.");
       return;
     }
+    const description = createDescription.trim();
     createMutation.mutate({
       name: createName.trim(),
       slug: createSlug.trim(),
-      description: createDescription.trim() || undefined,
+      metadata: description ? { description } : undefined,
     });
   }
 
@@ -212,7 +215,7 @@ function TenantsTab({ orgId }: { orgId: string }) {
     setEditTenant(t);
     setEditName(t.name);
     setEditSlug(t.slug);
-    setEditDescription(t.description ?? "");
+    setEditDescription((t.metadata?.description as string | undefined) ?? "");
     setEditError("");
   }
 
@@ -224,12 +227,13 @@ function TenantsTab({ orgId }: { orgId: string }) {
       setEditError("Name and slug are required.");
       return;
     }
+    const description = editDescription.trim();
     editMutation.mutate({
       id: editTenant.id,
       payload: {
         name: editName.trim(),
         slug: editSlug.trim(),
-        description: editDescription.trim() || undefined,
+        metadata: { ...editTenant.metadata, description },
       },
     });
   }
@@ -271,7 +275,9 @@ function TenantsTab({ orgId }: { orgId: string }) {
       header: "Description",
       render: (row) => (
         <span className="text-muted-foreground text-sm">
-          {row.description ?? <span className="opacity-40">—</span>}
+          {(row.metadata?.description as string | undefined) ?? (
+            <span className="opacity-40">—</span>
+          )}
         </span>
       ),
     },
@@ -394,6 +400,24 @@ function TenantsTab({ orgId }: { orgId: string }) {
 
 // ─── CA Certificates tab ──────────────────────────────────────────────────────
 
+/**
+ * Map the backend's PascalCase `CertificateStatus` (Active/Revoked/Expired)
+ * onto the lowercase variants the shared `StatusBadge` accepts. `Expired`
+ * has no badge variant of its own, so it renders with the neutral style.
+ */
+function caBadgeStatus(
+  status: CaCertificate["status"]
+): "active" | "revoked" | "inactive" {
+  switch (status) {
+    case "Active":
+      return "active";
+    case "Revoked":
+      return "revoked";
+    case "Expired":
+      return "inactive";
+  }
+}
+
 function CaCertificatesTab({ orgId }: { orgId: string }) {
   const queryClient = useQueryClient();
 
@@ -404,18 +428,28 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
 
   // Generate
   const [generateOpen, setGenerateOpen] = useState(false);
-  const [commonName, setCommonName] = useState("");
-  const [keyType, setKeyType] = useState<"RSA4096" | "Ed25519">("RSA4096");
+  const [subject, setSubject] = useState("");
+  const [keyAlgorithm, setKeyAlgorithm] = useState<"Rsa4096" | "Ed25519">(
+    "Rsa4096"
+  );
   const [validityDays, setValidityDays] = useState(365);
   const [generateError, setGenerateError] = useState("");
+  // The one-time PEM private key returned on generation (never retrievable again).
+  const [revealedPrivateKey, setRevealedPrivateKey] = useState<string | null>(
+    null
+  );
 
   const generateMutation = useMutation({
     mutationFn: (payload: GenerateCaCertPayload) =>
       caCertService.generate(orgId, payload),
-    onSuccess: () => {
+    onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ca-certificates", orgId] });
       setGenerateOpen(false);
       resetGenerate();
+      // Surface the one-time private key — it is never retrievable again.
+      if (result.private_key_pem) {
+        setRevealedPrivateKey(result.private_key_pem);
+      }
     },
     onError: (err: unknown) => {
       setGenerateError(
@@ -425,8 +459,8 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
   });
 
   function resetGenerate() {
-    setCommonName("");
-    setKeyType("RSA4096");
+    setSubject("");
+    setKeyAlgorithm("Rsa4096");
     setValidityDays(365);
     setGenerateError("");
   }
@@ -434,8 +468,8 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
   function handleGenerateSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setGenerateError("");
-    if (!commonName.trim()) {
-      setGenerateError("Common name is required.");
+    if (!subject.trim()) {
+      setGenerateError("Subject is required.");
       return;
     }
     if (validityDays < 1) {
@@ -443,8 +477,8 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
       return;
     }
     generateMutation.mutate({
-      common_name: commonName.trim(),
-      key_type: keyType,
+      subject: subject.trim(),
+      key_algorithm: keyAlgorithm,
       validity_days: validityDays,
     });
   }
@@ -461,42 +495,42 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
 
   const columns: Column<CaCertificate>[] = [
     {
-      key: "common_name",
-      header: "Common Name",
+      key: "subject",
+      header: "Subject",
       render: (row) => (
-        <span className="font-medium text-foreground">{row.common_name}</span>
+        <span className="font-medium text-foreground">{row.subject}</span>
       ),
     },
     {
-      key: "key_type",
-      header: "Key Type",
+      key: "key_algorithm",
+      header: "Key Algorithm",
       render: (row) => (
         <code className="text-xs bg-white/5 px-1.5 py-0.5 rounded text-muted-foreground">
-          {row.key_type}
+          {row.key_algorithm}
         </code>
       ),
     },
     {
       key: "status",
       header: "Status",
-      render: (row) => <StatusBadge status={row.status} />,
+      render: (row) => <StatusBadge status={caBadgeStatus(row.status)} />,
     },
     {
-      key: "expires_at",
+      key: "not_after",
       header: "Expires",
       render: (row) => (
         <span className="text-muted-foreground text-sm">
-          {formatDate(row.expires_at)}
+          {formatDate(row.not_after)}
         </span>
       ),
     },
     {
-      key: "created_at",
-      header: "Created",
+      key: "fingerprint",
+      header: "Fingerprint",
       render: (row) => (
-        <span className="text-muted-foreground text-sm">
-          {formatDate(row.created_at)}
-        </span>
+        <code className="text-xs text-muted-foreground">
+          {row.fingerprint.slice(0, 16)}…
+        </code>
       ),
     },
     {
@@ -505,12 +539,12 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
       width: "w-24",
       render: (row) => (
         <button
-          aria-label={`Revoke ${row.common_name}`}
+          aria-label={`Revoke ${row.subject}`}
           onClick={() => setRevokeCert(row)}
-          disabled={row.status === "revoked"}
+          disabled={row.status === "Revoked"}
           className={cn(
             "px-2.5 py-1 rounded text-xs font-medium transition-colors",
-            row.status === "revoked"
+            row.status === "Revoked"
               ? "opacity-40 cursor-not-allowed text-muted-foreground"
               : "text-red-400 hover:bg-red-500/20 hover:text-red-300"
           )}
@@ -559,22 +593,22 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
         submitLabel="Generate"
       >
         <div className="space-y-2">
-          <Label htmlFor="cert-cn">Common Name *</Label>
+          <Label htmlFor="cert-subject">Subject *</Label>
           <Input
-            id="cert-cn"
-            value={commonName}
-            onChange={(e) => setCommonName(e.target.value)}
-            placeholder="My Org Root CA"
+            id="cert-subject"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            placeholder="CN=My Org Root CA"
             required
           />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="cert-key-type">Key Type</Label>
+          <Label htmlFor="cert-key-algorithm">Key Algorithm</Label>
           <select
-            id="cert-key-type"
-            value={keyType}
+            id="cert-key-algorithm"
+            value={keyAlgorithm}
             onChange={(e) =>
-              setKeyType(e.target.value as "RSA4096" | "Ed25519")
+              setKeyAlgorithm(e.target.value as "Rsa4096" | "Ed25519")
             }
             className={cn(
               "flex h-10 w-full rounded-md px-3 py-2 text-sm",
@@ -583,7 +617,7 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
               "transition-colors duration-200"
             )}
           >
-            <option value="RSA4096">RSA-4096</option>
+            <option value="Rsa4096">RSA-4096</option>
             <option value="Ed25519">Ed25519</option>
           </select>
         </div>
@@ -607,8 +641,20 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
         onClose={() => setRevokeCert(null)}
         onConfirm={() => revokeCert && revokeMutation.mutate(revokeCert.id)}
         title="Revoke Certificate"
-        description={`Are you sure you want to revoke "${revokeCert?.common_name}"? This cannot be undone.`}
+        description={`Are you sure you want to revoke "${revokeCert?.subject}"? This cannot be undone.`}
         isLoading={revokeMutation.isPending}
+      />
+
+      <SecretRevealModal
+        open={revealedPrivateKey !== null}
+        onClose={() => setRevealedPrivateKey(null)}
+        title="CA Certificate Generated"
+        description="Save the CA private key now — it is never shown again and cannot be recovered."
+        secrets={
+          revealedPrivateKey
+            ? [{ label: "Private Key (PEM)", value: revealedPrivateKey }]
+            : []
+        }
       />
     </div>
   );
@@ -626,16 +672,18 @@ function SettingsTab({ orgId }: { orgId: string }) {
     queryFn: () => orgSettingsService.get(orgId),
   });
 
-  const [form, setForm] = useState<SecuritySettings>({});
+  // The form holds the FULL flat SetOrgSettings — PUT requires every field.
+  // `null` until the nested settings load, then pre-filled from them.
+  const [form, setForm] = useState<SetOrgSettings | null>(null);
 
-  // Sync form with loaded settings
-  const syncedRef = { current: false };
-  if (settings && !syncedRef.current) {
-    syncedRef.current = true;
-  }
+  // Initialize form from loaded settings (runs when settings first load or org changes)
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (settings) setForm(flattenOrgSettings(settings));
+  }, [settings]);
 
   const updateMutation = useMutation({
-    mutationFn: (payload: SecuritySettings) =>
+    mutationFn: (payload: SetOrgSettings) =>
       orgSettingsService.update(orgId, payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["org-settings", orgId] });
@@ -650,23 +698,22 @@ function SettingsTab({ orgId }: { orgId: string }) {
     },
   });
 
-  const merged: SecuritySettings = { ...settings, ...form };
-
-  function setField<K extends keyof SecuritySettings>(
+  function setField<K extends keyof SetOrgSettings>(
     key: K,
-    value: SecuritySettings[K]
+    value: SetOrgSettings[K]
   ) {
-    setForm((prev) => ({ ...prev, [key]: value }));
+    setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
   }
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (!form) return;
     setSaveError("");
     setSaveSuccess(false);
-    updateMutation.mutate(merged);
+    updateMutation.mutate(form);
   }
 
-  if (isLoading) {
+  if (isLoading || !form) {
     return (
       <div className="flex items-center justify-center py-12 text-muted-foreground">
         <Loader2 size={20} className="animate-spin mr-2" />
@@ -674,6 +721,8 @@ function SettingsTab({ orgId }: { orgId: string }) {
       </div>
     );
   }
+
+  const merged = form;
 
   return (
     <div role="tabpanel" id="tabpanel-settings" aria-labelledby="tab-settings">
@@ -690,20 +739,21 @@ function SettingsTab({ orgId }: { orgId: string }) {
               id="pwd-min-len"
               type="number"
               min={8}
-              value={merged.password_min_length ?? 12}
+              value={merged.min_length}
               onChange={(e) =>
-                setField("password_min_length", Number(e.target.value))
+                setField("min_length", Number(e.target.value))
               }
             />
           </div>
 
           {(
             [
-              ["password_require_uppercase", "Require uppercase letter"],
-              ["password_require_lowercase", "Require lowercase letter"],
-              ["password_require_digit", "Require digit"],
-              ["password_require_symbol", "Require symbol"],
-            ] as [keyof SecuritySettings, string][]
+              ["require_uppercase", "Require uppercase letter"],
+              ["require_lowercase", "Require lowercase letter"],
+              ["require_digits", "Require digit"],
+              ["require_symbols", "Require symbol"],
+              ["hibp_check_enabled", "Check against breach database (HIBP)"],
+            ] as [keyof SetOrgSettings, string][]
           ).map(([key, label]) => (
             <label key={key} className="flex items-center gap-3 cursor-pointer">
               <input
@@ -722,7 +772,7 @@ function SettingsTab({ orgId }: { orgId: string }) {
               id="pwd-history"
               type="number"
               min={0}
-              value={merged.password_history_count ?? 5}
+              value={merged.password_history_count}
               onChange={(e) =>
                 setField("password_history_count", Number(e.target.value))
               }
@@ -730,11 +780,9 @@ function SettingsTab({ orgId }: { orgId: string }) {
           </div>
         </div>
 
-        {/* MFA & Session */}
+        {/* MFA */}
         <div className="glass-card space-y-4">
-          <h3 className="text-base font-semibold text-foreground">
-            MFA & Session
-          </h3>
+          <h3 className="text-base font-semibold text-foreground">MFA</h3>
 
           <label
             htmlFor="mfa-enforced"
@@ -751,14 +799,169 @@ function SettingsTab({ orgId }: { orgId: string }) {
           </label>
 
           <div className="space-y-2">
-            <Label htmlFor="session-timeout">Session timeout (minutes)</Label>
+            <Label htmlFor="mfa-challenge">
+              MFA challenge lifetime (seconds)
+            </Label>
             <Input
-              id="session-timeout"
+              id="mfa-challenge"
               type="number"
               min={1}
-              value={merged.session_timeout_minutes ?? 60}
+              value={merged.mfa_challenge_lifetime_secs}
               onChange={(e) =>
-                setField("session_timeout_minutes", Number(e.target.value))
+                setField(
+                  "mfa_challenge_lifetime_secs",
+                  Number(e.target.value)
+                )
+              }
+            />
+          </div>
+        </div>
+
+        {/* Lockout */}
+        <div className="glass-card space-y-4">
+          <h3 className="text-base font-semibold text-foreground">
+            Account Lockout
+          </h3>
+
+          <div className="space-y-2">
+            <Label htmlFor="lockout-max-attempts">
+              Max failed login attempts
+            </Label>
+            <Input
+              id="lockout-max-attempts"
+              type="number"
+              min={1}
+              value={merged.max_failed_login_attempts}
+              onChange={(e) =>
+                setField("max_failed_login_attempts", Number(e.target.value))
+              }
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="lockout-duration">
+              Lockout duration (seconds)
+            </Label>
+            <Input
+              id="lockout-duration"
+              type="number"
+              min={1}
+              value={merged.lockout_duration_secs}
+              onChange={(e) =>
+                setField("lockout_duration_secs", Number(e.target.value))
+              }
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="lockout-backoff">Lockout backoff multiplier</Label>
+            <Input
+              id="lockout-backoff"
+              type="number"
+              min={1}
+              step={0.1}
+              value={merged.lockout_backoff_multiplier}
+              onChange={(e) =>
+                setField(
+                  "lockout_backoff_multiplier",
+                  Number(e.target.value)
+                )
+              }
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="lockout-max-duration">
+              Max lockout duration (seconds)
+            </Label>
+            <Input
+              id="lockout-max-duration"
+              type="number"
+              min={1}
+              value={merged.max_lockout_duration_secs}
+              onChange={(e) =>
+                setField("max_lockout_duration_secs", Number(e.target.value))
+              }
+            />
+          </div>
+        </div>
+
+        {/* Tokens */}
+        <div className="glass-card space-y-4">
+          <h3 className="text-base font-semibold text-foreground">Tokens</h3>
+
+          <div className="space-y-2">
+            <Label htmlFor="access-token-lifetime">
+              Access token lifetime (seconds)
+            </Label>
+            <Input
+              id="access-token-lifetime"
+              type="number"
+              min={1}
+              value={merged.access_token_lifetime_secs}
+              onChange={(e) =>
+                setField("access_token_lifetime_secs", Number(e.target.value))
+              }
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="refresh-token-lifetime">
+              Refresh token lifetime (seconds)
+            </Label>
+            <Input
+              id="refresh-token-lifetime"
+              type="number"
+              min={1}
+              value={merged.refresh_token_lifetime_secs}
+              onChange={(e) =>
+                setField(
+                  "refresh_token_lifetime_secs",
+                  Number(e.target.value)
+                )
+              }
+            />
+          </div>
+        </div>
+
+        {/* Email */}
+        <div className="glass-card space-y-4">
+          <h3 className="text-base font-semibold text-foreground">
+            Email Verification
+          </h3>
+
+          <label
+            htmlFor="email-verif-required"
+            className="flex items-center gap-3 cursor-pointer"
+          >
+            <input
+              id="email-verif-required"
+              type="checkbox"
+              checked={Boolean(merged.email_verification_required)}
+              onChange={(e) =>
+                setField("email_verification_required", e.target.checked)
+              }
+              className="h-4 w-4 rounded border-primary/40 bg-white/5 text-primary focus:ring-primary/40"
+            />
+            <span className="text-sm text-foreground">
+              Require email verification
+            </span>
+          </label>
+
+          <div className="space-y-2">
+            <Label htmlFor="email-grace">
+              Verification grace period (hours)
+            </Label>
+            <Input
+              id="email-grace"
+              type="number"
+              min={0}
+              value={merged.email_verification_grace_period_hours}
+              onChange={(e) =>
+                setField(
+                  "email_verification_grace_period_hours",
+                  Number(e.target.value)
+                )
               }
             />
           </div>
@@ -777,12 +980,50 @@ function SettingsTab({ orgId }: { orgId: string }) {
               id="cert-validity-days"
               type="number"
               min={1}
-              value={merged.certificate_validity_days ?? 365}
+              value={merged.default_cert_validity_days}
               onChange={(e) =>
-                setField("certificate_validity_days", Number(e.target.value))
+                setField("default_cert_validity_days", Number(e.target.value))
               }
             />
           </div>
+          <div className="space-y-2">
+            <Label htmlFor="cert-max-validity-days">
+              Max certificate validity (days)
+            </Label>
+            <Input
+              id="cert-max-validity-days"
+              type="number"
+              min={1}
+              value={merged.max_cert_validity_days}
+              onChange={(e) =>
+                setField("max_cert_validity_days", Number(e.target.value))
+              }
+            />
+          </div>
+        </div>
+
+        {/* Notifications */}
+        <div className="glass-card space-y-4">
+          <h3 className="text-base font-semibold text-foreground">
+            Notifications
+          </h3>
+          <label
+            htmlFor="admin-notifications"
+            className="flex items-center gap-3 cursor-pointer"
+          >
+            <input
+              id="admin-notifications"
+              type="checkbox"
+              checked={Boolean(merged.admin_notifications_enabled)}
+              onChange={(e) =>
+                setField("admin_notifications_enabled", e.target.checked)
+              }
+              className="h-4 w-4 rounded border-primary/40 bg-white/5 text-primary focus:ring-primary/40"
+            />
+            <span className="text-sm text-foreground">
+              Enable admin notifications
+            </span>
+          </label>
         </div>
 
         {saveError && <p className="text-sm text-destructive">{saveError}</p>}
@@ -844,7 +1085,7 @@ export function OrganizationDetailPage() {
 
       <PageHeader
         title={orgLoading ? "Loading..." : (org?.name ?? "Organization")}
-        description={org?.description}
+        description={org?.metadata?.description as string | undefined}
         action={
           <Button variant="ghost" size="sm" asChild>
             <Link to="/organizations">

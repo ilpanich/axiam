@@ -26,6 +26,12 @@ struct FederationConfigRow {
     client_secret: String,
     attribute_map: serde_json::Value,
     enabled: bool,
+    // Phase 4 fields (D-10 / D-11) — DB schema defaults to [] / None for legacy rows
+    allowed_algorithms: Vec<String>,
+    idp_signing_cert_pem: Option<String>,
+    client_secret_ciphertext: Option<String>,
+    client_secret_nonce: Option<String>,
+    client_secret_key_version: Option<i64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -41,6 +47,12 @@ struct FederationConfigRowWithId {
     client_secret: String,
     attribute_map: serde_json::Value,
     enabled: bool,
+    // Phase 4 fields (D-10 / D-11)
+    allowed_algorithms: Vec<String>,
+    idp_signing_cert_pem: Option<String>,
+    client_secret_ciphertext: Option<String>,
+    client_secret_nonce: Option<String>,
+    client_secret_key_version: Option<i64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -84,6 +96,11 @@ impl FederationConfigRow {
             client_secret: self.client_secret,
             attribute_map: self.attribute_map,
             enabled: self.enabled,
+            allowed_algorithms: self.allowed_algorithms,
+            idp_signing_cert_pem: self.idp_signing_cert_pem,
+            client_secret_ciphertext: self.client_secret_ciphertext,
+            client_secret_nonce: self.client_secret_nonce,
+            client_secret_key_version: self.client_secret_key_version,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -104,6 +121,11 @@ impl FederationConfigRowWithId {
             client_secret: self.client_secret,
             attribute_map: self.attribute_map,
             enabled: self.enabled,
+            allowed_algorithms: self.allowed_algorithms,
+            idp_signing_cert_pem: self.idp_signing_cert_pem,
+            client_secret_ciphertext: self.client_secret_ciphertext,
+            client_secret_nonce: self.client_secret_nonce,
+            client_secret_key_version: self.client_secret_key_version,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -138,6 +160,10 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         let protocol = protocol_to_string(&input.protocol);
         let attribute_map = input.attribute_map.unwrap_or_else(|| serde_json::json!({}));
 
+        let allowed_algorithms = input
+            .allowed_algorithms
+            .unwrap_or_else(|| vec!["RS256".to_string()]);
+
         let result = self
             .db
             .query(
@@ -149,6 +175,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  client_id = $client_id, \
                  client_secret = $client_secret, \
                  attribute_map = $attribute_map, \
+                 idp_signing_cert_pem = $idp_signing_cert_pem, \
+                 allowed_algorithms = $allowed_algorithms, \
                  enabled = true, \
                  created_at = time::now(), \
                  updated_at = time::now()",
@@ -163,6 +191,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             // storage (same pattern as MFA secrets and CA private keys).
             .bind(("client_secret", input.client_secret))
             .bind(("attribute_map", attribute_map))
+            .bind(("idp_signing_cert_pem", input.idp_signing_cert_pem))
+            .bind(("allowed_algorithms", allowed_algorithms))
             .await
             .map_err(DbError::from)?;
 
@@ -235,6 +265,20 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         if let Some(enabled) = input.enabled {
             set_clauses.push("enabled = $enabled".into());
             binds.push(("enabled".into(), serde_json::json!(enabled)));
+        }
+        if let Some(ref idp_signing_cert_pem) = input.idp_signing_cert_pem {
+            set_clauses.push("idp_signing_cert_pem = $idp_signing_cert_pem".into());
+            binds.push((
+                "idp_signing_cert_pem".into(),
+                serde_json::json!(idp_signing_cert_pem),
+            ));
+        }
+        if let Some(ref allowed_algorithms) = input.allowed_algorithms {
+            set_clauses.push("allowed_algorithms = $allowed_algorithms".into());
+            binds.push((
+                "allowed_algorithms".into(),
+                serde_json::json!(allowed_algorithms),
+            ));
         }
 
         let sql = format!(
@@ -342,5 +386,63 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             offset: pagination.offset,
             limit: pagination.limit,
         })
+    }
+
+    async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {
+        // Return rows that have a non-empty plaintext secret but no ciphertext yet.
+        // This is the predicate used by the boot backfill task (D-12).
+        let result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * \
+                 FROM federation_config \
+                 WHERE client_secret_ciphertext IS NONE \
+                 AND client_secret IS NOT NONE \
+                 AND client_secret != \"\"",
+            )
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<FederationConfigRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|r| r.try_into_entry().map_err(Into::into))
+            .collect()
+    }
+
+    async fn set_encrypted_secret(
+        &self,
+        tenant_id: Uuid,
+        config_id: Uuid,
+        nonce_b64: String,
+        ciphertext_b64: String,
+        key_version: i64,
+    ) -> AxiamResult<()> {
+        // Write the split encrypted columns and null out the legacy plaintext.
+        // Per MEMORY.md: bind() requires owned Strings.
+        let result = self
+            .db
+            .query(
+                "UPDATE type::record('federation_config', $config_id) \
+                 SET client_secret_nonce = $nonce, \
+                     client_secret_ciphertext = $ciphertext, \
+                     client_secret_key_version = $kv, \
+                     client_secret = '' \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("config_id", config_id.to_string()))
+            .bind(("nonce", nonce_b64))
+            .bind(("ciphertext", ciphertext_b64))
+            .bind(("kv", key_version))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
     }
 }

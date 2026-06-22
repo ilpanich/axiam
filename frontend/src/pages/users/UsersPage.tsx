@@ -16,8 +16,22 @@ import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Eye, Pencil, Plus, Trash2 } from "lucide-react";
+import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
+import { Eye, Lock, LockOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
+
+// ─── Locked Badge ─────────────────────────────────────────────────────────────
+
+function LockedBadge({ locked }: { locked: boolean }) {
+  if (!locked) return null;
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30">
+      Locked
+    </span>
+  );
+}
 
 // ─── MFA Badge ────────────────────────────────────────────────────────────────
 
@@ -69,12 +83,10 @@ interface CreateUserFieldsProps {
   email: string;
   password: string;
   displayName: string;
-  isActive: boolean;
   onUsernameChange: (v: string) => void;
   onEmailChange: (v: string) => void;
   onPasswordChange: (v: string) => void;
   onDisplayNameChange: (v: string) => void;
-  onIsActiveChange: (v: boolean) => void;
   error?: string;
 }
 
@@ -83,12 +95,10 @@ function CreateUserFields({
   email,
   password,
   displayName,
-  isActive,
   onUsernameChange,
   onEmailChange,
   onPasswordChange,
   onDisplayNameChange,
-  onIsActiveChange,
   error,
 }: CreateUserFieldsProps) {
   return (
@@ -127,6 +137,11 @@ function CreateUserFields({
           required
           autoComplete="new-password"
         />
+        {password.length > 0 && (
+          <div className="mt-2">
+            <PasswordPolicyChecker password={password} />
+          </div>
+        )}
       </div>
       <div className="space-y-2">
         <Label htmlFor="user-display-name">Display Name</Label>
@@ -138,12 +153,6 @@ function CreateUserFields({
           autoComplete="off"
         />
       </div>
-      <ToggleField
-        id="user-is-active"
-        label="Active"
-        checked={isActive}
-        onChange={onIsActiveChange}
-      />
       {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
@@ -208,20 +217,26 @@ function EditUserFields({
 export function UsersPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
-  // ─── Pagination + search state ───────────────────────────────────────────────
+  // ─── Pagination + search + filter state ─────────────────────────────────────
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [lockedOnly, setLockedOnly] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["users", page, search],
     queryFn: () => userService.list(page, 20, search),
+    placeholderData: (prev) => prev,
   });
 
-  const users = data?.data ?? [];
+  const users = data?.items ?? [];
   const total = data?.total ?? 0;
-  const perPage = data?.per_page ?? 20;
+  const perPage = data?.limit ?? 20;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
+
+  const lockedCount = users.filter((u) => u.is_locked).length;
+  const filteredUsers = lockedOnly ? users.filter((u) => u.is_locked) : users;
 
   function handleSearchChange(value: string) {
     setSearch(value);
@@ -234,7 +249,6 @@ export function UsersPage() {
   const [createEmail, setCreateEmail] = useState("");
   const [createPassword, setCreatePassword] = useState("");
   const [createDisplayName, setCreateDisplayName] = useState("");
-  const [createIsActive, setCreateIsActive] = useState(true);
   const [createError, setCreateError] = useState("");
 
   const createMutation = useMutation({
@@ -245,9 +259,9 @@ export function UsersPage() {
       resetCreateForm();
     },
     onError: (err: unknown) => {
-      setCreateError(
-        err instanceof Error ? err.message : "Failed to create user."
-      );
+      const msg = getApiErrorMessage(err);
+      setCreateError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -256,7 +270,6 @@ export function UsersPage() {
     setCreateEmail("");
     setCreatePassword("");
     setCreateDisplayName("");
-    setCreateIsActive(true);
     setCreateError("");
   }
 
@@ -267,12 +280,15 @@ export function UsersPage() {
       setCreateError("Username, email, and password are required.");
       return;
     }
+    if (!checkPasswordPolicy(createPassword)) {
+      setCreateError("Password does not meet the requirements.");
+      return;
+    }
     createMutation.mutate({
       username: createUsername.trim(),
       email: createEmail.trim(),
       password: createPassword,
       display_name: createDisplayName.trim() || undefined,
-      is_active: createIsActive,
     });
   }
 
@@ -291,9 +307,9 @@ export function UsersPage() {
       setEditUser(null);
     },
     onError: (err: unknown) => {
-      setEditError(
-        err instanceof Error ? err.message : "Failed to update user."
-      );
+      const msg = getApiErrorMessage(err);
+      setEditError(msg);
+      toast({ description: msg, variant: "destructive" });
     },
   });
 
@@ -301,7 +317,7 @@ export function UsersPage() {
     setEditUser(user);
     setEditEmail(user.email);
     setEditDisplayName(user.display_name ?? "");
-    setEditIsActive(user.is_active);
+    setEditIsActive(user.status === "Active");
     setEditError("");
   }
 
@@ -317,7 +333,7 @@ export function UsersPage() {
       payload: {
         email: editEmail.trim(),
         display_name: editDisplayName.trim() || undefined,
-        is_active: editIsActive,
+        status: editIsActive ? "Active" : "Inactive",
       },
     });
   }
@@ -330,6 +346,23 @@ export function UsersPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["users"] });
       setDeleteUser(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
+    },
+  });
+
+  // ─── Unlock state ─────────────────────────────────────────────────────────────
+  const [userToUnlock, setUserToUnlock] = useState<User | null>(null);
+
+  const unlockMutation = useMutation({
+    mutationFn: (userId: string) => userService.unlock(userId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      setUserToUnlock(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -361,10 +394,13 @@ export function UsersPage() {
       ),
     },
     {
-      key: "is_active",
+      key: "status",
       header: "Status",
       render: (row) => (
-        <StatusBadge status={row.is_active ? "active" : "inactive"} />
+        <div className="flex items-center gap-1.5">
+          <StatusBadge status={row.status === "Active" ? "active" : "inactive"} />
+          <LockedBadge locked={row.is_locked} />
+        </div>
       ),
     },
     {
@@ -401,9 +437,18 @@ export function UsersPage() {
     {
       key: "actions",
       header: "Actions",
-      width: "w-28",
+      width: "w-36",
       render: (row) => (
         <div className="flex items-center gap-1">
+          {row.is_locked && (
+            <button
+              aria-label={`Unlock ${row.username}`}
+              onClick={() => setUserToUnlock(row)}
+              className="p-1.5 rounded hover:bg-cyan-500/10 text-muted-foreground hover:text-cyan-400 transition-colors"
+            >
+              <LockOpen size={14} />
+            </button>
+          )}
           <button
             aria-label={`Edit ${row.username}`}
             onClick={() => openEdit(row)}
@@ -448,21 +493,37 @@ export function UsersPage() {
         }
       />
 
-      {/* Search */}
-      <div className="mb-4">
+      {/* Search + filter */}
+      <div className="mb-4 flex items-center gap-3">
         <SearchInput
           value={search}
           onChange={handleSearchChange}
           placeholder="Search users…"
           className="max-w-sm"
         />
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            setLockedOnly(!lockedOnly);
+            setPage(1);
+          }}
+          className={
+            lockedOnly
+              ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+              : "text-muted-foreground"
+          }
+        >
+          <Lock className="mr-1 h-3.5 w-3.5" />
+          {lockedOnly ? `Locked (${lockedCount})` : "Locked"}
+        </Button>
       </div>
 
       <DataTable
         columns={columns}
-        data={users}
+        data={filteredUsers}
         isLoading={isLoading}
-        emptyMessage="No users found."
+        emptyMessage={lockedOnly ? "No locked accounts." : "No users found."}
       />
 
       {/* Pagination */}
@@ -507,12 +568,10 @@ export function UsersPage() {
           email={createEmail}
           password={createPassword}
           displayName={createDisplayName}
-          isActive={createIsActive}
           onUsernameChange={setCreateUsername}
           onEmailChange={setCreateEmail}
           onPasswordChange={setCreatePassword}
           onDisplayNameChange={setCreateDisplayName}
-          onIsActiveChange={setCreateIsActive}
           error={createError}
         />
       </FormDialog>
@@ -546,6 +605,65 @@ export function UsersPage() {
         description={`Are you sure you want to delete "${deleteUser?.username}"? This action cannot be undone.`}
         isLoading={deleteMutation.isPending}
       />
+
+      {/* Unlock confirm */}
+      {userToUnlock !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          aria-modal="true"
+          role="dialog"
+          aria-labelledby="unlock-dialog-title"
+          aria-describedby="unlock-dialog-description"
+        >
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={
+              unlockMutation.isPending
+                ? undefined
+                : () => setUserToUnlock(null)
+            }
+            aria-hidden="true"
+          />
+          <div className="relative z-10 glass-card w-full max-w-sm p-6 space-y-4">
+            <h2
+              id="unlock-dialog-title"
+              className="text-lg font-semibold text-foreground"
+            >
+              Unlock Account
+            </h2>
+            <p
+              id="unlock-dialog-description"
+              className="text-sm text-muted-foreground"
+            >
+              Unlock{" "}
+              <span className="text-foreground font-medium">
+                {userToUnlock.username}
+              </span>
+              {"'"}s account? They will be able to log in immediately.
+            </p>
+            <div className="flex justify-end gap-3 pt-4 border-t border-primary/10">
+              <button
+                onClick={() => setUserToUnlock(null)}
+                disabled={unlockMutation.isPending}
+                className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-md text-muted-foreground hover:bg-white/5 hover:text-foreground transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => unlockMutation.mutate(userToUnlock.id)}
+                disabled={unlockMutation.isPending}
+                className="inline-flex items-center justify-center min-w-[120px] px-4 py-2 text-sm font-medium rounded-md bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-400/40 disabled:opacity-50"
+              >
+                {unlockMutation.isPending ? (
+                  <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-cyan-400 border-t-transparent rounded-full" />
+                ) : (
+                  "Unlock Account"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

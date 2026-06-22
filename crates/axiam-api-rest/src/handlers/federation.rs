@@ -3,6 +3,8 @@
 //! Provides CRUD for federation configurations, the OIDC authorization
 //! and callback flow, and federation link management.
 
+use std::sync::Arc;
+
 use actix_web::{HttpResponse, web};
 use axiam_core::models::federation::{
     CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol,
@@ -10,17 +12,38 @@ use axiam_core::models::federation::{
 };
 use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, PaginatedResult, Pagination,
+    UserRepository,
 };
 use axiam_db::{
     SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealUserRepository,
 };
+// Replay protection is only used by the SAML ACS handlers.
+#[cfg(feature = "saml")]
+use axiam_db::SurrealAssertionReplayRepository;
+use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
+#[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use axiam_auth::AuthService;
+use axiam_auth::config::AuthConfig;
+use axiam_core::error::AxiamError;
+use axiam_core::repository::{
+    FederationLoginStateRepository, OrganizationRepository, TenantRepository,
+};
+use axiam_db::{
+    SurrealFederationLoginStateRepository, SurrealOrganizationRepository,
+    SurrealRefreshTokenRepository, SurrealSessionRepository, SurrealTenantRepository,
+};
+use axiam_federation::secrets::{current_key_version, encrypt_client_secret};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -42,6 +65,12 @@ pub struct CreateFederationConfigRequest {
     pub client_secret: String,
     /// Maps external IdP attributes to AXIAM user fields.
     pub attribute_map: Option<serde_json::Value>,
+    /// PEM-encoded X.509 certificate for verifying SAML assertions or
+    /// OIDC signatures (CQ-B40/REQ-14 AC-5).  Required for SAML configs.
+    pub idp_signing_cert_pem: Option<String>,
+    /// Accepted JWT signing algorithms (OIDC) or signature algorithms (SAML).
+    /// Defaults to `["RS256"]` when not provided (CQ-B40/REQ-14 AC-5).
+    pub allowed_algorithms: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -52,6 +81,11 @@ pub struct UpdateFederationConfigRequest {
     pub client_secret: Option<String>,
     pub attribute_map: Option<serde_json::Value>,
     pub enabled: Option<bool>,
+    /// PEM-encoded X.509 certificate for verifying SAML assertions
+    /// (CQ-B40/REQ-14 AC-5).  `Some(None)` clears the stored cert.
+    pub idp_signing_cert_pem: Option<Option<String>>,
+    /// Accepted signature algorithms (CQ-B40/REQ-14 AC-5).
+    pub allowed_algorithms: Option<Vec<String>>,
 }
 
 /// Federation config response -- omits client_secret.
@@ -186,9 +220,14 @@ fn protocol_to_string(p: &FederationProtocol) -> &'static str {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<CreateFederationConfigRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
 
     if req.provider.is_empty() {
@@ -212,6 +251,29 @@ pub async fn create<C: Connection>(
         _ => return Err(validation_err("protocol must be 'OidcConnect' or 'Saml'")),
     };
 
+    // Validate IdP signing cert PEM before storage so garbage certs are
+    // rejected at upload rather than at assertion-verification time (CQ-B40).
+    if let Some(ref pem) = req.idp_signing_cert_pem {
+        axiam_federation::cert::validate_pem_cert(pem)
+            .map_err(|e| validation_err(format!("idp_signing_cert_pem is invalid: {e}")))?;
+    }
+
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
+    // Encrypt the client_secret before any DB write (SEC-045).
+    // Plaintext never reaches the DB layer.
+    let (nonce_b64, ciphertext_b64) =
+        encrypt_client_secret(&enc_key, &req.client_secret).map_err(|e| {
+            AxiamApiError(AxiamError::Internal(format!(
+                "failed to encrypt federation secret: {e}"
+            )))
+        })?;
+
+    // Store with empty legacy plaintext (field required by schema; nulled by set_encrypted_secret).
     let config = repo
         .create(CreateFederationConfig {
             tenant_id: user.tenant_id,
@@ -219,10 +281,25 @@ pub async fn create<C: Connection>(
             protocol,
             metadata_url: req.metadata_url,
             client_id: req.client_id,
-            client_secret: req.client_secret,
+            client_secret: String::new(), // plaintext never stored
             attribute_map: req.attribute_map,
+            idp_signing_cert_pem: req.idp_signing_cert_pem,
+            allowed_algorithms: req.allowed_algorithms,
         })
         .await?;
+
+    // Write the encrypted secret columns (overwrites the empty plaintext row).
+    repo.set_encrypted_secret(
+        user.tenant_id,
+        config.id,
+        nonce_b64,
+        ciphertext_b64,
+        current_key_version(),
+    )
+    .await?;
+
+    // Reload to return the canonical state (with ciphertext set, plaintext empty).
+    let config = repo.get_by_id(user.tenant_id, config.id).await?;
 
     Ok(HttpResponse::Created().json(FederationConfigResponse::from(config)))
 }
@@ -241,9 +318,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, pagination.into_inner()).await?;
     let response = PaginatedResult {
         items: result
@@ -273,9 +354,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let config = repo.get_by_id(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
@@ -297,10 +382,15 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<UpdateFederationConfigRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let req = body.into_inner();
 
@@ -325,6 +415,18 @@ pub async fn update<C: Connection>(
         return Err(validation_err("metadata_url must not be empty"));
     }
 
+    // Validate new IdP signing cert PEM if provided (CQ-B40).
+    if let Some(Some(ref pem)) = req.idp_signing_cert_pem {
+        axiam_federation::cert::validate_pem_cert(pem)
+            .map_err(|e| validation_err(format!("idp_signing_cert_pem is invalid: {e}")))?;
+    }
+
+    // If the caller is rotating the client_secret, encrypt it before storage
+    // (SEC-045). Plaintext never reaches the DB layer.
+    let new_secret_plaintext = req.client_secret.clone();
+
+    // Update non-secret fields via the standard update path (client_secret = None means
+    // "no change to secret columns").
     let config = repo
         .update(
             user.tenant_id,
@@ -333,12 +435,40 @@ pub async fn update<C: Connection>(
                 provider: req.provider,
                 metadata_url: req.metadata_url,
                 client_id: req.client_id,
-                client_secret: req.client_secret,
+                client_secret: None, // handled separately below
                 attribute_map: req.attribute_map,
                 enabled: req.enabled,
+                idp_signing_cert_pem: req.idp_signing_cert_pem,
+                allowed_algorithms: req.allowed_algorithms,
             },
         )
         .await?;
+
+    // If a new secret was provided, encrypt and store it now.
+    if let Some(ref plaintext) = new_secret_plaintext {
+        let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+            AxiamApiError(AxiamError::Validation {
+                message: "federation encryption key not configured".into(),
+            })
+        })?;
+        let (nonce_b64, ciphertext_b64) =
+            encrypt_client_secret(&enc_key, plaintext).map_err(|e| {
+                AxiamApiError(AxiamError::Internal(format!(
+                    "failed to encrypt federation secret: {e}"
+                )))
+            })?;
+        repo.set_encrypted_secret(
+            user.tenant_id,
+            config.id,
+            nonce_b64,
+            ciphertext_b64,
+            current_key_version(),
+        )
+        .await?;
+    }
+
+    // Reload to return canonical state.
+    let config = repo.get_by_id(user.tenant_id, config.id).await?;
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
 }
 
@@ -356,9 +486,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationConfigRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
@@ -395,6 +529,8 @@ pub async fn oidc_authorize<C: Connection>(
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
     http_client: web::Data<reqwest::Client>,
+    jwks_cache: web::Data<Arc<JwksCache>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<OidcAuthorizeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -409,11 +545,21 @@ pub async fn oidc_authorize<C: Connection>(
         return Err(validation_err("nonce must not be empty"));
     }
 
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
+    // TODO(T19): AppState refactor — CQ-B27/CQ-B43 deferred (per-request service rebuild;
+    // OidcFederationService constructed here instead of once at startup).
     let service = OidcFederationService::new(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
         (**http_client).clone(),
+        Arc::clone(&jwks_cache),
+        enc_key,
     );
 
     let auth_url = service
@@ -452,6 +598,8 @@ pub async fn oidc_callback<C: Connection>(
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
     http_client: web::Data<reqwest::Client>,
+    jwks_cache: web::Data<Arc<JwksCache>>,
+    auth_config: web::Data<AuthConfig>,
     body: web::Json<OidcCallbackRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -466,11 +614,19 @@ pub async fn oidc_callback<C: Connection>(
         return Err(validation_err("nonce must not be empty"));
     }
 
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
     let service = OidcFederationService::new(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
         (**http_client).clone(),
+        Arc::clone(&jwks_cache),
+        enc_key,
     );
 
     let result = service
@@ -509,9 +665,13 @@ pub async fn oidc_callback<C: Connection>(
 )]
 pub async fn list_user_links<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationLinkRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let target_user_id = path.into_inner();
     let links = repo.get_by_user_id(user.tenant_id, target_user_id).await?;
     let response: Vec<FederationLinkResponse> = links
@@ -535,9 +695,13 @@ pub async fn list_user_links<C: Connection>(
 )]
 pub async fn delete_link<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealFederationLinkRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("federation:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
@@ -548,6 +712,7 @@ pub async fn delete_link<C: Connection>(
 // ---------------------------------------------------------------------------
 
 /// Request to build a SAML AuthnRequest.
+#[cfg(feature = "saml")]
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SamlAuthnRequestRequest {
     /// ID of the SAML federation config.
@@ -560,6 +725,7 @@ pub struct SamlAuthnRequestRequest {
 }
 
 /// Response containing the SAML AuthnRequest details.
+#[cfg(feature = "saml")]
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SamlAuthnRequestResponse {
     /// Full redirect URL (HTTP-Redirect) or IdP SSO URL (HTTP-POST).
@@ -574,6 +740,7 @@ pub struct SamlAuthnRequestResponse {
 }
 
 /// Request to handle a SAML Response at the ACS endpoint.
+#[cfg(feature = "saml")]
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SamlAcsRequest {
     /// ID of the SAML federation config.
@@ -585,6 +752,7 @@ pub struct SamlAcsRequest {
 }
 
 /// Query parameters for SP metadata generation.
+#[cfg(feature = "saml")]
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SamlMetadataQuery {
     /// ID of the SAML federation config.
@@ -603,6 +771,7 @@ pub struct SamlMetadataQuery {
 /// Builds a SAML AuthnRequest for the specified federation config.
 /// Returns the SSO URL, encoded request, and binding type for the
 /// caller to initiate the redirect or POST to the IdP.
+#[cfg(feature = "saml")]
 #[utoipa::path(
     post,
     path = "/api/v1/federation/saml/authn-request",
@@ -619,6 +788,7 @@ pub async fn saml_authn_request<C: Connection>(
     config_repo: web::Data<SurrealFederationConfigRepository<C>>,
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     body: web::Json<SamlAuthnRequestRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -632,6 +802,7 @@ pub async fn saml_authn_request<C: Connection>(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
+        (**replay_repo).clone(),
         (**http_client).clone(),
     );
 
@@ -653,6 +824,7 @@ pub async fn saml_authn_request<C: Connection>(
 /// Handles the SAML Response received from the external IdP after
 /// user authentication. Validates the assertion, extracts claims,
 /// and provisions or links the local user.
+#[cfg(feature = "saml")]
 #[utoipa::path(
     post,
     path = "/api/v1/federation/saml/acs",
@@ -669,6 +841,7 @@ pub async fn saml_acs<C: Connection>(
     config_repo: web::Data<SurrealFederationConfigRepository<C>>,
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     body: web::Json<SamlAcsRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -682,6 +855,7 @@ pub async fn saml_acs<C: Connection>(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
+        (**replay_repo).clone(),
         (**http_client).clone(),
     );
 
@@ -691,6 +865,8 @@ pub async fn saml_acs<C: Connection>(
             req.config_id,
             &req.saml_response,
             req.relay_state.as_deref(),
+            None, // no request ID available in the authenticated ACS path
+            None, // no expected destination in the authenticated ACS path
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -706,6 +882,7 @@ pub async fn saml_acs<C: Connection>(
 ///
 /// Generates the SP metadata XML for the specified SAML federation
 /// config. Returns XML with content type `application/samlmetadata+xml`.
+#[cfg(feature = "saml")]
 #[utoipa::path(
     get,
     path = "/api/v1/federation/saml/metadata",
@@ -725,6 +902,7 @@ pub async fn saml_metadata<C: Connection>(
     config_repo: web::Data<SurrealFederationConfigRepository<C>>,
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     query: web::Query<SamlMetadataQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -732,6 +910,7 @@ pub async fn saml_metadata<C: Connection>(
         (**config_repo).clone(),
         (**link_repo).clone(),
         (**user_repo).clone(),
+        (**replay_repo).clone(),
         (**http_client).clone(),
     );
 
@@ -747,4 +926,641 @@ pub async fn saml_metadata<C: Connection>(
     Ok(HttpResponse::Ok()
         .content_type("application/samlmetadata+xml")
         .body(xml))
+}
+
+// ---------------------------------------------------------------------------
+// First-time SSO — PUBLIC endpoints (D-22)
+//
+// These four handlers are reachable WITHOUT a valid JWT (listed in
+// PUBLIC_PATHS).  They are DISTINCT from the authenticated link-account
+// endpoints above (/api/v1/federation/*), which continue to work unchanged.
+//
+// redirect_uri note: there are two kinds of redirect URI in this flow —
+//   1. The IdP callback URL (server-side AXIAM endpoint): hard-coded from
+//      the request Host header.  Not stored in the state row.
+//   2. The SPA post-login destination: supplied by the caller and stored in
+//      the state row so the callback can return it in the response body.
+//      The SPA reads this field and routes the user after receiving cookies.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// AuthSvc type alias (mirrors the one in handlers/auth.rs)
+// ---------------------------------------------------------------------------
+
+type PublicAuthSvc<C> = AuthService<
+    SurrealUserRepository<C>,
+    SurrealSessionRepository<C>,
+    axiam_db::SurrealFederationLinkRepository<C>,
+    SurrealRefreshTokenRepository<C>,
+>;
+
+// ---------------------------------------------------------------------------
+// Request / response DTOs for the public SSO flow
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/v1/auth/federation/oidc/start`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct OidcStartRequest {
+    pub org_id: Option<Uuid>,
+    pub org_slug: Option<String>,
+    pub tenant_id: Option<Uuid>,
+    pub tenant_slug: Option<String>,
+    pub federation_config_id: Uuid,
+    /// SPA post-login destination (stored server-side; returned in callback
+    /// response body so the SPA can route after receiving cookies).
+    pub redirect_uri: String,
+}
+
+/// Response body for `POST /api/v1/auth/federation/oidc/start`.
+/// The nonce is intentionally omitted — it stays server-side (T-04-31).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct OidcStartResponse {
+    /// The IdP authorization URL to redirect the user to.
+    pub authorize_url: String,
+    /// CSRF state value (must be round-tripped through the IdP).
+    pub state: String,
+    /// Remaining TTL in seconds (10 min = 600).
+    pub expires_in_secs: i64,
+}
+
+/// Request body for `POST /api/v1/auth/federation/oidc/callback`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct OidcPublicCallbackRequest {
+    pub state: String,
+    pub code: String,
+}
+
+/// Request body for `POST /api/v1/auth/federation/saml/login`.
+#[cfg(feature = "saml")]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SamlLoginRequest {
+    pub org_id: Option<Uuid>,
+    pub org_slug: Option<String>,
+    pub tenant_id: Option<Uuid>,
+    pub tenant_slug: Option<String>,
+    pub federation_config_id: Uuid,
+    /// SPA post-login destination (stored server-side).
+    pub redirect_uri: String,
+}
+
+/// Response body for `POST /api/v1/auth/federation/saml/login`.
+#[cfg(feature = "saml")]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SamlLoginResponse {
+    /// SAML binding URI.
+    pub binding: String,
+    /// IdP SSO URL to POST to.
+    pub sso_url: String,
+    /// Base64-encoded SAML AuthnRequest XML.
+    pub saml_request_b64: String,
+    /// RelayState carries our `state` value through the IdP round-trip.
+    pub relay_state: String,
+}
+
+/// Request body for `POST /api/v1/auth/federation/saml/acs`.
+#[cfg(feature = "saml")]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SamlAcsPublicRequest {
+    pub saml_response_b64: String,
+    pub relay_state: String,
+}
+
+/// Returned by both OIDC callback and SAML ACS on success (alongside
+/// Set-Cookie headers). The `redirect_uri` field allows the SPA to route
+/// the user to the originally requested destination.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SsoLoginSuccessResponse {
+    pub user_id: Uuid,
+    pub session_id: Uuid,
+    pub expires_in: u64,
+    /// SPA destination URL stored during start/login.
+    pub redirect_uri: String,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Generate 32 random bytes encoded as base64url (no padding).
+fn random_base64url() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Validate that a redirect_uri is a well-formed absolute HTTPS (or HTTP
+/// localhost) URL.  This is a minimal open-redirect guard — a full
+/// per-config allowlist would require a schema change (deferred).
+// TODO(T19.14): tighten open-redirect protection — add a per-FederationConfig
+// registered redirect_uri allowlist (needs a schema column) instead of the
+// current scheme/host-only guard. Tracked for Phase 19.
+fn validate_redirect_uri(uri: &str) -> Result<(), AxiamApiError> {
+    let parsed = url::Url::parse(uri).map_err(|_| {
+        AxiamApiError(AxiamError::Validation {
+            message: "redirect_uri is not a valid URL".into(),
+        })
+    })?;
+    let scheme = parsed.scheme();
+    let host = parsed.host_str().unwrap_or("");
+    let is_localhost = host == "localhost" || host == "127.0.0.1" || host == "::1";
+    if scheme == "https" || (scheme == "http" && is_localhost) {
+        Ok(())
+    } else {
+        Err(AxiamApiError(AxiamError::Validation {
+            message: "redirect_uri must use HTTPS (or HTTP for localhost)".into(),
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/auth/federation/oidc/start  (public)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/auth/federation/oidc/start`
+///
+/// Generates a server-side state+nonce pair, persists it in
+/// `federation_login_state` (10-min TTL), and returns the IdP authorization
+/// URL.  No JWT required — this is the first step of first-time SSO (D-22).
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/federation/oidc/start",
+    tag = "federation-sso",
+    request_body = OidcStartRequest,
+    responses(
+        (status = 200, description = "OIDC start: authorize URL returned",
+         body = OidcStartResponse),
+        (status = 401, description = "Unknown org/tenant slug"),
+        (status = 400, description = "Validation error"),
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+pub async fn oidc_start_public<C: Connection>(
+    org_repo: web::Data<SurrealOrganizationRepository<C>>,
+    tenant_repo: web::Data<SurrealTenantRepository<C>>,
+    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
+    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
+    http_client: web::Data<reqwest::Client>,
+    jwks_cache: web::Data<Arc<JwksCache>>,
+    auth_config: web::Data<AuthConfig>,
+    body: web::Json<OidcStartRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let b = body.into_inner();
+
+    if b.redirect_uri.is_empty() {
+        return Err(validation_err("redirect_uri must not be empty"));
+    }
+    validate_redirect_uri(&b.redirect_uri)?;
+
+    // Resolve workspace identity (mirrors Phase 1 login — 401 on slug miss).
+    let org_id = match (b.org_id, b.org_slug.as_deref()) {
+        (Some(id), _) => id,
+        (None, Some(slug)) => {
+            org_repo
+                .get_by_slug(slug)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid federation request".into(),
+                })?
+                .id
+        }
+        (None, None) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "must provide org_id or org_slug".into(),
+            }));
+        }
+    };
+    let tenant_id = match (b.tenant_id, b.tenant_slug.as_deref()) {
+        (Some(id), _) => id,
+        (None, Some(slug)) => {
+            tenant_repo
+                .get_by_slug(org_id, slug)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid federation request".into(),
+                })?
+                .id
+        }
+        (None, None) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "must provide tenant_id or tenant_slug".into(),
+            }));
+        }
+    };
+
+    // Generate server-side state + nonce (256 bits each).
+    let state = random_base64url();
+    let nonce = random_base64url();
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
+    // Build OIDC authorize URL via the verified service.
+    let service = OidcFederationService::new(
+        (**config_repo).clone(),
+        (**link_repo).clone(),
+        (**user_repo).clone(),
+        (**http_client).clone(),
+        Arc::clone(&jwks_cache),
+        enc_key,
+    );
+
+    let auth_url = service
+        .build_authorization_url(
+            tenant_id,
+            b.federation_config_id,
+            &b.redirect_uri,
+            &state,
+            &nonce,
+        )
+        .await
+        .map_err(axiam_core::error::AxiamError::from)?;
+
+    // Persist the state row (single-use, 10-min TTL).
+    login_state_repo
+        .insert(&axiam_core::repository::FederationLoginState {
+            state: state.clone(),
+            nonce,
+            tenant_id,
+            federation_config_id: b.federation_config_id,
+            redirect_uri: b.redirect_uri,
+            expires_at,
+            request_id: String::new(), // OIDC — no request ID
+        })
+        .await?;
+
+    Ok(HttpResponse::Ok().json(OidcStartResponse {
+        authorize_url: auth_url.url,
+        state,
+        expires_in_secs: 600,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/auth/federation/oidc/callback  (public)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/auth/federation/oidc/callback`
+///
+/// Consumes the state row (single-use), runs the verified OIDC flow from
+/// plan 04-02 (nonce from DB — not caller-supplied), provisions or links the
+/// user, and returns Set-Cookie response (no token in body).
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/federation/oidc/callback",
+    tag = "federation-sso",
+    request_body = OidcPublicCallbackRequest,
+    responses(
+        (status = 200, description = "OIDC callback: cookies set",
+         body = SsoLoginSuccessResponse),
+        (status = 401, description = "State not found or expired"),
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+pub async fn oidc_callback_public<C: Connection>(
+    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
+    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
+    auth_svc: web::Data<PublicAuthSvc<C>>,
+    auth_config: web::Data<AuthConfig>,
+    http_client: web::Data<reqwest::Client>,
+    jwks_cache: web::Data<Arc<JwksCache>>,
+    body: web::Json<OidcPublicCallbackRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let b = body.into_inner();
+
+    if b.state.is_empty() {
+        return Err(validation_err("state must not be empty"));
+    }
+    if b.code.is_empty() {
+        return Err(validation_err("code must not be empty"));
+    }
+
+    // Atomically consume the state row (single-use; expired → None → 401).
+    let login_state = login_state_repo
+        .consume_by_state(&b.state)
+        .await?
+        .ok_or_else(|| {
+            AxiamApiError(AxiamError::AuthenticationFailed {
+                reason: "state not found or expired".into(),
+            })
+        })?;
+
+    let tenant_id = login_state.tenant_id;
+    let config_id = login_state.federation_config_id;
+    // Nonce comes from the state row — NOT from the HTTP body (T-04-30).
+    let expected_nonce = login_state.nonce.clone();
+    let spa_redirect_uri = login_state.redirect_uri.clone();
+
+    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        AxiamApiError(AxiamError::Validation {
+            message: "federation encryption key not configured".into(),
+        })
+    })?;
+
+    // Run the verified OIDC flow (04-02): code exchange + ID token
+    // signature + iss/aud/exp/nonce validation.
+    let service = OidcFederationService::new(
+        (**config_repo).clone(),
+        (**link_repo).clone(),
+        (**user_repo).clone(),
+        (**http_client).clone(),
+        Arc::clone(&jwks_cache),
+        enc_key,
+    );
+
+    // The redirect_uri we pass to the IdP token endpoint is the AXIAM ACS
+    // URL.  Since we built the authorize URL using the SPA redirect_uri as
+    // the redirect_uri query param, we must echo the same value here.
+    let callback_result = service
+        .handle_callback(
+            tenant_id,
+            config_id,
+            &b.code,
+            &spa_redirect_uri,
+            &expected_nonce,
+        )
+        .await
+        .map_err(axiam_core::error::AxiamError::from)?;
+
+    let user = callback_result.user;
+
+    // TODO(T19.15): resolve real org_id from the tenant instead of Uuid::nil().
+    // SSO-provisioned access tokens currently carry an empty org_id claim.
+    // Wire a tenant->org_id lookup here (and at the OIDC callback below). Phase 19.
+    let auth_out = auth_svc
+        .create_session_and_tokens(user.id, tenant_id, Uuid::nil(), None, None)
+        .await?;
+
+    let csrf_token = crate::middleware::csrf::generate_csrf_token();
+    let user_detail = user_repo.get_by_id(tenant_id, user.id).await.map_err(|_| {
+        AxiamError::AuthenticationFailed {
+            reason: "user not found after federation login".into(),
+        }
+    })?;
+
+    Ok(actix_web::HttpResponse::Ok()
+        .cookie(crate::middleware::csrf::access_cookie(
+            &auth_out.access_token,
+            auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
+        ))
+        .cookie(crate::middleware::csrf::refresh_cookie(
+            &auth_out.refresh_token,
+            auth_config.refresh_token_lifetime_secs,
+            auth_config.cookie_secure,
+        ))
+        .cookie(crate::middleware::csrf::csrf_cookie(
+            &csrf_token,
+            auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
+        ))
+        .json(SsoLoginSuccessResponse {
+            user_id: user_detail.id,
+            session_id: auth_out.session_id,
+            expires_in: auth_out.expires_in,
+            redirect_uri: spa_redirect_uri,
+        }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/auth/federation/saml/login  (public)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/auth/federation/saml/login`
+///
+/// Builds a SAML AuthnRequest, persists state, and returns the POST-binding
+/// payload for the client to submit to the IdP.
+#[cfg(feature = "saml")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/federation/saml/login",
+    tag = "federation-sso",
+    request_body = SamlLoginRequest,
+    responses(
+        (status = 200, description = "SAML login: AuthnRequest payload",
+         body = SamlLoginResponse),
+        (status = 401, description = "Unknown org/tenant slug"),
+        (status = 400, description = "Validation error"),
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+pub async fn saml_login_public<C: Connection>(
+    org_repo: web::Data<SurrealOrganizationRepository<C>>,
+    tenant_repo: web::Data<SurrealTenantRepository<C>>,
+    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
+    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
+    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
+    http_client: web::Data<reqwest::Client>,
+    body: web::Json<SamlLoginRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let b = body.into_inner();
+
+    if b.redirect_uri.is_empty() {
+        return Err(validation_err("redirect_uri must not be empty"));
+    }
+    validate_redirect_uri(&b.redirect_uri)?;
+
+    // Resolve workspace identity (mirrors Phase 1 login — 401 on slug miss).
+    let org_id = match (b.org_id, b.org_slug.as_deref()) {
+        (Some(id), _) => id,
+        (None, Some(slug)) => {
+            org_repo
+                .get_by_slug(slug)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid federation request".into(),
+                })?
+                .id
+        }
+        (None, None) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "must provide org_id or org_slug".into(),
+            }));
+        }
+    };
+    let tenant_id = match (b.tenant_id, b.tenant_slug.as_deref()) {
+        (Some(id), _) => id,
+        (None, Some(slug)) => {
+            tenant_repo
+                .get_by_slug(org_id, slug)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid federation request".into(),
+                })?
+                .id
+        }
+        (None, None) => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "must provide tenant_id or tenant_slug".into(),
+            }));
+        }
+    };
+
+    // Generate state (SAML uses RelayState; nonce is unused for SAML).
+    let state = random_base64url();
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+
+    let service = SamlFederationService::new(
+        (**config_repo).clone(),
+        (**link_repo).clone(),
+        (**user_repo).clone(),
+        (**replay_repo).clone(),
+        (**http_client).clone(),
+    );
+
+    // Pass state as RelayState so the IdP echoes it back in the SAML response.
+    let result = service
+        .build_authn_request(tenant_id, b.federation_config_id, "", Some(state.clone()))
+        .await
+        .map_err(axiam_core::error::AxiamError::from)?;
+
+    // Persist state row (nonce = "" for SAML — unused but required by schema).
+    // Store the AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).
+    login_state_repo
+        .insert(&axiam_core::repository::FederationLoginState {
+            state: state.clone(),
+            nonce: String::new(),
+            tenant_id,
+            federation_config_id: b.federation_config_id,
+            redirect_uri: b.redirect_uri,
+            expires_at,
+            request_id: result.request_id.clone(),
+        })
+        .await?;
+
+    Ok(HttpResponse::Ok().json(SamlLoginResponse {
+        binding: result.binding,
+        sso_url: result.url,
+        saml_request_b64: result.saml_request,
+        relay_state: state,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/auth/federation/saml/acs  (public)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/auth/federation/saml/acs`
+///
+/// Assertion Consumer Service endpoint for first-time SSO.  Consumes the
+/// RelayState (maps to our state row), runs the verified SAML flow from
+/// plan 04-03, provisions or links the user, and returns Set-Cookie response.
+#[cfg(feature = "saml")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/federation/saml/acs",
+    tag = "federation-sso",
+    request_body = SamlAcsPublicRequest,
+    responses(
+        (status = 200, description = "SAML ACS: cookies set",
+         body = SsoLoginSuccessResponse),
+        (status = 401, description = "State not found or expired"),
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+pub async fn saml_acs_public<C: Connection>(
+    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
+    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
+    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
+    auth_svc: web::Data<PublicAuthSvc<C>>,
+    auth_config: web::Data<AuthConfig>,
+    http_client: web::Data<reqwest::Client>,
+    body: web::Json<SamlAcsPublicRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let b = body.into_inner();
+
+    if b.relay_state.is_empty() {
+        return Err(validation_err("relay_state must not be empty"));
+    }
+    if b.saml_response_b64.is_empty() {
+        return Err(validation_err("saml_response_b64 must not be empty"));
+    }
+
+    // Atomically consume the state row (single-use; expired → 401).
+    let login_state = login_state_repo
+        .consume_by_state(&b.relay_state)
+        .await?
+        .ok_or_else(|| {
+            AxiamApiError(AxiamError::AuthenticationFailed {
+                reason: "state not found or expired".into(),
+            })
+        })?;
+
+    let tenant_id = login_state.tenant_id;
+    let config_id = login_state.federation_config_id;
+    let spa_redirect_uri = login_state.redirect_uri.clone();
+
+    // Run the verified SAML flow (04-03): signature verify + replay check.
+    let service = SamlFederationService::new(
+        (**config_repo).clone(),
+        (**link_repo).clone(),
+        (**user_repo).clone(),
+        (**replay_repo).clone(),
+        (**http_client).clone(),
+    );
+
+    let callback_result = service
+        .handle_saml_response(
+            tenant_id,
+            config_id,
+            &b.saml_response_b64,
+            Some(&b.relay_state),
+            // Pass stored request_id for InResponseTo check (SEC-005/REQ-14 AC-5).
+            Some(login_state.request_id.as_str()),
+            // Destination check: pass empty string (ACS URL not available here;
+            // callers that know the ACS URL should pass it explicitly).
+            None,
+        )
+        .await
+        .map_err(axiam_core::error::AxiamError::from)?;
+
+    let user = callback_result.user;
+
+    // TODO(T19.15): resolve real org_id from the tenant instead of Uuid::nil()
+    // (see the SAML callback above) — SSO tokens carry an empty org_id claim. Phase 19.
+    let auth_out = auth_svc
+        .create_session_and_tokens(user.id, tenant_id, Uuid::nil(), None, None)
+        .await?;
+
+    let csrf_token = crate::middleware::csrf::generate_csrf_token();
+    let user_detail = user_repo.get_by_id(tenant_id, user.id).await.map_err(|_| {
+        AxiamError::AuthenticationFailed {
+            reason: "user not found after SAML login".into(),
+        }
+    })?;
+
+    Ok(actix_web::HttpResponse::Ok()
+        .cookie(crate::middleware::csrf::access_cookie(
+            &auth_out.access_token,
+            auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
+        ))
+        .cookie(crate::middleware::csrf::refresh_cookie(
+            &auth_out.refresh_token,
+            auth_config.refresh_token_lifetime_secs,
+            auth_config.cookie_secure,
+        ))
+        .cookie(crate::middleware::csrf::csrf_cookie(
+            &csrf_token,
+            auth_config.access_token_lifetime_secs,
+            auth_config.cookie_secure,
+        ))
+        .json(SsoLoginSuccessResponse {
+            user_id: user_detail.id,
+            session_id: auth_out.session_id,
+            expires_in: auth_out.expires_in,
+            redirect_uri: spa_redirect_uri,
+        }))
 }

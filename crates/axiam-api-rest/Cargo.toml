@@ -13,7 +13,10 @@ axiam-auth = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-db = { workspace = true }
 axiam-audit = { workspace = true }
+axiam-amqp = { workspace = true }
 axiam-oauth2 = { workspace = true }
+# default-features (=false) is inherited from [workspace.dependencies]; the
+# `saml` feature below re-enables it (on by default via this crate's `default`).
 axiam-federation = { workspace = true }
 axiam-pki = { workspace = true }
 actix-web = { workspace = true }
@@ -25,6 +28,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 actix-cors = { workspace = true }
+actix-governor = { workspace = true }
 tracing-actix-web = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
@@ -34,9 +38,18 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
+subtle = { workspace = true }
+rand = { workspace = true }
 
 surrealdb = { workspace = true }
 webauthn-rs-proto = { workspace = true }
+
+[features]
+# SAML SP endpoints + DTOs. Forwards to axiam-federation/saml (→ samael).
+# On by default; disable with `--no-default-features` to build on hosts whose
+# system libxml2 is incompatible with samael (e.g. Arch libxml2 2.15.x).
+default = ["saml"]
+saml = ["axiam-federation/saml"]
 
 [dev-dependencies]
 actix-rt = { workspace = true }
@@ -44,3 +57,4 @@ actix-http = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }
 totp-rs = { workspace = true }
+jsonwebtoken = { workspace = true }

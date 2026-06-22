@@ -1,8 +1,23 @@
 services:
+  # One-shot init: chown /data for the non-root SurrealDB user (65532).
+  # Named volumes are root-owned by default; without this surreal can't write.
+  surrealdb-init:
+    image: busybox
+    container_name: axiam-surrealdb-init
+    command: ["sh", "-c", "chown -R 65532:65532 /data && chmod -R u+rwX /data"]
+    volumes:
+      - surrealdb-data:/data
+    restart: "no"
+
   surrealdb:
-    image: surrealdb/surrealdb:v2
+    image: surrealdb/surrealdb:v3
     container_name: axiam-surrealdb
-    command: start --user root --pass root --log info
+    depends_on:
+      surrealdb-init:
+        condition: service_completed_successfully
+    # Persist the datastore on the mounted volume. Without a PATH arg the
+    # default is `memory` and all state is wiped on restart.
+    command: start --user root --pass root --log info surrealkv:/data/axiam.db
     ports:
       - "8000:8000"
     volumes:
@@ -15,7 +30,7 @@ services:
     restart: unless-stopped
 
   rabbitmq:
-    image: rabbitmq:3-management-alpine
+    image: rabbitmq:4-management-alpine
     container_name: axiam-rabbitmq
     ports:
       - "5672:5672"
@@ -30,6 +45,36 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  # axiam-server — run with COOKIE_SECURE=false so auth cookies work over
+  # plain http://localhost during local development (D-18).
+  # NEVER set AXIAM__AUTH__COOKIE_SECURE=false in staging or production.
+  #
+  # Gated behind the "full-stack" profile so `just dev-up` starts only the
+  # datastores (SurrealDB + RabbitMQ) and the server runs from source via
+  # `just run`. This image is published to a private registry; pulling it is
+  # opt-in for those with access: `docker compose --profile full-stack up -d`.
+  axiam-server:
+    profiles: ["full-stack"]
+    image: ghcr.io/axiamhq/axiam/server:latest
+    container_name: axiam-server
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8090:8090"
+    environment:
+      AXIAM__DB__URL: "surrealdb:8000"
+      AXIAM__DB__USERNAME: root
+      AXIAM__DB__PASSWORD: root
+      AXIAM__AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
+      RUST_LOG: "${RUST_LOG:-axiam=debug}"
+      # D-18: cookies work over HTTP in local dev (http://localhost).
+      # Default in code is true (prod-safe). NEVER set false in production.
+      AXIAM__AUTH__COOKIE_SECURE: "false"
     restart: unless-stopped
 
 volumes:

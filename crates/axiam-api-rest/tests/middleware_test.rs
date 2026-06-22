@@ -38,10 +38,7 @@ use uuid::Uuid;
 // -----------------------------------------------------------------------
 
 fn test_keypair() -> (String, String) {
-    let private_key = "\
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM
------END PRIVATE KEY-----";
+    let private_key = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n-----END PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
 
     let public_key = "\
 -----BEGIN PUBLIC KEY-----
@@ -62,6 +59,9 @@ fn test_auth_config(lifetime: u64) -> AuthConfig {
         pepper: None,
         min_password_length: 12,
         mfa_encryption_key: None,
+        federation_encryption_key: None,
+        allow_missing_aud_as_user: true,
+        cookie_secure: true,
         mfa_challenge_lifetime_secs: 300,
         totp_issuer: "AXIAM-Test".into(),
         max_failed_login_attempts: 5,
@@ -73,8 +73,10 @@ fn test_auth_config(lifetime: u64) -> AuthConfig {
         email_verification_grace_period_hours: 24,
         password_reset_token_expiry_hours: 1,
         webauthn_rp_id: "localhost".into(),
-        webauthn_rp_origin: "http://localhost:8080".into(),
+        webauthn_rp_origin: "http://localhost:8090".into(),
         webauthn_rp_name: "AXIAM-Test".into(),
+        jwt_encoding_key: None,
+        jwt_decoding_key: None,
     }
 }
 
@@ -256,7 +258,16 @@ async fn valid_token_extracts_user() {
     let tenant_id = Uuid::new_v4();
     let org_id = Uuid::new_v4();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
+    let token = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        &config,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
 
     let app = actix_web::test::init_service(
         App::new()
@@ -285,7 +296,16 @@ async fn tenant_context_matches_jwt() {
     let tenant_id = Uuid::new_v4();
     let org_id = Uuid::new_v4();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
+    let token = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        &config,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
 
     let app = actix_web::test::init_service(
         App::new()
@@ -356,7 +376,16 @@ async fn authorized_request_returns_200() {
         .await
         .unwrap();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
+    let token = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        &config,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
 
     let app = actix_web::test::init_service(
         App::new()
@@ -393,7 +422,16 @@ async fn unauthorized_request_returns_403() {
         .await
         .unwrap();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
+    let token = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        &config,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
 
     let app = actix_web::test::init_service(
         App::new()
@@ -473,7 +511,16 @@ async fn scope_authorization_check() {
         .await
         .unwrap();
 
-    let token = issue_access_token(user_id, tenant_id, org_id, &[], &config).unwrap();
+    let token = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        &config,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
 
     let app = actix_web::test::init_service(
         App::new()

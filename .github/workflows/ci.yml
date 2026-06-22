@@ -18,9 +18,10 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)
         with:
+          toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -28,30 +29,193 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+      # libxmlsec1-dev / libxml2-dev are required by the `saml` feature
+      # (→ samael → libxmlsec1), which is on by default. Without them the
+      # samael build script fails ("xmlsec1-config not found").
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+      # libxmlsec1-dev / libxml2-dev are required by the `saml` feature
+      # (→ samael → libxmlsec1), which is on by default. Without them the
+      # samael build script fails ("xmlsec1-config not found").
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
       - run: cargo build --workspace
+
+  build-no-saml:
+    name: Build (SAML off / --no-default-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+      # Install ONLY protobuf-compiler. libxmlsec1-dev / libxml2-dev are
+      # deliberately NOT installed: the `saml` feature (→ samael → libxmlsec1)
+      # is off here, so if SAML ever leaks back into the default-off build the
+      # compile must FAIL for lack of the native lib. This guards the very
+      # configuration that lets the workspace build on hosts with an
+      # incompatible system libxml2 (e.g. Arch 2.15.x).
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: cargo check -p axiam-federation -p axiam-api-rest -p axiam-server --no-default-features
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # --- Rust toolchain (for cargo-audit and cargo-deny) ---
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
+
+      # --- cargo audit ---
+      # Ignored advisories MUST stay in sync with deny.toml [advisories].ignore.
+      # cargo-audit (unlike cargo-deny) reads its ignore list from this input,
+      # not from deny.toml, so the same IDs are listed here with the same rationale:
+      #   RUSTSEC-2023-0071 — Marvin attack (rsa); no upstream fix, PGP-encryption path only.
+      #   RUSTSEC-2025-0141 — bincode unmaintained; transitive via surrealdb-core, no CVE.
+      #   RUSTSEC-2023-0089 — atomic-polyfill unmaintained; transitive via surrealdb, no CVE.
+      - name: cargo audit
+        uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
+        with:
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089
+
+      # --- cargo deny (advisories + licenses + bans + sources) ---
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe  # v2
+        with:
+          command: check
+          arguments: --all-features
+
+      # --- npm audit ---
+      - name: npm audit
+        working-directory: frontend
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+
+      # --- Hadolint Dockerfile lint ---
+      - name: Hadolint server Dockerfile
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf  # v3.1.0
+        with:
+          dockerfile: docker/Dockerfile.server
+          format: sarif
+          output-file: hadolint-server.sarif
+          no-fail: true
+
+      - name: Hadolint frontend Dockerfile
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf  # v3.1.0
+        with:
+          dockerfile: docker/Dockerfile.frontend
+          format: sarif
+          output-file: hadolint-frontend.sarif
+          no-fail: true
+
+      # --- Trivy filesystem scan (dependency vulns — HIGH/CRITICAL, exit 1) ---
+      # scanners: vuln only. Secret detection is intentionally NOT delegated to
+      # Trivy here: the repository carries ~40 throwaway Ed25519/RSA PEM fixtures
+      # inside `#[cfg(test)]` modules and test files, which Trivy's generic
+      # `private-key` rule flags as CRITICAL across the board. Real secret
+      # detection is owned by the dedicated GitGuardian check and GitHub's native
+      # secret scanning, both of which run on this repo. Keeping Trivy scoped to
+      # vulnerabilities removes that whole class of false positives from the
+      # code-scanning dashboard while preserving the dependency-vuln gate.
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          # trivy-action writes ALL severities into the SARIF by default
+          # ("Building SARIF report with all severities") — the `severity`
+          # input only gates the table/exit-code. This flag makes the SARIF
+          # honour the filter too, so the code-scanning dashboard isn't flooded
+          # with LOW/MEDIUM advisories that fail the Trivy check.
+          limit-severities-for-sarif: true
+          ignore-unfixed: true
+          exit-code: '1'
+          format: sarif
+          output: trivy-fs.sarif
+
+      # --- Trivy config scan (Dockerfile/K8s misconfig — advisory, exit 0) ---
+      # Gated to HIGH,CRITICAL via limit-severities-for-sarif (see fs scan note):
+      # the manifests were hardened to clear the only HIGH finding (KSV-0118, pod
+      # securityContext). The residual MEDIUM/LOW advisories are structural and
+      # non-hardenable — AVD-KSV-0125 (ghcr.io is the project's own registry;
+      # trusted-registry is scanner policy, not a manifest field) and
+      # AVD-KSV-0020/0021 (nginx-unprivileged requires UID/GID 101). They are
+      # intentionally kept out of the SARIF so the advisory code-scanning check
+      # stays green while real HIGH/CRITICAL regressions would still surface.
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          format: sarif
+          output: trivy-config.sarif
+          exit-code: '0'
+
+      # --- Upload all SARIF results to GitHub Security tab (D-07) ---
+      - name: Upload hadolint server SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
+        if: always()
+        with:
+          sarif_file: hadolint-server.sarif
+          category: hadolint-server
+
+      - name: Upload hadolint frontend SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
+        if: always()
+        with:
+          sarif_file: hadolint-frontend.sarif
+          category: hadolint-frontend
+
+      - name: Upload trivy filesystem SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Upload trivy config SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
+        if: always()
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
 
   test:
     name: Test
     runs-on: ubuntu-latest
     services:
       rabbitmq:
-        image: rabbitmq:3-management-alpine
+        image: rabbitmq:4-management-alpine
         ports:
           - 5672:5672
           - 15672:15672
@@ -66,16 +230,132 @@ jobs:
       AXIAM_DATABASE__PASSWORD: root
       AXIAM_AMQP__URL: "amqp://localhost:5672"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
       - name: Start SurrealDB
         run: |
           docker run -d --name surrealdb -p 8000:8000 \
-            surrealdb/surrealdb:v2 start \
+            surrealdb/surrealdb:v3 start \
             --user root --pass root --log info
           for i in $(seq 1 30); do
             docker exec surrealdb /surreal isready 2>/dev/null && break || sleep 2
           done
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo test --workspace
+      # libxmlsec1-dev / libxml2-dev are required by the `saml` feature
+      # (→ samael → libxmlsec1), which is on by default. Without them the
+      # samael build script fails ("xmlsec1-config not found").
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
+      # --no-fail-fast: run every test target and report all failures in one
+      # pass (the suite only began running once libxmlsec1 was installed, so
+      # surfacing the whole picture at once is far cheaper than one-per-run).
+      - run: cargo test --workspace --no-fail-fast
+      # gRPC authz integration tests require the `client` feature (generated
+      # client stubs). `cargo test --workspace` above skips them via
+      # required-features; run them explicitly here so they execute as
+      # compliance evidence (D-10, T19.1, T19.2 / SC#4).
+      - run: cargo test -p axiam-api-grpc --features client --test grpc_authz_test
+
+  frontend-quality:
+    name: Frontend Lint + Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend lint and type-check
+        working-directory: frontend
+        run: npm run lint && npx tsc -b
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Start backend services (built from PR source)
+        # --build forces the server image to be built from this PR's source code.
+        # Using a pre-built registry image (ghcr.io/axiamhq/axiam/server:latest)
+        # would produce false-green results on PR branches (W8 — stale image).
+        run: |
+          # load_config() asserts the JWT signing keypair is non-empty, else the
+          # server panics on startup (exit 101). Generate an ephemeral Ed25519
+          # keypair for this run and pass it through to the server container
+          # (compose substitutes the ${...} refs in docker-compose.e2e.yml).
+          AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(openssl genpkey -algorithm ed25519)"
+          AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(printf '%s' "$AXIAM__AUTH__JWT_PRIVATE_KEY_PEM" | openssl pkey -pubout)"
+          export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM AXIAM__AUTH__JWT_PUBLIC_KEY_PEM
+          docker compose -f docker/docker-compose.e2e.yml up -d --build --wait
+        timeout-minutes: 15
+
+      - name: Dump server logs on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.e2e.yml logs axiam-server
+
+      - name: Bootstrap E2E fixture (org + tenant + admin)
+        run: bash scripts/e2e-bootstrap.sh
+        env:
+          E2E_ORG_SLUG: "test-org"
+          E2E_TENANT_SLUG: "default"
+          E2E_ADMIN_EMAIL: "admin@axiam.dev"
+          E2E_ADMIN_PASSWORD: "Test@Admin123!"
+          AXIAM_URL: "http://localhost:8090"
+          SURREAL_URL: "http://localhost:8000"
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Install Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install chromium
+
+      - name: Serve frontend and run E2E tests
+        working-directory: frontend
+        run: |
+          # Serve the production build on port 5173 for Playwright
+          npx serve dist -l 5173 &
+          SERVE_PID=$!
+          # Wait for serve to be ready
+          for i in $(seq 1 15); do
+            curl -sf http://localhost:5173 > /dev/null 2>&1 && break || sleep 2
+          done
+          npm test
+          kill $SERVE_PID || true
+        env:
+          CI: "true"
+          E2E_BASE_URL: "http://localhost:5173"
+          E2E_ORG_SLUG: "test-org"
+          E2E_TENANT_SLUG: "default"
+          E2E_ADMIN_EMAIL: "admin@axiam.dev"
+          E2E_ADMIN_PASSWORD: "Test@Admin123!"
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+
+      - name: Stop backend services
+        if: always()
+        run: docker compose -f docker/docker-compose.e2e.yml down

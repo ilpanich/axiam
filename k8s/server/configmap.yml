@@ -7,10 +7,14 @@ metadata:
     app: axiam
     component: server
 data:
-  AXIAM_DB__URL: "ws://surrealdb:8000"
-  AXIAM_DB__NAMESPACE: "axiam"
-  AXIAM_DB__DATABASE: "axiam"
-  AXIAM_AMQP__URL: "amqp://rabbitmq:5672"
-  AXIAM_SERVER__HOST: "0.0.0.0"
-  AXIAM_GRPC__HOST: "0.0.0.0"
-  RUST_LOG: "info,axiam=debug"
+  # NOTE: Keys use DOUBLE underscore after AXIAM (AXIAM__) so config-rs
+  # .with_prefix("AXIAM").separator("__") parses them correctly.
+  # Single-underscore keys (AXIAM_DB__*) are silently ignored — SEC-052.
+  AXIAM__DB__URL: "surrealdb:8000"
+  AXIAM__DB__NAMESPACE: "axiam"
+  AXIAM__DB__DATABASE: "axiam"
+  AXIAM__AMQP__URL: "amqp://rabbitmq:5672"
+  AXIAM__SERVER__HOST: "0.0.0.0"
+  AXIAM__GRPC__HOST: "0.0.0.0"
+  # SEC-052: Narrow RUST_LOG — no internal module exposure in production
+  RUST_LOG: "info"

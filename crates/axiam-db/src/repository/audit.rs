@@ -7,6 +7,7 @@ use axiam_core::error::AxiamResult;
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
+use serde_json::json;
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
@@ -338,6 +339,98 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         self.list(Uuid::nil(), filter, pagination).await
     }
 
+    async fn pseudonymize_actor(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        pseudonym: &str,
+    ) -> AxiamResult<u64> {
+        // This is the SINGLE sanctioned non-INSERT write on audit_log (D-04).
+        // It requires the v15 schema permission: FOR update WHERE $auth.role = 'gdpr_pseudonymizer'.
+        //
+        // Full D-03 scrub:
+        // (a) actor_id → nil UUID
+        // (b) metadata.actor_pseudonym → pseudonym string (the new correlation key)
+        // (c) ip_address → NULL
+        // (d) known PII metadata keys redacted to "[redacted]"
+        // (e) resource_id → nil UUID in entries where resource_id == user_id
+        //
+        // NOTE: In SurrealDB in-memory engine (used by tests) the $auth context is not
+        // set, so the permission check may be bypassed. The application-layer guard
+        // (this method is the only path) is the true enforcement mechanism.
+        let nil_uuid = Uuid::nil().to_string();
+        let user_id_str = user_id.to_string();
+        let tenant_id_str = tenant_id.to_string();
+        let pii_keys = ["email", "username", "name", "display_name", "phone"];
+        let redacted_value = json!("[redacted]");
+
+        // Build a SET clause for metadata PII keys using SurrealDB object merge.
+        // We set each known PII key to "[redacted]" if present.
+        let pii_clauses: Vec<String> = pii_keys
+            .iter()
+            .map(|k| format!("metadata.{k} = IF metadata.{k} != NONE THEN '[redacted]' END"))
+            .collect();
+        let pii_set = if pii_clauses.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", pii_clauses.join(", "))
+        };
+
+        // Query 1: scrub actor fields + metadata PII on all entries for this actor.
+        let q1_sql = format!(
+            "UPDATE audit_log SET \
+             actor_id = $nil_uuid, \
+             metadata.actor_pseudonym = $pseudonym, \
+             ip_address = NONE{} \
+             WHERE tenant_id = $tenant_id AND actor_id = $user_id",
+            pii_set
+        );
+        let _ = self
+            .db
+            .query(&q1_sql)
+            .bind(("nil_uuid", nil_uuid.clone()))
+            .bind(("pseudonym", pseudonym.to_string()))
+            .bind(("tenant_id", tenant_id_str.clone()))
+            .bind(("user_id", user_id_str.clone()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        // Query 2: null-out resource_id in entries where someone acted ON this user.
+        let _ = self
+            .db
+            .query(
+                "UPDATE audit_log SET resource_id = $nil_uuid \
+                 WHERE tenant_id = $tenant_id AND resource_id = $user_id",
+            )
+            .bind(("nil_uuid", nil_uuid.clone()))
+            .bind(("tenant_id", tenant_id_str.clone()))
+            .bind(("user_id", user_id_str.clone()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        // Query 3: count entries that now have nil actor_id (as a proxy for rows updated).
+        let mut count_result = self
+            .db
+            .query(
+                "SELECT count() AS total FROM audit_log \
+                 WHERE tenant_id = $tenant_id AND actor_id = $nil_uuid GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("nil_uuid", nil_uuid))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
+        let _ = redacted_value; // used conceptually in the pii_clauses above
+        Ok(count_rows.first().map(|r| r.total).unwrap_or(0))
+    }
+
     async fn get_by_ids(&self, tenant_id: Uuid, ids: &[Uuid]) -> AxiamResult<Vec<AuditLogEntry>> {
         let id_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
         let r = self
@@ -362,5 +455,93 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         let index: std::collections::HashMap<Uuid, AuditLogEntry> =
             entries.into_iter().map(|e| (e.id, e)).collect();
         Ok(ids.iter().filter_map(|id| index.get(id).cloned()).collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::Mem;
+
+    async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        crate::schema::run_migrations(&db).await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn pseudonymize_actor_full_scrub() {
+        let db = setup_db().await;
+        let repo = SurrealAuditLogRepository::new(db);
+
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let pseudonym = "DELETED_USER_deadbeef01234567";
+
+        // Append an audit entry with PII in metadata.
+        let entry = repo
+            .append(CreateAuditLogEntry {
+                tenant_id,
+                actor_id: user_id,
+                actor_type: ActorType::User,
+                action: "user.login".into(),
+                resource_id: Some(user_id), // acted ON self
+                outcome: AuditOutcome::Success,
+                ip_address: Some("192.168.1.1".into()),
+                metadata: Some(json!({ "email": "user@example.com", "username": "alice" })),
+            })
+            .await
+            .unwrap();
+
+        let original_action = entry.action.clone();
+        let original_timestamp = entry.timestamp;
+
+        // Pseudonymize.
+        let count = repo
+            .pseudonymize_actor(tenant_id, user_id, pseudonym)
+            .await
+            .unwrap();
+        assert!(count >= 1, "at least one row should be updated");
+
+        // Re-fetch via list with actor_id filter = nil UUID.
+        let filter = AuditLogFilter {
+            actor_id: Some(Uuid::nil()),
+            ..Default::default()
+        };
+        let page = axiam_core::repository::Pagination::default();
+        let result = repo.list(tenant_id, filter, page).await.unwrap();
+        assert!(
+            !result.items.is_empty(),
+            "pseudonymized entry should be findable by nil actor_id"
+        );
+
+        let scrubbed = &result.items[0];
+        // (a) actor_id → nil UUID
+        assert_eq!(
+            scrubbed.actor_id,
+            Uuid::nil(),
+            "actor_id must be nil after scrub"
+        );
+        // (c) ip_address → NULL
+        assert!(scrubbed.ip_address.is_none(), "ip_address must be scrubbed");
+        // (b) metadata.actor_pseudonym set
+        assert_eq!(
+            scrubbed
+                .metadata
+                .get("actor_pseudonym")
+                .and_then(|v| v.as_str()),
+            Some(pseudonym),
+            "actor_pseudonym must be set in metadata"
+        );
+        // Immutable fields preserved
+        assert_eq!(scrubbed.action, original_action);
+        assert_eq!(scrubbed.timestamp, original_timestamp);
     }
 }

@@ -1,6 +1,7 @@
 //! AXIAM gRPC API — Authorization, user, and token services via Tonic.
 
 pub mod config;
+pub mod middleware;
 pub mod server;
 pub mod services;
 

@@ -1,0 +1,9 @@
+# .hadolint.yaml — Hadolint configuration for AXIAM Dockerfiles
+# Only suppress rules that conflict with intentional design choices.
+# See: https://github.com/hadolint/hadolint
+
+# DL3008: Pin versions in apt get install — intentionally not pinned because
+#         the build uses digest-pinned base images; apt versions should float
+#         within the pinned base to pick up security patches.
+ignore:
+  - DL3008

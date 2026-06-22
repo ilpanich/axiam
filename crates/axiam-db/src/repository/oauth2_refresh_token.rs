@@ -69,9 +69,18 @@ struct CountRow {
 }
 
 /// SurrealDB implementation of the RefreshToken repository.
-#[derive(Clone)]
 pub struct SurrealRefreshTokenRepository<C: Connection> {
     db: Surreal<C>,
+}
+
+// Manual Clone impl (not derive): avoids the spurious `C: Clone` bound that
+// blocks cloning under generic `C: Connection` callers. Matches SurrealUserRepository.
+impl<C: Connection> Clone for SurrealRefreshTokenRepository<C> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+        }
+    }
 }
 
 impl<C: Connection> SurrealRefreshTokenRepository<C> {
@@ -208,6 +217,28 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         }
 
         Ok(())
+    }
+
+    async fn revoke_all_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
+        // Revoke all non-revoked tokens for the user atomically. Skip already-revoked
+        // tokens so the returned count reflects only newly-revoked tokens.
+        // RETURN AFTER gives us the updated rows for counting.
+        let mut result = self
+            .db
+            .query(
+                "UPDATE oauth2_refresh_token SET revoked = true \
+                 WHERE tenant_id = $tenant_id \
+                   AND user_id = $user_id \
+                   AND revoked = false \
+                 RETURN AFTER",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
     }
 
     async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<()> {

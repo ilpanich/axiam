@@ -50,9 +50,24 @@ export function FormDialog({
     [onClose, isLoading],
   );
 
+  // Move focus into the dialog WHEN IT OPENS — prefer the first form field, fall
+  // back to the close button. This must depend on `open` ALONE. Previously the
+  // focus call shared an effect with the keydown listener (dep: handleKeyDown),
+  // and since callers pass an inline `onClose`, handleKeyDown changed identity on
+  // every render — so every keystroke re-ran the effect and stole focus back to
+  // the close button.
   useEffect(() => {
     if (!open) return;
-    closeRef.current?.focus();
+    const firstField = dialogRef.current?.querySelector<HTMLElement>(
+      'input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
+    );
+    (firstField ?? closeRef.current)?.focus();
+  }, [open]);
+
+  // Escape/Tab handling. Re-attaches when the handler identity changes but has no
+  // focus side-effect, so re-renders never disturb the caret.
+  useEffect(() => {
+    if (!open) return;
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [open, handleKeyDown]);
@@ -96,7 +111,7 @@ export function FormDialog({
         </div>
 
         {/* Body + Footer */}
-        <form onSubmit={onSubmit} noValidate>
+        <form onSubmit={onSubmit}>
           <div className="overflow-y-auto py-4 space-y-4 -mx-6 px-6">
             {children}
           </div>

@@ -10,6 +10,7 @@ use axiam_db::SurrealSettingsRepository;
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -29,9 +30,13 @@ use crate::extractors::auth::AuthenticatedUser;
 )]
 pub async fn get_org_settings<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealSettingsRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("settings:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let org_id = path.into_inner();
 
     // Authorization: only allow reads for the authenticated user's own org.
@@ -64,10 +69,14 @@ pub async fn get_org_settings<C: Connection>(
 )]
 pub async fn set_org_settings<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealSettingsRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<SetOrgSettings>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("settings:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let org_id = path.into_inner();
 
     // Authorization: only allow writes to the authenticated user's own org.
@@ -101,8 +110,12 @@ pub async fn set_org_settings<C: Connection>(
 )]
 pub async fn get_tenant_settings<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealSettingsRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("settings:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let settings = repo
         .get_effective_settings(user.org_id, user.tenant_id)
         .await?;
@@ -128,9 +141,13 @@ pub async fn get_tenant_settings<C: Connection>(
 )]
 pub async fn set_tenant_settings<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealSettingsRepository<C>>,
     body: web::Json<TenantSettingsOverride>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("settings:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let org = repo.get_org_settings(user.org_id).await?;
     let overrides = body.into_inner();
 

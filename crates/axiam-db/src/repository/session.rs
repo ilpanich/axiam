@@ -77,9 +77,19 @@ struct CountRow {
 }
 
 /// SurrealDB implementation of the Session repository.
-#[derive(Clone)]
 pub struct SurrealSessionRepository<C: Connection> {
     db: Surreal<C>,
+}
+
+// Manual Clone impl (not derive): `#[derive(Clone)]` would add a `C: Clone`
+// bound that generic `C: Connection` callers (e.g. REST handlers) cannot
+// satisfy, silently cloning a `&Self` instead. Matches SurrealUserRepository.
+impl<C: Connection> Clone for SurrealSessionRepository<C> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+        }
+    }
 }
 
 impl<C: Connection> SurrealSessionRepository<C> {
@@ -196,6 +206,34 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(DbError::from)?;
 
         Ok(())
+    }
+
+    async fn invalidate_user_sessions_except(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+    ) -> AxiamResult<u64> {
+        // DELETE all sessions for this user in this tenant EXCEPT the
+        // current one (identified by its record ID). RETURN BEFORE gives us
+        // the deleted rows so we can count them.
+        let mut result = self
+            .db
+            .query(
+                "DELETE session \
+                 WHERE tenant_id = $tenant_id \
+                   AND user_id = $user_id \
+                   AND id != type::record('session', $current_session_id) \
+                 RETURN BEFORE",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("current_session_id", current_session_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
+        Ok(deleted.len() as u64)
     }
 
     async fn cleanup_expired(&self, tenant_id: Uuid) -> AxiamResult<u64> {

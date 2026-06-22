@@ -382,7 +382,7 @@ When evaluating whether a subject can perform an action on a resource:
 2. **Filter by resource scope**: Keep global roles + roles assigned on the target resource or any ancestor in the hierarchy
 3. **Collect permissions**: Union of all permissions from the matching roles
 4. **Check scopes**: If the permission requires specific scopes, verify they are present
-5. **Apply inheritance**: Walk up the resource tree — a role on a parent grants access to children unless an explicit deny exists at a lower level
+5. **Apply inheritance**: Walk up the resource tree — a role on a parent grants access to children (additive-only, allow-wins; there is no explicit deny-override mechanism in v1.0-beta; deny-override cascade is deferred to post-v1.0-beta)
 6. **Return decision**: `Allow` if a matching permission is found, `Deny` otherwise (default deny)
 
 ### 5.2 Resource Hierarchy Traversal

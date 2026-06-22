@@ -12,6 +12,7 @@ use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::AuthenticatedUser;
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 
 // ---------------------------------------------------------------------------
@@ -84,9 +85,13 @@ impl From<Webhook> for WebhookResponse {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealWebhookRepository<C>>,
     body: web::Json<CreateWebhookRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("webhooks:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
 
     validate_webhook_url(&req.url)?;
@@ -124,9 +129,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealWebhookRepository<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("webhooks:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, pagination.into_inner()).await?;
     let response = PaginatedResult {
         items: result
@@ -155,9 +164,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealWebhookRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("webhooks:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let webhook = repo.get_by_id(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(WebhookResponse::from(webhook)))
@@ -178,10 +191,14 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealWebhookRepository<C>>,
     body: web::Json<UpdateWebhookRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("webhooks:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     let req = body.into_inner();
     if let Some(ref url) = req.url {
@@ -221,9 +238,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealWebhookRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("webhooks:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let id = path.into_inner();
     repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())

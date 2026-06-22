@@ -10,6 +10,7 @@ use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -21,6 +22,12 @@ use crate::extractors::auth::AuthenticatedUser;
 pub struct CreatePermissionRequest {
     pub action: String,
     pub description: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdatePermissionRequest {
+    pub action: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -57,9 +64,13 @@ pub struct RolePermissionPath {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealPermissionRepository<C>>,
     body: web::Json<CreatePermissionRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("permissions:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     let input = CreatePermission {
         tenant_id: user.tenant_id,
@@ -83,9 +94,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealPermissionRepository<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("permissions:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, query.into_inner()).await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -104,9 +119,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealPermissionRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("permissions:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let permission = repo.get_by_id(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::Ok().json(permission))
 }
@@ -117,7 +136,7 @@ pub async fn get<C: Connection>(
     path = "/api/v1/permissions/{permission_id}",
     tag = "permissions",
     params(("permission_id" = Uuid, Path, description = "Permission ID")),
-    request_body = UpdatePermission,
+    request_body = UpdatePermissionRequest,
     responses(
         (status = 200, description = "Permission updated", body = Permission),
         (status = 404, description = "Permission not found"),
@@ -126,12 +145,21 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealPermissionRepository<C>>,
     path: web::Path<Uuid>,
-    body: web::Json<UpdatePermission>,
+    body: web::Json<UpdatePermissionRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("permissions:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let req = body.into_inner();
+    let input = UpdatePermission {
+        action: req.action,
+        description: req.description,
+    };
     let permission = repo
-        .update(user.tenant_id, path.into_inner(), body.into_inner())
+        .update(user.tenant_id, path.into_inner(), input)
         .await?;
     Ok(HttpResponse::Ok().json(permission))
 }
@@ -150,9 +178,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealPermissionRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("permissions:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     repo.delete(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -175,10 +207,14 @@ pub async fn delete<C: Connection>(
 )]
 pub async fn grant_to_role<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealPermissionRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<GrantPermissionRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("permissions:grant", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     repo.grant_to_role_with_scopes(
         user.tenant_id,
@@ -203,9 +239,13 @@ pub async fn grant_to_role<C: Connection>(
 )]
 pub async fn list_role_permissions<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealPermissionRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("permissions:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let grants = repo
         .get_role_permission_grants(user.tenant_id, path.into_inner())
         .await?;
@@ -228,9 +268,13 @@ pub async fn list_role_permissions<C: Connection>(
 )]
 pub async fn revoke_from_role<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealPermissionRepository<C>>,
     path: web::Path<RolePermissionPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("permissions:revoke", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let p = path.into_inner();
     repo.revoke_from_role(user.tenant_id, p.role_id, p.permission_id)
         .await?;

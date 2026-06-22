@@ -114,3 +114,65 @@ impl RequirePermission {
 
 /// Convenience alias for the app-data type.
 pub type AuthzData = actix_web::web::Data<Arc<dyn AuthzChecker>>;
+
+/// Check if the caller is accessing their own resource (self-service).
+///
+/// Returns `true` when `caller.user_id == target_user_id`, allowing
+/// self-service endpoints to skip the authorization engine check.
+pub fn is_own_resource(caller: &AuthenticatedUser, target_user_id: Uuid) -> bool {
+    caller.user_id == target_user_id
+}
+
+/// Marker inserted into request extensions after a successful
+/// [`RequirePermission`] check.
+///
+/// Handlers can insert this after calling `RequirePermission::check()` to
+/// signal to the outer middleware (and integration tests) that authorization
+/// was explicitly performed:
+///
+/// ```ignore
+/// req.extensions_mut().insert(AuthzChecked);
+/// ```
+pub struct AuthzChecked;
+
+/// Always-allow [`AuthzChecker`] for integration tests.
+///
+/// Production code should never use this. Register it as
+/// `web::Data::new(Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>)`
+/// in test fixtures that don't exercise RBAC decisions — it lets handlers'
+/// `RequirePermission::check()` calls pass without seeding role/permission
+/// data in the test DB.
+pub struct AllowAllAuthzChecker;
+
+impl AuthzChecker for AllowAllAuthzChecker {
+    fn check_access<'a>(
+        &'a self,
+        _request: &'a AccessRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
+        Box::pin(async move { Ok(AccessDecision::Allow) })
+    }
+}
+
+/// Always-deny [`AuthzChecker`] for integration tests.
+///
+/// The mirror of [`AllowAllAuthzChecker`]: it returns
+/// [`AccessDecision::Deny`] for every request, simulating a caller who
+/// lacks the required permission. Register it as
+/// `web::Data::new(Arc::new(DenyAllAuthzChecker) as Arc<dyn AuthzChecker>)`
+/// in test fixtures that need to assert a handler's *forbidden* path
+/// (e.g. a non-admin caller hitting an admin-gated endpoint) without
+/// seeding role/permission data in the test DB.
+pub struct DenyAllAuthzChecker;
+
+impl AuthzChecker for DenyAllAuthzChecker {
+    fn check_access<'a>(
+        &'a self,
+        _request: &'a AccessRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(AccessDecision::Deny(
+                "caller lacks the required permission".into(),
+            ))
+        })
+    }
+}

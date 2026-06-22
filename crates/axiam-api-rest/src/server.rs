@@ -1,14 +1,41 @@
 //! Actix-Web application factory — composable route and middleware builders.
 
 use actix_cors::Cors;
+use actix_governor::Governor;
+use actix_governor::GovernorConfigBuilder;
+use actix_governor::governor::middleware::NoOpMiddleware;
 use actix_web::http::header;
 use actix_web::web;
-use axiam_db::WsClient;
-use utoipa::OpenApi;
+use axiam_db::DbClient;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::config::RateLimitConfig;
+use crate::extractors::rate_limit::XForwardedForKeyExtractor;
 use crate::handlers;
-use crate::openapi::ApiDoc;
+use crate::middleware::authz::AuthzMiddleware;
+use crate::middleware::csrf::CsrfMiddleware;
+use crate::openapi::api_doc;
+
+/// Build a per-endpoint Governor middleware instance from a requests-per-minute
+/// limit.
+///
+/// Each call creates an independent in-memory store — never share configs
+/// between endpoints with different limits (that would merge their counters).
+fn build_governor(requests_per_min: u32) -> Governor<XForwardedForKeyExtractor, NoOpMiddleware> {
+    // SEC-048: trusted_hops=0 default; override via AXIAM__RATE_LIMIT__TRUSTED_HOPS
+    // when running behind a single ingress/nginx layer (set to 1).
+    let trusted_hops: usize = std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let config = GovernorConfigBuilder::default()
+        .requests_per_minute(requests_per_min as u64)
+        .burst_size(requests_per_min)
+        .key_extractor(XForwardedForKeyExtractor::with_trusted_hops(trusted_hops))
+        .finish()
+        .expect("valid governor config");
+    Governor::new(&config)
+}
 
 /// Register health and readiness routes.
 pub fn health_routes(cfg: &mut web::ServiceConfig) {
@@ -18,45 +45,59 @@ pub fn health_routes(cfg: &mut web::ServiceConfig) {
 
 /// Register Swagger UI and OpenAPI JSON spec routes.
 pub fn openapi_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        SwaggerUi::new("/api/docs/{_:.*}").url("/api/docs/openapi.json", ApiDoc::openapi()),
-    );
+    cfg.service(SwaggerUi::new("/api/docs/{_:.*}").url("/api/docs/openapi.json", api_doc()));
 }
 
-/// Register the API v1 scope with all domain endpoints (production WsClient).
+/// Register the API v1 scope with all domain endpoints (production DbClient).
 pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
-    register_api_v1_routes::<WsClient>(cfg);
+    register_api_v1_routes::<DbClient>(cfg, &RateLimitConfig::default());
 }
 
 /// Register the API v1 scope, generic over the SurrealDB connection type.
 ///
 /// This allows tests to use an in-memory DB while production uses WebSocket.
-pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/auth")
+/// The `rate_limit_cfg` parameter controls per-endpoint rate limits.
+pub fn register_api_v1_routes<C: surrealdb::Connection>(
+    cfg: &mut web::ServiceConfig,
+    rate_limit_cfg: &RateLimitConfig,
+) {
+    let auth_scope = web::scope("/api/v1/auth")
+            .wrap(AuthzMiddleware)
+            .wrap(CsrfMiddleware)
             .app_data(web::JsonConfig::default().limit(65_536))
-            .route("/login", web::post().to(handlers::auth::login::<C>))
+            .service(
+                web::resource("/login")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(web::post().to(handlers::auth::login::<C>)),
+            )
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
             .route("/refresh", web::post().to(handlers::auth::refresh::<C>))
-            .route(
-                "/mfa/enroll",
-                web::post().to(handlers::auth::enroll_mfa::<C>),
+            .route("/me", web::get().to(handlers::auth::me::<C>))
+            // SEC-020: MFA endpoints rate-limited to prevent brute-force/enumeration.
+            .service(
+                web::resource("/mfa/enroll")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::enroll_mfa::<C>)),
             )
-            .route(
-                "/mfa/confirm",
-                web::post().to(handlers::auth::confirm_mfa::<C>),
+            .service(
+                web::resource("/mfa/confirm")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::confirm_mfa::<C>)),
             )
-            .route(
-                "/mfa/verify",
-                web::post().to(handlers::auth::verify_mfa::<C>),
+            .service(
+                web::resource("/mfa/verify")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::verify_mfa::<C>)),
             )
-            .route(
-                "/mfa/setup/enroll",
-                web::post().to(handlers::auth::setup_enroll_mfa::<C>),
+            .service(
+                web::resource("/mfa/setup/enroll")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::setup_enroll_mfa::<C>)),
             )
-            .route(
-                "/mfa/setup/confirm",
-                web::post().to(handlers::auth::setup_confirm_mfa::<C>),
+            .service(
+                web::resource("/mfa/setup/confirm")
+                    .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .route(web::post().to(handlers::auth::setup_confirm_mfa::<C>)),
             )
             .route("/device", web::post().to(handlers::auth::device_auth::<C>))
             .route(
@@ -83,15 +124,63 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                 "/resend-verification",
                 web::post().to(handlers::email_verification::resend_verification::<C>),
             )
-            .route(
-                "/reset",
-                web::post().to(handlers::password_reset::request_reset::<C>),
+            .service(
+                web::resource("/reset")
+                    .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
+                    .route(web::post().to(handlers::password_reset::request_reset::<C>)),
             )
             .route(
                 "/reset/confirm",
                 web::post().to(handlers::password_reset::confirm_reset::<C>),
-            ),
-    );
+            )
+            // --- GDPR delete-cancel (public — emailed single-use token, D-09) ---
+            // Listed in PUBLIC_PATHS so AuthzMiddleware lets it through without a JWT.
+            .service(
+                web::resource("/account/delete/cancel")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(
+                        web::get()
+                            .to(handlers::gdpr::cancel_account_delete::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/password/change")
+                    .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
+                    .route(web::post().to(handlers::auth::change_password::<C>)),
+            )
+            // --- First-time SSO — public (Phase 4 D-22) ---
+            // These routes are listed in PUBLIC_PATHS (permissions.rs) so the
+            // AuthzMiddleware lets them through without a JWT.
+            .service(
+                web::resource("/federation/oidc/start")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::federation::oidc_start_public::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/federation/oidc/callback")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::federation::oidc_callback_public::<C>),
+                    ),
+            );
+    // First-time SSO SAML public routes — only when the `saml` feature is on.
+    #[cfg(feature = "saml")]
+    let auth_scope = auth_scope
+        .service(
+            web::resource("/federation/saml/login")
+                .wrap(build_governor(rate_limit_cfg.login_per_min))
+                .route(web::post().to(handlers::federation::saml_login_public::<C>)),
+        )
+        .service(
+            web::resource("/federation/saml/acs")
+                .wrap(build_governor(rate_limit_cfg.login_per_min))
+                .route(web::post().to(handlers::federation::saml_acs_public::<C>)),
+        );
+    cfg.service(auth_scope);
     // OIDC Discovery (must be outside /oauth2 scope per spec)
     cfg.route(
         "/.well-known/openid-configuration",
@@ -99,21 +188,35 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
     );
     cfg.service(
         web::scope("/oauth2")
+            .wrap(AuthzMiddleware)
             .route(
                 "/authorize",
                 web::get().to(handlers::oauth2::authorize::<C>),
             )
-            .route("/token", web::post().to(handlers::oauth2::token::<C>))
-            .route("/revoke", web::post().to(handlers::oauth2::revoke::<C>))
-            .route(
-                "/introspect",
-                web::post().to(handlers::oauth2::introspect::<C>),
+            .service(
+                web::resource("/token")
+                    .wrap(build_governor(rate_limit_cfg.token_per_min))
+                    .route(web::post().to(handlers::oauth2::token::<C>)),
+            )
+            // SEC-020: revoke and introspect rate-limited to prevent DoS via token flooding
+            // and token probing attacks.
+            .service(
+                web::resource("/revoke")
+                    .wrap(build_governor(rate_limit_cfg.revoke_per_min))
+                    .route(web::post().to(handlers::oauth2::revoke::<C>)),
+            )
+            .service(
+                web::resource("/introspect")
+                    .wrap(build_governor(rate_limit_cfg.introspect_per_min))
+                    .route(web::post().to(handlers::oauth2::introspect::<C>)),
             )
             .route("/jwks", web::get().to(handlers::oauth2::jwks))
             .route("/userinfo", web::get().to(handlers::oauth2::userinfo::<C>)),
     );
-    cfg.service(
-        web::scope("/api/v1")
+    let api_scope = web::scope("/api/v1")
+            .wrap(AuthzMiddleware)
+            .wrap(CsrfMiddleware) // SEC-046: CSRF protection on all /api/v1 CRUD routes
+            .app_data(web::JsonConfig::default().limit(65_536)) // CQ-B21: body size limit
             .service(
                 web::resource("/organizations")
                     .route(web::post().to(handlers::organizations::create::<C>))
@@ -162,6 +265,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             )
             .service(
                 web::resource("/users")
+                    .wrap(build_governor(rate_limit_cfg.register_per_min))
                     .route(web::post().to(handlers::users::create::<C>))
                     .route(web::get().to(handlers::users::list::<C>)),
             )
@@ -170,6 +274,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(web::get().to(handlers::users::get::<C>))
                     .route(web::put().to(handlers::users::update::<C>))
                     .route(web::delete().to(handlers::users::delete::<C>)),
+            )
+            .service(
+                web::resource("/users/{user_id}/unlock")
+                    .route(web::post().to(handlers::users::unlock::<C>)),
             )
             .service(
                 web::resource("/users/{user_id}/reset-mfa")
@@ -221,6 +329,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             )
             .service(
                 web::resource("/roles/{role_id}/users")
+                    .route(web::get().to(handlers::roles::list_users::<C>))
                     .route(web::post().to(handlers::roles::assign_to_user::<C>)),
             )
             .service(
@@ -229,6 +338,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
             )
             .service(
                 web::resource("/roles/{role_id}/groups")
+                    .route(web::get().to(handlers::roles::list_groups::<C>))
                     .route(web::post().to(handlers::roles::assign_to_group::<C>)),
             )
             .service(
@@ -442,25 +552,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                         web::post().to(handlers::federation::oidc_callback::<C>),
                     ),
             )
-            // --- Federation SAML Flow ---
-            .service(
-                web::resource("/federation/saml/authn-request")
-                    .route(
-                        web::post().to(handlers::federation::saml_authn_request::<C>),
-                    ),
-            )
-            .service(
-                web::resource("/federation/saml/acs")
-                    .route(
-                        web::post().to(handlers::federation::saml_acs::<C>),
-                    ),
-            )
-            .service(
-                web::resource("/federation/saml/metadata")
-                    .route(
-                        web::get().to(handlers::federation::saml_metadata::<C>),
-                    ),
-            )
+            // --- Federation SAML Flow: registered at the end, feature-gated ---
             // --- Tenant Settings (from JWT context) ---
             .service(
                 web::resource("/settings")
@@ -483,8 +575,53 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(cfg: &mut web::ServiceCo
                     .route(
                         web::delete().to(handlers::federation::delete_link::<C>),
                     ),
-            ),
-    );
+            )
+            // --- Admin Bootstrap (public — no auth required) ---
+            .service(
+                web::resource("/admin/bootstrap")
+                    .route(web::post().to(handlers::bootstrap::bootstrap::<C>)),
+            )
+            // --- GDPR Art. 15 Export ---
+            .service(
+                web::resource("/account/export")
+                    .wrap(build_governor(rate_limit_cfg.register_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::gdpr::request_account_export::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/account/export/{token}")
+                    .route(
+                        web::get()
+                            .to(handlers::gdpr::download_account_export::<C>),
+                    ),
+            )
+            // --- GDPR Art. 17 Delete ---
+            .service(
+                web::resource("/account/delete")
+                    .wrap(build_governor(rate_limit_cfg.register_per_min))
+                    .route(
+                        web::post()
+                            .to(handlers::gdpr::request_account_delete::<C>),
+                    ),
+            );
+    // Authenticated SAML SP routes — only when the `saml` feature is on.
+    #[cfg(feature = "saml")]
+    let api_scope = api_scope
+        .service(
+            web::resource("/federation/saml/authn-request")
+                .route(web::post().to(handlers::federation::saml_authn_request::<C>)),
+        )
+        .service(
+            web::resource("/federation/saml/acs")
+                .route(web::post().to(handlers::federation::saml_acs::<C>)),
+        )
+        .service(
+            web::resource("/federation/saml/metadata")
+                .route(web::get().to(handlers::federation::saml_metadata::<C>)),
+        );
+    cfg.service(api_scope);
 }
 
 /// Build CORS middleware from configuration.
@@ -500,6 +637,7 @@ pub fn build_cors(allowed_origins: &[String]) -> Cors {
             header::CONTENT_TYPE,
             header::ACCEPT,
         ])
+        .allowed_header("X-CSRF-Token")
         .max_age(3600);
 
     for origin in allowed_origins {

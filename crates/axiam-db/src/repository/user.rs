@@ -1,12 +1,10 @@
 //! SurrealDB implementation of [`UserRepository`].
 //!
-//! Password hashing uses Argon2id with OWASP-recommended parameters
-//! (memory: 19 MiB, iterations: 2, parallelism: 1). Salt is randomly
-//! generated per hash. An optional pepper (server-side secret) can be
-//! provided at construction time.
+//! Password hashing is delegated entirely to `axiam_auth::password::hash_password`
+//! (Argon2id, OWASP-recommended parameters). An optional pepper (server-side
+//! secret) can be provided at construction time via `with_pepper`.
 
-use argon2::password_hash::SaltString;
-use argon2::{Argon2, PasswordHasher};
+use axiam_auth::password;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
@@ -16,9 +14,14 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, parse_uuid};
 
 /// DB-side row struct for queries where the UUID is already known.
-#[derive(Debug, SurrealValue)]
+///
+/// NOTE: `Debug` is manually implemented below to redact `mfa_secret` and
+/// `totp_last_used_step` (SEC-043 — AES-256-GCM ciphertext must not leak into
+/// logs or debug output).
+#[derive(SurrealValue)]
 struct UserRow {
     tenant_id: String,
     username: String,
@@ -27,17 +30,55 @@ struct UserRow {
     status: String,
     mfa_enabled: bool,
     mfa_secret: Option<String>,
+    /// Last TOTP step that was successfully verified (SEC-008/REQ-14 AC-5).
+    totp_last_used_step: Option<u64>,
     failed_login_attempts: u32,
     last_failed_login_at: Option<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
     email_verified_at: Option<DateTime<Utc>>,
+    /// GDPR Art. 17 — set when user requests account deletion (D-08).
+    deletion_pending: Option<bool>,
+    /// Scheduled purge date when deletion_pending is true (D-08).
+    scheduled_purge_at: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for UserRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserRow")
+            .field("tenant_id", &self.tenant_id)
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("status", &self.status)
+            .field("mfa_enabled", &self.mfa_enabled)
+            // SEC-043: never log the AES-256-GCM-encrypted MFA secret.
+            .field("mfa_secret", &self.mfa_secret.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "totp_last_used_step",
+                &self.totp_last_used_step.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("failed_login_attempts", &self.failed_login_attempts)
+            .field("last_failed_login_at", &self.last_failed_login_at)
+            .field("locked_until", &self.locked_until)
+            .field("email_verified_at", &self.email_verified_at)
+            .field("deletion_pending", &self.deletion_pending)
+            .field("scheduled_purge_at", &self.scheduled_purge_at)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish_non_exhaustive()
+    }
+}
+
 /// DB-side row struct that includes the record ID via `meta::id(id)`.
-#[derive(Debug, SurrealValue)]
+///
+/// Used by the list path only — `mfa_secret` and `totp_last_used_step` are
+/// intentionally absent (SEC-043: explicit column projection in the list query
+/// excludes these fields so they are never hydrated into list responses).
+/// NOTE: `Debug` is manually implemented below to prevent future accidental
+/// re-addition of those fields from leaking ciphertext into logs.
+#[derive(SurrealValue)]
 struct UserRowWithId {
     record_id: String,
     tenant_id: String,
@@ -46,14 +87,45 @@ struct UserRowWithId {
     password_hash: String,
     status: String,
     mfa_enabled: bool,
-    mfa_secret: Option<String>,
     failed_login_attempts: u32,
     last_failed_login_at: Option<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
     email_verified_at: Option<DateTime<Utc>>,
+    /// GDPR Art. 17 — set when user requests account deletion (D-08).
+    deletion_pending: Option<bool>,
+    /// Scheduled purge date when deletion_pending is true (D-08).
+    scheduled_purge_at: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for UserRowWithId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserRowWithId")
+            .field("record_id", &self.record_id)
+            .field("tenant_id", &self.tenant_id)
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("status", &self.status)
+            .field("mfa_enabled", &self.mfa_enabled)
+            // SEC-043: mfa_secret and totp_last_used_step are excluded from
+            // the list projection entirely; note their absence explicitly.
+            .field("mfa_secret", &"[REDACTED — excluded from list projection]")
+            .field(
+                "totp_last_used_step",
+                &"[REDACTED — excluded from list projection]",
+            )
+            .field("failed_login_attempts", &self.failed_login_attempts)
+            .field("last_failed_login_at", &self.last_failed_login_at)
+            .field("locked_until", &self.locked_until)
+            .field("email_verified_at", &self.email_verified_at)
+            .field("deletion_pending", &self.deletion_pending)
+            .field("scheduled_purge_at", &self.scheduled_purge_at)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish_non_exhaustive()
+    }
 }
 
 fn parse_status(s: &str) -> Result<UserStatus, DbError> {
@@ -62,6 +134,7 @@ fn parse_status(s: &str) -> Result<UserStatus, DbError> {
         "Inactive" => Ok(UserStatus::Inactive),
         "Locked" => Ok(UserStatus::Locked),
         "PendingVerification" => Ok(UserStatus::PendingVerification),
+        "Anonymized" => Ok(UserStatus::Anonymized),
         other => Err(DbError::Migration(format!("unknown user status: {other}"))),
     }
 }
@@ -72,13 +145,13 @@ fn status_to_string(s: &UserStatus) -> &'static str {
         UserStatus::Inactive => "Inactive",
         UserStatus::Locked => "Locked",
         UserStatus::PendingVerification => "PendingVerification",
+        UserStatus::Anonymized => "Anonymized",
     }
 }
 
 impl UserRow {
     fn into_user(self, id: Uuid) -> Result<User, DbError> {
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
         Ok(User {
             id,
             tenant_id,
@@ -88,10 +161,13 @@ impl UserRow {
             status: parse_status(&self.status)?,
             mfa_enabled: self.mfa_enabled,
             mfa_secret: self.mfa_secret,
+            totp_last_used_step: self.totp_last_used_step,
             failed_login_attempts: self.failed_login_attempts,
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
             email_verified_at: self.email_verified_at,
+            deletion_pending: self.deletion_pending.unwrap_or(false),
+            scheduled_purge_at: self.scheduled_purge_at,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -101,10 +177,8 @@ impl UserRow {
 
 impl UserRowWithId {
     fn try_into_user(self) -> Result<User, DbError> {
-        let id = Uuid::parse_str(&self.record_id)
-            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let id = parse_uuid(&self.record_id, "record_id")?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
         Ok(User {
             id,
             tenant_id,
@@ -113,49 +187,21 @@ impl UserRowWithId {
             password_hash: self.password_hash,
             status: parse_status(&self.status)?,
             mfa_enabled: self.mfa_enabled,
-            mfa_secret: self.mfa_secret,
+            // SEC-043: mfa_secret and totp_last_used_step are excluded from
+            // the list projection — always None on this path.
+            mfa_secret: None,
+            totp_last_used_step: None,
             failed_login_attempts: self.failed_login_attempts,
             last_failed_login_at: self.last_failed_login_at,
             locked_until: self.locked_until,
             email_verified_at: self.email_verified_at,
+            deletion_pending: self.deletion_pending.unwrap_or(false),
+            scheduled_purge_at: self.scheduled_purge_at,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
     }
-}
-
-/// Row struct for count queries.
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
-/// Hash a password with Argon2id using OWASP-recommended parameters.
-///
-/// If a pepper is provided, it is prepended to the password before
-/// hashing. The salt is randomly generated for each call.
-fn hash_password(password: &str, pepper: Option<&str>) -> Result<String, DbError> {
-    // OWASP ASVS recommended: m=19456 (19 MiB), t=2, p=1
-    let params = argon2::Params::new(19456, 2, 1, None)
-        .map_err(|e| DbError::Migration(format!("argon2 params error: {e}")))?;
-    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-
-    let peppered: String;
-    let input = match pepper {
-        Some(p) => {
-            peppered = format!("{p}{password}");
-            peppered.as_bytes()
-        }
-        None => password.as_bytes(),
-    };
-
-    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
-    let hash = argon2
-        .hash_password(input, &salt)
-        .map_err(|e| DbError::Migration(format!("password hash error: {e}")))?;
-
-    Ok(hash.to_string())
 }
 
 /// SurrealDB implementation of the User repository.
@@ -193,7 +239,8 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
 
-        let password_hash = hash_password(&input.password, self.pepper.as_deref())?;
+        let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let metadata = input
             .metadata
@@ -333,6 +380,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         if input.mfa_secret.is_some() {
             sets.push("mfa_secret = $mfa_secret");
         }
+        if input.totp_last_used_step.is_some() {
+            sets.push("totp_last_used_step = $totp_last_used_step");
+        }
         if input.failed_login_attempts.is_some() {
             sets.push("failed_login_attempts = $failed_login_attempts");
         }
@@ -381,6 +431,10 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             // mfa_secret is Option<Option<String>>: Some(Some(v)) = set, Some(None) = clear
             builder = builder.bind(("mfa_secret", mfa_secret));
         }
+        if let Some(totp_last_used_step) = input.totp_last_used_step {
+            // totp_last_used_step is Option<Option<u64>>: Some(Some(v)) = set, Some(None) = clear
+            builder = builder.bind(("totp_last_used_step", totp_last_used_step));
+        }
         if let Some(failed_login_attempts) = input.failed_login_attempts {
             builder = builder.bind(("failed_login_attempts", failed_login_attempts));
         }
@@ -427,6 +481,21 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         Ok(())
     }
 
+    async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<()> {
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 totp_last_used_step = $step, updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("step", step))
+            .await
+            .map_err(DbError::from)?;
+        Ok(())
+    }
+
     async fn list(
         &self,
         tenant_id: Uuid,
@@ -449,7 +518,17 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let mut result = self
             .db
             .query(
-                "SELECT meta::id(id) AS record_id, * FROM user \
+                // SEC-043: explicit column projection — mfa_secret and
+                // totp_last_used_step are intentionally excluded so they are
+                // never hydrated into list responses.
+                "SELECT meta::id(id) AS record_id, \
+                        tenant_id, username, email, password_hash, status, \
+                        mfa_enabled, \
+                        failed_login_attempts, last_failed_login_at, \
+                        locked_until, email_verified_at, \
+                        deletion_pending, scheduled_purge_at, \
+                        metadata, created_at, updated_at \
+                 FROM user \
                  WHERE tenant_id = $tenant_id \
                  ORDER BY created_at ASC \
                  LIMIT $limit START $offset",
@@ -474,13 +553,284 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             limit: pagination.limit,
         })
     }
+
+    async fn increment_failed_logins(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        lockout_threshold: u32,
+        base_lockout_secs: i64,
+        backoff_multiplier: f64,
+        max_lockout_secs: i64,
+    ) -> AxiamResult<()> {
+        let user_id_str = user_id.to_string();
+        let tenant_id_str = tenant_id.to_string();
+        self.db
+            .query(
+                // SurrealDB evaluates each RHS in this SET against the
+                // pre-update document, so `failed_login_attempts` inside the IF
+                // is the OLD count (before `+= 1`). Compare `+ 1` so the lock
+                // fires on the Nth failure (when the new count reaches the
+                // threshold), not the N+1th — otherwise an account gets one
+                // extra guess past the configured limit.
+                //
+                // Lockout duration grows exponentially with each lockout past
+                // the threshold and is capped at $max_secs (brute-force
+                // protection): d = min(base * mult^(new_count - threshold), max).
+                // `duration::from_secs` needs an int, so the float result of the
+                // math is cast with `<int>`. (SurrealDB v3 renamed the duration
+                // constructor; `duration::secs` is now an accessor, not a ctor.)
+                "UPDATE type::record('user', $id) \
+                 SET \
+                   failed_login_attempts += 1, \
+                   last_failed_login_at = time::now(), \
+                   locked_until = IF (failed_login_attempts + 1 >= $threshold) \
+                     THEN time::now() + duration::from_secs(<int> math::min([ \
+                       $base_secs * math::pow($mult, failed_login_attempts + 1 - $threshold), \
+                       $max_secs \
+                     ])) \
+                     ELSE locked_until \
+                   END, \
+                   updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id_str))
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("threshold", lockout_threshold))
+            .bind(("base_secs", base_lockout_secs))
+            .bind(("mult", backoff_multiplier))
+            .bind(("max_secs", max_lockout_secs))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GDPR deletion / anonymization methods (D-05, D-08)
+// ---------------------------------------------------------------------------
+
+impl<C: Connection> SurrealUserRepository<C> {
+    /// Atomically create a user together with its `terms_of_service` consent
+    /// row (REQ-8 / GDPR Art. 7 proof-of-consent).
+    ///
+    /// Both inserts run inside a single SurrealDB `BEGIN..COMMIT` transaction:
+    /// if the consent insert fails, the user insert is rolled back. This makes
+    /// the invariant *"a user never exists without proof-of-consent"* hold even
+    /// on a partial DB failure (threat T-5-consent-gap). AXIAM never physically
+    /// deletes user rows (anonymize-in-place preserves FK integrity), so a
+    /// compensating delete could not satisfy this invariant — the transaction
+    /// is required.
+    pub async fn create_with_consent(
+        &self,
+        input: CreateUser,
+        consent_type: &str,
+        consent_version: &str,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> AxiamResult<User> {
+        let id = Uuid::new_v4();
+        let id_str = id.to_string();
+        let consent_id = Uuid::new_v4().to_string();
+        let tenant_id_str = input.tenant_id.to_string();
+
+        let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let metadata = input
+            .metadata
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+
+        // Result slots: BEGIN=0, CREATE user=1, CREATE consent=2, COMMIT=3.
+        let result = self
+            .db
+            .query(
+                "BEGIN TRANSACTION; \
+                 CREATE type::record('user', $id) SET \
+                 tenant_id = $tenant_id, \
+                 username = $username, email = $email, \
+                 password_hash = $password_hash, \
+                 status = $status, \
+                 mfa_enabled = false, \
+                 failed_login_attempts = 0, \
+                 last_failed_login_at = NONE, \
+                 locked_until = NONE, \
+                 email_verified_at = NONE, \
+                 metadata = $metadata; \
+                 CREATE type::record('consent', $consent_id) SET \
+                 tenant_id = $tenant_id, \
+                 user_id = $id, \
+                 consent_type = $consent_type, \
+                 version = $consent_version, \
+                 accepted_at = time::now(), \
+                 ip_address = $ip_address, \
+                 user_agent = $user_agent; \
+                 COMMIT TRANSACTION",
+            )
+            .bind(("id", id_str.clone()))
+            .bind(("consent_id", consent_id))
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("username", input.username))
+            .bind(("email", input.email))
+            .bind(("password_hash", password_hash))
+            .bind(("status", "PendingVerification".to_string()))
+            .bind(("metadata", metadata))
+            .bind(("consent_type", consent_type.to_string()))
+            .bind(("consent_version", consent_version.to_string()))
+            .bind(("ip_address", ip_address))
+            .bind(("user_agent", user_agent))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        // The user CREATE result is at index 1 (BEGIN occupies slot 0).
+        let rows: Vec<UserRow> = result.take(1).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "user".into(),
+            id: id_str,
+        })?;
+
+        Ok(row.into_user(id)?)
+    }
+
+    /// Mark a user as deletion-pending and set the scheduled purge date (D-08).
+    ///
+    /// The user account is immediately disabled (status Inactive) so that
+    /// login is blocked during the grace period.
+    pub async fn mark_deletion_pending(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        scheduled_purge_at: DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 deletion_pending = true, \
+                 scheduled_purge_at = $purge_at, \
+                 status = 'Inactive', \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("purge_at", scheduled_purge_at))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Anonymize a user row in-place (D-05).
+    ///
+    /// Scrubs every PII column:
+    /// - email → `email_hash` (SHA-256 hex of original email, passed by caller)
+    /// - username → `pseudonym` (DELETED_USER_<hmac>)
+    /// - password_hash → NULL (login permanently blocked)
+    /// - mfa_secret → NULL
+    /// - metadata → `{}`
+    /// - locked_until / last_failed_login_at → NULL
+    /// - status → `Anonymized`
+    ///
+    /// The row and its `id` are kept to preserve referential integrity for
+    /// `created_by`/owner foreign-key references.
+    pub async fn anonymize_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+    ) -> AxiamResult<()> {
+        // password_hash is TYPE string (not nullable) — use empty string as
+        // tombstone value. Argon2 output is never empty, so login is permanently
+        // blocked without needing to make the column nullable.
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 email = $email_hash, \
+                 username = $pseudonym, \
+                 password_hash = '', \
+                 mfa_secret = NONE, \
+                 mfa_enabled = false, \
+                 metadata = {}, \
+                 locked_until = NONE, \
+                 last_failed_login_at = NONE, \
+                 deletion_pending = false, \
+                 scheduled_purge_at = NONE, \
+                 status = 'Anonymized', \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("email_hash", email_hash.to_string()))
+            .bind(("pseudonym", pseudonym.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Clear deletion-pending state and re-enable a user (D-09 cancel path).
+    ///
+    /// Called when the user clicks the emailed cancel link within the grace
+    /// window.  Resets `deletion_pending`, `scheduled_purge_at`, and sets
+    /// status back to `Active`.
+    pub async fn clear_deletion_pending(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 deletion_pending = false, \
+                 scheduled_purge_at = NONE, \
+                 status = 'Active', \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Find users whose scheduled purge date has passed (D-08).
+    ///
+    /// Used by the `CleanupTask` sweep to run the purge pipeline.
+    pub async fn find_due_for_purge(&self, now: DateTime<Utc>) -> AxiamResult<Vec<User>> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM user \
+                 WHERE deletion_pending = true \
+                 AND scheduled_purge_at <= $now",
+            )
+            .bind(("now", now))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<UserRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|r| r.try_into_user().map_err(Into::into))
+            .collect()
+    }
 }
 
 /// Verify a password against an Argon2id hash.
 ///
 /// Public for use by the auth layer.
 pub fn verify_password(password: &str, hash: &str, pepper: Option<&str>) -> Result<bool, DbError> {
-    use argon2::PasswordVerifier;
+    use argon2::{Argon2, PasswordVerifier};
 
     let peppered: String;
     let input = match pepper {
@@ -499,5 +849,89 @@ pub fn verify_password(password: &str, hash: &str, pepper: Option<&str>) -> Resu
         Ok(()) => Ok(true),
         Err(argon2::password_hash::Error::Password) => Ok(false),
         Err(e) => Err(DbError::Migration(format!("verify error: {e}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::models::user::CreateUser;
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::Mem;
+
+    async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        crate::schema::run_migrations(&db).await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn mark_deletion_pending_and_anonymize() {
+        let db = setup_db().await;
+        let repo = SurrealUserRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+
+        // Create a user.
+        let user = repo
+            .create(CreateUser {
+                tenant_id,
+                username: "alice".into(),
+                email: "alice@example.com".into(),
+                password: "correct-horse".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+
+        // Mark deletion pending.
+        let purge_at = Utc::now() + chrono::Duration::days(30);
+        repo.mark_deletion_pending(tenant_id, user.id, purge_at)
+            .await
+            .unwrap();
+
+        let updated = repo.get_by_id(tenant_id, user.id).await.unwrap();
+        assert!(updated.deletion_pending, "deletion_pending must be true");
+        assert_eq!(updated.status, UserStatus::Inactive);
+
+        // find_due_for_purge should find it when purge_at is in the past.
+        let past = Utc::now() + chrono::Duration::days(31);
+        let due = repo.find_due_for_purge(past).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, user.id);
+
+        // Not found when querying in the present (purge_at is 30 days away).
+        let now = Utc::now();
+        let not_due = repo.find_due_for_purge(now).await.unwrap();
+        assert!(not_due.is_empty());
+
+        // Anonymize.
+        repo.anonymize_user(
+            tenant_id,
+            user.id,
+            "sha256_of_alice_at_example_com",
+            "DELETED_USER_deadbeef01234567",
+        )
+        .await
+        .unwrap();
+
+        let anon = repo.get_by_id(tenant_id, user.id).await.unwrap();
+        assert_eq!(anon.status, UserStatus::Anonymized);
+        assert_eq!(anon.email, "sha256_of_alice_at_example_com");
+        assert_eq!(anon.username, "DELETED_USER_deadbeef01234567");
+        // password_hash schema is TYPE string (not nullable); tombstone = empty string
+        assert_eq!(
+            anon.password_hash, "",
+            "password_hash must be empty (tombstone) after anonymization"
+        );
+        assert!(anon.mfa_secret.is_none(), "mfa_secret must be scrubbed");
+        assert!(
+            !anon.deletion_pending,
+            "deletion_pending cleared after anonymization"
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! SurrealDB implementation of [`ResourceRepository`].
 
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::resource::{CreateResource, Resource, UpdateResource};
 use axiam_core::repository::{PaginatedResult, Pagination, ResourceRepository};
 use chrono::{DateTime, Utc};
@@ -202,6 +202,24 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
         // If parent_id is being changed, update the child_of edge.
         let parent_id_changed = input.parent_id.is_some();
         if parent_id_changed {
+            // CQ-B08: cycle check — walk ancestors of the new parent;
+            // if we visit the current resource id, this re-parent would form a cycle.
+            if let Some(Some(new_parent)) = &input.parent_id {
+                // Self-parent is always a cycle.
+                if *new_parent == id {
+                    return Err(AxiamError::Validation {
+                        message: "cycle detected in resource hierarchy".into(),
+                    });
+                }
+                // Walk the new parent's ancestors: if any equals `id`, it's a cycle.
+                let ancestors = self.get_ancestors(tenant_id, *new_parent).await?;
+                if ancestors.iter().any(|a| a.id == id) {
+                    return Err(AxiamError::Validation {
+                        message: "cycle detected in resource hierarchy".into(),
+                    });
+                }
+            }
+
             // Delete old child_of edge.
             query = format!("DELETE child_of WHERE in = resource:`{id_str}`; {query}");
 
@@ -256,6 +274,24 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let id_str = id.to_string();
+
+        // CQ-B08: block delete if this resource has children (prevents orphaning).
+        let child_count_sql = format!(
+            "SELECT count() AS total FROM child_of \
+             WHERE out = resource:`{id_str}` GROUP ALL"
+        );
+        let mut count_result = self
+            .db
+            .query(&child_count_sql)
+            .await
+            .map_err(DbError::from)?;
+        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
+        let child_count = count_rows.first().map(|r| r.total).unwrap_or(0);
+        if child_count > 0 {
+            return Err(AxiamError::Validation {
+                message: "cannot delete resource with children".into(),
+            });
+        }
 
         // Clean up edges, scopes, then delete the resource.
         let query = format!(
@@ -352,7 +388,19 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
         let mut ancestors = Vec::new();
         let mut current_id = id;
 
-        for _ in 0..MAX_ANCESTOR_DEPTH {
+        // CQ-B08: walk at most MAX_ANCESTOR_DEPTH steps; if we exhaust the limit
+        // without reaching a root (parent_id = None), the hierarchy is either
+        // pathologically deep or contains a cycle — surface an error.
+        let mut steps = 0usize;
+        loop {
+            if steps >= MAX_ANCESTOR_DEPTH {
+                return Err(DbError::Migration(
+                    "resource hierarchy exceeds maximum depth — possible cycle".into(),
+                )
+                .into());
+            }
+            steps += 1;
+
             let current_str = current_id.to_string();
 
             let mut result = self

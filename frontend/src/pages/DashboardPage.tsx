@@ -114,7 +114,7 @@ function ActivityRow({ log }: { log: AuditLog }) {
   return (
     <li className="flex items-start gap-3 py-2.5 border-b border-white/5 last:border-0">
       <div className="mt-0.5 shrink-0">
-        {log.outcome === "success" ? (
+        {log.outcome === "Success" ? (
           <CheckCircle2 size={14} className="text-emerald-400" aria-hidden="true" />
         ) : (
           <XCircle size={14} className="text-red-400" aria-hidden="true" />
@@ -123,15 +123,15 @@ function ActivityRow({ log }: { log: AuditLog }) {
       <div className="flex-1 min-w-0">
         <p className="text-sm text-foreground/90 font-mono truncate">{log.action}</p>
         <p className="text-xs text-muted-foreground truncate">
-          {log.actor_username ?? log.actor_id}
-          {log.resource_type ? ` · ${log.resource_type}` : ""}
+          {log.actor_id}
+          {log.resource_id ? ` · ${log.resource_id}` : ""}
         </p>
       </div>
       <time
         className="text-xs text-muted-foreground shrink-0 whitespace-nowrap"
-        dateTime={log.created_at}
+        dateTime={log.timestamp}
       >
-        {formatRelativeTime(log.created_at)}
+        {formatRelativeTime(log.timestamp)}
       </time>
     </li>
   );
@@ -174,29 +174,33 @@ function QuickAction({ icon, label, to, iconColor }: QuickActionProps) {
 // ─── Dashboard page ───────────────────────────────────────────────────────────
 
 export function DashboardPage() {
-  const { user, tenantSlug, orgSlug } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
+  const tenantSlug = useAuthStore((s) => s.tenantSlug);
+  const orgSlug = useAuthStore((s) => s.orgSlug);
 
+  // CQ-F10: query keys align with CRUD page invalidations so dashboard counts
+  // refresh after create/update/delete on the respective list pages.
   const results = useQueries({
     queries: [
       {
-        queryKey: ["dashboard-users"],
+        queryKey: ["users", 1, ""],
         queryFn: () => userService.list(1, 1, ""),
       },
       {
-        queryKey: ["dashboard-groups"],
+        queryKey: ["groups"],
         queryFn: () => groupService.list(),
       },
       {
-        queryKey: ["dashboard-roles"],
+        queryKey: ["roles"],
         queryFn: () => roleService.list(),
       },
       {
-        queryKey: ["dashboard-certs"],
+        queryKey: ["certificates"],
         queryFn: () => certificateService.list(),
       },
       {
-        queryKey: ["dashboard-audit"],
-        queryFn: () => auditService.list({ page: 1, per_page: 8 }),
+        queryKey: ["audit-logs"],
+        queryFn: () => auditService.list({ offset: 0, limit: 8 }),
       },
     ],
   });
@@ -207,13 +211,13 @@ export function DashboardPage() {
   const now = new Date();
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
   const expiringCerts: Certificate[] = (certsQ.data ?? []).filter((c) => {
-    if (c.status !== "active") return false;
-    const expiresAt = new Date(c.expires_at);
+    if (c.status !== "Active") return false;
+    const expiresAt = new Date(c.not_after);
     return expiresAt.getTime() - now.getTime() < thirtyDaysMs;
   });
 
   const activeCertsCount = (certsQ.data ?? []).filter(
-    (c) => c.status === "active"
+    (c) => c.status === "Active"
   ).length;
 
   const certSubLabel =
@@ -297,9 +301,9 @@ export function DashboardPage() {
                   key={cert.id}
                   className="flex items-center justify-between text-xs text-amber-200/80"
                 >
-                  <span className="font-mono truncate">{cert.common_name}</span>
+                  <span className="font-mono truncate">{cert.subject}</span>
                   <span className="ml-4 shrink-0 text-amber-400">
-                    Expires {formatDate(cert.expires_at)}
+                    Expires {formatDate(cert.not_after)}
                   </span>
                 </li>
               ))}
@@ -342,13 +346,13 @@ export function DashboardPage() {
                   </li>
                 ))}
               </ul>
-            ) : (auditQ.data?.data ?? []).length === 0 ? (
+            ) : (auditQ.data?.items ?? []).length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-6">
                 No activity recorded yet.
               </p>
             ) : (
               <ul aria-label="Recent audit events">
-                {(auditQ.data?.data ?? []).map((log) => (
+                {(auditQ.data?.items ?? []).map((log) => (
                   <ActivityRow key={log.id} log={log} />
                 ))}
               </ul>

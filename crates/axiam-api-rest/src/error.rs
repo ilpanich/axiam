@@ -7,6 +7,7 @@ use actix_web::HttpResponse;
 use actix_web::http::StatusCode;
 use axiam_core::error::AxiamError;
 use serde::Serialize;
+use tracing::error;
 
 /// Newtype wrapper so we can implement Actix-Web's `ResponseError`
 /// for the core `AxiamError` (orphan rule).
@@ -36,9 +37,12 @@ impl actix_web::ResponseError for AxiamApiError {
         match &self.0 {
             AxiamError::NotFound { .. } => StatusCode::NOT_FOUND,
             AxiamError::AlreadyExists { .. } => StatusCode::CONFLICT,
-            AxiamError::AuthenticationFailed { .. } => StatusCode::UNAUTHORIZED,
+            AxiamError::AuthenticationFailed { .. } | AxiamError::ReplayDetected => {
+                StatusCode::UNAUTHORIZED
+            }
             AxiamError::AuthorizationDenied { .. } => StatusCode::FORBIDDEN,
             AxiamError::Validation { .. } | AxiamError::TenantContext => StatusCode::BAD_REQUEST,
+            AxiamError::PasswordPolicy { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AxiamError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             AxiamError::EmailConfig(_) => StatusCode::BAD_REQUEST,
             AxiamError::Database(_)
@@ -47,24 +51,55 @@ impl actix_web::ResponseError for AxiamApiError {
             | AxiamError::EmailDelivery(_)
             | AxiamError::WebhookDelivery(_)
             | AxiamError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            // Note: ReplayDetected is handled above in the UNAUTHORIZED arm.
         }
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error = match &self.0 {
+        // Client-facing error code slug.
+        let error_code = match &self.0 {
             AxiamError::NotFound { .. } => "not_found",
             AxiamError::AlreadyExists { .. } => "already_exists",
-            AxiamError::AuthenticationFailed { .. } => "authentication_failed",
+            AxiamError::AuthenticationFailed { .. } | AxiamError::ReplayDetected => {
+                "authentication_failed"
+            }
             AxiamError::AuthorizationDenied { .. } => "authorization_denied",
             AxiamError::Validation { .. } => "validation_error",
+            AxiamError::PasswordPolicy { .. } => "password_policy_violation",
             AxiamError::TenantContext => "tenant_context",
             AxiamError::RateLimited => "rate_limited",
+            AxiamError::EmailConfig(_) => "email_config_error",
+            // Server-error variants: log detail, return generic message.
             _ => "internal_error",
         };
 
+        // Client-facing message: echo for known client errors; generic for 5xx.
+        // SEC-011/SEC-039/CQ-B33: internal detail (DB strings, crypto messages,
+        // stack traces) MUST NOT appear in the response body.
+        let message = match &self.0 {
+            AxiamError::NotFound { .. }
+            | AxiamError::AlreadyExists { .. }
+            | AxiamError::AuthenticationFailed { .. }
+            | AxiamError::ReplayDetected
+            | AxiamError::AuthorizationDenied { .. }
+            | AxiamError::Validation { .. }
+            | AxiamError::PasswordPolicy { .. }
+            | AxiamError::TenantContext
+            | AxiamError::RateLimited
+            | AxiamError::EmailConfig(_) => self.0.to_string(),
+            // 5xx variants: log the detail server-side, return only a generic message.
+            _ => {
+                error!(
+                    error = %self.0,
+                    "internal server error"
+                );
+                "An internal error occurred".to_string()
+            }
+        };
+
         HttpResponse::build(self.status_code()).json(ErrorBody {
-            error: error.into(),
-            message: self.0.to_string(),
+            error: error_code.into(),
+            message,
         })
     }
 }

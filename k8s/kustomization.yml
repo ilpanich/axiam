@@ -22,3 +22,8 @@ resources:
   - rabbitmq/statefulset.yml
   - rabbitmq/service.yml
   - rabbitmq/secret.yml
+  - network-policy/default-deny.yml
+  - network-policy/allow-dns-egress.yml
+  - network-policy/server-egress.yml
+  - network-policy/allow-ingress-to-server.yml
+  - network-policy/allow-ingress-to-frontend.yml

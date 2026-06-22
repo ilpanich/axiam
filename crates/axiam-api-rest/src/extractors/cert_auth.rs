@@ -8,7 +8,7 @@ use actix_web::HttpRequest;
 use actix_web::web;
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceIdentity;
-use axiam_db::SurrealCertificateRepository;
+use axiam_db::{SurrealCaCertificateRepository, SurrealCertificateRepository};
 use axiam_pki::DeviceAuthService;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -33,7 +33,12 @@ impl CertificateAuthenticated {
     /// depends on the DB connection generic `C`.
     pub async fn extract<C: Connection>(req: &HttpRequest) -> Result<Self, AxiamApiError> {
         let service = req
-            .app_data::<web::Data<DeviceAuthService<SurrealCertificateRepository<C>>>>()
+            .app_data::<web::Data<
+                DeviceAuthService<
+                    SurrealCertificateRepository<C>,
+                    SurrealCaCertificateRepository<C>,
+                >,
+            >>()
             .ok_or(AxiamError::Internal("missing DeviceAuthService".into()))?;
 
         let header = req

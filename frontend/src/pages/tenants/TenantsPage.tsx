@@ -13,7 +13,6 @@ import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { StatusBadge } from "@/components/StatusBadge";
 import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -185,13 +184,13 @@ export function TenantsPage() {
   const [search, setSearch] = useState("");
 
   // ─── Fetch organizations (for select & name mapping) ───────────────────────
-  const { data: organizations = [] } = useQuery({
+  const { data: organizations = [], isLoading: isLoadingOrgs } = useQuery({
     queryKey: ["organizations"],
     queryFn: () => orgService.list(),
   });
 
   // ─── Fetch tenants across all organizations ────────────────────────────────
-  const { data: tenants = [], isLoading } = useQuery({
+  const { data: tenants = [], isLoading: isLoadingTenants } = useQuery({
     queryKey: ["tenants", organizations.map((o) => o.id)],
     queryFn: async () => {
       if (organizations.length === 0) return [];
@@ -271,12 +270,13 @@ export function TenantsPage() {
       setCreateError("Name and slug are required.");
       return;
     }
+    const description = createDescription.trim();
     createMutation.mutate({
       orgId: createOrgId,
       payload: {
         name: createName.trim(),
         slug: createSlug.trim(),
-        description: createDescription.trim() || undefined,
+        metadata: description ? { description } : undefined,
       },
     });
   }
@@ -313,7 +313,9 @@ export function TenantsPage() {
     setEditTenant(tenant);
     setEditName(tenant.name);
     setEditSlug(tenant.slug);
-    setEditDescription(tenant.description ?? "");
+    setEditDescription(
+      (tenant.metadata?.description as string | undefined) ?? ""
+    );
     setEditError("");
   }
 
@@ -324,13 +326,14 @@ export function TenantsPage() {
       setEditError("Name and slug are required.");
       return;
     }
+    const description = editDescription.trim();
     editMutation.mutate({
-      orgId: editTenant.org_id,
+      orgId: editTenant.organization_id,
       tenantId: editTenant.id,
       payload: {
         name: editName.trim(),
         slug: editSlug.trim(),
-        description: editDescription.trim() || undefined,
+        metadata: { ...editTenant.metadata, description },
       },
     });
   }
@@ -375,11 +378,6 @@ export function TenantsPage() {
       ),
     },
     {
-      key: "status",
-      header: "Status",
-      render: () => <StatusBadge status="active" />,
-    },
-    {
       key: "created_at",
       header: "Created",
       render: (row) => (
@@ -404,7 +402,7 @@ export function TenantsPage() {
           <button
             aria-label={`View ${row.name}`}
             onClick={() =>
-              navigate(`/organizations/${row.org_id}/tenants/${row.id}`)
+              navigate(`/organizations/${row.organization_id}/tenants/${row.id}`)
             }
             className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
           >
@@ -456,7 +454,7 @@ export function TenantsPage() {
       <DataTable
         columns={columns}
         data={filteredTenants}
-        isLoading={isLoading}
+        isLoading={isLoadingOrgs || isLoadingTenants}
         emptyMessage="No tenants found."
       />
 
@@ -513,7 +511,7 @@ export function TenantsPage() {
         onConfirm={() =>
           deleteTenant &&
           deleteMutation.mutate({
-            orgId: deleteTenant.org_id,
+            orgId: deleteTenant.organization_id,
             tenantId: deleteTenant.id,
           })
         }

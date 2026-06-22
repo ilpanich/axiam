@@ -76,7 +76,7 @@ export function DataTable<T extends object>({
             ) : (
               data.map((row, rowIdx) => (
                 <tr
-                  key={getRowKey ? getRowKey(row, rowIdx) : (row as Record<string, unknown>).id as string ?? rowIdx}
+                  key={getRowKey ? getRowKey(row, rowIdx) : String((row as Record<string, unknown>).id ?? rowIdx)}
                   className="hover:bg-white/[0.03] transition-colors duration-150"
                 >
                   {columns.map((col) => (

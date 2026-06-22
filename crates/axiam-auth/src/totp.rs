@@ -1,49 +1,26 @@
 //! TOTP generation, verification, and AES-256-GCM secret encryption.
 
-use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use totp_rs::{Algorithm, Secret, TOTP};
 
+use crate::crypto;
 use crate::error::AuthError;
 
 /// Encrypt a TOTP secret with AES-256-GCM.
 ///
 /// Returns `base64(nonce || ciphertext || tag)`.
+///
+/// Delegates to [`crate::crypto::aes256gcm_encrypt`] — the bundled format
+/// is shared; changing the wire format here would break existing TOTP secrets
+/// stored in the database.
 pub fn encrypt_secret(key: &[u8; 32], plaintext: &[u8]) -> Result<String, AuthError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| AuthError::Crypto(format!("AES-GCM encrypt: {e}")))?;
-
-    let mut combined = nonce_bytes.to_vec();
-    combined.extend_from_slice(&ciphertext);
-    Ok(STANDARD.encode(combined))
+    crypto::aes256gcm_encrypt(key, plaintext)
 }
 
 /// Decrypt an AES-256-GCM encrypted TOTP secret.
+///
+/// Delegates to [`crate::crypto::aes256gcm_decrypt`].
 pub fn decrypt_secret(key: &[u8; 32], encoded: &str) -> Result<Vec<u8>, AuthError> {
-    let combined = STANDARD
-        .decode(encoded)
-        .map_err(|e| AuthError::Crypto(format!("base64 decode: {e}")))?;
-
-    if combined.len() < 13 {
-        return Err(AuthError::Crypto("ciphertext too short".into()));
-    }
-
-    let (nonce_bytes, ciphertext) = combined.split_at(12);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(nonce_bytes);
-
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| AuthError::Crypto(format!("AES-GCM decrypt: {e}")))
+    crypto::aes256gcm_decrypt(key, encoded)
 }
 
 /// Generate a TOTP enrollment: secret + otpauth URI.
@@ -92,6 +69,60 @@ pub fn verify_code(
 
     totp.check_current(code)
         .map_err(|e| AuthError::Crypto(format!("TOTP check: {e}")))
+}
+
+/// Verify a TOTP code with replay protection.
+///
+/// Computes the current time-step (`unix_timestamp / 30`) and, if the code
+/// is valid, checks that the step is strictly greater than
+/// `last_used_step.unwrap_or(0)`.  If the step is equal (same window) or
+/// less, the code is rejected even though the HMAC is correct.
+///
+/// Returns `Ok((valid, current_step))` on success.  The caller MUST persist
+/// `current_step` via `user_repo.update_totp_step` when `valid` is `true`.
+///
+/// Per SEC-008 (REQ-14 AC-5).
+pub fn verify_code_with_replay_check(
+    secret_bytes: &[u8],
+    code: &str,
+    issuer: &str,
+    account: &str,
+    last_used_step: Option<u64>,
+) -> Result<(bool, u64), AuthError> {
+    let totp = TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        secret_bytes.to_vec(),
+        Some(issuer.to_string()),
+        account.to_string(),
+    )
+    .map_err(|e| AuthError::Crypto(format!("TOTP init: {e}")))?;
+
+    // Compute current step independently of totp-rs internals.
+    let current_step = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| AuthError::Crypto(format!("system time error: {e}")))?
+        .as_secs()
+        / 30;
+
+    // Check the HMAC.
+    let hmac_valid = totp
+        .check_current(code)
+        .map_err(|e| AuthError::Crypto(format!("TOTP check: {e}")))?;
+
+    if !hmac_valid {
+        return Ok((false, current_step));
+    }
+
+    // Replay check: reject codes from the same or an earlier step.
+    let last = last_used_step.unwrap_or(0);
+    if current_step <= last {
+        return Ok((false, current_step));
+    }
+
+    Ok((true, current_step))
 }
 
 #[cfg(test)]
@@ -149,5 +180,27 @@ mod tests {
         let secret = Secret::generate_secret();
         let secret_bytes = secret.to_bytes().unwrap();
         assert!(!verify_code(&secret_bytes, "000000", "AXIAM", "test@test.com").unwrap());
+    }
+
+    /// Regression: a TOTP code produced by the SAME base32 secret returned to the
+    /// client (the live enroll path encrypts `Secret::Encoded(base32).to_bytes()`
+    /// and confirm verifies those bytes) must validate. Guards the enroll→confirm
+    /// round-trip end to end (RFC 6238 dynamic-truncation compliant).
+    #[test]
+    fn enroll_base32_roundtrip_confirms() {
+        let (base32, _uri) = generate_enrollment("AXIAM", "admin@axiam.dev").unwrap();
+        let secret_bytes = Secret::Encoded(base32).to_bytes().unwrap();
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes.clone(),
+            Some("AXIAM".into()),
+            "admin@axiam.dev".into(),
+        )
+        .unwrap();
+        let code = totp.generate_current().unwrap();
+        assert!(verify_code(&secret_bytes, &code, "AXIAM", "admin@axiam.dev").unwrap());
     }
 }

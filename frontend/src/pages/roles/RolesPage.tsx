@@ -173,7 +173,7 @@ export function RolesPage() {
     }
     createMutation.mutate({
       name: createName.trim(),
-      description: createDescription.trim() || undefined,
+      description: createDescription.trim(),
       is_global: createIsGlobal,
     });
   }
@@ -218,7 +218,7 @@ export function RolesPage() {
       id: editRole.id,
       payload: {
         name: editName.trim(),
-        description: editDescription.trim() || undefined,
+        description: editDescription.trim(),
         is_global: editIsGlobal,
       },
     });

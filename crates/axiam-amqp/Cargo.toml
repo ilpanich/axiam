@@ -11,8 +11,12 @@ rust-version.workspace = true
 axiam-core = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-audit = { workspace = true }
+axiam-email = { workspace = true }
 chrono = { workspace = true }
 futures-lite = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 lapin = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,3 +24,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+axiam-db = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }
+tokio-test = { workspace = true }

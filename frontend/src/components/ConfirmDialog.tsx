@@ -8,6 +8,7 @@ interface ConfirmDialogProps {
   title: string;
   description: string;
   isLoading?: boolean;
+  confirmLabel?: string;
 }
 
 export function ConfirmDialog({
@@ -17,6 +18,7 @@ export function ConfirmDialog({
   title,
   description,
   isLoading = false,
+  confirmLabel,
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -103,7 +105,7 @@ export function ConfirmDialog({
             {isLoading ? (
               <Loader2 size={14} className="animate-spin" />
             ) : (
-              "Delete"
+              confirmLabel ?? "Delete"
             )}
           </button>
         </div>

@@ -2,4 +2,6 @@
 
 pub mod auth;
 pub mod cert_auth;
+pub mod client_info;
+pub mod rate_limit;
 pub mod tenant;

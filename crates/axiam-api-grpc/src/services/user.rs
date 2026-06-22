@@ -40,6 +40,8 @@ fn status_to_string(status: &UserStatus) -> String {
         UserStatus::Inactive => "inactive".into(),
         UserStatus::Locked => "locked".into(),
         UserStatus::PendingVerification => "pending_verification".into(),
+        // D-05: anonymized users have their account permanently disabled.
+        UserStatus::Anonymized => "anonymized".into(),
     }
 }
 

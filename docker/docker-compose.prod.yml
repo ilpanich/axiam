@@ -15,25 +15,45 @@ services:
       dockerfile: docker/Dockerfile.server
     container_name: axiam-server
     ports:
-      - "8080:8080"   # REST API
-      - "50051:50051" # gRPC
+      # SEC-016: 8090 is published for local dev/testing only.
+      # In production (k8s), the server is ClusterIP-only — remove this mapping.
+      - "8090:8090"   # REST API — local-testing only; unpublish in production k8s
+      - "50051:50051" # gRPC — local-testing only; unpublish in production k8s
+    # NOTE on naming: load_config() in crates/axiam-server/src/main.rs calls
+    # `.with_prefix("AXIAM").separator("__")` without `.prefix_separator(_)`,
+    # so config-rs 0.15 uses `__` as BOTH the prefix separator and the nested
+    # key separator (see config-0.15.19/src/env.rs:236). Env vars must use a
+    # DOUBLE underscore after AXIAM (e.g. `AXIAM__DB__URL`), otherwise they
+    # are silently ignored and in-code defaults win.
     environment:
-      AXIAM_DB__URL: "ws://surrealdb:8000"
-      AXIAM_DB__USERNAME: "root"
-      AXIAM_DB__PASSWORD: "root"
-      AXIAM_DB__NAMESPACE: "axiam"
-      AXIAM_DB__DATABASE: "axiam"
-      AXIAM_AMQP__URL: "amqp://axiam:axiam@rabbitmq:5672"
-      AXIAM_SERVER__HOST: "0.0.0.0"
-      AXIAM_GRPC__HOST: "0.0.0.0"
-      RUST_LOG: "axiam=info"
+      # SurrealDB v3 Rust SDK's Ws engine takes a bare `host:port`, NOT a URL.
+      # Passing a websocket URL scheme makes the SDK try to resolve the scheme
+      # as a hostname and fail with a confusing DNS error.
+      AXIAM__DB__URL: "surrealdb:8000"
+      # SEC-023: No literal default credentials. Run `just prod-up` which sources
+      # docker/.secrets/db_credentials before starting compose.
+      AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?SurrealDB username required - run 'just prod-up' or export AXIAM__DB__USERNAME}"
+      AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?SurrealDB password required - run 'just prod-up' or export AXIAM__DB__PASSWORD}"
+      AXIAM__DB__NAMESPACE: "axiam"
+      AXIAM__DB__DATABASE: "axiam"
+      # SEC-023: AMQP URL must not embed literal credentials.
+      AXIAM__AMQP__URL: "amqp://${RABBITMQ_DEFAULT_USER:?RabbitMQ username required}:${RABBITMQ_DEFAULT_PASS:?RabbitMQ password required}@rabbitmq:5672"
+      AXIAM__SERVER__HOST: "0.0.0.0"
+      AXIAM__GRPC__HOST: "0.0.0.0"
+      # JWT signing keys — provided by `just prod-up` from docker/.secrets/jwt_ed25519*.pem.
+      # Compose refuses to start if these vars are not set in the shell environment,
+      # so `docker compose up` run outside `just prod-up` fails fast with a clear message.
+      AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?JWT private key missing - run 'just prod-up' instead of raw docker compose}"
+      AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?JWT public key missing - run 'just prod-up' instead of raw docker compose}"
+      RUST_LOG: "${RUST_LOG:-axiam=info}"
     depends_on:
       surrealdb:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      # D-09: distroless has no shell; use the axiam-server healthcheck subcommand
+      test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -51,7 +71,9 @@ services:
       dockerfile: docker/Dockerfile.frontend
     container_name: axiam-frontend
     ports:
-      - "80:8080"
+      # Host port 8081 keeps :80 free for a local HTTPS reverse proxy (Caddy).
+      # Point Caddy with: caddy reverse-proxy --from https://localhost --to :8081
+      - "8081:8080"
     depends_on:
       - axiam-server
     restart: unless-stopped
@@ -59,12 +81,30 @@ services:
       - axiam-network
 
   # ---------------------------------------------------------------------------
+  # One-shot init: fix /data ownership for the non-root SurrealDB user (65532).
+  # Docker creates named volumes owned by root; SurrealDB's non-root process
+  # cannot write without this. Runs once and exits; surrealdb `depends_on`
+  # its successful completion.
+  surrealdb-init:
+    image: busybox
+    container_name: axiam-surrealdb-init
+    command: ["sh", "-c", "chown -R 65532:65532 /data && chmod -R u+rwX /data"]
+    volumes:
+      - surrealdb-data:/data
+    restart: "no"
+
   # SurrealDB — document/graph database
   # ---------------------------------------------------------------------------
   surrealdb:
-    image: surrealdb/surrealdb:v2
+    image: surrealdb/surrealdb:v3
     container_name: axiam-surrealdb
-    command: start --user root --pass root --log info
+    depends_on:
+      surrealdb-init:
+        condition: service_completed_successfully
+    # Persist the datastore on the mounted volume. Without a PATH arg the
+    # default is `memory`, which leaves the volume untouched and wipes all
+    # state on every container restart.
+    command: start --user ${AXIAM__DB__USERNAME:?SurrealDB username required} --pass ${AXIAM__DB__PASSWORD:?SurrealDB password required} --log info surrealkv:/data/axiam.db
     volumes:
       - surrealdb-data:/data
     healthcheck:
@@ -80,11 +120,12 @@ services:
   # RabbitMQ — AMQP message broker
   # ---------------------------------------------------------------------------
   rabbitmq:
-    image: rabbitmq:3-management-alpine
+    image: rabbitmq:4-management-alpine
     container_name: axiam-rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: axiam
-      RABBITMQ_DEFAULT_PASS: axiam
+      # SEC-023: No literal default credentials.
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:?RabbitMQ username required - run 'just prod-up' or export RABBITMQ_DEFAULT_USER}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:?RabbitMQ password required - run 'just prod-up' or export RABBITMQ_DEFAULT_PASS}"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:

@@ -16,7 +16,6 @@ use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
 use tokio::sync::mpsc;
-use tracing::warn;
 use uuid::Uuid;
 
 /// Paths that should not generate audit entries.
@@ -52,10 +51,10 @@ impl AuditMiddleware {
 async fn audit_worker<A: AuditLogRepository>(mut rx: mpsc::Receiver<CreateAuditLogEntry>, repo: A) {
     while let Some(entry) = rx.recv().await {
         if let Err(e) = repo.append(entry).await {
-            warn!(error = %e, "Failed to write audit log entry");
+            tracing::warn!(error = %e, "Failed to write audit log entry");
         }
     }
-    warn!("Audit worker channel closed — no more entries will be written");
+    tracing::warn!("Audit worker channel closed — no more entries will be written");
 }
 
 impl<S, B> Transform<S, ServiceRequest> for AuditMiddleware
@@ -159,7 +158,12 @@ where
             };
 
             if tx.try_send(entry).is_err() {
-                warn!("Audit channel full — dropping audit entry for {method} {path}");
+                tracing::error!(
+                    audit_dropped = true,
+                    method = %method,
+                    path = %path,
+                    "Audit channel full — entry dropped. Investigate CHANNEL_CAPACITY."
+                );
             }
 
             result
@@ -180,17 +184,30 @@ fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid)> {
 
     let config = req.app_data::<web::Data<AuthConfig>>()?;
 
-    let header = req.headers().get("Authorization")?.to_str().ok()?;
-    let header = header.trim();
-    let mut parts = header.splitn(2, char::is_whitespace);
-    let scheme = parts.next()?;
-    let credentials = parts.next()?.trim();
+    // Prefer an `Authorization: Bearer <jwt>` header (service-to-service / API
+    // clients), but fall back to the `axiam_access` cookie. The admin UI uses
+    // cookie-based auth, so authenticated browser requests carry the access token
+    // as a cookie, not a header — without this fallback every UI action was logged
+    // as `System` with a nil tenant_id and never appeared in the tenant audit log.
+    let credentials: String = match req
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+    {
+        Some(header) => {
+            let header = header.trim();
+            let mut parts = header.splitn(2, char::is_whitespace);
+            let scheme = parts.next().unwrap_or("");
+            let creds = parts.next().unwrap_or("").trim();
+            if !scheme.eq_ignore_ascii_case("bearer") || creds.is_empty() {
+                return None;
+            }
+            creds.to_owned()
+        }
+        None => req.cookie("axiam_access")?.value().to_owned(),
+    };
 
-    if !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
-        return None;
-    }
-
-    let validated = validate_access_token(credentials, config).ok()?;
+    let validated = validate_access_token(&credentials, config).ok()?;
     let user_id = Uuid::parse_str(&validated.0.sub).ok()?;
     let tenant_id = Uuid::parse_str(&validated.0.tenant_id).ok()?;
     let org_id = Uuid::parse_str(&validated.0.org_id).ok()?;

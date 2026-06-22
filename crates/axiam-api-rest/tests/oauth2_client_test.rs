@@ -3,6 +3,8 @@
 //! Covers CRUD operations, input validation, and tenant isolation.
 
 use actix_web::{App, test, web};
+use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -17,11 +19,18 @@ use axiam_db::repository::{
 };
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
+
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
 
 fn test_keypair() -> (String, String) {
     let private_key = "\
@@ -91,7 +100,16 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 /// Build a test app with all services needed for OAuth2 client + flow tests.
@@ -127,7 +145,12 @@ macro_rules! test_app {
                 .app_data(web::Data::new(user_repo))
                 .app_data(web::Data::new(authz_service))
                 .app_data(web::Data::new(token_service))
-                .configure(register_api_v1_routes::<TestDb>),
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     }};
@@ -148,6 +171,8 @@ async fn create_test_client(
     let req = test::TestRequest::post()
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Test Client",
             "redirect_uris": ["https://app.example.com/callback"],
@@ -175,6 +200,8 @@ async fn create_oauth2_client_returns_201() {
     let req = test::TestRequest::post()
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "My App",
             "redirect_uris": ["https://myapp.example.com/callback"],
@@ -218,6 +245,8 @@ async fn create_oauth2_client_omits_secret_hash() {
     let req = test::TestRequest::post()
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Secret Test Client",
             "redirect_uris": ["https://example.com/cb"],
@@ -328,6 +357,8 @@ async fn update_oauth2_client_returns_200() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/oauth2-clients/{id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Updated Client Name"
         }))
@@ -357,6 +388,8 @@ async fn delete_oauth2_client_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/oauth2-clients/{id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -382,6 +415,8 @@ async fn create_oauth2_client_rejects_empty_redirect_uris() {
     let req = test::TestRequest::post()
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Bad Client",
             "redirect_uris": [],
@@ -406,6 +441,8 @@ async fn create_oauth2_client_rejects_http_redirect_uri() {
     let req = test::TestRequest::post()
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Http Client",
             "redirect_uris": ["http://example.com/callback"],
@@ -429,11 +466,13 @@ async fn create_oauth2_client_allows_http_localhost() {
 
     for uri in [
         "http://localhost:3000/callback",
-        "http://127.0.0.1:8080/callback",
+        "http://127.0.0.1:8090/callback",
     ] {
         let req = test::TestRequest::post()
             .uri("/api/v1/oauth2-clients")
             .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .set_json(serde_json::json!({
                 "name": "Dev Client",
                 "redirect_uris": [uri],
@@ -462,6 +501,8 @@ async fn create_oauth2_client_rejects_invalid_grant_type() {
     let req = test::TestRequest::post()
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Bad Grant Client",
             "redirect_uris": ["https://example.com/callback"],
@@ -485,6 +526,8 @@ async fn create_oauth2_client_rejects_empty_name() {
     let req = test::TestRequest::post()
         .uri("/api/v1/oauth2-clients")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "",
             "redirect_uris": ["https://example.com/callback"],

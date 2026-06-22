@@ -18,9 +18,18 @@ spec:
         app: axiam
         component: frontend
     spec:
+      # Pod-level restricted security context (KSV-0118). nginx-unprivileged
+      # runs as UID/GID 101; container-level contexts below remain authoritative.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: axiam-frontend
-          image: ghcr.io/OWNER/frontend:latest
+          # Pin a concrete tag, not :latest (KSV-0013). Update per release.
+          image: ghcr.io/OWNER/frontend:0.1.0
           ports:
             - name: http
               containerPort: 8080
@@ -48,3 +57,24 @@ spec:
             runAsNonRoot: true
             runAsUser: 101
             runAsGroup: 101
+            readOnlyRootFilesystem: true      # D-13: restricted profile (nginx-unprivileged supports this with emptyDir)
+            allowPrivilegeEscalation: false   # D-13: restricted profile
+            capabilities:
+              drop:
+                - ALL                 # D-13: restricted profile
+            seccompProfile:
+              type: RuntimeDefault    # D-13: restricted profile
+          volumeMounts:
+            - name: nginx-tmp
+              mountPath: /tmp
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+      volumes:
+        - name: nginx-tmp
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}

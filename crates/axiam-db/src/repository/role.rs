@@ -1,6 +1,6 @@
 //! SurrealDB implementation of [`RoleRepository`].
 
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::role::{CreateRole, Role, RoleAssignment, UpdateRole};
 use axiam_core::repository::{PaginatedResult, Pagination, RoleRepository};
 use chrono::{DateTime, Utc};
@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, parse_uuid};
 
 #[derive(Debug, SurrealValue)]
 struct RoleRow {
@@ -33,10 +34,8 @@ struct RoleRowWithId {
 
 impl RoleRowWithId {
     fn try_into_role(self) -> Result<Role, DbError> {
-        let id = Uuid::parse_str(&self.record_id)
-            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let id = parse_uuid(&self.record_id, "record_id")?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
         Ok(Role {
             id,
             tenant_id,
@@ -47,11 +46,6 @@ impl RoleRowWithId {
             updated_at: self.updated_at,
         })
     }
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 /// Row for querying has_role edges with the role data joined in.
@@ -69,16 +63,13 @@ struct RoleAssignmentRow {
 
 impl RoleAssignmentRow {
     fn try_into_assignment(self) -> Result<RoleAssignment, DbError> {
-        let id = Uuid::parse_str(&self.record_id)
-            .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
-        let tenant_id = Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let id = parse_uuid(&self.record_id, "record_id")?;
+        let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
         let resource_id = self
             .resource_id
             .as_deref()
-            .map(Uuid::parse_str)
-            .transpose()
-            .map_err(|e| DbError::Migration(format!("invalid resource UUID: {e}")))?;
+            .map(|s| parse_uuid(s, "resource_id"))
+            .transpose()?;
         Ok(RoleAssignment {
             role: Role {
                 id,
@@ -103,6 +94,27 @@ pub struct SurrealRoleRepository<C: Connection> {
 impl<C: Connection> SurrealRoleRepository<C> {
     pub fn new(db: Surreal<C>) -> Self {
         Self { db }
+    }
+
+    /// Look up a single role by name within a tenant (CQ-B42: replaces list()+scan pattern).
+    pub async fn get_by_name(&self, tenant_id: Uuid, name: &str) -> AxiamResult<Option<Role>> {
+        let tenant_str = tenant_id.to_string();
+        let mut result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM role \
+                 WHERE tenant_id = $tenant_id AND name = $name LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_str))
+            .bind(("name", name.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RoleRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .next()
+            .map(|row| row.try_into_role().map_err(AxiamError::from))
+            .transpose()
     }
 }
 
@@ -319,7 +331,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
     async fn assign_to_user(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         user_id: Uuid,
         role_id: Uuid,
         resource_id: Option<Uuid>,
@@ -328,49 +340,92 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         let role_id_str = role_id.to_string();
         let resource_id_str = resource_id.map(|r| r.to_string());
 
+        // CQ-B07: verify both endpoints belong to the same tenant before RELATE.
         let query = format!(
-            "RELATE user:`{user_id_str}` -> has_role -> role:`{role_id_str}` \
+            "LET $u = (SELECT id FROM user:`{user_id_str}` WHERE tenant_id = $tid);\
+             LET $r = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+             IF array::len($u) = 0 OR array::len($r) = 0 {{\
+                 THROW 'cross-tenant edge denied';\
+             }};\
+             RELATE user:`{user_id_str}` -> has_role -> role:`{role_id_str}` \
              SET resource_id = $resource_id;"
         );
 
-        self.db
+        let result = self
+            .db
             .query(query)
+            .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
             .await
             .map_err(DbError::from)?;
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cross-tenant edge denied") {
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "cross-tenant role assignment denied".into(),
+                });
+            }
+            return Err(DbError::Migration(msg).into());
+        }
 
         Ok(())
     }
 
     async fn unassign_from_user(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         user_id: Uuid,
         role_id: Uuid,
         resource_id: Option<Uuid>,
     ) -> AxiamResult<()> {
+        let user_id_str = user_id.to_string();
+        let role_id_str = role_id.to_string();
         let resource_id_str = resource_id.map(|r| r.to_string());
 
-        // Match on resource_id: None means global, Some means scoped.
-        let query = if resource_id_str.is_some() {
-            "DELETE has_role WHERE \
-             in = type::record('user', $user_id) AND \
-             out = type::record('role', $role_id) AND \
-             resource_id = $resource_id"
+        // CQ-B07: verify both endpoints belong to the same tenant before DELETE.
+        let delete_clause = if resource_id_str.is_some() {
+            format!(
+                "DELETE has_role WHERE \
+                 in = user:`{user_id_str}` AND \
+                 out = role:`{role_id_str}` AND \
+                 resource_id = $resource_id"
+            )
         } else {
-            "DELETE has_role WHERE \
-             in = type::record('user', $user_id) AND \
-             out = type::record('role', $role_id) AND \
-             resource_id = NONE"
+            format!(
+                "DELETE has_role WHERE \
+                 in = user:`{user_id_str}` AND \
+                 out = role:`{role_id_str}` AND \
+                 resource_id = NONE"
+            )
         };
 
-        self.db
+        let query = format!(
+            "LET $u = (SELECT id FROM user:`{user_id_str}` WHERE tenant_id = $tid);\
+             LET $r = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+             IF array::len($u) = 0 OR array::len($r) = 0 {{\
+                 THROW 'cross-tenant edge denied';\
+             }};\
+             {delete_clause}"
+        );
+
+        let result = self
+            .db
             .query(query)
-            .bind(("user_id", user_id.to_string()))
-            .bind(("role_id", role_id.to_string()))
+            .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
             .await
             .map_err(DbError::from)?;
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cross-tenant edge denied") {
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "cross-tenant role unassignment denied".into(),
+                });
+            }
+            return Err(DbError::Migration(msg).into());
+        }
 
         Ok(())
     }
@@ -476,7 +531,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
     async fn assign_to_group(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         group_id: Uuid,
         role_id: Uuid,
         resource_id: Option<Uuid>,
@@ -485,48 +540,92 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         let role_id_str = role_id.to_string();
         let resource_id_str = resource_id.map(|r| r.to_string());
 
+        // CQ-B07: verify both endpoints belong to the same tenant before RELATE.
         let query = format!(
-            "RELATE group:`{group_id_str}` -> has_role -> role:`{role_id_str}` \
+            "LET $g = (SELECT id FROM group:`{group_id_str}` WHERE tenant_id = $tid);\
+             LET $r = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+             IF array::len($g) = 0 OR array::len($r) = 0 {{\
+                 THROW 'cross-tenant edge denied';\
+             }};\
+             RELATE group:`{group_id_str}` -> has_role -> role:`{role_id_str}` \
              SET resource_id = $resource_id;"
         );
 
-        self.db
+        let result = self
+            .db
             .query(query)
+            .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
             .await
             .map_err(DbError::from)?;
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cross-tenant edge denied") {
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "cross-tenant group role assignment denied".into(),
+                });
+            }
+            return Err(DbError::Migration(msg).into());
+        }
 
         Ok(())
     }
 
     async fn unassign_from_group(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         group_id: Uuid,
         role_id: Uuid,
         resource_id: Option<Uuid>,
     ) -> AxiamResult<()> {
+        let group_id_str = group_id.to_string();
+        let role_id_str = role_id.to_string();
         let resource_id_str = resource_id.map(|r| r.to_string());
 
-        let query = if resource_id_str.is_some() {
-            "DELETE has_role WHERE \
-             in = type::record('group', $group_id) AND \
-             out = type::record('role', $role_id) AND \
-             resource_id = $resource_id"
+        // CQ-B07: verify both endpoints belong to the same tenant before DELETE.
+        let delete_clause = if resource_id_str.is_some() {
+            format!(
+                "DELETE has_role WHERE \
+                 in = group:`{group_id_str}` AND \
+                 out = role:`{role_id_str}` AND \
+                 resource_id = $resource_id"
+            )
         } else {
-            "DELETE has_role WHERE \
-             in = type::record('group', $group_id) AND \
-             out = type::record('role', $role_id) AND \
-             resource_id = NONE"
+            format!(
+                "DELETE has_role WHERE \
+                 in = group:`{group_id_str}` AND \
+                 out = role:`{role_id_str}` AND \
+                 resource_id = NONE"
+            )
         };
 
-        self.db
+        let query = format!(
+            "LET $g = (SELECT id FROM group:`{group_id_str}` WHERE tenant_id = $tid);\
+             LET $r = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+             IF array::len($g) = 0 OR array::len($r) = 0 {{\
+                 THROW 'cross-tenant edge denied';\
+             }};\
+             {delete_clause}"
+        );
+
+        let result = self
+            .db
             .query(query)
-            .bind(("group_id", group_id.to_string()))
-            .bind(("role_id", role_id.to_string()))
+            .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
             .await
             .map_err(DbError::from)?;
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cross-tenant edge denied") {
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "cross-tenant group role unassignment denied".into(),
+                });
+            }
+            return Err(DbError::Migration(msg).into());
+        }
 
         Ok(())
     }
@@ -558,5 +657,51 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         Ok(roles)
+    }
+
+    async fn get_role_user_ids(&self, tenant_id: Uuid, role_id: Uuid) -> AxiamResult<Vec<Uuid>> {
+        // Select user IDs directly assigned this role. Selecting FROM `user`
+        // naturally excludes group edges (group links never match a user id).
+        let mut result = self
+            .db
+            .query(
+                "SELECT VALUE meta::id(id) FROM user \
+                 WHERE tenant_id = $tenant_id \
+                 AND id IN (\
+                     SELECT VALUE in FROM has_role \
+                     WHERE out = type::record('role', $role_id)\
+                 )",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("role_id", role_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let ids: Vec<String> = result.take(0).map_err(DbError::from)?;
+        ids.iter()
+            .map(|s| parse_uuid(s, "user_id").map_err(Into::into))
+            .collect()
+    }
+
+    async fn get_role_group_ids(&self, tenant_id: Uuid, role_id: Uuid) -> AxiamResult<Vec<Uuid>> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT VALUE meta::id(id) FROM group \
+                 WHERE tenant_id = $tenant_id \
+                 AND id IN (\
+                     SELECT VALUE in FROM has_role \
+                     WHERE out = type::record('role', $role_id)\
+                 )",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("role_id", role_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let ids: Vec<String> = result.take(0).map_err(DbError::from)?;
+        ids.iter()
+            .map(|s| parse_uuid(s, "group_id").map_err(Into::into))
+            .collect()
     }
 }

@@ -8,7 +8,7 @@ use axiam_core::models::settings::PasswordPolicy;
 use axiam_core::models::user::UpdateUser;
 use axiam_core::repository::{
     FederationLinkRepository, PasswordHistoryRepository, PasswordResetTokenRepository,
-    UserRepository,
+    RefreshTokenRepository, SessionRepository, UserRepository,
 };
 use chrono::{Duration, Utc};
 use uuid::Uuid;
@@ -26,32 +26,54 @@ const MAX_RESETS_PER_DAY: u64 = 3;
 /// Handles reset token generation with rate limiting and prior-token
 /// invalidation, plus reset confirmation with password policy
 /// enforcement, fail2ban counter reset, and password history storage.
-pub struct PasswordResetService<U, R, F, H>
+///
+/// `S` is the session repository — used by `confirm_reset` to invalidate ALL
+/// active sessions after a successful password reset (D-16 — caller is
+/// unauthenticated so there is no current session to preserve).
+///
+/// `T` is the OAuth2 refresh-token repository — used by `confirm_reset` to
+/// also revoke OAuth2-flow refresh tokens (RESEARCH §4 "two chokepoints").
+pub struct PasswordResetService<U, R, F, H, S, T>
 where
     U: UserRepository,
     R: PasswordResetTokenRepository,
     F: FederationLinkRepository,
     H: PasswordHistoryRepository,
+    S: SessionRepository,
+    T: RefreshTokenRepository,
 {
     user_repo: U,
     token_repo: R,
     federation_repo: F,
     history_repo: H,
+    session_repo: S,
+    refresh_token_repo: T,
 }
 
-impl<U, R, F, H> PasswordResetService<U, R, F, H>
+impl<U, R, F, H, S, T> PasswordResetService<U, R, F, H, S, T>
 where
     U: UserRepository,
     R: PasswordResetTokenRepository,
     F: FederationLinkRepository,
     H: PasswordHistoryRepository,
+    S: SessionRepository,
+    T: RefreshTokenRepository,
 {
-    pub fn new(user_repo: U, token_repo: R, federation_repo: F, history_repo: H) -> Self {
+    pub fn new(
+        user_repo: U,
+        token_repo: R,
+        federation_repo: F,
+        history_repo: H,
+        session_repo: S,
+        refresh_token_repo: T,
+    ) -> Self {
         Self {
             user_repo,
             token_repo,
             federation_repo,
             history_repo,
+            session_repo,
+            refresh_token_repo,
         }
     }
 
@@ -186,8 +208,18 @@ where
             })
             .await?;
 
+        // Invalidate all active sessions for the user (D-16: password reset
+        // caller is unauthenticated, so there is no current session to preserve —
+        // ALL sessions die).  Both the session-flow tokens AND the OAuth2-flow
+        // refresh tokens must be revoked (RESEARCH §4 — D-18 "two chokepoints").
+        self.session_repo
+            .invalidate_user_sessions(tenant_id, user.id)
+            .await?;
+        self.refresh_token_repo
+            .revoke_all_for_user(tenant_id, user.id)
+            .await?;
+
         // Update user: new password hash + reset fail2ban counters.
-        // TODO(T19): invalidate all active sessions for the user.
         self.user_repo
             .update(
                 tenant_id,
@@ -222,7 +254,8 @@ mod tests {
     use axiam_db::{
         SurrealFederationConfigRepository, SurrealFederationLinkRepository,
         SurrealPasswordHistoryRepository, SurrealPasswordResetTokenRepository,
-        SurrealUserRepository, run_migrations,
+        SurrealRefreshTokenRepository, SurrealSessionRepository, SurrealUserRepository,
+        run_migrations,
     };
     use surrealdb::engine::local::Db;
 
@@ -291,6 +324,8 @@ mod tests {
         SurrealPasswordResetTokenRepository<Db>,
         SurrealFederationLinkRepository<Db>,
         SurrealPasswordHistoryRepository<Db>,
+        SurrealSessionRepository<Db>,
+        SurrealRefreshTokenRepository<Db>,
         Uuid, // tenant_id
         axiam_core::models::user::User,
     ) {
@@ -306,16 +341,43 @@ mod tests {
         let token_repo = SurrealPasswordResetTokenRepository::new(db.clone());
         let fed_repo = SurrealFederationLinkRepository::new(db.clone());
         let hist_repo = SurrealPasswordHistoryRepository::new(db.clone());
+        let session_repo = SurrealSessionRepository::new(db.clone());
+        let refresh_token_repo = SurrealRefreshTokenRepository::new(db.clone());
 
         let user = create_test_user(&user_repo, tenant_id).await;
 
-        (user_repo, token_repo, fed_repo, hist_repo, tenant_id, user)
+        (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tenant_id,
+            user,
+        )
     }
 
     #[tokio::test]
     async fn initiate_reset_generates_token() {
-        let (user_repo, token_repo, fed_repo, hist_repo, tid, user) = full_setup().await;
-        let svc = PasswordResetService::new(user_repo, token_repo, fed_repo, hist_repo);
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            user,
+        ) = full_setup().await;
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
 
         let result = svc.initiate_reset(tid, &user.email, 1).await.unwrap();
 
@@ -328,8 +390,24 @@ mod tests {
 
     #[tokio::test]
     async fn initiate_reset_returns_none_for_unknown_email() {
-        let (user_repo, token_repo, fed_repo, hist_repo, tid, _user) = full_setup().await;
-        let svc = PasswordResetService::new(user_repo, token_repo, fed_repo, hist_repo);
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            _user,
+        ) = full_setup().await;
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
 
         let result = svc
             .initiate_reset(tid, "nonexistent@example.com", 1)
@@ -353,6 +431,8 @@ mod tests {
         let token_repo = SurrealPasswordResetTokenRepository::new(db.clone());
         let fed_repo = SurrealFederationLinkRepository::new(db.clone());
         let hist_repo = SurrealPasswordHistoryRepository::new(db.clone());
+        let session_repo = SurrealSessionRepository::new(db.clone());
+        let refresh_token_repo = SurrealRefreshTokenRepository::new(db.clone());
 
         let user = create_test_user(&user_repo, tid).await;
 
@@ -367,6 +447,8 @@ mod tests {
                 client_id: "google-client-id".into(),
                 client_secret: "google-secret".into(),
                 attribute_map: None,
+                idp_signing_cert_pem: None,
+                allowed_algorithms: None,
             })
             .await
             .unwrap();
@@ -382,7 +464,14 @@ mod tests {
             .await
             .unwrap();
 
-        let svc = PasswordResetService::new(user_repo, token_repo, fed_repo, hist_repo);
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
 
         let result = svc.initiate_reset(tid, &user.email, 1).await.unwrap();
 
@@ -391,8 +480,24 @@ mod tests {
 
     #[tokio::test]
     async fn initiate_reset_rate_limited() {
-        let (user_repo, token_repo, fed_repo, hist_repo, tid, user) = full_setup().await;
-        let svc = PasswordResetService::new(user_repo, token_repo, fed_repo, hist_repo);
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            user,
+        ) = full_setup().await;
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
 
         // First 3 requests should succeed.
         for _ in 0..3 {
@@ -410,8 +515,24 @@ mod tests {
 
     #[tokio::test]
     async fn initiate_reset_invalidates_prior_tokens() {
-        let (user_repo, token_repo, fed_repo, hist_repo, tid, user) = full_setup().await;
-        let svc = PasswordResetService::new(user_repo, token_repo.clone(), fed_repo, hist_repo);
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            user,
+        ) = full_setup().await;
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo.clone(),
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
 
         // Generate first token.
         let first = svc
@@ -445,7 +566,16 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_reset_succeeds_and_clears_lockout() {
-        let (user_repo, token_repo, fed_repo, hist_repo, tid, user) = full_setup().await;
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            user,
+        ) = full_setup().await;
 
         // Lock the user out first.
         user_repo
@@ -461,7 +591,14 @@ mod tests {
             .await
             .unwrap();
 
-        let svc = PasswordResetService::new(user_repo.clone(), token_repo, fed_repo, hist_repo);
+        let svc = PasswordResetService::new(
+            user_repo.clone(),
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
 
         let (raw_token, _uid, _exp) = svc
             .initiate_reset(tid, &user.email, 1)
@@ -483,8 +620,24 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_reset_invalid_token() {
-        let (user_repo, token_repo, fed_repo, hist_repo, tid, _user) = full_setup().await;
-        let svc = PasswordResetService::new(user_repo, token_repo, fed_repo, hist_repo);
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            _user,
+        ) = full_setup().await;
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
         let policy = relaxed_policy();
 
         let result = svc
@@ -500,7 +653,16 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_reset_expired_token() {
-        let (user_repo, token_repo, fed_repo, hist_repo, tid, user) = full_setup().await;
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            user,
+        ) = full_setup().await;
 
         // Create a token that is already expired.
         let raw_token = token::generate_refresh_token();
@@ -515,7 +677,14 @@ mod tests {
             .await
             .unwrap();
 
-        let svc = PasswordResetService::new(user_repo, token_repo, fed_repo, hist_repo);
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
         let policy = relaxed_policy();
 
         let result = svc
@@ -527,8 +696,24 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_reset_rejects_weak_password() {
-        let (user_repo, token_repo, fed_repo, hist_repo, tid, user) = full_setup().await;
-        let svc = PasswordResetService::new(user_repo, token_repo, fed_repo, hist_repo);
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            user,
+        ) = full_setup().await;
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
 
         let (raw_token, _uid, _exp) = svc
             .initiate_reset(tid, &user.email, 1)
@@ -549,7 +734,16 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_reset_rejects_reused_password() {
-        let (user_repo, token_repo, fed_repo, hist_repo, tid, user) = full_setup().await;
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            user,
+        ) = full_setup().await;
 
         // Store the old password in history.
         let old_hash = crate::password::hash_password("ReusedPassw0rd", None).unwrap();
@@ -562,7 +756,14 @@ mod tests {
             .await
             .unwrap();
 
-        let svc = PasswordResetService::new(user_repo, token_repo, fed_repo, hist_repo);
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+        );
 
         let (raw_token, _uid, _exp) = svc
             .initiate_reset(tid, &user.email, 1)

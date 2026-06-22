@@ -74,6 +74,16 @@ where
             ));
         }
 
+        // 2b. SEC-025: Enforce PKCE for public clients.
+        // A public client has no client_secret (client_secret_hash is empty).
+        // Per OAuth 2.0 Security BCP §7.6 and RFC 7636, public clients MUST use PKCE.
+        let is_public_client = client.client_secret_hash.is_empty();
+        if is_public_client && req.code_challenge.is_none() {
+            return Err(OAuth2Error::InvalidRequest(
+                "PKCE (code_challenge) is required for public clients".into(),
+            ));
+        }
+
         // 3. Validate response_type (now safe to redirect errors)
         if req.response_type != "code" {
             return Err(OAuth2Error::UnsupportedResponseType);
@@ -182,5 +192,222 @@ fn parse_scopes(scope: Option<&str>) -> Vec<String> {
     match scope {
         Some(s) => s.split_whitespace().map(String::from).collect(),
         None => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — SEC-025 PKCE enforcement
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::error::AxiamResult;
+    use axiam_core::models::oauth2_client::{
+        AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, OAuth2Client,
+        UpdateOAuth2Client,
+    };
+    use axiam_core::repository::{
+        AuthorizationCodeRepository, OAuth2ClientRepository, PaginatedResult, Pagination,
+    };
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    // ---- Mock repositories ----
+
+    #[derive(Clone)]
+    struct MockClientRepo {
+        client: OAuth2Client,
+    }
+
+    impl OAuth2ClientRepository for MockClientRepo {
+        async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+            unimplemented!()
+        }
+        async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
+            unimplemented!()
+        }
+        async fn get_by_client_id(
+            &self,
+            _tenant_id: Uuid,
+            _client_id: &str,
+        ) -> AxiamResult<OAuth2Client> {
+            Ok(self.client.clone())
+        }
+        async fn update(
+            &self,
+            _tid: Uuid,
+            _id: Uuid,
+            _input: UpdateOAuth2Client,
+        ) -> AxiamResult<OAuth2Client> {
+            unimplemented!()
+        }
+        async fn delete(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn list(
+            &self,
+            _tid: Uuid,
+            _page: Pagination,
+        ) -> AxiamResult<PaginatedResult<OAuth2Client>> {
+            unimplemented!()
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockCodeRepo;
+
+    impl AuthorizationCodeRepository for MockCodeRepo {
+        async fn create(&self, input: CreateAuthorizationCode) -> AxiamResult<AuthorizationCode> {
+            Ok(AuthorizationCode {
+                id: Uuid::new_v4(),
+                tenant_id: input.tenant_id,
+                client_id: input.client_id,
+                user_id: input.user_id,
+                code_hash: input.code_hash,
+                redirect_uri: input.redirect_uri,
+                scopes: input.scopes,
+                code_challenge: input.code_challenge,
+                code_challenge_method: input.code_challenge_method,
+                nonce: input.nonce,
+                expires_at: input.expires_at,
+                used: false,
+                created_at: Utc::now(),
+            })
+        }
+        async fn get_by_hash(
+            &self,
+            _tid: Uuid,
+            _hash: &str,
+            _client_id: &str,
+            _redirect_uri: &str,
+        ) -> AxiamResult<AuthorizationCode> {
+            unimplemented!()
+        }
+        async fn consume(
+            &self,
+            _tid: Uuid,
+            _hash: &str,
+            _client_id: &str,
+            _redirect_uri: &str,
+        ) -> AxiamResult<AuthorizationCode> {
+            unimplemented!()
+        }
+        async fn delete_expired(&self) -> AxiamResult<u64> {
+            Ok(0)
+        }
+    }
+
+    fn make_client(is_public: bool) -> OAuth2Client {
+        OAuth2Client {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            client_id: "test-client".into(),
+            // Public client has an empty secret hash; confidential has a non-empty one.
+            client_secret_hash: if is_public {
+                String::new()
+            } else {
+                "some-hash".into()
+            },
+            name: "Test Client".into(),
+            redirect_uris: vec!["https://app.example.com/callback".into()],
+            grant_types: vec!["authorization_code".into()],
+            scopes: vec!["openid".into(), "profile".into()],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_authorize_request(
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        code_challenge: Option<&str>,
+    ) -> AuthorizeRequest {
+        AuthorizeRequest {
+            tenant_id,
+            user_id: Uuid::new_v4(),
+            response_type: "code".into(),
+            client_id: client.client_id.clone(),
+            redirect_uri: client.redirect_uris[0].clone(),
+            scope: Some("openid".into()),
+            state: Some("state-xyz".into()),
+            code_challenge: code_challenge.map(String::from),
+            code_challenge_method: code_challenge.map(|_| "S256".into()),
+            nonce: None,
+        }
+    }
+
+    // SEC-025 Case 1: public client WITHOUT code_challenge → InvalidRequest
+    #[tokio::test]
+    async fn authorize_public_client_without_pkce_returns_invalid_request() {
+        let client = make_client(true); // public
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let req = make_authorize_request(tenant_id, &client, None);
+        let result = svc.authorize(req).await;
+
+        assert!(
+            result.is_err(),
+            "public client without PKCE must be rejected"
+        );
+        assert!(
+            matches!(result.unwrap_err(), OAuth2Error::InvalidRequest(_)),
+            "error must be InvalidRequest"
+        );
+    }
+
+    // SEC-025 Case 2: public client WITH valid S256 code_challenge → success
+    #[tokio::test]
+    async fn authorize_public_client_with_s256_pkce_succeeds() {
+        let client = make_client(true); // public
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        // Provide a valid S256 code_challenge (any base64url string is syntactically valid here)
+        let req = make_authorize_request(
+            tenant_id,
+            &client,
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
+        );
+        let result = svc.authorize(req).await;
+
+        assert!(
+            result.is_ok(),
+            "public client with S256 PKCE must succeed, got: {:?}",
+            result
+        );
+    }
+
+    // SEC-025 Case 3: confidential client WITHOUT PKCE → success (unchanged)
+    #[tokio::test]
+    async fn authorize_confidential_client_without_pkce_succeeds() {
+        let client = make_client(false); // confidential
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let req = make_authorize_request(tenant_id, &client, None);
+        let result = svc.authorize(req).await;
+
+        assert!(
+            result.is_ok(),
+            "confidential client without PKCE must still succeed, got: {:?}",
+            result
+        );
     }
 }

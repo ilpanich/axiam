@@ -514,15 +514,34 @@ After a successful password reset (`confirm_reset`), invalidate all active sessi
 
 **Commit**: `security(auth): invalidate sessions on password reset`
 
-### T19.11 — Wire Email Sending for Password Reset and Verification
-Connect the `EmailService` to the `/auth/reset` and `/auth/resend-verification` handlers so that reset/verification emails are actually delivered. Currently the handlers generate and store tokens but do not send emails (marked with `TODO(T19)` comments).
+### ~~T19.11 — Wire Email Sending for Password Reset and Verification~~ ✓ RESOLVED (Phase 05-04)
+~~Connect the `EmailService` to the `/auth/reset` and `/auth/resend-verification` handlers so that reset/verification emails are actually delivered. Currently the handlers generate and store tokens but do not send emails (marked with `TODO(T19)` comments).~~
 
-**Commit**: `feat(email): wire email delivery for password reset and verification endpoints`
+Resolved in Phase 05 Plan 04: handlers now enqueue `OutboundMailMessage(PasswordReset/EmailVerification)` to `axiam.mail.outbound`; responses are enumeration-safe (D-15). The `TODO(T19)` stubs in `password_reset.rs` and `email_verification.rs` are wired.
 
-### T19.12 — Wire NotificationDispatcher Email Delivery
-Connect `NotificationDispatcher` to `EmailService` with template resolution and org_id lookup so that matched notification rules actually send emails. Currently the dispatcher returns matched rules/recipients but does not send (marked with `TODO(T19)` in `crates/axiam-audit/src/notification.rs`).
+**Commit**: `feat(05-04): wire password-reset and email-verify handlers to enqueue mail (D-14/D-15)`
 
-**Commit**: `feat(notifications): wire email delivery for admin notification dispatch`
+### ~~T19.12 — Wire NotificationDispatcher Email Delivery~~ ✓ RESOLVED (Phase 05-04)
+~~Connect `NotificationDispatcher` to `EmailService` with template resolution and org_id lookup so that matched notification rules actually send emails. Currently the dispatcher returns matched rules/recipients but does not send (marked with `TODO(T19)` in `crates/axiam-audit/src/notification.rs`).~~
+
+Resolved in Phase 05 Plan 04: `NotificationDispatcher::dispatch` now accepts a `&impl MailPublisher` and enqueues one `OutboundMailMessage(Notification)` per matched recipient. The `TODO(T19)` stub in `notification.rs` is wired.
+
+**Commit**: `feat(05-04): notification dispatcher enqueues mail messages (T19.12/T19.13)`
+
+### T19.20 — Admin Email-Config CRUD API
+Add admin-facing REST endpoints to create/read/update/delete `email_config` rows (org- and tenant-scoped), guarded by an appropriate RBAC permission (e.g. `email_config:write`). Phase 5 builds the DB-backed `SurrealEmailConfigRepository` (encrypt-at-rest, all five providers) and resolves the effective provider per org/tenant, but provider rows are seeded/written via the repository only — there is no admin UI/API in Phase 5. This task exposes that configuration surface. Deferred from Phase 5 (see `.planning/phases/05-email-delivery-gdpr-compliance/05-CONTEXT.md` Claude's Discretion).
+
+**Commit**: `feat(api-rest): admin email-config CRUD endpoints (org/tenant scoped)`
+
+### T19.21 — Per-Org/Tenant Custom Template Lookup in Mail Consumer
+The mail consumer (`axiam-amqp/src/mail_consumer.rs`) currently uses the built-in default template only (`resolve_template(kind, None, None)`). Wire the `SurrealEmailTemplateRepository` to fetch per-org and per-tenant custom templates and pass them to `resolve_template`, so custom templates are applied at delivery time.
+
+**Commit**: `feat(amqp): wire custom template resolution in mail consumer`
+
+### T19.22 — Email Config Secrets Backfill UPDATE Path
+`SurrealEmailConfigRepository::backfill_plaintext_secrets` counts unencrypted rows but does not yet UPDATE them (returns the pending count and logs a warning). Implement the UPDATE path: for each row where `smtp_password_ciphertext IS NULL AND smtp_password IS NOT NULL` (or API-key equivalent), encrypt via `encrypt_field` and UPDATE the row. This path is needed only if pre-Phase-5 tooling wrote plaintext rows before schema v15 was deployed.
+
+**Commit**: `feat(db): implement email config secrets backfill UPDATE path (T19.22)`
 
 ---
 

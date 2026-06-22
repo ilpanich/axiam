@@ -13,12 +13,16 @@ pub enum DbError {
 
     #[error("Record not found: {entity} with id {id}")]
     NotFound { entity: String, id: String },
+
+    #[error("Record already exists: {entity}")]
+    AlreadyExists { entity: String },
 }
 
 impl From<DbError> for AxiamError {
     fn from(err: DbError) -> Self {
         match err {
             DbError::NotFound { entity, id } => AxiamError::NotFound { entity, id },
+            DbError::AlreadyExists { entity } => AxiamError::AlreadyExists { entity },
             other => AxiamError::Database(other.to_string()),
         }
     }

@@ -1,6 +1,8 @@
 //! Integration tests for group management and membership endpoints.
 
 use actix_web::{App, test, web};
+use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -12,11 +14,18 @@ use axiam_db::repository::{
     SurrealGroupRepository, SurrealOrganizationRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
+
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
 
 fn test_keypair() -> (String, String) {
     let private_key = "\
@@ -107,7 +116,16 @@ async fn create_extra_user(
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 macro_rules! test_app {
@@ -121,7 +139,12 @@ macro_rules! test_app {
                 .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealGroupRepository::new($db.clone())))
-                .configure(register_api_v1_routes::<TestDb>),
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     };
@@ -138,6 +161,8 @@ async fn create_group_returns_201() {
     let req = test::TestRequest::post()
         .uri("/api/v1/groups")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Engineering",
             "description": "Engineering team"
@@ -166,6 +191,8 @@ async fn list_groups_returns_200() {
         let req = test::TestRequest::post()
             .uri("/api/v1/groups")
             .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .set_json(serde_json::json!({
                 "name": name,
                 "description": format!("{name} group")
@@ -197,6 +224,8 @@ async fn get_group_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/groups")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "DevOps",
             "description": "DevOps team"
@@ -229,6 +258,8 @@ async fn update_group_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/groups")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Old Name",
             "description": "Old desc"
@@ -241,6 +272,8 @@ async fn update_group_returns_200() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/groups/{group_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "New Name" }))
         .to_request();
 
@@ -262,6 +295,8 @@ async fn delete_group_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/groups")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "To Delete",
             "description": "Will be deleted"
@@ -274,6 +309,8 @@ async fn delete_group_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/groups/{group_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -293,6 +330,8 @@ async fn add_member_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/groups")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Team",
             "description": "A team"
@@ -306,6 +345,8 @@ async fn add_member_returns_204() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/groups/{group_id}/members"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "user_id": member_id }))
         .to_request();
 
@@ -327,6 +368,8 @@ async fn list_members_returns_members() {
     let req = test::TestRequest::post()
         .uri("/api/v1/groups")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Team",
             "description": "A team"
@@ -340,6 +383,8 @@ async fn list_members_returns_members() {
         let req = test::TestRequest::post()
             .uri(&format!("/api/v1/groups/{group_id}/members"))
             .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .set_json(serde_json::json!({ "user_id": uid }))
             .to_request();
         test::call_service(&app, req).await;
@@ -374,6 +419,8 @@ async fn remove_member_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/groups")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Team",
             "description": "A team"
@@ -386,6 +433,8 @@ async fn remove_member_returns_204() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/groups/{group_id}/members"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "user_id": alice_id }))
         .to_request();
     test::call_service(&app, req).await;
@@ -394,6 +443,8 @@ async fn remove_member_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/groups/{group_id}/members/{alice_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;

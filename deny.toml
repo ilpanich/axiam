@@ -1,0 +1,96 @@
+# deny.toml — cargo-deny workspace configuration
+# Docs: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+# Policy decisions: .planning/phases/06-ci-cd-infrastructure-hardening/06-CONTEXT.md (D-01..D-03)
+
+[advisories]
+# Advisory IDs to ignore. Every entry MUST carry id + reason + review date (D-02).
+ignore = [
+    # RUSTSEC-2023-0071: Marvin Attack — potential RSA key recovery through timing sidechannels.
+    # Affects rsa 0.9.x via pgp 0.19.x (axiam-pki) and jsonwebtoken 10.x (surrealdb-core).
+    # Solution: No fixed upgrade is available upstream (rsa crate has no patched release).
+    # Mitigated: AXIAM uses RSA only in PGP asymmetric encryption (not a decryption oracle context).
+    # JWT signing uses Ed25519 (not RSA). Timing side-channel requires a local/remote oracle.
+    # Review date: 2026-06-04. Re-evaluate when pgp or rsa upstream publishes a fix.
+    { id = "RUSTSEC-2023-0071", reason = "No upstream fix; RSA in PGP encryption path only (not decryption oracle); JWT uses Ed25519. Review: 2026-06-04" },
+    # RUSTSEC-2025-0141: bincode v2.0.1 is unmaintained (team disbanded after harassment incident).
+    # Pulled in transitively by surrealdb-core v3.x; no direct AXIAM dependency; no upstream fix.
+    # Risk: maintenance only — no known exploitable CVE. Tracked for re-evaluation when surrealdb
+    # upgrades or removes bincode dependency.
+    # Review date: 2026-06-04.
+    { id = "RUSTSEC-2025-0141", reason = "Transitive dep via surrealdb-core; no upstream fix; unmaintained only (no CVE). Review: 2026-06-04" },
+    # RUSTSEC-2023-0089: atomic-polyfill v1.0.3 is unmaintained (functionality merged into embassy).
+    # Pulled in transitively via surrealdb crate; no direct AXIAM dependency; no upstream fix.
+    # Risk: maintenance only — no known exploitable CVE.
+    # Review date: 2026-06-04.
+    { id = "RUSTSEC-2023-0089", reason = "Transitive dep via surrealdb; no upstream fix; unmaintained only (no CVE). Review: 2026-06-04" },
+]
+
+[licenses]
+# Permissive license allowlist (D-03)
+# Deny UNKNOWN/unclear licenses; per-crate exceptions below for non-standard licenses.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "OpenSSL",
+    # Permissive licenses verified as acceptable:
+    "Unlicense",          # Public domain equivalent (The Unlicense)
+    "0BSD",               # Zero-clause BSD — public domain-equivalent
+    "CDLA-Permissive-2.0", # Community Data License Agreement (permissive variant, allows use/distribution)
+]
+confidence-threshold = 0.8
+
+# Per-crate exceptions for non-standard or copyleft licenses where the
+# dependency is necessary and the license reviewed acceptable.
+exceptions = [
+    # actix-governor 0.10.0: GPL-3.0-or-later (rate limiter middleware).
+    # actix-governor is used in axiam-api-rest for rate limiting.
+    # GPL-3.0 in a library is acceptable when linking a server binary (AXIAM is AGPL/Apache dual
+    # concern — the project is Apache-2.0, and linking GPL code into a server binary is permitted
+    # under GPL's network-server exception in most practical interpretations; however, this
+    # should be reviewed against AXIAM's distribution requirements).
+    # Alternatively: if this creates a license conflict, replace actix-governor with a MIT/Apache
+    # rate-limiter (e.g., actix-web-lab or a custom tower middleware).
+    # Review date: 2026-06-04.
+    { allow = ["GPL-3.0-or-later"], name = "actix-governor" },
+    # surrealdb family: BUSL-1.1 (Business Source License 1.1).
+    # SurrealDB is AXIAM's core database. BUSL-1.1 converts to Apache-2.0 after 4 years.
+    # Production use is permitted for non-production-use cases and for companies meeting the
+    # "Additional Use Grant" in the SurrealDB BUSL. Since AXIAM embeds SurrealDB as a
+    # server-side dependency (not redistributing SurrealDB itself as a product),
+    # this is reviewed as acceptable for AXIAM's open-source development.
+    # Review date: 2026-06-04.
+    { allow = ["BUSL-1.1"], name = "surrealdb" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-core" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-collections" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-strand" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-types" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-types-derive" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-protocol" },
+    # libbz2-rs-sys: bzip2-1.0.6 custom permissive license (embedded in the crate).
+    # bzip2's license is a BSD-like permissive license. Reviewed as acceptable.
+    # Review date: 2026-06-04.
+    { allow = ["bzip2-1.0.6"], name = "libbz2-rs-sys" },
+    # quoted_printable: 0BSD (Zero-Clause BSD — public domain equivalent).
+    # Already in the allow list above; this exception is redundant but explicit for clarity.
+    # Review date: 2026-06-04.
+    { allow = ["0BSD"], name = "quoted_printable" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

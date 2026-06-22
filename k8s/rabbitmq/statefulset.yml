@@ -19,9 +19,19 @@ spec:
         app: axiam
         component: rabbitmq
     spec:
+      # Pod-level restricted security context (KSV-0118). Mirrors the container
+      # context below; fsGroup makes the /var/lib/rabbitmq PVC writable under the
+      # non-root rabbitmq UID (999).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: rabbitmq
-          image: rabbitmq:3-management-alpine
+          image: rabbitmq:4-management-alpine
           env:
             - name: RABBITMQ_DEFAULT_USER
               valueFrom:
@@ -33,6 +43,18 @@ spec:
                 secretKeyRef:
                   name: rabbitmq-credentials
                   key: password
+          securityContext:
+            runAsNonRoot: true
+            # D-13 best-effort: RabbitMQ default UID is 999 (rabbitmq user in official image)
+            # If volume permission errors occur at runtime, add an initContainer: chown 999:999 /var/lib/rabbitmq
+            runAsUser: 999
+            readOnlyRootFilesystem: true      # KSV-0014: immutable root fs (see writable emptyDir mounts below)
+            allowPrivilegeEscalation: false   # D-13: restricted profile
+            capabilities:
+              drop:
+                - ALL                 # D-13: restricted profile
+            seccompProfile:
+              type: RuntimeDefault    # D-13: restricted profile
           ports:
             - containerPort: 5672
               name: amqp
@@ -43,6 +65,15 @@ spec:
           volumeMounts:
             - name: rabbitmq-data
               mountPath: /var/lib/rabbitmq
+            # Writable paths required under a read-only root fs (KSV-0014): the
+            # entrypoint regenerates config under /etc/rabbitmq on each start,
+            # and the broker writes logs/scratch to /var/log/rabbitmq and /tmp.
+            - name: rabbitmq-etc
+              mountPath: /etc/rabbitmq
+            - name: rabbitmq-logs
+              mountPath: /var/log/rabbitmq
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 250m
@@ -60,6 +91,16 @@ spec:
               command: ["rabbitmq-diagnostics", "check_running"]
             initialDelaySeconds: 60
             periodSeconds: 10
+      volumes:
+        # Writable scratch required because the root filesystem is read-only
+        # (KSV-0014). Durable broker state (mnesia, .erlang.cookie) stays on the
+        # PVC mounted at /var/lib/rabbitmq.
+        - name: rabbitmq-etc
+          emptyDir: {}
+        - name: rabbitmq-logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: rabbitmq-data

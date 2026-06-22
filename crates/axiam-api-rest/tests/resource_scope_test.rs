@@ -1,6 +1,8 @@
 //! Integration tests for resource and scope endpoints.
 
 use actix_web::{App, test, web};
+use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -13,11 +15,18 @@ use axiam_db::repository::{
     SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
     SurrealServiceAccountRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
+
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
 
 fn test_keypair() -> (String, String) {
     let private_key = "\
@@ -87,7 +96,16 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 macro_rules! test_app {
@@ -110,7 +128,12 @@ macro_rules! test_app {
                 .app_data(web::Data::new(SurrealServiceAccountRepository::new(
                     $db.clone(),
                 )))
-                .configure(register_api_v1_routes::<TestDb>),
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     };
@@ -131,6 +154,8 @@ async fn create_resource_returns_201() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Project Alpha",
             "resource_type": "project"
@@ -156,6 +181,8 @@ async fn list_resources_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Service A",
             "resource_type": "service"
@@ -186,6 +213,8 @@ async fn get_resource_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "API Gateway",
             "resource_type": "gateway"
@@ -218,6 +247,8 @@ async fn update_resource_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Old Name",
             "resource_type": "service"
@@ -230,6 +261,8 @@ async fn update_resource_returns_200() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/resources/{resource_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "New Name" }))
         .to_request();
 
@@ -251,6 +284,8 @@ async fn delete_resource_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "To Delete",
             "resource_type": "temp"
@@ -263,6 +298,8 @@ async fn delete_resource_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/resources/{resource_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -281,6 +318,8 @@ async fn list_children_returns_children() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Parent",
             "resource_type": "project"
@@ -294,6 +333,8 @@ async fn list_children_returns_children() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Child",
             "resource_type": "service",
@@ -329,6 +370,8 @@ async fn list_ancestors_returns_ancestors() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Grandparent",
             "resource_type": "org"
@@ -341,6 +384,8 @@ async fn list_ancestors_returns_ancestors() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Parent",
             "resource_type": "project",
@@ -354,6 +399,8 @@ async fn list_ancestors_returns_ancestors() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "Child",
             "resource_type": "service",
@@ -394,6 +441,8 @@ async fn create_scope_returns_201() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "API",
             "resource_type": "service"
@@ -407,6 +456,8 @@ async fn create_scope_returns_201() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/resources/{resource_id}/scopes"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "read:users",
             "description": "Read user data"
@@ -432,6 +483,8 @@ async fn list_scopes_returns_scopes() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "API",
             "resource_type": "service"
@@ -445,6 +498,8 @@ async fn list_scopes_returns_scopes() {
         let req = test::TestRequest::post()
             .uri(&format!("/api/v1/resources/{resource_id}/scopes"))
             .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .set_json(serde_json::json!({
                 "name": scope,
                 "description": scope
@@ -477,6 +532,8 @@ async fn delete_scope_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/resources")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "API",
             "resource_type": "service"
@@ -489,6 +546,8 @@ async fn delete_scope_returns_204() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/resources/{resource_id}/scopes"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "name": "temp",
             "description": "Temporary scope"
@@ -503,6 +562,8 @@ async fn delete_scope_returns_204() {
             "/api/v1/resources/{resource_id}/scopes/{scope_id}"
         ))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;

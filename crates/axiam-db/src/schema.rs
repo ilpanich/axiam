@@ -14,6 +14,7 @@ use crate::error::DbError;
 // Migration tracking
 // -----------------------------------------------------------------------
 
+/// DDL for the migration-tracking table (idempotent — all IF NOT EXISTS).
 const MIGRATION_TABLE_DDL: &str = "\
 DEFINE TABLE IF NOT EXISTS _migration SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON TABLE _migration TYPE int;
@@ -22,6 +23,9 @@ DEFINE FIELD IF NOT EXISTS applied_at ON TABLE _migration TYPE datetime \
     DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_migration_version ON TABLE _migration \
     COLUMNS version UNIQUE;
+DEFINE TABLE IF NOT EXISTS _migration_lock SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS locked_at ON TABLE _migration_lock TYPE datetime \
+    DEFAULT time::now();
 ";
 
 #[derive(Debug, SurrealValue)]
@@ -107,6 +111,36 @@ static MIGRATIONS: &[Migration] = &[
         version: 14,
         name: "webauthn_credentials",
         sql: SCHEMA_V14,
+    },
+    Migration {
+        version: 15,
+        name: "phase5_email_gdpr",
+        sql: SCHEMA_V15,
+    },
+    Migration {
+        version: 16,
+        name: "sparse_tenant_settings",
+        sql: SCHEMA_V16,
+    },
+    Migration {
+        version: 17,
+        name: "totp_replay_prevention",
+        sql: SCHEMA_V17,
+    },
+    Migration {
+        version: 18,
+        name: "federation_login_state_request_id",
+        sql: SCHEMA_V18,
+    },
+    Migration {
+        version: 19,
+        name: "edge_unique_indexes",
+        sql: SCHEMA_V19,
+    },
+    Migration {
+        version: 20,
+        name: "seeder_state",
+        sql: SCHEMA_V20,
     },
 ];
 
@@ -368,6 +402,49 @@ DEFINE FIELD created_at ON TABLE federation_config TYPE datetime \
     DEFAULT time::now();
 DEFINE FIELD updated_at ON TABLE federation_config TYPE datetime \
     DEFAULT time::now();
+-- Phase 4 additions: encrypted client secret columns + algorithm allow-list
+-- (legacy client_secret column is kept for back-compat; nulled by plan 04-02 backfill)
+DEFINE FIELD IF NOT EXISTS allowed_algorithms ON TABLE federation_config \
+    TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS idp_signing_cert_pem ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS client_secret_ciphertext ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS client_secret_nonce ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS client_secret_key_version ON TABLE federation_config \
+    TYPE option<int>;
+
+-- =======================================================================
+-- SAML Assertion Replay Table (D-09)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS saml_assertion_replay SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_assertion_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS assertion_id ON TABLE saml_assertion_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE saml_assertion_replay TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_assertion_replay TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_replay_uniq ON TABLE saml_assertion_replay \
+    COLUMNS tenant_id, assertion_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_replay_expires_at ON TABLE saml_assertion_replay \
+    COLUMNS expires_at;
+
+-- =======================================================================
+-- Federation Login State Table (D-24)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS federation_login_state SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS state ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS nonce ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS federation_config_id ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS redirect_uri ON TABLE federation_login_state TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE federation_login_state TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE federation_login_state TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_login_state_uniq ON TABLE federation_login_state \
+    COLUMNS state UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_login_state_expires_at ON TABLE federation_login_state \
+    COLUMNS expires_at;
 
 -- =======================================================================
 -- Certificates (tenant scope)
@@ -781,20 +858,269 @@ DEFINE INDEX idx_webauthn_cred_id ON TABLE webauthn_credential \
 ";
 
 // -----------------------------------------------------------------------
+// Schema v15 — Phase 5: email delivery & GDPR compliance
+// -----------------------------------------------------------------------
+
+const SCHEMA_V15: &str = "\
+-- =======================================================================
+-- Email Config (org/tenant scope) — provider secrets stored encrypted
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS email_config SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS scope ON TABLE email_config TYPE string
+    ASSERT $value IN ['org', 'tenant'];
+DEFINE FIELD IF NOT EXISTS scope_id ON TABLE email_config TYPE string;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE email_config TYPE bool
+    DEFAULT true;
+DEFINE FIELD IF NOT EXISTS from_name ON TABLE email_config TYPE string;
+DEFINE FIELD IF NOT EXISTS from_email ON TABLE email_config TYPE string;
+DEFINE FIELD IF NOT EXISTS reply_to ON TABLE email_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS provider_kind ON TABLE email_config TYPE string
+    ASSERT $value IN ['smtp', 'send_grid', 'postmark', 'resend', 'brevo'];
+DEFINE FIELD IF NOT EXISTS smtp_host ON TABLE email_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS smtp_port ON TABLE email_config TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS smtp_username ON TABLE email_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS smtp_starttls ON TABLE email_config TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS smtp_password_ciphertext ON TABLE email_config
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS smtp_password_nonce ON TABLE email_config
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS api_url ON TABLE email_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS api_key_ciphertext ON TABLE email_config
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS api_key_nonce ON TABLE email_config
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS secret_key_version ON TABLE email_config
+    TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE email_config TYPE datetime
+    DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE email_config TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_email_config_scope ON TABLE email_config
+    COLUMNS scope, scope_id UNIQUE;
+
+-- =======================================================================
+-- Consent (tenant scope, immutable records — append-only)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS consent SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE consent TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE consent TYPE string;
+DEFINE FIELD IF NOT EXISTS consent_type ON TABLE consent TYPE string;
+DEFINE FIELD IF NOT EXISTS version ON TABLE consent TYPE string;
+DEFINE FIELD IF NOT EXISTS accepted_at ON TABLE consent TYPE datetime
+    DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS ip_address ON TABLE consent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS user_agent ON TABLE consent TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_consent_tenant_user_type ON TABLE consent
+    COLUMNS tenant_id, user_id, consent_type, version UNIQUE;
+
+-- =======================================================================
+-- Account Deletion Requests (tenant scope)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS account_deletion SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE account_deletion TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE account_deletion TYPE string;
+DEFINE FIELD IF NOT EXISTS cancel_token_hash ON TABLE account_deletion TYPE string;
+DEFINE FIELD IF NOT EXISTS scheduled_purge_at ON TABLE account_deletion
+    TYPE datetime;
+DEFINE FIELD IF NOT EXISTS status ON TABLE account_deletion TYPE string
+    ASSERT $value IN ['pending', 'cancelled', 'completed'];
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE account_deletion TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_account_deletion_tenant_user ON TABLE account_deletion
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_account_deletion_token ON TABLE account_deletion
+    COLUMNS tenant_id, cancel_token_hash;
+
+-- =======================================================================
+-- Export Jobs (tenant scope)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS export_job SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE export_job TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE export_job TYPE string;
+DEFINE FIELD IF NOT EXISTS status ON TABLE export_job TYPE string
+    ASSERT $value IN ['queued', 'ready', 'downloaded', 'expired'];
+DEFINE FIELD IF NOT EXISTS encrypted_blob ON TABLE export_job
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS file_path ON TABLE export_job TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS blob_nonce ON TABLE export_job TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS download_token_hash ON TABLE export_job
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE export_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE export_job TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_export_job_tenant_user ON TABLE export_job
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_export_job_token ON TABLE export_job
+    COLUMNS tenant_id, download_token_hash;
+
+-- =======================================================================
+-- Erasure Proof (PII-free record proving erasure happened)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS erasure_proof SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS pseudonym ON TABLE erasure_proof TYPE string;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE erasure_proof TYPE string;
+DEFINE FIELD IF NOT EXISTS erased_at ON TABLE erasure_proof TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_erasure_proof_tenant ON TABLE erasure_proof
+    COLUMNS tenant_id;
+
+-- =======================================================================
+-- ALTER user table: add GDPR deletion fields
+-- =======================================================================
+DEFINE FIELD IF NOT EXISTS deletion_pending ON TABLE user TYPE bool
+    DEFAULT false;
+DEFINE FIELD IF NOT EXISTS scheduled_purge_at ON TABLE user
+    TYPE option<datetime>;
+
+-- Re-DEFINE user.status ASSERT to include 'Anonymized' (OVERWRITE extends the ASSERT)
+DEFINE FIELD OVERWRITE status ON TABLE user TYPE string
+    ASSERT $value IN ['Active', 'Inactive', 'Locked', 'PendingVerification',
+                      'Anonymized'];
+
+-- =======================================================================
+-- ALTER audit_log permissions: add gdpr_pseudonymizer UPDATE path (D-04)
+-- Note: FOR delete stays NONE. True enforcement is the single repo method.
+-- =======================================================================
+DEFINE TABLE OVERWRITE audit_log SCHEMAFULL
+    PERMISSIONS
+        FOR create FULL
+        FOR select FULL
+        FOR update WHERE $auth.role = 'gdpr_pseudonymizer'
+        FOR delete NONE;
+
+-- =======================================================================
+-- ALTER email_template.kind ASSERT: add deletion_scheduled, export_ready
+-- =======================================================================
+DEFINE FIELD OVERWRITE kind ON TABLE email_template TYPE string
+    ASSERT $value IN ['activation', 'password_reset', 'mfa_setup_reminder',
+                      'admin_notification', 'deletion_scheduled', 'export_ready'];
+";
+
+// -----------------------------------------------------------------------
+// Schema v16 — sparse tenant settings (CQ-B03 / REQ-14 AC-3)
+// -----------------------------------------------------------------------
+//
+// Adds an `overrides_json` column to `security_settings` to persist only
+// the fields explicitly overridden by a tenant.  Org rows leave this
+// column `NONE`.  The repository uses it at read time instead of
+// diff-against-org so that an org baseline change propagates correctly to
+// tenants that did not explicitly override that field.
+
+const SCHEMA_V16: &str = "\
+-- Add sparse override mask to security_settings (CQ-B03 / REQ-14 AC-3).
+DEFINE FIELD IF NOT EXISTS overrides_json ON TABLE security_settings \
+    TYPE option<string>;
+-- Extend export_job status ASSERT to include 'failed' (CQ-B38 / REQ-14 AC-5).
+DEFINE FIELD OVERWRITE status ON TABLE export_job TYPE string \
+    ASSERT $value IN ['queued', 'ready', 'downloaded', 'expired', 'failed'];
+";
+
+// -----------------------------------------------------------------------
+// Schema v17 — TOTP replay prevention (SEC-008 / REQ-14 AC-5)
+// -----------------------------------------------------------------------
+//
+// Adds `totp_last_used_step` to the `user` table.  The field records the
+// last TOTP time-step that was accepted so that codes cannot be replayed
+// within the same 30-second window.
+
+const SCHEMA_V17: &str = "\
+-- Add TOTP replay prevention step counter to user table (SEC-008/REQ-14 AC-5).
+DEFINE FIELD IF NOT EXISTS totp_last_used_step ON TABLE user \
+    TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v18 — SAML InResponseTo / Destination tracking (SEC-005/REQ-14 AC-5)
+// -----------------------------------------------------------------------
+//
+// Adds `request_id` to `federation_login_state` to track the SAML
+// AuthnRequest ID so the ACS handler can verify InResponseTo.
+
+const SCHEMA_V18: &str = "\
+-- Add SAML AuthnRequest ID to federation_login_state (SEC-005/REQ-14 AC-5).
+DEFINE FIELD IF NOT EXISTS request_id ON TABLE federation_login_state \
+    TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v19 — unique (in, out) indexes on edge tables (CQ-B17)
+// -----------------------------------------------------------------------
+//
+// Without unique constraints, duplicate edges (e.g. user → role assigned
+// twice) could be silently inserted.  A duplicate edge now surfaces as a
+// SurrealDB unique-index violation which the repository layer maps to
+// DbError::AlreadyExists → AxiamError::AlreadyExists → HTTP 409 (ASVS V5).
+
+const SCHEMA_V19: &str = "\
+-- Unique (in, out) composite indexes for all edge tables (CQ-B17).
+-- IF NOT EXISTS guards idempotent re-runs.
+DEFINE INDEX IF NOT EXISTS idx_has_tenant_unique \
+    ON TABLE has_tenant FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_member_of_unique \
+    ON TABLE member_of FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_has_role_unique \
+    ON TABLE has_role FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_grants_unique \
+    ON TABLE grants FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_on_resource_unique \
+    ON TABLE on_resource FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_child_of_unique \
+    ON TABLE child_of FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_signed_by_unique \
+    ON TABLE signed_by FIELDS in, out UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v20 — seeder_state (CQ-B42 hash-guard skip)
+// -----------------------------------------------------------------------
+//
+// Persists the sha256 hash of the permission registry per tenant so that
+// repeated restarts with an unchanged registry skip the UPSERT storm.
+
+const SCHEMA_V20: &str = "\
+-- =======================================================================
+-- Seeder state (tenant scope) — hash-guard for permission seeder (CQ-B42)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS seeder_state SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE seeder_state TYPE string;
+DEFINE FIELD IF NOT EXISTS hash ON TABLE seeder_state TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE seeder_state TYPE datetime
+    DEFAULT time::now();
+";
+
+// -----------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------
 
 /// Run all pending migrations against the given SurrealDB client.
 ///
-/// Creates a `_migration` tracking table on first run, then applies
-/// each migration whose version exceeds the current maximum.
-/// All DEFINE statements are idempotent so re-running is safe.
+/// Creates `_migration` and `_migration_lock` tracking tables on first run,
+/// then applies each pending migration atomically: the schema DDL and the
+/// version-record INSERT are wrapped in a single `BEGIN TRANSACTION …
+/// COMMIT TRANSACTION` so that a mid-step failure leaves the row
+/// re-selectable (CQ-B06 / REQ-14 AC-5).
+///
+/// The `_migration_lock` record (`CREATE IF NOT EXISTS`) guards concurrent
+/// startup — only one process may hold the lock at a time.  The record is
+/// removed once migrations complete.
 pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbError> {
-    // Ensure migration tracking table exists (idempotent).
+    // Ensure migration-tracking tables exist (all DDL is IF NOT EXISTS).
     db.query(MIGRATION_TABLE_DDL)
         .await?
         .check()
         .map_err(|e| DbError::Migration(e.to_string()))?;
+
+    // Acquire a startup lock so that concurrent instances do not race on
+    // schema application.  UPSERT with a deterministic record ID is
+    // idempotent — if a lock record already exists this is a no-op.
+    db.query(
+        "BEGIN TRANSACTION; \
+         UPSERT _migration_lock:`startup` SET locked_at = time::now(); \
+         COMMIT TRANSACTION",
+    )
+    .await?
+    .check()
+    .map_err(|e| DbError::Migration(format!("failed to acquire _migration_lock: {e}")))?;
 
     // Determine current schema version.
     let mut result = db
@@ -810,26 +1136,28 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
                 name = migration.name,
                 "Applying migration"
             );
-            db.query(migration.sql).await?.check().map_err(|e| {
-                DbError::Migration(format!(
-                    "Migration v{} '{}' failed: {}",
-                    migration.version, migration.name, e,
-                ))
-            })?;
 
-            // Record the applied migration.
-            db.query(
-                "CREATE _migration SET version = $version, \
-                 name = $name",
-            )
-            .bind(("version", migration.version))
-            .bind(("name", migration.name))
-            .await?
-            .check()
-            .map_err(|e| {
+            // Wrap the schema DDL and the version-record INSERT in a single
+            // transaction (CQ-B06).  If the DDL succeeds but the INSERT
+            // fails, the whole block is rolled back and the migration will
+            // be retried on the next startup.
+            //
+            // SurrealDB v3 transaction slot offset: BEGIN = slot 0, first
+            // statement = slot 1, … (MEMORY.md).  We don't take() from the
+            // result; we only call .check() to surface errors.
+            let txn = format!(
+                "BEGIN TRANSACTION;\n\
+                 {};\n\
+                 CREATE _migration SET version = {v}, name = '{n}';\n\
+                 COMMIT TRANSACTION",
+                migration.sql,
+                v = migration.version,
+                n = migration.name,
+            );
+            db.query(&txn).await?.check().map_err(|e| {
                 DbError::Migration(format!(
-                    "Failed to record migration v{}: {}",
-                    migration.version, e,
+                    "Migration v{} '{}' failed (transaction rolled back): {}",
+                    migration.version, migration.name, e,
                 ))
             })?;
 
@@ -839,6 +1167,12 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
             );
         }
     }
+
+    // Release the startup lock now that migrations are complete.
+    db.query("DELETE _migration_lock:`startup`")
+        .await?
+        .check()
+        .map_err(|e| DbError::Migration(format!("failed to release migration lock: {e}")))?;
 
     Ok(())
 }

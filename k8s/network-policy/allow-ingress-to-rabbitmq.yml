@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-rabbitmq
+  namespace: axiam
+spec:
+  # SEC-053: Receiver-side ingress policy — restrict RabbitMQ to accept
+  # connections only from axiam-server pods (default-deny complement).
+  podSelector:
+    matchLabels:
+      component: rabbitmq
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              component: server
+      ports:
+        - protocol: TCP
+          port: 5672

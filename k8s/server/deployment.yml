@@ -18,12 +18,21 @@ spec:
         app: axiam
         component: server
     spec:
+      # Pod-level restricted security context (KSV-0118). Container-level
+      # contexts below remain authoritative; this satisfies the pod-scope check.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: axiam-server
-          image: ghcr.io/OWNER/server:latest
+          # Pin a concrete tag, not :latest (KSV-0013). Update per release.
+          image: ghcr.io/OWNER/server:0.1.0
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 8090
               protocol: TCP
             - name: grpc
               containerPort: 50051
@@ -38,13 +47,13 @@ spec:
           readinessProbe:
             httpGet:
               path: /ready
-              port: 8080
+              port: 8090
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
-              port: 8080
+              port: 8090
             initialDelaySeconds: 30
             periodSeconds: 30
           envFrom:
@@ -54,5 +63,12 @@ spec:
                 name: axiam-secrets
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1000
+            runAsUser: 65532          # distroless/cc-debian12:nonroot UID (D-08)
+            runAsGroup: 65532         # KSV-0021: non-root GID > 10000
             readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false   # D-13: restricted profile
+            capabilities:
+              drop:
+                - ALL                 # D-13: restricted profile
+            seccompProfile:
+              type: RuntimeDefault    # D-13: restricted profile

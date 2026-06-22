@@ -1,7 +1,9 @@
 import { useNavigate, useMatches } from "react-router-dom";
 import { Menu, LogOut, ChevronDown, Building2 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
+import { useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
+import api from "@/lib/api";
 import {
   useState,
   useEffect,
@@ -18,6 +20,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
   const navigate = useNavigate();
   const matches = useMatches();
   const { user, tenantSlug, orgSlug, clearAuth } = useAuthStore();
+  const queryClientInstance = useQueryClient();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tenantMenuOpen, setTenantMenuOpen] = useState(false);
   const tenantPanelRef = useRef<HTMLDivElement>(null);
@@ -83,7 +86,13 @@ export function Topbar({ onMenuClick }: TopbarProps) {
     [],
   );
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await api.post("/api/v1/auth/logout", {});
+    } catch {
+      // Ignore errors — still clear local state
+    }
+    queryClientInstance.clear();
     clearAuth();
     navigate("/login");
   };
@@ -225,7 +234,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               </div>
               <button
                 role="menuitem"
-                onClick={handleLogout}
+                onClick={() => void handleLogout()}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-destructive/10 transition-colors"
               >
                 <LogOut size={14} aria-hidden="true" />

@@ -52,6 +52,7 @@ use crate::handlers;
         handlers::users::get,
         handlers::users::update,
         handlers::users::delete,
+        handlers::users::unlock,
         // Groups
         handlers::groups::create,
         handlers::groups::list,
@@ -71,6 +72,8 @@ use crate::handlers;
         handlers::roles::unassign_from_user,
         handlers::roles::assign_to_group,
         handlers::roles::unassign_from_group,
+        handlers::roles::list_users,
+        handlers::roles::list_groups,
         // Permissions
         handlers::permissions::create,
         handlers::permissions::list,
@@ -157,9 +160,8 @@ use crate::handlers;
         handlers::federation::delete,
         handlers::federation::oidc_authorize,
         handlers::federation::oidc_callback,
-        handlers::federation::saml_authn_request,
-        handlers::federation::saml_acs,
-        handlers::federation::saml_metadata,
+        // SAML SP paths live in `SamlApiDoc` (feature-gated) and are merged in
+        // by `api_doc()` when the `saml` feature is enabled.
         handlers::federation::list_user_links,
         handlers::federation::delete_link,
         // Email Verification
@@ -306,10 +308,7 @@ use crate::handlers;
         handlers::federation::OidcAuthorizeRequest,
         handlers::federation::OidcCallbackRequest,
         handlers::federation::OidcCallbackResponse,
-        handlers::federation::SamlAuthnRequestRequest,
-        handlers::federation::SamlAuthnRequestResponse,
-        handlers::federation::SamlAcsRequest,
-        handlers::federation::SamlMetadataQuery,
+        // SAML SP schemas live in `SamlApiDoc` (feature-gated).
         handlers::federation::FederationLinkResponse,
         axiam_core::models::federation::FederationProtocol,
         // OAuth2 Flow
@@ -378,6 +377,37 @@ use crate::handlers;
     modifiers(&SecurityAddon),
 )]
 pub struct ApiDoc;
+
+/// SAML SP paths and schemas, compiled only with the `saml` feature.
+///
+/// Kept separate from [`ApiDoc`] because utoipa's `paths()`/`schemas()` macro
+/// arguments can't be `#[cfg]`-gated individually. [`api_doc`] merges this into
+/// the main document when the feature is on.
+#[cfg(feature = "saml")]
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        handlers::federation::saml_authn_request,
+        handlers::federation::saml_acs,
+        handlers::federation::saml_metadata,
+    ),
+    components(schemas(
+        handlers::federation::SamlAuthnRequestRequest,
+        handlers::federation::SamlAuthnRequestResponse,
+        handlers::federation::SamlAcsRequest,
+        handlers::federation::SamlMetadataQuery,
+    ))
+)]
+struct SamlApiDoc;
+
+/// Build the full OpenAPI document, merging in the SAML SP endpoints when the
+/// `saml` feature is enabled. Use this instead of `ApiDoc::openapi()` directly.
+pub fn api_doc() -> utoipa::openapi::OpenApi {
+    let doc = ApiDoc::openapi();
+    #[cfg(feature = "saml")]
+    let doc = doc.merge_from(SamlApiDoc::openapi());
+    doc
+}
 
 /// Adds Bearer JWT security scheme to the OpenAPI spec.
 struct SecurityAddon;

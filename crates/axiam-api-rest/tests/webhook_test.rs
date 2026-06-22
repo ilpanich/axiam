@@ -1,6 +1,10 @@
 //! Integration tests for webhook management endpoints.
 
+use std::sync::Arc;
+
 use actix_web::{App, test, web};
+use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -17,6 +21,12 @@ use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
+
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
 
 fn test_keypair() -> (String, String) {
     let private_key = "\
@@ -86,19 +96,32 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 macro_rules! test_app {
-    ($db:expr, $auth:expr) => {
+    ($db:expr, $auth:expr) => {{
+        let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new(SurrealWebhookRepository::new($db.clone())))
-                .configure(register_api_v1_routes::<TestDb>),
+                .app_data(web::Data::new(authz))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
-    };
+    }};
 }
 
 #[actix_rt::test]
@@ -112,6 +135,8 @@ async fn create_webhook_returns_201() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created", "auth.login"],
@@ -141,6 +166,8 @@ async fn create_webhook_omits_secret() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -167,6 +194,8 @@ async fn create_webhook_validates_empty_url() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "",
             "events": ["user.created"],
@@ -189,6 +218,8 @@ async fn create_webhook_validates_empty_events() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": [],
@@ -212,6 +243,8 @@ async fn list_webhooks_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -244,6 +277,8 @@ async fn get_webhook_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -296,6 +331,8 @@ async fn update_webhook_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -309,6 +346,8 @@ async fn update_webhook_returns_200() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/webhooks/{id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/new-hook",
             "enabled": false
@@ -334,6 +373,8 @@ async fn delete_webhook_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -347,6 +388,8 @@ async fn delete_webhook_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/webhooks/{id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -374,6 +417,8 @@ async fn delete_nonexistent_webhook_returns_404() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/webhooks/{fake_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -391,6 +436,8 @@ async fn create_webhook_with_custom_retry_policy() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -450,6 +497,8 @@ async fn webhook_tenant_isolation() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -492,6 +541,8 @@ async fn create_webhook_rejects_http_url() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "http://example.com/hook",
             "events": ["user.created"],
@@ -521,6 +572,8 @@ async fn create_webhook_rejects_private_ip() {
         let req = test::TestRequest::post()
             .uri("/api/v1/webhooks")
             .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .set_json(serde_json::json!({
                 "url": url,
                 "events": ["user.created"],
@@ -545,6 +598,8 @@ async fn update_webhook_rejects_invalid_url() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -559,6 +614,8 @@ async fn update_webhook_rejects_invalid_url() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/webhooks/{id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "http://example.com/hook"
         }))
@@ -571,6 +628,8 @@ async fn update_webhook_rejects_invalid_url() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/webhooks/{id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "events": []
         }))
@@ -592,6 +651,8 @@ async fn create_webhook_rejects_invalid_retry_policy() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -610,6 +671,8 @@ async fn create_webhook_rejects_invalid_retry_policy() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],
@@ -628,6 +691,8 @@ async fn create_webhook_rejects_invalid_retry_policy() {
     let req = test::TestRequest::post()
         .uri("/api/v1/webhooks")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "url": "https://example.com/hook",
             "events": ["user.created"],

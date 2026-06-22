@@ -3,6 +3,8 @@ import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { User, Lock, Shield, CheckCircle2, AlertCircle, Pencil, X, Loader2 } from "lucide-react";
 import api from "@/lib/api";
+import { authService } from "@/services/auth";
+import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,24 +15,41 @@ import type { AxiosError } from "axios";
 // API helpers (inline, per spec)
 // ---------------------------------------------------------------------------
 
+// Backend UserResponse: there is NO `display_name` column — it lives inside
+// the free-form `metadata` object (key `display_name`, shared with the users
+// admin UI). `email_verified` is serialized directly on UserResponse.
+// Source: crates/axiam-api-rest/src/handlers/users.rs (UserResponse,
+// UpdateUserRequest).
+interface UserMetadata {
+  display_name?: string;
+  [key: string]: unknown;
+}
+
+interface UserResponse {
+  id: string;
+  username: string;
+  email: string;
+  email_verified: boolean;
+  metadata: UserMetadata;
+}
+
+/** View-model with `display_name` projected out of `metadata` for the UI. */
 interface UserProfile {
   id: string;
   username: string;
   email: string;
-  display_name: string | null;
   email_verified: boolean;
+  display_name: string | null;
+  /** Raw metadata, preserved so updates don't clobber other keys. */
+  metadata: UserMetadata;
 }
 
-interface MfaMethod {
-  id: string;
-  method_type: string;
-  name: string;
-  created_at: string;
-}
+// CQ-F17: use canonical MfaMethod type from services/users.ts
+import type { MfaMethod } from "@/services/users";
 
 interface UpdateProfilePayload {
-  display_name?: string;
   email?: string;
+  metadata?: UserMetadata;
 }
 
 interface ErrorResponse {
@@ -38,23 +57,36 @@ interface ErrorResponse {
   error?: string;
 }
 
-async function getCurrentUser(): Promise<UserProfile> {
-  const res = await api.get<UserProfile>("/api/v1/users/me");
+// The backend addresses users by their real id — there is no `/users/me`
+// alias — so the authenticated user's id is threaded in from the auth store.
+async function getCurrentUser(userId: string): Promise<UserProfile> {
+  const res = await api.get<UserResponse>(`/api/v1/users/${userId}`);
+  const u = res.data;
+  const metadata = u.metadata ?? {};
+  return {
+    id: u.id,
+    username: u.username,
+    email: u.email,
+    email_verified: u.email_verified,
+    display_name:
+      typeof metadata.display_name === "string" ? metadata.display_name : null,
+    metadata,
+  };
+}
+
+async function updateProfile(
+  userId: string,
+  data: UpdateProfilePayload,
+): Promise<UserResponse> {
+  const res = await api.put<UserResponse>(`/api/v1/users/${userId}`, data);
   return res.data;
 }
 
-async function updateProfile(data: UpdateProfilePayload): Promise<UserProfile> {
-  const res = await api.put<UserProfile>("/api/v1/users/me", data);
-  return res.data;
-}
-
-async function resendVerification(): Promise<void> {
-  await api.post("/auth/resend-verification");
-}
-
-async function getMfaMethods(): Promise<MfaMethod[]> {
-  const res = await api.get<MfaMethod[]>("/api/v1/users/me/mfa-methods");
-  return res.data;
+async function getMfaMethods(userId: string): Promise<MfaMethod[]> {
+  const res = await api.get<MfaMethod[] | { items: MfaMethod[] }>(
+    `/api/v1/users/${userId}/mfa-methods`,
+  );
+  return Array.isArray(res.data) ? res.data : res.data.items;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,18 +127,22 @@ export function ProfilePage() {
   const [editing, setEditing] = useState(false);
   const [verificationMessage, setVerificationMessage] = useState<string | null>(null);
 
+  const userId = useAuthStore((s) => s.user?.id);
+
   const { data: profile, isLoading, error: loadError } = useQuery({
-    queryKey: ["currentUser"],
-    queryFn: getCurrentUser,
+    queryKey: ["currentUser", userId],
+    queryFn: () => getCurrentUser(userId!),
+    enabled: !!userId,
   });
 
   const { data: mfaMethods } = useQuery({
-    queryKey: ["mfaMethods"],
-    queryFn: getMfaMethods,
+    queryKey: ["mfaMethods", userId],
+    queryFn: () => getMfaMethods(userId!),
+    enabled: !!userId,
   });
 
   const resendMutation = useMutation({
-    mutationFn: resendVerification,
+    mutationFn: authService.resendVerification,
     onSuccess: () => {
       setVerificationMessage("Verification email sent. Please check your inbox.");
     },
@@ -121,7 +157,18 @@ export function ProfilePage() {
       const display_name = (formData.get("display_name") as string).trim();
       const email = (formData.get("email") as string).trim();
       try {
-        await updateProfile({ display_name: display_name || undefined, email: email || undefined });
+        // display_name has no backend column — persist it inside `metadata`,
+        // merging with existing keys so we don't drop other metadata.
+        const metadata: UserMetadata = { ...(profile?.metadata ?? {}) };
+        if (display_name) {
+          metadata.display_name = display_name;
+        } else {
+          delete metadata.display_name;
+        }
+        await updateProfile(userId!, {
+          email: email || undefined,
+          metadata,
+        });
         await queryClient.invalidateQueries({ queryKey: ["currentUser"] });
         setEditing(false);
         return { error: null, success: true };

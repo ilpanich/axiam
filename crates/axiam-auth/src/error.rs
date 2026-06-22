@@ -65,8 +65,24 @@ pub enum AuthError {
     #[error("cannot remove the last MFA method while MFA is enabled")]
     MfaCannotRemoveLastMethod,
 
+    /// Generic cryptography failure (use typed sub-variants for new call sites).
     #[error("cryptography error: {0}")]
     Crypto(String),
+
+    /// Key material could not be parsed or decoded (e.g. PEM/DER parse failure).
+    #[error("key parse error: {0}")]
+    CryptoKeyParse(String),
+
+    /// AES-GCM decryption failure (authentication tag mismatch or wrong key).
+    #[error("AES decryption error: {0}")]
+    CryptoAesDecrypt(String),
+
+    /// HMAC signature verification failed.
+    #[error("HMAC verification failed: {0}")]
+    CryptoHmacInvalid(String),
+
+    #[error("new password must differ from the current password")]
+    PasswordReusedCurrent,
 }
 
 impl From<AuthError> for AxiamError {
@@ -101,7 +117,13 @@ impl From<AuthError> for AxiamError {
             AuthError::MfaSetupTokenInvalid => AxiamError::AuthenticationFailed {
                 reason: err.to_string(),
             },
-            AuthError::Crypto(msg) => AxiamError::Crypto(msg),
+            AuthError::Crypto(msg)
+            | AuthError::CryptoKeyParse(msg)
+            | AuthError::CryptoAesDecrypt(msg)
+            | AuthError::CryptoHmacInvalid(msg) => AxiamError::Crypto(msg),
+            AuthError::PasswordReusedCurrent => AxiamError::Validation {
+                message: err.to_string(),
+            },
         }
     }
 }

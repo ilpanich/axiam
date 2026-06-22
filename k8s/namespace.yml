@@ -4,3 +4,12 @@ metadata:
   name: axiam
   labels:
     app: axiam
+    # D-13: Pod Security Admission — enforce restricted + keep warn/audit for observability
+    # SEC-053: enforce promoted from warn-only; blocks non-conforming pods at admission time
+    # [kubernetes.io/docs/tasks/configure-pod-container/enforce-standards-namespace-labels/]
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.29
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.29
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.29

@@ -1,6 +1,8 @@
 //! Integration tests for service account endpoints.
 
 use actix_web::{App, test, web};
+use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -13,11 +15,18 @@ use axiam_db::repository::{
     SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
     SurrealServiceAccountRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
+
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
 
 fn test_keypair() -> (String, String) {
     let private_key = "\
@@ -87,7 +96,16 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 macro_rules! test_app {
@@ -110,7 +128,12 @@ macro_rules! test_app {
                 .app_data(web::Data::new(SurrealServiceAccountRepository::new(
                     $db.clone(),
                 )))
-                .configure(register_api_v1_routes::<TestDb>),
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     };
@@ -127,6 +150,8 @@ async fn create_service_account_returns_201_with_secret() {
     let req = test::TestRequest::post()
         .uri("/api/v1/service-accounts")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "CI Bot" }))
         .to_request();
 
@@ -152,6 +177,8 @@ async fn create_service_account_omits_secret_hash() {
     let req = test::TestRequest::post()
         .uri("/api/v1/service-accounts")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "Deploy Bot" }))
         .to_request();
 
@@ -171,6 +198,8 @@ async fn list_service_accounts_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/service-accounts")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "Bot 1" }))
         .to_request();
     test::call_service(&app, req).await;
@@ -199,6 +228,8 @@ async fn get_service_account_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/service-accounts")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "My Bot" }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -229,6 +260,8 @@ async fn update_service_account_returns_200() {
     let req = test::TestRequest::post()
         .uri("/api/v1/service-accounts")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "Old Bot" }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -238,6 +271,8 @@ async fn update_service_account_returns_200() {
     let req = test::TestRequest::put()
         .uri(&format!("/api/v1/service-accounts/{sa_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "New Bot" }))
         .to_request();
 
@@ -259,6 +294,8 @@ async fn delete_service_account_returns_204() {
     let req = test::TestRequest::post()
         .uri("/api/v1/service-accounts")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "Temp Bot" }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -268,6 +305,8 @@ async fn delete_service_account_returns_204() {
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/service-accounts/{sa_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -285,6 +324,8 @@ async fn rotate_secret_returns_new_secret() {
     let req = test::TestRequest::post()
         .uri("/api/v1/service-accounts")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({ "name": "Rotate Bot" }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -296,6 +337,8 @@ async fn rotate_secret_returns_new_secret() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/v1/service-accounts/{sa_id}/rotate-secret"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;

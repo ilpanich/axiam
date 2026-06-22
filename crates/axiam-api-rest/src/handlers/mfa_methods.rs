@@ -8,6 +8,7 @@ use serde::Serialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission, is_own_resource};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -64,19 +65,16 @@ impl From<MfaMethod> for MfaMethodResponse {
 )]
 pub async fn list_mfa_methods<C: Connection>(
     caller: AuthenticatedUser,
+    authz: AuthzData,
     svc: web::Data<MfaMethodSvc<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_id = path.into_inner();
 
-    // TODO(T19): allow admin users to list MFA methods for other users
-    // once RBAC middleware is available.
-    if user_id != caller.user_id {
-        return Err(AxiamApiError(
-            axiam_core::error::AxiamError::AuthorizationDenied {
-                reason: "can only view your own MFA methods".into(),
-            },
-        ));
+    if !is_own_resource(&caller, user_id) {
+        RequirePermission::new("users:admin", Uuid::nil())
+            .check(&caller, authz.get_ref().as_ref())
+            .await?;
     }
 
     let methods = svc.list_methods(caller.tenant_id, user_id).await?;
@@ -108,19 +106,16 @@ pub async fn list_mfa_methods<C: Connection>(
 )]
 pub async fn delete_mfa_method<C: Connection>(
     caller: AuthenticatedUser,
+    authz: AuthzData,
     svc: web::Data<MfaMethodSvc<C>>,
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let (user_id, method_id) = path.into_inner();
 
-    // TODO(T19): allow admin users to delete MFA methods for other users
-    // once RBAC middleware is available.
-    if user_id != caller.user_id {
-        return Err(AxiamApiError(
-            axiam_core::error::AxiamError::AuthorizationDenied {
-                reason: "can only delete your own MFA methods".into(),
-            },
-        ));
+    if !is_own_resource(&caller, user_id) {
+        RequirePermission::new("users:admin", Uuid::nil())
+            .check(&caller, authz.get_ref().as_ref())
+            .await?;
     }
 
     svc.delete_method(caller.tenant_id, user_id, &method_id)

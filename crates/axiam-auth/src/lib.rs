@@ -2,6 +2,7 @@
 //! and MFA (TOTP).
 
 pub mod config;
+pub mod crypto;
 pub mod error;
 pub mod mfa_methods;
 pub mod password;

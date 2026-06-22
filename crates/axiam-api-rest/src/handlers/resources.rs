@@ -8,6 +8,7 @@ use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -20,6 +21,14 @@ pub struct CreateResourceRequest {
     pub name: String,
     pub resource_type: String,
     pub parent_id: Option<Uuid>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateResourceRequest {
+    pub name: Option<String>,
+    pub resource_type: Option<String>,
+    pub parent_id: Option<Option<Uuid>>,
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -40,9 +49,13 @@ pub struct CreateResourceRequest {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealResourceRepository<C>>,
     body: web::Json<CreateResourceRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("resources:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     let input = CreateResource {
         tenant_id: user.tenant_id,
@@ -68,9 +81,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealResourceRepository<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("resources:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, query.into_inner()).await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -89,9 +106,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealResourceRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("resources:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let resource = repo.get_by_id(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::Ok().json(resource))
 }
@@ -102,7 +123,7 @@ pub async fn get<C: Connection>(
     path = "/api/v1/resources/{resource_id}",
     tag = "resources",
     params(("resource_id" = Uuid, Path, description = "Resource ID")),
-    request_body = UpdateResource,
+    request_body = UpdateResourceRequest,
     responses(
         (status = 200, description = "Resource updated", body = Resource),
         (status = 404, description = "Resource not found"),
@@ -111,12 +132,23 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealResourceRepository<C>>,
     path: web::Path<Uuid>,
-    body: web::Json<UpdateResource>,
+    body: web::Json<UpdateResourceRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("resources:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let req = body.into_inner();
+    let input = UpdateResource {
+        name: req.name,
+        resource_type: req.resource_type,
+        parent_id: req.parent_id,
+        metadata: req.metadata,
+    };
     let resource = repo
-        .update(user.tenant_id, path.into_inner(), body.into_inner())
+        .update(user.tenant_id, path.into_inner(), input)
         .await?;
     Ok(HttpResponse::Ok().json(resource))
 }
@@ -135,9 +167,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealResourceRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("resources:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     repo.delete(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -159,9 +195,13 @@ pub async fn delete<C: Connection>(
 )]
 pub async fn list_children<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealResourceRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("resources:list_children", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let children = repo.get_children(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::Ok().json(children))
 }
@@ -179,9 +219,13 @@ pub async fn list_children<C: Connection>(
 )]
 pub async fn list_ancestors<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealResourceRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("resources:list_ancestors", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let ancestors = repo
         .get_ancestors(user.tenant_id, path.into_inner())
         .await?;

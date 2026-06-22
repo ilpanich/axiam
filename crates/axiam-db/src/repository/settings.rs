@@ -1,5 +1,6 @@
 //! SurrealDB implementation of [`SettingsRepository`].
 
+use crate::error::DbError;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::settings::{
     CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
@@ -12,8 +13,6 @@ use chrono::{DateTime, Utc};
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
-
-use crate::error::DbError;
 
 // -----------------------------------------------------------------------
 // Row structs (flat, matching DB columns)
@@ -51,6 +50,9 @@ struct SettingsRow {
     cert_max_validity: u32,
     // Notification
     notif_admin_enabled: bool,
+    // Sparse override mask (tenant rows only — V16 / CQ-B03).
+    // JSON-encoded `TenantSettingsOverride`; `None` for org rows.
+    overrides_json: Option<String>,
     // Timestamps
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -89,6 +91,8 @@ struct SettingsRowWithId {
     cert_max_validity: u32,
     // Notification
     notif_admin_enabled: bool,
+    // Sparse override mask (tenant rows only — V16 / CQ-B03).
+    overrides_json: Option<String>,
     // Timestamps
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -174,7 +178,8 @@ email_verification_required = $email_verification_required, \
 email_grace_period_hours = $email_grace_period_hours, \
 cert_default_validity = $cert_default_validity, \
 cert_max_validity = $cert_max_validity, \
-notif_admin_enabled = $notif_admin_enabled";
+notif_admin_enabled = $notif_admin_enabled, \
+overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
 SELECT meta::id(id) AS record_id, * \
@@ -197,8 +202,15 @@ impl<C: Connection> SurrealSettingsRepository<C> {
     }
 
     /// Bind all settings fields from a SecuritySettings onto a query.
-    fn bind_settings(&self, settings: &SecuritySettings) -> Vec<(&'static str, BindValue)> {
-        vec![
+    ///
+    /// `overrides_json` is `Some(json)` for tenant rows (sparse override mask
+    /// for CQ-B03 propagation) and `None` for org rows.
+    fn bind_settings(
+        &self,
+        settings: &SecuritySettings,
+        overrides_json: Option<String>,
+    ) -> Vec<(&'static str, BindValue)> {
+        let mut bindings = vec![
             ("scope", BindValue::Str(settings.scope.to_string())),
             ("scope_id", BindValue::Str(settings.scope_id.to_string())),
             (
@@ -278,7 +290,9 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                 "notif_admin_enabled",
                 BindValue::Bool(settings.notification.admin_notifications_enabled),
             ),
-        ]
+        ];
+        bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
+        bindings
     }
 
     /// Look up the organization_id for a tenant from the tenant table.
@@ -324,10 +338,42 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         }
     }
 
+    /// Fetch a settings row, returning both the resolved `SecuritySettings`
+    /// and the raw `overrides_json` string (CQ-B03).
+    async fn fetch_row_with_overrides(
+        &self,
+        scope: &str,
+        scope_id: &str,
+    ) -> Result<Option<(SecuritySettings, Option<String>)>, DbError> {
+        let mut result = self
+            .db
+            .query(SELECT_WITH_ID)
+            .bind(("scope", scope.to_string()))
+            .bind(("scope_id", scope_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<SettingsRowWithId> = result.take(0).map_err(DbError::from)?;
+        match rows.into_iter().next() {
+            Some(row) => {
+                let overrides_json = row.overrides_json.clone();
+                Ok(Some((row.try_into_security_settings()?, overrides_json)))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Upsert a complete settings row. Reuses the existing record ID
     /// and preserves `created_at` when a row already exists (UPDATE).
     /// Creates a new row otherwise (CREATE).
-    async fn upsert(&self, settings: &SecuritySettings) -> Result<SecuritySettings, DbError> {
+    ///
+    /// `overrides_json` is `Some(json)` for tenant rows (sparse override mask,
+    /// CQ-B03) and `None` for org rows.
+    async fn upsert(
+        &self,
+        settings: &SecuritySettings,
+        overrides_json: Option<String>,
+    ) -> Result<SecuritySettings, DbError> {
         // Use a deterministic record ID derived from (scope, scope_id) so
         // that concurrent requests for the same key converge on the same
         // row.  UPDATE on a deterministic ID is a single-statement upsert
@@ -351,11 +397,12 @@ impl<C: Connection> SurrealSettingsRepository<C> {
              updated_at = time::now()",
         );
 
-        let bindings = self.bind_settings(settings);
+        let bindings = self.bind_settings(settings, overrides_json);
         let mut builder = self.db.query(&query).bind(("id", id_str.clone()));
         for (name, value) in bindings {
             builder = match value {
                 BindValue::Str(v) => builder.bind((name, v)),
+                BindValue::OptionStr(v) => builder.bind((name, v)),
                 BindValue::Bool(v) => builder.bind((name, v)),
                 BindValue::U32(v) => builder.bind((name, v)),
                 BindValue::U64(v) => builder.bind((name, v)),
@@ -421,6 +468,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
 /// Helper enum to avoid Box<dyn> for query bindings.
 enum BindValue {
     Str(String),
+    OptionStr(Option<String>),
     Bool(bool),
     U32(u32),
     U64(u64),
@@ -458,8 +506,9 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         input: SetOrgSettings,
     ) -> AxiamResult<SecuritySettings> {
         // ID will be determined by upsert (reuses existing or generates new).
+        // Org rows carry no overrides_json (None = org-scope row).
         let settings = settings_from_org_input(Uuid::nil(), org_id, &input);
-        let result = self.upsert(&settings).await?;
+        let result = self.upsert(&settings, None).await?;
         Ok(result)
     }
 
@@ -467,26 +516,59 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         &self,
         tenant_id: Uuid,
     ) -> AxiamResult<Option<TenantSettingsOverride>> {
-        let tenant_row = self.fetch_row("tenant", &tenant_id.to_string()).await?;
-        match tenant_row {
+        // Always look up the org so we can fall back to diff-against-org
+        // for pre-V16 rows (no overrides_json present).
+        let org_id = self.lookup_org_id(tenant_id).await?;
+        let org = self.get_org_settings(org_id).await?;
+
+        match self
+            .fetch_row_with_overrides("tenant", &tenant_id.to_string())
+            .await?
+        {
             None => Ok(None),
-            Some(tenant_settings) => {
-                // Look up the tenant's org_id to compute a proper diff.
-                let org_id = self.lookup_org_id(tenant_id).await?;
-                let org = self.get_org_settings(org_id).await?;
-                Ok(Some(diff_against_org(&org, &tenant_settings)))
+            Some((tenant_settings, overrides_json_opt)) => {
+                let overrides = if let Some(ref json) = overrides_json_opt {
+                    // V16+ row: return the stored sparse mask directly.
+                    serde_json::from_str::<TenantSettingsOverride>(json)
+                        .unwrap_or_else(|_| diff_against_org(&org, &tenant_settings))
+                } else {
+                    // Pre-V16 row: compute from diff.
+                    diff_against_org(&org, &tenant_settings)
+                };
+                Ok(Some(overrides))
             }
         }
     }
 
+    /// Store tenant settings as a sparse override (CQ-B03/SEC-033).
+    ///
+    /// Diffs the supplied merged `settings` against the current org baseline
+    /// so that only genuinely overridden fields are persisted in the
+    /// `overrides_json` column.  `get_effective_settings` reads from
+    /// `overrides_json` at read time, so a later org baseline change
+    /// propagates to any field the tenant did not explicitly override.
     async fn store_effective_tenant_settings(
         &self,
         tenant_id: Uuid,
-        mut settings: SecuritySettings,
+        settings: SecuritySettings,
     ) -> AxiamResult<SecuritySettings> {
-        settings.scope = SettingsScope::Tenant;
-        settings.scope_id = tenant_id;
-        let result = self.upsert(&settings).await?;
+        // Look up the current org baseline so we can isolate the true overrides.
+        let org_id = self.lookup_org_id(tenant_id).await?;
+        let org = self.get_org_settings(org_id).await?;
+
+        // Compute only the fields that genuinely differ from the org baseline.
+        let sparse_overrides = diff_against_org(&org, &settings);
+
+        // Persist the sparse override mask alongside the merged row.
+        let overrides_json = serde_json::to_string(&sparse_overrides)
+            .map_err(|e| DbError::Migration(format!("failed to serialize overrides: {e}")))?;
+
+        // Re-merge to produce the canonical stored row.  The `overrides_json`
+        // column preserves which fields were explicitly set so that
+        // `get_effective_settings` can distinguish intent from inheritance.
+        let merged = effective_settings(&org, &sparse_overrides, tenant_id, settings.id);
+
+        let result = self.upsert(&merged, Some(overrides_json)).await?;
         Ok(result)
     }
 
@@ -499,14 +581,19 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
         let org_id = self.lookup_org_id(tenant_id).await?;
         let org = self.get_org_settings(org_id).await?;
 
-        // Merge org baseline + overrides into a complete tenant row.
+        // Persist the sparse override mask (CQ-B03) so that a later org
+        // baseline change propagates to fields the tenant did not override.
+        let overrides_json = serde_json::to_string(&input)
+            .map_err(|e| DbError::Migration(format!("failed to serialize overrides: {e}")))?;
+
+        // Merge org baseline + overrides into a complete tenant row to be
+        // stored; the full merged values populate all required schema fields.
         let merged = effective_settings(&org, &input, tenant_id, Uuid::nil());
 
-        let result = self.upsert(&merged).await?;
-        // Diff the stored result against the org baseline (not the
-        // previous tenant row) so the returned override reflects
-        // actual deviations from org policy.
-        Ok(diff_against_org(&org, &result))
+        self.upsert(&merged, Some(overrides_json)).await?;
+        // Return the sparse diff against the org baseline so the caller sees
+        // only the explicitly-set overrides (not inherited values).
+        Ok(diff_against_org(&org, &merged))
     }
 
     async fn delete_tenant_override(&self, tenant_id: Uuid) -> AxiamResult<()> {
@@ -528,11 +615,26 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
     ) -> AxiamResult<SecuritySettings> {
         let org = self.get_org_settings(org_id).await?;
 
-        // If there is a stored tenant row, diff it against the current
-        // org baseline and re-merge so that any org-level changes propagate
-        // to fields the tenant has NOT explicitly overridden.
-        if let Some(tenant_row) = self.fetch_row("tenant", &tenant_id.to_string()).await? {
-            let overrides = diff_against_org(&org, &tenant_row);
+        // If there is a stored tenant row, resolve effective settings by
+        // merging the current org baseline with the tenant's sparse overrides.
+        // The sparse overrides are stored in `overrides_json` (V16, CQ-B03).
+        // For rows written before V16 we fall back to diff-against-org for
+        // backward compatibility.
+        if let Some((tenant_row, overrides_json_opt)) = self
+            .fetch_row_with_overrides("tenant", &tenant_id.to_string())
+            .await?
+        {
+            let overrides: TenantSettingsOverride = if let Some(ref json) = overrides_json_opt {
+                // V16+ row: use the stored sparse override mask directly so
+                // that fields the tenant did NOT override pick up the current
+                // org baseline (CQ-B03).
+                serde_json::from_str(json).unwrap_or_else(|_| diff_against_org(&org, &tenant_row))
+            } else {
+                // Pre-V16 row: fall back to diff-against-org.  This may
+                // produce stale results until the row is next written through
+                // `set_tenant_override` or `store_effective_tenant_settings`.
+                diff_against_org(&org, &tenant_row)
+            };
             let mut merged = effective_settings(&org, &overrides, tenant_id, tenant_row.id);
             // Preserve the persisted timestamps rather than using
             // Utc::now() from the merge function.

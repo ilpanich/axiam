@@ -19,9 +19,18 @@ spec:
         app: axiam
         component: surrealdb
     spec:
+      # Pod-level restricted security context (KSV-0118). Mirrors the container
+      # context below; fsGroup makes the /data PVC writable under the non-root UID.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: surrealdb
-          image: surrealdb/surrealdb:v2
+          image: surrealdb/surrealdb:v3
           command: ["surreal"]
           args:
             - "start"
@@ -43,6 +52,16 @@ spec:
                 secretKeyRef:
                   name: surrealdb-credentials
                   key: password
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532          # D-13 best-effort: surrealdb v3 nonroot UID (adjust if image uses different UID)
+            readOnlyRootFilesystem: true      # KSV-0014: immutable root fs; persistent data lives on the PVC, scratch on emptyDir /tmp
+            allowPrivilegeEscalation: false   # D-13: restricted profile
+            capabilities:
+              drop:
+                - ALL                 # D-13: restricted profile
+            seccompProfile:
+              type: RuntimeDefault    # D-13: restricted profile
           ports:
             - containerPort: 8000
               name: http
@@ -50,6 +69,8 @@ spec:
           volumeMounts:
             - name: surrealdb-data
               mountPath: /data
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 250m
@@ -67,6 +88,11 @@ spec:
               command: ["/surreal", "isready"]
             initialDelaySeconds: 30
             periodSeconds: 10
+      volumes:
+        # Writable scratch space required because the root filesystem is
+        # read-only (KSV-0014). Persistent DB state lives on the PVC at /data.
+        - name: tmp
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: surrealdb-data

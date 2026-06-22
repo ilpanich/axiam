@@ -10,6 +10,8 @@ pub enum UserStatus {
     Inactive,
     Locked,
     PendingVerification,
+    /// User has been anonymized in-place following Art. 17 erasure (D-05).
+    Anonymized,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -23,10 +25,19 @@ pub struct User {
     pub mfa_enabled: bool,
     /// AES-256-GCM encrypted TOTP secret (if MFA is enrolled).
     pub mfa_secret: Option<String>,
+    /// The TOTP time-step counter value last successfully verified.
+    ///
+    /// Used to prevent replay attacks: a code whose step ≤ this value is
+    /// rejected even if the HMAC is correct (SEC-008).
+    pub totp_last_used_step: Option<u64>,
     pub failed_login_attempts: u32,
     pub last_failed_login_at: Option<DateTime<Utc>>,
     pub locked_until: Option<DateTime<Utc>>,
     pub email_verified_at: Option<DateTime<Utc>>,
+    /// GDPR Art. 17 — set when user requests account deletion (D-08).
+    pub deletion_pending: bool,
+    /// Scheduled purge date when `deletion_pending` is true (D-08).
+    pub scheduled_purge_at: Option<DateTime<Utc>>,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -56,6 +67,8 @@ pub struct UpdateUser {
     pub mfa_enabled: Option<bool>,
     /// `Some(Some(val))` = set, `Some(None)` = clear, `None` = no change.
     pub mfa_secret: Option<Option<String>>,
+    /// `Some(Some(val))` = set, `Some(None)` = clear, `None` = no change.
+    pub totp_last_used_step: Option<Option<u64>>,
     pub failed_login_attempts: Option<u32>,
     pub last_failed_login_at: Option<Option<DateTime<Utc>>>,
     pub locked_until: Option<Option<DateTime<Utc>>>,

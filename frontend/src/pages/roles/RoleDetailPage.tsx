@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -9,10 +9,13 @@ import {
   permissionService,
   type Permission,
 } from "@/services/permissions";
-import { userService, groupService, type User, type Group } from "@/services/users";
+import { groupService, type Group, type User } from "@/services/users";
+import { useToast } from "@/hooks/useToast";
+import { getApiErrorMessage } from "@/lib/apiError";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { UserSearchDialog } from "@/components/UserSearchDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -120,9 +123,10 @@ function GrantPermissionDialog({
     enabled: open,
   });
 
-  const filtered = allPermissions.filter((p) =>
-    p.name.toLowerCase().includes(search.toLowerCase()) ||
-    p.action.toLowerCase().includes(search.toLowerCase())
+  const filtered = allPermissions.filter(
+    (p) =>
+      p.action.toLowerCase().includes(search.toLowerCase()) ||
+      (p.description ?? "").toLowerCase().includes(search.toLowerCase())
   );
 
   async function handleGrant(permission: Permission) {
@@ -215,17 +219,14 @@ function GrantPermissionDialog({
                       className="flex items-center justify-between px-3 py-2.5 hover:bg-white/5 border-b border-white/5 last:border-0"
                     >
                       <div>
-                        <p className="text-sm font-medium text-foreground/90">
-                          {perm.name}
-                        </p>
-                        <div className="flex items-center gap-2 mt-0.5">
+                        <div className="flex items-center gap-2">
                           <ActionBadge action={perm.action} />
-                          {perm.resource_id && (
-                            <span className="text-xs text-muted-foreground">
-                              {perm.resource_id}
-                            </span>
-                          )}
                         </div>
+                        {perm.description && (
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {perm.description}
+                          </p>
+                        )}
                       </div>
                       {alreadyGranted ? (
                         <span className="text-xs text-muted-foreground">
@@ -248,179 +249,6 @@ function GrantPermissionDialog({
                     </li>
                   );
                 })}
-              </ul>
-            )}
-          </div>
-        </div>
-
-        <div className="flex justify-end pt-4 border-t border-primary/10">
-          <Button variant="ghost" onClick={handleClose}>
-            Done
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Assign User dialog ───────────────────────────────────────────────────────
-
-interface AssignUserDialogProps {
-  open: boolean;
-  onClose: () => void;
-  roleId: string;
-  onAssigned: () => void;
-}
-
-function AssignUserDialog({
-  open,
-  onClose,
-  roleId,
-  onAssigned,
-}: AssignUserDialogProps) {
-  const [searchTerm, setSearchTerm] = useState("");
-  const [results, setResults] = useState<User[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [assigningId, setAssigningId] = useState<string | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  function handleSearchChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const term = e.target.value;
-    setSearchTerm(term);
-
-    if (debounceRef.current !== null) clearTimeout(debounceRef.current);
-    if (!term.trim()) {
-      setResults([]);
-      return;
-    }
-    debounceRef.current = setTimeout(async () => {
-      setSearching(true);
-      try {
-        const data = await userService.list(1, 20, term.trim());
-        setResults(data.data);
-      } catch {
-        setResults([]);
-      } finally {
-        setSearching(false);
-      }
-    }, 300);
-  }
-
-  async function handleAssign(user: User) {
-    setAssigningId(user.id);
-    try {
-      await roleService.assignToUser(roleId, user.id);
-      onAssigned();
-      setResults((prev) => prev.filter((u) => u.id !== user.id));
-    } catch {
-      // silently ignore
-    } finally {
-      setAssigningId(null);
-    }
-  }
-
-  function handleClose() {
-    setSearchTerm("");
-    setResults([]);
-    onClose();
-  }
-
-  if (!open) return null;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      aria-modal="true"
-      role="dialog"
-      aria-labelledby="assign-user-title"
-    >
-      <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={handleClose}
-        aria-hidden="true"
-      />
-      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[80vh]">
-        <div className="flex items-center justify-between pb-4 border-b border-primary/10">
-          <h2
-            id="assign-user-title"
-            className="text-lg font-semibold text-foreground"
-          >
-            Assign User
-          </h2>
-          <button
-            onClick={handleClose}
-            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-none focus:ring-2 focus:ring-primary/40"
-            aria-label="Close dialog"
-          >
-            ✕
-          </button>
-        </div>
-
-        <div className="py-4 flex flex-col gap-3 overflow-hidden">
-          <div className="relative">
-            <Search
-              size={15}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none"
-              aria-hidden="true"
-            />
-            <input
-              type="search"
-              value={searchTerm}
-              onChange={handleSearchChange}
-              placeholder="Search users…"
-              aria-label="Search users"
-              className={cn(
-                "h-9 w-full rounded-md pl-9 pr-3 text-sm",
-                "bg-white/5 border border-primary/20 text-foreground",
-                "placeholder:text-muted-foreground",
-                "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
-                "transition-colors duration-200"
-              )}
-            />
-          </div>
-
-          <div className="overflow-y-auto flex-1 min-h-[120px] max-h-60 rounded-md border border-white/5">
-            {searching ? (
-              <div className="flex items-center justify-center py-6">
-                <Loader2 size={20} className="animate-spin text-primary/60" />
-              </div>
-            ) : !searchTerm ? (
-              <p className="text-sm text-muted-foreground text-center py-6">
-                Type to search for users.
-              </p>
-            ) : results.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-6">
-                No users found.
-              </p>
-            ) : (
-              <ul>
-                {results.map((user) => (
-                  <li
-                    key={user.id}
-                    className="flex items-center justify-between px-3 py-2.5 hover:bg-white/5 border-b border-white/5 last:border-0"
-                  >
-                    <div>
-                      <p className="text-sm font-medium text-foreground/90">
-                        {user.display_name ?? user.username}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {user.email}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => handleAssign(user)}
-                      disabled={assigningId === user.id}
-                      className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-primary/20 text-primary hover:bg-primary/30 transition-colors disabled:opacity-50"
-                    >
-                      {assigningId === user.id ? (
-                        <Loader2 size={12} className="animate-spin" />
-                      ) : (
-                        <Plus size={12} />
-                      )}
-                      Assign
-                    </button>
-                  </li>
-                ))}
               </ul>
             )}
           </div>
@@ -596,6 +424,7 @@ type AssignmentTab = "users" | "groups";
 export function RoleDetailPage() {
   const { roleId } = useParams<{ roleId: string }>();
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   // ─── Role query ────────────────────────────────────────────────────────────
   const {
@@ -616,7 +445,14 @@ export function RoleDetailPage() {
       enabled: !!roleId,
     });
 
-  const grantedPermissionIds = new Set(grantedPermissions.map((p) => p.id));
+  const grantedPermissionIds = new Set(
+    grantedPermissions.map((g) => g.permission.id)
+  );
+
+  // Flatten grants to the underlying permissions for the table.
+  const grantedPermissionList: Permission[] = grantedPermissions.map(
+    (g) => g.permission
+  );
 
   // ─── Edit state ────────────────────────────────────────────────────────────
   const [editOpen, setEditOpen] = useState(false);
@@ -696,28 +532,57 @@ export function RoleDetailPage() {
   const [assignUserOpen, setAssignUserOpen] = useState(false);
   const [assignGroupOpen, setAssignGroupOpen] = useState(false);
 
+  // ─── Assigned users/groups ─────────────────────────────────────────────────
+  const { data: assignedUsers = [], isLoading: usersLoading } = useQuery({
+    queryKey: ["role-users", roleId],
+    queryFn: () => roleService.listUsers(roleId!),
+    enabled: !!roleId,
+  });
+
+  const { data: assignedGroups = [], isLoading: groupsLoading } = useQuery({
+    queryKey: ["role-groups", roleId],
+    queryFn: () => roleService.listGroups(roleId!),
+    enabled: !!roleId,
+  });
+
+  const [unassignUser, setUnassignUser] = useState<User | null>(null);
+  const [unassignGroup, setUnassignGroup] = useState<Group | null>(null);
+
+  const unassignUserMutation = useMutation({
+    mutationFn: (userId: string) => roleService.unassignFromUser(roleId!, userId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["role-users", roleId] });
+      setUnassignUser(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
+    },
+  });
+
+  const unassignGroupMutation = useMutation({
+    mutationFn: (gId: string) => roleService.unassignFromGroup(roleId!, gId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["role-groups", roleId] });
+      setUnassignGroup(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
+    },
+  });
+
   // ─── Permissions table columns ─────────────────────────────────────────────
   const permissionColumns: Column<Permission>[] = [
     {
-      key: "name",
-      header: "Permission",
-      render: (row) => (
-        <span className="font-medium text-foreground/90">{row.name}</span>
-      ),
-    },
-    {
       key: "action",
-      header: "Action",
+      header: "Permission",
       render: (row) => <ActionBadge action={row.action} />,
     },
     {
-      key: "resource_id",
-      header: "Resource",
+      key: "description",
+      header: "Description",
       render: (row) => (
         <span className="text-muted-foreground text-sm">
-          {row.resource_id ?? (
-            <span className="text-cyan-400/70 text-xs italic">Global</span>
-          )}
+          {row.description ?? <span className="opacity-40">—</span>}
         </span>
       ),
     },
@@ -736,7 +601,7 @@ export function RoleDetailPage() {
       width: "w-16",
       render: (row) => (
         <button
-          aria-label={`Revoke ${row.name}`}
+          aria-label={`Revoke ${row.action}`}
           onClick={() => setRevokePermission(row)}
           className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
           title="Revoke permission"
@@ -807,7 +672,7 @@ export function RoleDetailPage() {
       >
         <DataTable
           columns={permissionColumns}
-          data={grantedPermissions}
+          data={grantedPermissionList}
           isLoading={permissionsLoading}
           emptyMessage="No permissions granted to this role."
         />
@@ -849,25 +714,60 @@ export function RoleDetailPage() {
         </div>
 
         {assignmentTab === "users" && (
-          <div className="py-4 text-sm text-muted-foreground text-center">
-            <p>
-              Use "Assign User" to grant this role to a user directly.
-            </p>
-            <p className="mt-1 text-xs opacity-60">
-              Assigned users are visible on each user's detail page.
-            </p>
-          </div>
+          usersLoading ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader2 size={20} className="animate-spin text-primary/60" />
+            </div>
+          ) : assignedUsers.length === 0 ? (
+            <div className="py-4 text-sm text-muted-foreground text-center">
+              <p>No users assigned. Use "Assign User" to grant this role.</p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-white/5">
+              {assignedUsers.map((u) => (
+                <li key={u.id} className="flex items-center justify-between py-2.5 px-1">
+                  <div>
+                    <p className="text-sm font-medium text-foreground/90">{u.display_name ?? u.username}</p>
+                    <p className="text-xs text-muted-foreground">{u.email}</p>
+                  </div>
+                  <button
+                    aria-label={`Unassign ${u.username}`}
+                    onClick={() => setUnassignUser(u)}
+                    className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <Unlink size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
         )}
 
         {assignmentTab === "groups" && (
-          <div className="py-4 text-sm text-muted-foreground text-center">
-            <p>
-              Use "Assign Group" to grant this role to all members of a group.
-            </p>
-            <p className="mt-1 text-xs opacity-60">
-              Assigned groups are visible on each group's detail page.
-            </p>
-          </div>
+          groupsLoading ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader2 size={20} className="animate-spin text-primary/60" />
+            </div>
+          ) : assignedGroups.length === 0 ? (
+            <div className="py-4 text-sm text-muted-foreground text-center">
+              <p>No groups assigned. Use "Assign Group" to grant this role.</p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-white/5">
+              {assignedGroups.map((g) => (
+                <li key={g.id} className="flex items-center justify-between py-2.5 px-1">
+                  <p className="text-sm font-medium text-foreground/90">{g.name}</p>
+                  <button
+                    aria-label={`Unassign group ${g.name}`}
+                    onClick={() => setUnassignGroup(g)}
+                    className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <Unlink size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
         )}
       </SectionCard>
 
@@ -899,7 +799,7 @@ export function RoleDetailPage() {
           revokePermission && revokeMutation.mutate(revokePermission.id)
         }
         title="Revoke Permission"
-        description={`Remove permission "${revokePermission?.name}" from this role?`}
+        description={`Remove permission "${revokePermission?.action}" from this role?`}
         isLoading={revokeMutation.isPending}
       />
 
@@ -913,11 +813,15 @@ export function RoleDetailPage() {
       />
 
       {/* Assign user dialog */}
-      <AssignUserDialog
+      <UserSearchDialog
         open={assignUserOpen}
         onClose={() => setAssignUserOpen(false)}
-        roleId={roleId!}
-        onAssigned={() => {}}
+        title="Assign User"
+        actionLabel="Assign"
+        onAction={async (user) => {
+          await roleService.assignToUser(roleId!, user.id);
+          void queryClient.invalidateQueries({ queryKey: ["role-users", roleId] });
+        }}
       />
 
       {/* Assign group dialog */}
@@ -926,8 +830,29 @@ export function RoleDetailPage() {
         onClose={() => setAssignGroupOpen(false)}
         roleId={roleId!}
         onAssigned={() => {
+          void queryClient.invalidateQueries({ queryKey: ["role-groups", roleId] });
           setAssignGroupOpen(false);
         }}
+      />
+
+      {/* Unassign user confirm */}
+      <ConfirmDialog
+        open={unassignUser !== null}
+        onClose={() => setUnassignUser(null)}
+        onConfirm={() => unassignUser && unassignUserMutation.mutate(unassignUser.id)}
+        title="Unassign User"
+        description={`Remove this role from "${unassignUser?.display_name ?? unassignUser?.username}"?`}
+        isLoading={unassignUserMutation.isPending}
+      />
+
+      {/* Unassign group confirm */}
+      <ConfirmDialog
+        open={unassignGroup !== null}
+        onClose={() => setUnassignGroup(null)}
+        onConfirm={() => unassignGroup && unassignGroupMutation.mutate(unassignGroup.id)}
+        title="Unassign Group"
+        description={`Remove this role from group "${unassignGroup?.name}"?`}
+        isLoading={unassignGroupMutation.isPending}
       />
     </div>
   );

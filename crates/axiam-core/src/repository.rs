@@ -3,10 +3,11 @@
 //! All repository operations are async. Tenant-scoped repositories
 //! require a `tenant_id` parameter to enforce data isolation.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::error::AxiamResult;
+use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
@@ -16,6 +17,10 @@ use crate::models::{
     federation::{
         CreateFederationConfig, CreateFederationLink, FederationConfig, FederationLink,
         UpdateFederationConfig,
+    },
+    gdpr::{
+        AccountDeletion, Consent, CreateAccountDeletion, CreateConsent, CreateErasureProof,
+        CreateExportJob, ErasureProof, ExportJob,
     },
     group::{CreateGroup, Group, UpdateGroup},
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
@@ -40,11 +45,24 @@ use crate::models::{
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
 };
 
+/// Clamp a pagination limit to [1, 200] at deserialization time.
+///
+/// Prevents resource exhaustion from unbounded page requests (SEC-010/CQ-B30).
+/// Direct struct construction is unaffected — only the serde path clamps.
+fn clamp_pagination_limit<'de, D>(de: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = u64::deserialize(de)?;
+    Ok(raw.clamp(1, 200))
+}
+
 /// Pagination parameters for list queries.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(default)]
 pub struct Pagination {
     pub offset: u64,
+    #[serde(deserialize_with = "clamp_pagination_limit")]
     pub limit: u64,
 }
 
@@ -139,11 +157,48 @@ pub trait UserRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<User>> + Send;
     /// Soft-delete: sets status to Inactive.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Persist the last-used TOTP step after a successful verification.
+    ///
+    /// Called by `AuthService` after a TOTP code is accepted to prevent replay
+    /// within the same time window (SEC-008 / REQ-14 AC-5).
+    fn update_totp_step(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        step: u64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<User>>> + Send;
+
+    /// Atomically increment the failed-login counter (SEC-032).
+    ///
+    /// Avoids read-modify-write TOCTOU by delegating the increment to the DB
+    /// layer via a single `UPDATE ... SET field += 1` statement.
+    ///
+    /// When the new attempt count reaches `lockout_threshold`, the account is
+    /// locked until `now + d`, where `d` grows exponentially with each lockout
+    /// beyond the threshold (brute-force protection, design-document §Security):
+    ///
+    /// ```text
+    /// d = min(base_lockout_secs * backoff_multiplier ^ (new_count - threshold),
+    ///         max_lockout_secs)
+    /// ```
+    ///
+    /// so the first lockout lasts `base_lockout_secs`, the next
+    /// `base * multiplier`, and so on, capped at `max_lockout_secs`.
+    fn increment_failed_logins(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        lockout_threshold: u32,
+        base_lockout_secs: i64,
+        backoff_multiplier: f64,
+        max_lockout_secs: i64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 pub trait RoleRepository: Send + Sync {
@@ -223,6 +278,20 @@ pub trait RoleRepository: Send + Sync {
         tenant_id: Uuid,
         group_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Role>>> + Send;
+
+    /// Get the IDs of all users directly assigned this role.
+    fn get_role_user_ids(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send;
+
+    /// Get the IDs of all groups directly assigned this role.
+    fn get_role_group_ids(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send;
 }
 
 pub trait PermissionRepository: Send + Sync {
@@ -401,6 +470,16 @@ pub trait SessionRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+    /// Invalidate all sessions for a user except one (e.g., on password
+    /// change — preserve the caller's current session).
+    ///
+    /// Returns the number of sessions deleted.
+    fn invalidate_user_sessions_except(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
     /// Remove all expired sessions.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
@@ -501,6 +580,26 @@ pub trait AuditLogRepository: Send + Sync {
         tenant_id: Uuid,
         ids: &[Uuid],
     ) -> impl Future<Output = AxiamResult<Vec<AuditLogEntry>>> + Send;
+
+    /// Pseudonymize audit entries for a deleted user (D-03/D-04).
+    ///
+    /// This is the ONLY non-INSERT write permitted on `audit_log`.
+    /// It runs under the `gdpr_pseudonymizer` schema permission (v15).
+    ///
+    /// Full D-03 scrub:
+    /// - `actor_id` → nil UUID
+    /// - `metadata.actor_pseudonym` → `pseudonym` string
+    /// - `ip_address` → NULL
+    /// - known PII metadata keys (`email`, `username`, `name`, etc.) → `[redacted]`
+    /// - `resource_id` → nil UUID where it equals `user_id`
+    ///
+    /// Returns the count of updated rows.
+    fn pseudonymize_actor(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        pseudonym: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -599,6 +698,17 @@ pub trait RefreshTokenRepository: Send + Sync {
         client_id: &str,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
+    /// Revoke all refresh tokens for a user within a tenant (e.g., on
+    /// password change or reset). Idempotent — already-revoked tokens are
+    /// skipped and do not count toward the returned total.
+    ///
+    /// Returns the number of tokens newly revoked.
+    fn revoke_all_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
     /// Delete expired and revoked refresh tokens (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
@@ -625,6 +735,29 @@ pub trait FederationConfigRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<FederationConfig>>> + Send;
+
+    /// Return all `federation_config` rows where the legacy plaintext
+    /// `client_secret` is present and the encrypted columns are absent.
+    ///
+    /// Used by the boot backfill task (D-12) to find rows that have not yet
+    /// been encrypted with AES-256-GCM.
+    fn list_with_legacy_plaintext_secret(
+        &self,
+    ) -> impl Future<Output = AxiamResult<Vec<FederationConfig>>> + Send;
+
+    /// Persist the AES-256-GCM encrypted client secret split-column values
+    /// (D-11) and clear the legacy plaintext column.
+    ///
+    /// Writes `client_secret_nonce`, `client_secret_ciphertext`,
+    /// `client_secret_key_version`, and sets `client_secret = NONE`.
+    fn set_encrypted_secret(
+        &self,
+        tenant_id: Uuid,
+        config_id: Uuid,
+        nonce_b64: String,
+        ciphertext_b64: String,
+        key_version: i64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 pub trait FederationLinkRepository: Send + Sync {
@@ -654,6 +787,86 @@ pub trait FederationLinkRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Federation Login State (D-24) — first-time SSO state + nonce correlation
+// ---------------------------------------------------------------------------
+
+/// A pending first-time SSO login state row.
+///
+/// Created by `oidc_start_public` / `saml_login_public` and consumed atomically
+/// by the corresponding callback. Rows have a 10-minute TTL enforced at
+/// consume time (expires_at check) and swept by `cleanup_expired`.
+#[derive(Debug, Clone)]
+pub struct FederationLoginState {
+    /// Random 32-byte base64url value used as CSRF state and as the DB key.
+    pub state: String,
+    /// Random 32-byte base64url nonce (OIDC only; empty string for SAML).
+    pub nonce: String,
+    pub tenant_id: uuid::Uuid,
+    pub federation_config_id: uuid::Uuid,
+    /// SPA post-login destination (NOT the AXIAM ACS/callback URL).
+    pub redirect_uri: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// SAML AuthnRequest ID (SAML only; empty string for OIDC).
+    ///
+    /// Stored at SAML login-start time so the ACS handler can verify
+    /// `Response.InResponseTo` matches the request ID (SEC-005/REQ-14 AC-5).
+    pub request_id: String,
+}
+
+/// Repository for first-time SSO login state rows.
+pub trait FederationLoginStateRepository: Send + Sync {
+    /// Persist a new login state row. Returns `Err(Conflict)` if the same
+    /// `state` value already exists (UNIQUE index violation).
+    fn insert(&self, row: &FederationLoginState) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Atomically consume a state row: SELECT + DELETE in one transaction.
+    ///
+    /// Returns `Ok(Some(row))` if the row was found and has not expired.
+    /// Returns `Ok(None)` if the row was not found or was expired — the
+    /// caller MUST treat both as `401 state not found or expired` to avoid
+    /// distinguishing between the two cases (timing side-channel).
+    ///
+    /// The row is always deleted if found, regardless of expiry — this
+    /// prevents a second consume from succeeding on an expired row.
+    fn consume_by_state(
+        &self,
+        state: &str,
+    ) -> impl Future<Output = AxiamResult<Option<FederationLoginState>>> + Send;
+
+    /// Delete all rows where `expires_at < now()`. Returns the count deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SAML Assertion Replay (D-09)
+// ---------------------------------------------------------------------------
+
+/// Repository for tracking consumed SAML assertion IDs.
+///
+/// Provides insert-or-conflict semantics: inserting an assertion ID that has
+/// already been recorded for the same tenant returns
+/// `Err(AxiamError::ReplayDetected)`.  The replay table rows live until the
+/// assertion's `NotOnOrAfter` time; `cleanup_expired` removes them.
+pub trait AssertionReplayRepository: Send + Sync {
+    /// Record a consumed assertion ID.
+    ///
+    /// Returns `Ok(())` on first insertion.  Returns
+    /// `Err(AxiamError::ReplayDetected)` if an identical `(tenant_id,
+    /// assertion_id)` pair already exists (UNIQUE constraint violation).
+    fn insert_assertion(
+        &self,
+        tenant_id: Uuid,
+        assertion_id: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired assertion replay rows across all tenants.
+    ///
+    /// Returns the number of rows deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // PKI / Certificates
 // ---------------------------------------------------------------------------
 
@@ -677,6 +890,11 @@ pub trait CaCertificateRepository: Send + Sync {
         organization_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<CaCertificate>>> + Send;
+    /// Look up a CA certificate by its record ID without requiring the
+    /// organization ID. Used internally by mTLS chain verification
+    /// (SEC-024) where the issuer_ca_id is already known from the leaf cert.
+    fn get_by_issuer_id(&self, id: Uuid)
+    -> impl Future<Output = AxiamResult<CaCertificate>> + Send;
 }
 
 pub trait CertificateRepository: Send + Sync {
@@ -1126,4 +1344,134 @@ pub trait WebauthnCredentialRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// GDPR — Consent (REQ-8)
+// ---------------------------------------------------------------------------
+
+pub trait ConsentRepository: Send + Sync {
+    /// Record a new consent (immutable — no update/delete).
+    fn create(&self, input: CreateConsent) -> impl Future<Output = AxiamResult<Consent>> + Send;
+
+    /// List all consent records for a user in a tenant.
+    fn list_by_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Consent>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// GDPR — Account Deletion (D-08/D-09)
+// ---------------------------------------------------------------------------
+
+pub trait AccountDeletionRepository: Send + Sync {
+    /// Create a deletion request; stores only the cancel_token_hash.
+    fn create(
+        &self,
+        input: CreateAccountDeletion,
+    ) -> impl Future<Output = AxiamResult<AccountDeletion>> + Send;
+
+    /// Find by cancel-token hash (for the cancel-link endpoint).
+    fn find_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        cancel_token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<AccountDeletion>>> + Send;
+
+    /// Mark as cancelled (user clicked cancel link in time).
+    fn mark_cancelled(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Mark as completed (purge ran successfully).
+    fn mark_completed(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// GDPR — Export Job (D-12/D-13)
+// ---------------------------------------------------------------------------
+
+pub trait ExportJobRepository: Send + Sync {
+    /// Create a new queued export job.
+    fn create(&self, input: CreateExportJob)
+    -> impl Future<Output = AxiamResult<ExportJob>> + Send;
+
+    /// Find queued jobs (for the export worker).
+    fn find_queued(&self) -> impl Future<Output = AxiamResult<Vec<ExportJob>>> + Send;
+
+    /// Mark job as ready with encrypted blob and single-use download token hash.
+    fn set_ready(
+        &self,
+        id: Uuid,
+        download_token_hash: String,
+        encrypted_blob: Option<String>,
+        file_path: Option<String>,
+        blob_nonce: Option<String>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Find a ready job by its download token hash (single-use).
+    fn find_by_download_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<ExportJob>>> + Send;
+
+    /// Mark a job as downloaded (single-use consumed).
+    fn mark_downloaded(&self, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Atomically consume a Ready export job: update status to 'downloaded'
+    /// only if the current status is 'ready', then delete the row.
+    ///
+    /// Returns `true` if the job was successfully consumed (status was 'ready'),
+    /// `false` if it was already consumed or in a different state (TOCTTOU-safe,
+    /// CQ-B38 / REQ-14 AC-5).
+    fn consume_ready_and_delete(&self, id: Uuid) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Mark a job as failed (processing error; may be retried — CQ-B38/REQ-14 AC-5).
+    fn mark_failed(&self, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete an expired or downloaded job and its file.
+    fn delete(&self, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// GDPR — Erasure Proof (D-06)
+// ---------------------------------------------------------------------------
+
+pub trait ErasureProofRepository: Send + Sync {
+    /// Append a PII-free erasure proof record (INSERT-only).
+    fn create(
+        &self,
+        input: CreateErasureProof,
+    ) -> impl Future<Output = AxiamResult<ErasureProof>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Mail Publisher (D-14 — thin trait for async mail enqueue)
+// ---------------------------------------------------------------------------
+
+/// Trait for publishing outbound mail messages to the async delivery queue.
+///
+/// Implemented by `axiam-amqp`'s `MailOutboundPublisher`.  The thin trait
+/// lives in `axiam-core` so that `axiam-audit` (which must not depend on
+/// `axiam-amqp` due to the circular-dep constraint) can accept a generic
+/// publisher without coupling to the AMQP infrastructure layer.
+pub trait MailPublisher: Send + Sync {
+    /// Enqueue a single outbound mail message.
+    ///
+    /// Implementations MUST be fire-and-forget at the call site: callers
+    /// log a warning on error but do **not** propagate it to the client.
+    fn publish(
+        &self,
+        msg: OutboundMailMessage,
+    ) -> impl Future<Output = crate::error::AxiamResult<()>> + Send;
 }

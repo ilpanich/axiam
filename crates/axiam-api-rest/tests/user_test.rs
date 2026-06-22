@@ -1,6 +1,8 @@
 //! Integration tests for user management endpoints.
 
 use actix_web::{App, test, web};
+use axiam_api_rest::RateLimitConfig;
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -11,11 +13,18 @@ use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepos
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
+
+/// Arbitrary CSRF token for the double-submit check (SEC-046). These
+/// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
+/// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
+/// are equal (no session lookup). Safe (GET) requests ignore it.
+const CSRF_TOKEN: &str = "test-csrf-token";
 
 fn test_keypair() -> (String, String) {
     let private_key = "\
@@ -87,7 +96,16 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
-    issue_access_token(user_id, tenant_id, org_id, &[], auth).unwrap()
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
 }
 
 macro_rules! test_app {
@@ -100,7 +118,12 @@ macro_rules! test_app {
                 )))
                 .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
                 .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .configure(register_api_v1_routes::<TestDb>),
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
         )
         .await
     };
@@ -115,8 +138,11 @@ async fn create_user_returns_201() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "alice",
             "email": "alice@example.com",
@@ -143,8 +169,11 @@ async fn create_user_omits_sensitive_fields() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "bob",
             "email": "bob@example.com",
@@ -158,8 +187,10 @@ async fn create_user_omits_sensitive_fields() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert!(body.get("password_hash").is_none());
     assert!(body.get("mfa_secret").is_none());
-    assert!(body.get("failed_login_attempts").is_none());
-    assert!(body.get("locked_until").is_none());
+    // failed_login_attempts and locked_until are now exposed in UserResponse
+    // for admin visibility of lockout state
+    assert!(body["failed_login_attempts"].is_number());
+    assert!(body.get("locked_until").is_some()); // present (may be null)
 }
 
 #[actix_rt::test]
@@ -171,6 +202,7 @@ async fn list_users_returns_200() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
@@ -193,6 +225,7 @@ async fn get_user_returns_200() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{user_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_request();
@@ -214,8 +247,11 @@ async fn update_user_returns_200() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{user_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "admin-updated",
             "status": "Active"
@@ -227,7 +263,10 @@ async fn update_user_returns_200() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["username"], "admin-updated");
-    assert_eq!(body["status"], "Active");
+    // SEC-050: `status` is stripped on self-update (a user cannot change their
+    // own account status), so it stays at the created default rather than the
+    // requested "Active". This positively asserts the privilege-escalation guard.
+    assert_eq!(body["status"], "PendingVerification");
 }
 
 #[actix_rt::test]
@@ -240,8 +279,11 @@ async fn delete_user_returns_204() {
 
     // Create a second user to delete
     let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri("/api/v1/users")
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "username": "to-delete",
             "email": "delete@example.com",
@@ -253,10 +295,67 @@ async fn delete_user_returns_204() {
     let delete_id = created["id"].as_str().unwrap();
 
     let req = test::TestRequest::delete()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
         .uri(&format!("/api/v1/users/{delete_id}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 204);
+}
+
+#[actix_rt::test]
+async fn user_response_includes_lock_state_fields() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri(&format!("/api/v1/users/{user_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    // is_locked should be present and false for a freshly created user
+    assert_eq!(body["is_locked"], false);
+    // locked_until should be present (null for a non-locked user)
+    assert!(body.get("locked_until").is_some());
+    // failed_login_attempts should be 0
+    assert_eq!(body["failed_login_attempts"], 0);
+}
+
+#[actix_rt::test]
+async fn unlock_user_returns_200() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // POST to unlock endpoint — user is not locked but unlock is idempotent
+    let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri(&format!("/api/v1/users/{user_id}/unlock"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["is_locked"], false);
+    assert_eq!(body["failed_login_attempts"], 0);
+    assert!(body["locked_until"].is_null());
+    // status should be Active after unlock
+    assert_eq!(body["status"], "Active");
 }

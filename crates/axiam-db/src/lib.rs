@@ -9,17 +9,23 @@
 
 mod connection;
 mod error;
+pub mod helpers;
 pub mod repository;
 mod schema;
+pub mod seeder;
 
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
+pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};
 pub use repository::{
-    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealEmailTemplateRepository,
-    SurrealEmailVerificationTokenRepository, SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealGroupRepository, SurrealNotificationRuleRepository,
-    SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
+    SurrealAccountDeletionRepository, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
+    SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    SurrealCertificateRepository, SurrealConsentRepository, SurrealEmailConfigRepository,
+    SurrealEmailTemplateRepository, SurrealEmailVerificationTokenRepository,
+    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
+    SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
@@ -28,6 +34,13 @@ pub use repository::{
     verify_password,
 };
 pub use schema::{run_migrations, schema_v1};
+pub use seeder::{
+    SeedRolesResult, SeederStateRow, reconcile_default_role_grants, seed_default_roles,
+    seed_permissions,
+};
 /// Re-export SurrealDB connection types for use in repository type aliases.
 pub use surrealdb::Connection;
-pub use surrealdb::engine::remote::ws::Client as WsClient;
+/// Production SurrealDB client type — the stateless HTTP engine (see `connection.rs`
+/// for why HTTP over WebSocket). Named `DbClient` (engine-neutral) since it is no
+/// longer the WebSocket client.
+pub use surrealdb::engine::remote::http::Client as DbClient;

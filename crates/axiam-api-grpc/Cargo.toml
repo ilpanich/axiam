@@ -11,7 +11,7 @@ rust-version.workspace = true
 axiam-core = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-auth = { workspace = true }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["tls-ring"] }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }
@@ -19,7 +19,36 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
+tower_governor = { workspace = true }
+governor = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+
+[features]
+client = []
+
+[dev-dependencies]
+axiam-db = { path = "../axiam-db" }
+axiam-auth = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio = { workspace = true }
+uuid = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
 tonic-prost-build = { workspace = true }
+
+# The gRPC authz integration tests need generated client stubs, which are only
+# produced under the `client` feature (build.rs gates on CARGO_FEATURE_CLIENT).
+# `required-features` makes Cargo SKIP this target when the feature is off
+# (so `cargo test --workspace` compiles cleanly) and build+run it when the
+# feature is enabled (`cargo test -p axiam-api-grpc --features client`).
+[[test]]
+name = "grpc_authz_test"
+required-features = ["client"]
+
+[[test]]
+name = "grpc_auth_test"
+required-features = ["client"]

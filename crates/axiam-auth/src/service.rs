@@ -1,17 +1,31 @@
 //! Authentication service — login, logout, token refresh, and MFA.
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::password_history::CreatePasswordHistoryEntry;
 use axiam_core::models::session::CreateSession;
-use axiam_core::models::settings::MfaPolicy;
+use axiam_core::models::settings::{MfaPolicy, PasswordPolicy};
 use axiam_core::models::user::{UpdateUser, UserStatus};
-use axiam_core::repository::{FederationLinkRepository, SessionRepository, UserRepository};
+use axiam_core::repository::{
+    FederationLinkRepository, PasswordHistoryRepository, RefreshTokenRepository, SessionRepository,
+    UserRepository,
+};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
 use crate::config::AuthConfig;
 use crate::error::AuthError;
+use crate::token::AUD_USER;
 use crate::{password, token, totp};
+
+/// Constant Argon2id hash of "dummy" used for timing equalization on
+/// user-not-found (SEC-026). Must be a valid Argon2 PHC string so that
+/// `verify_password` executes the full Argon2 computation.
+const DUMMY_HASH: &str =
+    "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaasfNiu6f6WSz0n28";
 
 // -----------------------------------------------------------------------
 // Input / output types
@@ -133,21 +147,50 @@ struct MfaChallengeClaims {
 ///
 /// Generic over repository implementations so that the auth layer
 /// has no dependency on the database crate.
+///
+/// `T` is the OAuth2 refresh-token repository. It is used by
+/// `revoke_all_sessions` and `revoke_all_sessions_except` to ensure that
+/// both session-flow and OAuth2-flow refresh tokens are revoked whenever
+/// a credential change occurs (RESEARCH §4 — "two chokepoints").
 #[derive(Clone)]
-pub struct AuthService<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> {
+pub struct AuthService<
+    U: UserRepository,
+    S: SessionRepository,
+    F: FederationLinkRepository,
+    T: RefreshTokenRepository,
+> {
     user_repo: U,
     session_repo: S,
     federation_repo: F,
+    refresh_token_repo: T,
     config: AuthConfig,
+    /// Bounding semaphore (CQ-B02): limits concurrent Argon2 operations to prevent
+    /// CPU-bound crypto from starving the Tokio async runtime under login bursts.
+    crypto_semaphore: Arc<Semaphore>,
 }
 
-impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthService<U, S, F> {
-    pub fn new(user_repo: U, session_repo: S, federation_repo: F, config: AuthConfig) -> Self {
+impl<
+    U: UserRepository,
+    S: SessionRepository,
+    F: FederationLinkRepository,
+    T: RefreshTokenRepository,
+> AuthService<U, S, F, T>
+{
+    pub fn new(
+        user_repo: U,
+        session_repo: S,
+        federation_repo: F,
+        refresh_token_repo: T,
+        config: AuthConfig,
+        crypto_semaphore: Arc<Semaphore>,
+    ) -> Self {
         Self {
             user_repo,
             session_repo,
             federation_repo,
+            refresh_token_repo,
             config,
+            crypto_semaphore,
         }
     }
 
@@ -164,11 +207,28 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             .await
         {
             Ok(u) => u,
-            Err(AxiamError::NotFound { .. }) => self
-                .user_repo
-                .get_by_email(input.tenant_id, &input.username_or_email)
-                .await
-                .map_err(|_| AuthError::InvalidCredentials)?,
+            Err(AxiamError::NotFound { .. }) => {
+                match self
+                    .user_repo
+                    .get_by_email(input.tenant_id, &input.username_or_email)
+                    .await
+                {
+                    Ok(u) => u,
+                    Err(AxiamError::NotFound { .. }) => {
+                        // SEC-026: timing equalization — run a dummy Argon2 verify so
+                        // user-not-found takes the same time as wrong-password (ASVS V2).
+                        let _permit = self.crypto_semaphore.acquire().await.ok();
+                        let pepper_owned = self.config.pepper.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            password::verify_password("dummy", DUMMY_HASH, pepper_owned.as_deref())
+                        })
+                        .await;
+                        return Err(AuthError::InvalidCredentials.into());
+                    }
+                    // CQ-B12: propagate real DB errors instead of swallowing them.
+                    Err(e) => return Err(e),
+                }
+            }
             Err(e) => return Err(e),
         };
 
@@ -179,12 +239,20 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             return Err(AuthError::InvalidCredentials.into());
         }
 
-        // 3. Verify password.
-        let valid = password::verify_password(
-            &input.password,
-            &user.password_hash,
-            self.config.pepper.as_deref(),
-        )
+        // 3. Verify password — CPU-bound Argon2id runs in spawn_blocking behind semaphore (CQ-B02).
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let pw_owned = input.password.clone();
+        let hash_owned = user.password_hash.clone();
+        let pepper_owned = self.config.pepper.clone();
+        let valid = tokio::task::spawn_blocking(move || {
+            password::verify_password(&pw_owned, &hash_owned, pepper_owned.as_deref())
+        })
+        .await
+        .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
         .map_err(|e| AxiamError::Crypto(e.to_string()))?;
 
         if !valid {
@@ -284,16 +352,22 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             .ok_or_else(|| AuthError::Crypto("MFA encryption key not configured".into()))?;
 
         let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
-        let valid = totp::verify_code(
+        let (valid, used_step) = totp::verify_code_with_replay_check(
             &secret_bytes,
             &input.totp_code,
             &self.config.totp_issuer,
             &user.email,
+            user.totp_last_used_step,
         )?;
 
         if !valid {
             return Err(AuthError::MfaInvalidCode.into());
         }
+
+        // Persist the used step to prevent replay within this window (SEC-008).
+        self.user_repo
+            .update_totp_step(tenant_id, user_id, used_step)
+            .await?;
 
         // 3. Create session and issue tokens.
         self.create_session_and_tokens(
@@ -393,6 +467,9 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             .ok_or(AuthError::MfaNotEnrolled)?;
 
         let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
+        // confirm_mfa is enrollment confirmation only — use plain verify_code (no
+        // replay tracking).  Replay protection (SEC-008) applies to login via
+        // verify_mfa, not to enrollment confirmation.
         let valid = totp::verify_code(
             &secret_bytes,
             totp_code,
@@ -404,7 +481,9 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             return Err(AuthError::MfaInvalidCode.into());
         }
 
-        // Activate MFA.
+        // Activate MFA.  totp_last_used_step is intentionally NOT set here:
+        // the user must complete a full login (verify_mfa) for replay tracking
+        // to begin.
         self.user_repo
             .update(
                 tenant_id,
@@ -478,9 +557,16 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             })
             .await?;
 
-        // 6. Issue new access token.
-        let access_token =
-            token::issue_access_token(user.id, input.tenant_id, input.org_id, &[], &self.config)?;
+        // 6. Issue new access token (jti = new session.id per D-15).
+        let access_token = token::issue_access_token(
+            user.id,
+            input.tenant_id,
+            input.org_id,
+            &[],
+            &self.config,
+            new_session.id.to_string(),
+            AUD_USER,
+        )?;
 
         Ok(RefreshOutput {
             access_token,
@@ -495,11 +581,187 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
         self.session_repo.invalidate(tenant_id, session_id).await
     }
 
-    /// Revoke all sessions for a user (e.g. on password change).
+    /// Revoke all sessions for a user AND all OAuth2 refresh tokens.
+    ///
+    /// Used by password reset confirm and MFA reset — caller is unauthenticated
+    /// so there is no current session to preserve (D-16).
+    ///
+    /// Revokes both the session-flow refresh tokens (via `session_repo`) AND
+    /// the OAuth2-flow refresh tokens (via `refresh_token_repo`). RESEARCH §4
+    /// confirmed these are two separate tables; both must be hit.
     pub async fn revoke_all_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
         self.session_repo
             .invalidate_user_sessions(tenant_id, user_id)
+            .await?;
+
+        // Also revoke OAuth2 refresh tokens for this user (the second
+        // chokepoint identified in RESEARCH §4). Tolerate 0 revocations —
+        // user may not have any OAuth2 tokens.
+        let oauth2_revoked = self
+            .refresh_token_repo
+            .revoke_all_for_user(tenant_id, user_id)
+            .await?;
+        tracing::debug!(
+            %tenant_id, %user_id, %oauth2_revoked,
+            "revoke_all_sessions: session-flow and OAuth2 refresh tokens revoked"
+        );
+
+        Ok(())
+    }
+
+    /// Revoke all sessions for a user EXCEPT the current one, AND revoke all
+    /// OAuth2 refresh tokens.
+    ///
+    /// Used on password change — the caller's current session (identified by
+    /// `current_session_id` = JWT `jti` = `session.id`) is preserved so the
+    /// caller can continue using the application after changing their password
+    /// (D-14, D-15).
+    ///
+    /// Audit-log entry: `event_type = "sessions_revoked_except_current"`.
+    pub async fn revoke_all_sessions_except(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+    ) -> AxiamResult<()> {
+        let sessions_deleted = self
+            .session_repo
+            .invalidate_user_sessions_except(tenant_id, user_id, current_session_id)
+            .await?;
+
+        // Revoke all OAuth2 refresh tokens for the user. OAuth2 tokens are not
+        // session-scoped, so we must revoke all of them even on a "keep current
+        // session" path — the caller's browser session continues but any OAuth2
+        // app must re-authenticate. Tolerate 0 revocations.
+        let oauth2_revoked = self
+            .refresh_token_repo
+            .revoke_all_for_user(tenant_id, user_id)
+            .await?;
+        tracing::debug!(
+            %tenant_id, %user_id, %sessions_deleted, %oauth2_revoked,
+            event_type = "sessions_revoked_except_current",
+            "password change: other sessions and all OAuth2 tokens revoked; current session preserved"
+        );
+
+        Ok(())
+    }
+
+    /// Change a user's password with current-password verification.
+    ///
+    /// Security protocol (D-14, D-21):
+    /// 1. Verify `current_password` against the stored Argon2id hash.
+    ///    Mismatch → `AuthenticationFailed` (maps to 401 in the REST layer).
+    /// 2. Evaluate `new_password` against the tenant password policy.
+    ///    Failure → `Validation` (maps to 422 in the REST layer).
+    /// 3. Hash and store the new password.
+    /// 4. Store old hash in password history.
+    /// 5. Revoke all sessions except the caller's current session.
+    /// 6. Emit audit log entry.
+    #[allow(clippy::too_many_arguments)] // CQ-B35: http_client param added for HIBP check
+    pub async fn change_password<H: PasswordHistoryRepository>(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+        current_password: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        history_repo: &H,
+        http_client: Option<&reqwest::Client>, // CQ-B35: pass through to HIBP check
+    ) -> AxiamResult<()> {
+        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+
+        // 1. Verify current password — CPU-bound, run in spawn_blocking behind semaphore (CQ-B02).
+        let _permit = self
+            .crypto_semaphore
+            .acquire()
             .await
+            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let pw_owned = current_password.to_string();
+        let hash_owned = user.password_hash.clone();
+        let pepper_owned = self.config.pepper.clone();
+        let valid = tokio::task::spawn_blocking(move || {
+            password::verify_password(&pw_owned, &hash_owned, pepper_owned.as_deref())
+        })
+        .await
+        .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
+        .map_err(|e| AxiamError::Crypto(e.to_string()))?;
+
+        if !valid {
+            return Err(AuthError::InvalidCredentials.into());
+        }
+
+        // 1b. SEC-028: Block reset to current password — reject if new password
+        //     matches the stored hash. Runs in spawn_blocking (CPU-bound Argon2).
+        let new_pw_owned = new_password.to_string();
+        let current_hash_owned = user.password_hash.clone();
+        let pepper_owned2 = self.config.pepper.clone();
+        let is_same = tokio::task::spawn_blocking(move || {
+            password::verify_password(&new_pw_owned, &current_hash_owned, pepper_owned2.as_deref())
+        })
+        .await
+        .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
+        .map_err(|e| AxiamError::Crypto(e.to_string()))?;
+        if is_same {
+            return Err(AuthError::PasswordReusedCurrent.into());
+        }
+
+        // 2. Evaluate new password against policy.
+        let check = crate::policy::evaluate_password(
+            new_password,
+            self.config.pepper.as_deref(),
+            policy,
+            tenant_id,
+            user_id,
+            history_repo,
+            http_client,
+        )
+        .await?;
+
+        if !check.is_ok() {
+            return Err(AxiamError::PasswordPolicy {
+                message: check.error_message(),
+            });
+        }
+
+        // 3. Hash new password.
+        let new_hash = password::hash_password(new_password, self.config.pepper.as_deref())?;
+
+        // 4. Store old password in history before overwriting.
+        history_repo
+            .create(CreatePasswordHistoryEntry {
+                tenant_id,
+                user_id,
+                password_hash: user.password_hash.clone(),
+            })
+            .await?;
+
+        // 5. Update user with new password hash.
+        self.user_repo
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    password_hash: Some(new_hash),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // 6. Revoke all other sessions + OAuth2 tokens; preserve current session.
+        self.revoke_all_sessions_except(tenant_id, user_id, current_session_id)
+            .await?;
+
+        tracing::info!(
+            %tenant_id,
+            actor = %user_id,
+            target = %user_id,
+            mode = "self_service",
+            event_type = "password_changed",
+            "user changed their password"
+        );
+
+        Ok(())
     }
 
     /// Start MFA enrollment using an MFA setup token (enforcement flow).
@@ -585,6 +847,8 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             UserStatus::Active => Ok(()),
             UserStatus::Locked => Err(AuthError::AccountLocked),
             UserStatus::Inactive => Err(AuthError::AccountInactive),
+            // Anonymized users cannot log in — treat as inactive.
+            UserStatus::Anonymized => Err(AuthError::AccountInactive),
             UserStatus::PendingVerification => {
                 if grace_period_hours > 0 {
                     let grace_end = created_at + Duration::hours(grace_period_hours as i64);
@@ -626,8 +890,16 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
             })
             .await?;
 
-        let access_token =
-            token::issue_access_token(user_id, tenant_id, org_id, &[], &self.config)?;
+        // jti = session.id per D-15 (session-based revocation).
+        let access_token = token::issue_access_token(
+            user_id,
+            tenant_id,
+            org_id,
+            &[],
+            &self.config,
+            session.id.to_string(),
+            AUD_USER,
+        )?;
 
         Ok(LoginOutput {
             access_token,
@@ -765,31 +1037,19 @@ impl<U: UserRepository, S: SessionRepository, F: FederationLinkRepository> AuthS
         tenant_id: Uuid,
         user: &axiam_core::models::user::User,
     ) -> AxiamResult<()> {
-        let new_count = user.failed_login_attempts + 1;
-        let now = Utc::now();
-
-        let locked_until = if new_count >= self.config.max_failed_login_attempts {
-            let exponent = (new_count - self.config.max_failed_login_attempts) as f64;
-            let duration_secs = (self.config.lockout_duration_secs as f64
-                * self.config.lockout_backoff_multiplier.powf(exponent))
-            .min(self.config.max_lockout_duration_secs as f64)
-                as i64;
-            Some(Some(now + Duration::seconds(duration_secs)))
-        } else {
-            None
-        };
-
-        let mut update = UpdateUser {
-            failed_login_attempts: Some(new_count),
-            last_failed_login_at: Some(Some(now)),
-            ..Default::default()
-        };
-        if let Some(lu) = locked_until {
-            update.locked_until = Some(lu);
-        }
-
-        self.user_repo.update(tenant_id, user.id, update).await?;
-        Ok(())
+        // SEC-032: atomic increment — single SurrealQL UPDATE avoids TOCTOU race.
+        // Lockout duration escalates exponentially per repeated lockout, capped
+        // at max_lockout_duration_secs (brute-force protection).
+        self.user_repo
+            .increment_failed_logins(
+                tenant_id,
+                user.id,
+                self.config.max_failed_login_attempts,
+                self.config.lockout_duration_secs as i64,
+                self.config.lockout_backoff_multiplier,
+                self.config.max_lockout_duration_secs as i64,
+            )
+            .await
     }
 
     async fn reset_failed_logins(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {

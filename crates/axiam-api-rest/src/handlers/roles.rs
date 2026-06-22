@@ -1,13 +1,19 @@
 //! Role management and role-assignment endpoints (tenant-scoped via JWT).
 
 use actix_web::{HttpResponse, web};
+use axiam_core::models::group::Group;
 use axiam_core::models::role::{CreateRole, Role, UpdateRole};
-use axiam_core::repository::{PaginatedResult, Pagination, RoleRepository};
-use axiam_db::SurrealRoleRepository;
+use axiam_core::repository::{
+    GroupRepository, PaginatedResult, Pagination, RoleRepository, UserRepository,
+};
+use axiam_db::{SurrealGroupRepository, SurrealRoleRepository, SurrealUserRepository};
+
+use super::users::UserResponse;
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
+use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -75,9 +81,13 @@ pub struct UnassignQuery {
 )]
 pub async fn create<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealRoleRepository<C>>,
     body: web::Json<CreateRoleRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:create", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     let input = CreateRole {
         tenant_id: user.tenant_id,
@@ -102,9 +112,13 @@ pub async fn create<C: Connection>(
 )]
 pub async fn list<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealRoleRepository<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:list", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let result = repo.list(user.tenant_id, query.into_inner()).await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -123,9 +137,13 @@ pub async fn list<C: Connection>(
 )]
 pub async fn get<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealRoleRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let role = repo.get_by_id(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::Ok().json(role))
 }
@@ -145,10 +163,14 @@ pub async fn get<C: Connection>(
 )]
 pub async fn update<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealRoleRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateRole>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:update", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let role = repo
         .update(user.tenant_id, path.into_inner(), body.into_inner())
         .await?;
@@ -169,9 +191,13 @@ pub async fn update<C: Connection>(
 )]
 pub async fn delete<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealRoleRepository<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:delete", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     repo.delete(user.tenant_id, path.into_inner()).await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -194,10 +220,14 @@ pub async fn delete<C: Connection>(
 )]
 pub async fn assign_to_user<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealRoleRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AssignRoleToUserRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:assign", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     repo.assign_to_user(
         user.tenant_id,
@@ -226,10 +256,14 @@ pub async fn assign_to_user<C: Connection>(
 )]
 pub async fn unassign_from_user<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealRoleRepository<C>>,
     path: web::Path<RoleUserPath>,
     query: web::Query<UnassignQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:unassign", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let p = path.into_inner();
     repo.unassign_from_user(user.tenant_id, p.user_id, p.role_id, query.resource_id)
         .await?;
@@ -254,10 +288,14 @@ pub async fn unassign_from_user<C: Connection>(
 )]
 pub async fn assign_to_group<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealRoleRepository<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AssignRoleToGroupRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:assign", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let req = body.into_inner();
     repo.assign_to_group(
         user.tenant_id,
@@ -286,12 +324,83 @@ pub async fn assign_to_group<C: Connection>(
 )]
 pub async fn unassign_from_group<C: Connection>(
     user: AuthenticatedUser,
+    authz: AuthzData,
     repo: web::Data<SurrealRoleRepository<C>>,
     path: web::Path<RoleGroupPath>,
     query: web::Query<UnassignQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:unassign", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
     let p = path.into_inner();
     repo.unassign_from_group(user.tenant_id, p.group_id, p.role_id, query.resource_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// `GET /api/v1/roles/{role_id}/users`
+///
+/// Lists the users directly assigned this role (the inverse of
+/// `GET /users/{id}/roles`). Used by the role detail page's members panel.
+#[utoipa::path(
+    get,
+    path = "/api/v1/roles/{role_id}/users",
+    tag = "roles",
+    params(("role_id" = Uuid, Path, description = "Role ID")),
+    responses(
+        (status = 200, description = "Users assigned this role", body = [UserResponse]),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_users<C: Connection>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    repo: web::Data<SurrealRoleRepository<C>>,
+    user_repo: web::Data<SurrealUserRepository<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let role_id = path.into_inner();
+    let ids = repo.get_role_user_ids(user.tenant_id, role_id).await?;
+    let mut users = Vec::with_capacity(ids.len());
+    for id in ids {
+        users.push(UserResponse::from(
+            user_repo.get_by_id(user.tenant_id, id).await?,
+        ));
+    }
+    Ok(HttpResponse::Ok().json(users))
+}
+
+/// `GET /api/v1/roles/{role_id}/groups`
+///
+/// Lists the groups directly assigned this role.
+#[utoipa::path(
+    get,
+    path = "/api/v1/roles/{role_id}/groups",
+    tag = "roles",
+    params(("role_id" = Uuid, Path, description = "Role ID")),
+    responses(
+        (status = 200, description = "Groups assigned this role", body = [Group]),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_groups<C: Connection>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    repo: web::Data<SurrealRoleRepository<C>>,
+    group_repo: web::Data<SurrealGroupRepository<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("roles:get", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let role_id = path.into_inner();
+    let ids = repo.get_role_group_ids(user.tenant_id, role_id).await?;
+    let mut groups: Vec<Group> = Vec::with_capacity(ids.len());
+    for id in ids {
+        groups.push(group_repo.get_by_id(user.tenant_id, id).await?);
+    }
+    Ok(HttpResponse::Ok().json(groups))
 }

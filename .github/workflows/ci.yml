@@ -181,6 +181,17 @@ jobs:
           output: trivy-config.sarif
           exit-code: '0'
 
+      # TEMP DEBUG: print the HIGH/CRITICAL config findings to the log so they
+      # can be enumerated and fixed (SARIF mode is silent on findings). Remove.
+      - name: Trivy config scan (DEBUG table — TEMP)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: '0'
+
       # --- Upload all SARIF results to GitHub Security tab (D-07) ---
       - name: Upload hadolint server SARIF
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4

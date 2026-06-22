@@ -102,7 +102,7 @@ pgp = "0.19"
 pem = "3"
 
 # SAML
-samael = { version = "0.0.19", features = ["xmlsec"] }
+samael = { version = "0.0.21", features = ["xmlsec"] }
 flate2 = "1"
 
 # Email

@@ -22,13 +22,15 @@ use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::repository::{
     AccountDeletionRepository, AssertionReplayRepository, AuditLogFilter, AuditLogRepository,
     ConsentRepository, ErasureProofRepository, ExportJobRepository, FederationLinkRepository,
-    FederationLoginStateRepository, MailPublisher, Pagination, UserRepository,
+    FederationLoginStateRepository, GroupRepository, MailPublisher, Pagination,
+    PasswordHistoryRepository, RoleRepository, UserRepository, WebauthnCredentialRepository,
 };
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
     SurrealConsentRepository, SurrealErasureProofRepository, SurrealExportJobRepository,
-    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository,
-    SurrealRefreshTokenRepository, SurrealSessionRepository, SurrealUserRepository,
+    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealPasswordHistoryRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
+    SurrealSessionRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use chrono::Utc;
 use surrealdb::Connection;
@@ -59,6 +61,12 @@ pub struct CleanupTask<C: Connection> {
     account_deletion_repo: Arc<SurrealAccountDeletionRepository<C>>,
     erasure_proof_repo: Arc<SurrealErasureProofRepository<C>>,
     federation_link_repo: Arc<SurrealFederationLinkRepository<C>>,
+    // Credential/authorization tables purged on erasure and surfaced in exports
+    // (SEC-056, CQ-B38).
+    role_repo: Arc<SurrealRoleRepository<C>>,
+    group_repo: Arc<SurrealGroupRepository<C>>,
+    webauthn_repo: Arc<SurrealWebauthnCredentialRepository<C>>,
+    password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
     // GDPR export sweep (D-12).
     export_job_repo: Arc<SurrealExportJobRepository<C>>,
     consent_repo: Arc<SurrealConsentRepository<C>>,
@@ -82,6 +90,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         account_deletion_repo: Arc<SurrealAccountDeletionRepository<C>>,
         erasure_proof_repo: Arc<SurrealErasureProofRepository<C>>,
         federation_link_repo: Arc<SurrealFederationLinkRepository<C>>,
+        role_repo: Arc<SurrealRoleRepository<C>>,
+        group_repo: Arc<SurrealGroupRepository<C>>,
+        webauthn_repo: Arc<SurrealWebauthnCredentialRepository<C>>,
+        password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
         export_job_repo: Arc<SurrealExportJobRepository<C>>,
         consent_repo: Arc<SurrealConsentRepository<C>>,
         mail_publisher: Arc<MailOutboundPublisher>,
@@ -99,6 +111,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             account_deletion_repo,
             erasure_proof_repo,
             federation_link_repo,
+            role_repo,
+            group_repo,
+            webauthn_repo,
+            password_history_repo,
             export_job_repo,
             consent_repo,
             mail_publisher,
@@ -184,6 +200,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// For each user:
     /// (a) Revoke all sessions (auth artifact cascade via `AuthService`).
     /// (b) Hard-delete federation links.
+    /// (b2) Hard-delete WebAuthn credentials and password history (SEC-056).
     /// (c) Compute deterministic GDPR pseudonym via `gdpr_pseudonym`.
     /// (d) Anonymize user row in-place (D-05).
     /// (e) Pseudonymize all audit entries for this user (D-01/D-03/D-04).
@@ -258,6 +275,19 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 tracing::warn!(error = ?e, user_id = %user_id, "failed to list federation links for purge");
             }
         }
+
+        // (b2) Hard-delete stored credential material (SEC-056). Done with `?`
+        // (fail-closed): erasure must not be certified while a user's passkeys or
+        // password hashes remain. A transient failure aborts the purge and it is
+        // retried next sweep — every step here is idempotent.
+        let webauthn_creds = self.webauthn_repo.list_by_user(tenant_id, user_id).await?;
+        for cred in webauthn_creds {
+            self.webauthn_repo.delete(tenant_id, cred.id).await?;
+        }
+        // Prune the entire password-history chain (keep_count = 0 deletes all).
+        self.password_history_repo
+            .prune(tenant_id, user_id, 0)
+            .await?;
 
         // (c) Compute deterministic pseudonym (keyed HMAC-SHA256, D-02).
         let pseudonym = gdpr_pseudonym(&pepper, tenant_id, user_id);
@@ -492,19 +522,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             "updated_at": user.updated_at,
         });
 
-        // Consents — error propagation instead of silent swallow (CQ-B38).
-        let consents = self
-            .consent_repo
-            .list_by_user(tenant_id, user_id)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    error = ?e,
-                    user_id = %user_id,
-                    "failed to list consents for export — using empty list"
-                );
-                vec![]
-            });
+        // Consents — propagate errors (CQ-B38 / SEC-056): a section that fails to
+        // query must fail the whole export job rather than emit a legally
+        // incomplete Art. 15 inventory. `process_export_job` marks the job Failed.
+        let consents = self.consent_repo.list_by_user(tenant_id, user_id).await?;
         let consents_json: Vec<_> = consents
             .iter()
             .map(|c| {
@@ -540,21 +561,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         limit: AUDIT_PAGE_SIZE,
                     },
                 )
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        error = ?e,
-                        user_id = %user_id,
-                        offset,
-                        "failed to list audit entries for export page — using empty"
-                    );
-                    axiam_core::repository::PaginatedResult {
-                        items: vec![],
-                        total: 0,
-                        offset,
-                        limit: AUDIT_PAGE_SIZE,
-                    }
-                });
+                .await?;
             let fetched = page.items.len() as u64;
             audit_items.extend(page.items);
             offset += fetched;
@@ -574,19 +581,11 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             })
             .collect();
 
-        // Federation identities — error propagation instead of silent swallow (CQ-B38).
+        // Federation identities — propagate errors (CQ-B38 / SEC-056).
         let fed_links = self
             .federation_link_repo
             .get_by_user_id(tenant_id, user_id)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    error = ?e,
-                    user_id = %user_id,
-                    "failed to list federation links for export — using empty list"
-                );
-                vec![]
-            });
+            .await?;
         let fed_json: Vec<_> = fed_links
             .iter()
             .map(|l| {
@@ -594,6 +593,53 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                     "federation_config_id": l.federation_config_id,
                     "external_subject": l.external_subject,
                     "created_at": l.created_at,
+                })
+            })
+            .collect();
+
+        // Role assignments (direct + inherited via groups), incl. resource scope.
+        let assignments = self
+            .role_repo
+            .get_user_role_assignments(tenant_id, user_id)
+            .await?;
+        let assignments_json: Vec<_> = assignments
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "role_id": a.role.id,
+                    "role_name": a.role.name,
+                    "is_global": a.role.is_global,
+                    "resource_id": a.resource_id,
+                })
+            })
+            .collect();
+
+        // Group memberships.
+        let groups = self.group_repo.get_user_groups(tenant_id, user_id).await?;
+        let groups_json: Vec<_> = groups
+            .iter()
+            .map(|g| {
+                serde_json::json!({
+                    "group_id": g.id,
+                    "name": g.name,
+                    "description": g.description,
+                })
+            })
+            .collect();
+
+        // WebAuthn credentials — metadata only; the encrypted `passkey_json`
+        // secret material is intentionally EXCLUDED (D-10).
+        let webauthn_creds = self.webauthn_repo.list_by_user(tenant_id, user_id).await?;
+        let webauthn_json: Vec<_> = webauthn_creds
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "credential_id": c.credential_id,
+                    "name": c.name,
+                    "credential_type": c.credential_type,
+                    "created_at": c.created_at,
+                    "last_used_at": c.last_used_at,
                 })
             })
             .collect();
@@ -610,10 +656,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             "sessions": [],           // metadata only; short-lived, not retained
             "mfa": { "enabled": user.mfa_enabled }, // NO mfa_secret
             "federation_identities": fed_json,
-            "assignments": [],
-            "group_memberships": [],
+            "assignments": assignments_json,
+            "group_memberships": groups_json,
             "audit_entries": audit_json,
-            "webauthn_credentials": [],
+            "webauthn_credentials": webauthn_json,
         });
 
         Ok(export)

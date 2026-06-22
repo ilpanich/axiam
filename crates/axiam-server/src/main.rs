@@ -354,7 +354,7 @@ async fn main() -> std::io::Result<()> {
     let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(db.client().clone());
     let webauthn_service = WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
         .expect("Failed to build WebauthnService");
-    let mfa_method_service = MfaMethodService::new(user_repo.clone(), webauthn_cred_repo);
+    let mfa_method_service = MfaMethodService::new(user_repo.clone(), webauthn_cred_repo.clone());
 
     // PKI service — encryption key for CA private keys (SEC-012).
     // Absent key → None; operations that encrypt private key material will fail fast
@@ -606,6 +606,10 @@ async fn main() -> std::io::Result<()> {
         Arc::new(account_deletion_repo.clone()),
         Arc::new(erasure_proof_repo.clone()),
         Arc::new(cleanup_federation_link_repo),
+        Arc::new(role_repo.clone()),
+        Arc::new(group_repo.clone()),
+        Arc::new(webauthn_cred_repo.clone()),
+        Arc::new(password_history_repo.clone()),
         Arc::new(export_job_repo.clone()),
         Arc::new(consent_repo.clone()),
         cleanup_mail_publisher,

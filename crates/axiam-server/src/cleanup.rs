@@ -201,6 +201,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// (a) Revoke all sessions (auth artifact cascade via `AuthService`).
     /// (b) Hard-delete federation links.
     /// (b2) Hard-delete WebAuthn credentials and password history (SEC-056).
+    /// (b3) Prune `member_of` and `has_role` graph edges (isolated tombstone).
     /// (c) Compute deterministic GDPR pseudonym via `gdpr_pseudonym`.
     /// (d) Anonymize user row in-place (D-05).
     /// (e) Pseudonymize all audit entries for this user (D-01/D-03/D-04).
@@ -288,6 +289,29 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         self.password_history_repo
             .prune(tenant_id, user_id, 0)
             .await?;
+
+        // (b3) Prune authorization-graph edges so the anonymized row is left as
+        // an isolated tombstone — no dangling `member_of` / `has_role` relations
+        // skewing group-member queries or leaving live authorization paths.
+        // Remove group memberships first so the subsequent role pass only sees
+        // the user's *direct* has_role edges (inherited ones vanish with the
+        // membership). Fail-closed (`?`): the tombstone must not be created while
+        // graph edges survive; every delete is idempotent and retried on failure.
+        let groups = self.group_repo.get_user_groups(tenant_id, user_id).await?;
+        for group in groups {
+            self.group_repo
+                .remove_member(tenant_id, user_id, group.id)
+                .await?;
+        }
+        let assignments = self
+            .role_repo
+            .get_user_role_assignments(tenant_id, user_id)
+            .await?;
+        for a in assignments {
+            self.role_repo
+                .unassign_from_user(tenant_id, user_id, a.role.id, a.resource_id)
+                .await?;
+        }
 
         // (c) Compute deterministic pseudonym (keyed HMAC-SHA256, D-02).
         let pseudonym = gdpr_pseudonym(&pepper, tenant_id, user_id);

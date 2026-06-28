@@ -146,11 +146,27 @@ axiam/
 │   └── axiam-server/       # Binary — composes all crates
 ├── proto/                  # Protocol Buffer definitions
 ├── frontend/               # React admin UI
+├── benchmarks/             # Performance/efficiency/security benchmark framework
 ├── claude_dev/             # Design document & roadmap
 ├── docker/                 # Docker Compose configs
 ├── k8s/                    # Kubernetes manifests
 └── sdks/                   # SDK projects
 ```
+
+## Benchmarking
+
+AXIAM ships a vendor-neutral benchmark framework in [`benchmarks/`](benchmarks/README.md)
+for comparing it against other open-source IAM systems (Keycloak, Zitadel, …)
+across three axes: **performance** (throughput / latency), **resource efficiency**
+(throughput per CPU core and per GiB — *competitor-level performance at a smaller
+footprint?*), and **security posture** (the same workload replayed from plaintext
+HTTP up to mTLS with client-certificate auth, quantifying what each tier costs).
+
+It drives standard OAuth2/OIDC flows through a per-target adapter so every system
+is measured on equal footing, and includes scaffolded per-SDK client-overhead
+benchmarks that activate as the SDKs land. See
+[`benchmarks/README.md`](benchmarks/README.md) and
+[`benchmarks/docs/methodology.md`](benchmarks/docs/methodology.md).
 
 ## License
 

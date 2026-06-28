@@ -1,0 +1,72 @@
+# Benchmark target: Keycloak (resource-capped reference setup).
+#
+# Same CPU/memory envelope as the AXIAM target so resource efficiency is
+# comparable. Keycloak terminates TLS natively (no separate edge), so the
+# security profile maps onto its own KC_HTTPS_* / KC_HTTP_* settings, selected
+# by the runner via the BENCH_* env it exports.
+#
+# Caps default to match the AXIAM target: server 2 CPU / 1 GiB, db 2 CPU / 1 GiB.
+name: bench-keycloak
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    container_name: bench-keycloak
+    cpus: ${BENCH_CPUS:-2}
+    mem_limit: ${BENCH_MEM:-1024m}
+    command: start --optimized --http-enabled=${BENCH_KC_HTTP_ENABLED:-true}
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: "${KC_ADMIN:-admin}"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KC_ADMIN_PASSWORD:-admin}"
+      KC_DB: postgres
+      KC_DB_URL: "jdbc:postgresql://postgres:5432/keycloak"
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KC_HOSTNAME_STRICT: "false"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      # Profile-driven TLS. The runner sets these from profiles/p*.env:
+      #   p0: KC_HTTP_ENABLED=true (plaintext :8080)
+      #   p1/p2: provide cert+key, KC_HTTPS_PROTOCOLS from BENCH_TLS_MIN
+      #   p3: additionally KC_HTTPS_CLIENT_AUTH=required (x509)
+      KC_HTTPS_CERTIFICATE_FILE: "${BENCH_KC_CERT:-}"
+      KC_HTTPS_CERTIFICATE_KEY_FILE: "${BENCH_KC_KEY:-}"
+      KC_HTTPS_PROTOCOLS: "${BENCH_KC_HTTPS_PROTOCOLS:-TLSv1.3}"
+      KC_HTTPS_CLIENT_AUTH: "${BENCH_KC_CLIENT_AUTH:-none}"
+      KC_HTTPS_TRUST_STORE_FILE: "${BENCH_KC_TRUSTSTORE:-}"
+    ports:
+      - "${BENCH_APP_PORT:-8090}:8080"
+      - "${BENCH_TLS_PORT:-8443}:8443"
+    volumes:
+      - ../../profiles/certs:/certs:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nhost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200 OK'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+    restart: "no"
+    networks: [bench]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: bench-keycloak-postgres
+    cpus: ${BENCH_DB_CPUS:-2}
+    mem_limit: ${BENCH_DB_MEM:-1024m}
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+    networks: [bench]
+
+networks:
+  bench:
+    driver: bridge

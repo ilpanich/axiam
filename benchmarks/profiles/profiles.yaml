@@ -1,0 +1,43 @@
+# Security profile registry. Consumed by runner/run-benchmark.sh (to select the
+# env file) and runner/report.py (to order profiles weakest→strictest and label
+# the security-cost table). Order matters: index = strictness rank.
+profiles:
+  - id: p0-plaintext
+    rank: 0
+    label: "Plaintext HTTP"
+    transport: http
+    min_tls: ""
+    client_auth: none
+    description: >
+      No transport encryption. The speed ceiling and the baseline against which
+      every stronger profile's cost is measured. Realistic only behind a trusted
+      service-mesh sidecar that terminates TLS.
+
+  - id: p1-tls12
+    rank: 1
+    label: "TLS 1.2 (broad ciphers)"
+    transport: https
+    min_tls: "1.2"
+    client_auth: none
+    description: >
+      Legacy-compatible HTTPS. Server-authenticated TLS with a broad cipher set.
+
+  - id: p2-tls13
+    rank: 2
+    label: "TLS 1.3 only"
+    transport: https
+    min_tls: "1.3"
+    client_auth: none
+    description: >
+      Modern recommended default. TLS 1.3 suites only, server-authenticated.
+
+  - id: p3-mtls
+    rank: 3
+    label: "mTLS + client-cert auth (TLS 1.3)"
+    transport: https
+    min_tls: "1.3"
+    client_auth: x509
+    description: >
+      Zero-trust posture. Mutual TLS with X.509 client-certificate authentication
+      on TLS 1.3. Exercises AXIAM's certificate-based authentication path used for
+      IoT/mTLS device auth.

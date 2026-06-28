@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-status: verifying
-stopped_at: Completed 14-01-PLAN.md (Phase 14 code-complete; live 12-HUMAN-UAT smoke pending a rebuilt run-local)
-last_updated: "2026-06-19T16:05:00.000Z"
-last_activity: 2026-06-19
+milestone: v1.1
+milestone_name: Client SDKs
+status: planning
+last_updated: "2026-06-28T17:18:33.874Z"
+last_activity: 2026-06-28
 progress:
-  total_phases: 14
-  completed_phases: 14
-  total_plans: 61
-  completed_plans: 61
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -25,13 +24,10 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 14 (frontend-list-contract) — CODE-COMPLETE (1/1 plan; unwrapList helper across all list services; lint + tsc green)
-Plan: 1 of 1 complete
-Next: Rebuild + run the live validation — `just dev-up` → `just run-local` → `just bootstrap-local`, then walk 12-HUMAN-UAT.md (11 items). The dashboard + all list pages should now render.
-Status: All planned phases complete (14/14). Remaining work is the human-verify smoke (12-HUMAN-UAT.md).
-Last activity: 2026-06-19
-
-Progress: [██████████] 100%
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-06-28 — Milestone v1.1 started
 
 ## Performance Metrics
 

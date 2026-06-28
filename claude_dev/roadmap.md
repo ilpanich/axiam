@@ -584,6 +584,6 @@ Generate the website to be deployed on github.io for the documentation. Produce 
 | Phase 18 | 4 | Security, compliance, performance, docs |
 | Phase 19 | 12 | Deferred improvements & optimizations from PR reviews |
 
-**Total: 87 tasks across 20 phases**
+**Total: 89 tasks across 21 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

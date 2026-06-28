@@ -573,3 +573,209 @@ Phase 1 (Cookie Auth) -----> Phase 2 (Headers/Rate Limit) -----> Phase 3 (RBAC) 
               Phase 8 (Build Unblock / W0) -> Phase 9 (Critical / W1) -> Phase 10 (High / W2)
                   -> Phase 11 (Medium / W3) -> Phase 12 (Low / W4)
 ```
+
+---
+
+## Milestone v1.1 — Client SDKs
+
+> Milestone: v1.1
+> Phase range: 15–22 | Granularity: standard
+> Created: 2026-06-28
+
+### Overview (v1.1)
+
+This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) wrapping the frozen v1.0 REST / gRPC / AMQP APIs. SDKs are stateful auth clients — not thin codegen wrappers — managing token lifecycles, tenant context, concurrency-safe refresh guards, and framework middleware per language. Phase 15 (foundation) is a hard prerequisite for all per-language work; Phase 16 (Rust reference implementation) must precede Phases 17–22, which can then parallelize.
+
+### Phases (v1.1)
+
+- [ ] **Phase 15: SDK Foundation** - Export OpenAPI spec, establish buf proto codegen pipeline, add REST authz-check endpoint, author cross-language contract, scaffold `sdks/` monorepo with per-SDK path-filtered CI
+- [ ] **Phase 16: Rust SDK** - Reference implementation (REST + gRPC + AMQP); establishes `Sensitive<T>` and gRPC-channel patterns reused by all later SDKs
+- [ ] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish
+- [ ] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish
+- [ ] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish
+- [ ] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing
+- [ ] **Phase 21: C# SDK** - HttpClient + Grpc.Net.Client; Grpc.Tools MSBuild codegen; ASP.NET Core middleware; NuGet publish
+- [ ] **Phase 22: PHP SDK** - REST-first; gRPC guarded by runtime `extension_loaded('grpc')`; Laravel + Symfony middleware; Packagist publish
+
+### Phase Details (v1.1)
+
+### Phase 15: SDK Foundation
+
+**Goal**: All shared SDK artifacts exist and CI gates prevent spec drift or breaking proto changes before any per-language SDK begins
+**Depends on**: Phase 14 (v1.0 complete; v1.1 opens)
+**Requirements**: FND-01, FND-02, FND-03, FND-04, FND-05
+**Success Criteria** (what must be TRUE):
+  1. `axiam-server --dump-openapi` exits without starting SurrealDB or AMQP; `sdks/openapi.json` is committed; a CI drift gate fails the build if the spec diverges from code on a release tag.
+  2. `buf lint` and `buf breaking` pass in CI on every `proto/**` change; proto stubs for all gRPC-capable SDKs generate reproducibly from a clean checkout via a single documented command.
+  3. `POST /api/v1/authz/check` returns `{ allowed, reason? }` using the same `AuthorizationEngine` as gRPC; the route↔OpenAPI parity test includes the new endpoint and it is rate-limited.
+  4. `sdks/CONTRACT.md` documents method naming map, error taxonomy, CSRF/cookie-jar behavior, TLS policy, `Sensitive<T>` token-redaction requirement, AMQP HMAC contract, and middleware interface — and is referenced in every SDK README stub.
+  5. `sdks/{rust,typescript,python,java,csharp,php,go}/` directories exist with Apache-2.0 LICENSE and per-SDK path-filtered CI workflows that trigger only on per-SDK path changes.
+**Plans**: TBD
+
+---
+
+### Phase 16: Rust SDK
+
+**Goal**: A Rust developer can `cargo add axiam-sdk`, authenticate against AXIAM with full REST + gRPC + AMQP coverage, and token safety + concurrency correctness are proven by test
+**Depends on**: Phase 15
+**Requirements**: RUST-01
+**Success Criteria** (what must be TRUE):
+  1. A client constructed with a non-optional `tenant_slug` calls `login(email, password)` and receives a typed `LoginResult { mfa_required }`; if MFA required, `verify_mfa(code)` completes the two-phase flow.
+  2. A concurrency test fires 5 simultaneous requests against an expired token and asserts exactly 1 refresh call was made (single-flight `tokio::sync::Mutex` guard).
+  3. `grep -r 'eyJ' target/debug/` returns empty in CI — `Sensitive<T>` prevents token values from appearing in any debug output or test logs.
+  4. gRPC `CheckAccess` and `BatchCheckAccess` succeed via `tonic 0.14`; AMQP consumer verifies HMAC-SHA256 before processing and nacks without requeue on signature failure.
+  5. `cargo publish --dry-run` succeeds; crates.io publish CI pipeline runs on release tag.
+**Plans**: TBD
+
+---
+
+### Phase 17: TypeScript SDK
+
+**Goal**: A TypeScript developer can use the SDK in a browser (REST-only) or Node.js (REST + gRPC + AMQP) context with correct per-persona behavior and framework middleware for Express and Fastify
+**Depends on**: Phase 15, Phase 16
+**Requirements**: TS-01
+**Success Criteria** (what must be TRUE):
+  1. A browser bundler (Vite/webpack) importing `axiam-sdk/rest` tree-shakes all Node-only exports — zero Node-only modules (`@grpc/grpc-js`, `amqplib`) appear in the browser bundle.
+  2. In browser persona, `client.can(action, resource)` calls `POST /api/v1/authz/check` (FND-04 REST endpoint); in Node persona it calls gRPC `CheckAccess` — each persona uses only its viable transport.
+  3. 5 parallel fetch calls on an expired token trigger exactly 1 refresh (promise-dedup guard); the CSRF token is auto-forwarded on all state-changing requests via the axios interceptor.
+  4. Express and Fastify middleware examples compile under TypeScript strict mode and protect a sample route; the package publishes as `axiam-sdk` on npm.
+  5. `npm publish --dry-run` succeeds; npm publish CI pipeline runs on release tag.
+**Plans**: TBD
+**UI hint**: yes
+
+---
+
+### Phase 18: Go SDK
+
+**Goal**: A Go developer can import the SDK and authenticate, authorize, and consume AMQP events using idiomatic Go patterns, with no TLS bypass paths possible in the SDK
+**Depends on**: Phase 15, Phase 16
+**Requirements**: GO-01
+**Success Criteria** (what must be TRUE):
+  1. `go get github.com/axiam/axiam-go-sdk` installs; a `net/http` middleware example compiles and protects a sample route; `tenantSlug` is a required constructor parameter enforced at call time.
+  2. `sync.Mutex` single-flight refresh: 5 concurrent goroutines firing against an expired token trigger exactly 1 refresh call (verified by table-driven test).
+  3. CI lint gate: `grep -rn 'InsecureSkipVerify' sdks/go/` returns empty — no TLS bypass paths exist anywhere in the SDK source tree.
+  4. AMQP consumer verifies HMAC-SHA256 of each message body; nacks without requeue on signature mismatch.
+  5. `go test ./...` passes; Go module publish pipeline tags `sdk/go/vX.Y.Z` on release.
+**Plans**: TBD
+
+---
+
+### Phase 19: Python SDK
+
+**Goal**: A Python developer using sync or async patterns can authenticate and make authorized requests, with FastAPI dependency injection and Django middleware as first-class integrations
+**Depends on**: Phase 15, Phase 16
+**Requirements**: PY-01
+**Success Criteria** (what must be TRUE):
+  1. `pip install axiam-sdk` installs; both `client.login(email, password)` (sync via httpx) and `await client.async_login(email, password)` (async) return a typed `LoginResult` with a `mfa_required` field.
+  2. `asyncio.Lock` single-flight refresh: 5 concurrent asyncio tasks on an expired token trigger exactly 1 refresh call (verified by pytest-asyncio test).
+  3. `httpx` client is constructed with `verify=True` (hardcoded); a CI grep gate confirms `verify=False` does not appear anywhere in SDK source or examples.
+  4. A FastAPI dependency-injection helper and a Django middleware class are both provided and demonstrated in runnable example scripts.
+  5. `python -m build && twine check dist/*` succeeds; PyPI publish CI pipeline runs on release tag.
+**Plans**: TBD
+
+---
+
+### Phase 20: Java SDK
+
+**Goal**: A Java developer using Spring Security can authenticate and authorize via the SDK with the artifact available on Maven Central, GPG-signed
+**Depends on**: Phase 15, Phase 16
+**Requirements**: JAVA-01
+**Success Criteria** (what must be TRUE):
+  1. `io.axiam:axiam-sdk` added to a Maven POM; `tenantId` is a required builder parameter (compiler-enforced via no-arg builder absence); `login(email, password)` returns a typed `LoginResult`.
+  2. `ReentrantLock` single-flight refresh: 5 concurrent threads on an expired token trigger exactly 1 refresh call (verified by JUnit 5 test).
+  3. A Spring Security `Filter` using the SDK protects a sample endpoint and compiles against Spring Boot 3.x; the example includes a complete working application context.
+  4. `OkHttpClient` uses `CookieManager` for cookie persistence; no `hostnameVerifier` or `sslSocketFactory` bypass is present anywhere in SDK source.
+  5. Maven Central publish pipeline with GPG signing is documented and operational; `mvn verify` passes including signing.
+**Plans**: TBD
+
+---
+
+### Phase 21: C# SDK
+
+**Goal**: An ASP.NET Core developer can use the SDK for auth and authorization via NuGet, with `Grpc.Tools` MSBuild providing gRPC codegen at build time (C# exception to the buf pipeline)
+**Depends on**: Phase 15, Phase 16
+**Requirements**: CS-01
+**Success Criteria** (what must be TRUE):
+  1. `dotnet add package Axiam.Sdk` installs; `await client.LoginAsync(email, password)` returns a typed `LoginResult`; tenant context is a required constructor parameter with no default.
+  2. `SemaphoreSlim(1,1)` single-flight refresh: 5 concurrent tasks on an expired token trigger exactly 1 refresh call (verified by xUnit test).
+  3. `Axiam.Sdk.AspNetCore` sub-package provides middleware that protects a sample ASP.NET Core 8+ endpoint and is demonstrated in a runnable example.
+  4. `Grpc.Tools` MSBuild integration generates gRPC stubs at build time (documented as the C# exception to the repo-wide buf pipeline); no `ServerCertificateCustomValidationCallback` bypass present in SDK source.
+  5. `dotnet pack` succeeds and produces a valid `.nupkg`; NuGet publish pipeline with credential setup is documented and operational.
+**Plans**: TBD
+
+---
+
+### Phase 22: PHP SDK
+
+**Goal**: A PHP developer using Laravel or Symfony can authenticate via REST and AMQP, with gRPC available on long-running runtimes, and the package published to Packagist
+**Depends on**: Phase 15, Phase 16
+**Requirements**: PHP-01
+**Success Criteria** (what must be TRUE):
+  1. `composer require axiam/axiam-sdk` installs; `$client->login($email, $password)` returns a typed `LoginResult`; tenant slug is a required constructor parameter with no nullable default.
+  2. Guzzle `HandlerStack` single-refresh middleware: concurrent Guzzle requests on an expired token trigger exactly 1 refresh call (verified by PHPUnit test).
+  3. gRPC usage is guarded by `extension_loaded('grpc')` — when absent, the SDK operates in REST-only mode; the Swoole/RoadRunner long-running runtime requirement is documented prominently.
+  4. Laravel and Symfony middleware helpers are provided as runnable examples; AMQP consumer verifies HMAC-SHA256 and calls `nack` (no requeue) on signature failure.
+  5. `composer test` passes; Packagist automation (`axiam/axiam-sdk`) runs on release tag.
+**Plans**: TBD
+
+---
+
+### Progress (v1.1)
+
+**Execution Order:**
+Phase 15 (SDK Foundation) is a hard prerequisite — no per-language SDK can begin without `sdks/openapi.json` and the buf codegen pipeline.
+Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17–22 can parallelize once 15 + 16 are complete.
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 15. SDK Foundation | 0/? | Not started | - |
+| 16. Rust SDK | 0/? | Not started | - |
+| 17. TypeScript SDK | 0/? | Not started | - |
+| 18. Go SDK | 0/? | Not started | - |
+| 19. Python SDK | 0/? | Not started | - |
+| 20. Java SDK | 0/? | Not started | - |
+| 21. C# SDK | 0/? | Not started | - |
+| 22. PHP SDK | 0/? | Not started | - |
+
+---
+
+### Coverage Matrix (v1.1)
+
+| Requirement | Phase | Description |
+|-------------|-------|-------------|
+| FND-01 | Phase 15 | OpenAPI Spec Export (`--dump-openapi` flag + `sdks/openapi.json` + drift gate) |
+| FND-02 | Phase 15 | Multi-Language Proto Codegen (buf pipeline + lint/breaking gate) |
+| FND-03 | Phase 15 | Cross-Language SDK Contract Document (`sdks/CONTRACT.md`) |
+| FND-04 | Phase 15 | REST Authorization-Check Endpoint (`POST /api/v1/authz/check`) |
+| FND-05 | Phase 15 | SDK Monorepo Scaffold & per-SDK path-filtered CI |
+| RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) |
+| TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) |
+| GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP |
+| PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) |
+| JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central |
+| CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet |
+| PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only |
+
+**Coverage: 12/12 v1.1 requirements mapped (100%)**
+
+---
+
+### Dependency Graph (v1.1)
+
+```
+Phase 15: SDK Foundation (hard prerequisite)
+    ├── FND-01: --dump-openapi -> sdks/openapi.json + CI drift gate
+    ├── FND-02: buf codegen pipeline (proto stubs for Rust/TS/Go/Python/Java)
+    ├── FND-03: sdks/CONTRACT.md (cross-language behavioral spec)
+    ├── FND-04: POST /api/v1/authz/check (REST authz query endpoint)
+    └── FND-05: sdks/ monorepo + per-SDK path-filtered CI
+          |
+          v
+Phase 16: Rust SDK (reference implementation — validates full pattern)
+          |
+          +------+------+------+------+------+------+
+          v      v      v      v      v      v      v
+        Ph.17  Ph.18  Ph.19  Ph.20  Ph.21  Ph.22
+        (TS)   (Go)   (Py)  (Java) (C#)   (PHP)
+        [phases 17-22 can parallelize after 15+16 complete]
+```

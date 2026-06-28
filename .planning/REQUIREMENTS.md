@@ -545,18 +545,24 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
                                                   (these 6 can parallelize once FND + RUST land)
 ```
 
-## v1.1 Traceability (proposed — confirmed by roadmapper)
+## v1.1 Traceability (confirmed — roadmap created 2026-06-28)
 
-| Requirement | Proposed Phase | Status |
-|-------------|----------------|--------|
-| FND-01..05 | Phase 15 (SDK Foundation) | Pending |
-| RUST-01 | Phase 16 | Pending |
-| TS-01 | Phase 17 | Pending |
-| GO-01 | Phase 18 | Pending |
-| PY-01 | Phase 19 | Pending |
-| JAVA-01 | Phase 20 | Pending |
-| CS-01 | Phase 21 | Pending |
-| PHP-01 | Phase 22 | Pending |
+| Requirement | Phase | Description | Status |
+|-------------|-------|-------------|--------|
+| FND-01 | Phase 15 | OpenAPI Spec Export (`--dump-openapi` + `sdks/openapi.json` + drift gate) | Pending |
+| FND-02 | Phase 15 | Multi-Language Proto Codegen (buf pipeline + lint/breaking gate) | Pending |
+| FND-03 | Phase 15 | Cross-Language SDK Contract Document (`sdks/CONTRACT.md`) | Pending |
+| FND-04 | Phase 15 | REST Authorization-Check Endpoint (`POST /api/v1/authz/check`) | Pending |
+| FND-05 | Phase 15 | SDK Monorepo Scaffold & per-SDK path-filtered CI | Pending |
+| RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) | Pending |
+| TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) | Pending |
+| GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Pending |
+| PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Pending |
+| JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Pending |
+| CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Pending |
+| PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only | Pending |
+
+**Coverage: 12/12 v1.1 requirements mapped (100%)**
 
 ---
-*v1.1 requirements added 2026-06-28 — Client SDKs milestone (Phase 17). Foundation-first; 7 SDKs full multi-protocol; auth flows P1+P2; publish pipelines included.*
+*v1.1 requirements added 2026-06-28 — Client SDKs milestone (phases 15–22). Foundation-first; 7 SDKs full multi-protocol where viable; auth flows P1+P2; publish pipelines included. Roadmap confirmed 2026-06-28.*

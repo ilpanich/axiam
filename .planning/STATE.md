@@ -6,7 +6,7 @@ status: planning
 last_updated: "2026-06-28T17:18:33.874Z"
 last_activity: 2026-06-28
 progress:
-  total_phases: 0
+  total_phases: 8
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 14 — frontend-list-contract (complete)
+**Current focus:** Phase 15 — SDK Foundation (next to execute)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-06-28 — Milestone v1.1 started
+Phase: 15 — SDK Foundation
+Plan: TBD (run `/gsd:plan-phase 15`)
+Status: Planning complete — roadmap created
+Last activity: 2026-06-28 — Roadmap created (phases 15–22, 12/12 requirements mapped)
 
 ## Performance Metrics
 
@@ -101,6 +101,7 @@ Last activity: 2026-06-28 — Milestone v1.1 started
   - Phase 12: Low/Trivial Remediation (Wave 4) — REQ-16
 - Sequential, green-build gated (8→9→10→11→12). Per-finding atomic commits happen during execute-phase.
 - Note: `gsd-sdk phase.add` mis-numbered (returned 100) because the `99-followups/` sentinel dir inflates its `max+1` counter; phases were authored directly as `08`–`12` instead.
+- 2026-06-28 — Milestone v1.1 Client SDKs roadmap created (phases 15–22). Foundation-first structure: Phase 15 (shared artifacts) → Phase 16 (Rust reference impl) → Phases 17–22 (parallelizable per-language SDKs). 12/12 requirements mapped. FND-04 REST authz-check endpoint added to server as part of Phase 15 scope (browser SDK authz path, Q1 resolved). `gsd-sdk phase.add` sentinel bug still present — phase dirs must be authored directly as `15`–`22`.
 
 ### Decisions
 
@@ -158,6 +159,10 @@ Recent decisions affecting current work:
 - [Phase 11]: 11-02: mTLS chain verify fails closed when issuing CA cannot be resolved (SEC-024)
 - [Phase ?]: Seed script db targeting
 - [Phase ?]: Just recipe delegation pattern
+- [v1.1 Phase 15]: FND-04 REST authz endpoint chosen over documenting the no-`can()` limitation — adds `POST /api/v1/authz/check` to the otherwise-frozen v1.0 surface; same AuthorizationEngine as gRPC, rate-limited, included in OpenAPI spec and parity test
+- [v1.1 Phase 15]: C# is the documented exception to the buf codegen pipeline — uses Grpc.Tools MSBuild instead; all other languages go through buf
+- [v1.1 Phase 17]: TypeScript browser persona authz uses FND-04 REST endpoint; Node persona uses gRPC CheckAccess; separate export conditions (axiam-sdk/rest, axiam-sdk/grpc, axiam-sdk/amqp) allow tree-shaking
+- [v1.1 Phase 22]: PHP gRPC guarded by `extension_loaded('grpc')` at runtime; SDK falls back to REST-only when absent; Swoole/RoadRunner documented as long-running runtime requirement for gRPC
 
 ### Pending Todos
 
@@ -174,9 +179,10 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 - 36 Dependabot vulnerabilities on the default branch (13 high / 15 moderate / 8 low) — surfaced on push 2026-06-02; triage separately (relates to Phase 6 REQ-9 cargo-audit/cargo-deny work)
 - Tracking note: `02-VERIFICATION.md` status field still reads `human_needed`, but the lone human item was closed via Playwright UAT (`02-HUMAN-UAT.md` status: complete, result: pass, evidence in uat-evidence/) — Phase 2 is complete despite the stale verification-file field
+- `gsd-sdk phase.add` sentinel bug: `99-followups/` dir inflates max+1 counter → returns 100; create phase dirs 15–22 directly, do NOT use phase.add for this milestone
 
 ## Session Continuity
 
-Last session: 2026-06-19T15:50:03.540Z
-Stopped at: Completed 11-02-PLAN.md
+Last session: 2026-06-28T00:00:00.000Z
+Stopped at: Roadmap created for v1.1 (phases 15–22)
 Resume file: None

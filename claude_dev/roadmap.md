@@ -400,7 +400,7 @@ Extend GitHub Actions: build, sign (using ([sigstore](https://www.sigstore.dev/)
 ## Phase 17: SDKs (Starters)
 
 ### T17.1 — Rust SDK
-Create `sdks/rust/` with a client library wrapping REST and gRPC APIs. Auth helper, token management, authorization check helper, tenant context. Add usage examples. Publish-ready with `Cargo.toml`.
+Create `sdks/rust/` with a client library wrapping REST,AMQP and gRPC APIs. Auth helper, token management, authorization check helper, tenant context. Add usage examples. Publish-ready with `Cargo.toml`.
 
 **Commit**: `feat(sdk): Rust SDK with REST and gRPC client`
 
@@ -410,17 +410,17 @@ Create `sdks/typescript/` with a TypeScript/Node.js client library wrapping REST
 **Commit**: `feat(sdk): TypeScript SDK with REST client`
 
 ### T17.3 — Python SDK
-Create `sdks/python/` with a Python client library wrapping REST API. Auth flows, token management, tenant context, FastAPI/Django middleware helper. Add usage examples.
+Create `sdks/python/` with a Python client library wrapping REST API,AMQP and gRPC. Auth flows, token management, tenant context, FastAPI/Django middleware helper. Add usage examples.
 
 **Commit**: `feat(sdk): Python SDK with REST client`
 
 ### T17.4 — Java SDK
-Create `sdks/java/` with a Java client library wrapping REST API. Auth flows, token management, tenant context, Spring Security integration helper. Add usage examples.
+Create `sdks/java/` with a Java client library wrapping REST API, AMQP and gRPC. Auth flows, token management, tenant context, Spring Security integration helper. Add usage examples.
 
 **Commit**: `feat(sdk): Java SDK with REST client`
 
 ### T17.5 — C# SDK
-Create `sdks/csharp/` with a C# client library wrapping REST API. Auth flows, token management, tenant context, ASP.NET Core middleware helper. Add usage examples.
+Create `sdks/csharp/` with a C# client library wrapping REST API, AMQP and gRPC. Auth flows, token management, tenant context, ASP.NET Core middleware helper. Add usage examples.
 
 **Commit**: `feat(sdk): C# SDK with REST client`
 
@@ -430,7 +430,7 @@ Create `sdks/php/` with a PHP client library wrapping REST API. Auth flows, toke
 **Commit**: `feat(sdk): PHP SDK with REST client`
 
 ### T17.7 — Go SDK
-Create `sdks/go/` with a Go client library wrapping REST and gRPC APIs. Auth flows, token management, tenant context, HTTP middleware helper. Add usage examples.
+Create `sdks/go/` with a Go client library wrapping REST, AMQP and gRPC APIs. Auth flows, token management, tenant context, HTTP middleware helper. Add usage examples.
 
 **Commit**: `feat(sdk): Go SDK with REST and gRPC client`
 
@@ -542,6 +542,20 @@ The mail consumer (`axiam-amqp/src/mail_consumer.rs`) currently uses the built-i
 `SurrealEmailConfigRepository::backfill_plaintext_secrets` counts unencrypted rows but does not yet UPDATE them (returns the pending count and logs a warning). Implement the UPDATE path: for each row where `smtp_password_ciphertext IS NULL AND smtp_password IS NOT NULL` (or API-key equivalent), encrypt via `encrypt_field` and UPDATE the row. This path is needed only if pre-Phase-5 tooling wrote plaintext rows before schema v15 was deployed.
 
 **Commit**: `feat(db): implement email config secrets backfill UPDATE path (T19.22)`
+
+---
+
+## Phase 20: Axiam website
+
+### 20.1 - Generate Axiam website - Showcase
+Generate the website to be deployed on github.io to describe and showcase axiam
+
+**Commit**`feat(website): Axiam showcase website`
+
+### 20.1 - Generate Axiam website - Docs
+Generate the website to be deployed on github.io for the documentation. Produce the docs according to standard docs formats (OpenAPI v3, AsyncAPI, docs.rs, JavaDocs, ...).
+
+**Commit**`feat(website): Axiam docs website`
 
 ---
 

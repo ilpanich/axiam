@@ -3,8 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Client SDKs
 status: planning
-last_updated: "2026-06-28T17:18:33.874Z"
-last_activity: 2026-06-28
+stopped_at: Phase 15 context gathered
+last_updated: "2026-06-29T19:59:43.965Z"
+last_activity: 2026-06-28 — Roadmap created (phases 15–22, 12/12 requirements mapped)
 progress:
   total_phases: 8
   completed_phases: 0
@@ -183,6 +184,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-28T00:00:00.000Z
-Stopped at: Roadmap created for v1.1 (phases 15–22)
-Resume file: None
+Last session: 2026-06-29T19:59:43.953Z
+Stopped at: Phase 15 context gathered
+Resume file: .planning/phases/15-sdk-foundation/15-CONTEXT.md

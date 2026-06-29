@@ -699,22 +699,22 @@ These are ops/human verification items. The table shows what is checkable progra
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should `sdks/openapi.json` include SAML paths?**
    - What we know: SAML is behind `saml` feature; local Arch builds use `--no-default-features`; `build-no-saml` CI guard exists
    - What's unclear: whether the public SDK REST contract should document SAML endpoints (useful for SDK consumers who run SAML-enabled AXIAM)
-   - Recommendation: start with `--no-default-features` (simpler, deterministic); add a SAML-features export variant if requested by downstream SDK consumers
+   - RESOLVED: Use `--no-default-features` (simpler, deterministic) — both the committed spec and the drift gate pin the same flags. Implemented in Plan 15-02. A SAML-features export variant remains a future option if requested by downstream SDK consumers.
 
 2. **buf plugin name verification**
    - What we know: prior research named the plugins; npm `@bufbuild/buf` confirmed at v1.71.0
    - What's unclear: exact current BSR plugin identifiers for Rust community plugins
-   - Recommendation: planner adds a `checkpoint:human-verify` task — run `buf registry plugin list` after buf install to confirm before committing `buf.gen.yaml`
+   - RESOLVED: Human-verify via a `checkpoint:human-verify` task (Plan 15-04 Task 2) — run `buf registry plugin list` after buf install to confirm the Rust plugin identifiers before `buf.gen.yaml` is committed.
 
 3. **Audit log schema for cross-subject authz check (D-06)**
    - What we know: `crates/axiam-amqp/src/messages.rs` defines `AuditEventMessage`; `audit_repo` is available in `main.rs` and passed as `web::Data`
    - What's unclear: which `action` string and `outcome` the audit entry should use
-   - Recommendation: `action = "authz.check_as"`, `outcome = "allowed"/"denied"` following existing audit patterns
+   - RESOLVED: `action = "authz.check_as"`, `outcome = "allowed"/"denied"` following existing audit patterns. Implemented in Plan 15-01 Task 2.
 
 ---
 

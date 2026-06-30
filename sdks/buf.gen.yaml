@@ -1,0 +1,47 @@
+version: v2
+plugins:
+  # Rust: prost (message codegen) + tonic (service codegen)
+  # Verified against buf.build BSR — orchestrator-confirmed 2026-06-30
+  - remote: buf.build/community/neoeinstein-prost
+    out: rust/src/gen
+    opt:
+      - compile_well_known_types=true
+  - remote: buf.build/community/neoeinstein-tonic
+    out: rust/src/gen
+    opt:
+      - compile_well_known_types=true
+      - no_include=true
+
+  # TypeScript: ts-proto (@grpc/grpc-js compatible stubs)
+  # Verified against buf.build BSR — orchestrator-confirmed 2026-06-30
+  - remote: buf.build/community/stephenh-ts-proto
+    out: typescript/src/gen
+    opt:
+      - target=ts
+      - outputServices=grpc-js
+
+  # Go: protobuf types + gRPC service stubs
+  # Verified against buf.build BSR — orchestrator-confirmed 2026-06-30
+  - remote: buf.build/protocolbuffers/go
+    out: go/gen
+    opt:
+      - paths=source_relative
+  - remote: buf.build/grpc/go
+    out: go/gen
+    opt:
+      - paths=source_relative
+
+  # Python: protobuf types + gRPC service stubs
+  # Verified against buf.build BSR — orchestrator-confirmed 2026-06-30
+  - remote: buf.build/protocolbuffers/python
+    out: python/axiam_sdk/gen
+  - remote: buf.build/grpc/python
+    out: python/axiam_sdk/gen
+
+  # Java: protobuf types + gRPC service stubs
+  # Verified against buf.build BSR — orchestrator-confirmed 2026-06-30
+  - remote: buf.build/protocolbuffers/java
+    out: java/src/main/java
+  - remote: buf.build/grpc/java
+    out: java/src/main/java
+

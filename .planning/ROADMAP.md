@@ -666,11 +666,11 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 **Requirements**: GO-01
 **Success Criteria** (what must be TRUE):
 
-  1. `go get github.com/axiam/axiam-go-sdk` installs; a `net/http` middleware example compiles and protects a sample route; `tenantSlug` is a required constructor parameter enforced at call time.
+  1. `go get github.com/axiam/axiam/sdks/go` installs; a `net/http` middleware example compiles and protects a sample route; `tenantSlug` is a required constructor parameter enforced at call time.
   2. `sync.Mutex` single-flight refresh: 5 concurrent goroutines firing against an expired token trigger exactly 1 refresh call (verified by table-driven test).
   3. CI lint gate: `grep -rn 'InsecureSkipVerify' sdks/go/` returns empty — no TLS bypass paths exist anywhere in the SDK source tree.
   4. AMQP consumer verifies HMAC-SHA256 of each message body; nacks without requeue on signature mismatch.
-  5. `go test ./...` passes; Go module publish pipeline tags `sdk/go/vX.Y.Z` on release.
+  5. `go test ./...` passes; Go module publish pipeline tags `sdks/go/vX.Y.Z` on release.
 
 **Plans**: TBD
 

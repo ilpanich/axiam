@@ -4,11 +4,11 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 16
 current_phase_name: Rust SDK
-status: executing
-stopped_at: Phase 16 context gathered
-last_updated: "2026-06-30T21:38:41.469Z"
+status: planned
+stopped_at: Phase 16 planned (6 plans, 4 waves)
+last_updated: "2026-06-30T22:18:12.000Z"
 last_activity: 2026-06-30
-last_activity_desc: Phase 15 complete, transitioned to Phase 16
+last_activity_desc: Phase 16 planned — 6 plans across 4 waves, verified (plan-checker PASSED)
 progress:
   total_phases: 8
   completed_phases: 1
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 16 — Rust SDK
-Plan: Not started
+Plan: 6 plans across 4 waves (planned, verified — ready to execute)
 Status: Ready to execute
-Last activity: 2026-06-30 — Phase 15 complete, transitioned to Phase 16
+Last activity: 2026-06-30 — Phase 16 planned (6 plans, 4 waves; plan-checker PASSED)
 
 ## Performance Metrics
 

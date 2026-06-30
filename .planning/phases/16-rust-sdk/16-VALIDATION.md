@@ -1,8 +1,8 @@
 ---
 phase: 16
 slug: rust-sdk
-status: draft
-nyquist_compliant: false
+status: approved
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-06-30
 ---
@@ -37,20 +37,20 @@ created: 2026-06-30
 
 ## Per-Task Verification Map
 
-> Task IDs are assigned by the planner/executor. This map is seeded from the requirement → success-criterion test map; the executor fills `Task ID` / `Plan` / `Wave` / `Status` columns as tasks are created.
+> Each success criterion is now mapped to its owning plan (verified by gsd-plan-checker). The executor fills the exact `Task ID` and flips `Status` as tasks complete.
 
-| Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
-|---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | — | — | RUST-01 (SC#1) | — | `login()`→typed `LoginResult{mfa_required}`; `verify_mfa` completes two-phase flow | integration | `cargo test -p axiam-sdk login_mfa_flow -- --exact` | ❌ W0 | ⬜ pending |
-| TBD | — | — | RUST-01 (SC#2) | T-DoS (thundering-herd refresh) | 5 concurrent reqs on expired token ⇒ exactly 1 refresh | integration | `cargo test -p axiam-sdk single_flight_refresh -- --exact` | ❌ W0 | ⬜ pending |
-| TBD | — | — | RUST-01 (SC#3) | T-InfoDisclosure (token leak) | `grep -r 'eyJ' target/debug/` empty | CI-grep | `cargo build && [ "$(grep -r 'eyJ' target/debug/ \| wc -l)" -eq 0 ]` | ❌ W0 | ⬜ pending |
-| TBD | — | — | RUST-01 (SC#3) | T-InfoDisclosure | `Sensitive<T>` Debug/Display never print raw value | unit | `cargo test -p axiam-sdk sensitive_redaction -- --exact` | ❌ W0 | ⬜ pending |
-| TBD | — | — | RUST-01 (SC#4) | — | gRPC `CheckAccess`/`BatchCheckAccess` via tonic 0.14 | integration | `cargo test -p axiam-sdk --features grpc grpc_check_access -- --exact` | ❌ W0 | ⬜ pending |
-| TBD | — | — | RUST-01 (SC#4) | T-Tampering/Spoofing (AMQP) | HMAC-SHA256 verified before handler; nack-without-requeue on mismatch | unit+integration | `cargo test -p axiam-sdk --features amqp amqp_hmac -- --exact` | ❌ W0 | ⬜ pending |
-| TBD | — | — | RUST-01 (SC#5) | — | `cargo publish --dry-run` succeeds | CI smoke | `cargo publish --dry-run -p axiam-sdk` | ❌ W0 | ⬜ pending |
-| TBD | — | — | §1–§10 conformance | T-TLS-downgrade | method names, error map, CSRF/tenant header, no insecure-skip surface | unit+CI-grep | `cargo test -p axiam-sdk contract_conformance` + `grep -rn 'danger_accept_invalid_certs\|insecure' sdks/rust/src/` (expect 0) | ❌ W0 | ⬜ pending |
+| Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
+|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
+| 16-02 | 2 | RUST-01 (SC#1) | — | `login()`→typed `LoginResult{mfa_required}`; `verify_mfa` completes two-phase flow | integration | `cargo test -p axiam-sdk login_mfa_flow -- --exact` | ❌ W0 | ⬜ pending |
+| 16-02 | 2 | RUST-01 (SC#2) | T-DoS (thundering-herd refresh) | 5 concurrent reqs on expired token ⇒ exactly 1 refresh | integration | `cargo test -p axiam-sdk single_flight_refresh -- --exact` | ❌ W0 | ⬜ pending |
+| 16-06 | 4 | RUST-01 (SC#3) | T-InfoDisclosure (token leak) | `grep -r 'eyJ' target/debug/` empty | CI-grep | `cargo build && [ "$(grep -r 'eyJ' target/debug/ \| wc -l)" -eq 0 ]` | ❌ W0 | ⬜ pending |
+| 16-01 | 1 | RUST-01 (SC#3) | T-InfoDisclosure | `Sensitive<T>` Debug/Display never print raw value | unit | `cargo test -p axiam-sdk sensitive_redaction -- --exact` | ❌ W0 | ⬜ pending |
+| 16-03 | 3 | RUST-01 (SC#4) | — | gRPC `CheckAccess`/`BatchCheckAccess` via tonic 0.14 | integration | `cargo test -p axiam-sdk --features grpc grpc_check_access -- --exact` | ❌ W0 | ⬜ pending |
+| 16-04 | 2 | RUST-01 (SC#4) | T-Tampering/Spoofing (AMQP) | HMAC-SHA256 verified before handler; nack-without-requeue on mismatch | unit+integration | `cargo test -p axiam-sdk --features amqp amqp_hmac -- --exact` | ❌ W0 | ⬜ pending |
+| 16-06 | 4 | RUST-01 (SC#5) | — | `cargo publish --dry-run` succeeds | CI smoke | `cargo publish --dry-run -p axiam-sdk` | ❌ W0 | ⬜ pending |
+| 16-06 | 4 | §1–§10 conformance | T-TLS-downgrade | method names, error map, CSRF/tenant header, no insecure-skip surface | unit+CI-grep | `cargo test -p axiam-sdk contract_conformance` + `grep -rn 'danger_accept_invalid_certs\|insecure' sdks/rust/src/` (expect 0) | ❌ W0 | ⬜ pending |
 
-*Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+*Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky. File Exists ❌ W0 = test file created during execution (Wave 0 of each plan).*
 
 ---
 
@@ -89,11 +89,12 @@ The SDK crate is currently a doc-only placeholder (Phase 15 scaffold) — **no d
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 60s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All success criteria have an `<automated>` verify command or Wave 0 dependency
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references (test infra enumerated per plan)
+- [x] No watch-mode flags
+- [x] Feedback latency < 60s
+- [x] `nyquist_compliant: true` set in frontmatter
+- [ ] `wave_0_complete` — flipped to true by the executor once Wave 0 test files exist and compile
 
-**Approval:** pending
+**Approval:** approved 2026-06-30 (plan-phase; per-task IDs + `wave_0_complete` finalized at execution)

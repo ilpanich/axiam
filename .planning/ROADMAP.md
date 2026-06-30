@@ -589,7 +589,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 
 ### Phases (v1.1)
 
-- [ ] **Phase 15: SDK Foundation** - Export OpenAPI spec, establish buf proto codegen pipeline, add REST authz-check endpoint, author cross-language contract, scaffold `sdks/` monorepo with per-SDK path-filtered CI
+- [x] **Phase 15: SDK Foundation** - Export OpenAPI spec, establish buf proto codegen pipeline, add REST authz-check endpoint, author cross-language contract, scaffold `sdks/` monorepo with per-SDK path-filtered CI (completed 2026-06-30)
 - [ ] **Phase 16: Rust SDK** - Reference implementation (REST + gRPC + AMQP); establishes `Sensitive<T>` and gRPC-channel patterns reused by all later SDKs
 - [ ] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish
 - [ ] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish
@@ -613,10 +613,10 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
   4. `sdks/CONTRACT.md` documents method naming map, error taxonomy, CSRF/cookie-jar behavior, TLS policy, `Sensitive<T>` token-redaction requirement, AMQP HMAC contract, and middleware interface — and is referenced in every SDK README stub.
   5. `sdks/{rust,typescript,python,java,csharp,php,go}/` directories exist with Apache-2.0 LICENSE and per-SDK path-filtered CI workflows that trigger only on per-SDK path changes.
 
-**Plans**: 5/6 plans executed
+**Plans**: 6/6 plans complete
 
   - [x] 15-01-PLAN.md — FND-04 REST authz-check endpoint (single + batch, authz:check_as, dedicated rate-limit tier)
-  - [ ] 15-02-PLAN.md — FND-01 --dump-openapi flag + committed sdks/openapi.json + drift gate
+  - [x] 15-02-PLAN.md — FND-01 --dump-openapi flag + committed sdks/openapi.json + drift gate
   - [x] 15-03-PLAN.md — FND-03 sdks/CONTRACT.md (§1-§10) + D-13 ROADMAP Go fixup
   - [x] 15-04-PLAN.md — FND-02 buf codegen pipeline (buf.yaml/buf.gen.yaml + lint/breaking CI)
   - [x] 15-05-PLAN.md — FND-05 sdks/ monorepo scaffold (7 languages) + per-SDK path-filtered CI
@@ -752,7 +752,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 15. SDK Foundation | 5/6 | In Progress|  |
+| 15. SDK Foundation | 6/6 | Complete   | 2026-06-30 |
 | 16. Rust SDK | 0/? | Not started | - |
 | 17. TypeScript SDK | 0/? | Not started | - |
 | 18. Go SDK | 0/? | Not started | - |

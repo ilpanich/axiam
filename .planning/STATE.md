@@ -5,16 +5,16 @@ milestone_name: — Client SDKs
 current_phase: 15
 current_phase_name: sdk-foundation
 status: executing
-stopped_at: "Completed 15-04-PLAN.md: buf codegen pipeline (FND-02)"
-last_updated: "2026-06-30T09:33:57.861Z"
+stopped_at: "Completed 15-02-PLAN.md: OpenAPI export flag and SDK drift gate (FND-01)"
+last_updated: "2026-06-30T09:49:27.522Z"
 last_activity: 2026-06-30
 last_activity_desc: Phase 15 execution started
 progress:
   total_phases: 8
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 6
-  completed_plans: 4
-  percent: 0
+  completed_plans: 6
+  percent: 13
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 15 (sdk-foundation) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-06-30 — Phase 15 execution started
 
@@ -95,6 +95,7 @@ Last activity: 2026-06-30 — Phase 15 execution started
 | Phase 15 P01 | 90min | 3 tasks | 9 files |
 | Phase 15 P03 | 8 | 2 tasks | 2 files |
 | Phase 15 P04 | 2 | 3 tasks | 4 files |
+| Phase 15 P02 | 9 minutes | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -176,6 +177,9 @@ Recent decisions affecting current work:
 - [Phase ?]: tenant_id from authenticated user only — never from request body (T-15-03)
 - [Phase ?]: sdks/CONTRACT.md is the normative/binding (D-09) cross-language SDK contract; canonical D-10 vocabulary locked in Phase 15 before any SDK is built
 - [Phase ?]: bufbuild/buf-action@v1.4.0 pinned after orchestrator verification of BSR plugin names; local buf generate deferred to CI
+- [v1.1 Phase 15-02]: --dump-openapi placed before tracing_subscriber::fmt() and before load_config() — usable in CI without any running infrastructure
+- [v1.1 Phase 15-02]: sdks/openapi.json committed with --no-default-features (SAML excluded); drift gate pins identical feature set in both export and diff steps (Pitfall 2 avoided)
+- [v1.1 Phase 15-02]: release-tag trigger (v*) and push-to-main share a single YAML push: block to avoid duplicate-key YAML parse error
 
 ### Pending Todos
 
@@ -196,6 +200,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-30T09:33:57.851Z
+Last session: 2026-06-30T09:49:27.511Z
 Stopped at: Completed 15-04-PLAN.md: buf codegen pipeline (FND-02)
 Resume file: None

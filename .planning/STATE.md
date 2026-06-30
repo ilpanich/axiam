@@ -1,16 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.1
-milestone_name: Client SDKs
-status: planning
-stopped_at: Phase 15 context gathered
-last_updated: "2026-06-29T19:59:43.965Z"
-last_activity: 2026-06-28 — Roadmap created (phases 15–22, 12/12 requirements mapped)
+milestone_name: — Client SDKs
+current_phase: 15
+current_phase_name: sdk-foundation
+status: executing
+stopped_at: "Completed 15-01-PLAN.md: REST authz-check endpoints (FND-04)"
+last_updated: "2026-06-30T09:13:30.783Z"
+last_activity: 2026-06-30
+last_activity_desc: Phase 15 execution started
 progress:
   total_phases: 8
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_plans: 6
+  completed_plans: 1
   percent: 0
 ---
 
@@ -21,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 15 — SDK Foundation (next to execute)
+**Current focus:** Phase 15 — sdk-foundation
 
 ## Current Position
 
-Phase: 15 — SDK Foundation
-Plan: TBD (run `/gsd:plan-phase 15`)
-Status: Planning complete — roadmap created
-Last activity: 2026-06-28 — Roadmap created (phases 15–22, 12/12 requirements mapped)
+Phase: 15 (sdk-foundation) — EXECUTING
+Plan: 2 of 6
+Status: Ready to execute
+Last activity: 2026-06-30 — Phase 15 execution started
 
 ## Performance Metrics
 
@@ -89,6 +92,7 @@ Last activity: 2026-06-28 — Roadmap created (phases 15–22, 12/12 requirement
 | Phase 12-low-remediation P03 | 18 | 3 tasks | 10 files |
 | Phase 12-low-remediation P04 | 15 | 3 tasks | 8 files |
 | Phase 13-surrealdb-connection-resilience P02 | 10 | 2 tasks | 2 files |
+| Phase 15 P01 | 90min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -164,6 +168,10 @@ Recent decisions affecting current work:
 - [v1.1 Phase 15]: C# is the documented exception to the buf codegen pipeline — uses Grpc.Tools MSBuild instead; all other languages go through buf
 - [v1.1 Phase 17]: TypeScript browser persona authz uses FND-04 REST endpoint; Node persona uses gRPC CheckAccess; separate export conditions (axiam-sdk/rest, axiam-sdk/grpc, axiam-sdk/amqp) allow tree-shaking
 - [v1.1 Phase 22]: PHP gRPC guarded by `extension_loaded('grpc')` at runtime; SDK falls back to REST-only when absent; Swoole/RoadRunner documented as long-running runtime requirement for gRPC
+- [Phase ?]: authz:check_as in PERMISSION_REGISTRY only, not ROUTE_PERMISSION_MAP
+- [Phase ?]: Both authz-check paths in AUTHENTICATED_SELF_SERVICE_PATHS, not ROUTE_PERMISSION_MAP
+- [Phase ?]: Batch validates authz:check_as once for all cross-subject checks — atomic 403
+- [Phase ?]: tenant_id from authenticated user only — never from request body (T-15-03)
 
 ### Pending Todos
 
@@ -184,6 +192,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-29T19:59:43.953Z
-Stopped at: Phase 15 context gathered
-Resume file: .planning/phases/15-sdk-foundation/15-CONTEXT.md
+Last session: 2026-06-30T09:13:30.772Z
+Stopped at: Completed 15-01-PLAN.md: REST authz-check endpoints (FND-04)
+Resume file: None

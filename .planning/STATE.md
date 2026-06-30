@@ -5,8 +5,8 @@ milestone_name: — Client SDKs
 current_phase: 16
 current_phase_name: Rust SDK
 status: executing
-stopped_at: "Completed 15-04-PLAN.md: buf codegen pipeline (FND-02)"
-last_updated: "2026-06-30T10:12:44.202Z"
+stopped_at: Phase 16 context gathered
+last_updated: "2026-06-30T21:38:41.469Z"
 last_activity: 2026-06-30
 last_activity_desc: Phase 15 complete, transitioned to Phase 16
 progress:
@@ -201,6 +201,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-30T09:49:27.511Z
-Stopped at: Completed 15-04-PLAN.md: buf codegen pipeline (FND-02)
-Resume file: None
+Last session: 2026-06-30T21:38:41.431Z
+Stopped at: Phase 16 context gathered
+Resume file: .planning/phases/16-rust-sdk/16-CONTEXT.md

@@ -34,3 +34,11 @@ login-page.png
 docker/.secrets/
 **/*.pem
 **/*.key
+
+# Claude Code dev tooling — generated/ephemeral, reprovisioned by
+# scripts/bootstrap-dev-tools.sh (GSD installs globally to ~/.claude).
+.claude/
+.claude-flow/
+.mcp.json
+CLAUDE.md.pre-ruflo
+.swarm/

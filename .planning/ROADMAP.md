@@ -613,13 +613,13 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
   4. `sdks/CONTRACT.md` documents method naming map, error taxonomy, CSRF/cookie-jar behavior, TLS policy, `Sensitive<T>` token-redaction requirement, AMQP HMAC contract, and middleware interface — and is referenced in every SDK README stub.
   5. `sdks/{rust,typescript,python,java,csharp,php,go}/` directories exist with Apache-2.0 LICENSE and per-SDK path-filtered CI workflows that trigger only on per-SDK path changes.
 
-**Plans**: 1/6 plans executed
+**Plans**: 4/6 plans executed
 
   - [x] 15-01-PLAN.md — FND-04 REST authz-check endpoint (single + batch, authz:check_as, dedicated rate-limit tier)
   - [ ] 15-02-PLAN.md — FND-01 --dump-openapi flag + committed sdks/openapi.json + drift gate
-  - [ ] 15-03-PLAN.md — FND-03 sdks/CONTRACT.md (§1-§10) + D-13 ROADMAP Go fixup
-  - [ ] 15-04-PLAN.md — FND-02 buf codegen pipeline (buf.yaml/buf.gen.yaml + lint/breaking CI)
-  - [ ] 15-05-PLAN.md — FND-05 sdks/ monorepo scaffold (7 languages) + per-SDK path-filtered CI
+  - [x] 15-03-PLAN.md — FND-03 sdks/CONTRACT.md (§1-§10) + D-13 ROADMAP Go fixup
+  - [x] 15-04-PLAN.md — FND-02 buf codegen pipeline (buf.yaml/buf.gen.yaml + lint/breaking CI)
+  - [x] 15-05-PLAN.md — FND-05 sdks/ monorepo scaffold (7 languages) + per-SDK path-filtered CI
   - [ ] 15-06-PLAN.md — FND-05 registry/org name availability verification (human-verify)
 
 ---
@@ -752,7 +752,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 15. SDK Foundation | 1/6 | In Progress|  |
+| 15. SDK Foundation | 4/6 | In Progress|  |
 | 16. Rust SDK | 0/? | Not started | - |
 | 17. TypeScript SDK | 0/? | Not started | - |
 | 18. Go SDK | 0/? | Not started | - |

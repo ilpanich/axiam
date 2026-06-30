@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 15
 current_phase_name: sdk-foundation
 status: executing
-stopped_at: "Completed 15-01-PLAN.md: REST authz-check endpoints (FND-04)"
-last_updated: "2026-06-30T09:18:51.269Z"
+stopped_at: "Completed 15-04-PLAN.md: buf codegen pipeline (FND-02)"
+last_updated: "2026-06-30T09:33:57.861Z"
 last_activity: 2026-06-30
 last_activity_desc: Phase 15 execution started
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 6
-  completed_plans: 1
+  completed_plans: 4
   percent: 0
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 15 (sdk-foundation) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 Status: Ready to execute
 Last activity: 2026-06-30 — Phase 15 execution started
 
@@ -94,6 +94,7 @@ Last activity: 2026-06-30 — Phase 15 execution started
 | Phase 13-surrealdb-connection-resilience P02 | 10 | 2 tasks | 2 files |
 | Phase 15 P01 | 90min | 3 tasks | 9 files |
 | Phase 15 P03 | 8 | 2 tasks | 2 files |
+| Phase 15 P04 | 2 | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -174,6 +175,7 @@ Recent decisions affecting current work:
 - [Phase ?]: Batch validates authz:check_as once for all cross-subject checks — atomic 403
 - [Phase ?]: tenant_id from authenticated user only — never from request body (T-15-03)
 - [Phase ?]: sdks/CONTRACT.md is the normative/binding (D-09) cross-language SDK contract; canonical D-10 vocabulary locked in Phase 15 before any SDK is built
+- [Phase ?]: bufbuild/buf-action@v1.4.0 pinned after orchestrator verification of BSR plugin names; local buf generate deferred to CI
 
 ### Pending Todos
 
@@ -194,6 +196,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-30T09:18:42.249Z
-Stopped at: Completed 15-01-PLAN.md: REST authz-check endpoints (FND-04)
+Last session: 2026-06-30T09:33:57.851Z
+Stopped at: Completed 15-04-PLAN.md: buf codegen pipeline (FND-02)
 Resume file: None

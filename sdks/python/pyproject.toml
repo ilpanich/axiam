@@ -22,5 +22,5 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/axiam/axiam"
+Repository = "https://github.com/ilpanich/axiam"
 Documentation = "https://docs.axiam.io/sdks/python"

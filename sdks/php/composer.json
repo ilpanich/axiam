@@ -24,9 +24,9 @@
     }
   },
   "keywords": ["axiam", "iam", "auth", "authentication", "authorization"],
-  "homepage": "https://github.com/axiam/axiam",
+  "homepage": "https://github.com/ilpanich/axiam",
   "support": {
-    "source": "https://github.com/axiam/axiam/tree/main/sdks/php",
-    "issues": "https://github.com/axiam/axiam/issues"
+    "source": "https://github.com/ilpanich/axiam/tree/main/sdks/php",
+    "issues": "https://github.com/ilpanich/axiam/issues"
   }
 }

@@ -24,4 +24,4 @@ jobs:
           input: sdks
           lint: true
           breaking: true
-          breaking_against: "https://github.com/axiam/axiam.git#branch=main,subdir=proto"
+          breaking_against: "https://github.com/ilpanich/axiam.git#branch=main,subdir=proto"

@@ -1,6 +1,6 @@
 # axiam-sdk (Python)
 
-Official Python client SDK for [AXIAM](https://github.com/axiam/axiam) — Access eXtended Identity and Authorization Management.
+Official Python client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Access eXtended Identity and Authorization Management.
 
 ## Package identity
 

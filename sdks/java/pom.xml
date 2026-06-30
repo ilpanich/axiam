@@ -11,7 +11,7 @@
 
   <name>axiam-sdk</name>
   <description>Official Java client SDK for AXIAM IAM</description>
-  <url>https://github.com/axiam/axiam</url>
+  <url>https://github.com/ilpanich/axiam</url>
 
   <licenses>
     <license>
@@ -22,9 +22,9 @@
   </licenses>
 
   <scm>
-    <url>https://github.com/axiam/axiam</url>
-    <connection>scm:git:https://github.com/axiam/axiam.git</connection>
-    <developerConnection>scm:git:https://github.com/axiam/axiam.git</developerConnection>
+    <url>https://github.com/ilpanich/axiam</url>
+    <connection>scm:git:https://github.com/ilpanich/axiam.git</connection>
+    <developerConnection>scm:git:https://github.com/ilpanich/axiam.git</developerConnection>
   </scm>
 
   <properties>

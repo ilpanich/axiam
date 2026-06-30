@@ -5,7 +5,7 @@ edition = "2021"
 description = "Official Rust client SDK for AXIAM IAM"
 license = "Apache-2.0"
 publish = true
-repository = "https://github.com/axiam/axiam"
+repository = "https://github.com/ilpanich/axiam"
 documentation = "https://docs.rs/axiam-sdk"
 readme = "README.md"
 

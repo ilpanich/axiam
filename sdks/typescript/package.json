@@ -18,7 +18,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/axiam/axiam",
+    "url": "https://github.com/ilpanich/axiam",
     "directory": "sdks/typescript"
   },
   "keywords": [

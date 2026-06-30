@@ -1,0 +1,22 @@
+name: SDK CI — Go
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'sdks/go/**'
+      - 'sdks/openapi.json'
+      - 'sdks/buf.yaml'
+      - 'sdks/buf.gen.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  scaffold-check:
+    name: SDK Scaffold Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Verify LICENSE file
+        run: test -f sdks/go/LICENSE

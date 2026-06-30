@@ -115,6 +115,22 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    // FND-01: --dump-openapi flag — print the OpenAPI JSON spec to stdout and exit 0.
+    // Runs before tracing init and before load_config() / SurrealDB / AMQP so it is
+    // usable in CI without any running infrastructure.  Generate the committed
+    // sdks/openapi.json with:
+    //   cargo build -p axiam-server --no-default-features
+    //   ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("--dump-openapi") {
+            let json = serde_json::to_string_pretty(&axiam_api_rest::openapi::api_doc())
+                .expect("OpenAPI serialization failed");
+            println!("{json}");
+            std::process::exit(0);
+        }
+    }
+
     // `tracing-subscriber` with the `tracing-log` feature auto-installs a
     // LogTracer so third-party crates (actix-web, hyper, etc.) that log via
     // the `log` crate surface in structured tracing output.

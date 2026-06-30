@@ -176,6 +176,9 @@ use crate::handlers;
         handlers::notification_rules::get,
         handlers::notification_rules::update,
         handlers::notification_rules::delete,
+        // Authz check — FND-04 REST authorization surface (same engine as gRPC, D-08)
+        handlers::authz_check::check_access,
+        handlers::authz_check::batch_check_access,
     ),
     components(schemas(
         // Health
@@ -346,6 +349,11 @@ use crate::handlers;
         handlers::notification_rules::NotificationRuleResponse,
         axiam_core::models::notification_rule::NotificationRule,
         axiam_core::models::notification_rule::NotificationEventType,
+        // Authz check (FND-04)
+        handlers::authz_check::CheckAccessBody,
+        handlers::authz_check::CheckAccessResponse,
+        handlers::authz_check::BatchCheckAccessBody,
+        handlers::authz_check::BatchCheckAccessResponse,
         // Pagination
         axiam_core::repository::Pagination,
     )),
@@ -373,6 +381,7 @@ use crate::handlers;
         (name = "settings", description = "Organization and tenant security settings"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),
         (name = "notification_rules", description = "Notification rule management"),
+        (name = "authz", description = "Authorization check (FND-04 REST surface)"),
     ),
     modifiers(&SecurityAddon),
 )]

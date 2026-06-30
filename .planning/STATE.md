@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: — Client SDKs
-current_phase: 15
-current_phase_name: sdk-foundation
+current_phase: 16
+current_phase_name: Rust SDK
 status: executing
-stopped_at: "Completed 15-02-PLAN.md: OpenAPI export flag and SDK drift gate (FND-01)"
-last_updated: "2026-06-30T09:49:27.522Z"
+stopped_at: "Completed 15-04-PLAN.md: buf codegen pipeline (FND-02)"
+last_updated: "2026-06-30T10:12:44.202Z"
 last_activity: 2026-06-30
-last_activity_desc: Phase 15 execution started
+last_activity_desc: Phase 15 complete, transitioned to Phase 16
 progress:
   total_phases: 8
   completed_phases: 1
@@ -28,16 +28,16 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 15 (sdk-foundation) — EXECUTING
-Plan: 5 of 6
+Phase: 16 — Rust SDK
+Plan: Not started
 Status: Ready to execute
-Last activity: 2026-06-30 — Phase 15 execution started
+Last activity: 2026-06-30 — Phase 15 complete, transitioned to Phase 16
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 21
+- Total plans completed: 27
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -49,6 +49,7 @@ Last activity: 2026-06-30 — Phase 15 execution started
 | 07 | 5 | - | - |
 | 10 | 6 | - | - |
 | 11 | 5 | - | - |
+| 15 | 6 | - | - |
 
 **Recent Trend:**
 

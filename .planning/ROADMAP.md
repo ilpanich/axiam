@@ -752,7 +752,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 15. SDK Foundation | 6/6 | Complete   | 2026-06-30 |
+| 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
 | 16. Rust SDK | 0/? | Not started | - |
 | 17. TypeScript SDK | 0/? | Not started | - |
 | 18. Go SDK | 0/? | Not started | - |

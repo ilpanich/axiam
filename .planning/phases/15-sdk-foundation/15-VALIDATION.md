@@ -46,11 +46,11 @@ created: 2026-06-29
 | 15-02-01 | 02 | 2 | FND-01 | T-15-04 | `--dump-openapi` exits before SurrealDB/AMQP init (proven with bogus DB URL) | ci/behavior | `cargo build -p axiam-server --no-default-features` + `AXIAM__DB__URL=ws://127.0.0.1:9 axiam-server --dump-openapi` | ✅ | ⬜ pending |
 | 15-02-02 | 02 | 2 | FND-01 | T-15-04 | Committed spec deterministic (`--no-default-features` pinned); drift gate diff-clean | ci | `diff sdks/openapi.json <(axiam-server --dump-openapi)` + drift workflow `paths:` filter | ✅ | ⬜ pending |
 | 15-03-01 | 03 | 1 | FND-03 | — | CONTRACT.md §1–§10 present incl. `Sensitive`, `HMAC-SHA256`, TLS CA | ci/source | `for s in 1..10: grep "§$s" sdks/CONTRACT.md` + `Sensitive`/`HMAC-SHA256`/`with_custom_ca` | ✅ | ⬜ pending |
-| 15-03-02 | 03 | 1 | FND-03 | — | D-13 ROADMAP Go strings corrected (no stale `axiam-go-sdk` / `sdk/go/v`) | ci/source | `! grep 'axiam/axiam-go-sdk' ROADMAP.md` + `grep 'github.com/axiam/axiam/sdks/go'` | ✅ | ⬜ pending |
+| 15-03-02 | 03 | 1 | FND-03 | — | D-13 ROADMAP Go strings corrected (no stale `axiam-go-sdk` / `sdk/go/v`) | ci/source | `! grep 'axiam/axiam-go-sdk' ROADMAP.md` + `grep 'github.com/ilpanich/axiam/sdks/go'` | ✅ | ⬜ pending |
 | 15-04-01 | 04 | 1 | FND-02 | — | `buf.yaml` v2 targets `../proto`; generated stubs gitignored (not committed) | ci | `grep 'version: v2' sdks/buf.yaml` + `grep '../proto'` + `.gitignore` stub paths | ✅ | ⬜ pending |
 | 15-04-03 | 04 | 1 | FND-02 | — | `buf.gen.yaml` v2, no C# plugin (Grpc.Tools exception); buf lint+breaking CI on `proto/**` | ci | `grep 'version: v2' sdks/buf.gen.yaml` + `! grep csharp` + buf-gates workflow `breaking` | ✅ | ⬜ pending |
 | 15-05-01 | 05 | 1 | FND-05 | — | All 7 `sdks/<lang>/LICENSE` present and Apache-2.0 | ci | `for l in 7 langs: test -f sdks/$l/LICENSE && grep 'Apache License'` | ✅ | ⬜ pending |
-| 15-05-02 | 05 | 1 | FND-05 | — | Locked package identities in manifests; every README references CONTRACT.md | ci/source | `grep 'axiam-sdk'/'io.axiam'/'Axiam.Sdk'/'github.com/axiam/axiam/sdks/go'` + README CONTRACT ref | ✅ | ⬜ pending |
+| 15-05-02 | 05 | 1 | FND-05 | — | Locked package identities in manifests; every README references CONTRACT.md | ci/source | `grep 'axiam-sdk'/'io.axiam'/'Axiam.Sdk'/'github.com/ilpanich/axiam/sdks/go'` + README CONTRACT ref | ✅ | ⬜ pending |
 | 15-05-03 | 05 | 1 | FND-05 | — | 7 per-SDK CI workflows path-filtered to `sdks/<lang>/`, SHA-pinned checkout, no `libxmlsec1-dev` | ci | `for l: test -f sdk-ci-$l.yml && grep "sdks/$l/" && grep <pinned-sha>` + `! grep libxmlsec1-dev` | ✅ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*

@@ -613,14 +613,14 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
   4. `sdks/CONTRACT.md` documents method naming map, error taxonomy, CSRF/cookie-jar behavior, TLS policy, `Sensitive<T>` token-redaction requirement, AMQP HMAC contract, and middleware interface — and is referenced in every SDK README stub.
   5. `sdks/{rust,typescript,python,java,csharp,php,go}/` directories exist with Apache-2.0 LICENSE and per-SDK path-filtered CI workflows that trigger only on per-SDK path changes.
 
-**Plans**: 4/6 plans executed
+**Plans**: 5/6 plans executed
 
   - [x] 15-01-PLAN.md — FND-04 REST authz-check endpoint (single + batch, authz:check_as, dedicated rate-limit tier)
   - [ ] 15-02-PLAN.md — FND-01 --dump-openapi flag + committed sdks/openapi.json + drift gate
   - [x] 15-03-PLAN.md — FND-03 sdks/CONTRACT.md (§1-§10) + D-13 ROADMAP Go fixup
   - [x] 15-04-PLAN.md — FND-02 buf codegen pipeline (buf.yaml/buf.gen.yaml + lint/breaking CI)
   - [x] 15-05-PLAN.md — FND-05 sdks/ monorepo scaffold (7 languages) + per-SDK path-filtered CI
-  - [ ] 15-06-PLAN.md — FND-05 registry/org name availability verification (human-verify)
+  - [x] 15-06-PLAN.md — FND-05 registry/org name availability verification (human-verify)
 
 ---
 
@@ -666,7 +666,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 **Requirements**: GO-01
 **Success Criteria** (what must be TRUE):
 
-  1. `go get github.com/axiam/axiam/sdks/go` installs; a `net/http` middleware example compiles and protects a sample route; `tenantSlug` is a required constructor parameter enforced at call time.
+  1. `go get github.com/ilpanich/axiam/sdks/go` installs; a `net/http` middleware example compiles and protects a sample route; `tenantSlug` is a required constructor parameter enforced at call time.
   2. `sync.Mutex` single-flight refresh: 5 concurrent goroutines firing against an expired token trigger exactly 1 refresh call (verified by table-driven test).
   3. CI lint gate: `grep -rn 'InsecureSkipVerify' sdks/go/` returns empty — no TLS bypass paths exist anywhere in the SDK source tree.
   4. AMQP consumer verifies HMAC-SHA256 of each message body; nacks without requeue on signature mismatch.
@@ -752,7 +752,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 15. SDK Foundation | 4/6 | In Progress|  |
+| 15. SDK Foundation | 5/6 | In Progress|  |
 | 16. Rust SDK | 0/? | Not started | - |
 | 17. TypeScript SDK | 0/? | Not started | - |
 | 18. Go SDK | 0/? | Not started | - |

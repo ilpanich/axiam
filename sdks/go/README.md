@@ -4,7 +4,7 @@ Official Go client SDK for [AXIAM](https://github.com/axiam/axiam) — Access eX
 
 ## Package identity
 
-- **Go module:** `github.com/axiam/axiam/sdks/go`
+- **Go module:** `github.com/ilpanich/axiam/sdks/go`
 - **Version tags:** `sdks/go/vX.Y.Z` (monorepo subdir tagging convention, D-13)
 - **License:** Apache-2.0
 
@@ -21,9 +21,9 @@ Scaffold placeholder. Full implementation follows in Phase 18 (Go SDK).
 ## Usage
 
 ```bash
-go get github.com/axiam/axiam/sdks/go@sdks/go/v0.1.0
+go get github.com/ilpanich/axiam/sdks/go@sdks/go/v0.1.0
 ```
 
 ```go
-import axiam "github.com/axiam/axiam/sdks/go"
+import axiam "github.com/ilpanich/axiam/sdks/go"
 ```

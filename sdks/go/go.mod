@@ -1,3 +1,3 @@
-module github.com/axiam/axiam/sdks/go
+module github.com/ilpanich/axiam/sdks/go
 
 go 1.22

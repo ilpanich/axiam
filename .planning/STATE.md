@@ -6,7 +6,7 @@ current_phase: 15
 current_phase_name: sdk-foundation
 status: executing
 stopped_at: "Completed 15-01-PLAN.md: REST authz-check endpoints (FND-04)"
-last_updated: "2026-06-30T09:13:30.783Z"
+last_updated: "2026-06-30T09:18:51.269Z"
 last_activity: 2026-06-30
 last_activity_desc: Phase 15 execution started
 progress:
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 15 (sdk-foundation) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-06-30 — Phase 15 execution started
 
@@ -93,6 +93,7 @@ Last activity: 2026-06-30 — Phase 15 execution started
 | Phase 12-low-remediation P04 | 15 | 3 tasks | 8 files |
 | Phase 13-surrealdb-connection-resilience P02 | 10 | 2 tasks | 2 files |
 | Phase 15 P01 | 90min | 3 tasks | 9 files |
+| Phase 15 P03 | 8 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -172,6 +173,7 @@ Recent decisions affecting current work:
 - [Phase ?]: Both authz-check paths in AUTHENTICATED_SELF_SERVICE_PATHS, not ROUTE_PERMISSION_MAP
 - [Phase ?]: Batch validates authz:check_as once for all cross-subject checks — atomic 403
 - [Phase ?]: tenant_id from authenticated user only — never from request body (T-15-03)
+- [Phase ?]: sdks/CONTRACT.md is the normative/binding (D-09) cross-language SDK contract; canonical D-10 vocabulary locked in Phase 15 before any SDK is built
 
 ### Pending Todos
 
@@ -192,6 +194,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-30T09:13:30.772Z
+Last session: 2026-06-30T09:18:42.249Z
 Stopped at: Completed 15-01-PLAN.md: REST authz-check endpoints (FND-04)
 Resume file: None

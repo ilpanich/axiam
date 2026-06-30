@@ -1,0 +1,32 @@
+{
+  "name": "axiam/axiam-sdk",
+  "description": "Official PHP client SDK for AXIAM IAM",
+  "type": "library",
+  "license": "Apache-2.0",
+  "version": "0.0.0",
+  "require": {
+    "php": ">=8.1"
+  },
+  "require-dev": {},
+  "autoload": {
+    "psr-4": {
+      "Axiam\\Sdk\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Axiam\\Sdk\\Tests\\": "tests/"
+    }
+  },
+  "extra": {
+    "branch-alias": {
+      "dev-main": "0.x-dev"
+    }
+  },
+  "keywords": ["axiam", "iam", "auth", "authentication", "authorization"],
+  "homepage": "https://github.com/axiam/axiam",
+  "support": {
+    "source": "https://github.com/axiam/axiam/tree/main/sdks/php",
+    "issues": "https://github.com/axiam/axiam/issues"
+  }
+}

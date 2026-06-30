@@ -1,0 +1,35 @@
+{
+  "name": "axiam-sdk",
+  "version": "0.0.0",
+  "description": "Official TypeScript/JavaScript client SDK for AXIAM IAM",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./rest": "./dist/rest/index.js",
+    "./grpc": "./dist/grpc/index.js",
+    "./amqp": "./dist/amqp/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/axiam/axiam",
+    "directory": "sdks/typescript"
+  },
+  "keywords": [
+    "axiam",
+    "iam",
+    "auth",
+    "authentication",
+    "authorization"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {}
+}

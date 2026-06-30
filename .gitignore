@@ -42,3 +42,11 @@ docker/.secrets/
 .mcp.json
 CLAUDE.md.pre-ruflo
 .swarm/
+
+# buf-generated gRPC stubs — generate-on-build (D-01); run `cd sdks && buf generate`
+# Each SDK build and CI regenerates these; they are never committed.
+sdks/rust/src/gen/
+sdks/typescript/src/gen/
+sdks/go/gen/
+sdks/python/axiam_sdk/gen/
+sdks/java/src/main/java/io/axiam/sdk/gen/

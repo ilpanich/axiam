@@ -1,0 +1,306 @@
+# AXIAM SDK Behavioral Contract
+
+> **Status: normative/binding (D-09)**
+>
+> This document is the cross-language behavioral contract for all AXIAM SDKs.
+> Every SDK implementation (Phases 16–22) MUST conform to §1–§10 in full.
+> Each downstream SDK README must state: "This SDK conforms to CONTRACT.md §1–§10."
+>
+> Vocabulary locked: 2026-06-30 (D-10). Rust (Phase 16) implements this contract; it does not define it.
+
+---
+
+## §1 Method Naming Map
+
+The canonical method vocabulary is locked here (D-10). All SDKs expose these operations;
+each language uses its own idiomatic naming convention as shown below.
+
+| Canonical operation | Rust (snake_case) | TypeScript/JS (camelCase) | Python (snake_case) | Java (camelCase) | C# (PascalCase) | PHP (camelCase) | Go (PascalCase) |
+|---------------------|-------------------|---------------------------|---------------------|------------------|-----------------|-----------------|-----------------|
+| login               | `login`           | `login`                   | `login`             | `login`          | `Login`         | `login`         | `Login`         |
+| MFA verification    | `verify_mfa`      | `verifyMfa`               | `verify_mfa`        | `verifyMfa`      | `VerifyMfa`     | `verifyMfa`     | `VerifyMfa`     |
+| token refresh       | `refresh`         | `refresh`                 | `refresh`           | `refresh`        | `Refresh`       | `refresh`       | `Refresh`       |
+| logout              | `logout`          | `logout`                  | `logout`            | `logout`         | `Logout`        | `logout`        | `Logout`        |
+| single access check | `check_access`    | `checkAccess`             | `check_access`      | `checkAccess`    | `CheckAccess`   | `checkAccess`   | `CheckAccess`   |
+| browser access alias| `can`             | `can`                     | `can`               | `can`            | `Can`           | `can`           | `Can`           |
+| batch access check  | `batch_check`     | `batchCheck`              | `batch_check`       | `batchCheck`     | `BatchCheck`    | `batchCheck`    | `BatchCheck`    |
+
+**Notes:**
+- `can` is an alias for `check_access` targeting browser/UI scenarios; it calls `POST /api/v1/authz/check` via REST (avoids N round-trips when combined with `batch_check` for page-level permission gating).
+- `batch_check` calls `POST /api/v1/authz/check/batch` and returns results in the same order as input.
+- No SDK is permitted to expose additional login/auth/authz method names that diverge from this map.
+
+---
+
+## §2 Error Taxonomy
+
+### Error Types
+
+All SDKs MUST expose exactly three error types. Additional sub-types are permitted as language-idiomatic variants of these three, but MUST NOT replace them:
+
+| Error type    | Meaning                                                              |
+|---------------|----------------------------------------------------------------------|
+| `AuthError`   | Authentication failure: wrong credentials, expired session, MFA failure, 401 on refresh |
+| `AuthzError`  | Authorization failure: caller lacks permission for the requested operation |
+| `NetworkError`| Transport-level failure: connection refused, timeout, TLS error, DNS failure |
+
+### HTTP Status → Error Type Mapping
+
+| HTTP Status | Error Type    | Notes                                         |
+|-------------|---------------|-----------------------------------------------|
+| 400         | `NetworkError`| Malformed request (SDK programming error)     |
+| 401         | `AuthError`   | Unauthenticated; triggers refresh if tokens present |
+| 403         | `AuthzError`  | Authenticated but not authorized              |
+| 408, 429    | `NetworkError`| Timeout / rate-limited                        |
+| 409         | `AuthzError`  | Conflict (resource-level access denied)       |
+| 5xx         | `NetworkError`| Server error; SDK should NOT retry auth       |
+| Connection error / DNS / TLS | `NetworkError` | Transport-layer failures   |
+
+### gRPC Status → Error Type Mapping
+
+| gRPC Status Code          | Error Type    | Notes                                         |
+|---------------------------|---------------|-----------------------------------------------|
+| `UNAUTHENTICATED` (16)    | `AuthError`   | Triggers single-flight refresh (see §9)       |
+| `PERMISSION_DENIED` (7)   | `AuthzError`  | Caller lacks the required permission          |
+| `UNAVAILABLE` (14)        | `NetworkError`| Server unreachable                            |
+| `DEADLINE_EXCEEDED` (4)   | `NetworkError`| Request timed out                             |
+| `INTERNAL` (13)           | `NetworkError`| Server-side error                             |
+| `RESOURCE_EXHAUSTED` (8)  | `NetworkError`| Rate-limited by the server                   |
+
+### Error Construction Rules
+
+- `AuthError` MUST carry a `message` field describing the failure.
+- `AuthzError` MUST carry a `message` field and SHOULD carry the denied `action` and `resource_id` if available from the response body.
+- `NetworkError` MUST carry the underlying OS/transport error as a `cause` (or equivalent chained exception).
+- Errors MUST NOT expose raw token strings in their messages, context fields, or stack traces.
+
+---
+
+## §3 CSRF Behavior
+
+All SDKs (browser and non-browser) MUST implement automatic CSRF token forwarding:
+
+1. On any response from the AXIAM server, capture the `X-CSRF-Token` response header value and store it in the client's session state.
+2. On all state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`), include the stored token as the `X-CSRF-Token` request header.
+3. If no CSRF token has been received yet, omit the header (the server rejects unauthenticated state-changing calls for other reasons first).
+4. Non-browser SDKs (Rust, Python, Java, C#, PHP, Go) are subject to the **same rule** — the AXIAM server enforces CSRF regardless of client type.
+
+**Implementation note for browser SDKs (TypeScript):** Read `X-CSRF-Token` from the fetch/XHR response and store in a module-level variable, not in `localStorage` or `sessionStorage`.
+
+---
+
+## §4 Cookie-Jar Requirement
+
+All non-browser SDKs (Rust, Python, Java, C#, PHP, Go) **MUST** initialize their HTTP client with a persistent in-memory cookie store before making any requests.
+
+**Rationale:** AXIAM delivers access and refresh tokens via `httpOnly` cookies. An HTTP client that does not persist cookies across requests will fail every request after the initial login because the server will not see the session cookie.
+
+Requirements:
+- The cookie store MUST persist across all requests made through the same `AximaClient` instance.
+- The cookie store SHOULD be per-client-instance (not process-global), so multiple clients can hold independent sessions.
+- The cookie store MUST follow the cookie domain/path/secure attributes set by the server.
+
+Per-language guidance:
+| Language | Recommended approach |
+|----------|----------------------|
+| Rust     | `reqwest::Client` with `cookie_store(true)` builder option |
+| Python   | `requests.Session` or `httpx.AsyncClient` with `cookies` parameter |
+| Java     | `CookieManager` + `CookieHandler.setDefault()` or per-client store |
+| C#       | `HttpClient` with `HttpClientHandler { UseCookies = true, CookieContainer = new() }` |
+| PHP      | Guzzle `CookieJar` with `cookies: true` handler option |
+| Go       | `http.CookieJar` (e.g. `cookiejar.New(nil)`) assigned to `http.Client.Jar` |
+
+---
+
+## §5 Tenant Context Contract
+
+**`tenant_slug` or `tenant_id` is a non-optional constructor parameter.**
+
+All SDKs MUST:
+1. Require either `tenant_slug` (human-readable) or `tenant_id` (UUID) at client construction time. Neither can be deferred or set later.
+2. Inject the tenant identifier as the `X-Tenant-ID` HTTP header on **every** outgoing request.
+3. For gRPC, inject `x-tenant-id` as a metadata key on every outgoing RPC call.
+
+There is NO default tenant. Constructing an `AximaClient` without a tenant identifier is a compile-time or runtime error, never a silent behavior.
+
+```
+AximaClient::new(base_url, tenant_slug: "acme")   // tenant_slug form
+AximaClient::new(base_url, tenant_id: uuid)        // tenant_id UUID form
+```
+
+**Why this matters:** AXIAM is a multi-tenant system. Omitting the tenant identifier causes every authenticated API call to fail with 400 or 403. Enforcing it at construction time gives a clear, early error.
+
+---
+
+## §6 TLS Policy
+
+**Default: strict TLS verification is ALWAYS on.**
+
+- All SDKs MUST verify the server's TLS certificate against the system trust store by default.
+- The ONLY escape hatch is `with_custom_ca(pem: &[u8])` (or language equivalent), which adds a custom CA certificate (PEM-encoded) to the verification chain. This is intended for development environments using self-signed certificates.
+- **There is NO `skip_tls_verification()`, `insecure()`, `allow_insecure()`, `disable_tls()`, `verify_peer(false)`, or any other API surface that bypasses TLS verification.** This is an absolute prohibition enforced by §6 of this contract (T-15-08).
+- CI lint gates MUST verify no TLS-bypass patterns exist in SDK source trees (e.g. `grep -rn 'InsecureSkipVerify'` for Go).
+
+Per-language builder pattern:
+```
+// Rust
+AximaClient::builder()
+    .with_custom_ca(pem_bytes)
+    .build()
+
+// TypeScript
+new AximaClient({ baseUrl, tenantSlug, customCa: pemString })
+
+// Go
+client.WithCustomCA(pemBytes)
+
+// Python
+AximaClient(base_url, tenant_slug, custom_ca=pem_bytes)
+```
+
+The `with_custom_ca` parameter accepts PEM-encoded certificate bytes/string for the issuing CA. It does NOT accept raw DER bytes, PKCS#12, or JKS. If a non-PEM format is passed, the SDK MUST return a clear error at construction time.
+
+---
+
+## §7 `Sensitive<T>` Requirement
+
+All token-carrying fields in all SDKs MUST suppress the token value from any debug, logging, or display output (T-15-09).
+
+**Required behavior:**
+- The raw token string MUST NOT be exposed via any public getter API.
+- Debug/logging representations (`Debug`, `Display` in Rust; `toString`, JSON serialization in JS/TS; `__repr__`, `__str__` in Python; `toString` in Java/Go; `ToString` in C#; `__toString` in PHP) MUST emit a redacted placeholder such as `[SENSITIVE]` or `Sensitive<String>`.
+- SDK internal code THAT NEEDS the raw value accesses it via a crate/module-private method or friend function, not a public API.
+
+Per-language implementation guidance:
+| Language   | Mechanism                                                         |
+|------------|-------------------------------------------------------------------|
+| Rust       | Newtype `Sensitive<T>` with custom `Debug`/`Display` impl        |
+| TypeScript | Class with private `#value`; `toString()` returns `"[SENSITIVE]"` |
+| Python     | `__repr__` / `__str__` return `"Sensitive(<redacted>)"`          |
+| Java       | Final class; `toString()` returns `"[SENSITIVE]"`                |
+| C#         | Struct with `ToString()` override returning `"[SENSITIVE]"`      |
+| PHP        | `__toString()` returns `"[SENSITIVE]"`                           |
+| Go         | String type with `String()` method returning `"[SENSITIVE]"`     |
+
+**The token MUST NOT appear in:**
+- Log files (structured or unstructured)
+- Error messages
+- Stack traces
+- Serialized diagnostic output
+
+---
+
+## §8 AMQP HMAC Contract
+
+All SDKs that consume AXIAM AMQP messages (currently: Rust, TypeScript/Node, Go, Python, Java, PHP) MUST implement the following HMAC verification protocol (SEC-022/055, T-15-10):
+
+### Protocol
+
+1. **Signing key**: Each tenant has a per-tenant AMQP signing secret. Obtain it from the AXIAM server via the management API (not hardcoded).
+2. **Verification**: When a message arrives with an `hmac_signature` field:
+   a. Extract the `hmac_signature` value from the message.
+   b. Set `hmac_signature` to `null` (or remove it) in the message body.
+   c. Serialize the remaining message body to canonical JSON.
+   d. Compute `HMAC-SHA256(secret_key, canonical_json_bytes)`.
+   e. Compare the computed hex-encoded HMAC to the received `hmac_signature` using constant-time comparison.
+   f. If they match: process the message normally.
+   g. If they do NOT match: **nack the message WITHOUT requeue** and emit a security event log entry.
+3. **Missing signature**: A message arriving without `hmac_signature` SHOULD be nacked without requeue in strict mode. During rolling deployments, lenient mode (log-and-accept) is permitted as a temporary measure; strict mode MUST be the default.
+4. **Security event**: A failed HMAC check MUST be logged as a security event with at minimum: timestamp, exchange, routing key, and tenant context (if available from other message fields). Do NOT log the received or expected HMAC value.
+
+### Reference Implementation
+
+See `crates/axiam-amqp/src/messages.rs`:
+- `sign_payload(key, payload_json)` — HMAC-SHA256 of payload bytes, returns hex string.
+- `verify_payload(key, payload_json, signature_hex)` — constant-time comparison via the `hmac` crate's `verify_slice`.
+- `hmac_signature` field present on `AuthzRequest` and `AuditEventMessage`.
+
+### Message Types Subject to HMAC Verification
+
+| AMQP Exchange/Queue            | Message Type        | hmac_signature field |
+|-------------------------------|---------------------|----------------------|
+| `axiam.authz.request`          | `AuthzRequest`      | Yes                  |
+| `axiam.audit.events`           | `AuditEventMessage` | Yes                  |
+
+`AuthzResponse` and `NotificationEvent` are published by the server and do not carry `hmac_signature` in v1.0.
+
+---
+
+## §9 Single-Flight Refresh Guard
+
+All SDKs that manage token state (access + refresh tokens) MUST implement a single-flight refresh guard to prevent thundering-herd token refresh calls:
+
+1. **Exactly one in-flight refresh at any time.** When a 401 (or gRPC `UNAUTHENTICATED`) response arrives and the client has a valid refresh token, the SDK attempts a token refresh. If a refresh is already in progress, all concurrent 401-triggering requests MUST wait for the existing refresh to complete.
+2. **Result sharing.** After the single in-flight refresh resolves (success or failure), all waiting requesters receive the outcome simultaneously:
+   - On success: all waiting requests are retried with the new tokens.
+   - On failure: all waiting requests fail with `AuthError`.
+3. **No retry on refresh failure.** A 401 response to the refresh call itself is `AuthError` — the user must re-authenticate. The SDK MUST NOT attempt to refresh again (no retry loop).
+4. **Thread/concurrency safety.** The guard MUST be safe across concurrent goroutines (Go), async tasks (Rust/TS/Python), threads (Java/C#/PHP-Swoole).
+
+Per-language implementation guidance:
+| Language   | Mechanism                                                         |
+|------------|-------------------------------------------------------------------|
+| Rust       | `tokio::sync::OnceCell` or `Mutex<Option<JoinHandle>>`           |
+| TypeScript | `Promise` shared via module-level variable; `null` check guard   |
+| Python     | `asyncio.Lock` + shared `asyncio.Future`                         |
+| Java       | `ReentrantLock` + `CompletableFuture` held in `AtomicReference`  |
+| C#         | `SemaphoreSlim(1,1)` + `Task<TokenPair>` stored in field        |
+| PHP        | Fiber-safe `Mutex` from `revolt/event-loop` or equivalent        |
+| Go         | `sync.Mutex` + single goroutine holding `chan TokenPair`         |
+
+**Test requirement:** Each SDK MUST include a test that fires N (≥5) concurrent requests against an expired token and asserts exactly 1 refresh call is made. (See Phase 18 success criterion #2 for Go reference.)
+
+---
+
+## §10 Middleware / Route-Guard Interface
+
+Each SDK MUST provide a per-framework middleware or route-guard integration that:
+1. Extracts the session from incoming requests (cookie or `Authorization: Bearer`).
+2. Verifies the session is valid against the AXIAM server (or locally if short-TTL tokens are cached).
+3. Injects the authenticated user identity into the request context.
+4. Returns the appropriate HTTP error (401 or 403) when verification fails.
+
+Per-framework expectations:
+
+| Framework                        | Language   | Integration mechanism                                              |
+|----------------------------------|------------|--------------------------------------------------------------------|
+| Actix-Web                        | Rust       | `FromRequest` extractor returning `AxiamUser`; registered on App  |
+| Express / Fastify                | TypeScript | `app.use(axiamMiddleware())` / `fastify.addHook('preHandler', ...)` |
+| FastAPI                          | Python     | `Depends(require_authenticated_user)` dependency injection         |
+| Django                           | Python     | `MIDDLEWARE = [..., 'axiam_sdk.middleware.AxiamAuthMiddleware']`   |
+| Spring Boot                      | Java       | `OncePerRequestFilter` subclass registered in `SecurityFilterChain` |
+| ASP.NET Core                     | C#         | `app.UseMiddleware<AxiamAuthMiddleware>()` in `Program.cs`         |
+| `net/http`                       | Go         | Handler wrapping: `axiamMiddleware(next http.Handler) http.Handler` |
+| Laravel / Symfony                | PHP        | `Middleware` (Laravel) / `EventSubscriber` (Symfony)               |
+
+**Interface contract:**
+- The middleware/extractor MUST read the `X-Tenant-ID` header (or use the client's configured tenant) to scope the session verification.
+- On success, the authenticated user identity (at minimum: `user_id`, `tenant_id`, `roles`) MUST be available from the request context in a framework-idiomatic way.
+- The middleware MUST NOT cache session verification results longer than the token's remaining TTL.
+- The middleware MUST surface `AuthError` as HTTP 401 and `AuthzError` as HTTP 403 to the end-user with a standardized JSON error body.
+
+---
+
+## Closing Notes
+
+### Conformance Statement
+
+Each downstream SDK README (Phases 16–22) MUST include the following statement:
+
+> "This SDK conforms to CONTRACT.md §1–§10."
+
+Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conformance verified."
+
+### C# `Grpc.Tools` Exception
+
+C# is the one documented deviation from the repository-wide `buf` codegen pipeline. The C# SDK uses `Grpc.Tools` MSBuild integration (via `<Protobuf Include="../../proto/**/*.proto" GrpcServices="Client" />` in the `.csproj`) to generate gRPC client stubs at build time, rather than a `buf generate` plugin entry. This is intentional (D-01 in `15-CONTEXT.md`) and does not affect behavioral conformance with §1–§10. All other SDKs (Rust, TypeScript, Go, Python, Java, PHP) run `buf generate` as their codegen step.
+
+### OpenAPI Export Feature Flag
+
+`sdks/openapi.json` is generated with `--no-default-features` (SAML endpoints excluded). Both the committed spec and the CI drift gate use identical flags. SDK consumers requiring SAML endpoint documentation should build AXIAM with the `saml` feature enabled and export locally.
+
+---
+
+*Contract version: 1.0 — Phase 15 (sdk-foundation)*
+*Binding since: 2026-06-30*
+*Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

@@ -187,7 +187,7 @@ Plans:
   4. A user can request account deletion, which removes PII and pseudonymizes audit logs
   5. Audit log entries for deleted users show DELETED_USER_<hash> instead of PII
 
-**Plans**: 4/7 plans executed
+**Plans**: 5/7 plans executed
 
 Plans:
 **Wave 1**
@@ -770,7 +770,7 @@ Plans:
 
 - [x] 19-03-PLAN.md — REST core: shared _Session (cookie jar/CSRF/lazy sync+async httpx) + AxiamClient sync+async login/verify_mfa/refresh/logout + check_access/can/batch (SC#1, org_id, path-scoped refresh)
 - [x] 19-04-PLAN.md — gRPC: sync (grpcio) + async (grpc.aio) AuthzGrpcClient + non-blocking interceptor + strict TLS + UNAUTHENTICATED retry-once (D-12)
-- [ ] 19-05-PLAN.md — AMQP: async closure-handler consumer, HMAC verify-before-handler + full §8 ack/nack matrix (D-02)
+- [x] 19-05-PLAN.md — AMQP: async closure-handler consumer, HMAC verify-before-handler + full §8 ack/nack matrix (D-02)
 
 **Wave 4** *(depends on 19-02)*
 
@@ -845,7 +845,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
-| 19. Python SDK | 4/7 | In Progress|  |
+| 19. Python SDK | 5/7 | In Progress|  |
 | 20. Java SDK | 0/? | Not started | - |
 | 21. C# SDK | 0/? | Not started | - |
 | 22. PHP SDK | 0/? | Not started | - |

@@ -19,7 +19,12 @@ readme = "README.md"
 default = ["rest", "grpc", "amqp"]
 rest = ["dep:reqwest"]
 grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost"]
-amqp = ["dep:lapin", "dep:hmac", "dep:sha2", "dep:hex"]
+# `tracing` is a required (non-optional) dependency of `amqp`, not gated by
+# `observability`: the CONTRACT.md §8.4 security-event log on HMAC
+# verification failure is a mandatory correctness/security control (T-16-11),
+# not optional diagnostic instrumentation, so it must always be emitted
+# regardless of whether the crate-wide `observability` feature is enabled.
+amqp = ["dep:lapin", "dep:hmac", "dep:sha2", "dep:hex", "dep:futures-util", "dep:tracing"]
 observability = ["dep:tracing"]
 # NOTE: the "actix" feature (Actix-Web FromRequest middleware) is added by
 # plan 16-05 — intentionally not declared here.
@@ -31,6 +36,7 @@ tonic = { version = "0.14", optional = true }
 tonic-prost = { version = "0.14", optional = true }
 prost = { version = "0.14", optional = true }
 lapin = { version = "4", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
 hmac = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }

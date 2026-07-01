@@ -11,11 +11,10 @@
 //! See `sdks/CONTRACT.md` §8 for the full HMAC verification protocol this
 //! module implements.
 
+pub mod consumer;
 pub mod hmac;
 pub mod messages;
 
+pub use consumer::consume;
 pub use hmac::{sign_payload, verify_payload};
 pub use messages::{AuditEventMessage, AuthzRequest};
-
-// `consumer` (the closure-handler `consume(...)` API, D-07) is added by this
-// plan's Task 2, which depends on the `hmac`/`messages` primitives above.

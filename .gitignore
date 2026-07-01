@@ -50,3 +50,6 @@ sdks/typescript/src/gen/
 sdks/go/gen/
 sdks/python/axiam_sdk/gen/
 sdks/java/src/main/java/io/axiam/sdk/gen/
+
+# GSD research web-fetch cache (transient)
+.planning/research/.cache/

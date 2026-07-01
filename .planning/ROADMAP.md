@@ -755,7 +755,30 @@ Plans:
   4. A FastAPI dependency-injection helper and a Django middleware class are both provided and demonstrated in runnable example scripts.
   5. `python -m build && twine check dist/*` succeeds; PyPI publish CI pipeline runs on release tag.
 
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 19-01-PLAN.md — Foundation: pyproject fix (build_meta/>=3.10/src-layout/py.typed/package-data) + committed gRPC stubs (grpc_tools.protoc + import fixup) + conftest + **AMQP HMAC cross-language fixture test** (Assumption A2 / Pitfall 2)
+
+**Wave 2** *(depends on 19-01)*
+
+- [ ] 19-02-PLAN.md — Core primitives: error taxonomy + redact-before-wrap (D-08/CR-04), Pydantic models + SecretStr (D-06/D-07/D-21), local JWKS EdDSA-only verifier (D-16), dual-lock single-flight refresh guard (SC#2)
+
+**Wave 3** *(parallel; depend on 19-01 + 19-02; zero file overlap)*
+
+- [ ] 19-03-PLAN.md — REST core: shared _Session (cookie jar/CSRF/lazy sync+async httpx) + AxiamClient sync+async login/verify_mfa/refresh/logout + check_access/can/batch (SC#1, org_id, path-scoped refresh)
+- [ ] 19-04-PLAN.md — gRPC: sync (grpcio) + async (grpc.aio) AuthzGrpcClient + non-blocking interceptor + strict TLS + UNAUTHENTICATED retry-once (D-12)
+- [ ] 19-05-PLAN.md — AMQP: async closure-handler consumer, HMAC verify-before-handler + full §8 ack/nack matrix (D-02)
+
+**Wave 4** *(depends on 19-02)*
+
+- [ ] 19-06-PLAN.md — FastAPI dependency + Django middleware (local JWKS verify + cross-tenant claim check + identity injection), import-safe optional extras (D-09/D-10, SC#4)
+
+**Wave 5** *(depends on all transports + integrations)*
+
+- [ ] 19-07-PLAN.md — Six examples (login+MFA/REST/gRPC/AMQP/FastAPI/Django) + README §1–§10 conformance + Python SDK CI (matrix 3.10–3.13, verify=False gate, gRPC drift-check, mypy/ruff, build/twine, tag-triggered PyPI Trusted Publishing) (SC#3/SC#5/D-13/D-18/D-20)
 
 ---
 
@@ -822,7 +845,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
-| 19. Python SDK | 0/? | Not started | - |
+| 19. Python SDK | 0/7 | Planned | - |
 | 20. Java SDK | 0/? | Not started | - |
 | 21. C# SDK | 0/? | Not started | - |
 | 22. PHP SDK | 0/? | Not started | - |

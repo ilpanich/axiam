@@ -137,4 +137,4 @@ def require_authenticated_user(
     return _dependency
 
 
-__all__ = ["AxiamUser", "require_authenticated_user"]
+__all__ = ["AxiamUser", "JwksVerifier", "require_authenticated_user"]

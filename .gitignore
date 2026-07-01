@@ -58,3 +58,12 @@ sdks/java/src/main/java/io/axiam/sdk/gen/
 
 # GSD research web-fetch cache (transient)
 .planning/research/.cache/
+
+# Go SDK example binaries — `go build ./examples/...` (run without -o)
+# compiles each example main package to a same-named binary in the current
+# directory; these are build artifacts, never source.
+/sdks/go/login-mfa
+/sdks/go/authz-check
+/sdks/go/grpc-checkaccess
+/sdks/go/amqp-consumer
+/sdks/go/middleware-guard

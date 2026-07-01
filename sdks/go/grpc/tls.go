@@ -30,3 +30,14 @@ func newTLSCredentials(customCAPEM []byte) (credentials.TransportCredentials, er
 
 	return credentials.NewTLS(tlsConfig), nil
 }
+
+// NewTLSCredentials is the exported entry point for constructing this
+// package's strict TLS transport credentials (§6) — the credentials.
+// TransportCredentials value NewGRPCClient requires as its second argument.
+// It is a thin, behavior-identical wrapper over newTLSCredentials: TLS 1.3
+// minimum, no verification bypass, customCAPEM is the sole optional escape
+// hatch for a development CA (mirrors WithCustomCA on the root REST
+// Client).
+func NewTLSCredentials(customCAPEM []byte) (credentials.TransportCredentials, error) {
+	return newTLSCredentials(customCAPEM)
+}

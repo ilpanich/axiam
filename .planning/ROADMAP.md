@@ -187,7 +187,7 @@ Plans:
   4. A user can request account deletion, which removes PII and pseudonymizes audit logs
   5. Audit log entries for deleted users show DELETED_USER_<hash> instead of PII
 
-**Plans**: 6/7 plans executed
+**Plans**: 7/7 plans complete
 
 Plans:
 **Wave 1**
@@ -593,7 +593,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 - [x] **Phase 16: Rust SDK** - Reference implementation (REST + gRPC + AMQP); establishes `Sensitive<T>` and gRPC-channel patterns reused by all later SDKs (completed 2026-07-01)
 - [x] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish (6/6 plans executed 2026-07-01; verification found 4 critical security gaps CR-01..CR-04 — gap-closure plan 17-07 executed 2026-07-01 closing CR-02/CR-03; 17-08 pending for CR-01/CR-04) (completed 2026-07-01)
 - [x] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish (completed 2026-07-01)
-- [ ] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish
+- [x] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish (completed 2026-07-01)
 - [ ] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing
 - [ ] **Phase 21: C# SDK** - HttpClient + Grpc.Net.Client; Grpc.Tools MSBuild codegen; ASP.NET Core middleware; NuGet publish
 - [ ] **Phase 22: PHP SDK** - REST-first; gRPC guarded by runtime `extension_loaded('grpc')`; Laravel + Symfony middleware; Packagist publish
@@ -778,7 +778,7 @@ Plans:
 
 **Wave 5** *(depends on all transports + integrations)*
 
-- [ ] 19-07-PLAN.md — Six examples (login+MFA/REST/gRPC/AMQP/FastAPI/Django) + README §1–§10 conformance + Python SDK CI (matrix 3.10–3.13, verify=False gate, gRPC drift-check, mypy/ruff, build/twine, tag-triggered PyPI Trusted Publishing) (SC#3/SC#5/D-13/D-18/D-20)
+- [x] 19-07-PLAN.md — Six examples (login+MFA/REST/gRPC/AMQP/FastAPI/Django) + README §1–§10 conformance + Python SDK CI (matrix 3.10–3.13, verify=False gate, gRPC drift-check, mypy/ruff, build/twine, tag-triggered PyPI Trusted Publishing) (SC#3/SC#5/D-13/D-18/D-20)
 
 ---
 
@@ -845,7 +845,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
-| 19. Python SDK | 6/7 | In Progress|  |
+| 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
 | 20. Java SDK | 0/? | Not started | - |
 | 21. C# SDK | 0/? | Not started | - |
 | 22. PHP SDK | 0/? | Not started | - |

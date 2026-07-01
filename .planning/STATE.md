@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 19
 current_phase_name: Python SDK
-status: executing
-stopped_at: Completed 19-06-PLAN.md
-last_updated: "2026-07-01T21:07:28.435Z"
+status: verifying
+stopped_at: Completed 19-07-PLAN.md
+last_updated: "2026-07-01T21:19:58.527Z"
 last_activity: 2026-07-01
 last_activity_desc: Plan 19-03 (REST core — unified AxiamClient) complete
 progress:
   total_phases: 8
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 33
-  completed_plans: 32
-  percent: 50
+  completed_plans: 33
+  percent: 63
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 19 — Python SDK
 Plan: 7 of 7
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-01 — Plan 19-03 (REST core — unified AxiamClient) complete
 
 ## Performance Metrics
@@ -125,6 +125,7 @@ Last activity: 2026-07-01 — Plan 19-03 (REST core — unified AxiamClient) com
 | Phase 19 P05 | 15min | 1 tasks | 3 files |
 | Phase 19 P05 | 15min | 1 tasks | 3 files |
 | Phase 19-python-sdk P06 | 40min | 3 tasks | 8 files |
+| Phase 19-python-sdk P07 | 45min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -269,6 +270,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 19-python-sdk] 19-05: Post-verify parse-failure path structurally converges with HMAC-fail in both Python and Go references (both require JSON-object body for HMAC to succeed); test isolates the branch via monkeypatched json.loads failing only on its second call
 - [Phase 19-python-sdk]: 19-06: Django's AxiamUser is a separate local dataclass rather than importing axiam_sdk.fastapi.AxiamUser -- prevents a runtime cross-dependency between the two optional framework extras
 - [Phase 19-python-sdk]: 19-06: Added [[tool.mypy.overrides]] for django.* (ignore_missing_imports=true) rather than pulling in django-stubs -- mirrors the existing axiam_sdk.grpc.gen.* precedent for untyped/stub-less dependencies
+- [Phase ?]: [Phase 19-python-sdk] 19-07: Re-exported JwksVerifier from axiam_sdk.fastapi.__all__ so the FastAPI example imports only public entry points, never axiam_sdk._jwks directly
+- [Phase ?]: [Phase 19-python-sdk] 19-07: actions/setup-python and pypa/gh-action-pypi-publish pinned by major-version tag (@v5, @release/v1), not SHA -- no pre-existing pin to reuse and no GitHub network egress in this environment to source a new SHA; flagged for a maintainer follow-up
+- [Phase ?]: [Phase 19-python-sdk] 19-07: Added [tool.ruff] extend-exclude for src/axiam_sdk/grpc/gen, mirroring the existing mypy override, so the new CI lint job doesn't fail on pre-existing generated-code style debt from 19-01
 
 ### Pending Todos
 
@@ -289,6 +293,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T21:07:28.422Z
-Stopped at: Completed 19-06-PLAN.md
+Last session: 2026-07-01T21:19:58.515Z
+Stopped at: Completed 19-07-PLAN.md
 Resume file: None

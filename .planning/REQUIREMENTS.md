@@ -483,10 +483,10 @@ Deliver `sdks/go/` (second server-side reference).
 Deliver `sdks/python/` with sync + async interfaces.
 
 ### Acceptance Criteria
-- [ ] Full baseline; `asyncio.Lock` single-flight refresh; `httpx.Cookies` jar; `verify=True` hardcoded
-- [ ] httpx 0.27 (sync+async) + grpcio 1.78 + aio-pika 9.6; Pydantic v2 models; PyJWT for JWKS
-- [ ] FastAPI dependency + Django middleware helpers
-- [ ] Examples; **PyPI publish pipeline** (`axiam-sdk`)
+- [x] Full baseline; `asyncio.Lock` single-flight refresh; `httpx.Cookies` jar; `verify=True` hardcoded
+- [x] httpx 0.27 (sync+async) + grpcio 1.78 + aio-pika 9.6; Pydantic v2 models; PyJWT for JWKS
+- [x] FastAPI dependency + Django middleware helpers
+- [x] Examples; **PyPI publish pipeline** (`axiam-sdk`)
 
 ---
 
@@ -557,7 +557,7 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
 | RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) | Complete |
 | TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) | Pending |
 | GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Complete |
-| PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Pending |
+| PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Complete |
 | JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Pending |
 | CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Pending |
 | PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only | Pending |

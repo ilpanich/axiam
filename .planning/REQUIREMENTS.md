@@ -469,10 +469,10 @@ Deliver `sdks/typescript/` with distinct browser vs Node entry points.
 Deliver `sdks/go/` (second server-side reference).
 
 ### Acceptance Criteria
-- [ ] Full baseline; `sync.Mutex` single-flight refresh; `net/http/cookiejar`
-- [ ] net/http REST + grpc-go 1.81 + amqp091-go 1.10; lestrrat-go/jwx/v3 for EdDSA/JWKS
-- [ ] No `InsecureSkipVerify` anywhere (CI lint gate); net/http middleware
-- [ ] Examples; **Go module publish** (`github.com/ilpanich/axiam/sdks/go`, version tag `sdks/go/vX.Y.Z`)
+- [x] Full baseline; `sync.Mutex` single-flight refresh; `net/http/cookiejar`
+- [x] net/http REST + grpc-go 1.81 + amqp091-go 1.10; lestrrat-go/jwx/v3 for EdDSA/JWKS
+- [x] No `InsecureSkipVerify` anywhere (CI lint gate); net/http middleware
+- [x] Examples; **Go module publish** (`github.com/ilpanich/axiam/sdks/go`, version tag `sdks/go/vX.Y.Z`)
 
 ---
 
@@ -556,7 +556,7 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
 | FND-05 | Phase 15 | SDK Monorepo Scaffold & per-SDK path-filtered CI | Pending |
 | RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) | Complete |
 | TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) | Pending |
-| GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Pending |
+| GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Complete |
 | PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Pending |
 | JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Pending |
 | CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Pending |

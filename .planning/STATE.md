@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 18
 current_phase_name: go-sdk
-status: executing
+status: verifying
 stopped_at: Completed 18-04-PLAN.md
-last_updated: "2026-07-01T16:05:20.385Z"
+last_updated: "2026-07-01T16:13:59.475Z"
 last_activity: 2026-07-01
 last_activity_desc: Phase 18 execution started
 progress:
   total_phases: 8
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 26
-  completed_plans: 25
-  percent: 38
+  completed_plans: 26
+  percent: 50
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 18 (go-sdk) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-01 — Phase 18 execution started
 
 ## Performance Metrics
@@ -116,6 +116,7 @@ Last activity: 2026-07-01 — Phase 18 execution started
 | Phase Phase 18-go-sdk PP03 | 20min | 2 tasks tasks | 8 files files |
 | Phase 18 P04 | 20min | 2 tasks | 7 files |
 | Phase 18-go-sdk P05 | 15min | 1 tasks | 3 files |
+| Phase 18-go-sdk P06 | 20min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -245,6 +246,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 18-go-sdk] 18-04: grpc package imports root axiam package directly for AuthError/AuthzError/NetworkError (no import cycle — root axiam has no grpc import), avoiding a duplicated error taxonomy
 - [Phase ?]: [Phase 18-go-sdk] 18-05: middleware added its own claims.Exp check beyond the Plan-04 verifier's signature-only Verify — resource-server trust boundary must reject expired-but-signature-valid tokens (Rule 2)
 - [Phase ?]: [Phase 18-go-sdk] 18-05: cross-tenant token rejection returns 401, matching the TS verifyCore.ts reference, not 403 — a tenant_id mismatch is an identity/authentication problem, not an authorization decision on a correctly-identified caller
+- [Phase ?]: [Phase 18-go-sdk] 18-06: Exported grpc.NewTLSCredentials as a thin wrapper over the existing unexported newTLSCredentials so external callers can build strict TLS credentials without reimplementing tls.Config wiring
+- [Phase ?]: [Phase 18-go-sdk] 18-06: Added root-package axiam.JWKSVerifier/NewJWKSVerifier wrapping internal/jwks.NewVerifier so no example needs to import an internal/ package directly, keeping the SDK's supported public API entry points consistent (root/grpc/amqp/middleware only)
+- [Phase ?]: [Phase 18-go-sdk] 18-06: CI workflow pins actions/setup-go to go-version 1.25.0 matching go.mod's actual floor after 18-01's dependency-driven bump; tag-triggered publish job verifies module-proxy resolution rather than an explicit publish call, since pushing sdks/go/vX.Y.Z IS the release for the Go module proxy
 
 ### Pending Todos
 
@@ -265,6 +269,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T16:04:35.368Z
+Last session: 2026-07-01T16:13:59.463Z
 Stopped at: Completed 18-04-PLAN.md
 Resume file: None

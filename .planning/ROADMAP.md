@@ -592,7 +592,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 - [x] **Phase 15: SDK Foundation** - Export OpenAPI spec, establish buf proto codegen pipeline, add REST authz-check endpoint, author cross-language contract, scaffold `sdks/` monorepo with per-SDK path-filtered CI (completed 2026-06-30)
 - [x] **Phase 16: Rust SDK** - Reference implementation (REST + gRPC + AMQP); establishes `Sensitive<T>` and gRPC-channel patterns reused by all later SDKs (completed 2026-07-01)
 - [x] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish (6/6 plans executed 2026-07-01; verification found 4 critical security gaps CR-01..CR-04 — gap-closure plan 17-07 executed 2026-07-01 closing CR-02/CR-03; 17-08 pending for CR-01/CR-04) (completed 2026-07-01)
-- [ ] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish
+- [x] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish (completed 2026-07-01)
 - [ ] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish
 - [ ] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing
 - [ ] **Phase 21: C# SDK** - HttpClient + Grpc.Net.Client; Grpc.Tools MSBuild codegen; ASP.NET Core middleware; NuGet publish
@@ -719,7 +719,7 @@ Plans:
   4. AMQP consumer verifies HMAC-SHA256 of each message body; nacks without requeue on signature mismatch.
   5. `go test ./...` passes; Go module publish pipeline tags `sdks/go/vX.Y.Z` on release.
 
-**Plans**: 5/6 plans executed
+**Plans**: 6/6 plans complete
 
 Plans:
 **Wave 1**
@@ -738,7 +738,7 @@ Plans:
 
 **Wave 4** *(depends on all transports + middleware)*
 
-- [ ] 18-06-PLAN.md — Five per-capability examples + README conformance + sdk-ci-go.yml (test/vet + TLS-bypass grep gate + buf drift-check + tag-triggered publish) (SC#1, SC#3, SC#5)
+- [x] 18-06-PLAN.md — Five per-capability examples + README conformance + sdk-ci-go.yml (test/vet + TLS-bypass grep gate + buf drift-check + tag-triggered publish) (SC#1, SC#3, SC#5)
 
 ---
 
@@ -821,7 +821,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
-| 18. Go SDK | 5/6 | In Progress|  |
+| 18. Go SDK | 6/6 | Complete   | 2026-07-01 |
 | 19. Python SDK | 0/? | Not started | - |
 | 20. Java SDK | 0/? | Not started | - |
 | 21. C# SDK | 0/? | Not started | - |

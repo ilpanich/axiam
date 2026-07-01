@@ -206,3 +206,6 @@ No action was taken on these in this plan (side-effecting service configuration 
 ---
 *Phase: 17-typescript-sdk*
 *Completed: 2026-07-01*
+
+## Self-Check: PASSED
+All 7 created/modified files verified present on disk; all 3 commits (1d76b01, c893322, 4a9409c) verified in git log.

@@ -4,11 +4,11 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 18
 current_phase_name: Go SDK
-status: completed
-stopped_at: Phase 18 context gathered
-last_updated: "2026-07-01T14:32:51.711Z"
+status: planned
+stopped_at: Phase 18 planned (6 plans, 4 waves)
+last_updated: "2026-07-01T15:09:05.000Z"
 last_activity: 2026-07-01
-last_activity_desc: Phase 17 complete, transitioned to Phase 18
+last_activity_desc: Phase 18 planned — 6 plans across 4 waves, ready to execute
 progress:
   total_phases: 8
   completed_phases: 3
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 17 — typescript-sdk
+**Current focus:** Phase 18 — go-sdk
 
 ## Current Position
 
 Phase: 18 — Go SDK
-Plan: Not started
-Status: 17-07 complete (CR-02, CR-03 closed); 17-08 remaining (CR-01, CR-04)
-Last activity: 2026-07-01 — Phase 17 complete, transitioned to Phase 18
+Plan: 6 plans (4 waves) — ready to execute
+Status: Phase 18 planned — research + VALIDATION + 6 plans committed; ready to execute (`/gsd-execute-phase 18`)
+Last activity: 2026-07-01 — Phase 18 planned (RESEARCH.md, VALIDATION.md, 6 plans across 4 waves)
 
 ## Performance Metrics
 

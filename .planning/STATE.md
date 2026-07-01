@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 17
 current_phase_name: typescript-sdk
 status: executing
-stopped_at: Phase 17 context gathered
-last_updated: "2026-07-01T11:59:07.015Z"
+stopped_at: Completed 17-02-PLAN.md
+last_updated: "2026-07-01T12:10:02.625Z"
 last_activity: 2026-07-01
 last_activity_desc: Phase 17 execution started
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 18
-  completed_plans: 13
+  completed_plans: 14
   percent: 25
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 17 (typescript-sdk) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-07-01 — Phase 17 execution started
 
@@ -104,6 +104,7 @@ Last activity: 2026-07-01 — Phase 17 execution started
 | Phase 16-rust-sdk P05 | 30min | 1 tasks | 6 files |
 | Phase 16 P06 | 45min | 2 tasks | 9 files |
 | Phase 17-typescript-sdk P01 | 3min | 2 tasks | 20 files |
+| Phase 17-typescript-sdk P02 | 9min | 2 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -206,6 +207,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 16-rust-sdk] 16-06: cargo publish --dry-run/publish require --allow-dirty in CI because the newly-included src/gen/ is gitignored-but-present by design, not because the gate is weakened
 - [Phase 17-typescript-sdk]: 17-01 externalized runtime deps in tsup.config.ts so dist/ never bundles axios/jose/tough-cookie/axios-cookiejar-support/@grpc/grpc-js/amqplib
 - [Phase 17-typescript-sdk]: 17-01 fixed AximClient typo to AxiamClient in README.md in addition to src/ (D-14 repo-wide intent)
+- [Phase 17-typescript-sdk]: 17-02: Added jsdom devDependency (missing from 17-01 scaffold) required by vitest jsdom environment for browser-persona CSRF tests
+- [Phase 17-typescript-sdk]: 17-02: login()/verifyMfa() branch on response.status===202 inside the resolved success path, not the catch block, since axios's default validateStatus resolves any 2xx (including 202) as success
 
 ### Pending Todos
 
@@ -226,6 +229,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T11:58:36.603Z
-Stopped at: Phase 17 context gathered
-Resume file: .planning/phases/17-typescript-sdk/17-CONTEXT.md
+Last session: 2026-07-01T12:10:02.614Z
+Stopped at: Completed 17-02-PLAN.md
+Resume file: None

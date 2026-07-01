@@ -673,7 +673,7 @@ Plans:
   4. Express and Fastify middleware examples compile under TypeScript strict mode and protect a sample route; the package publishes as `axiam-sdk` on npm.
   5. `npm publish --dry-run` succeeds; npm publish CI pipeline runs on release tag.
 
-**Plans**: 1/6 plans executed
+**Plans**: 2/6 plans executed
 
 Plans:
 **Wave 1**
@@ -682,7 +682,7 @@ Plans:
 
 **Wave 2** *(parallel; depend on 17-01)*
 
-- [ ] 17-02-PLAN.md — REST/browser persona: AxiamClient + CSRF interceptor + reactive single-flight refresh + login/MFA discriminated union + can/checkAccess/batchCheck over FND-04 REST + CF-01 retry + SharedSession (D-05..D-08/D-13/D-18/D-25, SC#2 browser, SC#3)
+- [x] 17-02-PLAN.md — REST/browser persona: AxiamClient + CSRF interceptor + reactive single-flight refresh + login/MFA discriminated union + can/checkAccess/batchCheck over FND-04 REST + CF-01 retry + SharedSession (D-05..D-08/D-13/D-18/D-25, SC#2 browser, SC#3)
 - [ ] 17-04-PLAN.md — AMQP: byte-identical HMAC sign/verify + server-identical DTOs + verify-before-handler closure consumer (nack-no-requeue + security event) (D-12/§8)
 
 **Wave 3** *(depends on 17-01 + 17-02)*
@@ -796,7 +796,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 |-------|----------------|--------|-----------|
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
-| 17. TypeScript SDK | 1/6 | In Progress|  |
+| 17. TypeScript SDK | 2/6 | In Progress|  |
 | 18. Go SDK | 0/? | Not started | - |
 | 19. Python SDK | 0/? | Not started | - |
 | 20. Java SDK | 0/? | Not started | - |

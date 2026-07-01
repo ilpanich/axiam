@@ -74,6 +74,10 @@ export async function login(client: AxiamClient, email: string, password: string
       return mfaRequiredToResult(response.data as MfaRequiredResponseWire);
     }
     client.session.authenticated = true;
+    // CR-01/D-05: sync the Node persona's csrfToken (and cached access token)
+    // from the jar now that the session cookie(s) have landed. No-op for the
+    // browser SharedSession, which has no onAuthenticated implementation.
+    await client.session.onAuthenticated?.();
     return loginSuccessToResult(response.data as LoginSuccessResponseWire);
   } catch (err) {
     const status = extractAxiosStatus(err);
@@ -99,6 +103,8 @@ export async function verifyMfa(client: AxiamClient, mfaToken: string, code: str
   try {
     const response = await client.session.axios.post<LoginSuccessResponseWire>(MFA_VERIFY_PATH, body);
     client.session.authenticated = true;
+    // CR-01/D-05: same post-authentication sync as login()'s 200 branch.
+    await client.session.onAuthenticated?.();
     return loginSuccessToResult(response.data);
   } catch (err) {
     const status = extractAxiosStatus(err);

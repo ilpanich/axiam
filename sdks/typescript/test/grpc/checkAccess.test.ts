@@ -109,7 +109,7 @@ async function buildTestSession(): Promise<NodeSession> {
   const tokenManager = new TokenManager(jar, BASE_URL, base.tenantHeaderValue);
   await tokenManager.syncFromJar();
   const jwksVerifier = createVerifier(BASE_URL);
-  return new NodeSession({ baseUrl: BASE_URL, tenantSlug: 'acme' }, base, tokenManager, jwksVerifier);
+  return new NodeSession({ baseUrl: BASE_URL, tenantSlug: 'acme' }, base, tokenManager, jwksVerifier, jar);
 }
 
 describe('gRPC checkAccess/batchCheck (SC#2 Node half)', () => {

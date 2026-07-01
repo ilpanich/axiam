@@ -41,6 +41,16 @@ export class SharedSession {
     this.tenantHeaderValue = tenantHeaderValue;
     this.refreshGuard = createRefreshGuard();
   }
+
+  /**
+   * Optional session-level hook invoked by rest/auth.ts after a successful
+   * login()/verifyMfa() (CR-01, D-05). The base SharedSession (browser
+   * persona) does not implement it — the browser reads document.cookie
+   * directly on every request and has no jar to sync from. NodeSession
+   * overrides this to populate `csrfToken` from its cookie jar and refresh
+   * the cached access token.
+   */
+  onAuthenticated?(): Promise<void>;
 }
 
 /**

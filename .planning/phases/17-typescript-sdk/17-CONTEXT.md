@@ -146,6 +146,30 @@ scaffold).
   speed; a separate optional testcontainers-based smoke test exercises gRPC/AMQP against a real AXIAM
   server in CI.
 
+### Post-Context Refinements (follow-up discussion, 2026-07-01)
+> These four pin the genuinely-open nuances inside the areas re-opened after the initial context
+> pass (persona selection, Node auth internals, middleware verification, §3 reconciliation). Each
+> confirms the recommended direction, consistent with the contract and the Rust reference.
+- **D-25:** **Persona selection is by import path only — no runtime auto-detection.** A consumer
+  chooses the persona purely by which entry they import (`axiam-sdk`/`/rest` vs `/grpc` `/amqp`); the
+  SDK does **not** sniff `typeof window`/`process` to swap transports. Deterministic and statically
+  tree-shakeable (protects SC#1); reinforces D-01/D-03.
+- **D-26:** **`Sensitive<T>` redaction covers `toString` + `toJSON` + Node `util.inspect.custom`.**
+  The Node-persona wrapper holds a private `#value` and redacts to `[SENSITIVE]` across **all three**
+  surfaces — so `String(token)`, `JSON.stringify(obj)`, and `console.log(obj)` all stay clean, not
+  just direct stringification. Raw value is reachable only via a package-internal accessor (§7 is the
+  floor; this is the ceiling). Browser persona still holds no tokens (D-06), so this applies Node-only.
+- **D-27:** **Express/Fastify middleware verifies locally via `jose`, injects `req.axiamUser`.** The
+  middleware validates the session against the cached JWKS (no per-request server round-trip, reusing
+  the D-11 cache, honoring §10's short-TTL cache rule) and injects identity as `req.axiamUser`
+  (Express) / `request.axiamUser` (Fastify). Falls back to refresh on expiry. Mirrors Rust D-03; both
+  frameworks share one verification core.
+- **D-28:** **§3 reconciliation direction = update the contract, not document a divergence.** The
+  planner's scoped doc task (see deferred) MUST update CONTRACT §3's browser note to make **cookie
+  double-submit** (read `axiam_csrf` → echo `X-CSRF-Token`) the canonical browser behavior — it is the
+  server's actual mechanism — while non-browser SDKs capture `X-CSRF-Token` from the response header.
+  One coherent contract; do **not** leave §3 describing behavior no client uses.
+
 ### Carried Forward from the Rust Reference (Phase 16) — apply unless research contradicts
 - **CF-01 (D-12 Rust):** Bounded backoff, **idempotent operations only** — auto-retry only GET /
   read-only authz checks for transient `NetworkError` (timeouts, gRPC `UNAVAILABLE`), honor
@@ -289,7 +313,9 @@ scaffold).
 - **CONTRACT.md §3 + class-name fixups** — D-05 (cookie double-submit) contradicts §3's browser note,
   and D-14 fixes `AximaClient`/`AximClient` typos. These are contract/doc edits that touch the shared
   `sdks/CONTRACT.md` (affecting later SDKs), so surface them to the planner as an explicit, scoped
-  documentation task rather than silently diverging. **Do not lose.**
+  documentation task rather than silently diverging. **Direction is now decided (D-28):** update §3 so
+  cookie double-submit is the canonical **browser** behavior and non-browser SDKs capture the token
+  from the response header — not a browser-only divergence note. **Do not lose.**
 - **Browser JS-readable token / proactive refresh in the browser** — considered (D-06) and rejected
   because httpOnly cookies + XSS posture forbid it; revisit only if a non-cookie browser auth model
   is ever adopted.

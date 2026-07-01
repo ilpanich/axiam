@@ -158,9 +158,25 @@
 - Package-manager/workspace tooling (pnpm vs npm), `engines.node` matrix, examples layout, versioning tooling.
 - Exact `jose` JWKS caching/rotation API usage (D-11).
 
+## Post-Context Refinements (Round 2 — 2026-07-01)
+
+Re-opened the four areas (persona selection, Node auth internals, middleware verification, §3
+reconciliation) to pin the genuinely-open nuances the first pass left to §7/planner discretion.
+
+| Area | Question | Options considered | Selected → CONTEXT |
+|------|----------|--------------------|--------------------|
+| Persona selection | Import path vs runtime detection | Explicit import path only / runtime auto-detection | Explicit import path only → **D-25** |
+| `Sensitive<T>` surface | Redaction ceiling | `toString`+`toJSON`+`util.inspect` / §7 minimum (`toString` only) | Full three-surface redaction → **D-26** |
+| Middleware verification | Local vs server round-trip | Local JWKS (`jose`), inject `req.axiamUser` / per-request server round-trip | Local JWKS, `req.axiamUser` → **D-27** |
+| §3 reconciliation | Contract-edit direction | Update §3 to cookie double-submit canonical / document a browser-only divergence | Update §3 → **D-28** |
+
+_Note: the Round-2 interactive prompt hit an environment permission-stream error mid-session; the
+four recommended directions (each consistent with CONTRACT.md and the Rust reference D-03/D-11) were
+applied to close the areas the user had opted to discuss._
+
 ## Deferred Ideas
 
-- CONTRACT.md §3 (CSRF browser note) + class-name (`AximaClient`/`AximClient`) fixups — scoped doc task for the planner.
+- CONTRACT.md §3 (CSRF browser note) + class-name (`AximaClient`/`AximClient`) fixups — scoped doc task for the planner. Direction decided (D-28): update §3, don't document a divergence.
 - Browser JS-readable token / proactive browser refresh — rejected (httpOnly + XSS).
 - Built-in authz cache — deferred to caller-owned caching.
 - EventEmitter/stream AMQP consumer — deferred for the safer closure-handler.

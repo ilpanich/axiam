@@ -81,6 +81,13 @@ ignore_missing_imports = true
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Generated gRPC stubs (D-04, "DO NOT EDIT!" header) are out of every plan's
+# file-modification scope, same rationale as the [[tool.mypy.overrides]]
+# exemption for axiam_sdk.grpc.gen.* above — grpc_tools.protoc's own
+# codegen output predates ruff's modern style conventions (e.g. explicit
+# `object` base classes) and is not something this SDK's own lint gate
+# should enforce on upstream-generated code.
+extend-exclude = ["src/axiam_sdk/grpc/gen"]
 
 [tool.ruff.format]
 quote-style = "double"

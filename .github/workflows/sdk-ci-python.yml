@@ -8,6 +8,9 @@ on:
       - 'sdks/openapi.json'
       - 'sdks/buf.yaml'
       - 'sdks/buf.gen.yaml'
+  push:
+    tags:
+      - 'sdks/python/v*'
 
 permissions:
   contents: read
@@ -15,8 +18,195 @@ permissions:
 jobs:
   scaffold-check:
     name: SDK Scaffold Check
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Verify LICENSE file
         run: test -f sdks/python/LICENSE
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # D-18: CI test matrix = Python 3.10/3.11/3.12/3.13 on ubuntu-latest.
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # NOTE: actions/setup-python has no pre-existing pin anywhere else in
+      # this repository's workflows to reuse (unlike actions/checkout and
+      # bufbuild/buf-action, which are SHA/tag-pinned consistently
+      # repo-wide) and this environment has no GitHub network egress to
+      # source a new commit SHA (RESEARCH.md environment constraint,
+      # 19-CONTEXT.md). Using the major-version tag is a documented,
+      # narrowly-scoped exception — see 19-07-SUMMARY.md.
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies (incl. fastapi/django/dev extras)
+        run: pip install -e 'sdks/python[dev,fastapi,django]'
+
+      - name: Test
+        run: pytest sdks/python/tests -v
+
+      - name: Byte-compile examples (D-13)
+        run: python -m py_compile sdks/python/examples/*.py
+
+  tls-bypass-gate:
+    name: TLS-bypass gate (SC#3)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # §6 / SC#3: strict TLS is always on (verify=True hardcoded); the only
+      # escape hatch is an explicit custom_ca parameter — there must be no
+      # insecure/skip-verification surface anywhere in the SDK's own source
+      # tree, including examples and tests. Extended beyond the literal
+      # verify=False string to ssl._create_unverified_context and verify=0
+      # (falsy-but-not-literal-False) per CF-03's "no TLS-bypass idiom
+      # appears anywhere" requirement.
+      - name: TLS-bypass gate — no TLS-bypass patterns (SC#3)
+        run: |
+          if grep -rnE 'verify\s*=\s*(False|0)|ssl\._create_unverified_context' \
+              sdks/python/src sdks/python/examples sdks/python/tests 2>/dev/null | grep -q .; then
+            echo "FAIL: found a TLS-bypass pattern under sdks/python/"
+            grep -rnE 'verify\s*=\s*(False|0)|ssl\._create_unverified_context' \
+              sdks/python/src sdks/python/examples sdks/python/tests || true
+            exit 1
+          fi
+          echo "OK: no TLS-bypass patterns found under sdks/python/"
+
+  grpc-drift-check:
+    name: gRPC stub drift-check (D-04)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # D-04 / Pitfall 5: the buf CLI is absent from this environment and
+      # this repo has no pinned SHA for a buf-CLI-driven Python codegen
+      # action to reuse; the documented Python exception standardizes on
+      # `python -m grpc_tools.protoc` (via gen_grpc.sh) for BOTH local and
+      # CI codegen instead, matching Phase 18's Go `protoc` precedent.
+      - name: Install grpcio-tools (matches the pinned grpcio runtime)
+        run: pip install 'grpcio-tools==1.78.*'
+
+      - name: Regenerate gRPC stubs
+        run: bash sdks/python/scripts/gen_grpc.sh
+
+      - name: Fail on drift — committed stubs must match protos (D-04)
+        run: git diff --exit-code sdks/python/src/axiam_sdk/grpc/gen
+
+  lint:
+    name: Lint (mypy --strict + ruff) (D-20)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies (incl. fastapi/django/dev extras)
+        run: pip install -e 'sdks/python[dev,fastapi,django]'
+
+      - name: mypy --strict
+        run: mypy --strict sdks/python/src
+
+      - name: ruff check
+        run: ruff check sdks/python
+
+      - name: ruff format --check
+        run: ruff format --check sdks/python
+
+  build-check:
+    name: Build + twine check (SC#5)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build + twine
+        run: pip install build twine
+
+      - name: Build sdist + wheel (SC#5)
+        working-directory: sdks/python
+        run: python -m build
+
+      - name: twine check (SC#5)
+        working-directory: sdks/python
+        run: twine check dist/*
+
+  publish:
+    name: Publish to PyPI
+    # Manual-on-tag, side-effecting step: this job only runs when a
+    # maintainer pushes a tag matching sdks/python/vX.Y.Z (D-05/D-13
+    # monorepo tag convention). It is never triggered by a PR, so no
+    # publish-adjacent secret/OIDC token is ever exposed to a PR-triggered
+    # job (T-19-25, mirrors Rust T-16-26 / Go T-18-25).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/python/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      # Required for PyPI Trusted Publishing (OIDC) — no stored API token
+      # (D-05). The Trusted Publisher must be registered on PyPI for this
+      # repo + workflow + environment before the first tagged publish (see
+      # 19-07-SUMMARY.md "User Setup Required").
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # D-04: the committed gRPC stubs must be up to date before a release
+      # tag is trusted — same drift-check as the PR gate, run again here as
+      # a belt-and-suspenders confirm on the tagged commit.
+      - name: Install grpcio-tools (matches the pinned grpcio runtime)
+        run: pip install 'grpcio-tools==1.78.*'
+
+      - name: Regenerate gRPC stubs
+        run: bash sdks/python/scripts/gen_grpc.sh
+
+      - name: Fail on drift — committed stubs must match protos (D-04)
+        run: git diff --exit-code sdks/python/src/axiam_sdk/grpc/gen
+
+      - name: Install build + twine
+        run: pip install build twine
+
+      - name: Build sdist + wheel (SC#5)
+        working-directory: sdks/python
+        run: python -m build
+
+      - name: twine check (SC#5)
+        working-directory: sdks/python
+        run: twine check dist/*
+
+      # PyPI Trusted Publishing (OIDC, D-05) — no password/token input; the
+      # id-token: write permission above is what authorizes the exchange.
+      # NOTE: pypa/gh-action-pypi-publish has no pre-existing pin elsewhere
+      # in this repo to reuse and this environment has no GitHub network
+      # egress to source a new commit SHA — using the major-version tag is
+      # a documented, narrowly-scoped exception (see 19-07-SUMMARY.md).
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdks/python/dist

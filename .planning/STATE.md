@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: — Client SDKs
-current_phase: 16
-current_phase_name: Rust SDK
+current_phase: 17
+current_phase_name: typescript-sdk
 status: executing
 stopped_at: Phase 17 context gathered
-last_updated: "2026-07-01T11:30:00.672Z"
+last_updated: "2026-07-01T11:52:14.820Z"
 last_activity: 2026-07-01
-last_activity_desc: Executed 16-06-PLAN.md (Five per-capability examples, README conformance fill-in, and SDK Rust CI leak/TLS-lint/dry-run gates + tag-triggered crates.io publish job)
+last_activity_desc: Phase 17 execution started
 progress:
   total_phases: 8
   completed_phases: 2
-  total_plans: 12
+  total_plans: 18
   completed_plans: 12
   percent: 25
 ---
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 16 — Rust SDK
+**Current focus:** Phase 17 — typescript-sdk
 
 ## Current Position
 
-Phase: 16 — Rust SDK
-Plan: 6 of 6 complete (16-01 foundation, 16-02 REST/token, 16-03 gRPC, 16-04 AMQP, 16-05 Actix middleware, 16-06 examples/publish) — Phase 16 complete
-Status: Ready to execute
-Last activity: 2026-07-01 — Executed 16-06-PLAN.md (Five per-capability examples, README conformance fill-in, and SDK Rust CI leak/TLS-lint/dry-run gates + tag-triggered crates.io publish job)
+Phase: 17 (typescript-sdk) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 17
+Last activity: 2026-07-01 — Phase 17 execution started
 
 ## Performance Metrics
 

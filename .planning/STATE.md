@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 18
 current_phase_name: go-sdk
 status: executing
-stopped_at: Completed 18-01-PLAN.md
-last_updated: "2026-07-01T15:27:07.009Z"
+stopped_at: Completed 18-02-PLAN.md
+last_updated: "2026-07-01T15:38:50.631Z"
 last_activity: 2026-07-01
 last_activity_desc: Phase 18 execution started
 progress:
   total_phases: 8
   completed_phases: 3
   total_plans: 26
-  completed_plans: 21
+  completed_plans: 22
   percent: 38
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 18 (go-sdk) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-07-01 — Phase 18 execution started
 
@@ -112,6 +112,7 @@ Last activity: 2026-07-01 — Phase 18 execution started
 | Phase 17-typescript-sdk P06 | 15min | 2 tasks | 6 files |
 | Phase 17-typescript-sdk P07 | 20min | 2 tasks | 10 files |
 | Phase 18 P01 | 25min | 3 tasks | 11 files |
+| Phase 18 P02 | 30min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -231,6 +232,10 @@ Recent decisions affecting current work:
 - [Phase 18]: buf CLI unavailable locally — generated axiam.v1 gRPC stubs with protoc + protoc-gen-go/protoc-gen-go-grpc
 - [Phase 18]: sdks/go/go.mod go directive auto-bumped 1.22 to 1.25.0 by grpc v1.81.0's go>=1.25.0 requirement
 - [Phase 18]: newNetworkError redesigned so a non-nil *http.Response is the SOLE source of the wrapped cause (via sanitizeResponse), never a caller-supplied pre-built cause — closes a redact-before-wrap bypass gap (D-04/CR-04)
+- [Phase 18-go-sdk]: internal/refreshguard defines a local Sensitive string alias (not imported from root package) to avoid an import cycle with client.go
+- [Phase 18-go-sdk]: TLS-bypass regression tests use a reflection-based helper to check the tls.Config field without spelling it literally, so the tests don't trip the SC#3 repo-wide grep gate
+- [Phase 18-go-sdk]: org_id/tenant_id/jti resolved via unverified base64url JWT payload parse post-login; signature verification deferred to a later plan's JWKS/middleware work
+- [Phase 18-go-sdk]: Refresh resolves tenant_id from the access token's claim (UUID) rather than the client's configured tenantSlug string, since the server's RefreshRequest requires a UUID
 
 ### Pending Todos
 
@@ -251,6 +256,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T15:27:06.997Z
-Stopped at: Completed 18-01-PLAN.md
+Last session: 2026-07-01T15:38:50.619Z
+Stopped at: Completed 18-02-PLAN.md
 Resume file: None

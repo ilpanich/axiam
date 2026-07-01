@@ -4,9 +4,9 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 16
 current_phase_name: Rust SDK
-status: phase_complete
+status: executing
 stopped_at: Phase 17 context gathered
-last_updated: "2026-07-01T10:23:18.231Z"
+last_updated: "2026-07-01T11:30:00.672Z"
 last_activity: 2026-07-01
 last_activity_desc: Executed 16-06-PLAN.md (Five per-capability examples, README conformance fill-in, and SDK Rust CI leak/TLS-lint/dry-run gates + tag-triggered crates.io publish job)
 progress:
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 16 — Rust SDK
 Plan: 6 of 6 complete (16-01 foundation, 16-02 REST/token, 16-03 gRPC, 16-04 AMQP, 16-05 Actix middleware, 16-06 examples/publish) — Phase 16 complete
-Status: Phase complete; next phase (17 — TypeScript SDK) not yet started
+Status: Ready to execute
 Last activity: 2026-07-01 — Executed 16-06-PLAN.md (Five per-capability examples, README conformance fill-in, and SDK Rust CI leak/TLS-lint/dry-run gates + tag-triggered crates.io publish job)
 
 ## Performance Metrics

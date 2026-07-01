@@ -5,7 +5,7 @@
 // exclusively via Set-Cookie — LoginResult deliberately carries no session
 // token field anywhere in the public API (T-17-07).
 
-import { mapHttpStatusToError, NetworkError } from '../core/index.js';
+import { mapHttpStatusToError, NetworkError, sanitizeAxiosError } from '../core/index.js';
 import type { AxiamClient } from './client.js';
 import type {
   LoginResult,
@@ -86,7 +86,7 @@ export async function login(client: AxiamClient, email: string, password: string
         cause: err,
       });
     }
-    throw new NetworkError('login request failed', err);
+    throw new NetworkError('login request failed', sanitizeAxiosError(err));
   }
 }
 
@@ -113,7 +113,7 @@ export async function verifyMfa(client: AxiamClient, mfaToken: string, code: str
         cause: err,
       });
     }
-    throw new NetworkError('verifyMfa request failed', err);
+    throw new NetworkError('verifyMfa request failed', sanitizeAxiosError(err));
   }
 }
 
@@ -135,7 +135,7 @@ export async function refresh(client: AxiamClient): Promise<void> {
         cause: err,
       });
     }
-    throw new NetworkError('refresh request failed', err);
+    throw new NetworkError('refresh request failed', sanitizeAxiosError(err));
   }
 }
 
@@ -155,7 +155,7 @@ export async function logout(client: AxiamClient): Promise<void> {
         cause: err,
       });
     }
-    throw new NetworkError('logout request failed', err);
+    throw new NetworkError('logout request failed', sanitizeAxiosError(err));
   } finally {
     client.session.authenticated = false;
     client.session.csrfToken = undefined;

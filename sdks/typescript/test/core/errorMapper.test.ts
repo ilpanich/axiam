@@ -25,11 +25,36 @@ describe('mapHttpStatusToError', () => {
     expect((err as AuthzError).resourceId).toBe('res-1');
   });
 
-  it('carries cause on NetworkError from context', () => {
+  it('carries cause on NetworkError from context (plain Error, no response headers to sanitize)', () => {
     const cause = new Error('ECONNREFUSED');
     const err = mapHttpStatusToError(500, 'server error', { cause });
     expect(err).toBeInstanceOf(NetworkError);
     expect((err as NetworkError).cause).toBe(cause);
+  });
+
+  it('redacts Set-Cookie from an axios-error-shaped cause instead of preserving it verbatim (CR-04, D-16)', () => {
+    const cause = {
+      message: 'Request failed with status code 401',
+      response: {
+        status: 401,
+        headers: {
+          'set-cookie': ['axiam_access=eyJfake.jwt.token; Path=/', 'axiam_refresh=opaque-refresh-secret; Path=/api/v1/auth/refresh'],
+          'content-type': 'application/json',
+        },
+      },
+    };
+    const err = mapHttpStatusToError(500, 'server error', { cause });
+
+    expect(err).toBeInstanceOf(NetworkError);
+    // Must NOT be the verbatim cause object — it must be sanitized.
+    expect((err as NetworkError).cause).not.toBe(cause);
+    expect(JSON.stringify(err)).not.toContain('axiam_access=eyJfake.jwt.token');
+    expect(JSON.stringify(err)).not.toContain('opaque-refresh-secret');
+    // Non-sensitive diagnostics survive redaction.
+    const sanitizedCause = (err as NetworkError).cause as { response: { status: number; headers: Record<string, unknown> } };
+    expect(sanitizedCause.response.status).toBe(401);
+    expect(sanitizedCause.response.headers['content-type']).toBe('application/json');
+    expect(sanitizedCause.response.headers['set-cookie']).toBeUndefined();
   });
 });
 

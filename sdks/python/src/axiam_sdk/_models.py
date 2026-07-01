@@ -7,8 +7,6 @@ and only exposes the raw value via ``.get_secret_value()``.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic import BaseModel, SecretStr
 
 
@@ -26,11 +24,11 @@ class LoginResult(BaseModel):
     """
 
     mfa_required: bool
-    mfa_token: Optional[SecretStr] = None
-    user_id: Optional[str] = None
-    tenant_id: Optional[str] = None
-    session_id: Optional[str] = None
-    expires_in: Optional[int] = None
+    mfa_token: SecretStr | None = None
+    user_id: str | None = None
+    tenant_id: str | None = None
+    session_id: str | None = None
+    expires_in: int | None = None
 
     model_config = {"frozen": True}
 
@@ -41,8 +39,8 @@ class User(BaseModel):
 
     user_id: str
     tenant_id: str
-    username: Optional[str] = None
-    email: Optional[str] = None
+    username: str | None = None
+    email: str | None = None
     permissions: list[str] = []
 
     model_config = {"frozen": True}
@@ -53,7 +51,7 @@ class AccessCheck(BaseModel):
 
     action: str
     resource_id: str
-    scope: Optional[str] = None
+    scope: str | None = None
 
     model_config = {"frozen": True}
 
@@ -62,7 +60,7 @@ class AccessResult(BaseModel):
     """The result of a single authorization check."""
 
     allowed: bool
-    reason: Optional[str] = None
+    reason: str | None = None
 
     model_config = {"frozen": True}
 

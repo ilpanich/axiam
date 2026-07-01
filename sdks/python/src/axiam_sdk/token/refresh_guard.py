@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 
 class RefreshGuard:
@@ -33,14 +34,14 @@ class RefreshGuard:
     def __init__(self) -> None:
         self._async_lock = asyncio.Lock()
         self._sync_lock = threading.Lock()
-        self._cached_access: Optional[str] = None
-        self._cached_refresh: Optional[str] = None
-        self._cached_exp: Optional[int] = None
+        self._cached_access: str | None = None
+        self._cached_refresh: str | None = None
+        self._cached_exp: int | None = None
         self._has_any = False
 
     async def refresh_if_needed_async(
         self,
-        observed_access: Optional[str],
+        observed_access: str | None,
         do_refresh: Callable[[], Awaitable[Any]],
     ) -> str:
         """Async entry point, guarded by the async-only lock.
@@ -69,7 +70,7 @@ class RefreshGuard:
 
     def refresh_if_needed_sync(
         self,
-        observed_access: Optional[str],
+        observed_access: str | None,
         do_refresh: Callable[[], Any],
     ) -> str:
         """Sync entry point, guarded by the sync-only lock. Mirrors
@@ -104,22 +105,22 @@ class RefreshGuard:
         self._cached_exp = exp
         self._has_any = True
 
-    def cached_access_token(self) -> Optional[str]:
+    def cached_access_token(self) -> str | None:
         """Non-blocking read of the most recently cached access token.
         Acquires no lock — safe to call from a hot RPC/interceptor path."""
         return self._cached_access
 
-    def cached_refresh_token(self) -> Optional[str]:
+    def cached_refresh_token(self) -> str | None:
         """Non-blocking read of the most recently cached refresh token.
         Acquires no lock."""
         return self._cached_refresh
 
-    def cached_exp(self) -> Optional[int]:
+    def cached_exp(self) -> int | None:
         """Non-blocking read of the most recently cached access token
         expiry (unix seconds). Acquires no lock."""
         return self._cached_exp
 
-    def seed(self, access: str, refresh: Optional[str], exp: Optional[int]) -> None:
+    def seed(self, access: str, refresh: str | None, exp: int | None) -> None:
         """Prime the guard's cache with an already-known token triple, used
         by the client after a successful ``login``/``verify_mfa`` — before
         any refresh has run — so a subsequent 401 sees the correct

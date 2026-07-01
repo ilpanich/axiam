@@ -19,7 +19,7 @@ unredacted response before calling this constructor. Never construct
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import httpx
@@ -43,8 +43,8 @@ class AuthzError(Exception):
     def __init__(
         self,
         message: str,
-        action: Optional[str] = None,
-        resource_id: Optional[str] = None,
+        action: str | None = None,
+        resource_id: str | None = None,
     ) -> None:
         super().__init__(f"authorization denied: {message}")
         self.message = message
@@ -64,7 +64,7 @@ class NetworkError(Exception):
     directly from an unredacted response.
     """
 
-    def __init__(self, message: str, cause: Optional[BaseException] = None) -> None:
+    def __init__(self, message: str, cause: BaseException | None = None) -> None:
         super().__init__(f"network error: {message}")
         self.message = message
         self.__cause__ = cause
@@ -75,7 +75,7 @@ class NetworkError(Exception):
 _SENSITIVE_RESPONSE_HEADERS = {"set-cookie", "authorization", "cookie"}
 
 
-def _sanitize_response(response: "httpx.Response") -> str:
+def _sanitize_response(response: httpx.Response) -> str:
     """Redact sensitive headers BEFORE building any string representation
     that could end up in a NetworkError's cause (D-08, CR-04 carry-forward).
 
@@ -92,7 +92,7 @@ def _sanitize_response(response: "httpx.Response") -> str:
 def error_from_http_status(
     status: int,
     message: str,
-    response: Optional["httpx.Response"] = None,
+    response: httpx.Response | None = None,
 ) -> Exception:
     """Map an HTTP status code to an AxiamError-family exception per
     CONTRACT.md §2's HTTP status table.
@@ -118,7 +118,7 @@ def error_from_http_status(
     if status in (403, 409):
         return AuthzError(message)
 
-    cause: Optional[BaseException] = None
+    cause: BaseException | None = None
     if response is not None:
         cause = RuntimeError(_sanitize_response(response))
     return NetworkError(message, cause=cause)

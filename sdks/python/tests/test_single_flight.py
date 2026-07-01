@@ -52,9 +52,7 @@ def test_single_flight_refresh_exactly_once_sync() -> None:
     expired_token = "expired-access-token"
 
     threads = [
-        threading.Thread(
-            target=lambda: guard.refresh_if_needed_sync(expired_token, fake_refresh)
-        )
+        threading.Thread(target=lambda: guard.refresh_if_needed_sync(expired_token, fake_refresh))
         for _ in range(5)
     ]
     for t in threads:

@@ -1,7 +1,12 @@
 // AXIAM SDK — REST entry (`axiam-sdk/rest`).
 //
-// Isomorphic REST core (browser + Node). Filled in by later Phase 17 plans
-// (17-02 browser persona, 17-03 Node persona). This stub exists so
-// parallel Wave-2/3 plans never collide on this file (17-01 scope).
+// Isomorphic REST core (browser + Node). The AxiamClient class, SharedSession,
+// and REST auth/authz methods are implemented across 17-02 (browser persona);
+// the Node persona (17-03) augments the same SharedSession with a cookie jar
+// and local JWKS verification.
 
-export {};
+export { AxiamClient } from './client.js';
+export { SharedSession } from './session.js';
+export { SKIP_REFRESH } from './interceptors.js';
+export { withRetry } from './retry.js';
+export type { RetryOptions } from './retry.js';

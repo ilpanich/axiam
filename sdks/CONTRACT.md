@@ -78,14 +78,41 @@ All SDKs MUST expose exactly three error types. Additional sub-types are permitt
 
 ## §3 CSRF Behavior
 
-All SDKs (browser and non-browser) MUST implement automatic CSRF token forwarding:
+All SDKs (browser and non-browser) MUST implement automatic CSRF token forwarding. The
+AXIAM server validates CSRF via **cookie double-submit**: it compares the `X-CSRF-Token`
+request header against the `axiam_csrf` cookie value directly. The two client shapes below
+are both conformant implementations of that single server-side mechanism — pick the one
+that matches your SDK's HTTP client model:
 
-1. On any response from the AXIAM server, capture the `X-CSRF-Token` response header value and store it in the client's session state.
-2. On all state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`), include the stored token as the `X-CSRF-Token` request header.
-3. If no CSRF token has been received yet, omit the header (the server rejects unauthenticated state-changing calls for other reasons first).
-4. Non-browser SDKs (Rust, Python, Java, C#, PHP, Go) are subject to the **same rule** — the AXIAM server enforces CSRF regardless of client type.
+**Canonical browser behavior (cookie double-submit):**
+1. The browser reads the `axiam_csrf` cookie (via `document.cookie`, since the cookie is
+   not `httpOnly`) on each request.
+2. On all state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`), echo the cookie value
+   as the `X-CSRF-Token` request header.
+3. If the `axiam_csrf` cookie is not yet present (no session established), omit the header
+   — the server rejects unauthenticated state-changing calls for other reasons first.
+4. Do not read the CSRF value from the response header in the browser; read the cookie
+   directly. This avoids extra response-header plumbing and matches
+   `frontend/src/lib/api.ts`'s proven implementation.
 
-**Implementation note for browser SDKs (TypeScript):** Read `X-CSRF-Token` from the fetch/XHR response and store in a module-level variable, not in `localStorage` or `sessionStorage`.
+**Non-browser SDKs (Rust, Python, Java, C#, PHP, Go):**
+1. On any response from the AXIAM server, capture the `X-CSRF-Token` response header value
+   and store it in the client's session state (these SDKs' cookie jars are typically
+   `httpOnly`-cookie-opaque or simply do not expose a convenient per-request cookie read,
+   so capturing the value the server already echoes back is the idiomatic non-browser path).
+2. On all state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`), include the stored
+   token as the `X-CSRF-Token` request header.
+3. If no CSRF token has been received yet, omit the header (same fallback as the browser
+   case above).
+4. Non-browser SDKs are subject to the **same server-side enforcement** as browser
+   clients — the AXIAM server's CSRF middleware does not distinguish client type; it always
+   compares `X-CSRF-Token` against the `axiam_csrf` cookie. The response-header-capture
+   pattern above is simply how non-browser SDKs obtain the value to echo back, since they
+   are not reading `document.cookie`.
+
+**Implementation note for browser SDKs (TypeScript):** Read the `axiam_csrf` cookie via a
+hardcoded (non-dynamic, ReDoS-safe) regex against `document.cookie`, store nothing beyond
+that read — no `localStorage`/`sessionStorage` caching of the token value.
 
 ---
 
@@ -96,7 +123,7 @@ All non-browser SDKs (Rust, Python, Java, C#, PHP, Go) **MUST** initialize their
 **Rationale:** AXIAM delivers access and refresh tokens via `httpOnly` cookies. An HTTP client that does not persist cookies across requests will fail every request after the initial login because the server will not see the session cookie.
 
 Requirements:
-- The cookie store MUST persist across all requests made through the same `AximaClient` instance.
+- The cookie store MUST persist across all requests made through the same `AxiamClient` instance.
 - The cookie store SHOULD be per-client-instance (not process-global), so multiple clients can hold independent sessions.
 - The cookie store MUST follow the cookie domain/path/secure attributes set by the server.
 
@@ -121,11 +148,11 @@ All SDKs MUST:
 2. Inject the tenant identifier as the `X-Tenant-ID` HTTP header on **every** outgoing request.
 3. For gRPC, inject `x-tenant-id` as a metadata key on every outgoing RPC call.
 
-There is NO default tenant. Constructing an `AximaClient` without a tenant identifier is a compile-time or runtime error, never a silent behavior.
+There is NO default tenant. Constructing an `AxiamClient` without a tenant identifier is a compile-time or runtime error, never a silent behavior.
 
 ```
-AximaClient::new(base_url, tenant_slug: "acme")   // tenant_slug form
-AximaClient::new(base_url, tenant_id: uuid)        // tenant_id UUID form
+AxiamClient::new(base_url, tenant_slug: "acme")   // tenant_slug form
+AxiamClient::new(base_url, tenant_id: uuid)        // tenant_id UUID form
 ```
 
 **Why this matters:** AXIAM is a multi-tenant system. Omitting the tenant identifier causes every authenticated API call to fail with 400 or 403. Enforcing it at construction time gives a clear, early error.
@@ -144,18 +171,18 @@ AximaClient::new(base_url, tenant_id: uuid)        // tenant_id UUID form
 Per-language builder pattern:
 ```
 // Rust
-AximaClient::builder()
+AxiamClient::builder()
     .with_custom_ca(pem_bytes)
     .build()
 
 // TypeScript
-new AximaClient({ baseUrl, tenantSlug, customCa: pemString })
+new AxiamClient({ baseUrl, tenantSlug, customCa })
 
 // Go
 client.WithCustomCA(pemBytes)
 
 // Python
-AximaClient(base_url, tenant_slug, custom_ca=pem_bytes)
+AxiamClient(base_url, tenant_slug, custom_ca=pem_bytes)
 ```
 
 The `with_custom_ca` parameter accepts PEM-encoded certificate bytes/string for the issuing CA. It does NOT accept raw DER bytes, PKCS#12, or JKS. If a non-PEM format is passed, the SDK MUST return a clear error at construction time.

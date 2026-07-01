@@ -34,7 +34,17 @@ findings:
   warning: 5
   info: 2
   total: 8
-status: issues_found
+status: clean
+resolved_at: 2026-07-01T00:00:00Z
+resolution:
+  CR-01: fixed — single threading.Lock guards both sync+async paths; mixed-mode test fails on old design (call_count==2), passes now (call_count==1)
+  WR-01: fixed — error_from_grpc_status redacts token/cookie material from call.details() before wrapping
+  WR-02: fixed — scope:null normalized to empty roles (== absent) in FastAPI + Django; no more 500
+  WR-03: fixed — observed_access=None forces a refresh instead of returning stale cached token
+  WR-04: fixed — bare asserts replaced with explicit RuntimeError raise (survives python -O)
+  WR-05: fixed — added non-vacuous negative TLS tests (gRPC + REST, sync + async) rejecting untrusted certs
+  IN-01: fixed — injectable logger now logs refresh/login lifecycle events (status only, never tokens)
+  IN-02: fixed — _decode_unverified_claims raises AuthError on non-dict JWT payloads
 ---
 
 # Phase 19: Code Review Report — Python SDK
@@ -42,7 +52,7 @@ status: issues_found
 **Reviewed:** 2026-07-01
 **Depth:** deep
 **Files Reviewed:** 27 (+ 13 test modules)
-**Status:** issues_found
+**Status:** clean (all 8 findings fixed 2026-07-01 — see `resolution` in frontmatter; each fix has a proving test and was committed atomically)
 
 ## Summary
 

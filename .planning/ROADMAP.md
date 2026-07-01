@@ -673,12 +673,12 @@ Plans:
   4. Express and Fastify middleware examples compile under TypeScript strict mode and protect a sample route; the package publishes as `axiam-sdk` on npm.
   5. `npm publish --dry-run` succeeds; npm publish CI pipeline runs on release tag.
 
-**Plans**: 6 plans
+**Plans**: 1/6 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 17-01-PLAN.md — Foundation: tsup dual ESM+CJS multi-entry + gitignored buf codegen + dependency-free `core` (error taxonomy, status mapper, Sensitive<T>, CSRF, single-flight) + AxiamClient rename (D-01..D-04/D-14/D-16/D-17/D-19/D-20/D-26/CF-03)
+- [x] 17-01-PLAN.md — Foundation: tsup dual ESM+CJS multi-entry + gitignored buf codegen + dependency-free `core` (error taxonomy, status mapper, Sensitive<T>, CSRF, single-flight) + AxiamClient rename (D-01..D-04/D-14/D-16/D-17/D-19/D-20/D-26/CF-03)
 
 **Wave 2** *(parallel; depend on 17-01)*
 
@@ -796,7 +796,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 |-------|----------------|--------|-----------|
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
-| 17. TypeScript SDK | 0/? | Not started | - |
+| 17. TypeScript SDK | 1/6 | In Progress|  |
 | 18. Go SDK | 0/? | Not started | - |
 | 19. Python SDK | 0/? | Not started | - |
 | 20. Java SDK | 0/? | Not started | - |

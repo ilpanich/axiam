@@ -1,0 +1,152 @@
+"""Regression tests for the exception taxonomy (D-08) and LoginResult
+redaction (D-07/D-21).
+
+Mirrors ``sdks/typescript/test`` intent (CR-04 carry-forward): the raw
+``axiam_access``/``axiam_refresh`` cookie value must never appear in
+``repr``/``str``/``repr(__cause__)`` of a raised ``NetworkError``, and a
+non-sensitive header value MUST survive redaction — proving the test is
+non-vacuous (redaction is selective, not blanket).
+"""
+
+from __future__ import annotations
+
+import httpx
+
+from axiam_sdk._errors import (
+    AuthError,
+    AuthzError,
+    NetworkError,
+    error_from_grpc_status,
+    error_from_http_status,
+)
+from axiam_sdk._models import LoginResult
+
+
+def _response(status: int, headers: dict[str, str]) -> httpx.Response:
+    return httpx.Response(
+        status,
+        headers=headers,
+        request=httpx.Request("POST", "https://example.test/api/v1/auth/refresh"),
+    )
+
+
+class TestErrorFromHttpStatus:
+    def test_401_maps_to_auth_error(self) -> None:
+        err = error_from_http_status(401, "bad credentials")
+        assert isinstance(err, AuthError)
+
+    def test_403_maps_to_authz_error(self) -> None:
+        err = error_from_http_status(403, "forbidden")
+        assert isinstance(err, AuthzError)
+
+    def test_409_maps_to_authz_error(self) -> None:
+        err = error_from_http_status(409, "conflict")
+        assert isinstance(err, AuthzError)
+
+    def test_other_status_maps_to_network_error(self) -> None:
+        for status in (400, 408, 429, 500, 503):
+            err = error_from_http_status(status, "x")
+            assert isinstance(err, NetworkError), f"status {status} should map to NetworkError"
+
+
+class TestErrorFromGrpcStatus:
+    def test_unauthenticated_maps_to_auth_error(self) -> None:
+        import grpc
+
+        err = error_from_grpc_status(grpc.StatusCode.UNAUTHENTICATED, "no creds")
+        assert isinstance(err, AuthError)
+
+    def test_permission_denied_maps_to_authz_error(self) -> None:
+        import grpc
+
+        err = error_from_grpc_status(grpc.StatusCode.PERMISSION_DENIED, "denied")
+        assert isinstance(err, AuthzError)
+
+    def test_other_codes_map_to_network_error(self) -> None:
+        import grpc
+
+        for code in (
+            grpc.StatusCode.UNAVAILABLE,
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+            grpc.StatusCode.INTERNAL,
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+        ):
+            err = error_from_grpc_status(code, "x")
+            assert isinstance(err, NetworkError)
+
+
+class TestNetworkErrorRedaction:
+    def test_network_error_never_leaks_set_cookie_with_raw_tokens(self) -> None:
+        raw_access_secret = "SEKRIT-access-token-value-should-never-leak"
+        response = _response(
+            503,
+            {
+                "set-cookie": f"axiam_access={raw_access_secret}; HttpOnly",
+                "content-type": "application/json",
+            },
+        )
+
+        err = error_from_http_status(503, "unavailable", response=response)
+
+        assert isinstance(err, NetworkError)
+        assert raw_access_secret not in repr(err)
+        assert raw_access_secret not in str(err)
+        assert err.__cause__ is not None
+        assert raw_access_secret not in repr(err.__cause__)
+        assert raw_access_secret not in str(err.__cause__)
+
+    def test_network_error_never_leaks_authorization_header(self) -> None:
+        raw_refresh_secret = "SEKRIT-refresh-bearer-value"
+        response = _response(
+            500,
+            {
+                "authorization": f"Bearer {raw_refresh_secret}",
+                "cookie": f"axiam_refresh={raw_refresh_secret}",
+            },
+        )
+
+        err = error_from_http_status(500, "server error", response=response)
+
+        assert raw_refresh_secret not in repr(err)
+        assert raw_refresh_secret not in repr(err.__cause__)
+
+    def test_network_error_redaction_is_non_vacuous(self) -> None:
+        """Control case: prove the tests above aren't vacuously passing
+        because NO header content ever appears — assert a NON-sensitive
+        header value DOES survive, so redaction is selective, not blanket.
+        """
+        response = _response(
+            503,
+            {"x-request-id": "trace-abc-123", "content-type": "application/json"},
+        )
+        err = error_from_http_status(503, "unavailable", response=response)
+        assert "trace-abc-123" in repr(err.__cause__)
+
+    def test_401_and_403_never_construct_network_error_from_response(self) -> None:
+        """401/403 map to AuthError/AuthzError, which never carry a response
+        cause at all — no response data can leak through those paths."""
+        response = _response(401, {"set-cookie": "axiam_access=SEKRIT"})
+        err = error_from_http_status(401, "bad creds", response=response)
+        assert isinstance(err, AuthError)
+        assert "SEKRIT" not in repr(err)
+        assert not hasattr(err, "cause")
+
+
+class TestLoginResultRedaction:
+    def test_mfa_token_redacted_in_repr(self) -> None:
+        result = LoginResult(mfa_required=True, mfa_token="secret-token")
+        assert "secret-token" not in repr(result)
+
+    def test_mfa_token_redacted_in_model_dump(self) -> None:
+        result = LoginResult(mfa_required=True, mfa_token="secret-token")
+        assert "secret-token" not in str(result.model_dump())
+
+    def test_mfa_token_accessible_via_get_secret_value(self) -> None:
+        result = LoginResult(mfa_required=True, mfa_token="secret-token")
+        assert result.mfa_token is not None
+        assert result.mfa_token.get_secret_value() == "secret-token"
+
+    def test_login_result_without_mfa_token(self) -> None:
+        result = LoginResult(mfa_required=False, user_id="u1", tenant_id="t1")
+        assert result.mfa_token is None
+        assert result.mfa_required is False

@@ -6,14 +6,14 @@ current_phase: 19
 current_phase_name: Python SDK
 status: executing
 stopped_at: Completed 19-03-PLAN.md
-last_updated: "2026-07-01T20:36:17.088Z"
+last_updated: "2026-07-01T20:48:17.828Z"
 last_activity: 2026-07-01
 last_activity_desc: Plan 19-03 (REST core — unified AxiamClient) complete
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 33
-  completed_plans: 29
+  completed_plans: 30
   percent: 50
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 19 — Python SDK
-Plan: 4 of 7
+Plan: 5 of 7
 Status: Ready to execute
 Last activity: 2026-07-01 — Plan 19-03 (REST core — unified AxiamClient) complete
 
@@ -121,6 +121,7 @@ Last activity: 2026-07-01 — Plan 19-03 (REST core — unified AxiamClient) com
 | Phase 19-python-sdk P01 | 12min | 3 tasks | 18 files |
 | Phase 19-python-sdk P02 | 30min | 3 tasks | 8 files |
 | Phase 19-python-sdk P03 | 35min | 3 tasks | 4 files |
+| Phase 19-python-sdk P04 | 9min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -259,6 +260,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 19-python-sdk] 19-02: JwksVerifier catches jwt.exceptions.PyJWTError (not the narrower PyJWKClientError) since PyJWT raises the sibling PyJWKSetError for an empty/malformed keyset -- confirmed empirically against installed PyJWT 2.13.0 (Assumption A3)
 - [Phase ?]: [Phase 19-python-sdk] 19-03: Cookie-jar sharing between sync httpx.Client and async httpx.AsyncClient requires a raw http.cookiejar.CookieJar (not an httpx.Cookies() wrapper) — httpx 0.27.2's Cookies.__init__ copies an existing Cookies argument into a fresh jar rather than sharing it (Assumption A1)
 - [Phase ?]: [Phase 19-python-sdk] 19-03: _Session.cookie_value() disambiguates same-name cookies at different Paths (login's axiam_access at Path=/ vs. refresh's axiam_access at Path=/api/v1/auth/refresh) by preferring the most specific path, since httpx.Cookies.get() raises CookieConflict otherwise
+- [Phase 19-python-sdk]: 19-04: Added [[tool.mypy.overrides]] exemption for axiam_sdk.grpc.gen.* — grpc_tools.protoc's generated authorization_pb2_grpc.py has no matching .pyi stub coverage, and this plan is the first to import it from a --strict-checked module; the generated code itself is out of every plan's file-modification scope (D-04, DO NOT EDIT!)
+- [Phase 19-python-sdk]: 19-04: AuthzGrpcClient/AsyncAuthzGrpcClient accept a refresh_fn constructor closure instead of importing axiam_sdk._client, avoiding the import cycle noted in 19-CONTEXT.md — mirrors sdks/go/grpc/client.go's RefreshFunc decoupling
 
 ### Pending Todos
 
@@ -279,6 +282,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T20:36:17.075Z
+Last session: 2026-07-01T20:47:54.691Z
 Stopped at: Completed 19-03-PLAN.md
 Resume file: None

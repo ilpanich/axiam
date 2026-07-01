@@ -1,9 +1,10 @@
-// AXIAM SDK for TypeScript/JavaScript
+// AXIAM SDK for TypeScript/JavaScript — root entry.
 //
-// This package provides the official TypeScript/JavaScript client SDK for AXIAM
-// (Access eXtended Identity and Authorization Management).
+// Per D-01, the root `.` entry is the isomorphic REST core (browser-safe),
+// identical to the `/rest` subpath. `axiam-sdk/grpc` and `axiam-sdk/amqp`
+// are Node-only opt-in subpaths that augment the same AxiamClient.
 //
 // See CONTRACT.md §1-§10 for the cross-language behavioral contract.
-// Implementation follows in Phase 17 (TypeScript SDK).
+// This SDK conforms to CONTRACT.md §1-§10.
 
-export {};
+export * from './rest/index.js';

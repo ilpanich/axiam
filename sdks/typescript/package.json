@@ -3,13 +3,52 @@
   "version": "0.0.0",
   "description": "Official TypeScript/JavaScript client SDK for AXIAM IAM",
   "license": "Apache-2.0",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js",
-    "./rest": "./dist/rest/index.js",
-    "./grpc": "./dist/grpc/index.js",
-    "./amqp": "./dist/amqp/index.js"
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./rest": {
+      "import": {
+        "types": "./dist/rest/index.d.mts",
+        "default": "./dist/rest/index.mjs"
+      },
+      "require": {
+        "types": "./dist/rest/index.d.ts",
+        "default": "./dist/rest/index.js"
+      }
+    },
+    "./grpc": {
+      "import": {
+        "types": "./dist/grpc/index.d.mts",
+        "default": "./dist/grpc/index.mjs"
+      },
+      "require": {
+        "types": "./dist/grpc/index.d.ts",
+        "default": "./dist/grpc/index.js"
+      }
+    },
+    "./amqp": {
+      "import": {
+        "types": "./dist/amqp/index.d.mts",
+        "default": "./dist/amqp/index.mjs"
+      },
+      "require": {
+        "types": "./dist/amqp/index.d.ts",
+        "default": "./dist/amqp/index.js"
+      }
+    }
   },
   "files": [
     "dist",
@@ -28,8 +67,34 @@
     "authentication",
     "authorization"
   ],
-  "scripts": {
-    "build": "tsc"
+  "engines": {
+    "node": ">=18"
   },
-  "devDependencies": {}
+  "scripts": {
+    "generate": "buf generate ../ --template ../buf.gen.yaml",
+    "prebuild": "npm run generate",
+    "build": "tsup",
+    "test": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "tough-cookie": "^6.0.0",
+    "axios-cookiejar-support": "^7.0.0",
+    "@grpc/grpc-js": "^1.14.0",
+    "amqplib": "^2.0.0",
+    "jose": "^6.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "vitest": "^4.0.0",
+    "msw": "^2.0.0",
+    "ts-proto": "^2.0.0",
+    "typescript": "~5.9.0",
+    "@types/amqplib": "^0.10.0",
+    "@types/express": "^5.0.0",
+    "express": "^5.0.0",
+    "fastify": "^5.0.0",
+    "esbuild": "^0.24.0"
+  }
 }

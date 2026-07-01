@@ -25,7 +25,7 @@ npm install axiam-sdk
 ```
 
 ```typescript
-import { AximClient } from 'axiam-sdk';
+import { AxiamClient } from 'axiam-sdk';
 // or for browser-only (REST authz via FND-04):
-import { AximClient } from 'axiam-sdk/rest';
+import { AxiamClient } from 'axiam-sdk/rest';
 ```

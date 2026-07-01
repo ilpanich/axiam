@@ -6,6 +6,6 @@ pub mod manager;
 pub mod refresh_guard;
 
 pub use jwks::Claims;
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 pub use jwks::JwksVerifier;
 pub use manager::TokenManager;

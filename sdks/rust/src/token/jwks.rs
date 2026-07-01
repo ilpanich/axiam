@@ -10,18 +10,18 @@
 //! endpoint. This is NOT the common OIDC discovery-style JWKS path some
 //! other IdPs serve, and it is NOT tenant-scoped.
 
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 use std::sync::RwLock;
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 use jsonwebtoken::jwk::JwkSet;
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 use crate::AxiamError;
 
 /// The AXIAM JWKS endpoint path — organization-wide, not tenant-scoped
@@ -31,12 +31,12 @@ pub const JWKS_PATH: &str = "/oauth2/jwks";
 
 /// How long a fetched `JwkSet` is cached before a normal (non-forced)
 /// refetch is attempted.
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// Minimum interval between forced refetches triggered by an unknown `kid`,
 /// to avoid a hostile/rotating token stream hammering the JWKS endpoint.
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 const FORCED_REFETCH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The SDK's own plain claims struct, matching the field names AXIAM issues
@@ -69,7 +69,7 @@ pub struct Claims {
     pub scope: Option<String>,
 }
 
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 struct CachedJwks {
     jwks: JwkSet,
     fetched_at: Instant,
@@ -80,19 +80,21 @@ struct CachedJwks {
 /// organization-wide EdDSA JWKS.
 ///
 /// **Feature gating note:** this type owns a `reqwest::Client` to perform
-/// the JWKS fetch, so it is gated behind `feature = "rest"` to preserve
-/// 16-01's `cargo build --no-default-features` invariant. 16-05's Actix
-/// extractor also needs this type via its own `actix` feature; when that
-/// feature is added, broaden this `cfg` to `any(feature = "rest", feature =
-/// "actix")` rather than duplicating the implementation.
-#[cfg(feature = "rest")]
+/// the JWKS fetch, so it is gated behind `any(feature = "rest", feature =
+/// "actix")` to preserve 16-01's `cargo build --no-default-features`
+/// invariant while also being available to 16-05's Actix `FromRequest`
+/// extractor (which declares `actix = ["dep:actix-web", "rest"]`, so `rest`
+/// is always active whenever `actix` is — this `any(...)` gate is kept for
+/// clarity/documentation of the two call sites rather than strict
+/// necessity).
+#[cfg(any(feature = "rest", feature = "actix"))]
 pub struct JwksVerifier {
     http_client: reqwest::Client,
     jwks_url: url::Url,
     cache: RwLock<Option<CachedJwks>>,
 }
 
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 impl JwksVerifier {
     /// Construct a verifier that will fetch `{base_url}/oauth2/jwks` lazily
     /// on first use.
@@ -249,7 +251,7 @@ impl JwksVerifier {
 /// `/oauth2/jwks` serves exactly one org-wide Ed25519 key (D-11).
 ///
 /// Mirrors `crates/axiam-federation/src/oidc.rs::find_jwk` exactly.
-#[cfg(feature = "rest")]
+#[cfg(any(feature = "rest", feature = "actix"))]
 fn find_jwk(jwks: &JwkSet, kid: Option<&str>) -> Option<jsonwebtoken::jwk::Jwk> {
     match kid {
         Some(k) => jwks
@@ -262,7 +264,7 @@ fn find_jwk(jwks: &JwkSet, kid: Option<&str>) -> Option<jsonwebtoken::jwk::Jwk> 
     }
 }
 
-#[cfg(all(test, feature = "rest"))]
+#[cfg(all(test, any(feature = "rest", feature = "actix")))]
 mod tests {
     use super::*;
     use jsonwebtoken::{jwk::*, EncodingKey, Header};

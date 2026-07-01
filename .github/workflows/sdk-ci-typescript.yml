@@ -8,15 +8,157 @@ on:
       - 'sdks/openapi.json'
       - 'sdks/buf.yaml'
       - 'sdks/buf.gen.yaml'
+  push:
+    tags:
+      - 'sdks/typescript/v*'
 
 permissions:
   contents: read
 
 jobs:
-  scaffold-check:
-    name: SDK Scaffold Check
+  test:
+    name: Test
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - name: Verify LICENSE file
-        run: test -f sdks/typescript/LICENSE
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # buf generate (below) needs the buf CLI; reuse the same pinned
+      # bufbuild/buf-action already established for proto lint/breaking in
+      # sdk-buf-gates.yml, rather than sourcing a second unpinned mechanism.
+      - name: Install buf
+        uses: bufbuild/buf-action@v1.4.0
+        with:
+          setup_only: true
+
+      - name: Install dependencies
+        working-directory: sdks/typescript
+        run: npm ci
+
+      # typescript/src/gen stays gitignored (Phase 15 D-01); buf generate
+      # runs here as the CI-time codegen step (sdks/buf.gen.yaml targets
+      # typescript/src/gen with outputServices=grpc-js).
+      - name: Generate proto stubs (buf generate)
+        working-directory: sdks/typescript
+        run: npm run generate
+
+      - name: Build
+        working-directory: sdks/typescript
+        run: npm run build
+
+      - name: Typecheck
+        working-directory: sdks/typescript
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: sdks/typescript
+        run: npm test -- --run
+
+      # SC#1 / D-02: end-to-end proof (not config trust) that the browser
+      # persona never pulls in a Node-only transport. esbuild
+      # --platform=browser makes a Node built-in (net/tls/dns/etc.) pulled
+      # in transitively by @grpc/grpc-js or amqplib a hard build error
+      # rather than a silent polyfill (RESEARCH Area 1).
+      - name: Bundle-and-grep gate — no Node transports in the browser bundle (SC#1)
+        working-directory: sdks/typescript
+        run: npm run bundle-grep
+
+      # T-17-27: the dynamic `import('jose')` guard (17-03) that lets the
+      # Node persona lazy-load jose must not throw ERR_REQUIRE_ESM when a
+      # CommonJS consumer requires the built entry. This failure surfaces
+      # only at first require of the CJS entry — invisible to
+      # tsc/vitest/bundle-grep — so it needs its own post-build gate.
+      - name: CJS-require smoke — grpc entry (T-17-27)
+        working-directory: sdks/typescript
+        run: node -e "require('./dist/grpc/index.js')"
+
+      - name: CJS-require smoke — middleware entry (T-17-27)
+        working-directory: sdks/typescript
+        run: node -e "require('./dist/middleware/index.js')"
+
+      # T-17-24: analog of the Rust SDK's `grep -r 'eyJ' target/debug/` leak
+      # gate — no JWT-shaped ("eyJ"-prefixed) string may appear anywhere in
+      # this SDK's own built output. Sensitive<T> (17-01) keeps token
+      # values out of debug/log/serialized surfaces; this proves it holds
+      # in the compiled artifact too.
+      - name: Token-leak gate — no JWT-shaped strings in built output (T-17-24)
+        working-directory: sdks/typescript
+        run: |
+          if grep -r 'eyJ' dist/ 2>/dev/null | grep -v '^Binary file' | grep -q .; then
+            echo "FAIL: found 'eyJ'-prefixed (JWT-shaped) strings in sdks/typescript/dist/"
+            grep -r 'eyJ' dist/ 2>/dev/null | grep -v '^Binary file' || true
+            exit 1
+          fi
+          echo "OK: no JWT-shaped strings found in sdks/typescript/dist/"
+
+      # T-17-25 / CONTRACT §6: strict TLS is always on; the only escape
+      # hatch is customCa — there must be no insecure/skip-verification
+      # surface anywhere in the SDK's own source tree.
+      - name: TLS-lint gate — no TLS-bypass patterns (CONTRACT §6, T-17-25)
+        working-directory: sdks/typescript
+        run: |
+          if grep -rniE 'rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED|insecureskipverify' src/ 2>/dev/null | grep -q .; then
+            echo "FAIL: found a TLS-bypass pattern under sdks/typescript/src/"
+            grep -rniE 'rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED|insecureskipverify' src/ || true
+            exit 1
+          fi
+          echo "OK: no TLS-bypass patterns found under sdks/typescript/src/"
+
+      # SC#5: proves the tarball is publish-ready (dist/ included; src/gen
+      # and node_modules excluded via package.json's `files` allowlist)
+      # without side effects. The publish job re-runs this same command
+      # before the real `npm publish`.
+      - name: Dry-run publish gate (SC#5)
+        working-directory: sdks/typescript
+        run: npm publish --dry-run
+
+  publish:
+    name: Publish to npm
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/typescript/v')
+    runs-on: ubuntu-latest
+    # Manual-on-tag, side-effecting step: this job only runs when a
+    # maintainer pushes a tag matching sdks/typescript/vX.Y.Z (D-13
+    # monorepo tag convention). It is never triggered by a PR, so
+    # NPM_TOKEN is never exposed to PR-triggered jobs (T-17-26).
+    permissions:
+      contents: read
+      id-token: write   # required for npm provenance (OIDC), D-21
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install buf
+        uses: bufbuild/buf-action@v1.4.0
+        with:
+          setup_only: true
+
+      - name: Install dependencies
+        working-directory: sdks/typescript
+        run: npm ci
+
+      # D-20: regenerate-and-bundle the compiled ts-proto stubs before
+      # publishing so npm consumers (who cannot run buf) get a
+      # self-contained package — mirrors the Rust publish job's
+      # "Regenerate gRPC stubs for the published artifact" step.
+      - name: Regenerate and bundle proto stubs (D-20)
+        working-directory: sdks/typescript
+        run: npm run generate && npm run build
+
+      - name: Verify package before publish (SC#5)
+        working-directory: sdks/typescript
+        run: npm publish --dry-run
+
+      - name: Publish to npm with provenance
+        working-directory: sdks/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance

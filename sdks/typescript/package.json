@@ -85,7 +85,8 @@
     "prebuild": "npm run generate",
     "build": "tsup",
     "test": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bundle-grep": "node scripts/bundle-grep.mjs"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.0",

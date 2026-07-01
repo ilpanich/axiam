@@ -457,7 +457,7 @@ Deliver `sdks/typescript/` with distinct browser vs Node entry points.
 - [x] Full baseline; **browser persona** authz via REST endpoint (FND-04); **Node persona** authz via gRPC
 - [x] axios 1.7 REST + @grpc/grpc-js 1.14 (Node) + amqplib (Node); `jose` for JWKS; ts-proto 2.x stubs
 - [x] Separate `axiam-sdk/rest` / `axiam-sdk/grpc` / `axiam-sdk/amqp` export conditions (browser bundlers tree-shake Node-only)
-- [ ] CSRF interceptor auto-forwards `X-CSRF-Token`; promise-deduplicated refresh guard (Node CSRF still unpopulated — CR-01 pending in 17-08; refresh guard is now per-session via `createRefreshGuard()`, CR-02 closed in 17-07)
+- [x] CSRF interceptor auto-forwards `X-CSRF-Token`; promise-deduplicated refresh guard (Node CSRF populated via `onAuthenticated()` jar-read — CR-01 closed in 17-08; refresh guard is per-session via `createRefreshGuard()` — CR-02 closed in 17-07)
 - [x] Express + Fastify middleware; examples; **npm publish pipeline** (`axiam-sdk`)
 
 ---

@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: — Client SDKs
-current_phase: 17
-current_phase_name: typescript-sdk
-status: executing
+current_phase: 18
+current_phase_name: Go SDK
+status: completed
 stopped_at: Completed 17-07-PLAN.md (CR-02, CR-03 closed)
-last_updated: "2026-07-01T13:35:24.062Z"
+last_updated: "2026-07-01T13:59:43.154Z"
 last_activity: 2026-07-01
-last_activity_desc: "Completed 17-07-PLAN.md (gap closure: per-session refresh guard + tenant isolation)"
+last_activity_desc: Phase 17 complete, transitioned to Phase 18
 progress:
   total_phases: 8
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 20
-  completed_plans: 19
-  percent: 25
+  completed_plans: 20
+  percent: 38
 ---
 
 # Project State
@@ -28,16 +28,16 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 17 (typescript-sdk) — EXECUTING (gap closure)
-Plan: 17-07 of 2 gap-closure plans (17-07, 17-08) complete
+Phase: 18 — Go SDK
+Plan: Not started
 Status: 17-07 complete (CR-02, CR-03 closed); 17-08 remaining (CR-01, CR-04)
-Last activity: 2026-07-01 — Completed 17-07-PLAN.md (gap closure: per-session refresh guard + tenant isolation)
+Last activity: 2026-07-01 — Phase 17 complete, transitioned to Phase 18
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 27
+- Total plans completed: 35
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -50,6 +50,7 @@ Last activity: 2026-07-01 — Completed 17-07-PLAN.md (gap closure: per-session 
 | 10 | 6 | - | - |
 | 11 | 5 | - | - |
 | 15 | 6 | - | - |
+| 17 | 8 | - | - |
 
 **Recent Trend:**
 

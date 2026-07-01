@@ -75,6 +75,65 @@ class TestErrorFromGrpcStatus:
             assert isinstance(err, NetworkError)
 
 
+class TestGrpcErrorRedaction:
+    """WR-01: the gRPC error path must redact token/cookie-shaped material
+    from ``status.details`` before wrapping it into an exception, mirroring
+    the REST path's ``_sanitize_response`` redact-before-wrap guarantee — a
+    misbehaving/compromised backend reflecting a token into ``status.details``
+    must not leak it into the exception's ``str()``/``repr()``.
+    """
+
+    def test_bearer_token_in_grpc_details_is_redacted(self) -> None:
+        import grpc
+
+        raw_token = "SEKRIT-grpc-bearer-token-value"
+        details = f"upstream rejected credentials: Bearer {raw_token}"
+
+        err = error_from_grpc_status(grpc.StatusCode.UNAUTHENTICATED, details)
+
+        assert isinstance(err, AuthError)
+        assert raw_token not in repr(err)
+        assert raw_token not in str(err)
+
+    def test_axiam_cookie_material_in_grpc_details_is_redacted(self) -> None:
+        import grpc
+
+        raw_access = "SEKRIT-access-cookie-value"
+        raw_refresh = "SEKRIT-refresh-cookie-value"
+        details = f"debug echo: axiam_access={raw_access}; axiam_refresh={raw_refresh}"
+
+        err = error_from_grpc_status(grpc.StatusCode.INTERNAL, details)
+
+        assert isinstance(err, NetworkError)
+        assert raw_access not in repr(err)
+        assert raw_access not in str(err)
+        assert raw_refresh not in repr(err)
+        assert raw_refresh not in str(err)
+
+    def test_authorization_header_shaped_details_is_redacted(self) -> None:
+        import grpc
+
+        raw = "SEKRIT-header-value"
+        details = f"reflected trailer Authorization: {raw}"
+
+        err = error_from_grpc_status(grpc.StatusCode.PERMISSION_DENIED, details)
+
+        assert isinstance(err, AuthzError)
+        assert raw not in repr(err)
+        assert raw not in str(err)
+
+    def test_grpc_redaction_is_non_vacuous(self) -> None:
+        """Control case: non-sensitive details survive, proving redaction is
+        selective (not blanket) and the tests above aren't vacuously passing
+        because ALL message content is dropped."""
+        import grpc
+
+        details = "resource temporarily unavailable (trace-id abc-123)"
+        err = error_from_grpc_status(grpc.StatusCode.UNAVAILABLE, details)
+        assert "resource temporarily unavailable" in str(err)
+        assert "abc-123" in str(err)
+
+
 class TestNetworkErrorRedaction:
     def test_network_error_never_leaks_set_cookie_with_raw_tokens(self) -> None:
         raw_access_secret = "SEKRIT-access-token-value-should-never-leak"

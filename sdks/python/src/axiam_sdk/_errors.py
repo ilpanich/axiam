@@ -19,6 +19,7 @@ unredacted response before calling this constructor. Never construct
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -89,6 +90,46 @@ def _sanitize_response(response: httpx.Response) -> str:
     return f"http status {response.status_code}, headers: {safe_headers}"
 
 
+_REDACTED = "[REDACTED]"
+
+# Token/cookie-shaped substrings that must never survive into a gRPC-derived
+# exception message (WR-01). The gRPC path has no structured headers to strip
+# like the REST path's Set-Cookie/Authorization; ``status.details`` is a
+# server-controlled free-text string, so we redact by pattern instead. These
+# are hardcoded (non-dynamic) patterns — ReDoS-safe, no catastrophic
+# backtracking — mirroring the REST path's redact-before-wrap guarantee so
+# both transports uphold the same invariant from one source of truth.
+_GRPC_REDACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # `Bearer <token>` (Authorization-style), case-insensitive scheme.
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
+    # `axiam_access=...` / `axiam_refresh=...` cookie material up to a
+    # delimiter (whitespace, ';', or ',').
+    re.compile(r"(?i)\baxiam_(?:access|refresh)=[^\s;,]+"),
+    # Generic `Authorization: ...` / `Set-Cookie: ...` / `Cookie: ...`
+    # header-shaped substrings, redacting the value after the colon.
+    re.compile(r"(?i)\b(?:Authorization|Set-Cookie|Cookie)\s*:\s*[^\s;,]+"),
+)
+
+
+def _sanitize_grpc_message(message: str) -> str:
+    """Redact token/cookie-shaped material from a gRPC status-details string
+    BEFORE it is wrapped into an AxiamError (WR-01).
+
+    ``error_from_grpc_status`` takes a caller-supplied ``message`` (both gRPC
+    client call sites pass ``call.details()``, a server-controlled free-text
+    string). Unlike the REST path — where ``_sanitize_response`` structurally
+    strips sensitive headers — gRPC details have no structure, so a misbehaving
+    or compromised backend that reflects a token into ``status.details`` would
+    otherwise leak it into the exception's ``str()``/``repr()`` and any logs.
+    This applies the same redact-before-wrap guarantee via pattern matching so
+    both transports cannot drift on the redaction invariant.
+    """
+    redacted = message
+    for pattern in _GRPC_REDACTION_PATTERNS:
+        redacted = pattern.sub(_REDACTED, redacted)
+    return redacted
+
+
 def error_from_http_status(
     status: int,
     message: str,
@@ -138,12 +179,19 @@ def error_from_grpc_status(code: object, message: str) -> Exception:
     | RESOURCE_EXHAUSTED (8) | NetworkError |
     | other                  | NetworkError |
 
-    ``message`` is caller-controlled and MUST NOT contain a raw token value.
+    ``message`` is caller-supplied (both gRPC call sites pass
+    ``call.details()``, a server-controlled free-text string) — it is
+    redacted here via :func:`_sanitize_grpc_message` BEFORE constructing any
+    exception, mirroring the REST path's ``_sanitize_response`` redact-before-
+    wrap guarantee (WR-01) so a token reflected into ``status.details`` cannot
+    leak through an exception's ``str()``/``repr()`` or logs.
     ``code`` accepts either a ``grpc.StatusCode`` member or its bare name/int
     value so callers do not need to import ``grpc`` merely to classify an
     error (keeping this module import-cheap for REST-only consumers).
     """
     import grpc
+
+    safe_message = _sanitize_grpc_message(message)
 
     normalized = code
     if not isinstance(code, grpc.StatusCode):
@@ -153,7 +201,7 @@ def error_from_grpc_status(code: object, message: str) -> Exception:
                 break
 
     if normalized == grpc.StatusCode.UNAUTHENTICATED:
-        return AuthError(message)
+        return AuthError(safe_message)
     if normalized == grpc.StatusCode.PERMISSION_DENIED:
-        return AuthzError(message)
-    return NetworkError(message)
+        return AuthzError(safe_message)
+    return NetworkError(safe_message)

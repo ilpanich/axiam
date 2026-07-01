@@ -45,9 +45,17 @@ def _decode_unverified_claims(token: str) -> dict[str, Any]:
     padding = "=" * (-len(payload) % 4)
     try:
         decoded = base64.urlsafe_b64decode(payload + padding)
-        claims: dict[str, Any] = json.loads(decoded)
+        claims: Any = json.loads(decoded)
     except (ValueError, json.JSONDecodeError) as exc:
         raise AuthError(f"failed to decode access token claims: {exc}") from None
+    # IN-02: json.loads succeeds for any valid JSON, including arrays/scalars.
+    # The function's own signature promises a dict; every caller does
+    # ``.get(...)`` on the result, which would raise AttributeError on a
+    # non-object payload. Validate the shape here so a malformed token
+    # surfaces a clean AuthError, mirroring the isinstance(..., dict) checks
+    # already in _jwks.py and amqp/_hmac.py.
+    if not isinstance(claims, dict):
+        raise AuthError("access token payload is not a JSON object")
     return claims
 
 

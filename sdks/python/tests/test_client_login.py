@@ -430,3 +430,47 @@ def test_public_import_surface() -> None:
         LoginResult,
         NetworkError,
     )
+
+
+# ---------------------------------------------------------------------
+# IN-02: _decode_unverified_claims payload-shape validation
+# ---------------------------------------------------------------------
+
+
+def _token_with_payload(payload_obj: object) -> str:
+    header = base64.urlsafe_b64encode(json.dumps({"alg": "EdDSA"}).encode()).rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(json.dumps(payload_obj).encode()).rstrip(b"=").decode()
+    return f"{header}.{payload}.fake-signature"
+
+
+def test_decode_unverified_claims_rejects_non_dict_array_payload() -> None:
+    """IN-02: a token whose payload segment decodes to valid JSON that is NOT
+    an object (e.g. an array) must raise a clean AuthError, not the
+    AttributeError a caller's ``.get(...)`` would otherwise raise."""
+    from axiam_sdk._client import _decode_unverified_claims
+
+    token = _token_with_payload([1, 2, 3])
+    with pytest.raises(AuthError, match="not a JSON object"):
+        _decode_unverified_claims(token)
+
+
+def test_decode_unverified_claims_rejects_non_dict_scalar_payload() -> None:
+    """IN-02: a scalar (e.g. a JSON number/string) payload also raises
+    AuthError rather than propagating an AttributeError downstream."""
+    from axiam_sdk._client import _decode_unverified_claims
+
+    for scalar in (42, "just-a-string", True):
+        token = _token_with_payload(scalar)
+        with pytest.raises(AuthError, match="not a JSON object"):
+            _decode_unverified_claims(token)
+
+
+def test_decode_unverified_claims_accepts_object_payload() -> None:
+    """Control for IN-02: a normal JSON-object payload still decodes to the
+    claims dict, so the shape check does not over-reject."""
+    from axiam_sdk._client import _decode_unverified_claims
+
+    token = _token_with_payload({"sub": "user-1", "tenant_id": "acme"})
+    claims = _decode_unverified_claims(token)
+    assert claims["sub"] == "user-1"
+    assert claims["tenant_id"] == "acme"

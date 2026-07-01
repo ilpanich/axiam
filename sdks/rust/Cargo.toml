@@ -1,7 +1,13 @@
+# This crate is standalone — deliberately NOT a member of the root AXIAM
+# Cargo workspace (edition 2021 here vs workspace edition 2024). The empty
+# [workspace] table below opts it out of ancestor workspace discovery.
+[workspace]
+
 [package]
 name = "axiam-sdk"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Official Rust client SDK for AXIAM IAM"
 license = "Apache-2.0"
 publish = true
@@ -9,4 +15,47 @@ repository = "https://github.com/ilpanich/axiam"
 documentation = "https://docs.rs/axiam-sdk"
 readme = "README.md"
 
+[features]
+default = ["rest", "grpc", "amqp"]
+rest = ["dep:reqwest"]
+grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost"]
+amqp = ["dep:lapin", "dep:hmac", "dep:sha2", "dep:hex"]
+observability = ["dep:tracing"]
+# NOTE: the "actix" feature (Actix-Web FromRequest middleware) is added by
+# plan 16-05 — intentionally not declared here.
+
 [dependencies]
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"], optional = true }
+tonic = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14", optional = true }
+prost = { version = "0.14", optional = true }
+lapin = { version = "4", optional = true }
+jsonwebtoken = "10"
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4"] }
+url = "2"
+backon = "1"
+tracing = { version = "0.1", optional = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+wiremock = "0.6"
+tokio-test = "0.4"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints.rust]
+# The "actix" feature is declared in lib.rs ahead of its Cargo.toml feature
+# entry, which plan 16-05 adds. This avoids an `unexpected_cfgs` warning in
+# the interim without disabling the lint crate-wide.
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("actix"))'] }

@@ -10,3 +10,9 @@ export { SharedSession } from './session.js';
 export { SKIP_REFRESH } from './interceptors.js';
 export { withRetry } from './retry.js';
 export type { RetryOptions } from './retry.js';
+export type {
+  AccessCheck,
+  AccessDecision,
+  AxiamUserInfo,
+  LoginResult,
+} from './types.js';

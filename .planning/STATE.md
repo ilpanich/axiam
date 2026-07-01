@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 19
 current_phase_name: Python SDK
 status: executing
-stopped_at: Completed 19-05-PLAN.md
-last_updated: "2026-07-01T20:54:48.882Z"
+stopped_at: Completed 19-06-PLAN.md
+last_updated: "2026-07-01T21:07:28.435Z"
 last_activity: 2026-07-01
 last_activity_desc: Plan 19-03 (REST core — unified AxiamClient) complete
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 33
-  completed_plans: 31
+  completed_plans: 32
   percent: 50
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 19 — Python SDK
-Plan: 6 of 7
+Plan: 7 of 7
 Status: Ready to execute
 Last activity: 2026-07-01 — Plan 19-03 (REST core — unified AxiamClient) complete
 
@@ -124,6 +124,7 @@ Last activity: 2026-07-01 — Plan 19-03 (REST core — unified AxiamClient) com
 | Phase 19-python-sdk P04 | 9min | 2 tasks | 7 files |
 | Phase 19 P05 | 15min | 1 tasks | 3 files |
 | Phase 19 P05 | 15min | 1 tasks | 3 files |
+| Phase 19-python-sdk P06 | 40min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -266,6 +267,8 @@ Recent decisions affecting current work:
 - [Phase 19-python-sdk]: 19-04: AuthzGrpcClient/AsyncAuthzGrpcClient accept a refresh_fn constructor closure instead of importing axiam_sdk._client, avoiding the import cycle noted in 19-CONTEXT.md — mirrors sdks/go/grpc/client.go's RefreshFunc decoupling
 - [Phase ?]: [Phase 19-python-sdk] 19-05: Reused 19-01's verify_hmac() exactly in the AMQP consumer (no reimplementation); HMAC-fail/parse-fail/ErrDrop all nack-without-requeue + security log, other handler exceptions nack-with-requeue
 - [Phase ?]: [Phase 19-python-sdk] 19-05: Post-verify parse-failure path structurally converges with HMAC-fail in both Python and Go references (both require JSON-object body for HMAC to succeed); test isolates the branch via monkeypatched json.loads failing only on its second call
+- [Phase 19-python-sdk]: 19-06: Django's AxiamUser is a separate local dataclass rather than importing axiam_sdk.fastapi.AxiamUser -- prevents a runtime cross-dependency between the two optional framework extras
+- [Phase 19-python-sdk]: 19-06: Added [[tool.mypy.overrides]] for django.* (ignore_missing_imports=true) rather than pulling in django-stubs -- mirrors the existing axiam_sdk.grpc.gen.* precedent for untyped/stub-less dependencies
 
 ### Pending Todos
 
@@ -286,6 +289,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T20:54:48.870Z
-Stopped at: Completed 19-05-PLAN.md
+Last session: 2026-07-01T21:07:28.422Z
+Stopped at: Completed 19-06-PLAN.md
 Resume file: None

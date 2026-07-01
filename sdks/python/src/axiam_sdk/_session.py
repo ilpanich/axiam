@@ -70,7 +70,10 @@ class _Session:
         self.base_url = base_url
         self.tenant_slug = tenant_slug
         self._timeout = timeout or httpx.Timeout(
-            connect=_DEFAULT_CONNECT_TIMEOUT, read=_DEFAULT_READ_TIMEOUT, write=_DEFAULT_READ_TIMEOUT, pool=_DEFAULT_CONNECT_TIMEOUT
+            connect=_DEFAULT_CONNECT_TIMEOUT,
+            read=_DEFAULT_READ_TIMEOUT,
+            write=_DEFAULT_READ_TIMEOUT,
+            pool=_DEFAULT_CONNECT_TIMEOUT,
         )
         # SC#3/CF-03: the ONLY TLS escape hatch is a custom-CA path/bundle —
         # never a boolean. `custom_ca` is either None (-> True, strict
@@ -172,8 +175,23 @@ class _Session:
         return response
 
     def cookie_value(self, name: str) -> str | None:
-        """Read a named cookie's current value out of the shared jar."""
-        return self._cookies.get(name)
+        """Read a named cookie's current value out of the shared jar.
+
+        The server sets ``axiam_refresh`` (and, on a refresh response, a
+        fresh ``axiam_access``) Path-scoped to ``/api/v1/auth/refresh``
+        (Pitfall 4) while the initial login sets ``axiam_access`` at
+        ``Path=/`` — the jar can therefore legitimately hold two distinct
+        cookie entries with the same name at different paths, which
+        ``httpx.Cookies.get()`` rejects as ambiguous (``CookieConflict``).
+        Disambiguate by preferring the entry with the MOST SPECIFIC
+        (longest) path, since that is always the one the most recent
+        request/response actually targeted.
+        """
+        matches = [cookie for cookie in self._cookies.jar if cookie.name == name]
+        if not matches:
+            return None
+        best = max(matches, key=lambda cookie: len(cookie.path or ""))
+        return best.value
 
     def close(self) -> None:
         """Close the sync httpx client, if constructed (D-19). Never

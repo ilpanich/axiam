@@ -719,7 +719,7 @@ Plans:
   4. AMQP consumer verifies HMAC-SHA256 of each message body; nacks without requeue on signature mismatch.
   5. `go test ./...` passes; Go module publish pipeline tags `sdks/go/vX.Y.Z` on release.
 
-**Plans**: 3/6 plans executed
+**Plans**: 4/6 plans executed
 
 Plans:
 **Wave 1**
@@ -730,7 +730,7 @@ Plans:
 
 - [x] 18-02-PLAN.md — REST core: NewClient functional options + cookie jar/TLS override safety + sync.Mutex single-flight + Login/VerifyMfa/Refresh/Logout (LoginResult, org_id) + CheckAccess/Can/BatchCheck (SC#1, SC#2)
 - [x] 18-03-PLAN.md — AMQP: byte-identical HMAC verify + closure-handler Consume (verify-before-handler, nack-no-requeue, ErrDrop) (SC#4)
-- [ ] 18-04-PLAN.md — Local JWKS verifier (jwx/v3, EdDSA allowlist, org-wide /oauth2/jwks) + gRPC client (grpc.NewClient, strict TLS, sync-safe interceptor) (SC#3 gRPC half)
+- [x] 18-04-PLAN.md — Local JWKS verifier (jwx/v3, EdDSA allowlist, org-wide /oauth2/jwks) + gRPC client (grpc.NewClient, strict TLS, sync-safe interceptor) (SC#3 gRPC half)
 
 **Wave 3** *(depends on 18-01 + 18-04)*
 
@@ -821,7 +821,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
-| 18. Go SDK | 3/6 | In Progress|  |
+| 18. Go SDK | 4/6 | In Progress|  |
 | 19. Python SDK | 0/? | Not started | - |
 | 20. Java SDK | 0/? | Not started | - |
 | 21. C# SDK | 0/? | Not started | - |

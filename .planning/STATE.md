@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 18
 current_phase_name: go-sdk
 status: executing
-stopped_at: Completed 18-03-PLAN.md
-last_updated: "2026-07-01T15:47:21.101Z"
+stopped_at: Completed 18-04-PLAN.md
+last_updated: "2026-07-01T15:59:31.759Z"
 last_activity: 2026-07-01
 last_activity_desc: Phase 18 execution started
 progress:
   total_phases: 8
   completed_phases: 3
   total_plans: 26
-  completed_plans: 23
+  completed_plans: 24
   percent: 38
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 18 (go-sdk) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-07-01 — Phase 18 execution started
 
@@ -114,6 +114,7 @@ Last activity: 2026-07-01 — Phase 18 execution started
 | Phase 18 P01 | 25min | 3 tasks | 11 files |
 | Phase 18 P02 | 30min | 3 tasks | 8 files |
 | Phase Phase 18-go-sdk PP03 | 20min | 2 tasks tasks | 8 files files |
+| Phase 18 P04 | 20min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -239,6 +240,8 @@ Recent decisions affecting current work:
 - [Phase 18-go-sdk]: Refresh resolves tenant_id from the access token's claim (UUID) rather than the client's configured tenantSlug string, since the server's RefreshRequest requires a UUID
 - [Phase ?]: [Phase 18-go-sdk] 18-03: amqp package cannot reuse root axiam package's unexported newNetworkError (separate Go package per D-02) -- Consume's own connection-setup errors use plain fmt.Errorf wrapping; does not affect the verify-and-dispatch security path
 - [Phase ?]: [Phase 18-go-sdk] 18-03: amqp091-go promoted from indirect to direct go.mod requirement via go mod tidy -- 18-01 pinned it but no code imported it until this plan's amqp package
+- [Phase ?]: [Phase 18-go-sdk] 18-04: jwx/v3 API confirmed live via go doc — httprc.NewClient(httprc.WithHTTPClient(hc)) takes zero positional args
+- [Phase ?]: [Phase 18-go-sdk] 18-04: grpc package imports root axiam package directly for AuthError/AuthzError/NetworkError (no import cycle — root axiam has no grpc import), avoiding a duplicated error taxonomy
 
 ### Pending Todos
 
@@ -259,6 +262,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T15:47:21.090Z
-Stopped at: Completed 18-03-PLAN.md
+Last session: 2026-07-01T15:59:31.748Z
+Stopped at: Completed 18-04-PLAN.md
 Resume file: None

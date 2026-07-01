@@ -1,5 +1,6 @@
 //! gRPC transport: shared `tonic::Channel`, auth + tenant interceptor,
-//! and the build.rs/buf-generated stubs under `src/gen/`.
+//! `check_access`/`batch_check` client methods, and the build.rs/buf-
+//! generated stubs under `src/gen/`.
 //!
 //! CONTRACT.md §5: `x-tenant-id` metadata (UUID form) is injected on every
 //! outgoing RPC. CONTRACT.md §6: TLS verification is always strict; the only
@@ -9,6 +10,7 @@
 //! — never inside the (synchronous) interceptor (RESEARCH.md Pitfall 3).
 
 pub mod channel;
+pub mod client;
 pub mod interceptor;
 
 /// Generated stubs from `build.rs` (`tonic-prost-build`) / the repository's
@@ -26,9 +28,5 @@ pub mod interceptor;
 pub mod gen;
 
 pub use channel::{build_channel, GrpcChannelConfig};
+pub use client::{AccessDecision, AuthzGrpcClient, CheckAccessRequest, RefreshFn};
 pub use interceptor::AuthInterceptor;
-
-// `pub mod client;` (the `check_access`/`batch_check` methods +
-// UNAUTHENTICATED-retry wrapper) is added by this plan's Task 2 once
-// `src/grpc/client.rs` exists. This state (Task 1) builds and compiles
-// standalone with only `channel`/`interceptor`/`gen`.

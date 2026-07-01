@@ -1,6 +1,8 @@
 // AXIAM SDK — AMQP entry (`axiam-sdk/amqp`), Node-only opt-in subpath.
 //
-// Filled in by a later Phase 17 plan (17-04). This stub exists so parallel
-// Wave-2/3 plans never collide on this file (17-01 scope).
+// Re-exports the HMAC sign/verify pair, server-identical message DTOs, and
+// the verify-before-handler `consume()` function (D-12, CONTRACT.md §8).
 
-export {};
+export * from './hmac.js';
+export * from './messages.js';
+export * from './consumer.js';

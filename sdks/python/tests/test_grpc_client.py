@@ -227,6 +227,37 @@ class TestSyncAuthzGrpcClient:
         finally:
             client.close()
 
+    def test_untrusted_server_certificate_is_rejected(self, test_server: _TestServer) -> None:
+        """WR-05 (negative TLS path): with NO custom_ca supplied, the client
+        verifies against the SYSTEM trust store, which does NOT contain the
+        test server's throwaway self-signed cert — so the TLS handshake MUST
+        fail. This proves build_channel_credentials/ssl_channel_credentials
+        actually performs verification (not a no-op): a regression that
+        silently disabled verification would let this RPC succeed, and the
+        test would catch it.
+        """
+        client = AuthzGrpcClient(
+            test_server.target,
+            token_fn=lambda: "tok",
+            tenant_id="t1",
+            custom_ca=None,  # <-- deliberately NOT trusting the self-signed cert
+        )
+        try:
+            with pytest.raises(grpc.RpcError) as exc_info:
+                # Short deadline so a verification failure surfaces promptly as
+                # UNAVAILABLE rather than the test hanging on retries.
+                client._stub.CheckAccess(
+                    authorization_pb2.CheckAccessRequest(
+                        tenant_id="t1", subject_id="u", action="read", resource_id="r"
+                    ),
+                    timeout=5,
+                )
+            # A TLS handshake failure surfaces as UNAVAILABLE (transport
+            # failure), never OK — the connection must NOT be established.
+            assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE
+        finally:
+            client.close()
+
 
 class TestAsyncAuthzGrpcClient:
     @pytest.mark.asyncio
@@ -303,5 +334,29 @@ class TestAsyncAuthzGrpcClient:
         try:
             with pytest.raises(AuthzError):
                 await client.check_access("user-1", "read", "resource-1")
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_untrusted_server_certificate_is_rejected(self, test_server: _TestServer) -> None:
+        """WR-05 (async negative TLS path): with NO custom_ca, verification
+        against the system trust store rejects the throwaway self-signed
+        server cert, so the RPC MUST fail with a transport-level TLS error
+        (UNAVAILABLE), never succeed."""
+        client = AsyncAuthzGrpcClient(
+            test_server.target,
+            token_fn=lambda: "tok",
+            tenant_id="t1",
+            custom_ca=None,  # <-- deliberately NOT trusting the self-signed cert
+        )
+        try:
+            with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+                await client._stub.CheckAccess(
+                    authorization_pb2.CheckAccessRequest(
+                        tenant_id="t1", subject_id="u", action="read", resource_id="r"
+                    ),
+                    timeout=5,
+                )
+            assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE
         finally:
             await client.close()

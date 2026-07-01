@@ -256,6 +256,48 @@ def test_axiam_user_populated_with_roles(eddsa_keypair, bound_verifier) -> None:
     assert request.axiam_user.roles == ["read", "write"]
 
 
+def test_scope_null_does_not_500(eddsa_keypair, bound_verifier) -> None:
+    """WR-02: a signature-valid token whose ``scope`` claim is explicitly
+    JSON ``null`` must NOT raise an unhandled 500 from ``list(None)``
+    propagating through the middleware. We normalize null scope to empty
+    roles — identical to how an absent scope is handled — so the request
+    succeeds (200) with empty roles. The critical WR-02 property is: the
+    signature-valid token never produces a 500."""
+    private_key, _jwk_dict = eddsa_keypair
+    middleware = AxiamAuthMiddleware(_sync_get_response)
+    factory = RequestFactory()
+
+    token = _sign_eddsa_token(
+        private_key,
+        "test-kid-1",
+        {"sub": "user-1", "tenant_id": "acme", "scope": None, "exp": time.time() + 3600},
+    )
+    request = factory.get("/", HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    response = middleware(request)
+
+    assert response.status_code != 500
+    assert response.status_code == 200
+    assert request.axiam_user.roles == []
+
+
+def test_scope_absent_yields_empty_roles(eddsa_keypair, bound_verifier) -> None:
+    """Control for WR-02: an absent scope claim yields empty roles (200)."""
+    private_key, _jwk_dict = eddsa_keypair
+    middleware = AxiamAuthMiddleware(_sync_get_response)
+    factory = RequestFactory()
+
+    token = _sign_eddsa_token(
+        private_key, "test-kid-1", {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600}
+    )
+    request = factory.get("/", HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    response = middleware(request)
+
+    assert response.status_code == 200
+    assert request.axiam_user.roles == []
+
+
 def test_cookie_fallback_extraction(eddsa_keypair, bound_verifier) -> None:
     private_key, _jwk_dict = eddsa_keypair
     middleware = AxiamAuthMiddleware(_sync_get_response)

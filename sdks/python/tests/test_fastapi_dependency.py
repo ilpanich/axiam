@@ -171,6 +171,53 @@ def test_cross_tenant_token_is_rejected(eddsa_keypair, verifier_and_endpoint) ->
     assert response.status_code == 401
 
 
+def test_scope_null_does_not_500(eddsa_keypair, verifier_and_endpoint) -> None:
+    """WR-02: a signature-valid token whose ``scope`` claim is explicitly
+    JSON ``null`` (present, not absent) must NOT raise an unhandled 500 from
+    ``list(None)``. We normalize null scope to empty roles — identical to how
+    an absent scope is handled — so the request succeeds (200) with empty
+    roles rather than crashing. The critical WR-02 assertion is: never a 500.
+    """
+    private_key, _jwk_dict = eddsa_keypair
+    verifier, _endpoint = verifier_and_endpoint
+    app = _make_app(verifier, configured_tenant="acme")
+    # raise_server_exceptions=False so a would-be 500 surfaces as a response,
+    # not a re-raised exception, proving we truly do not 500.
+    client = TestClient(app, raise_server_exceptions=False)
+
+    token = _sign_eddsa_token(
+        private_key,
+        "test-kid-1",
+        {"sub": "user-1", "tenant_id": "acme", "scope": None, "exp": time.time() + 3600},
+    )
+
+    response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code != 500
+    assert response.status_code == 200
+    assert response.json()["roles"] == []
+
+
+def test_scope_absent_yields_empty_roles(eddsa_keypair, verifier_and_endpoint) -> None:
+    """Control for WR-02: an absent scope claim yields an empty roles list
+    (200), confirming null and absent are handled identically."""
+    private_key, _jwk_dict = eddsa_keypair
+    verifier, _endpoint = verifier_and_endpoint
+    app = _make_app(verifier, configured_tenant="acme")
+    client = TestClient(app)
+
+    token = _sign_eddsa_token(
+        private_key,
+        "test-kid-1",
+        {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600},
+    )
+
+    response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["roles"] == []
+
+
 def test_cookie_fallback_extraction(eddsa_keypair, verifier_and_endpoint) -> None:
     private_key, _jwk_dict = eddsa_keypair
     verifier, _endpoint = verifier_and_endpoint

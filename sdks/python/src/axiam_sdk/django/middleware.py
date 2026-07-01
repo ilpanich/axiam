@@ -78,10 +78,25 @@ def _extract_token(request: HttpRequest) -> str | None:
     return cookie or None
 
 
+class _MalformedClaims(Exception):
+    """Raised by :func:`_build_user` when a signature-valid token carries a
+    malformed claim shape (e.g. ``scope: null``, missing ``sub``), so the
+    caller can degrade it to a standardized 401 rather than an unhandled 500
+    (WR-02, CONTRACT.md §10)."""
+
+
 def _build_user(claims: dict[str, Any]) -> AxiamUser:
-    roles_claim = claims.get("scope", "")
+    # WR-02: ``dict.get("scope", "")`` returns ``None`` (not ``""``) when the
+    # claim is PRESENT with an explicit JSON ``null`` value, and ``list(None)``
+    # raises TypeError. ``claims.get("scope") or ""`` maps both absent AND null
+    # scope to empty roles, matching how an absent scope is already handled.
+    roles_claim = claims.get("scope") or ""
     roles = roles_claim.split() if isinstance(roles_claim, str) else list(roles_claim)
-    return AxiamUser(user_id=claims["sub"], tenant_id=claims["tenant_id"], roles=roles)
+    subject = claims.get("sub")
+    tenant_id = claims.get("tenant_id")
+    if not subject or not tenant_id:
+        raise _MalformedClaims("access token is missing sub/tenant_id")
+    return AxiamUser(user_id=subject, tenant_id=tenant_id, roles=roles)
 
 
 def _error_response(message: str) -> JsonResponse:
@@ -170,7 +185,12 @@ class AxiamAuthMiddleware:
         if not tenant_id or tenant_id != self._configured_tenant:
             return _error_response("token tenant_id does not match the configured tenant")
 
-        request.axiam_user = _build_user(claims)
+        # WR-02: a malformed-but-signed claim shape (e.g. scope: null) must
+        # degrade to the standardized 401, never an unhandled 500.
+        try:
+            request.axiam_user = _build_user(claims)
+        except _MalformedClaims:
+            return _error_response("invalid or expired token")
         return None
 
 

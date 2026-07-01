@@ -129,10 +129,22 @@ def require_authenticated_user(
                 detail="token tenant_id does not match the configured tenant",
             )
 
-        roles_claim = claims.get("scope", "")
+        # WR-02: ``dict.get("scope", "")`` returns ``None`` (not ``""``) when
+        # the claim is PRESENT with an explicit JSON ``null`` value, and
+        # ``list(None)`` raises TypeError — which would propagate AFTER the
+        # verify() try/except above and surface as an unhandled 500 for an
+        # otherwise signature-valid token. ``claims.get("scope") or ""`` maps
+        # both absent AND null scope to empty roles, matching how an absent
+        # scope is already handled (CONTRACT.md §10: malformed claims must
+        # still degrade to a standardized 401, never a 500).
+        roles_claim = claims.get("scope") or ""
         roles = roles_claim.split() if isinstance(roles_claim, str) else list(roles_claim)
 
-        return AxiamUser(user_id=claims["sub"], tenant_id=tenant_id, roles=roles)
+        subject = claims.get("sub")
+        if not subject:
+            raise HTTPException(status_code=_AUTH_FAILED_STATUS, detail="invalid or expired token")
+
+        return AxiamUser(user_id=subject, tenant_id=tenant_id, roles=roles)
 
     return _dependency
 

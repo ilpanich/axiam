@@ -5,3 +5,32 @@
 //!
 //! See `../CONTRACT.md §1-§10` for the cross-language behavioral contract.
 //! Implementation follows in Phase 16 (Rust reference implementation).
+//!
+//! This SDK conforms to CONTRACT.md §1–§10.
+
+#![forbid(unsafe_code)]
+
+mod error;
+mod sensitive;
+
+pub use error::AxiamError;
+pub use sensitive::Sensitive;
+
+// Single owner of all Phase 16 module declarations (this file is final
+// after plan 16-01; downstream plans 16-02..16-05 only fill in module
+// bodies, never edit this file, to avoid parallel-execution merge
+// conflicts).
+pub mod client;
+pub mod token;
+
+#[cfg(feature = "rest")]
+pub mod rest;
+
+#[cfg(feature = "grpc")]
+pub mod grpc;
+
+#[cfg(feature = "amqp")]
+pub mod amqp;
+
+#[cfg(feature = "actix")]
+pub mod middleware;

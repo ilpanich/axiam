@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 16
 current_phase_name: Rust SDK
-status: in_progress
-stopped_at: Phase 16 Plan 01 complete (foundation — Sensitive<T>, AxiamError, manifest, build.rs)
-last_updated: "2026-07-01T07:46:49.000Z"
+status: executing
+stopped_at: Completed 16-02-PLAN.md
+last_updated: "2026-07-01T08:10:44.346Z"
 last_activity: 2026-07-01
-last_activity_desc: Executed 16-01-PLAN.md — axiam-sdk crate skeleton (manifest, Sensitive<T>, AxiamError, build.rs), redaction test green
+last_activity_desc: "Executed 16-01-PLAN.md (foundation: Sensitive<T>, AxiamError, manifest, build.rs, redaction test green)"
 progress:
   total_phases: 8
   completed_phases: 1
-  total_plans: 6
-  completed_plans: 1
-  percent: 15
+  total_plans: 12
+  completed_plans: 8
+  percent: 13
 ---
 
 # Project State
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 16 — Rust SDK
-Plan: 01 of 6 complete (foundation); 5 plans remaining across 4 waves
-Status: In progress
+Plan: 2 of 6 complete (foundation); 5 plans remaining across 4 waves
+Status: Ready to execute
 Last activity: 2026-07-01 — Executed 16-01-PLAN.md (foundation: Sensitive<T>, AxiamError, manifest, build.rs, redaction test green)
 
 ## Performance Metrics
@@ -98,6 +98,7 @@ Last activity: 2026-07-01 — Executed 16-01-PLAN.md (foundation: Sensitive<T>, 
 | Phase 15 P04 | 2 | 3 tasks | 4 files |
 | Phase 15 P02 | 9 minutes | 2 tasks | 3 files |
 | Phase 16-rust-sdk P01 | 25min | 2 tasks | 14 files |
+| Phase 16-rust-sdk P02 | 42min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -185,6 +186,9 @@ Recent decisions affecting current work:
 - [v1.1 Phase 16-01]: sdks/rust/Cargo.toml carries an empty [workspace] table to opt out of the root AXIAM Cargo workspace (edition 2021 vs workspace edition 2024) — without it `cargo build`/`cargo metadata` error with "current package believes it's in a workspace when it's not"
 - [v1.1 Phase 16-01]: src/lib.rs is the single owner of all Phase 16 module declarations (client/token/rest/grpc/amqp/middleware); placeholder module files committed in 16-01 so downstream plans 16-02..16-05 never edit lib.rs, avoiding parallel-wave merge conflicts
 - [v1.1 Phase 16-01]: AxiamError::Network carries `source: Option<Box<dyn Error + Send + Sync>>` rather than a #[from]-derived cause type until concrete transport errors exist in 16-02/16-03/16-04
+- [Phase 16-rust-sdk]: Pinned jsonwebtoken's rust_crypto backend feature explicitly — no default crypto provider is selected by jsonwebtoken 10, and this standalone crate has no workspace neighbor to resolve one transitively
+- [Phase 16-rust-sdk]: Added optional org_slug/org_id builder methods beyond CONTRACT.md §5's tenant-only mandate — AXIAM's real login/refresh endpoints require an organization identifier; resolved org UUID is cached from the access token's org_id claim after first login
+- [Phase 16-rust-sdk]: Gated client.rs and the reqwest-touching half of token/jwks.rs behind cfg(feature = "rest") to preserve 16-01's cargo build --no-default-features invariant
 
 ### Pending Todos
 
@@ -205,6 +209,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T07:46:49.000Z
-Stopped at: Phase 16 Plan 01 executed (foundation complete); plan 16-02 (REST client, TokenManager, JWKS) next
-Resume file: .planning/phases/16-rust-sdk/16-02-PLAN.md
+Last session: 2026-07-01T08:10:44.335Z
+Stopped at: Completed 16-02-PLAN.md
+Resume file: None

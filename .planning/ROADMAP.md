@@ -637,7 +637,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
   4. gRPC `CheckAccess` and `BatchCheckAccess` succeed via `tonic 0.14`; AMQP consumer verifies HMAC-SHA256 before processing and nacks without requeue on signature failure.
   5. `cargo publish --dry-run` succeeds; crates.io publish CI pipeline runs on release tag.
 
-**Plans**: 2/6 plans executed
+**Plans**: 3/6 plans executed
 
 Plans:
 **Wave 1**
@@ -647,7 +647,7 @@ Plans:
 **Wave 2** *(parallel; depend on 16-01)*
 
 - [x] 16-02-PLAN.md — REST core: AxiamClient builder + cookie jar + TokenManager + single-flight refresh + local JWKS verify + login/verify_mfa/refresh/logout + check_access/can/batch_check (SC#1, SC#2)
-- [ ] 16-04-PLAN.md — AMQP: byte-identical HMAC sign/verify + server-identical message DTOs + closure-handler consumer (verify-before-handler, nack-no-requeue) (SC#4 AMQP half)
+- [x] 16-04-PLAN.md — AMQP: byte-identical HMAC sign/verify + server-identical message DTOs + closure-handler consumer (verify-before-handler, nack-no-requeue) (SC#4 AMQP half)
 
 **Wave 3** *(parallel; depend on 16-01 + 16-02)*
 
@@ -772,7 +772,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
-| 16. Rust SDK | 2/6 | In Progress|  |
+| 16. Rust SDK | 3/6 | In Progress|  |
 | 17. TypeScript SDK | 0/? | Not started | - |
 | 18. Go SDK | 0/? | Not started | - |
 | 19. Python SDK | 0/? | Not started | - |

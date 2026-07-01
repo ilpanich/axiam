@@ -474,3 +474,116 @@ def test_decode_unverified_claims_accepts_object_payload() -> None:
     claims = _decode_unverified_claims(token)
     assert claims["sub"] == "user-1"
     assert claims["tenant_id"] == "acme"
+
+
+# ---------------------------------------------------------------------
+# IN-01 (D-15): injectable stdlib logger actually logs lifecycle events,
+# and NEVER logs a token/secret value.
+# ---------------------------------------------------------------------
+
+
+class _CapturingHandler:
+    """A minimal logging.Handler that records every emitted message (fully
+    formatted, so any %-args are interpolated into the final string)."""
+
+    def __init__(self) -> None:
+        import logging
+
+        self.records: list[str] = []
+
+        handler = self
+
+        class _H(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                handler.records.append(record.getMessage())
+
+        self._handler = _H()
+        self._handler.setLevel(logging.DEBUG)
+
+    @property
+    def handler(self) -> object:
+        return self._handler
+
+    def joined(self) -> str:
+        return "\n".join(self.records)
+
+
+def _logger_with_capture() -> tuple[object, _CapturingHandler]:
+    import logging
+
+    cap = _CapturingHandler()
+    logger = logging.getLogger("axiam_sdk.test.in01")
+    logger.handlers.clear()
+    logger.addHandler(cap.handler)  # type: ignore[arg-type]
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    return logger, cap
+
+
+def test_logger_logs_refresh_lifecycle_without_token_values(
+    respx_mock: respx.MockRouter,
+) -> None:
+    """IN-01/D-15: the injectable logger logs the refresh lifecycle event,
+    and the raw access/refresh token values never appear in any emitted log
+    record."""
+    logger, cap = _logger_with_capture()
+
+    access = _make_access_token()
+    new_access = _make_access_token(jti="session-uuid-2")
+    respx_mock.post(f"{BASE_URL}{'/api/v1/auth/login'}").mock(
+        return_value=httpx.Response(
+            200,
+            json={"user": {"id": "user-1"}, "session_id": "s1", "expires_in": 900},
+            headers=[_set_cookie_header("axiam_access", access)],
+        )
+    )
+    respx_mock.post(f"{BASE_URL}{'/api/v1/auth/refresh'}").mock(
+        return_value=httpx.Response(
+            200,
+            json={"expires_in": 900},
+            headers=[_set_cookie_header("axiam_access", new_access, path="/api/v1/auth/refresh")],
+        )
+    )
+
+    with AxiamClient(base_url=BASE_URL, tenant_slug="acme", logger=logger) as client:  # type: ignore[arg-type]
+        client.login("user@example.com", "password123")
+        client.refresh()
+
+    logged = cap.joined()
+    # A lifecycle event was actually logged (D-15 feature is wired, not inert).
+    assert "refresh triggered" in logged
+    # No raw token value ever appears in any log record (redaction guarantee).
+    assert access not in logged
+    assert new_access not in logged
+
+
+def test_logger_logs_login_failure_status_without_secrets(
+    respx_mock: respx.MockRouter,
+) -> None:
+    """IN-01/D-15: a login failure is logged with the status code only —
+    never the submitted password or any response body/token value."""
+    logger, cap = _logger_with_capture()
+
+    respx_mock.post(f"{BASE_URL}{'/api/v1/auth/login'}").mock(
+        return_value=httpx.Response(401, json={"error": "invalid credentials"})
+    )
+
+    secret_password = "SUPER-SECRET-PASSWORD-123"
+    with AxiamClient(base_url=BASE_URL, tenant_slug="acme", logger=logger) as client:  # type: ignore[arg-type]
+        with pytest.raises(AuthError):
+            client.login("user@example.com", secret_password)
+
+    logged = cap.joined()
+    assert "login/verify_mfa failed" in logged
+    assert "status=401" in logged
+    assert secret_password not in logged
+
+
+def test_logger_is_off_by_default_null_handler() -> None:
+    """IN-01/D-15: with no logger injected, the default logger has a
+    NullHandler so the SDK is silent unless the app configures logging."""
+    import logging
+
+    with AxiamClient(base_url=BASE_URL, tenant_slug="acme") as client:
+        default_logger = client._logger
+    assert any(isinstance(h, logging.NullHandler) for h in default_logger.handlers)

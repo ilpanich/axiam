@@ -215,6 +215,9 @@ class AxiamClient:
                 mfa_required=True,
                 mfa_token=wire.get("challenge_token"),
             )
+        # D-15: log the failure with status code only — never the request
+        # body, response body, or any token/credential value.
+        self._logger.warning("axiam_sdk: login/verify_mfa failed: status=%s", response.status_code)
         raise error_from_http_status(
             response.status_code, "login/verify_mfa failed", response=response
         )
@@ -252,6 +255,9 @@ class AxiamClient:
             raise AuthError("no access token to refresh — call login() first")
 
         tenant_id, org_id = self._refresh_identifiers(observed_access)
+        # D-15: diagnostic-only, never a token value. Off by default
+        # (NullHandler); integrates with the consuming app's logging config.
+        self._logger.debug("axiam_sdk: token refresh triggered")
         self._session.refresh_guard.refresh_if_needed_sync(
             observed_access, lambda: self._do_refresh_sync(tenant_id, org_id)
         )
@@ -263,6 +269,7 @@ class AxiamClient:
             raise AuthError("no access token to refresh — call async_login() first")
 
         tenant_id, org_id = self._refresh_identifiers(observed_access)
+        self._logger.debug("axiam_sdk: token refresh triggered")
         await self._session.refresh_guard.refresh_if_needed_async(
             observed_access, lambda: self._do_refresh_async(tenant_id, org_id)
         )
@@ -302,6 +309,8 @@ class AxiamClient:
     def _handle_refresh_response(self, response: httpx.Response) -> dict[str, Any]:
         if response.status_code != httpx.codes.OK:
             # §9.3: no retry loop on refresh failure — propagate as-is.
+            # D-15: status code only, never a token value.
+            self._logger.warning("axiam_sdk: token refresh failed: status=%s", response.status_code)
             raise error_from_http_status(response.status_code, "refresh failed", response=response)
 
         new_access = self._session.cookie_value(ACCESS_COOKIE)

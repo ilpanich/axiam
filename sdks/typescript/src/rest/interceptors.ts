@@ -5,7 +5,7 @@
 // (no window.location access anywhere in this module).
 
 import type { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from 'axios';
-import { csrfHeaderForMethod, mapHttpStatusToError, refreshOnce } from '../core/index.js';
+import { csrfHeaderForMethod, mapHttpStatusToError } from '../core/index.js';
 import type { SharedSession } from './session.js';
 
 /**
@@ -68,7 +68,7 @@ export function installRefreshInterceptor(axiosInstance: AxiosInstance, session:
         originalRequest._retry = true;
 
         try {
-          await refreshOnce(async () => {
+          await session.refreshGuard(async () => {
             await session.axios.post('/api/v1/auth/refresh', {});
           });
           return axiosInstance(originalRequest);

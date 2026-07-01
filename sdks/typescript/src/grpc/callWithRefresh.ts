@@ -3,14 +3,15 @@
 // The interceptor (interceptor.ts) is synchronous and never triggers a
 // refresh (Pitfall 3). This ASYNC call-site wrapper is where
 // UNAUTHENTICATED handling actually lives: on a caught error whose
-// `.code === GrpcStatus.UNAUTHENTICATED`, it awaits the shared single-flight
-// `refreshOnce` guard (the SAME guard instance the REST transport uses,
-// D-13), resyncs the interceptor's cached-token fast-path via
-// `syncFromJar()`, then retries the call exactly once. A second
-// UNAUTHENTICATED (or any other error) maps through `mapGrpcStatusToError`
-// and rethrows — no further retry (§9.3).
+// `.code === GrpcStatus.UNAUTHENTICATED`, it awaits the session's
+// per-instance single-flight refresh guard (`session.refreshGuard` — the
+// SAME guard instance the REST transport for this session uses, D-13, but
+// NEVER shared with a different session, CR-02), resyncs the interceptor's
+// cached-token fast-path via `syncFromJar()`, then retries the call exactly
+// once. A second UNAUTHENTICATED (or any other error) maps through
+// `mapGrpcStatusToError` and rethrows — no further retry (§9.3).
 
-import { GrpcStatus, mapGrpcStatusToError, refreshOnce, type AxiamError } from '../core/index.js';
+import { GrpcStatus, mapGrpcStatusToError, type AxiamError } from '../core/index.js';
 import type { NodeSession } from '../node/session.js';
 
 interface GrpcServiceErrorLike {
@@ -33,7 +34,7 @@ export async function callWithRefresh<T>(session: NodeSession, fn: () => Promise
     return await fn();
   } catch (err) {
     if (isGrpcServiceError(err) && err.code === GrpcStatus.UNAUTHENTICATED) {
-      await refreshOnce(session.doRefresh);
+      await session.refreshGuard(session.doRefresh);
       await session.tokenManager.syncFromJar();
       try {
         return await fn();

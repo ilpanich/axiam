@@ -2,13 +2,15 @@
 // 17-05) attach gRPC/JWKS/middleware state to (D-13).
 //
 // Holds: the axios instance, the tenant header value (computed once at
-// construction), a mutable csrfToken store, the base URL, and the bound
-// refreshOnce single-flight guard (from core). One login() drives all
-// transports.
+// construction), a mutable csrfToken store, the base URL, and a per-instance
+// single-flight refresh guard (CR-02: NOT the module-level default guard —
+// each SharedSession gets its own via createRefreshGuard(), so two
+// independent AxiamClient/NodeSession instances never cross-wire refreshes).
+// One login() drives all transports for a given session.
 
 import axios, { type AxiosInstance } from 'axios';
-import type { AxiamClientOptions } from '../core/index.js';
-import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS } from '../core/index.js';
+import type { AxiamClientOptions, RefreshGuard } from '../core/index.js';
+import { createRefreshGuard, DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS } from '../core/index.js';
 
 const PEM_MARKER = '-----BEGIN CERTIFICATE-----';
 
@@ -25,11 +27,19 @@ export class SharedSession {
   csrfToken: string | undefined;
   /** Set true once a successful login/verifyMfa has completed. */
   authenticated = false;
+  /**
+   * Per-instance single-flight refresh guard (CR-02, D-13). Shared across
+   * this session's REST and gRPC transports (rest/interceptors.ts,
+   * grpc/callWithRefresh.ts both call `session.refreshGuard(...)`), but
+   * NEVER shared with a different SharedSession/NodeSession instance.
+   */
+  readonly refreshGuard: RefreshGuard;
 
   constructor(options: AxiamClientOptions, axiosInstance: AxiosInstance, tenantHeaderValue: string) {
     this.axios = axiosInstance;
     this.baseUrl = options.baseUrl;
     this.tenantHeaderValue = tenantHeaderValue;
+    this.refreshGuard = createRefreshGuard();
   }
 }
 

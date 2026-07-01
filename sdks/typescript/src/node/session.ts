@@ -5,9 +5,13 @@
 // in a tough-cookie jar (via wrapAxios) so httpOnly Set-Cookie tokens
 // persist, and attaches a TokenManager + JWKS verifier. This is the ONE
 // shared session object gRPC (interceptor.ts/callWithRefresh.ts) and REST
-// both operate on — the single-flight `refreshOnce` guard (core, module-
-// level) is therefore transparently shared across both transports, since
-// both call it with an equivalent `POST /api/v1/auth/refresh` closure.
+// both operate on — the single-flight refresh guard (`session.refreshGuard`,
+// a per-session instance created in the SharedSession constructor, CR-02)
+// is therefore transparently shared across both transports FOR THIS
+// SESSION ONLY, since both call it with an equivalent `POST
+// /api/v1/auth/refresh` closure. A different NodeSession/SharedSession
+// instance gets its own independent guard — refreshes never cross-wire
+// between sessions.
 
 import type { AxiamClientOptions } from '../core/index.js';
 import { createSession, SharedSession } from '../rest/session.js';
@@ -26,11 +30,13 @@ export class NodeSession extends SharedSession {
   }
 
   /**
-   * Drives the actual `POST /api/v1/auth/refresh` HTTP call. Passed to the
-   * shared `refreshOnce` single-flight guard by both REST's reactive
-   * interceptor (rest/interceptors.ts) and gRPC's callWithRefresh — since
-   * `refreshOnce` is a module-level singleton, both transports share exactly
-   * one in-flight refresh regardless of which one triggers it (D-13).
+   * Drives the actual `POST /api/v1/auth/refresh` HTTP call. Passed to this
+   * session's per-instance `refreshGuard` (inherited from SharedSession) by
+   * both REST's reactive interceptor (rest/interceptors.ts) and gRPC's
+   * callWithRefresh — since `refreshGuard` is scoped to THIS session
+   * instance (CR-02, D-13), both transports share exactly one in-flight
+   * refresh for this session regardless of which one triggers it, while
+   * remaining fully independent from any other session's guard.
    */
   doRefresh = async (): Promise<void> => {
     await this.axios.post('/api/v1/auth/refresh', {});

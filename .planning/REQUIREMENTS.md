@@ -457,7 +457,7 @@ Deliver `sdks/typescript/` with distinct browser vs Node entry points.
 - [x] Full baseline; **browser persona** authz via REST endpoint (FND-04); **Node persona** authz via gRPC
 - [x] axios 1.7 REST + @grpc/grpc-js 1.14 (Node) + amqplib (Node); `jose` for JWKS; ts-proto 2.x stubs
 - [x] Separate `axiam-sdk/rest` / `axiam-sdk/grpc` / `axiam-sdk/amqp` export conditions (browser bundlers tree-shake Node-only)
-- [x] CSRF interceptor auto-forwards `X-CSRF-Token`; promise-deduplicated refresh guard
+- [ ] CSRF interceptor auto-forwards `X-CSRF-Token`; promise-deduplicated refresh guard (Node CSRF unpopulated + process-global refresh guard — see 17-VERIFICATION.md CR-01/CR-02)
 - [x] Express + Fastify middleware; examples; **npm publish pipeline** (`axiam-sdk`)
 
 ---
@@ -555,7 +555,7 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
 | FND-04 | Phase 15 | REST Authorization-Check Endpoint (`POST /api/v1/authz/check`) | Pending |
 | FND-05 | Phase 15 | SDK Monorepo Scaffold & per-SDK path-filtered CI | Pending |
 | RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) | Complete |
-| TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) | Complete |
+| TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) | Pending |
 | GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Pending |
 | PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Pending |
 | JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Pending |

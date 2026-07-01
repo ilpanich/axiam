@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 17
 current_phase_name: typescript-sdk
-status: verifying
-stopped_at: Completed 17-06-PLAN.md
-last_updated: "2026-07-01T12:48:47.725Z"
+status: gaps_found
+stopped_at: Phase 17 verification found 4 critical security gaps
+last_updated: "2026-07-01T13:10:00.000Z"
 last_activity: 2026-07-01
-last_activity_desc: Phase 17 execution started
+last_activity_desc: Phase 17 verified — gaps found (4 critical), pending gap closure
 progress:
   total_phases: 8
-  completed_phases: 3
+  completed_phases: 2
   total_plans: 18
   completed_plans: 18
-  percent: 38
+  percent: 25
 ---
 
 # Project State
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 17 (typescript-sdk) — EXECUTING
-Plan: 6 of 6
-Status: Phase complete — ready for verification
+Phase: 17 (typescript-sdk) — GAPS FOUND
+Plan: 6 of 6 executed
+Status: Verification found 4 critical security gaps — pending gap closure (/gsd-plan-phase 17 --gaps)
 Last activity: 2026-07-01 — Phase 17 execution started
 
 ## Performance Metrics

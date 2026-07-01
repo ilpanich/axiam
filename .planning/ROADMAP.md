@@ -591,7 +591,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 
 - [x] **Phase 15: SDK Foundation** - Export OpenAPI spec, establish buf proto codegen pipeline, add REST authz-check endpoint, author cross-language contract, scaffold `sdks/` monorepo with per-SDK path-filtered CI (completed 2026-06-30)
 - [x] **Phase 16: Rust SDK** - Reference implementation (REST + gRPC + AMQP); establishes `Sensitive<T>` and gRPC-channel patterns reused by all later SDKs (completed 2026-07-01)
-- [x] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish (completed 2026-07-01)
+- [ ] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish (6/6 plans executed 2026-07-01; verification found 4 critical security gaps — pending gap closure)
 - [ ] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish
 - [ ] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish
 - [ ] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing
@@ -796,7 +796,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 |-------|----------------|--------|-----------|
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
-| 17. TypeScript SDK | 6/6 | Complete   | 2026-07-01 |
+| 17. TypeScript SDK | 6/6 | Gaps Found | - |
 | 18. Go SDK | 0/? | Not started | - |
 | 19. Python SDK | 0/? | Not started | - |
 | 20. Java SDK | 0/? | Not started | - |

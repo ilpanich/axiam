@@ -197,6 +197,10 @@ None - no external service configuration required. (Local dev-tooling installs â
 - The Wave-0 foundation is complete: `sdks/python/` builds, the gRPC stubs are committed and drift-checkable, and the AMQP HMAC protocol is proven cross-language-compatible. Later Phase 19 plans (client/session, REST transport, gRPC transport, AMQP consumer, FastAPI/Django integrations, examples, CI) can now build on a verified foundation instead of an unverified assumption.
 - No blockers. The CI drift-check job and PyPI publish workflow referenced in this plan's `<verification>` block are explicitly out of scope for 19-01 (deferred to plan 19-07 per the phase's wave structure) â€” `scripts/gen_grpc.sh` is ready to be wired into that job as-is.
 
+## Self-Check: PASSED
+
+All claimed files verified present on disk; all claimed commit hashes verified present in `git log --oneline --all` (`ca790b3`, `8262eba`, `c83fa6e`, `ffe528f`).
+
 ---
 *Phase: 19-python-sdk*
 *Completed: 2026-07-01*

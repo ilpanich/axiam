@@ -4,16 +4,16 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 19
 current_phase_name: Python SDK
-status: verifying
-stopped_at: Phase 19 planned — 7 plans / 5 waves, plan-checker PASSED
-last_updated: "2026-07-01T19:46:59.884Z"
+status: executing
+stopped_at: Completed 19-01-PLAN.md
+last_updated: "2026-07-01T20:10:21.873Z"
 last_activity: 2026-07-01
-last_activity_desc: Phase 18 complete, transitioned to Phase 19
+last_activity_desc: Plan 19-01 (Foundation) complete
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 33
-  completed_plans: 26
+  completed_plans: 27
   percent: 50
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 19 — Python SDK
-Plan: Not started
-Status: Phase complete — ready for verification
-Last activity: 2026-07-01 — Phase 18 complete, transitioned to Phase 19
+Plan: 2 of 7
+Status: Ready to execute
+Last activity: 2026-07-01 — Plan 19-01 (Foundation) complete
 
 ## Performance Metrics
 
@@ -118,6 +118,7 @@ Last activity: 2026-07-01 — Phase 18 complete, transitioned to Phase 19
 | Phase 18 P04 | 20min | 2 tasks | 7 files |
 | Phase 18-go-sdk P05 | 15min | 1 tasks | 3 files |
 | Phase 18-go-sdk P06 | 20min | 2 tasks | 10 files |
+| Phase 19-python-sdk P01 | 12min | 3 tasks | 18 files |
 
 ## Accumulated Context
 
@@ -250,6 +251,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 18-go-sdk] 18-06: Exported grpc.NewTLSCredentials as a thin wrapper over the existing unexported newTLSCredentials so external callers can build strict TLS credentials without reimplementing tls.Config wiring
 - [Phase ?]: [Phase 18-go-sdk] 18-06: Added root-package axiam.JWKSVerifier/NewJWKSVerifier wrapping internal/jwks.NewVerifier so no example needs to import an internal/ package directly, keeping the SDK's supported public API entry points consistent (root/grpc/amqp/middleware only)
 - [Phase ?]: [Phase 18-go-sdk] 18-06: CI workflow pins actions/setup-go to go-version 1.25.0 matching go.mod's actual floor after 18-01's dependency-driven bump; tag-triggered publish job verifies module-proxy resolution rather than an explicit publish call, since pushing sdks/go/vX.Y.Z IS the release for the Go module proxy
+- [Phase ?]: [Phase 19-python-sdk]: AMQP HMAC canonicalization preserves wire/insertion key order (json.dumps without sort_keys) rather than alphabetizing — proven against a real Rust-signed fixture where field order is declared-struct order, not alphabetical
+- [Phase ?]: [Phase 19-python-sdk]: Pinned grpcio-tools==1.78.* to match the grpcio==1.78.* runtime pin — grpc_tools.protoc embeds its own version as a hard import-time floor check in generated _pb2_grpc.py, so a newer grpcio-tools would break every consumer's import
 
 ### Pending Todos
 
@@ -270,6 +273,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T19:46:59.871Z
-Stopped at: Phase 19 planned — 7 plans / 5 waves, plan-checker PASSED
-Resume file: .planning/phases/19-python-sdk/19-01-PLAN.md
+Last session: 2026-07-01T20:10:21.860Z
+Stopped at: Completed 19-01-PLAN.md
+Resume file: None

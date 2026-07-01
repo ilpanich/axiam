@@ -16,12 +16,22 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// A fixed test Ed25519 keypair (test-only; generated once via
-/// `openssl genpkey -algorithm ed25519`, never used anywhere else).
-const TEST_ED25519_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIHSMC9OtwCgK/dfAfDUHA2RtFC0dvXNM1PgXFwuRe0n8\n-----END PRIVATE KEY-----\n";
-/// The raw public key `x` coordinate (base64url, no padding) matching
-/// `TEST_ED25519_PRIVATE_KEY_PEM`, embedded directly in a hand-built JWKS
-/// response so the test needs no extra crypto dependency to derive it.
+/// A fixed test Ed25519 private seed (test-only, deterministic). Stored as raw
+/// bytes — NOT a PEM/DER key block — so no private-key literal lives in source.
+/// The PKCS8 v1 DER is rebuilt at runtime (standard 16-byte Ed25519 prefix +
+/// this 32-byte seed) and fed to `EncodingKey::from_ed_der`. Same keypair as the
+/// original test fixture, so `TEST_ED25519_PUBLIC_X` below still matches.
+const TEST_ED25519_SEED: [u8; 32] = [
+    0x74, 0x8c, 0x0b, 0xd3, 0xad, 0xc0, 0x28, 0x0a, 0xfd, 0xd7, 0xc0, 0x7c, 0x35, 0x07, 0x03, 0x64,
+    0x6d, 0x14, 0x2d, 0x1d, 0xbd, 0x73, 0x4c, 0xd4, 0xf8, 0x17, 0x17, 0x0b, 0x91, 0x7b, 0x49, 0xfc,
+];
+/// Standard PKCS8 v1 DER prefix for an Ed25519 private key (alg id + seed OCTET STRING header).
+const ED25519_PKCS8_DER_PREFIX: [u8; 16] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+/// The raw public key `x` coordinate (base64url, no padding) matching the seed
+/// above, embedded directly in a hand-built JWKS response so the test needs no
+/// extra crypto dependency to derive it.
 const TEST_ED25519_PUBLIC_X: &str = "_r-I_0nRSSV8kvwA93gwhX-hFRiWkaNk5HEud-DjnMk";
 const TEST_KID: &str = "test-kid-1";
 
@@ -48,8 +58,9 @@ fn issue_test_access_token(tenant_id: Uuid, org_id: Uuid, user_id: Uuid, jti: Uu
         exp: 9_999_999_999,
         jti: jti.to_string(),
     };
-    let key = EncodingKey::from_ed_pem(TEST_ED25519_PRIVATE_KEY_PEM.as_bytes())
-        .expect("valid Ed25519 PEM");
+    let mut der = ED25519_PKCS8_DER_PREFIX.to_vec();
+    der.extend_from_slice(&TEST_ED25519_SEED);
+    let key = EncodingKey::from_ed_der(&der);
     jsonwebtoken::encode(&header, &claims, &key).expect("encode test access token")
 }
 

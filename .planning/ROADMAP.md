@@ -673,7 +673,7 @@ Plans:
   4. Express and Fastify middleware examples compile under TypeScript strict mode and protect a sample route; the package publishes as `axiam-sdk` on npm.
   5. `npm publish --dry-run` succeeds; npm publish CI pipeline runs on release tag.
 
-**Plans**: 4/6 plans executed
+**Plans**: 5/6 plans executed
 
 Plans:
 **Wave 1**
@@ -691,7 +691,7 @@ Plans:
 
 **Wave 4** *(depends on 17-02 + 17-03)*
 
-- [ ] 17-05-PLAN.md — Express + Fastify middleware (shared local-JWKS verify core, inject req.axiamUser) + five strict-compiling examples (D-27/§10, SC#4)
+- [x] 17-05-PLAN.md — Express + Fastify middleware (shared local-JWKS verify core, inject req.axiamUser) + five strict-compiling examples (D-27/§10, SC#4)
 
 **Wave 5** *(depends on all transports + middleware)*
 
@@ -796,7 +796,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 |-------|----------------|--------|-----------|
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
-| 17. TypeScript SDK | 4/6 | In Progress|  |
+| 17. TypeScript SDK | 5/6 | In Progress|  |
 | 18. Go SDK | 0/? | Not started | - |
 | 19. Python SDK | 0/? | Not started | - |
 | 20. Java SDK | 0/? | Not started | - |

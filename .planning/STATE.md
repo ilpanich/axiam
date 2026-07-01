@@ -6,14 +6,14 @@ current_phase: 17
 current_phase_name: typescript-sdk
 status: executing
 stopped_at: Completed 17-03-PLAN.md
-last_updated: "2026-07-01T12:27:52.518Z"
+last_updated: "2026-07-01T12:37:16.103Z"
 last_activity: 2026-07-01
 last_activity_desc: Phase 17 execution started
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 18
-  completed_plans: 16
+  completed_plans: 17
   percent: 25
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 17 (typescript-sdk) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
 Last activity: 2026-07-01 — Phase 17 execution started
 
@@ -107,6 +107,7 @@ Last activity: 2026-07-01 — Phase 17 execution started
 | Phase 17-typescript-sdk P02 | 9min | 2 tasks | 15 files |
 | Phase 17-typescript-sdk P04 | 10min | 2 tasks | 8 files |
 | Phase 17-typescript-sdk P03 | 18min | 2 tasks | 11 files |
+| Phase 17 P05 | 12min | 2 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -216,6 +217,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 17-typescript-sdk] 17-03: gRPC transport built directly on grpc-js's makeClientConstructor with local Wire* types mirroring authorization.proto (src/gen unavailable, no buf CLI) behind an injectable AuthorizationServiceClientFactory seam
 - [Phase ?]: [Phase 17-typescript-sdk] 17-03: TokenManager.refreshTokenValue() reads the jar against {baseUrl}/api/v1/auth/refresh (not bare baseUrl) since axiam_refresh is path-scoped server-side
 - [Phase ?]: [Phase 17-typescript-sdk] 17-03: NodeSession.doRefresh and REST's inline refresh closure both drive the same module-level refreshOnce singleton guard, so REST and gRPC transparently share exactly one in-flight refresh (D-13)
+- [Phase ?]: [Phase 17-typescript-sdk] 17-05: Fastify plugin marked with Symbol.for('skip-override') (fastify's own escape hatch, same mechanism fastify-plugin wraps) so axiamPlugin's preHandler hook applies to sibling routes without adding a new dependency
+- [Phase ?]: [Phase 17-typescript-sdk] 17-05: examples/tsconfig.json resolves axiam-sdk/* via a paths mapping to src/*.ts rather than the package's own exports map, since dist/ is unbuilt in this sandbox (no buf CLI)
+- [Phase ?]: [Phase 17-typescript-sdk] 17-05: Added a new axiam-sdk/middleware public subpath export (package.json + tsup.config.ts) and re-exported Sensitive from axiam-sdk/amqp — both needed for Task 2's examples to satisfy the plan's public-entry-points-only constraint
 
 ### Pending Todos
 
@@ -236,6 +240,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T12:27:52.505Z
+Last session: 2026-07-01T12:36:37.255Z
 Stopped at: Completed 17-03-PLAN.md
 Resume file: None

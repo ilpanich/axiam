@@ -9,15 +9,13 @@
     // examples type-check against source directly instead of the package's
     // own `exports` map (which points at unbuilt dist/ paths). A buf-enabled
     // CI run additionally verifies the built package resolves the same way.
-    "baseUrl": ".",
     "paths": {
       "axiam-sdk": ["../src/index.ts"],
       "axiam-sdk/rest": ["../src/rest/index.ts"],
       "axiam-sdk/grpc": ["../src/grpc/index.ts"],
       "axiam-sdk/amqp": ["../src/amqp/index.ts"],
       "axiam-sdk/middleware": ["../src/middleware/index.ts"]
-    },
-    "ignoreDeprecations": "6.0"
+    }
   },
   "include": ["*.ts"],
   "exclude": ["node_modules", "../dist", "../src/gen"]

@@ -118,6 +118,6 @@ None beyond what the plan's own `<threat_model>` already covers (T-18-01, T-18-0
 - buf `out:` resolves to `sdks/go/internal/gen`; `git status --porcelain sdks/go/internal/gen` shows the stubs tracked (committed in `0c648da`), not ignored.
 - `.planning/REQUIREMENTS.md` GO-01 module path/tag reconciled; no stale identifiers remain.
 
-## Self-Check
+## Self-Check: PASSED
 
-Verifying claims made in this summary against the actual filesystem/git state.
+All 11 files listed under `key_files` (created + modified) confirmed present on disk. All 5 commit hashes referenced in this summary (`0c648da`, `a751b0e`, `5e7787f`, `0854a64`, and this summary's own commit) confirmed present in `git log --oneline --all`.

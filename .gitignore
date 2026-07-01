@@ -47,9 +47,14 @@ CLAUDE.md.pre-ruflo
 # Each SDK build and CI regenerates these; they are never committed.
 sdks/rust/src/gen/
 sdks/typescript/src/gen/
-sdks/go/gen/
 sdks/python/axiam_sdk/gen/
 sdks/java/src/main/java/io/axiam/sdk/gen/
+
+# Go is the documented codegen-distribution exception (Phase 18 D-01):
+# `go get` fetches source only, so the buf-generated stubs at
+# sdks/go/internal/gen MUST be committed (not gitignored) and are
+# drift-checked in CI against sdks/buf.gen.yaml + proto/axiam/v1.
+# Do NOT add sdks/go/internal/gen/ (or sdks/go/gen/) here.
 
 # GSD research web-fetch cache (transient)
 .planning/research/.cache/

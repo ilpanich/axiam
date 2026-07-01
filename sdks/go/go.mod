@@ -1,3 +1,21 @@
 module github.com/ilpanich/axiam/sdks/go
 
-go 1.22
+go 1.25.0
+
+require (
+	google.golang.org/grpc v1.81.0
+	google.golang.org/protobuf v1.36.11
+)
+
+require (
+	github.com/goccy/go-json v0.10.6 // indirect
+	github.com/lestrrat-go/blackmagic v1.0.4 // indirect
+	github.com/lestrrat-go/jwx/v3 v3.1.1 // indirect
+	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
+	github.com/rabbitmq/amqp091-go v1.10.0 // indirect
+	github.com/segmentio/asm v1.2.1 // indirect
+	golang.org/x/net v0.51.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
+)

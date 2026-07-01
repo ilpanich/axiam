@@ -132,3 +132,7 @@ None - no external service configuration required.
 ---
 *Phase: 18-go-sdk*
 *Completed: 2026-07-01*
+
+## Self-Check: PASSED
+
+All 6 files listed under `key-files: created` (plus this SUMMARY.md) confirmed present on disk. All 3 commit hashes referenced in this summary (`051e72e`, `7aa4795`, and this summary's own commit `c27420c`) confirmed present in `git log --oneline --all`.

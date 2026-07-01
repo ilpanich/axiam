@@ -590,7 +590,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 ### Phases (v1.1)
 
 - [x] **Phase 15: SDK Foundation** - Export OpenAPI spec, establish buf proto codegen pipeline, add REST authz-check endpoint, author cross-language contract, scaffold `sdks/` monorepo with per-SDK path-filtered CI (completed 2026-06-30)
-- [ ] **Phase 16: Rust SDK** - Reference implementation (REST + gRPC + AMQP); establishes `Sensitive<T>` and gRPC-channel patterns reused by all later SDKs
+- [x] **Phase 16: Rust SDK** - Reference implementation (REST + gRPC + AMQP); establishes `Sensitive<T>` and gRPC-channel patterns reused by all later SDKs (completed 2026-07-01)
 - [ ] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish
 - [ ] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish
 - [ ] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish
@@ -637,7 +637,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
   4. gRPC `CheckAccess` and `BatchCheckAccess` succeed via `tonic 0.14`; AMQP consumer verifies HMAC-SHA256 before processing and nacks without requeue on signature failure.
   5. `cargo publish --dry-run` succeeds; crates.io publish CI pipeline runs on release tag.
 
-**Plans**: 5/6 plans executed
+**Plans**: 6/6 plans complete
 
 Plans:
 **Wave 1**
@@ -656,7 +656,7 @@ Plans:
 
 **Wave 4** *(depends on all transports)*
 
-- [ ] 16-06-PLAN.md — Examples (login+MFA / REST / gRPC / AMQP / Actix) + README conformance + crates.io publish CI (leak gate, TLS-lint gate, dry-run gate, tag-triggered publish + buf bundle) (SC#3, SC#5)
+- [x] 16-06-PLAN.md — Examples (login+MFA / REST / gRPC / AMQP / Actix) + README conformance + crates.io publish CI (leak gate, TLS-lint gate, dry-run gate, tag-triggered publish + buf bundle) (SC#3, SC#5)
 
 ---
 
@@ -772,7 +772,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
-| 16. Rust SDK | 5/6 | In Progress|  |
+| 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
 | 17. TypeScript SDK | 0/? | Not started | - |
 | 18. Go SDK | 0/? | Not started | - |
 | 19. Python SDK | 0/? | Not started | - |

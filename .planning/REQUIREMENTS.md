@@ -439,11 +439,11 @@ Create the `sdks/` monorepo layout and per-SDK CI so each language builds/tests 
 Deliver `sdks/rust/` as the reference SDK proving the full capability baseline; establishes the `Sensitive<T>` and gRPC-channel patterns reused by the others.
 
 ### Acceptance Criteria
-- [ ] Full **SDK Capability Baseline** (above)
-- [ ] reqwest 0.12 REST + tonic 0.14 gRPC + lapin 4 AMQP (versions pinned to server workspace)
-- [ ] `reqwest::cookie::Jar` cookie persistence; Actix-Web middleware/extractor helper
-- [ ] Concurrency test: 5 concurrent requests on an expired token ⇒ exactly 1 refresh call
-- [ ] Examples + publish-ready `Cargo.toml`; **crates.io publish pipeline** in CI
+- [x] Full **SDK Capability Baseline** (above)
+- [x] reqwest 0.12 REST + tonic 0.14 gRPC + lapin 4 AMQP (versions pinned to server workspace)
+- [x] `reqwest::cookie::Jar` cookie persistence; Actix-Web middleware/extractor helper
+- [x] Concurrency test: 5 concurrent requests on an expired token ⇒ exactly 1 refresh call
+- [x] Examples + publish-ready `Cargo.toml`; **crates.io publish pipeline** in CI
 
 ---
 
@@ -554,7 +554,7 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
 | FND-03 | Phase 15 | Cross-Language SDK Contract Document (`sdks/CONTRACT.md`) | Pending |
 | FND-04 | Phase 15 | REST Authorization-Check Endpoint (`POST /api/v1/authz/check`) | Pending |
 | FND-05 | Phase 15 | SDK Monorepo Scaffold & per-SDK path-filtered CI | Pending |
-| RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) | Pending |
+| RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) | Complete |
 | TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) | Pending |
 | GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Pending |
 | PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Pending |

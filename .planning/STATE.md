@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 16
 current_phase_name: Rust SDK
-status: executing
-stopped_at: Completed 16-05-PLAN.md
-last_updated: "2026-07-01T09:03:55.186Z"
+status: phase_complete
+stopped_at: Completed 16-06-PLAN.md
+last_updated: "2026-07-01T09:20:50.808Z"
 last_activity: 2026-07-01
-last_activity_desc: "Executed 16-05-PLAN.md (Actix middleware: AxiamUser FromRequest extractor with cookie-then-Bearer extraction, local JWKS verification, AuthError/AuthzError->401/403 mapping, off-by-default actix feature)"
+last_activity_desc: "Executed 16-06-PLAN.md (Five per-capability examples, README conformance fill-in, and SDK Rust CI leak/TLS-lint/dry-run gates + tag-triggered crates.io publish job)"
 progress:
   total_phases: 8
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 12
-  completed_plans: 11
-  percent: 13
+  completed_plans: 12
+  percent: 25
 ---
 
 # Project State
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 16 — Rust SDK
-Plan: 5 of 6 complete (16-01 foundation, 16-02 REST/token, 16-03 gRPC, 16-04 AMQP, 16-05 Actix middleware); 1 plan remaining (16-06 examples/publish)
-Status: Ready to execute
-Last activity: 2026-07-01 — Executed 16-05-PLAN.md (Actix middleware: AxiamUser FromRequest extractor with cookie-then-Bearer extraction, local JWKS verification, AuthError/AuthzError->401/403 mapping, off-by-default actix feature)
+Plan: 6 of 6 complete (16-01 foundation, 16-02 REST/token, 16-03 gRPC, 16-04 AMQP, 16-05 Actix middleware, 16-06 examples/publish) — Phase 16 complete
+Status: Phase complete; next phase (17 — TypeScript SDK) not yet started
+Last activity: 2026-07-01 — Executed 16-06-PLAN.md (Five per-capability examples, README conformance fill-in, and SDK Rust CI leak/TLS-lint/dry-run gates + tag-triggered crates.io publish job)
 
 ## Performance Metrics
 
@@ -102,6 +102,7 @@ Last activity: 2026-07-01 — Executed 16-05-PLAN.md (Actix middleware: AxiamUse
 | Phase 16-rust-sdk P04 | 55min | 2 tasks | 6 files |
 | Phase 16-rust-sdk P03 | 55min | 2 tasks | 6 files |
 | Phase 16-rust-sdk P05 | 30min | 1 tasks | 6 files |
+| Phase 16 P06 | 45min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -199,6 +200,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 16-rust-sdk] 16-05: AxiamUser.roles derived from the access token's scope claim (space-separated), not a roles claim — AXIAM's AccessTokenClaims has no roles field server-side
 - [Phase ?]: [Phase 16-rust-sdk] 16-05: actix feature declared as ["dep:actix-web", "rest"] so the extractor reuses the single shared JwksVerifier instead of forking a second JWKS implementation
 - [Phase ?]: [Phase 16-rust-sdk] 16-05: broadened JwksVerifier's cfg gate to any(feature = "rest", feature = "actix") per 16-02's documented hand-off note
+- [Phase ?]: [Phase 16-rust-sdk] 16-06: Added Cargo.toml include list bundling gitignored src/gen/ gRPC stubs -- cargo package/publish follow include/exclude not .gitignore, resolving the pre-existing cargo publish --dry-run gap 16-03 flagged
+- [Phase ?]: [Phase 16-rust-sdk] 16-06: SDK Rust CI regenerates gRPC stubs via cargo build --features grpc (build.rs tonic-prost-build) rather than invoking buf CLI directly -- avoids sourcing a new GitHub Action SHA pin (GitHub unreachable from this environment's egress policy) while still satisfying D-09
+- [Phase ?]: [Phase 16-rust-sdk] 16-06: cargo publish --dry-run/publish require --allow-dirty in CI because the newly-included src/gen/ is gitignored-but-present by design, not because the gate is weakened
 
 ### Pending Todos
 
@@ -219,6 +223,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T09:03:55.175Z
-Stopped at: Completed 16-05-PLAN.md
+Last session: 2026-07-01T09:20:50.797Z
+Stopped at: Completed 16-06-PLAN.md
 Resume file: None

@@ -5,10 +5,10 @@ milestone_name: — Client SDKs
 current_phase: 16
 current_phase_name: Rust SDK
 status: phase_complete
-stopped_at: Completed 16-06-PLAN.md
-last_updated: "2026-07-01T09:20:50.808Z"
+stopped_at: Phase 17 context gathered
+last_updated: "2026-07-01T10:23:18.231Z"
 last_activity: 2026-07-01
-last_activity_desc: "Executed 16-06-PLAN.md (Five per-capability examples, README conformance fill-in, and SDK Rust CI leak/TLS-lint/dry-run gates + tag-triggered crates.io publish job)"
+last_activity_desc: Executed 16-06-PLAN.md (Five per-capability examples, README conformance fill-in, and SDK Rust CI leak/TLS-lint/dry-run gates + tag-triggered crates.io publish job)
 progress:
   total_phases: 8
   completed_phases: 2
@@ -223,6 +223,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T09:20:50.797Z
-Stopped at: Completed 16-06-PLAN.md
-Resume file: None
+Last session: 2026-07-01T10:23:18.218Z
+Stopped at: Phase 17 context gathered
+Resume file: .planning/phases/17-typescript-sdk/17-CONTEXT.md

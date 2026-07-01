@@ -34,7 +34,7 @@ describe('axiamPlugin (Fastify)', () => {
     return { privateKey, kid };
   }
 
-  async function buildApp(session: { jwksVerifier: ReturnType<typeof createVerifier> }) {
+  async function buildApp(session: { jwksVerifier: ReturnType<typeof createVerifier>; tenantHeaderValue: string }) {
     const app = Fastify();
     await app.register(axiamPlugin(session));
     app.get('/protected', async (request) => {
@@ -49,7 +49,7 @@ describe('axiamPlugin (Fastify)', () => {
     const { privateKey, kid } = await setupJwks();
     const token = await signedToken(privateKey, kid);
     const verifier = createVerifier(BASE_URL);
-    const app = await buildApp({ jwksVerifier: verifier });
+    const app = await buildApp({ jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' });
 
     const response = await app.inject({
       method: 'GET',
@@ -70,7 +70,7 @@ describe('axiamPlugin (Fastify)', () => {
     const { privateKey, kid } = await setupJwks();
     const token = await signedToken(privateKey, kid, 'admin');
     const verifier = createVerifier(BASE_URL);
-    const app = await buildApp({ jwksVerifier: verifier });
+    const app = await buildApp({ jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' });
 
     const response = await app.inject({
       method: 'GET',
@@ -86,7 +86,7 @@ describe('axiamPlugin (Fastify)', () => {
 
   it('missing credentials -> 401 JSON', async () => {
     const verifier = createVerifier(BASE_URL);
-    const app = await buildApp({ jwksVerifier: verifier });
+    const app = await buildApp({ jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' });
 
     const response = await app.inject({ method: 'GET', url: '/protected' });
 
@@ -101,7 +101,7 @@ describe('axiamPlugin (Fastify)', () => {
   it('invalid/expired token -> 401 JSON', async () => {
     await setupJwks();
     const verifier = createVerifier(BASE_URL);
-    const app = await buildApp({ jwksVerifier: verifier });
+    const app = await buildApp({ jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' });
 
     const response = await app.inject({
       method: 'GET',

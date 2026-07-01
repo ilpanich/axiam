@@ -9,9 +9,16 @@
 import { AuthError } from '../core/index.js';
 import type { Verifier } from '../node/jwks.js';
 
-/** Minimal session shape the middleware needs: a JWKS verifier (D-11). */
+/**
+ * Minimal session shape the middleware needs: a JWKS verifier (D-11) and the
+ * tenant this resource server is configured for (CR-03). JWKS is org-wide,
+ * not tenant-scoped (node/jwks.ts) — `tenantHeaderValue` is what lets
+ * `authenticateRequest` reject a validly-signed token minted for a
+ * DIFFERENT tenant in the same org.
+ */
 export interface VerifiableSession {
   jwksVerifier: Verifier;
+  tenantHeaderValue: string;
 }
 
 /** Authenticated identity injected as req.axiamUser / request.axiamUser (§10). */
@@ -47,6 +54,13 @@ export async function authenticateRequest(
   }
   if (!claims.tenant_id) {
     throw new AuthError('invalid tenant_id claim');
+  }
+  // CR-03: JWKS is org-wide (node/jwks.ts), so signature validity alone does
+  // NOT imply the token was minted for THIS resource server's tenant.
+  // Enforce equality after the presence checks to preserve their error
+  // messages/ordering.
+  if (claims.tenant_id !== session.tenantHeaderValue) {
+    throw new AuthError('token tenant_id does not match configured tenant');
   }
 
   const roles = (claims.scope ?? '').split(' ').filter(Boolean);

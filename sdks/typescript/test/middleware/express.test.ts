@@ -45,7 +45,7 @@ describe('axiamMiddleware (Express)', () => {
     const { privateKey, kid } = await setupJwks();
     const token = await signedToken(privateKey, kid);
     const verifier = createVerifier(BASE_URL);
-    const session = { jwksVerifier: verifier };
+    const session = { jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' };
 
     const req = { headers: { cookie: `axiam_access=${token}` } } as unknown as Request;
     const res = fakeRes();
@@ -66,7 +66,7 @@ describe('axiamMiddleware (Express)', () => {
     const { privateKey, kid } = await setupJwks();
     const token = await signedToken(privateKey, kid, 'admin');
     const verifier = createVerifier(BASE_URL);
-    const session = { jwksVerifier: verifier };
+    const session = { jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' };
 
     const req = { headers: { authorization: `Bearer ${token}` } } as unknown as Request;
     const res = fakeRes();
@@ -80,7 +80,7 @@ describe('axiamMiddleware (Express)', () => {
 
   it('missing credentials -> 401 JSON, next() not called', async () => {
     const verifier = createVerifier(BASE_URL);
-    const session = { jwksVerifier: verifier };
+    const session = { jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' };
 
     const req = { headers: {} } as unknown as Request;
     const res = fakeRes();
@@ -98,7 +98,7 @@ describe('axiamMiddleware (Express)', () => {
   it('invalid/expired token -> 401 JSON', async () => {
     await setupJwks();
     const verifier = createVerifier(BASE_URL);
-    const session = { jwksVerifier: verifier };
+    const session = { jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' };
 
     const req = { headers: { cookie: 'axiam_access=not-a-real-token' } } as unknown as Request;
     const res = fakeRes();

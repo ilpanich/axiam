@@ -14,6 +14,24 @@ publish = true
 repository = "https://github.com/ilpanich/axiam"
 documentation = "https://docs.rs/axiam-sdk"
 readme = "README.md"
+# `cargo package`/`cargo publish` follow this `include` list, NOT
+# `.gitignore` — the default (VCS-only) file set would otherwise exclude
+# `src/gen/**`, since it is gitignored (16-01/D-09: generated gRPC stubs are
+# never committed to the repo). This crate is not published `default-run`
+# from a git worktree that regenerates `src/gen/` first (either via `cargo
+# build --features grpc`, which runs `build.rs`, or via the CI publish job's
+# buf-bundle step), the bundled stub file MUST ship inside the package
+# tarball so crates.io consumers (who cannot run buf) get a self-contained,
+# compilable crate (D-09). This list is additive to Cargo's built-in
+# defaults for a package with no `exclude`, so ordinary source/doc/license
+# files are still included automatically.
+include = [
+  "src/**",
+  "build.rs",
+  "Cargo.toml",
+  "README.md",
+  "LICENSE",
+]
 
 [features]
 default = ["rest", "grpc", "amqp"]
@@ -69,3 +87,27 @@ tonic = { version = "0.14", default-features = false, features = ["router"] }
 
 [package.metadata.docs.rs]
 all-features = true
+
+# Five per-capability examples (D-08) — the §1-§10 conformance demonstration
+# referenced by the README. Each declares only the feature(s) it actually
+# exercises so `cargo build --examples --features <subset>` only compiles
+# the examples relevant to that subset.
+[[example]]
+name = "login_mfa"
+required-features = ["rest"]
+
+[[example]]
+name = "rest_check_access"
+required-features = ["rest"]
+
+[[example]]
+name = "grpc_check_access"
+required-features = ["rest", "grpc"]
+
+[[example]]
+name = "amqp_consumer"
+required-features = ["amqp"]
+
+[[example]]
+name = "actix_route_guard"
+required-features = ["actix"]

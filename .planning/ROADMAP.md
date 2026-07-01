@@ -591,7 +591,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 
 - [x] **Phase 15: SDK Foundation** - Export OpenAPI spec, establish buf proto codegen pipeline, add REST authz-check endpoint, author cross-language contract, scaffold `sdks/` monorepo with per-SDK path-filtered CI (completed 2026-06-30)
 - [x] **Phase 16: Rust SDK** - Reference implementation (REST + gRPC + AMQP); establishes `Sensitive<T>` and gRPC-channel patterns reused by all later SDKs (completed 2026-07-01)
-- [ ] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish (6/6 plans executed 2026-07-01; verification found 4 critical security gaps CR-01..CR-04 — gap-closure plans 17-07/17-08 created, pending execution)
+- [ ] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish (6/6 plans executed 2026-07-01; verification found 4 critical security gaps CR-01..CR-04 — gap-closure plan 17-07 executed 2026-07-01 closing CR-02/CR-03; 17-08 pending for CR-01/CR-04)
 - [ ] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish
 - [ ] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish
 - [ ] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing
@@ -673,7 +673,7 @@ Plans:
   4. Express and Fastify middleware examples compile under TypeScript strict mode and protect a sample route; the package publishes as `axiam-sdk` on npm.
   5. `npm publish --dry-run` succeeds; npm publish CI pipeline runs on release tag.
 
-**Plans**: 6/6 base plans executed + 2 gap-closure plans (17-07/17-08) pending
+**Plans**: 7/8 plans executed
 
 Plans:
 **Wave 1**
@@ -699,7 +699,7 @@ Plans:
 
 **Wave 6** *(gap closure — CR-01..CR-04 from 17-VERIFICATION.md; sequential: 17-08 depends on 17-07 via shared session files)*
 
-- [ ] 17-07-PLAN.md — Gap closure: per-session single-flight refresh guard (CR-02) + middleware tenant_id enforcement (CR-03) + regression tests
+- [x] 17-07-PLAN.md — Gap closure: per-session single-flight refresh guard (CR-02) + middleware tenant_id enforcement (CR-03) + regression tests
 - [ ] 17-08-PLAN.md — Gap closure: Node persona CSRF token population (CR-01) + NetworkError.cause Set-Cookie redaction (CR-04) + regression tests
 
 **UI hint**: yes
@@ -801,7 +801,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 |-------|----------------|--------|-----------|
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
-| 17. TypeScript SDK | 6/6 | Gaps Found | - |
+| 17. TypeScript SDK | 7/8 | In Progress|  |
 | 18. Go SDK | 0/? | Not started | - |
 | 19. Python SDK | 0/? | Not started | - |
 | 20. Java SDK | 0/? | Not started | - |

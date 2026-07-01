@@ -4,16 +4,16 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 17
 current_phase_name: typescript-sdk
-status: gaps_found
-stopped_at: Phase 17 verification found 4 critical security gaps
-last_updated: "2026-07-01T13:10:00.000Z"
+status: executing
+stopped_at: Completed 17-07-PLAN.md (CR-02, CR-03 closed)
+last_updated: "2026-07-01T13:35:24.062Z"
 last_activity: 2026-07-01
-last_activity_desc: Phase 17 verified — gaps found (4 critical), pending gap closure
+last_activity_desc: "Completed 17-07-PLAN.md (gap closure: per-session refresh guard + tenant isolation)"
 progress:
   total_phases: 8
   completed_phases: 2
-  total_plans: 18
-  completed_plans: 18
+  total_plans: 20
+  completed_plans: 19
   percent: 25
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 17 (typescript-sdk) — GAPS FOUND
-Plan: 6 of 6 executed
-Status: Verification found 4 critical security gaps — pending gap closure (/gsd-plan-phase 17 --gaps)
-Last activity: 2026-07-01 — Phase 17 execution started
+Phase: 17 (typescript-sdk) — EXECUTING (gap closure)
+Plan: 17-07 of 2 gap-closure plans (17-07, 17-08) complete
+Status: 17-07 complete (CR-02, CR-03 closed); 17-08 remaining (CR-01, CR-04)
+Last activity: 2026-07-01 — Completed 17-07-PLAN.md (gap closure: per-session refresh guard + tenant isolation)
 
 ## Performance Metrics
 
@@ -109,6 +109,7 @@ Last activity: 2026-07-01 — Phase 17 execution started
 | Phase 17-typescript-sdk P03 | 18min | 2 tasks | 11 files |
 | Phase 17 P05 | 12min | 2 tasks | 16 files |
 | Phase 17-typescript-sdk P06 | 15min | 2 tasks | 6 files |
+| Phase 17-typescript-sdk P07 | 20min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -223,6 +224,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 17-typescript-sdk] 17-05: Added a new axiam-sdk/middleware public subpath export (package.json + tsup.config.ts) and re-exported Sensitive from axiam-sdk/amqp — both needed for Task 2's examples to satisfy the plan's public-entry-points-only constraint
 - [Phase 17-typescript-sdk]: 17-06: Fixed tsup outExtension (ESM=.mjs, CJS=.js) — package.json type:module reversed tsup's default extension mapping vs the exports map, making require('./dist/grpc/index.js') load ESM syntax that only worked via Node 22's experimental require(esm)
 - [Phase 17-typescript-sdk]: 17-06: CONTRACT.md §3 now states cookie double-submit as canonical browser CSRF behavior (read axiam_csrf -> echo X-CSRF-Token); non-browser SDKs scoped to response-header capture (D-28)
+- [Phase 17-typescript-sdk]: 17-07: createRefreshGuard() factory replaces module-level singleton; refreshOnce/resetRefreshGuard retained as a backward-compatible default instance so pre-existing unit tests pass unchanged (CR-02) — SharedSession constructs its own refreshGuard in the constructor; NodeSession inherits it via super(), so two independent client instances never cross-wire refreshes
+- [Phase 17-typescript-sdk]: 17-07: authenticateRequest enforces claims.tenant_id === session.tenantHeaderValue after presence checks; VerifiableSession now requires tenantHeaderValue (CR-03) — JWKS is org-wide, not tenant-scoped, so signature validity alone must not imply tenant authorization; non-breaking for NodeSession callers since NodeSession already exposes tenantHeaderValue
 
 ### Pending Todos
 
@@ -243,6 +246,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T12:48:47.712Z
-Stopped at: Completed 17-06-PLAN.md
+Last session: 2026-07-01T13:35:24.050Z
+Stopped at: Completed 17-07-PLAN.md (CR-02, CR-03 closed)
 Resume file: None

@@ -68,3 +68,14 @@ sdks/java/src/main/java/io/axiam/sdk/gen/
 /sdks/go/grpc-checkaccess
 /sdks/go/amqp-consumer
 /sdks/go/middleware-guard
+
+# Python build/tooling artifacts (Phase 19 python-sdk)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+sdks/python/dist/
+sdks/python/build/

@@ -59,6 +59,16 @@ testpaths = ["tests"]
 strict = true
 files = ["src"]
 
+# Generated gRPC stubs (D-04, "DO NOT EDIT!" header) are out of every
+# plan's file-modification scope and grpc_tools.protoc does not emit a
+# fully-typed _grpc.py counterpart to its .pyi message stubs — exempt the
+# generated package from --strict so downstream typed modules (e.g.
+# grpc/client.py, 19-04) that import it are not blocked by upstream
+# codegen gaps outside this SDK's control.
+[[tool.mypy.overrides]]
+module = "axiam_sdk.grpc.gen.*"
+ignore_errors = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

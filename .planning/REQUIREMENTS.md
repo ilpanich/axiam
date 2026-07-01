@@ -472,7 +472,7 @@ Deliver `sdks/go/` (second server-side reference).
 - [ ] Full baseline; `sync.Mutex` single-flight refresh; `net/http/cookiejar`
 - [ ] net/http REST + grpc-go 1.81 + amqp091-go 1.10; lestrrat-go/jwx/v3 for EdDSA/JWKS
 - [ ] No `InsecureSkipVerify` anywhere (CI lint gate); net/http middleware
-- [ ] Examples; **Go module publish** (`github.com/axiam/axiam-go-sdk`, version tag `sdk/go/vX.Y.Z`)
+- [ ] Examples; **Go module publish** (`github.com/ilpanich/axiam/sdks/go`, version tag `sdks/go/vX.Y.Z`)
 
 ---
 

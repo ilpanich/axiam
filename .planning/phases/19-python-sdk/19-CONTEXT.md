@@ -1,18 +1,23 @@
 # Phase 19: Python SDK - Context
 
 **Gathered:** 2026-07-01
+**Updated:** 2026-07-01 (interactive discuss session — decisions confirmed + extended)
 **Status:** Ready for planning
 
-> **Discussion note:** The user selected all four Python-specific gray areas to
-> discuss (sync/async architecture, packaging & gRPC stubs, token safety &
-> models, FastAPI + Django helpers). The interactive question channel closed
-> mid-session (transport error on a resumed session), so the decisions below
-> adopt the **recommended option** for each — every one grounded in the Rust
-> (Phase 16), TypeScript (Phase 17), and Go (Phase 18) reference SDKs and in the
-> binding `sdks/CONTRACT.md`. Two of the four "gray areas" turned out to be
-> **already locked by the PY-01 requirement** (AMQP = aio-pika async-only;
-> models = Pydantic v2). **The user may override any decision below before
-> planning** — the genuinely open ones are flagged `[recommended — revisable]`.
+> **Discussion note:** An earlier session auto-adopted the *recommended* option for
+> the four Python-specific gray areas because the interactive question channel
+> closed mid-session (transport error). This session **re-opened the discussion
+> and the user interactively confirmed all four** (sync/async architecture,
+> packaging backend, FastAPI helper, Django helper) and locked **eleven
+> additional decisions** (Python version floor, gRPC async coverage, examples
+> breadth, package layout, logging, JWKS, HTTP resilience, CI matrix, client
+> lifecycle, type/lint toolchain, `LoginResult` shape). Every choice is grounded
+> in the Rust (Phase 16), TypeScript (Phase 17), and Go (Phase 18) reference SDKs
+> and the binding `sdks/CONTRACT.md`. The four originally-flagged decisions are no
+> longer `[recommended — revisable]` — they are **user-locked**. Remaining
+> low-level items (module names, AMQP prefetch/QoS number, backoff constants,
+> `__init__` exports, README structure, exact JWKS/cookie endpoint paths) are
+> explicitly delegated to research/planner.
 
 <domain>
 ## Phase Boundary
@@ -20,17 +25,19 @@
 Phase 19 delivers `sdks/python/` — the publishable PyPI package **`axiam-sdk`** and
 the **fourth SDK** (after Rust ref Phase 16, TypeScript Phase 17, Go Phase 18). It
 implements the full client capability baseline against the frozen v1.0 APIs in
-idiomatic Python, exposing **both sync and async** interfaces:
+idiomatic Python, exposing **both sync and async** interfaces from a **single unified
+client** in a **src-layout** package (`src/axiam_sdk/`), targeting **Python >=3.10**:
 
 - **REST** (`httpx` 0.27, sync `httpx.Client` + async `httpx.AsyncClient`, `httpx.Cookies`
   jar) — auth flow (`login` → `verify_mfa`), `refresh`, `logout`, `check_access`/`can`,
   `batch_check`.
-- **gRPC** (`grpcio` 1.78 — sync stubs + `grpc.aio` async) — `CheckAccess`, `BatchCheckAccess`.
+- **gRPC** (`grpcio` 1.78 — **both** sync stubs + `grpc.aio` async) — `CheckAccess`,
+  `BatchCheckAccess`.
 - **AMQP** (`aio-pika` 9.6, **async-only**) — event consumer with HMAC-SHA256
   verify-before-handler.
-- Local JWKS verification via **PyJWT** (EdDSA/Ed25519) for proactive refresh; a
-  **FastAPI dependency-injection helper** and a **Django middleware class** as first-class
-  framework integrations.
+- Local JWKS verification via **PyJWT** (`PyJWKClient`, EdDSA/Ed25519) for proactive
+  refresh; a **FastAPI dependency-injection helper** and a **Django middleware class** as
+  first-class framework integrations.
 
 It conforms to `sdks/CONTRACT.md` §1–§10 in full and **inherits the Rust/TS/Go reference
 patterns** wherever a Python analog exists. Python is a **non-browser** SDK, so §3 CSRF =
@@ -40,9 +47,9 @@ dual-interface (sync+async) surface and packaging toolchain force that the Rust/
 references never faced.
 
 **In scope (PY-01):** the `sdks/python/` package + all three transports + FastAPI dependency
-+ Django middleware + examples + PyPI publish CI, with `asyncio.Lock` (async) +
-`threading.Lock` (sync) single-flight refresh, HMAC verify, and the no-TLS-bypass gate proven
-by test.
++ Django middleware + full per-capability examples + PyPI publish CI, with `asyncio.Lock`
+(async) + `threading.Lock` (sync) single-flight refresh, HMAC verify, and the no-TLS-bypass
+gate proven by test.
 
 **Out of scope:** any change to the AXIAM server (v1.0 APIs are frozen; the SDK is a pure
 external client and MUST NOT depend on server crates); the other remaining language SDKs
@@ -57,11 +64,12 @@ external client and MUST NOT depend on server crates); the other remaining langu
 > **Note:** The SDK's *behavioral* surface is already locked by the binding
 > `sdks/CONTRACT.md` §1–§10 and by `PY-01` (pinned deps: httpx 0.27 sync+async, grpcio 1.78,
 > aio-pika 9.6, Pydantic v2, PyJWT for JWKS; `asyncio.Lock` single-flight; `httpx.Cookies`
-> jar; `verify=True` hardcoded). The decisions below are the **open HOW choices**. They do
-> not restate the contract — downstream agents MUST read CONTRACT.md.
+> jar; `verify=True` hardcoded). The decisions below are the **HOW choices** — all
+> **user-confirmed** in the 2026-07-01 discuss session. They do not restate the contract —
+> downstream agents MUST read CONTRACT.md.
 
 ### Sync/Async Architecture
-- **D-01 [recommended — revisable]:** **Single `AxiamClient` exposing sync methods + `async_*`
+- **D-01 [LOCKED — user-confirmed]:** **Single `AxiamClient` exposing sync methods + `async_*`
   variants.** `client.login(email, password)` (sync via `httpx.Client`) and
   `await client.async_login(email, password)` (async via `httpx.AsyncClient`) both exist on the
   **same client object** and both return a typed `LoginResult` — chosen to satisfy **SC#1
@@ -69,23 +77,30 @@ external client and MUST NOT depend on server crates); the other remaining langu
   one shared session (cookie jar, tenant context, JWKS cache) and lazily constructs the sync/async
   httpx clients. `threading.Lock` guards sync single-flight; **`asyncio.Lock` guards async
   single-flight** (SC#2 explicitly tests `asyncio.Lock` via pytest-asyncio). *Alternative
-  considered:* the httpx-style two-class split (`AxiamClient` sync / `AsyncAxiamClient` async) is
-  more idiomatic but breaks SC#1's literal `client.async_login` — deferred behind an SC#1 wording
-  reconciliation (see Deferred).
+  considered and rejected:* the httpx-style two-class split (`AxiamClient` sync /
+  `AsyncAxiamClient` async) — more idiomatic but breaks SC#1's literal `client.async_login`; kept
+  in Deferred behind an SC#1 wording reconciliation.
 - **D-02:** **AMQP is async-only via `aio-pika`** (locked by PY-01 acceptance "aio-pika 9.6").
   Closure-handler consumer, SDK owns the ack/nack loop, **HMAC-SHA256 verify-before-handler**
   (§8); handler returns `None` → ack, raises retryable error → nack WITH requeue, raises the
   exported drop sentinel → nack WITHOUT requeue, HMAC-fail → nack WITHOUT requeue + security log
-  (handler never sees it). Direct Go D-07 analog. gRPC ships both `grpcio` sync stubs and
-  `grpc.aio` async (grpcio provides both from one codegen).
+  (handler never sees it). Direct Go D-07 analog.
+- **D-12 [LOCKED — user-confirmed]:** **gRPC ships BOTH sync (`grpcio`) and async (`grpc.aio`)
+  clients** for `CheckAccess`/`BatchCheckAccess` — one codegen emits both, mirroring the unified
+  client's sync + `async_*` surface so the async authz transport is first-class (not thread-pool
+  bridged). Sync-safe auth/tenant interceptor on both.
+- **D-19 [LOCKED — user-confirmed]:** **Client lifecycle via context managers.** Support
+  `with AxiamClient(...) as c:` (sync `__enter__`/`__exit__`) AND
+  `async with AxiamClient(...) as c:` (async `__aenter__`/`__aexit__`), plus explicit
+  `.close()`/`.aclose()`. These deterministically tear down the httpx clients, the gRPC channel,
+  and the aio-pika connection — leak-safe and idiomatic.
 
-### Packaging & Distribution
-- **D-03 [recommended — revisable]:** **Fix the broken build backend.** The scaffold's
-  `setuptools.backends.legacy:build` is invalid. Default to **`setuptools.build_meta`** (standard
-  PEP 517, consistent with the scaffold's declared `setuptools>=68` toolchain and the PEP 621
-  metadata already present). **Hatchling** is an acceptable alternative if the planner finds
-  stub/package-data inclusion cleaner. Either way `python -m build && twine check dist/*` must pass
-  (SC#5). src-layout vs flat = planner's call.
+### Packaging, Layout & Distribution
+- **D-03 [LOCKED — user-confirmed]:** **`setuptools.build_meta` build backend.** Replaces the
+  scaffold's invalid `setuptools.backends.legacy:build`; standard PEP 517, consistent with the
+  scaffold's declared `setuptools>=68` toolchain and existing PEP 621 metadata. `python -m build
+  && twine check dist/*` must pass (SC#5). (Hatchling considered; setuptools chosen for minimal
+  correct fit.)
 - **D-04:** **Commit gRPC stubs + CI drift-check + ship in wheel/sdist.** Commit the buf/protoc
   generated `*_pb2.py` / `*_pb2_grpc.py` (+ `*_pb2.pyi` type stubs) into `sdks/python/`, include
   them in the wheel **and** sdist (package-data), and add a CI job that regenerates with the pinned
@@ -96,16 +111,32 @@ external client and MUST NOT depend on server crates); the other remaining langu
   on tag `sdks/python/vX.Y.Z` (Phase 15 D-13 tag convention). Prefer PyPI **Trusted Publishing
   (OIDC)** over a stored API token; `python -m build` + `twine check` (and a `--repository testpypi`
   or dry-run) gate on PRs touching `sdks/python/**` (SC#5).
+- **D-11 [LOCKED — user-confirmed]:** **`requires-python = ">=3.10"`** (raised from the scaffold's
+  now-EOL `>=3.9`). 3.10 is the oldest non-EOL Python; enables `X | Y` union typing and `match`,
+  still broad enterprise reach. Update the scaffold's `requires-python` accordingly.
+- **D-14 [LOCKED — user-confirmed]:** **src-layout** (`src/axiam_sdk/`). Restructure the scaffold's
+  current flat `axiam_sdk/`; src-layout prevents accidental import of the un-built source tree and
+  surfaces missing package-data — important because the committed gRPC stubs are shipped as
+  package-data (D-04).
+- **D-18 [LOCKED — user-confirmed]:** **CI test matrix = Python 3.10/3.11/3.12/3.13 on
+  `ubuntu-latest`.** Runs `pytest` (incl. the pytest-asyncio `asyncio.Lock` single-flight test,
+  SC#2), the `verify=False` grep gate (SC#3), and the buf drift-check (D-04). Linux-only for cost;
+  macOS/Windows not required.
+- **D-20 [LOCKED — user-confirmed]:** **Ship PEP 561 `py.typed` marker; enforce `mypy --strict`
+  and `ruff` (lint + format) in CI.** Consumers get inline types; strong quality bar fitting a
+  Pydantic-v2 typed SDK.
 
 ### Token Safety & Models
-- **D-06:** **Pydantic v2 typed models** (locked by PY-01). `LoginResult` carries an explicit
-  **`mfa_required: bool`** field (SC#1) and discriminates MFA-required from authenticated (Go CF-04
-  / TS D-18 carry-forward) — an expected outcome, not an exception; then `verify_mfa(mfa_token,
-  code)`. Also typed `User`, authz result models.
+- **D-06:** **Pydantic v2 typed models** (locked by PY-01). Typed `User`, authz result models, and
+  `LoginResult` (shape pinned by D-21).
+- **D-21 [LOCKED — user-confirmed]:** **`LoginResult` = a single Pydantic model with
+  `mfa_required: bool`** (+ optional `mfa_token` and authenticated identity). Matches SC#1's literal
+  "typed `LoginResult` with a `mfa_required` field"; caller checks the flag then calls
+  `verify_mfa(mfa_token, code)`. Direct Go CF-04 / TS D-18 analog. *Discriminated-union alternative
+  rejected* — SC#1's test targets the flat field.
 - **D-07:** **`§7 Sensitive` = Pydantic `SecretStr` for token-bearing fields.** `SecretStr`
   redacts `repr`/`str`/`model_dump` and exposes the raw value only via `.get_secret_value()` —
-  it *is* the Python §7 Sensitive type; no bespoke wrapper needed. **PyJWT** does local
-  JWKS/EdDSA(Ed25519) verification.
+  it *is* the Python §7 Sensitive type; no bespoke wrapper needed.
 - **D-08:** **Exception taxonomy + redact-before-wrap (CR-04 carry-forward).** Three exception
   classes `AuthError` / `AuthzError` / `NetworkError` (§2), discriminated by type, from one central
   status→error mapper (HTTP §2 table + gRPC status codes → one source of truth). **`NetworkError`
@@ -114,18 +145,37 @@ external client and MUST NOT depend on server crates); the other remaining langu
   logs. Add a regression test analogous to TS `errorRedaction.test.ts` (assert the raw
   `axiam_access`/`axiam_refresh` value never appears in `repr`/`str`/`json`/log of a raised error,
   with a non-vacuous control case).
+- **D-16 [LOCKED — user-confirmed]:** **JWKS via PyJWT `PyJWKClient`** — built-in JWKS fetch +
+  caching + rotation on unknown `kid`, pointed at the org-wide JWKS endpoint (exact path confirmed
+  in research). Least custom crypto code; matches the "PyJWT for JWKS" PY-01 pin. Proactive refresh;
+  reactive 401/`UNAUTHENTICATED` remains the fallback (CF-07).
+
+### Runtime Behavior
+- **D-15 [LOCKED — user-confirmed]:** **Observability = injectable stdlib `logging.Logger`, OFF by
+  default.** The SDK attaches a `NullHandler` so it is silent unless the consuming app configures
+  logging; an injectable `logging.Logger` integrates with users' existing config. Redaction
+  guarantees no token values are ever logged (ties to D-07/D-08). No `structlog` dependency.
+- **D-17 [LOCKED — user-confirmed]:** **Ship sane HTTP defaults, overridable.** Default
+  connect/read timeouts + bounded exponential backoff **with jitter** on **idempotent ops only**
+  for **429/503** (honoring `Retry-After`); all overridable at client construction. Matches Go
+  CF-01/CF-03. aio-pika auto-reconnect with backoff+jitter. Concrete numeric constants =
+  research/planner.
 
 ### Framework Integrations
-- **D-09 [recommended — revisable]:** **FastAPI = dependency-injection callable returning the
-  identity.** Provide a `Depends(...)`-compatible dependency that verifies the session **locally**
-  via PyJWT against the cached JWKS (no per-request server round-trip; §10 short-TTL cache) and
-  **returns** the authenticated identity (`user_id`, `tenant_id`, `roles`); raises `HTTPException`
-  401 on `AuthError` / 403 on `AuthzError`. Async-native. Mirrors Go D-06 identity-injection intent.
-- **D-10 [recommended — revisable]:** **Django = middleware class attaching `request.axiam_user`.**
-  Primary target **sync WSGI** for broadest compatibility, declaring Django's
-  `sync_capable`/`async_capable` flags so it also works under ASGI when the cost is low. Local JWKS
-  verify via PyJWT; standardized 401/403 responses. Both FastAPI and Django helpers are demonstrated
-  in runnable example scripts (SC#4).
+- **D-09 [LOCKED — user-confirmed]:** **FastAPI = `Depends(...)` dependency-injection callable,
+  dependency-only.** Verifies the session **locally** via PyJWT/`PyJWKClient` against the cached
+  JWKS (no per-request server round-trip; §10 short-TTL cache) and **returns** the authenticated
+  identity (`user_id`, `tenant_id`, `roles`); raises `HTTPException` 401 on `AuthError` / 403 on
+  `AuthzError`. Async-native. **No ASGI-middleware variant** (dependency only). Mirrors Go D-06
+  identity-injection intent.
+- **D-10 [LOCKED — user-confirmed]:** **Django = middleware class attaching `request.axiam_user`,
+  sync-WSGI-primary + ASGI-capable.** Primary target **sync WSGI** for broadest compatibility,
+  declaring Django's `sync_capable`/`async_capable` flags so it also works under ASGI. Local JWKS
+  verify via PyJWT; standardized 401/403 responses.
+- **D-13 [LOCKED — user-confirmed]:** **Full per-capability examples set** (matches Rust/TS/Go
+  siblings): runnable example scripts for **login+MFA**, **REST authz**, **gRPC**, **AMQP consumer**,
+  **FastAPI dependency**, and **Django middleware**. SC#4 (FastAPI + Django both demonstrated) is a
+  subset of this set; every transport is demonstrated runnable.
 
 ### Carried Forward from Rust/TS/Go references — apply unless research contradicts
 - **CF-01:** **§3 CSRF** — Python = non-browser SDK → capture `X-CSRF-Token` from the response
@@ -141,21 +191,23 @@ external client and MUST NOT depend on server crates); the other remaining langu
   enforced at call time.
 - **CF-05:** **§9 single-flight** — `asyncio.Lock` (async, SC#2) + `threading.Lock` (sync), shared
   across REST + gRPC on one session; 5 concurrent tasks on an expired token ⇒ **exactly 1 refresh**.
-- **CF-06:** Retry = bounded backoff, **idempotent ops only** (Go CF-01); observability =
-  **injectable logger, OFF by default**, never emits token values (Go CF-02); sane connect/request
-  timeouts, aio-pika auto-reconnect w/ backoff+jitter, `base_url` required (Go CF-03). Numeric
-  values = research/planner.
+- **CF-06:** Retry = bounded backoff, **idempotent ops only** (Go CF-01, → D-17); observability =
+  **injectable logger, OFF by default** (→ D-15), never emits token values; sane connect/request
+  timeouts, aio-pika auto-reconnect w/ backoff+jitter, `base_url` required (Go CF-03).
 - **CF-07:** Local JWKS via PyJWT (EdDSA/Ed25519), OIDC discovery + rotation on unknown `kid`,
-  proactive refresh; reactive 401/`UNAUTHENTICATED` remains the fallback (Rust D-03/D-11, TS D-11).
+  proactive refresh; reactive 401/`UNAUTHENTICATED` remains the fallback (Rust D-03/D-11, TS D-11)
+  — implemented via `PyJWKClient` (D-16).
 
-### Claude's Discretion
-- Internal package/module layout (`rest`/`grpc`/`amqp`/`auth`/`middleware`/generated stubs) and
-  file names — planner's call within the locked contract.
-- Concrete numeric timeout/backoff/retry values and default AMQP prefetch/QoS (CF-06, D-02).
-- Exact `LoginResult` shape and the precise `async_*` naming (D-01).
-- src-layout vs flat layout; Python version floor (scaffold `requires-python >=3.9`) — planner,
-  CI-enforced.
-- Exact PyJWT JWKS-cache/rotation API usage (CF-07).
+### Claude's Discretion (remaining after this session)
+- Internal package/module layout **within** `src/axiam_sdk/` (`rest`/`grpc`/`amqp`/`auth`/
+  `middleware`/generated stubs) and file names — planner's call within the locked contract and D-14
+  src-layout.
+- Concrete numeric timeout/backoff/retry values and default AMQP prefetch/QoS (D-02/D-17 set the
+  *policy*; the *numbers* are the planner's).
+- Exact `async_*` method naming and the precise `LoginResult` optional-field set beyond
+  `mfa_required` (D-01/D-21).
+- Exact `PyJWKClient` cache-TTL/lifespan and rotation API usage (D-16/CF-07).
+- `__init__.py` public export surface and README structure.
 
 </decisions>
 
@@ -184,10 +236,10 @@ external client and MUST NOT depend on server crates); the other remaining langu
 - `.planning/phases/18-go-sdk/18-CONTEXT.md` — the **freshest analog** (non-browser SDK). D-04
   (typed error + redact-before-wrap → Python D-08), D-07 (closure-handler AMQP → D-02), D-01
   (committed stubs + drift-check → D-04), D-06 (identity-injection middleware → D-09/D-10), CF-01/02/03
-  (retry/observability/defaults → CF-06), CF-04 (discriminated LoginResult → D-06).
+  (retry/observability/defaults → CF-06/D-15/D-17), CF-04 (discriminated LoginResult → D-06/D-21).
 - `.planning/phases/17-typescript-sdk/17-CONTEXT.md` — sync/async-adjacent reference. D-16/D-17 (typed
-  error classes + central status mapper → D-08), D-18 (discriminated login result → D-06), D-26
-  (`Sensitive` multi-surface redaction → D-07), D-11 (local JWKS via jose → PyJWT, CF-07).
+  error classes + central status mapper → D-08), D-18 (discriminated login result → D-06/D-21), D-26
+  (`Sensitive` multi-surface redaction → D-07), D-11 (local JWKS via jose → PyJWT, CF-07/D-16).
 - `.planning/phases/17-typescript-sdk/17-REVIEW.md` §CR-04 + `17-VERIFICATION.md` — the
   **token-leak-via-error** finding and its `sanitizeAxiosError()` fix. **D-08's redact-before-wrap is
   the direct Python carry-forward.** Read CR-04 before implementing `NetworkError`.
@@ -225,8 +277,9 @@ external client and MUST NOT depend on server crates); the other remaining langu
   stubs.
 - `sdks/python/{pyproject.toml,README.md,LICENSE,axiam_sdk/__init__.py}` — existing scaffold (package
   `axiam-sdk`, `requires-python >=3.9`, README states CONTRACT.md conformance) — Phase 19 fills it in;
-  **the broken build backend (D-03) is fixed here.**
-- OIDC `/.well-known/jwks.json` (exact path to confirm in research) — JWKS source for CF-07.
+  **the broken build backend (D-03) is fixed, `requires-python` raised to >=3.10 (D-11), and the tree
+  moves to src-layout (D-14) here.**
+- OIDC JWKS endpoint (exact path to confirm in research) — JWKS source for CF-07/D-16 (`PyJWKClient`).
 
 ### Project-wide constraints
 - License is **Apache-2.0** repo-wide — `sdks/python/LICENSE` already matches; keep it. See project
@@ -250,7 +303,8 @@ external client and MUST NOT depend on server crates); the other remaining langu
 - `sdks/buf.gen.yaml` + `proto/axiam/v1/*.proto` — the codegen pipeline (Phase 15); D-04 commits the
   Python stubs generated from it into `sdks/python/` with a CI drift-check.
 - `sdks/python/` scaffold (`pyproject.toml`, LICENSE, README, `axiam_sdk/__init__.py`) — Phase 19
-  fills it in; the invalid `setuptools.backends.legacy:build` backend is corrected (D-03).
+  fills it in; the invalid `setuptools.backends.legacy:build` backend is corrected (D-03), the
+  version floor raised to >=3.10 (D-11), and the flat layout moved to src-layout (D-14).
 
 ### Established Patterns
 - **CONTRACT.md is binding (Phase 15 D-09):** "CONTRACT.md §1–§10 conformance verified" is a required
@@ -264,12 +318,12 @@ external client and MUST NOT depend on server crates); the other remaining langu
   the stubs + ships them in the wheel/sdist + drift-checks — the documented Python exception.
 
 ### Integration Points
-- New `sdks/python/axiam_sdk/` package tree (REST core + `grpc`/`amqp`/`auth`/`middleware` modules +
-  committed generated stubs + `examples/` scripts incl. FastAPI + Django).
+- New `src/axiam_sdk/` package tree (REST core + `grpc`/`amqp`/`auth`/`middleware` modules +
+  committed generated stubs) + `examples/` scripts (login+MFA, REST, gRPC, AMQP, FastAPI, Django — D-13).
 - New per-SDK GitHub Actions workflow under `.github/workflows/` with `paths: sdks/python/**` filter:
-  `pytest` (incl. the pytest-asyncio `asyncio.Lock` single-flight test SC#2) + the `verify=False` grep
-  gate + the buf drift-check (D-04) + `python -m build`/`twine check` + tag-triggered PyPI publish
-  (`sdks/python/vX.Y.Z`, SC#5).
+  `pytest` (incl. the pytest-asyncio `asyncio.Lock` single-flight test SC#2) across Python 3.10–3.13
+  (D-18) + the `verify=False` grep gate + `ruff` + `mypy --strict` (D-20) + the buf drift-check (D-04)
+  + `python -m build`/`twine check` + tag-triggered PyPI publish (`sdks/python/vX.Y.Z`, SC#5).
 - Committed Python stubs generated from `proto/axiam/v1/` via buf into `sdks/python/`.
 
 </code_context>
@@ -279,19 +333,23 @@ external client and MUST NOT depend on server crates); the other remaining langu
 
 - The Python SDK is the **first dual-interface (sync+async) SDK** in the set — decisions favor a
   surface Python developers recognize instantly (`httpx.Client`/`AsyncClient`, `asyncio.Lock`,
-  Pydantic v2, `Depends`, Django middleware) while staying byte-faithful to the shared contract.
+  Pydantic v2, `Depends`, Django middleware, `with`/`async with`, `py.typed`) while staying
+  byte-faithful to the shared contract.
 - Success-criterion proof points to preserve as concrete tests: (#1) `pip install axiam-sdk`
   installs + `client.login()` **and** `await client.async_login()` both return `LoginResult` with
-  `mfa_required`; (#2) 5 concurrent asyncio tasks on an expired token ⇒ **exactly 1 refresh**
-  (pytest-asyncio `asyncio.Lock` single-flight test); (#3) `grep -rn 'verify=False' sdks/python/`
-  → empty (CI gate); (#4) FastAPI dependency + Django middleware both demonstrated in runnable
-  example scripts; (#5) `python -m build && twine check dist/*` passes + tag `sdks/python/vX.Y.Z`
-  publishes.
+  `mfa_required` (D-01/D-21); (#2) 5 concurrent asyncio tasks on an expired token ⇒ **exactly 1
+  refresh** (pytest-asyncio `asyncio.Lock` single-flight test, CF-05); (#3)
+  `grep -rn 'verify=False' sdks/python/` → empty (CI gate, CF-03); (#4) FastAPI dependency + Django
+  middleware both demonstrated in runnable example scripts (D-09/D-10/D-13); (#5)
+  `python -m build && twine check dist/*` passes + tag `sdks/python/vX.Y.Z` publishes (D-05).
 - **CR-04 must not recur in Python:** never wrap a raw `httpx` response/error carrying
   `Set-Cookie`/`Authorization` into `NetworkError` without redacting first (D-08). Add a Python
   regression test analogous to TS `errorRedaction.test.ts` (assert the raw `axiam_access`/
   `axiam_refresh` value never appears in `repr`/`str`/`json`/log of a raised error, with a control
   case proving the test is non-vacuous).
+- **Quality bar:** `py.typed` shipped, `mypy --strict` + `ruff` gated in CI (D-20), matrix
+  3.10–3.13 (D-11/D-18). Context-manager cleanup (`with`/`async with`, D-19) and injectable
+  stdlib logging off-by-default (D-15) round out an SDK that "feels" native to Python developers.
 
 </specifics>
 
@@ -299,10 +357,11 @@ external client and MUST NOT depend on server crates); the other remaining langu
 ## Deferred Ideas
 
 - **SC#1 wording ↔ two-class idiom reconciliation** — SC#1 mandates both `client.login()` and
-  `await client.async_login()` on **one** object, which is why D-01 chose the unified client. The
-  httpx-native **two-class split** (`AxiamClient` sync / `AsyncAxiamClient` async, each with plain
-  `.login()`) is arguably more idiomatic; adopting it would require first reconciling SC#1's literal
-  wording. **Flag for the planner** — do not silently diverge from SC#1. **Do not lose.**
+  `await client.async_login()` on **one** object, which is why D-01 (user-confirmed) chose the
+  unified client. The httpx-native **two-class split** (`AxiamClient` sync / `AsyncAxiamClient`
+  async, each with plain `.login()`) is arguably more idiomatic; adopting it would require first
+  reconciling SC#1's literal wording. **Flag for the planner** — do not silently diverge from SC#1.
+  **Do not lose.**
 - **Sync AMQP (`pika`)** — considered; rejected because PY-01 pins `aio-pika` (async-only, D-02).
   Revisit only if a sync-only consumer becomes a real user request.
 - **REQUIREMENTS PY-01 wording audit** — verify PY-01's package/tag/module identifiers match the
@@ -310,6 +369,8 @@ external client and MUST NOT depend on server crates); the other remaining langu
   scoped doc edit if drift is found.
 - **Automated cross-language conformance harness** — inherited from Phase 15–18 deferred list; Phase
   19 verifies conformance via its own §1–§10 checklist, not a mechanical suite.
+- **macOS/Windows CI matrix** — considered for D-18; deferred (Linux-only) for CI cost. Revisit if a
+  platform-specific `grpcio`/`aio-pika` wheel issue is reported.
 
 ### Reviewed Todos (not folded)
 None — no pending todos matched this phase.
@@ -319,4 +380,4 @@ None — no pending todos matched this phase.
 ---
 
 *Phase: 19-python-sdk*
-*Context gathered: 2026-07-01*
+*Context gathered: 2026-07-01 · Updated 2026-07-01 (interactive discuss — 15 decisions locked)*

@@ -637,20 +637,23 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
   4. gRPC `CheckAccess` and `BatchCheckAccess` succeed via `tonic 0.14`; AMQP consumer verifies HMAC-SHA256 before processing and nacks without requeue on signature failure.
   5. `cargo publish --dry-run` succeeds; crates.io publish CI pipeline runs on release tag.
 
-**Plans**: 6 plans
+**Plans**: 1/6 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 16-01-PLAN.md — Foundation: crate manifest + Cargo features (rest/grpc/amqp/observability) + MSRV 1.88 + `Sensitive<T>` + `AxiamError` + build.rs gRPC codegen + redaction test
+- [x] 16-01-PLAN.md — Foundation: crate manifest + Cargo features (rest/grpc/amqp/observability) + MSRV 1.88 + `Sensitive<T>` + `AxiamError` + build.rs gRPC codegen + redaction test
+
 **Wave 2** *(parallel; depend on 16-01)*
 
 - [ ] 16-02-PLAN.md — REST core: AxiamClient builder + cookie jar + TokenManager + single-flight refresh + local JWKS verify + login/verify_mfa/refresh/logout + check_access/can/batch_check (SC#1, SC#2)
 - [ ] 16-04-PLAN.md — AMQP: byte-identical HMAC sign/verify + server-identical message DTOs + closure-handler consumer (verify-before-handler, nack-no-requeue) (SC#4 AMQP half)
+
 **Wave 3** *(parallel; depend on 16-01 + 16-02)*
 
 - [ ] 16-03-PLAN.md — gRPC: shared lazy tonic Channel + sync-safe auth/tenant interceptor + check_access/batch_check + UNAUTHENTICATED single-flight retry + in-process test server (SC#4 gRPC half)
 - [ ] 16-05-PLAN.md — Actix middleware: `AxiamUser` FromRequest extractor (cookie/Bearer → local JWKS verify → identity inject → 401/403), feature-gated
+
 **Wave 4** *(depends on all transports)*
 
 - [ ] 16-06-PLAN.md — Examples (login+MFA / REST / gRPC / AMQP / Actix) + README conformance + crates.io publish CI (leak gate, TLS-lint gate, dry-run gate, tag-triggered publish + buf bundle) (SC#3, SC#5)
@@ -769,7 +772,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 15. SDK Foundation | 6/6 | Complete    | 2026-06-30 |
-| 16. Rust SDK | 0/? | Not started | - |
+| 16. Rust SDK | 1/6 | In Progress|  |
 | 17. TypeScript SDK | 0/? | Not started | - |
 | 18. Go SDK | 0/? | Not started | - |
 | 19. Python SDK | 0/? | Not started | - |

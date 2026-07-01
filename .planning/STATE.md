@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 16
 current_phase_name: Rust SDK
-status: planned
-stopped_at: Phase 16 planned (6 plans, 4 waves)
-last_updated: "2026-06-30T22:18:12.000Z"
-last_activity: 2026-06-30
-last_activity_desc: Phase 16 planned — 6 plans across 4 waves, verified (plan-checker PASSED)
+status: in_progress
+stopped_at: Phase 16 Plan 01 complete (foundation — Sensitive<T>, AxiamError, manifest, build.rs)
+last_updated: "2026-07-01T07:46:49.000Z"
+last_activity: 2026-07-01
+last_activity_desc: Executed 16-01-PLAN.md — axiam-sdk crate skeleton (manifest, Sensitive<T>, AxiamError, build.rs), redaction test green
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 6
-  completed_plans: 6
-  percent: 13
+  completed_plans: 1
+  percent: 15
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 15 — sdk-foundation
+**Current focus:** Phase 16 — Rust SDK
 
 ## Current Position
 
 Phase: 16 — Rust SDK
-Plan: 6 plans across 4 waves (planned, verified — ready to execute)
-Status: Ready to execute
-Last activity: 2026-06-30 — Phase 16 planned (6 plans, 4 waves; plan-checker PASSED)
+Plan: 01 of 6 complete (foundation); 5 plans remaining across 4 waves
+Status: In progress
+Last activity: 2026-07-01 — Executed 16-01-PLAN.md (foundation: Sensitive<T>, AxiamError, manifest, build.rs, redaction test green)
 
 ## Performance Metrics
 
@@ -97,6 +97,7 @@ Last activity: 2026-06-30 — Phase 16 planned (6 plans, 4 waves; plan-checker P
 | Phase 15 P03 | 8 | 2 tasks | 2 files |
 | Phase 15 P04 | 2 | 3 tasks | 4 files |
 | Phase 15 P02 | 9 minutes | 2 tasks | 3 files |
+| Phase 16-rust-sdk P01 | 25min | 2 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -181,6 +182,9 @@ Recent decisions affecting current work:
 - [v1.1 Phase 15-02]: --dump-openapi placed before tracing_subscriber::fmt() and before load_config() — usable in CI without any running infrastructure
 - [v1.1 Phase 15-02]: sdks/openapi.json committed with --no-default-features (SAML excluded); drift gate pins identical feature set in both export and diff steps (Pitfall 2 avoided)
 - [v1.1 Phase 15-02]: release-tag trigger (v*) and push-to-main share a single YAML push: block to avoid duplicate-key YAML parse error
+- [v1.1 Phase 16-01]: sdks/rust/Cargo.toml carries an empty [workspace] table to opt out of the root AXIAM Cargo workspace (edition 2021 vs workspace edition 2024) — without it `cargo build`/`cargo metadata` error with "current package believes it's in a workspace when it's not"
+- [v1.1 Phase 16-01]: src/lib.rs is the single owner of all Phase 16 module declarations (client/token/rest/grpc/amqp/middleware); placeholder module files committed in 16-01 so downstream plans 16-02..16-05 never edit lib.rs, avoiding parallel-wave merge conflicts
+- [v1.1 Phase 16-01]: AxiamError::Network carries `source: Option<Box<dyn Error + Send + Sync>>` rather than a #[from]-derived cause type until concrete transport errors exist in 16-02/16-03/16-04
 
 ### Pending Todos
 
@@ -201,6 +205,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-06-30T21:38:41.431Z
-Stopped at: Phase 16 context gathered
-Resume file: .planning/phases/16-rust-sdk/16-CONTEXT.md
+Last session: 2026-07-01T07:46:49.000Z
+Stopped at: Phase 16 Plan 01 executed (foundation complete); plan 16-02 (REST client, TokenManager, JWKS) next
+Resume file: .planning/phases/16-rust-sdk/16-02-PLAN.md

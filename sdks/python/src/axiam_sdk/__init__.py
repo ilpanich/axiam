@@ -8,8 +8,8 @@
 #
 # NOTE: This module MUST remain importable with ONLY the runtime
 # dependencies declared in [project.dependencies] (httpx, grpcio,
-# aio-pika, pydantic, PyJWT). Do NOT import fastapi/django from here —
-# those are optional extras (see [project.optional-dependencies]).
+# aio-pika, pydantic, PyJWT). The optional web-framework integrations
+# (see [project.optional-dependencies]) MUST NOT be imported from here.
 
 from axiam_sdk._client import AxiamClient
 from axiam_sdk._errors import AuthError, AuthzError, NetworkError

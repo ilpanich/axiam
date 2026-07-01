@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "axiam-sdk"
@@ -8,19 +8,63 @@ version = "0.0.0"
 description = "Official Python client SDK for AXIAM IAM"
 license = "Apache-2.0"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 keywords = ["axiam", "iam", "auth", "authentication", "authorization"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "httpx==0.27.*",
+    "grpcio==1.78.*",
+    "aio-pika==9.6.*",
+    "pydantic>=2",
+    "PyJWT>=2.13",
+]
+
+[project.optional-dependencies]
+fastapi = ["fastapi"]
+django = ["django"]
+dev = [
+    "grpcio-tools",
+    "mypy",
+    "ruff",
+    "build",
+    "twine",
+    "pytest",
+    "pytest-asyncio",
+    "respx",
 ]
 
 [project.urls]
 Repository = "https://github.com/ilpanich/axiam"
 Documentation = "https://docs.axiam.io/sdks/python"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+axiam_sdk = ["py.typed", "grpc/gen/*.py", "grpc/gen/*.pyi"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+files = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

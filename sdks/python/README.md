@@ -25,5 +25,5 @@ pip install axiam-sdk
 ```
 
 ```python
-from axiam_sdk import AximClient
+from axiam_sdk import AxiamClient
 ```

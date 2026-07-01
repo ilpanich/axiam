@@ -673,7 +673,30 @@ Plans:
   4. Express and Fastify middleware examples compile under TypeScript strict mode and protect a sample route; the package publishes as `axiam-sdk` on npm.
   5. `npm publish --dry-run` succeeds; npm publish CI pipeline runs on release tag.
 
-**Plans**: TBD
+**Plans**: 6 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 17-01-PLAN.md — Foundation: tsup dual ESM+CJS multi-entry + gitignored buf codegen + dependency-free `core` (error taxonomy, status mapper, Sensitive<T>, CSRF, single-flight) + AxiamClient rename (D-01..D-04/D-14/D-16/D-17/D-19/D-20/D-26/CF-03)
+
+**Wave 2** *(parallel; depend on 17-01)*
+
+- [ ] 17-02-PLAN.md — REST/browser persona: AxiamClient + CSRF interceptor + reactive single-flight refresh + login/MFA discriminated union + can/checkAccess/batchCheck over FND-04 REST + CF-01 retry + SharedSession (D-05..D-08/D-13/D-18/D-25, SC#2 browser, SC#3)
+- [ ] 17-04-PLAN.md — AMQP: byte-identical HMAC sign/verify + server-identical DTOs + verify-before-handler closure consumer (nack-no-requeue + security event) (D-12/§8)
+
+**Wave 3** *(depends on 17-01 + 17-02)*
+
+- [ ] 17-03-PLAN.md — Node persona: tough-cookie jar + jar-read tokens (Sensitive) + local EdDSA JWKS via jose + reused gRPC channel + sync interceptor + UNAUTHENTICATED call-wrapper refresh; checkAccess/batchCheck over gRPC (D-09/D-10/D-11/D-13/D-15/D-26, SC#2 Node)
+
+**Wave 4** *(depends on 17-02 + 17-03)*
+
+- [ ] 17-05-PLAN.md — Express + Fastify middleware (shared local-JWKS verify core, inject req.axiamUser) + five strict-compiling examples (D-27/§10, SC#4)
+
+**Wave 5** *(depends on all transports + middleware)*
+
+- [ ] 17-06-PLAN.md — SC#1 bundle-and-grep gate + leak/TLS-lint gates + TS CI workflow (dry-run PR gate + tag-triggered provenance publish) + README + scoped CONTRACT.md §3/naming update (D-02/D-20/D-21/D-28/D-14, SC#1, SC#5)
+
 **UI hint**: yes
 
 ---

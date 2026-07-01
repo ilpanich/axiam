@@ -48,6 +48,16 @@
         "types": "./dist/amqp/index.d.ts",
         "default": "./dist/amqp/index.js"
       }
+    },
+    "./middleware": {
+      "import": {
+        "types": "./dist/middleware/index.d.mts",
+        "default": "./dist/middleware/index.mjs"
+      },
+      "require": {
+        "types": "./dist/middleware/index.d.ts",
+        "default": "./dist/middleware/index.js"
+      }
     }
   },
   "files": [
@@ -84,6 +94,18 @@
     "axios-cookiejar-support": "^7.0.0",
     "jose": "^6.0.0",
     "tough-cookie": "^6.0.0"
+  },
+  "peerDependencies": {
+    "express": "^5.0.0",
+    "fastify": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    },
+    "fastify": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.0",

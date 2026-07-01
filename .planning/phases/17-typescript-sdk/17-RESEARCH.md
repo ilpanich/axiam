@@ -943,9 +943,12 @@ discretion, lean toward hand-rolled given the narrow scope**).
 **If this table is empty:** N/A — six assumptions logged above, all low-to-medium risk with clear
 mitigation paths; none block planning.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does an AMQP signing-secret retrieval endpoint exist anywhere in the server API?**
+   - **RESOLVED — no server endpoint exists; the SDK mirrors the Rust design: the HMAC signing key
+     is a caller-supplied Sensitive<Buffer> parameter (see 17-04). Flagged as a cross-cutting
+     milestone-owner gap, NOT a TS-01 blocker.**
    - What we know: Neither this session's grep nor the Rust SDK's implementation reference one;
      the Rust SDK's `consume()` takes the key as a required caller-supplied parameter.
    - What's unclear: Whether this is a genuine, permanent gap (secret is provisioned out-of-band,
@@ -957,6 +960,8 @@ mitigation paths; none block planning.
 
 2. **Should `amqplib` be pinned to `^2.0` (current) or `^1.10` (last 1.x, closer to most public
    tutorial code)?**
+   - **RESOLVED — pin amqplib ^2.0 (current major); validated via the D-24 optional testcontainers
+     smoke test.**
    - What we know: 2.x is current on the registry; the core `consume`/`channel`/`ack`/`nack` API
      used in this phase's patterns has not had documented breaking changes relevant to these calls
      between 1.x and 2.x.

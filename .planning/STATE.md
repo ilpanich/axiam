@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 17
 current_phase_name: typescript-sdk
-status: executing
-stopped_at: Completed 17-03-PLAN.md
-last_updated: "2026-07-01T12:37:16.103Z"
+status: verifying
+stopped_at: Completed 17-06-PLAN.md
+last_updated: "2026-07-01T12:48:47.725Z"
 last_activity: 2026-07-01
 last_activity_desc: Phase 17 execution started
 progress:
   total_phases: 8
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 18
-  completed_plans: 17
-  percent: 25
+  completed_plans: 18
+  percent: 38
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 17 (typescript-sdk) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-01 — Phase 17 execution started
 
 ## Performance Metrics
@@ -108,6 +108,7 @@ Last activity: 2026-07-01 — Phase 17 execution started
 | Phase 17-typescript-sdk P04 | 10min | 2 tasks | 8 files |
 | Phase 17-typescript-sdk P03 | 18min | 2 tasks | 11 files |
 | Phase 17 P05 | 12min | 2 tasks | 16 files |
+| Phase 17-typescript-sdk P06 | 15min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -220,6 +221,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 17-typescript-sdk] 17-05: Fastify plugin marked with Symbol.for('skip-override') (fastify's own escape hatch, same mechanism fastify-plugin wraps) so axiamPlugin's preHandler hook applies to sibling routes without adding a new dependency
 - [Phase ?]: [Phase 17-typescript-sdk] 17-05: examples/tsconfig.json resolves axiam-sdk/* via a paths mapping to src/*.ts rather than the package's own exports map, since dist/ is unbuilt in this sandbox (no buf CLI)
 - [Phase ?]: [Phase 17-typescript-sdk] 17-05: Added a new axiam-sdk/middleware public subpath export (package.json + tsup.config.ts) and re-exported Sensitive from axiam-sdk/amqp — both needed for Task 2's examples to satisfy the plan's public-entry-points-only constraint
+- [Phase 17-typescript-sdk]: 17-06: Fixed tsup outExtension (ESM=.mjs, CJS=.js) — package.json type:module reversed tsup's default extension mapping vs the exports map, making require('./dist/grpc/index.js') load ESM syntax that only worked via Node 22's experimental require(esm)
+- [Phase 17-typescript-sdk]: 17-06: CONTRACT.md §3 now states cookie double-submit as canonical browser CSRF behavior (read axiam_csrf -> echo X-CSRF-Token); non-browser SDKs scoped to response-header capture (D-28)
 
 ### Pending Todos
 
@@ -240,6 +243,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T12:36:37.255Z
-Stopped at: Completed 17-03-PLAN.md
+Last session: 2026-07-01T12:48:47.712Z
+Stopped at: Completed 17-06-PLAN.md
 Resume file: None

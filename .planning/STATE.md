@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 18
-current_phase_name: Go SDK
-status: planned
-stopped_at: Phase 18 planned (6 plans, 4 waves)
-last_updated: "2026-07-01T15:09:05.000Z"
+current_phase_name: go-sdk
+status: executing
+stopped_at: Completed 18-01-PLAN.md
+last_updated: "2026-07-01T15:27:07.009Z"
 last_activity: 2026-07-01
-last_activity_desc: Phase 18 planned — 6 plans across 4 waves, ready to execute
+last_activity_desc: Phase 18 execution started
 progress:
   total_phases: 8
   completed_phases: 3
-  total_plans: 20
-  completed_plans: 20
+  total_plans: 26
+  completed_plans: 21
   percent: 38
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 18 — Go SDK
-Plan: 6 plans (4 waves) — ready to execute
-Status: Phase 18 planned — research + VALIDATION + 6 plans committed; ready to execute (`/gsd-execute-phase 18`)
-Last activity: 2026-07-01 — Phase 18 planned (RESEARCH.md, VALIDATION.md, 6 plans across 4 waves)
+Phase: 18 (go-sdk) — EXECUTING
+Plan: 2 of 6
+Status: Ready to execute
+Last activity: 2026-07-01 — Phase 18 execution started
 
 ## Performance Metrics
 
@@ -111,6 +111,7 @@ Last activity: 2026-07-01 — Phase 18 planned (RESEARCH.md, VALIDATION.md, 6 pl
 | Phase 17 P05 | 12min | 2 tasks | 16 files |
 | Phase 17-typescript-sdk P06 | 15min | 2 tasks | 6 files |
 | Phase 17-typescript-sdk P07 | 20min | 2 tasks | 10 files |
+| Phase 18 P01 | 25min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -227,6 +228,9 @@ Recent decisions affecting current work:
 - [Phase 17-typescript-sdk]: 17-06: CONTRACT.md §3 now states cookie double-submit as canonical browser CSRF behavior (read axiam_csrf -> echo X-CSRF-Token); non-browser SDKs scoped to response-header capture (D-28)
 - [Phase 17-typescript-sdk]: 17-07: createRefreshGuard() factory replaces module-level singleton; refreshOnce/resetRefreshGuard retained as a backward-compatible default instance so pre-existing unit tests pass unchanged (CR-02) — SharedSession constructs its own refreshGuard in the constructor; NodeSession inherits it via super(), so two independent client instances never cross-wire refreshes
 - [Phase 17-typescript-sdk]: 17-07: authenticateRequest enforces claims.tenant_id === session.tenantHeaderValue after presence checks; VerifiableSession now requires tenantHeaderValue (CR-03) — JWKS is org-wide, not tenant-scoped, so signature validity alone must not imply tenant authorization; non-breaking for NodeSession callers since NodeSession already exposes tenantHeaderValue
+- [Phase 18]: buf CLI unavailable locally — generated axiam.v1 gRPC stubs with protoc + protoc-gen-go/protoc-gen-go-grpc
+- [Phase 18]: sdks/go/go.mod go directive auto-bumped 1.22 to 1.25.0 by grpc v1.81.0's go>=1.25.0 requirement
+- [Phase 18]: newNetworkError redesigned so a non-nil *http.Response is the SOLE source of the wrapped cause (via sanitizeResponse), never a caller-supplied pre-built cause — closes a redact-before-wrap bypass gap (D-04/CR-04)
 
 ### Pending Todos
 
@@ -247,6 +251,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T14:32:51.700Z
-Stopped at: Phase 18 context gathered
-Resume file: .planning/phases/18-go-sdk/18-CONTEXT.md
+Last session: 2026-07-01T15:27:06.997Z
+Stopped at: Completed 18-01-PLAN.md
+Resume file: None

@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 19
 current_phase_name: Python SDK
 status: executing
-stopped_at: Completed 19-02-PLAN.md
-last_updated: "2026-07-01T20:25:01.029Z"
+stopped_at: Completed 19-03-PLAN.md
+last_updated: "2026-07-01T20:36:17.088Z"
 last_activity: 2026-07-01
-last_activity_desc: Plan 19-01 (Foundation) complete
+last_activity_desc: Plan 19-03 (REST core — unified AxiamClient) complete
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 33
-  completed_plans: 28
+  completed_plans: 29
   percent: 50
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 19 — Python SDK
-Plan: 3 of 7
+Plan: 4 of 7
 Status: Ready to execute
-Last activity: 2026-07-01 — Plan 19-01 (Foundation) complete
+Last activity: 2026-07-01 — Plan 19-03 (REST core — unified AxiamClient) complete
 
 ## Performance Metrics
 
@@ -120,6 +120,7 @@ Last activity: 2026-07-01 — Plan 19-01 (Foundation) complete
 | Phase 18-go-sdk P06 | 20min | 2 tasks | 10 files |
 | Phase 19-python-sdk P01 | 12min | 3 tasks | 18 files |
 | Phase 19-python-sdk P02 | 30min | 3 tasks | 8 files |
+| Phase 19-python-sdk P03 | 35min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -256,6 +257,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 19-python-sdk]: Pinned grpcio-tools==1.78.* to match the grpcio==1.78.* runtime pin — grpc_tools.protoc embeds its own version as a hard import-time floor check in generated _pb2_grpc.py, so a newer grpcio-tools would break every consumer's import
 - [Phase ?]: [Phase 19-python-sdk] 19-02: error_from_http_status structurally excludes a caller-supplied cause param when a response is present -- the sanitized response is the sole source of the wrapped cause (D-08/CR-04)
 - [Phase ?]: [Phase 19-python-sdk] 19-02: JwksVerifier catches jwt.exceptions.PyJWTError (not the narrower PyJWKClientError) since PyJWT raises the sibling PyJWKSetError for an empty/malformed keyset -- confirmed empirically against installed PyJWT 2.13.0 (Assumption A3)
+- [Phase ?]: [Phase 19-python-sdk] 19-03: Cookie-jar sharing between sync httpx.Client and async httpx.AsyncClient requires a raw http.cookiejar.CookieJar (not an httpx.Cookies() wrapper) — httpx 0.27.2's Cookies.__init__ copies an existing Cookies argument into a fresh jar rather than sharing it (Assumption A1)
+- [Phase ?]: [Phase 19-python-sdk] 19-03: _Session.cookie_value() disambiguates same-name cookies at different Paths (login's axiam_access at Path=/ vs. refresh's axiam_access at Path=/api/v1/auth/refresh) by preferring the most specific path, since httpx.Cookies.get() raises CookieConflict otherwise
 
 ### Pending Todos
 
@@ -276,6 +279,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T20:25:01.017Z
-Stopped at: Completed 19-02-PLAN.md
+Last session: 2026-07-01T20:36:17.075Z
+Stopped at: Completed 19-03-PLAN.md
 Resume file: None

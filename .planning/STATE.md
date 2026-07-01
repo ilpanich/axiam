@@ -5,16 +5,16 @@ milestone_name: — Client SDKs
 current_phase: 16
 current_phase_name: Rust SDK
 status: executing
-stopped_at: Completed 16-04-PLAN.md
-last_updated: "2026-07-01T08:28:35.516Z"
+stopped_at: Completed 16-03-PLAN.md
+last_updated: "2026-07-01T08:53:12.945Z"
 last_activity: 2026-07-01
-last_activity_desc: "Executed 16-04-PLAN.md (AMQP transport: byte-identical HMAC sign/verify, server-identical AuthzRequest/AuditEventMessage DTOs, D-07 closure-handler consumer with verify-before-handler + nack-without-requeue)"
+last_activity_desc: "Executed 16-03-PLAN.md (gRPC transport: shared lazy tonic::Channel, sync-safe auth/tenant interceptor, check_access/batch_check with UNAUTHENTICATED single-flight retry, in-process tonic test server)"
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 12
-  completed_plans: 9
-  percent: 13
+  completed_plans: 10
+  percent: 83
 ---
 
 # Project State
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 16 — Rust SDK
-Plan: 3 of 6 complete (16-01 foundation, 16-02 REST/token, 16-04 AMQP); 3 plans remaining (16-03 gRPC, 16-05 middleware, 16-06 examples/publish)
+Plan: 4 of 6 complete (16-01 foundation, 16-02 REST/token, 16-03 gRPC, 16-04 AMQP); 2 plans remaining (16-05 middleware, 16-06 examples/publish)
 Status: Ready to execute
-Last activity: 2026-07-01 — Executed 16-04-PLAN.md (AMQP transport: byte-identical HMAC sign/verify, server-identical AuthzRequest/AuditEventMessage DTOs, D-07 closure-handler consumer with verify-before-handler + nack-without-requeue)
+Last activity: 2026-07-01 — Executed 16-03-PLAN.md (gRPC transport: shared lazy tonic::Channel, sync-safe auth/tenant interceptor, check_access/batch_check with UNAUTHENTICATED single-flight retry, in-process tonic test server)
 
 ## Performance Metrics
 
@@ -100,6 +100,7 @@ Last activity: 2026-07-01 — Executed 16-04-PLAN.md (AMQP transport: byte-ident
 | Phase 16-rust-sdk P01 | 25min | 2 tasks | 14 files |
 | Phase 16-rust-sdk P02 | 42min | 2 tasks | 11 files |
 | Phase 16-rust-sdk P04 | 55min | 2 tasks | 6 files |
+| Phase 16-rust-sdk P03 | 55min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -192,6 +193,8 @@ Recent decisions affecting current work:
 - [Phase 16-rust-sdk]: Gated client.rs and the reqwest-touching half of token/jwks.rs behind cfg(feature = "rest") to preserve 16-01's cargo build --no-default-features invariant
 - [Phase ?]: [Phase 16-rust-sdk] 16-04: tracing promoted to a required (non-optional) amqp-feature dependency, independent of observability — the CONTRACT.md §8.4 security-event log on HMAC failure is a correctness/security control (T-16-11), not optional instrumentation
 - [Phase ?]: [Phase 16-rust-sdk] 16-04: AckableDelivery pub(crate) trait seam (lapin::message::Delivery in prod, RecordingDelivery in tests) proves the nack-without-requeue HMAC-failure contract without a live broker
+- [Phase ?]: 16-03: AuthzGrpcClient uses a caller-supplied RefreshFn closure instead of depending on AxiamClient/reqwest, so --no-default-features --features grpc has a fully working single-flight refresh mechanism with zero REST transport pulled in
+- [Phase ?]: 16-03: tonic grpc-feature pinned to transport+codegen+tls-ring+tls-native-roots (no default features) since Endpoint::from_shared does not auto-enable TLS the way Endpoint::new does
 
 ### Pending Todos
 
@@ -212,6 +215,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T08:28:35.505Z
-Stopped at: Completed 16-04-PLAN.md
+Last session: 2026-07-01T08:53:12.934Z
+Stopped at: Completed 16-03-PLAN.md
 Resume file: None

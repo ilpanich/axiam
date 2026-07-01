@@ -591,7 +591,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 
 - [x] **Phase 15: SDK Foundation** - Export OpenAPI spec, establish buf proto codegen pipeline, add REST authz-check endpoint, author cross-language contract, scaffold `sdks/` monorepo with per-SDK path-filtered CI (completed 2026-06-30)
 - [x] **Phase 16: Rust SDK** - Reference implementation (REST + gRPC + AMQP); establishes `Sensitive<T>` and gRPC-channel patterns reused by all later SDKs (completed 2026-07-01)
-- [ ] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish (6/6 plans executed 2026-07-01; verification found 4 critical security gaps — pending gap closure)
+- [ ] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish (6/6 plans executed 2026-07-01; verification found 4 critical security gaps CR-01..CR-04 — gap-closure plans 17-07/17-08 created, pending execution)
 - [ ] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish
 - [ ] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish
 - [ ] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing
@@ -673,7 +673,7 @@ Plans:
   4. Express and Fastify middleware examples compile under TypeScript strict mode and protect a sample route; the package publishes as `axiam-sdk` on npm.
   5. `npm publish --dry-run` succeeds; npm publish CI pipeline runs on release tag.
 
-**Plans**: 6/6 plans complete
+**Plans**: 6/6 base plans executed + 2 gap-closure plans (17-07/17-08) pending
 
 Plans:
 **Wave 1**
@@ -696,6 +696,11 @@ Plans:
 **Wave 5** *(depends on all transports + middleware)*
 
 - [x] 17-06-PLAN.md — SC#1 bundle-and-grep gate + leak/TLS-lint gates + TS CI workflow (dry-run PR gate + tag-triggered provenance publish) + README + scoped CONTRACT.md §3/naming update (D-02/D-20/D-21/D-28/D-14, SC#1, SC#5)
+
+**Wave 6** *(gap closure — CR-01..CR-04 from 17-VERIFICATION.md; sequential: 17-08 depends on 17-07 via shared session files)*
+
+- [ ] 17-07-PLAN.md — Gap closure: per-session single-flight refresh guard (CR-02) + middleware tenant_id enforcement (CR-03) + regression tests
+- [ ] 17-08-PLAN.md — Gap closure: Node persona CSRF token population (CR-01) + NetworkError.cause Set-Cookie redaction (CR-04) + regression tests
 
 **UI hint**: yes
 

@@ -34,10 +34,14 @@ func TestNetworkError_RedactsSensitiveHeaders(t *testing.T) {
 		err := newNetworkError("server error", resp, nil)
 
 		surfaces := map[string]string{
-			"%v":                fmt.Sprintf("%v", err),
-			"%+v":               fmt.Sprintf("%+v", err),
-			"%#v":               fmt.Sprintf("%#v", err),
-			"Error()":           err.Error(),
+			"%v":      fmt.Sprintf("%v", err),
+			"%+v":     fmt.Sprintf("%+v", err),
+			"%#v":     fmt.Sprintf("%#v", err),
+			"Error()": err.Error(),
+			// Unwrap() is the actual leak surface: newNetworkError builds
+			// cause from resp's headers, so this is where redaction must
+			// take effect.
+			"Unwrap()": fmt.Sprintf("%v", err.Unwrap()),
 		}
 		for name, out := range surfaces {
 			if strings.Contains(out, rawToken) {
@@ -61,11 +65,17 @@ func TestNetworkError_RedactsSensitiveHeaders(t *testing.T) {
 
 	t.Run("non-vacuous control: unredacted wrapper DOES leak (proves test validity)", func(t *testing.T) {
 		resp := newResponseWithSensitiveHeaders()
-		// Deliberately bypass sanitizeResponse to prove the assertions above
-		// would catch a real leak if redaction were absent.
+		// Deliberately bypass sanitizeResponse (skip newNetworkError, wrap the
+		// raw *http.Response's headers directly into cause) to prove the
+		// assertions above would catch a real leak if redaction were absent
+		// — i.e. this test is not vacuously passing regardless of behavior.
 		unredacted := &NetworkError{Message: "server error", cause: fmt.Errorf("headers: %v", resp.Header)}
 
-		out := fmt.Sprintf("%v", unredacted)
+		// The leak surface is the wrapped cause reachable via Unwrap()/%+v
+		// of the cause chain — NetworkError.Error() itself intentionally
+		// never includes the cause's text, so we inspect the cause directly,
+		// exactly as errors.Unwrap(err) or %+v-with-cause formatting would.
+		out := fmt.Sprintf("%v", unredacted.Unwrap())
 		if !strings.Contains(out, rawToken) {
 			t.Fatalf("control case did not leak as expected — test may be vacuous; got %q", out)
 		}

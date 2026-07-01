@@ -5,16 +5,16 @@ milestone_name: — Client SDKs
 current_phase: 16
 current_phase_name: Rust SDK
 status: executing
-stopped_at: Completed 16-03-PLAN.md
-last_updated: "2026-07-01T08:53:12.945Z"
+stopped_at: Completed 16-05-PLAN.md
+last_updated: "2026-07-01T09:03:55.186Z"
 last_activity: 2026-07-01
-last_activity_desc: "Executed 16-03-PLAN.md (gRPC transport: shared lazy tonic::Channel, sync-safe auth/tenant interceptor, check_access/batch_check with UNAUTHENTICATED single-flight retry, in-process tonic test server)"
+last_activity_desc: "Executed 16-05-PLAN.md (Actix middleware: AxiamUser FromRequest extractor with cookie-then-Bearer extraction, local JWKS verification, AuthError/AuthzError->401/403 mapping, off-by-default actix feature)"
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 12
-  completed_plans: 10
-  percent: 83
+  completed_plans: 11
+  percent: 13
 ---
 
 # Project State
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 16 — Rust SDK
-Plan: 4 of 6 complete (16-01 foundation, 16-02 REST/token, 16-03 gRPC, 16-04 AMQP); 2 plans remaining (16-05 middleware, 16-06 examples/publish)
+Plan: 5 of 6 complete (16-01 foundation, 16-02 REST/token, 16-03 gRPC, 16-04 AMQP, 16-05 Actix middleware); 1 plan remaining (16-06 examples/publish)
 Status: Ready to execute
-Last activity: 2026-07-01 — Executed 16-03-PLAN.md (gRPC transport: shared lazy tonic::Channel, sync-safe auth/tenant interceptor, check_access/batch_check with UNAUTHENTICATED single-flight retry, in-process tonic test server)
+Last activity: 2026-07-01 — Executed 16-05-PLAN.md (Actix middleware: AxiamUser FromRequest extractor with cookie-then-Bearer extraction, local JWKS verification, AuthError/AuthzError->401/403 mapping, off-by-default actix feature)
 
 ## Performance Metrics
 
@@ -101,6 +101,7 @@ Last activity: 2026-07-01 — Executed 16-03-PLAN.md (gRPC transport: shared laz
 | Phase 16-rust-sdk P02 | 42min | 2 tasks | 11 files |
 | Phase 16-rust-sdk P04 | 55min | 2 tasks | 6 files |
 | Phase 16-rust-sdk P03 | 55min | 2 tasks | 6 files |
+| Phase 16-rust-sdk P05 | 30min | 1 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -195,6 +196,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 16-rust-sdk] 16-04: AckableDelivery pub(crate) trait seam (lapin::message::Delivery in prod, RecordingDelivery in tests) proves the nack-without-requeue HMAC-failure contract without a live broker
 - [Phase ?]: 16-03: AuthzGrpcClient uses a caller-supplied RefreshFn closure instead of depending on AxiamClient/reqwest, so --no-default-features --features grpc has a fully working single-flight refresh mechanism with zero REST transport pulled in
 - [Phase ?]: 16-03: tonic grpc-feature pinned to transport+codegen+tls-ring+tls-native-roots (no default features) since Endpoint::from_shared does not auto-enable TLS the way Endpoint::new does
+- [Phase ?]: [Phase 16-rust-sdk] 16-05: AxiamUser.roles derived from the access token's scope claim (space-separated), not a roles claim — AXIAM's AccessTokenClaims has no roles field server-side
+- [Phase ?]: [Phase 16-rust-sdk] 16-05: actix feature declared as ["dep:actix-web", "rest"] so the extractor reuses the single shared JwksVerifier instead of forking a second JWKS implementation
+- [Phase ?]: [Phase 16-rust-sdk] 16-05: broadened JwksVerifier's cfg gate to any(feature = "rest", feature = "actix") per 16-02's documented hand-off note
 
 ### Pending Todos
 
@@ -215,6 +219,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T08:53:12.934Z
-Stopped at: Completed 16-03-PLAN.md
+Last session: 2026-07-01T09:03:55.175Z
+Stopped at: Completed 16-05-PLAN.md
 Resume file: None

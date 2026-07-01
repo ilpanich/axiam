@@ -215,10 +215,18 @@ _Note: `tdd="true"` was declared on Task 1; tests were authored alongside implem
 - **Verification:** `npx vitest run test/middleware/fastify.test.ts` passes (4/4).
 - **Commit:** `d92674f`
 
+**4. [Rule 1] `examples/tsconfig.json`'s `baseUrl` triggered a deprecated-option compile error**
+- **Found during:** Post-completion verification sweep (after the plan's docs commit) — `npx tsc --noEmit -p examples/tsconfig.json` started failing with `TS5101: Option 'baseUrl' is deprecated`; the suggested `"ignoreDeprecations": "6.0"` silencer was itself rejected as an invalid value by this TypeScript 5.9.3 install (`TS5103: Invalid value for '--ignoreDeprecations'`), and `"5.0"` alone did not silence the error when combined with the extended base `tsconfig.json`'s `moduleResolution: NodeNext`.
+- **Issue:** `baseUrl` was unnecessary in the first place — under `moduleResolution: NodeNext`, a `paths` map resolves relative to the tsconfig file's own directory without requiring `baseUrl`.
+- **Fix:** Removed `baseUrl` (and the now-unneeded `ignoreDeprecations`) from `examples/tsconfig.json`, keeping only the `paths` map.
+- **Files modified:** `sdks/typescript/examples/tsconfig.json`
+- **Verification:** `npx tsc --noEmit -p examples/tsconfig.json` passes with 0 errors.
+- **Commit:** `3ed62c1` (follow-up fix, after the plan's docs commit `fffb8db`)
+
 ---
 
-**Total deviations:** 3 auto-fixed (2 Rule 2 missing critical functionality, 1 Rule 1 bug)
-**Impact on plan:** All three were necessary to satisfy the plan's own acceptance criteria (public-entry-points-only constraint for examples; passing middleware tests for both frameworks). No scope creep — each fix is scoped to the minimal change (add an export, fix a plugin-registration bug).
+**Total deviations:** 4 auto-fixed (2 Rule 2 missing critical functionality, 2 Rule 1 bugs)
+**Impact on plan:** All four were necessary to satisfy the plan's own acceptance criteria (public-entry-points-only constraint for examples; passing middleware tests for both frameworks; a clean SC#4 compile gate). No scope creep — each fix is scoped to the minimal change (add an export, fix a plugin-registration bug, drop an unneeded deprecated compiler option).
 
 ## Issues Encountered
 `buf` CLI remains unavailable in this sandbox (pre-existing gap since 17-01). `npm run build` fails at the `prebuild`/`generate` step (`buf: not found`), confirmed and documented rather than treated as a code defect. `npm test` (77/77 passing across the whole package, up from 69) and `npm run typecheck` (`tsc --noEmit`, clean) were the verification surface for the middleware; `npx tsc --noEmit -p examples/tsconfig.json` (clean, 0 errors) is the SC#4 verification surface for the examples, per the plan's own instruction and this plan's environment notes.

@@ -188,3 +188,7 @@ The AMQP transport is fully independent of REST (16-02)/gRPC (16-03) and consume
 ---
 *Phase: 16-rust-sdk*
 *Completed: 2026-07-01*
+
+## Self-Check: PASSED
+
+All 5 created/modified files verified present on disk (`sdks/rust/src/amqp/hmac.rs`, `sdks/rust/src/amqp/messages.rs`, `sdks/rust/src/amqp/consumer.rs`, `sdks/rust/tests/amqp_hmac_test.rs`, `.planning/phases/16-rust-sdk/16-04-SUMMARY.md`). All 3 commit hashes (`8c6d6ed`, `5fe264a`, `45f5637`) verified present in `git log --oneline --all`.

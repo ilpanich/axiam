@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 17
 current_phase_name: typescript-sdk
 status: executing
-stopped_at: Completed 17-04-PLAN.md
-last_updated: "2026-07-01T12:16:53.204Z"
+stopped_at: Completed 17-03-PLAN.md
+last_updated: "2026-07-01T12:27:52.518Z"
 last_activity: 2026-07-01
 last_activity_desc: Phase 17 execution started
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 18
-  completed_plans: 15
+  completed_plans: 16
   percent: 25
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 17 (typescript-sdk) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-07-01 — Phase 17 execution started
 
@@ -106,6 +106,7 @@ Last activity: 2026-07-01 — Phase 17 execution started
 | Phase 17-typescript-sdk P01 | 3min | 2 tasks | 20 files |
 | Phase 17-typescript-sdk P02 | 9min | 2 tasks | 15 files |
 | Phase 17-typescript-sdk P04 | 10min | 2 tasks | 8 files |
+| Phase 17-typescript-sdk P03 | 18min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -212,6 +213,9 @@ Recent decisions affecting current work:
 - [Phase 17-typescript-sdk]: 17-02: login()/verifyMfa() branch on response.status===202 inside the resolved success path, not the catch block, since axios's default validateStatus resolves any 2xx (including 202) as success
 - [Phase ?]: [Phase 17-typescript-sdk] 17-04: verifyPayload never throws on malformed/short/empty hex; ConsumeOptions.strict defaults true and a present signature is always verified regardless of mode
 - [Phase ?]: [Phase 17-typescript-sdk] 17-04: fixed @types/node gap from 17-01 (missing devDependency + tsconfig types array) that was silently breaking tsc --noEmit on src/rest/session.ts and test/core/sensitive.test.ts
+- [Phase ?]: [Phase 17-typescript-sdk] 17-03: gRPC transport built directly on grpc-js's makeClientConstructor with local Wire* types mirroring authorization.proto (src/gen unavailable, no buf CLI) behind an injectable AuthorizationServiceClientFactory seam
+- [Phase ?]: [Phase 17-typescript-sdk] 17-03: TokenManager.refreshTokenValue() reads the jar against {baseUrl}/api/v1/auth/refresh (not bare baseUrl) since axiam_refresh is path-scoped server-side
+- [Phase ?]: [Phase 17-typescript-sdk] 17-03: NodeSession.doRefresh and REST's inline refresh closure both drive the same module-level refreshOnce singleton guard, so REST and gRPC transparently share exactly one in-flight refresh (D-13)
 
 ### Pending Todos
 
@@ -232,6 +236,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T12:16:53.193Z
-Stopped at: Completed 17-04-PLAN.md
+Last session: 2026-07-01T12:27:52.505Z
+Stopped at: Completed 17-03-PLAN.md
 Resume file: None

@@ -165,7 +165,7 @@ func (c *Client) absorbSessionCookies() error {
 		}
 	}
 
-	c.guard.Seed(refreshguard.Sensitive(access), refreshguard.Sensitive(refresh), claims.Exp)
+	c.guard.Load().Seed(refreshguard.Sensitive(access), refreshguard.Sensitive(refresh), claims.Exp)
 	return nil
 }
 
@@ -289,7 +289,7 @@ func (c *Client) Refresh(ctx context.Context) error {
 		return &AuthError{Message: "org_id could not be resolved; Login() must succeed before Refresh() — supply WithOrgID/WithOrgSlug or call Login() first"}
 	}
 
-	_, err := c.guard.RefreshIfNeeded(ctx, observedAccess, func(ctx context.Context) (refreshguard.RefreshedTokens, error) {
+	_, err := c.guard.Load().RefreshIfNeeded(ctx, observedAccess, func(ctx context.Context) (refreshguard.RefreshedTokens, error) {
 		body := refreshRequestBody{TenantID: tenantID, OrgID: orgID}
 		payload, err := json.Marshal(body)
 		if err != nil {
@@ -374,7 +374,7 @@ func (c *Client) Logout(ctx context.Context) error {
 		return mapErrorResponse(resp)
 	}
 
-	c.guard = &refreshguard.Guard{}
+	c.guard.Store(&refreshguard.Guard{})
 	return nil
 }
 
@@ -428,10 +428,16 @@ func mapErrorResponse(resp *http.Response) error {
 	return errorFromHTTPStatus(resp.StatusCode, message, resp, nil)
 }
 
+// readBodyForError drains a bounded amount of the error response body (so the
+// connection can be reused) but deliberately does NOT echo the raw body into
+// the returned string. The result flows into an exported error Message field,
+// which participates in json.Marshal / %v / %+v / .Error() with no redaction
+// surface (unlike Sensitive). A server error body can reflect request headers,
+// cookies, or token-shaped payloads (WAF/proxy pages, misconfigured debug
+// handlers), so echoing it verbatim would defeat the header-redaction work in
+// errors.go (WR-01). Diagnostic detail belongs in the optional WithLogger sink,
+// not in caller-visible/loggable error state.
 func readBodyForError(r io.Reader) string {
-	b, err := io.ReadAll(io.LimitReader(r, 4096))
-	if err != nil || len(b) == 0 {
-		return "no response body"
-	}
-	return string(b)
+	_, _ = io.Copy(io.Discard, io.LimitReader(r, 4096))
+	return "server returned an error response (body redacted; enable WithLogger for details)"
 }

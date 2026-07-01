@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -103,12 +104,16 @@ func WithLogger(logger *slog.Logger) Option {
 // Client is the AXIAM SDK's REST entry point (CONTRACT.md §1-§10). See
 // NewClient.
 type Client struct {
-	baseURL     *url.URL
-	tenantSlug  string
-	org         orgIdentifier
-	httpc       *http.Client
-	logger      *slog.Logger
-	guard       *refreshguard.Guard
+	baseURL    *url.URL
+	tenantSlug string
+	org        orgIdentifier
+	httpc      *http.Client
+	logger     *slog.Logger
+	// guard is swapped atomically: Logout() replaces it with a fresh Guard
+	// while Login/VerifyMfa/Refresh Load() it concurrently. Using an
+	// atomic.Pointer (rather than a plain field) prevents the data race
+	// between Logout's reassignment and concurrent Refresh reads (CR-01).
+	guard       atomic.Pointer[refreshguard.Guard]
 	csrfMu      sync.Mutex
 	csrfToken   string
 	orgIDMu     sync.Mutex
@@ -151,8 +156,8 @@ func NewClient(baseURL, tenantSlug string, opts ...Option) (*Client, error) {
 		org:        cfg.org,
 		httpc:      httpc,
 		logger:     cfg.logger,
-		guard:      &refreshguard.Guard{},
 	}
+	c.guard.Store(&refreshguard.Guard{})
 	return c, nil
 }
 

@@ -12,6 +12,12 @@ import (
 // mechanism consumed by the net/http middleware (package middleware). It is
 // a thin re-export of the internal jwks.Verifier so callers outside this
 // module never need to import an internal/ package directly.
+//
+// IMPORTANT: JWKSVerifier.Verify validates the token SIGNATURE ONLY — it does
+// NOT check expiry. Callers using this type directly (rather than via
+// middleware.Middleware, which checks expiry for you) MUST compare the
+// returned Claims.Exp against time.Now().Unix() before trusting the token
+// (WR-03).
 type JWKSVerifier = jwks.Verifier
 
 // NewJWKSVerifier constructs a JWKSVerifier bound to {baseURL}/oauth2/jwks

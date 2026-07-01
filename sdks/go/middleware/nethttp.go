@@ -78,16 +78,19 @@ func Middleware(verifier jwksVerifier, configuredTenant string, opts ...Option) 
 			// Cross-tenant replay defense (T-18-19, TS CR-03 carry-forward):
 			// a signature-VALID token minted for the org-wide JWKS may
 			// belong to a different tenant. Enforce the configured-tenant
-			// claim check BEFORE trusting the token any further. The
-			// caller-supplied X-Tenant-ID header (if present) narrows which
-			// tenant is being asserted for this request; it must also match
-			// the middleware's configured tenant, never substitute for it.
-			expectedTenant := configuredTenant
-			if h := r.Header.Get("X-Tenant-ID"); h != "" {
-				expectedTenant = h
-			}
-			if claims.TenantID == "" || claims.TenantID != configuredTenant || expectedTenant != configuredTenant {
+			// claim check BEFORE trusting the token any further.
+			if claims.TenantID == "" || claims.TenantID != configuredTenant {
 				writeError(w, cfg, http.StatusUnauthorized, "authentication_failed", "token tenant_id does not match the configured tenant")
+				return
+			}
+
+			// If the caller also supplied an X-Tenant-ID header, it must agree
+			// with the token's own tenant_id claim — the header narrows which
+			// tenant is being asserted for this request and can never
+			// substitute for or override the claim (WR-04). Absent the header,
+			// the claim check above is sufficient.
+			if h := r.Header.Get("X-Tenant-ID"); h != "" && h != claims.TenantID {
+				writeError(w, cfg, http.StatusUnauthorized, "authentication_failed", "X-Tenant-ID header does not match token tenant_id")
 				return
 			}
 

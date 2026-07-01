@@ -72,13 +72,27 @@ func NewVerifier(ctx context.Context, baseURL string, hc *http.Client) (*Verifie
 // verification algorithm (algorithm-confusion defense). An unknown kid
 // triggers exactly one forced JWKS refetch, then a single retry; if the kid
 // is still unknown after that, verification fails.
+//
+// Verify does NOT check token expiry — it validates the signature only.
+// Callers MUST compare the returned Claims.Exp against time.Now().Unix()
+// themselves before trusting the result (see middleware.Middleware for a
+// reference implementation). A signature-valid but expired token will verify
+// successfully here.
 func (v *Verifier) Verify(ctx context.Context, token []byte) (Claims, error) {
 	msg, err := jws.Parse(token)
 	if err != nil {
 		return Claims{}, fmt.Errorf("jwks: invalid token: %w", err)
 	}
 
-	for _, sig := range msg.Signatures() {
+	// Fail closed if the message carries no signatures: an empty loop would
+	// otherwise skip the EdDSA allowlist entirely and fall through to keyset
+	// verification, silently violating the "only EdDSA, checked BEFORE any
+	// keyset lookup" invariant above (WR-02).
+	sigs := msg.Signatures()
+	if len(sigs) == 0 {
+		return Claims{}, fmt.Errorf("jwks: token has no signatures")
+	}
+	for _, sig := range sigs {
 		alg, ok := sig.ProtectedHeaders().Algorithm()
 		if !ok || alg != jwa.EdDSA() {
 			return Claims{}, fmt.Errorf("jwks: unexpected alg %q: only EdDSA is accepted", alg.String())

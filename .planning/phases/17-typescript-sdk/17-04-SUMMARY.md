@@ -189,3 +189,6 @@ None - no external service configuration required. (Note: the AMQP signing key r
 ---
 *Phase: 17-typescript-sdk*
 *Completed: 2026-07-01*
+
+## Self-Check: PASSED
+All 6 created/modified source and test files verified present on disk; all 3 commits (2d30b28, 62892d1, 71f07c0) verified in git log.

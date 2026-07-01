@@ -755,7 +755,7 @@ Plans:
   4. A FastAPI dependency-injection helper and a Django middleware class are both provided and demonstrated in runnable example scripts.
   5. `python -m build && twine check dist/*` succeeds; PyPI publish CI pipeline runs on release tag.
 
-**Plans**: 1/7 plans executed
+**Plans**: 2/7 plans executed
 
 Plans:
 **Wave 1**
@@ -764,7 +764,7 @@ Plans:
 
 **Wave 2** *(depends on 19-01)*
 
-- [ ] 19-02-PLAN.md — Core primitives: error taxonomy + redact-before-wrap (D-08/CR-04), Pydantic models + SecretStr (D-06/D-07/D-21), local JWKS EdDSA-only verifier (D-16), dual-lock single-flight refresh guard (SC#2)
+- [x] 19-02-PLAN.md — Core primitives: error taxonomy + redact-before-wrap (D-08/CR-04), Pydantic models + SecretStr (D-06/D-07/D-21), local JWKS EdDSA-only verifier (D-16), dual-lock single-flight refresh guard (SC#2)
 
 **Wave 3** *(parallel; depend on 19-01 + 19-02; zero file overlap)*
 
@@ -845,7 +845,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 16. Rust SDK | 6/6 | Complete   | 2026-07-01 |
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
-| 19. Python SDK | 1/7 | In Progress  | -          |
+| 19. Python SDK | 2/7 | In Progress  | -          |
 | 20. Java SDK | 0/? | Not started | - |
 | 21. C# SDK | 0/? | Not started | - |
 | 22. PHP SDK | 0/? | Not started | - |

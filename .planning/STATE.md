@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 19
 current_phase_name: Python SDK
 status: executing
-stopped_at: Completed 19-01-PLAN.md
-last_updated: "2026-07-01T20:10:21.873Z"
+stopped_at: Completed 19-02-PLAN.md
+last_updated: "2026-07-01T20:25:01.029Z"
 last_activity: 2026-07-01
 last_activity_desc: Plan 19-01 (Foundation) complete
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 33
-  completed_plans: 27
+  completed_plans: 28
   percent: 50
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 19 — Python SDK
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-07-01 — Plan 19-01 (Foundation) complete
 
@@ -119,6 +119,7 @@ Last activity: 2026-07-01 — Plan 19-01 (Foundation) complete
 | Phase 18-go-sdk P05 | 15min | 1 tasks | 3 files |
 | Phase 18-go-sdk P06 | 20min | 2 tasks | 10 files |
 | Phase 19-python-sdk P01 | 12min | 3 tasks | 18 files |
+| Phase 19-python-sdk P02 | 30min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -253,6 +254,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 18-go-sdk] 18-06: CI workflow pins actions/setup-go to go-version 1.25.0 matching go.mod's actual floor after 18-01's dependency-driven bump; tag-triggered publish job verifies module-proxy resolution rather than an explicit publish call, since pushing sdks/go/vX.Y.Z IS the release for the Go module proxy
 - [Phase ?]: [Phase 19-python-sdk]: AMQP HMAC canonicalization preserves wire/insertion key order (json.dumps without sort_keys) rather than alphabetizing — proven against a real Rust-signed fixture where field order is declared-struct order, not alphabetical
 - [Phase ?]: [Phase 19-python-sdk]: Pinned grpcio-tools==1.78.* to match the grpcio==1.78.* runtime pin — grpc_tools.protoc embeds its own version as a hard import-time floor check in generated _pb2_grpc.py, so a newer grpcio-tools would break every consumer's import
+- [Phase ?]: [Phase 19-python-sdk] 19-02: error_from_http_status structurally excludes a caller-supplied cause param when a response is present -- the sanitized response is the sole source of the wrapped cause (D-08/CR-04)
+- [Phase ?]: [Phase 19-python-sdk] 19-02: JwksVerifier catches jwt.exceptions.PyJWTError (not the narrower PyJWKClientError) since PyJWT raises the sibling PyJWKSetError for an empty/malformed keyset -- confirmed empirically against installed PyJWT 2.13.0 (Assumption A3)
 
 ### Pending Todos
 
@@ -273,6 +276,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-01T20:10:21.860Z
-Stopped at: Completed 19-01-PLAN.md
+Last session: 2026-07-01T20:25:01.017Z
+Stopped at: Completed 19-02-PLAN.md
 Resume file: None

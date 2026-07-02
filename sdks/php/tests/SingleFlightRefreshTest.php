@@ -8,6 +8,8 @@ use Axiam\Sdk\Rest\AuthMiddleware;
 use Axiam\Sdk\Rest\RefreshMiddleware;
 use Axiam\Sdk\Session;
 use GuzzleHttp\Client;
+use GuzzleHttp\Cookie\CookieJar;
+use GuzzleHttp\Cookie\SetCookie;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
@@ -31,10 +33,44 @@ use PHPUnit\Framework\TestCase;
  * queued 401→refresh→200→401→refresh→200..., the single-flight guard would never be
  * genuinely exercised and this test would pass even if the shared-promise guard were
  * removed — this ordering is load-bearing for a meaningful assertion.
+ *
+ * Also asserts the refresh request BODY (not just the call count): the fixture access
+ * token seeded into the shared cookie jar carries `tenant_id`/`org_id` claims, and the
+ * captured `/api/v1/auth/refresh` request must send exactly `{tenant_id, org_id}` per
+ * `sdks/openapi.json`'s `RefreshRequest` schema — never a bare `tenant` slug field
+ * (the pre-fix defect: see `Session::refreshIfNeeded()`'s doc comment).
  */
 final class SingleFlightRefreshTest extends TestCase
 {
     private const TENANT = 'acme';
+    private const FIXTURE_TENANT_ID = '11111111-1111-1111-1111-111111111111';
+    private const FIXTURE_ORG_ID = '22222222-2222-2222-2222-222222222222';
+
+    /**
+     * A JWT-SHAPED (header.payload.signature) access token whose payload carries
+     * `tenant_id`/`org_id` claims — deliberately UNSIGNED (arbitrary third segment):
+     * {@see Session}'s refresh-body resolution only ever base64url-decodes the
+     * payload segment and never checks the signature (that is exclusively
+     * {@see \Axiam\Sdk\Auth\JwksVerifier::verify()}'s job), so a real signature adds
+     * nothing to this test's non-vacuousness.
+     */
+    private function fixtureAccessToken(): string
+    {
+        $header = $this->base64url((string) json_encode(['alg' => 'EdDSA', 'typ' => 'JWT']));
+        $payload = $this->base64url((string) json_encode([
+            'sub' => 'user-fixture-0001',
+            'tenant_id' => self::FIXTURE_TENANT_ID,
+            'org_id' => self::FIXTURE_ORG_ID,
+            'exp' => 9999999999,
+        ]));
+
+        return $header . '.' . $payload . '.unsigned-test-fixture-signature';
+    }
+
+    private function base64url(string $bin): string
+    {
+        return rtrim(strtr(base64_encode($bin), '+/', '-_'), '=');
+    }
 
     public function testFiveConcurrentExpiredRequestsTriggerExactlyOneRefresh(): void
     {
@@ -62,11 +98,22 @@ final class SingleFlightRefreshTest extends TestCase
         $stack = HandlerStack::create($mock);
         $stack->push($history, 'history');
 
+        // Seed the shared cookie jar with a claims-bearing access token BEFORE any
+        // request fires, so Session::refreshIfNeeded() can resolve tenant_id/org_id
+        // from it (mirrors a real post-login state) — see Session::accessToken().
+        $cookieJar = new CookieJar();
+        $cookieJar->setCookie(new SetCookie([
+            'Name' => 'axiam_access',
+            'Value' => $this->fixtureAccessToken(),
+            'Domain' => 'api.test',
+            'Path' => '/',
+        ]));
+
         // Session's own refresh POST is sent through this SAME stack/mock queue, so
         // the refresh call is counted by the same $container as the 5 concurrent
         // requests below.
         $refreshHttp = new Client(['handler' => $stack]);
-        $session = new Session('https://api.test', self::TENANT, $refreshHttp);
+        $session = new Session('https://api.test', self::TENANT, $refreshHttp, $cookieJar);
 
         $stack->push(new AuthMiddleware($session), 'axiam_auth');
         $stack->push(new RefreshMiddleware($session), 'axiam_refresh');
@@ -93,6 +140,24 @@ final class SingleFlightRefreshTest extends TestCase
             1,
             $refreshCalls,
             'expected exactly one refresh call across 5 concurrent requests sharing an expired token',
+        );
+
+        $refreshBody = json_decode((string) $refreshCalls[0]['request']->getBody(), true);
+        self::assertIsArray($refreshBody, 'refresh request body must be valid JSON');
+        self::assertSame(
+            self::FIXTURE_TENANT_ID,
+            $refreshBody['tenant_id'] ?? null,
+            'refresh request body must carry tenant_id resolved from the access token claims (sdks/openapi.json RefreshRequest)',
+        );
+        self::assertSame(
+            self::FIXTURE_ORG_ID,
+            $refreshBody['org_id'] ?? null,
+            'refresh request body must carry org_id resolved from the access token claims (sdks/openapi.json RefreshRequest)',
+        );
+        self::assertArrayNotHasKey(
+            'tenant',
+            $refreshBody,
+            'refresh request body must NOT send a bare tenant slug field — RefreshRequest has no such field',
         );
 
         self::assertSame(

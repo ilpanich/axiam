@@ -120,9 +120,25 @@ public sealed class AuthInterceptor : Interceptor
         where TRequest : class
         where TResponse : class
     {
-        Metadata headers = context.Options.Headers ?? new Metadata();
-        RemoveIfPresent(headers, AuthorizationHeader);
-        RemoveIfPresent(headers, TenantHeader);
+        // Build a FRESH Metadata rather than mutating context.Options.Headers in place:
+        // when a caller supplied their own Headers/Metadata (e.g. a reused "default
+        // options" object), mutating it directly would silently corrupt the caller's
+        // instance and race two concurrent interceptor invocations sharing that list
+        // (Metadata is a List<Entry> wrapper, not safe for concurrent mutation). Copy
+        // every pre-existing NON-auth/NON-tenant entry into the fresh instance so
+        // caller-supplied custom metadata is preserved.
+        var headers = new Metadata();
+        if (context.Options.Headers is { } existing)
+        {
+            foreach (Metadata.Entry entry in existing)
+            {
+                if (!string.Equals(entry.Key, AuthorizationHeader, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(entry.Key, TenantHeader, StringComparison.OrdinalIgnoreCase))
+                {
+                    headers.Add(entry);
+                }
+            }
+        }
 
         // Non-blocking read — NEVER refresh synchronously on this hot path (mirrors the
         // REST AxiamHttpMessageHandler and the Java/Go sibling interceptors' token-accessor
@@ -136,16 +152,5 @@ public sealed class AuthInterceptor : Interceptor
 
         CallOptions newOptions = context.Options.WithHeaders(headers);
         return new ClientInterceptorContext<TRequest, TResponse>(context.Method, context.Host, newOptions);
-    }
-
-    private static void RemoveIfPresent(Metadata headers, string key)
-    {
-        for (int i = headers.Count - 1; i >= 0; i--)
-        {
-            if (string.Equals(headers[i].Key, key, StringComparison.OrdinalIgnoreCase))
-            {
-                headers.RemoveAt(i);
-            }
-        }
     }
 }

@@ -6,14 +6,14 @@ current_phase: 21
 current_phase_name: c-sdk
 status: executing
 stopped_at: Completed 21-c-sdk-03-PLAN.md
-last_updated: "2026-07-02T12:52:33.807Z"
+last_updated: "2026-07-02T13:15:15.028Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 21 execution started
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 49
-  completed_plans: 45
+  completed_plans: 46
   percent: 75
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 21 (c-sdk) — EXECUTING
-Plan: 4 of 7
+Plan: 5 of 7
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 21 execution started
 
@@ -139,6 +139,7 @@ Last activity: 2026-07-02 — Phase 21 execution started
 | Phase 21-c-sdk P01 | 35min | 3 tasks | 14 files |
 | Phase 21-c-sdk P02 | 12min | 2 tasks | 5 files |
 | Phase 21-c-sdk P03 | 25min | 2 tasks | 6 files |
+| Phase 21-c-sdk P04 | 30min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -313,6 +314,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 21-c-sdk] 21-03: RefreshGuard awaits the refresh delegate while still holding the SemaphoreSlim(1,1) gate (RESEARCH.md Pattern 2) so concurrent callers queue and share one Task<TokenPair>, proving SC#2 exactly
 - [Phase ?]: [Phase 21-c-sdk] 21-03: LoginResult omits a User/AxiamUser field in this plan (AxiamUser.cs is out of scope) -- deferred to 21-04 which introduces AxiamClient/AxiamUser
 - [Phase ?]: [Phase 21-c-sdk] 21-03: Jwk/JwksDocument use explicit JsonPropertyName attributes pinned to the exact lowercase JWKS wire field names rather than relying on a JsonSerializerOptions naming policy
+- [Phase ?]: 21-c-sdk-04: AxiamClientOptions.BaseUrl/TenantId are required for the future AddAxiam() DI path (21-06); AxiamClient's own constructor always sources tenant/base-URL from its own positional parameters, so SC#1 never depends on what an options object carries
+- [Phase ?]: 21-c-sdk-04: Added OrgId/OrgSlug to AxiamClientOptions (Rule 2) — the real LoginRequest/RefreshRequest handlers require an organization identifier beyond CONTRACT.md §5's tenant-only minimum, without which LoginAsync/RefreshAsync cannot succeed against the real server
+- [Phase ?]: 21-c-sdk-04: AuthzRestClient.CheckAccessAsync signature is (action, resourceId, scope, subjectId, ct) rather than the plan text's literal ordering — matches the server's CheckAccessBody field priority and C#'s optional-params-trail-required-ones rule
 
 ### Pending Todos
 
@@ -333,6 +337,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T12:52:33.793Z
+Last session: 2026-07-02T13:14:15.526Z
 Stopped at: Completed 21-c-sdk-03-PLAN.md
 Resume file: None

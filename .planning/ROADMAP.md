@@ -839,7 +839,7 @@ Plans:
   4. `Grpc.Tools` MSBuild integration generates gRPC stubs at build time (documented as the C# exception to the repo-wide buf pipeline); no `ServerCertificateCustomValidationCallback` bypass present in SDK source.
   5. `dotnet pack` succeeds and produces a valid `.nupkg`; NuGet publish pipeline with credential setup is documented and operational.
 
-**Plans**: 3/7 plans executed
+**Plans**: 4/7 plans executed
 
 Plans:
 **Wave 1**
@@ -853,7 +853,7 @@ Plans:
 
 **Wave 3** *(depends on 21-01 + 21-03)*
 
-- [ ] 21-04-PLAN.md — REST transport + `AxiamClient` facade: cookie jar + client-override safety + no-TLS-bypass + tenant-required ctor + async auth flow + FND-04 authz (SC#1, D-09/D-10, §3/§4/§5/§6)
+- [x] 21-04-PLAN.md — REST transport + `AxiamClient` facade: cookie jar + client-override safety + no-TLS-bypass + tenant-required ctor + async auth flow + FND-04 authz (SC#1, D-09/D-10, §3/§4/§5/§6)
 
 **Wave 4** *(parallel; depend on 21-04)*
 
@@ -897,7 +897,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
 | 20. Java SDK | 9/9 | Complete    | 2026-07-02 |
-| 21. C# SDK | 3/7 | In Progress|  |
+| 21. C# SDK | 4/7 | In Progress|  |
 | 22. PHP SDK | 0/? | Not started | - |
 
 ---

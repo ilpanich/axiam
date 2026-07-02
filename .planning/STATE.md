@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 21
 current_phase_name: c-sdk
 status: executing
-stopped_at: Phase 21 context gathered
-last_updated: "2026-07-02T12:25:49.941Z"
+stopped_at: Completed 21-c-sdk-02-PLAN.md
+last_updated: "2026-07-02T12:37:47.201Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 21 execution started
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 49
-  completed_plans: 43
+  completed_plans: 44
   percent: 75
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 21 (c-sdk) — EXECUTING
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 21 execution started
 
@@ -137,6 +137,7 @@ Last activity: 2026-07-02 — Phase 21 execution started
 | Phase 20-java-sdk P08 | 25min | 2 tasks | 5 files |
 | Phase 20-java-sdk P09 | 14min | 3 tasks | 15 files |
 | Phase 21-c-sdk P01 | 35min | 3 tasks | 14 files |
+| Phase 21-c-sdk P02 | 12min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -307,6 +308,7 @@ Recent decisions affecting current work:
 - [Phase ?]: 21-01: Google.Protobuf pinned to 2.80.0 matching Grpc.Net.Client/Grpc.Tools' 2.80.x line (dotnet restore unavailable locally to resolve-then-lock)
 - [Phase ?]: 21-01: Sensitive<T> uses the open-generic JsonConverter attribute form (typeof(SensitiveJsonConverter<>)) so redaction generalizes to any T
 - [Phase ?]: 21-01: Added InternalsVisibleTo(Axiam.Sdk.Tests) on Axiam.Sdk so tests can exercise Sensitive<T>'s internal factory/Reveal() without widening public API
+- [Phase ?]: CreateReceivedHandler captures IChannel via closure parameter (not sender-cast) for direct fake-channel testability, mirroring Java's deliverCallback(channel, ...) shape — 21-c-sdk-02: functionally identical to RESEARCH.md's sender-cast draft but avoids needing a real AsyncEventingBasicConsumer wrapper in tests
 
 ### Pending Todos
 
@@ -327,6 +329,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T12:24:41.062Z
-Stopped at: Phase 21 context gathered
-Resume file: .planning/phases/21-c-sdk/21-CONTEXT.md
+Last session: 2026-07-02T12:37:47.189Z
+Stopped at: Completed 21-c-sdk-02-PLAN.md
+Resume file: None

@@ -60,6 +60,15 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
     private static readonly HashSet<string> StateChangingMethods =
         new(StringComparer.OrdinalIgnoreCase) { "POST", "PUT", "PATCH", "DELETE" };
 
+    /// <summary>
+    /// Header names that <see cref="ApplyHeaders"/> owns and re-derives on every request —
+    /// excluded when copying a caller's headers onto the 401-retry clone (WR-05) so the
+    /// retry never carries a stale copy of a managed header. Content-Type is included for
+    /// completeness (it rides on the copied body content, not the request headers).
+    /// </summary>
+    private static readonly HashSet<string> ApplyHeaderManagedNames =
+        new(StringComparer.OrdinalIgnoreCase) { AuthorizationHeaderName, TenantHeaderName, CsrfHeaderName, "Content-Type" };
+
     private static readonly HttpRequestOptionsKey<bool> RetryMarkerKey = new("axiam-sdk-retried-once");
 
     private readonly CookieContainer _cookieContainer;
@@ -138,6 +147,20 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
                 }
                 retryRequest.Content = retryContent;
             }
+            // Preserve any caller-set request headers on the retry clone, EXCEPT the ones
+            // ApplyHeaders manages itself (Authorization/X-Tenant-Id/X-CSRF-Token; and
+            // Content-Type, which travels with the copied body) — otherwise a future
+            // consumer of the internal TransportHttpClient seam that set custom headers
+            // would silently lose them on a 401 retry (WR-05).
+            foreach (var header in request.Headers)
+            {
+                if (ApplyHeaderManagedNames.Contains(header.Key))
+                {
+                    continue;
+                }
+                retryRequest.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            }
+
             // Marks this clone so a second 401 on the retry itself does NOT trigger yet
             // another refresh attempt — exactly one retry, never a loop (§9.3).
             retryRequest.Options.Set(RetryMarkerKey, true);

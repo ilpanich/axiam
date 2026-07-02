@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: — Client SDKs
-current_phase: 21
-current_phase_name: c-sdk
+current_phase: 22
+current_phase_name: php-sdk
 status: executing
-stopped_at: Phase 22 context gathered
-last_updated: "2026-07-02T17:25:42.075Z"
+stopped_at: Completed 22-01-PLAN.md
+last_updated: "2026-07-02T18:12:54.663Z"
 last_activity: 2026-07-02
-last_activity_desc: Phase 21 execution started
+last_activity_desc: Phase 22 execution started
 progress:
   total_phases: 8
   completed_phases: 7
-  total_plans: 49
-  completed_plans: 49
-  percent: 88
+  total_plans: 58
+  completed_plans: 50
+  percent: 86
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 21 — c-sdk
+**Current focus:** Phase 22 — php-sdk
 
 ## Current Position
 
-Phase: 21 (c-sdk) — EXECUTING
-Plan: 7 of 7
+Phase: 22 (php-sdk) — EXECUTING
+Plan: 2 of 9
 Status: Ready to execute
-Last activity: 2026-07-02 — Phase 21 execution started
+Last activity: 2026-07-02 — Phase 22 execution started
 
 ## Performance Metrics
 
@@ -143,6 +143,7 @@ Last activity: 2026-07-02 — Phase 21 execution started
 | Phase 21-c-sdk P05 | 45min | 2 tasks | 5 files |
 | Phase 21-c-sdk P06 | 45min | 3 tasks | 11 files |
 | Phase 21-c-sdk P07 | 45min | 3 tasks | 10 files |
+| Phase 22 P01 | 35min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -328,6 +329,9 @@ Recent decisions affecting current work:
 - [Phase ?]: AspNetCoreSample uses MVC controllers with literal [Authorize]/[Authorize(Policy=documents:read)] attributes so the plan's literal source-assertion acceptance criteria are grep-satisfiable
 - [Phase ?]: build-test CI job has no PR-only if restriction so it re-runs on the tag-push trigger too; publish's needs: build-test gates the actual tagged commit
 - [Phase ?]: dotnet nuget push guarded by if: secrets.NUGET_API_KEY != '' at step level so an absent key degrades to a documented maintainer action instead of failing the pipeline (D-04)
+- [Phase ?]: [Phase 22-php-sdk] 22-01: symfony/event-dispatcher-contracts pinned ^2.5||^3.0 not ^7.0||^8.0 -- versions independently of the Symfony component line; security-core 7.x/8.x requires ^2.5|^3 of it
+- [Phase ?]: [Phase 22-php-sdk] 22-01: Sensitive stores its value in a private static WeakMap keyed by $this (not an instance property) so print_r()/var_export()/var_dump() enumerate zero properties -- required to satisfy the plan's print_r-must-not-leak behavior
+- [Phase ?]: [Phase 22-php-sdk] 22-01: NetworkError::fromException() never stores the caught Throwable as previous -- a wrapped Guzzle exception can itself carry a live PSR-7 response with the same sensitive headers, reopening the CR-04 leak path
 
 ### Pending Todos
 
@@ -345,9 +349,10 @@ Raised 2026-06-02 (SAML feature-flag work):
 - 36 Dependabot vulnerabilities on the default branch (13 high / 15 moderate / 8 low) — surfaced on push 2026-06-02; triage separately (relates to Phase 6 REQ-9 cargo-audit/cargo-deny work)
 - Tracking note: `02-VERIFICATION.md` status field still reads `human_needed`, but the lone human item was closed via Playwright UAT (`02-HUMAN-UAT.md` status: complete, result: pass, evidence in uat-evidence/) — Phase 2 is complete despite the stale verification-file field
 - `gsd-sdk phase.add` sentinel bug: `99-followups/` dir inflates max+1 counter → returns 100; create phase dirs 15–22 directly, do NOT use phase.add for this milestone
+- [Phase 22-php-sdk] 22-01: PHPStan level-6 verification could not run in this sandbox -- api.github.com zipball for phpstan/phpstan returns 403 'GitHub access to this repository is not enabled for this session'; git-clone fallback requires an impractical 7GB+ full-history mirror. Deferred to sdk-ci-php.yml CI (unrestricted infra).
 
 ## Session Continuity
 
-Last session: 2026-07-02T16:27:19.927Z
-Stopped at: Phase 22 context gathered
-Resume file: .planning/phases/22-php-sdk/22-CONTEXT.md
+Last session: 2026-07-02T18:12:54.649Z
+Stopped at: Completed 22-01-PLAN.md
+Resume file: None

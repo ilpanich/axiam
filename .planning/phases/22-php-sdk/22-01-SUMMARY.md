@@ -206,3 +206,8 @@ None - no external service configuration required.
 ---
 *Phase: 22-php-sdk*
 *Completed: 2026-07-02*
+
+## Self-Check: PASSED
+
+All 11 created/modified files confirmed present on disk; all 4 commit hashes
+(`7b57e4f`, `9c5f018`, `9c79a95`, `37aa367`) confirmed present in `git log --oneline --all`.

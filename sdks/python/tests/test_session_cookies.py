@@ -344,3 +344,22 @@ def test_custom_ca_allows_self_signed_server_sync(
         assert response.status_code == 200
     finally:
         session.close()
+
+
+def test_prepare_request_gates_tenant_and_csrf_headers_by_origin() -> None:
+    """Defense in depth: X-Tenant-ID / X-CSRF-Token are attached for a
+    same-origin request but withheld from a cross-origin one, so the tenant
+    identifier and CSRF token can never leak to a third-party host (e.g. via
+    an absolute cross-origin URL or a followed redirect)."""
+    session = _Session(base_url="https://api.example.com", tenant_slug="tenant-a")
+    session._csrf_token = "csrf-secret"
+
+    same_origin = httpx.Request("POST", "https://api.example.com/v1/things")
+    session._prepare_request(same_origin)
+    assert same_origin.headers["X-Tenant-ID"] == "tenant-a"
+    assert same_origin.headers["X-CSRF-Token"] == "csrf-secret"
+
+    cross_origin = httpx.Request("POST", "https://evil.example.net/v1/things")
+    session._prepare_request(cross_origin)
+    assert "X-Tenant-ID" not in cross_origin.headers
+    assert "X-CSRF-Token" not in cross_origin.headers

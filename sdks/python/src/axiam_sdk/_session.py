@@ -68,6 +68,10 @@ class _Session:
         logger: Any = None,
     ) -> None:
         self.base_url = base_url
+        # Host of our own origin — used to gate tenant/CSRF header injection
+        # so those secrets never travel to a different host (defense in depth
+        # against a cross-origin request or a followed redirect).
+        self._base_host = httpx.URL(base_url).host
         self.tenant_slug = tenant_slug
         self._timeout = timeout or httpx.Timeout(
             connect=_DEFAULT_CONNECT_TIMEOUT,
@@ -139,7 +143,17 @@ class _Session:
     def _prepare_request(self, request: httpx.Request) -> None:
         """Single choke-point request decorator (mirrors Go's
         ``decorateRequest``): sets ``X-Tenant-ID`` on every request and
-        echoes the captured CSRF token on state-changing methods."""
+        echoes the captured CSRF token on state-changing methods.
+
+        Defense in depth: if the request targets a host other than this
+        session's own origin (e.g. a request built against an absolute
+        third-party URL, or a followed redirect), skip injection so the
+        tenant identifier and CSRF token are never leaked cross-origin. A
+        relative/host-less request (the normal case, merged against
+        ``base_url``) is treated as same-origin and decorated as before."""
+        req_host = request.url.host
+        if req_host and req_host != self._base_host:
+            return
         request.headers["X-Tenant-ID"] = self.tenant_slug
         if request.method.upper() in _STATE_CHANGING_METHODS:
             token = self._get_csrf_token()

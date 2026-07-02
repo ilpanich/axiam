@@ -500,7 +500,7 @@ Deliver `sdks/java/` with Spring Security integration.
 - [ ] Full baseline; `ReentrantLock` single-flight refresh; OkHttp `CookieManager`
 - [ ] OkHttp 4.12 + grpc-netty-shaded 1.82 + amqp-client 5.22; nimbus-jose-jwt 10.x + Tink for EdDSA
 - [ ] Spring Security filter integration; builder requires `tenantId`
-- [ ] Examples; **Maven Central publish** (`io.axiam:axiam-sdk`) incl. **GPG signing setup** task
+- [ ] Examples; **Maven Central publish** (`io.axiam:axiam-sdk` SDK jar **and** `io.axiam:axiam-bom` Bill-of-Materials — the BOM coordinate was added during Phase 20 discuss, D-23, to align consumer dependency versions) incl. **GPG signing setup** task
 
 ---
 

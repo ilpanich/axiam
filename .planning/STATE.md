@@ -6,14 +6,14 @@ current_phase: 20
 current_phase_name: Java SDK
 status: executing
 stopped_at: Phase 20 context gathered
-last_updated: "2026-07-02T07:08:57.153Z"
+last_updated: "2026-07-02T07:16:03.945Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 20 execution started
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 42
-  completed_plans: 34
+  completed_plans: 35
   percent: 63
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 20 (Java SDK) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 20 execution started
 
@@ -127,6 +127,7 @@ Last activity: 2026-07-02 — Phase 20 execution started
 | Phase 19-python-sdk P06 | 40min | 3 tasks | 8 files |
 | Phase 19-python-sdk P07 | 45min | 3 tasks | 10 files |
 | Phase 20-java-sdk P01 | 10min | 3 tasks | 6 files |
+| Phase 20-java-sdk P02 | 8min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -277,6 +278,7 @@ Recent decisions affecting current work:
 - [Phase 20-java-sdk]: protobuf.version pinned to 3.25.8 (verified via mvn dependency:tree against grpc-protobuf 1.82.0's actual transitive protobuf-java version, not the RESEARCH.md 4.29.0 placeholder)
 - [Phase 20-java-sdk]: buf.gen.yaml Java plugin entries commented out (drift-check-only) rather than deleted, per D-21's optional CI drift-check allowance -- authoritative Java gRPC codegen is protobuf-maven-plugin via mvn generate-sources
 - [Phase 20-java-sdk]: tls-bypass-gate.sh excludes sdks/java/src/test via grep --exclude-dir=test so a future reflection-based TLS regression test cannot self-trip the gate
+- [Phase ?]: [Phase 20-java-sdk] 20-02: Hmac.verify canonicalizes via ObjectNode.remove in place preserving Rust struct-declaration field order (not alphabetized), re-proven against the real Phase-19 fixture in Java; manually confirmed (not committed) a TreeMap/sorted variant breaks the two valid vectors, proving the ordering invariant is test-enforced
 
 ### Pending Todos
 
@@ -297,6 +299,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T07:08:24.808Z
+Last session: 2026-07-02T07:15:16.083Z
 Stopped at: Phase 20 context gathered
 Resume file: .planning/phases/20-java-sdk/20-CONTEXT.md

@@ -39,6 +39,11 @@
   "extra": {
     "branch-alias": {
       "dev-main": "0.x-dev"
+    },
+    "laravel": {
+      "providers": [
+        "Axiam\\Sdk\\Laravel\\AxiamServiceProvider"
+      ]
     }
   },
   "scripts": {

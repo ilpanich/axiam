@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 20
 current_phase_name: Java SDK
 status: executing
-stopped_at: Completed 20-05-PLAN.md
-last_updated: "2026-07-02T08:06:56.666Z"
+stopped_at: Completed 20-06-PLAN.md
+last_updated: "2026-07-02T08:15:25.967Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 20 execution started
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 42
-  completed_plans: 38
+  completed_plans: 39
   percent: 63
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 20 (Java SDK) — EXECUTING
-Plan: 6 of 9
+Plan: 7 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 20 execution started
 
@@ -131,6 +131,7 @@ Last activity: 2026-07-02 — Phase 20 execution started
 | Phase 20-java-sdk P03 | 12min | 2 tasks | 10 files |
 | Phase 20-java-sdk P04 | 16min | 3 tasks | 8 files |
 | Phase 20-java-sdk P05 | 25min | 3 tasks | 11 files |
+| Phase 20-java-sdk P06 | 10min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -288,6 +289,9 @@ Recent decisions affecting current work:
 - [Phase 20-java-sdk]: 20-04: RefreshGuard's join() path unwraps CompletionException so every waiter receives the SAME exception instance the refreshing thread threw (not a wrapped CompletionException) — Matches the plan's literal 'same exception to every waiter' requirement more precisely than the research pattern's unmodified join() call
 - [Phase ?]: [Phase 20-java-sdk] 20-05: SessionState reads the current access token straight from the shared cookie jar (no separate in-memory cache); AuthInterceptor/AuthAuthenticator special-case the refresh endpoint's own request path to avoid a self-deadlock, since the refresh POST runs through the same interceptor-decorated OkHttpClient
 - [Phase ?]: [Phase 20-java-sdk] 20-05: Fixed sdks/java/scripts/tls-bypass-gate.sh's over-broad ban on the literal method names hostnameVerifier(/sslSocketFactory( -- verified via OkHttp 4.12 source that these are the ONLY stdlib-only path to implement CONTRACT.md section 6's customCa escape hatch; narrowed the gate to concrete bypass idioms (empty checkServerTrusted, TrustAllCerts, ALLOW_ALL_HOSTNAME_VERIFIER, NoopHostnameVerifier, permissive -> true lambdas)
+- [Phase 20-java-sdk]: 20-06: Jackson ObjectMapper used for the Spring filter's JSON error body instead of manual string concatenation, closing a JSON-injection risk in the RESEARCH.md reference pattern
+- [Phase 20-java-sdk]: 20-06: AxiamAutoConfiguration ships real @ConditionalOnMissingBean filter + SecurityFilterChain beans (axiam.base-url/axiam.tenant-id properties), not an empty marker class, so it can literally yield to a consumer's own SecurityConfig bean per D-15
+- [Phase 20-java-sdk]: 20-06: added test-scoped org.springframework:spring-test:6.2.11 (pinned to spring-security-web's transitive spring-core) for AxiamAuthenticationFilterIT's MockFilterChain-level test, avoiding a full spring-boot-starter-test dependency
 
 ### Pending Todos
 
@@ -308,6 +312,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T08:06:56.653Z
-Stopped at: Completed 20-05-PLAN.md
+Last session: 2026-07-02T08:15:25.955Z
+Stopped at: Completed 20-06-PLAN.md
 Resume file: None

@@ -55,6 +55,14 @@
       <version>4.12.0</version>
     </dependency>
     <dependency>
+      <!-- Provides JavaNetCookieJar, the CookieManager-backed CookieJar
+           adapter used by AxiamClient.Builder.build() (§4/D-27) — a separate
+           artifact from okhttp core as of the 4.x line. -->
+      <groupId>com.squareup.okhttp3</groupId>
+      <artifactId>okhttp-urlconnection</artifactId>
+      <version>4.12.0</version>
+    </dependency>
+    <dependency>
       <groupId>io.grpc</groupId>
       <artifactId>grpc-netty-shaded</artifactId>
       <version>1.82.0</version>

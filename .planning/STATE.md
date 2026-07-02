@@ -6,14 +6,14 @@ current_phase: 22
 current_phase_name: php-sdk
 status: executing
 stopped_at: Completed 22-02-PLAN.md
-last_updated: "2026-07-02T18:22:36.876Z"
+last_updated: "2026-07-02T18:32:51.625Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 22 execution started
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 58
-  completed_plans: 51
+  completed_plans: 52
   percent: 88
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 22 (php-sdk) — EXECUTING
-Plan: 3 of 9
+Plan: 4 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 22 execution started
 
@@ -145,6 +145,7 @@ Last activity: 2026-07-02 — Phase 22 execution started
 | Phase 21-c-sdk P07 | 45min | 3 tasks | 10 files |
 | Phase 22 P01 | 35min | 3 tasks | 9 files |
 | Phase 22-php-sdk P02 | 20min | 3 tasks | 7 files |
+| Phase 22-php-sdk P03 | 9min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -336,6 +337,8 @@ Recent decisions affecting current work:
 - [Phase ?]: firebase/php-jwt EdDSA sign/verify expects the key argument as standard (non-urlsafe) base64, not base64url — fixtures store base64url for portability but re-encode to standard base64 at call sites
 - [Phase ?]: JwksVerifier::ensureFresh() swallows discovery/JWKS fetch failures and leaves the existing cache untouched rather than propagating, relying on the existing unknown-kid-after-refetch fail-closed path
 - [Phase ?]: Committed tests/Fixtures/verify_fixture.php as a standalone CLI check (not part of files_modified frontmatter) to satisfy the plan's own Task 1 verify command
+- [Phase ?]: [Phase 22-php-sdk] 22-03: Generated real fixture signatures via a throwaway cargo #[test] calling axiam-amqp's sign_payload directly, reverted after use -- PHP SDK has zero runtime/test dependency on axiam-amqp
+- [Phase ?]: [Phase 22-php-sdk] 22-03: Slash+non-ASCII HMAC regression payload placed inside AuthzRequest.action (plain String) rather than a new struct field -- reproduces Pitfall 1 without any server schema change
 
 ### Pending Todos
 
@@ -357,6 +360,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T18:22:36.863Z
+Last session: 2026-07-02T18:32:25.868Z
 Stopped at: Completed 22-02-PLAN.md
 Resume file: None

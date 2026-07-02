@@ -57,8 +57,9 @@ import java.util.concurrent.CompletableFuture;
  * authenticator here and, by future plans, the gRPC transport (D-07/D-08:
  * "one guard"). Package-internal accessors ({@link #refreshGuard()},
  * {@link #tenantId()}, {@link #baseUrl()}, {@link #okHttpClient()},
- * {@link #customCa()}) expose this seam without requiring the gRPC plan
- * (20-08) to edit this class.
+ * {@link #customCa()}, {@link #session()}) expose this seam without
+ * requiring the gRPC plan (20-08) or the examples (20-09) to edit this
+ * class.
  */
 public final class AxiamClient implements AutoCloseable {
 
@@ -248,6 +249,17 @@ public final class AxiamClient implements AutoCloseable {
 
     public byte @Nullable [] customCa() {
         return customCaPem;
+    }
+
+    /**
+     * The SAME {@link SessionState} instance this client's REST transport
+     * uses — required by {@link io.axiam.sdk.grpc.GrpcAuthzClient}'s public
+     * constructor so the gRPC transport shares one session/guard pair with
+     * REST (D-07/D-08 "one guard"), never a second, independently
+     * constructed session.
+     */
+    public SessionState session() {
+        return session;
     }
 
     // ------------------------------------------------------------------

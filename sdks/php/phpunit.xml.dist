@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         failOnWarning="true"
+         failOnRisky="true"
+>
+    <testsuites>
+        <!-- Default: everything under tests/ except the framework-bridge integration
+             tests below (SC#5 entry point: `composer test` / `composer test-unit`). -->
+        <testsuite name="unit">
+            <directory suffix="Test.php">tests</directory>
+            <exclude>tests/LaravelMiddlewareTest.php</exclude>
+            <exclude>tests/SymfonyAuthSubscriberTest.php</exclude>
+        </testsuite>
+        <!-- Laravel/Symfony bridge tests (wave-5 plans) require the dev-only
+             illuminate/* and symfony/* packages declared in require-dev. -->
+        <testsuite name="integration">
+            <directory suffix="MiddlewareTest.php">tests</directory>
+            <directory suffix="SubscriberTest.php">tests</directory>
+        </testsuite>
+    </testsuites>
+
+    <source>
+        <include>
+            <directory suffix=".php">src</directory>
+        </include>
+    </source>
+</phpunit>

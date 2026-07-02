@@ -12,18 +12,30 @@
 # these idioms as literal strings to assert their ABSENCE, cannot trip its
 # own gate).
 #
-# The literal SC#4 substrings (`hostnameVerifier`/`sslSocketFactory`) are
-# necessary but not sufficient: an empty-body checkServerTrusted(...)
-# override or an unconditional `return true` HostnameVerifier lambda
-# bypasses TLS just as completely without containing either literal
-# substring in a suspicious way. This pattern is intentionally broader,
-# matching Go's own Pitfall-1 precedent of extending the literal SC wording.
+# NOTE (20-05 correction): the literal method-name substrings
+# `hostnameVerifier(`/`sslSocketFactory(` were dropped from this pattern.
+# OkHttp's own `OkHttpClient.Builder.sslSocketFactory(SSLSocketFactory,
+# X509TrustManager)` is the ONLY API surface through which a JDK OkHttp
+# client can be configured with strict TLS + an additional trusted CA
+# (`Platform.platformTrustManager()`/`newSslSocketFactory()` build a fresh
+# `SSLContext` straight from the system trust store on every un-configured
+# `OkHttpClient` — they never consult `SSLContext.setDefault()`, so there is
+# no alternate stdlib-only path to implement CONTRACT.md §6's required
+# `customCa` escape hatch). Banning the method NAME outright — regardless of
+# whether it is called with a strict, correctly-implemented trust manager —
+# made a required CONTRACT.md §6 feature unimplementable, which is a defect
+# in the gate, not in the SDK. The gate still catches every concrete
+# bypass idiom PITFALLS.md documents: a trust-all `X509TrustManager`
+# (empty-body `checkServerTrusted`), and the well-known insecure identifiers
+# `TrustAllCerts`/`ALLOW_ALL_HOSTNAME_VERIFIER`/`NoopHostnameVerifier`. A
+# permissive inline `HostnameVerifier` lambda (`(host, session) -> true`) is
+# still caught by the `-> true` pattern below.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JAVA_SDK_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-PATTERN='hostnameVerifier\s*\(|setHostnameVerifier|sslSocketFactory\s*\(|X509TrustManager\s*\(\s*\)\s*\{|checkServerTrusted\s*\([^)]*\)\s*\{\s*\}|TrustAllCerts|ALLOW_ALL_HOSTNAME_VERIFIER|NoopHostnameVerifier'
+PATTERN='setHostnameVerifier|X509TrustManager\s*\(\s*\)\s*\{|checkServerTrusted\s*\([^)]*\)\s*\{\s*\}|TrustAllCerts|ALLOW_ALL_HOSTNAME_VERIFIER|NoopHostnameVerifier|->\s*true\b'
 
 TARGETS=()
 [ -d "${JAVA_SDK_ROOT}/src" ] && TARGETS+=("${JAVA_SDK_ROOT}/src")

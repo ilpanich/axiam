@@ -349,6 +349,15 @@ public sealed class AxiamClient : IDisposable
         {
             throw NetworkError.FromException(ex, $"POST {path} failed");
         }
+        catch (OperationCanceledException ex) when (ex.CancellationToken != cancellationToken)
+        {
+            // An OperationCanceledException/TaskCanceledException whose token is NOT the
+            // caller's token comes from HttpClient.Timeout expiring (RequestTimeout) — a
+            // transport-level timeout, which CONTRACT.md §2 maps to NetworkError. A genuine
+            // caller-supplied cancellation (ex.CancellationToken == cancellationToken) is
+            // deliberately NOT caught here and propagates as-is.
+            throw NetworkError.FromException(ex, $"POST {path} timed out");
+        }
     }
 
     private static async Task<JsonElement> ReadJsonAsync(HttpResponseMessage response, CancellationToken cancellationToken)

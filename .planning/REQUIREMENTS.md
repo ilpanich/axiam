@@ -525,10 +525,10 @@ Deliver `sdks/csharp/` with ASP.NET Core integration.
 Deliver `sdks/php/` (REST-first; gRPC guarded by runtime capability).
 
 ### Acceptance Criteria
-- [ ] Full baseline minus standard-FPM gRPC; Guzzle `HandlerStack` single-refresh middleware; Guzzle `CookieJar`; `verify: true`
-- [ ] Guzzle 7.x REST + php-amqplib 3.7 AMQP + firebase/php-jwt 6.11; optional grpc PECL behind `extension_loaded('grpc')` guard with documented Swoole/RoadRunner requirement
-- [ ] Laravel + Symfony middleware helpers
-- [ ] Examples; **Packagist publish** (`axiam/axiam-sdk`)
+- [x] Full baseline minus standard-FPM gRPC; Guzzle `HandlerStack` single-refresh middleware; Guzzle `CookieJar`; `verify: true`
+- [x] Guzzle 7.x REST + php-amqplib 3.7 AMQP + firebase/php-jwt 6.11; optional grpc PECL behind `extension_loaded('grpc')` guard with documented Swoole/RoadRunner requirement
+- [x] Laravel + Symfony middleware helpers
+- [x] Examples; **Packagist publish** (`axiam/axiam-sdk`) — publish pipeline shipped (`sdk-ci-php.yml`); live publish is a maintainer `user_setup` (mirror repo + `PHP_SDK_MIRROR_TOKEN`)
 
 ---
 
@@ -560,7 +560,7 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
 | PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Complete |
 | JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Complete |
 | CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Complete |
-| PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only | Pending |
+| PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only | Complete |
 
 **Coverage: 12/12 v1.1 requirements mapped (100%)**
 

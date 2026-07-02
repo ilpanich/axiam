@@ -926,7 +926,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
 | 20. Java SDK | 9/9 | Complete    | 2026-07-02 |
 | 21. C# SDK | 7/7 | Complete   | 2026-07-02 |
-| 22. PHP SDK | 9/9 | Complete   | 2026-07-02 |
+| 22. PHP SDK | 9/9 | Complete    | 2026-07-02 |
 
 ---
 

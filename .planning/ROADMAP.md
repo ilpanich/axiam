@@ -795,7 +795,7 @@ Plans:
   4. `OkHttpClient` uses `CookieManager` for cookie persistence; no `hostnameVerifier` or `sslSocketFactory` bypass is present anywhere in SDK source.
   5. Maven Central publish pipeline with GPG signing is documented and operational; `mvn verify` passes including signing.
 
-**Plans**: 6/9 plans executed
+**Plans**: 7/9 plans executed
 
 Plans:
 **Wave 1**
@@ -812,7 +812,7 @@ Plans:
 
 - [x] 20-05-PLAN.md — REST core: SessionState + interceptors + AxiamClient builder (SC#1, D-27) + auth (login/verifyMfa/refresh/logout) + authz (checkAccess/can/batchCheck)
 - [x] 20-06-PLAN.md — Spring Security: AxiamAuthenticationFilter (cross-tenant check) + @AutoConfiguration (SC#3 core)
-- [ ] 20-07-PLAN.md — AMQP consumer: verify-before-handler + §8 ack/nack matrix + built-in recovery (D-13)
+- [x] 20-07-PLAN.md — AMQP consumer: verify-before-handler + §8 ack/nack matrix + built-in recovery (D-13)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -873,7 +873,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
-| 20. Java SDK | 6/9 | In Progress|  |
+| 20. Java SDK | 7/9 | In Progress|  |
 | 21. C# SDK | 0/? | Not started | - |
 | 22. PHP SDK | 0/? | Not started | - |
 

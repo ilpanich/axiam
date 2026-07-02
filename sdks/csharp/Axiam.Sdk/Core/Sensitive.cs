@@ -1,5 +1,12 @@
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+
+// Grants the Wave 0 test project access to internal-only members (Sensitive<T>'s
+// internal constructor/Reveal(), the internal Sensitive.Of<T> factory) so
+// SensitiveRedactionTests can exercise the redaction behavior directly without
+// widening any public surface (CONTRACT.md §7 requires these stay internal-only).
+[assembly: InternalsVisibleTo("Axiam.Sdk.Tests")]
 
 namespace Axiam.Sdk.Core;
 

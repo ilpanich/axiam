@@ -795,7 +795,7 @@ Plans:
   4. `OkHttpClient` uses `CookieManager` for cookie persistence; no `hostnameVerifier` or `sslSocketFactory` bypass is present anywhere in SDK source.
   5. Maven Central publish pipeline with GPG signing is documented and operational; `mvn verify` passes including signing.
 
-**Plans**: 2/9 plans executed
+**Plans**: 3/9 plans executed
 
 Plans:
 **Wave 1**
@@ -805,7 +805,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 20-02-PLAN.md — AMQP HMAC foundation: Hmac.verify (wire-order canonicalization) + ErrDrop + real cross-language fixture + HmacVerifyTest
-- [ ] 20-03-PLAN.md — Token safety & error taxonomy: Sensitive (D-17) + AuthError/AuthzError/NetworkError + ErrorMapper redact-before-wrap (D-18/CR-04) + records
+- [x] 20-03-PLAN.md — Token safety & error taxonomy: Sensitive (D-17) + AuthError/AuthzError/NetworkError + ErrorMapper redact-before-wrap (D-18/CR-04) + records
 - [ ] 20-04-PLAN.md — Verification & concurrency core: RefreshGuard single-flight (SC#2) + JwksVerifier EdDSA-pinned + cross-tenant helper (D-19)
 
 **Wave 3** *(blocked on Wave 2 completion)*
@@ -873,7 +873,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
-| 20. Java SDK | 2/9 | In Progress|  |
+| 20. Java SDK | 3/9 | In Progress|  |
 | 21. C# SDK | 0/? | Not started | - |
 | 22. PHP SDK | 0/? | Not started | - |
 

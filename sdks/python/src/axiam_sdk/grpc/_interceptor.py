@@ -78,7 +78,7 @@ class SyncAuthInterceptor(_AuthMetadataMixin, grpc.UnaryUnaryClientInterceptor):
         client_call_details: SyncClientCallDetails,
         request: _TRequest,
     ) -> Any:
-        new_details = client_call_details._replace(  # type: ignore[attr-defined]
+        new_details = client_call_details._replace(
             metadata=self._build_metadata(client_call_details.metadata)
         )
         return continuation(new_details, request)
@@ -100,7 +100,7 @@ class AsyncAuthInterceptor(_AuthMetadataMixin, grpc.aio.UnaryUnaryClientIntercep
         client_call_details: AioClientCallDetails,
         request: _TRequest,
     ) -> _TResponse | UnaryUnaryCall[_TRequest, _TResponse]:
-        new_details = client_call_details._replace(  # type: ignore[attr-defined]
+        new_details = client_call_details._replace(
             metadata=self._build_metadata(client_call_details.metadata)
         )
         return await continuation(new_details, request)

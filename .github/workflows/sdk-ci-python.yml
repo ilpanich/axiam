@@ -122,8 +122,13 @@ jobs:
       - name: Install dependencies (incl. fastapi/django/dev extras)
         run: pip install -e 'sdks/python[dev,fastapi,django]'
 
+      # Run from the SDK root so mypy discovers sdks/python/pyproject.toml's
+      # [tool.mypy] per-module overrides (grpc/django/generated-stub
+      # exemptions). Invoked from the repo root, mypy reads config from the
+      # CWD and silently ignores those overrides.
       - name: mypy --strict
-        run: mypy --strict sdks/python/src
+        working-directory: sdks/python
+        run: mypy --strict src
 
       - name: ruff check
         run: ruff check sdks/python

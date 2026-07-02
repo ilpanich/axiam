@@ -78,6 +78,23 @@ ignore_errors = true
 module = ["django.*"]
 ignore_missing_imports = true
 
+# grpcio ships no py.typed marker / inline type stubs (the third-party
+# `types-grpcio` package is incomplete for grpc.aio and would introduce its
+# own strict-mode gaps). Suppress import-untyped for the grpc runtime imports
+# in the gRPC client/interceptor/TLS modules — the SDK's own code around them
+# stays fully typed.
+[[tool.mypy.overrides]]
+module = ["grpc", "grpc.*"]
+ignore_missing_imports = true
+
+# With grpc untyped (above), grpc.UnaryUnaryClientInterceptor /
+# grpc.aio.UnaryUnaryClientInterceptor resolve to Any; the two concrete
+# interceptor classes must subclass them. Permit subclassing-Any for this
+# module only (the base classes are external, not ours to type).
+[[tool.mypy.overrides]]
+module = "axiam_sdk.grpc._interceptor"
+disallow_subclassing_any = false
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

@@ -1,428 +1,726 @@
-# Architecture Research: AXIAM Client SDKs (v1.1)
+# Architecture Patterns: Security Hardening Integration
 
-**Domain:** Multi-language IAM client SDK layer over frozen v1.0 REST/gRPC/AMQP server
-**Researched:** 2026-06-28
-**Confidence:** HIGH — based on codebase inspection + current tooling verification
+**Domain:** IAM system — Actix-Web + React security hardening
+**Researched:** 2026-03-30
+**Confidence:** HIGH — based on direct codebase inspection
 
 ---
 
-## 1. Shared Conceptual Core
+## Current Architecture Snapshot
 
-Every SDK — regardless of language — exposes the same five logical layers realized
-idiomatically per language.
+The system is a layered Rust monorepo. The request path that matters for this
+milestone is:
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                      SDK Consumer (user code)                       │
-├────────────────────────────────────────────────────────────────────┤
-│  AuthClient    TenantContext    AuthzClient    AdminClient           │
-│  (login/MFA/   (org+tenant      (gRPC check   (REST CRUD            │
-│   OAuth2/OIDC)  scope header)   /batch)        endpoints)           │
-├────────────────────────────────────────────────────────────────────┤
-│                       TokenManager                                   │
-│  (in-memory access token, proactive refresh, 401-retry, queue)      │
-├────────────────────────────────────────────────────────────────────┤
-│         Transport layer (REST HTTP)  |  gRPC channel  |  AMQP conn  │
-│         (HttpClient / reqwest /       (tonic / grpc-   (lapin /     │
-│          requests / fetch / Guzzle)   java / grpc-go)  amqplib)     │
-├────────────────────────────────────────────────────────────────────┤
-│   TypedModels (generated or hand-maintained — Organization, Tenant, │
-│   User, Role, Permission, Token, CheckAccessRequest …)              │
-└────────────────────────────────────────────────────────────────────┘
+HTTP request
+  -> AuditMiddleware (axiam-audit: validates JWT, caches identity)
+  -> CORS middleware
+  -> Route dispatch
+  -> AuthenticatedUser extractor (axiam-api-rest: reads Bearer token OR cached identity)
+  -> Handler body
+  -> Repository call (axiam-db)
+  -> JSON response
 ```
 
-### Component Responsibilities
-
-| Component | Responsibility | Notes |
-|-----------|---------------|-------|
-| **AuthClient** | Login, MFA confirm, OAuth2 Code+PKCE, Client Credentials, refresh, logout, WebAuthn | Produces `TokenSet`; delegates storage to TokenManager |
-| **TokenManager** | In-memory access token; proactive background refresh (at 80% lifetime); 401-triggered reactive refresh with request queue to avoid thundering herd | httpOnly cookie refresh flow: backend sets the cookie, SDK just calls `/auth/refresh` with `credentials: include` |
-| **TenantContext** | Holds `org_slug` + `tenant_slug`; injects `X-Tenant-ID` header (or path prefix) on every request | Built once, passed to every client constructor |
-| **AuthzClient** | Wraps gRPC `AuthorizationService` (`CheckAccess`, `BatchCheckAccess`) and `TokenService` (`ValidateToken`, `IntrospectToken`) | Falls back to REST introspect endpoint for languages where gRPC is not viable |
-| **AdminClient** | Typed methods for every REST CRUD resource (org, tenant, user, group, role, permission, resource, scope, cert, PGP, webhook, audit, service-account, oauth2-client, federation, settings) | Generated from OpenAPI spec where tooling is reliable; hand-written otherwise |
-| **TypedModels** | Request/response types matching the OpenAPI components schema and proto messages | Source of truth: OpenAPI spec (`/api/docs/openapi.json`) + proto files in `proto/axiam/v1/` |
+The four hardening changes intersect this path at different layers. Each is
+described below with its exact integration point.
 
 ---
 
-## 2. Contract Source of Truth and Codegen Strategy
+## Change 1: JWT from sessionStorage to httpOnly Cookies
 
-### OpenAPI Spec (REST)
+### Problem
 
-**Source of truth:** utoipa annotations in `crates/axiam-api-rest/src/` compiled into
-`ApiDoc`. The spec is served live at `GET /api/docs/openapi.json`.
+`frontend/src/stores/auth.ts` uses Zustand `persist` with
+`createJSONStorage(() => sessionStorage)`. The `accessToken` and `refreshToken`
+are stored in `sessionStorage`, which is readable by any JavaScript running in
+the page origin — including XSS payloads.
 
-**Export strategy for codegen:** Add a CI step that starts the server (or a minimal
-binary that calls `api_doc().to_pretty_json()` without spinning up Actix) and writes
-`artifacts/openapi.json`. This artifact is committed to `sdks/openapi.json` (or
-published as a CI artifact) and consumed by codegen tools. The file must be re-exported
-on every release tag; stale codegen is a maintenance trap.
+`frontend/src/lib/api.ts` reads the token from the Zustand store and injects it
+as `Authorization: Bearer <token>` on every outgoing Axios request.
 
-**Codegen tool recommendation:** Use `openapi-generator-cli` (openapi-generator 7.x,
-JVM-based, `docker run --rm openapitools/openapi-generator-cli`) for typed model
-stubs only (data classes / structs / interfaces). Do NOT use it to generate full client
-logic — the auth/token/tenant layers require hand-written orchestration that codegen
-tools produce poorly (non-idiomatic, missing retry queues, OAuth2 not wired). Generate:
-- TypeScript: `typescript-fetch` generator → type stubs + raw fetch calls; replace HTTP
-  layer with hand-written `AuthClient` + `TokenManager`.
-- Python: `python` generator (or `python-pydantic-v1`) → Pydantic models only.
-- Java: `java` generator with `okhttp-gson` library → model POJOs only.
-- C#: `csharp` generator → model classes only.
-- PHP: `php` generator → model classes only.
-- Go: `go` generator → type structs only.
-- Rust: Do NOT use codegen for Rust — hand-write `reqwest`-based client; the generated
-  Rust code from openapi-generator is low quality and conflicts with Rust idioms.
+The `/auth/refresh` call in `api.ts` already passes `{ withCredentials: true }`
+but there is no cookie being set by the server — it reads `refresh_token` from
+the request JSON body (`RefreshRequest` struct in `handlers/auth.rs`).
 
-### Proto (gRPC)
-
-**Source of truth:** `proto/axiam/v1/` — three services:
-- `AuthorizationService` (CheckAccess, BatchCheckAccess) — `authorization.proto`
-- `TokenService` (ValidateToken, IntrospectToken) — `token.proto`
-- `UserService` (GetUser, ValidateCredentials) — `user.proto`
-
-**Codegen tool:** Use [buf](https://buf.build/) (`buf.gen.yaml`) to generate stubs
-for all gRPC-capable languages in one pass. Buf provides: linting, breaking-change
-detection in CI, remote plugins (no local `protoc` install required), and a single
-`buf.gen.yaml` that outputs to each SDK's generated directory.
-
-Sample `buf.gen.yaml` at repo root:
-```yaml
-version: v2
-plugins:
-  - remote: buf.build/grpc/go
-    out: sdks/go/internal/gen/grpc
-  - remote: buf.build/grpc/java
-    out: sdks/java/src/main/java/gen/grpc
-  - remote: buf.build/community/neoeinstein-prost  # Rust
-    out: sdks/rust/src/gen
-  - remote: buf.build/grpc/python
-    out: sdks/python/axiam_sdk/gen/grpc
-  - remote: buf.build/grpc/csharp
-    out: sdks/csharp/Axiam.Sdk/Gen/Grpc
-```
-TypeScript gRPC: use `buf.build/community/stephenh-ts-proto` for Node.js environments;
-browser gRPC requires `grpc-web` (not in scope for v1.1 starter SDKs).
-PHP gRPC: use the official `grpc/grpc` PHP extension + `protoc-gen-php-grpc`; viable
-but complex to set up — treat as optional for PHP SDK starter.
-
-**Buf CI gate:** Add `buf lint` + `buf breaking --against '.git#branch=main'` to
-the existing `ci.yml` whenever protos change. Prevents accidental wire-breaking changes.
-
----
-
-## 3. Monorepo vs. Polyrepo Decision
-
-**Decision: Monorepo (sdks/ subtree in the existing repo)**
-
-Rationale:
-- SDKs track the frozen v1.0 API. They version together: an API fix in the server
-  that changes a response field must update ALL SDKs atomically. Polyrepos make this
-  coordination expensive.
-- The OpenAPI spec and proto files are the shared contract. With a monorepo, a
-  codegen regeneration step can update all 7 SDKs in a single PR, with a single CI run
-  verifying they still compile.
-- AXIAM is open-source. GitHub Actions path filters (`paths:`) make it cheap to run
-  only the affected SDK's CI job on a per-change basis, removing the main monorepo
-  downside (slow CI).
-- Polyrepo is better when SDK teams are independent and need divergent release cadences.
-  AXIAM has one maintainer team and wants coordinated v1.1 releases. Polyrepo is wrong
-  here.
-
-**Monorepo layout:**
-```
-sdks/
-├── openapi.json              # exported spec (source of truth for codegen)
-├── buf.gen.yaml              # multi-language proto codegen config
-├── buf.yaml                  # buf workspace pointing at proto/
-├── rust/
-│   ├── Cargo.toml            # [package] axiam-client; publishes to crates.io
-│   ├── src/
-│   │   ├── lib.rs
-│   │   ├── auth.rs           # AuthClient
-│   │   ├── authz.rs          # AuthzClient (gRPC via tonic)
-│   │   ├── admin.rs          # AdminClient (reqwest REST)
-│   │   ├── token.rs          # TokenManager
-│   │   ├── tenant.rs         # TenantContext
-│   │   ├── models/           # hand-written or generated model types
-│   │   └── gen/              # buf-generated proto stubs (gitignored or committed)
-│   └── examples/
-├── typescript/
-│   ├── package.json          # name: @axiam/sdk; publishes to npm
-│   ├── src/
-│   │   ├── index.ts
-│   │   ├── auth.ts
-│   │   ├── authz.ts          # gRPC via @grpc/grpc-js (Node.js only)
-│   │   ├── admin.ts
-│   │   ├── token-manager.ts
-│   │   ├── tenant.ts
-│   │   ├── models/           # generated from openapi-generator typescript-fetch
-│   │   └── gen/              # buf-generated ts-proto stubs
-│   ├── middleware/
-│   │   ├── express.ts
-│   │   └── fastify.ts
-│   └── examples/
-├── python/
-│   ├── pyproject.toml        # name: axiam-sdk; publishes to PyPI
-│   ├── axiam_sdk/
-│   │   ├── __init__.py
-│   │   ├── auth.py
-│   │   ├── authz.py          # gRPC via grpcio
-│   │   ├── admin.py
-│   │   ├── token_manager.py
-│   │   ├── tenant.py
-│   │   ├── models/           # Pydantic v2 models (generated stubs, then customized)
-│   │   └── gen/              # buf-generated proto stubs
-│   ├── middleware/
-│   │   ├── fastapi.py
-│   │   └── django.py
-│   └── examples/
-├── java/
-│   ├── pom.xml               # group: io.axiam; publishes to Maven Central
-│   ├── src/main/java/io/axiam/sdk/
-│   │   ├── AximClient.java
-│   │   ├── AuthClient.java
-│   │   ├── AuthzClient.java  # gRPC via grpc-java
-│   │   ├── AdminClient.java
-│   │   ├── TokenManager.java
-│   │   ├── TenantContext.java
-│   │   ├── models/
-│   │   └── gen/grpc/
-│   ├── spring/               # Spring Security integration
-│   └── examples/
-├── csharp/
-│   ├── Axiam.Sdk.csproj      # publishes to NuGet
-│   ├── Axiam.Sdk/
-│   │   ├── AuthClient.cs
-│   │   ├── AuthzClient.cs    # gRPC via Grpc.Net.Client
-│   │   ├── AdminClient.cs
-│   │   ├── TokenManager.cs
-│   │   ├── TenantContext.cs
-│   │   ├── Models/
-│   │   └── Gen/Grpc/
-│   ├── Axiam.Sdk.AspNetCore/ # ASP.NET Core middleware
-│   └── examples/
-├── php/
-│   ├── composer.json         # name: axiam/sdk; publishes to Packagist
-│   ├── src/
-│   │   ├── AuthClient.php
-│   │   ├── AdminClient.php
-│   │   ├── TokenManager.php
-│   │   ├── TenantContext.php
-│   │   ├── Models/
-│   │   └── Middleware/
-│   │       ├── LaravelMiddleware.php
-│   │       └── SymfonyMiddleware.php
-│   └── examples/
-└── go/
-    ├── go.mod                # module github.com/axiamhq/axiam-go; publishes to pkg.go.dev
-    ├── auth.go
-    ├── authz.go              # gRPC via google.golang.org/grpc
-    ├── admin.go
-    ├── token_manager.go
-    ├── tenant.go
-    ├── models/               # generated Go structs + hand-written
-    ├── gen/grpc/             # buf-generated stubs
-    ├── middleware/
-    │   └── http.go           # net/http middleware
-    └── examples/
-```
-
----
-
-## 4. Versioning Strategy
-
-### SDK Versions vs. Server API Version
-
-- Server API is versioned by URL prefix: `/api/v1/`. This prefix is stable for all
-  of v1.x. A breaking REST change would introduce `/api/v2/`.
-- SDKs use **semver independently** from the server: `axiam-client 0.1.0` targets
-  `server v1.0`. SDK patch releases fix SDK bugs without server changes. SDK minor
-  releases add convenience wrappers for existing endpoints. SDK major releases track
-  server API major versions or their own breaking API surface changes.
-- **Compatibility contract:** Each SDK's README declares a compatibility matrix:
-  `axiam-client >= 0.1 requires axiam-server >= 1.0`. A `[package.metadata.axiam]`
-  section in each manifest pins the minimum server version.
-- **Proto stability:** buf `breaking` checks enforce proto wire compatibility. Any
-  proto field removal or renaming is a breaking change requiring a new SDK major.
-- **OpenAPI drift detection:** CI re-exports `openapi.json` from the server binary and
-  diffs it against `sdks/openapi.json`. A mismatch (field added/removed) fails the
-  SDK CI gate and forces a codegen + SDK update cycle.
-
-### Release Tagging
-
-Tags are per-SDK to trigger only the relevant publish workflow:
-- `sdk/rust/v0.1.0` → triggers `publish-sdk-rust.yml`
-- `sdk/typescript/v0.1.0` → triggers `publish-sdk-typescript.yml`
-- etc.
-
-Server releases (`v1.x.y`) do NOT automatically trigger SDK publishes — a human
-bumps SDK versions after verifying compatibility.
-
----
-
-## 5. Build Order Across 7 SDKs
-
-**Rationale for ordering:** The Rust SDK is the reference implementation because:
-1. The server is Rust — the maintainer understands the type system and auth flows best.
-2. Rust SDK can share proto-generated types from `buf` without fighting the toolchain.
-3. TypeScript is the second most likely consumer (frontend/BFF) and has the richest
-   codegen ecosystem; it validates the OpenAPI export pipeline.
-4. Go and Python have mature gRPC ecosystems and serve microservice use cases.
-5. Java and C# are enterprise targets; their codegen output is predictable but verbose.
-6. PHP is REST-only (gRPC optional); it's lowest complexity and serves as a smoke-test
-   that the OpenAPI codegen models are correct.
-
-**Shared artifacts that must exist before per-language work:**
-- `sdks/openapi.json` — exported from server, committed
-- `buf.gen.yaml` + `buf.yaml` — proto codegen config
-- CI job `export-openapi` — runs on every release, updates `sdks/openapi.json`
-
-**Suggested phase order:**
-
-| Phase | SDK | Rationale | Depends On |
-|-------|-----|-----------|------------|
-| T17.1 | **Rust** | Reference impl; proves transport + TokenManager pattern | openapi.json, proto |
-| T17.2 | **TypeScript** | Validates OpenAPI export + npm publish pipeline; broadest immediate user base | openapi.json (codegen), proto (ts-proto) |
-| T17.7 | **Go** | gRPC ecosystem matures alongside Rust; microservice use case | proto (buf go), openapi.json |
-| T17.3 | **Python** | gRPC via grpcio; FastAPI/Django middleware needed for Python IAM consumers | proto (buf python), openapi.json |
-| T17.4 | **Java** | Enterprise; grpc-java codegen well understood; Spring Security integration | proto (buf java), openapi.json |
-| T17.5 | **C#** | Grpc.Net.Client is .NET-native; ASP.NET Core middleware; similar to Java effort | proto (buf csharp), openapi.json |
-| T17.6 | **PHP** | REST-only starter; no gRPC complexity; validates Packagist publish pipeline | openapi.json only |
-
----
-
-## 6. Integration Points with Existing Monorepo
-
-### New Components (net-new, nothing modified in server)
-
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| `sdks/openapi.json` | `sdks/openapi.json` | Exported spec; codegen source of truth |
-| `sdks/buf.yaml` | `sdks/buf.yaml` | Buf workspace config pointing at `proto/axiam/v1/` |
-| `sdks/buf.gen.yaml` | `sdks/buf.gen.yaml` | Multi-language proto codegen output config |
-| Per-SDK packages | `sdks/{rust,typescript,…}/` | SDK source trees |
-| CI workflow: export-openapi | `.github/workflows/sdk-export-openapi.yml` | Builds server binary, dumps spec, diffs vs committed |
-| CI workflow per SDK | `.github/workflows/sdk-ci-{lang}.yml` | Build + test each SDK on `sdks/{lang}/**` path filter |
-| CI workflow publish | `.github/workflows/publish-sdk-{lang}.yml` | Triggered by `sdk/{lang}/v*` tag; pushes to registry |
-
-### Modified Components (existing, minimal changes)
-
-| Component | Change | Why |
-|-----------|--------|-----|
-| `crates/axiam-server/src/main.rs` (or new binary) | Add `--dump-openapi` flag that prints `api_doc().to_pretty_json()` and exits | Enables CI spec export without starting SurrealDB/AMQP |
-| `.github/workflows/ci.yml` | Add buf lint + buf breaking gate on `proto/**` changes | Prevents accidental wire breaks |
-| `Cargo.toml` (workspace) | Add `members = ["sdks/rust"]` if Rust SDK uses workspace | Optional — SDK may be standalone to decouple release |
-
-### Data Flow for Auth in SDKs
+### Target Architecture
 
 ```
-SDK user calls client.auth.login(email, password, tenant)
-    -> POST /api/v1/auth/login with X-Tenant-ID header
-    -> Server sets httpOnly cookie (refresh_token) + returns access_token in body
-    -> TokenManager stores access_token in memory
-    -> TokenManager schedules refresh at (exp - 15s)
+Login response
+  -> Backend sets:
+       access_token  — httpOnly, Secure, SameSite=Strict, Path=/,    Max-Age=900
+       refresh_token — httpOnly, Secure, SameSite=Strict, Path=/auth/refresh, Max-Age=<refresh_lifetime>
 
-On subsequent API call:
-    -> TokenManager injects Authorization: Bearer <access_token>
-    -> On 401: pause queue, POST /api/v1/auth/refresh (cookie auto-sent)
-    -> New access_token stored, queue drained
+Subsequent API requests
+  -> Browser sends cookies automatically (no JS involvement)
+  -> Backend reads access_token from cookie (not Authorization header)
+  -> Frontend Zustand store holds only non-secret state: user metadata, tenant/org slugs
 
-For gRPC (AuthzClient):
-    -> TokenManager provides access_token as gRPC metadata: authorization: Bearer <token>
-    -> Same refresh path — REST refresh, then retry gRPC call
+/auth/refresh
+  -> Browser sends refresh_token cookie automatically
+  -> Backend rotates: clears old cookie, sets new pair
+  -> Frontend retains same silent-refresh interceptor logic but no longer
+     needs to read/write the token value itself
+```
 
-For AMQP (Rust/Go/Python/Java/C# only):
-    -> AMQP client connects with service-account credentials (Client Credentials flow)
-    -> Publishes authz request messages; consumes response messages
-    -> SDK wraps publish/consume with typed message structs from proto
+### Backend Changes Required
+
+**File: `crates/axiam-api-rest/src/handlers/auth.rs`**
+
+All handlers that currently return `LoginSuccessResponse { access_token, refresh_token, … }`
+must change to:
+1. Build `actix_web::cookie::Cookie` for each token.
+2. Return `HttpResponse::Ok().cookie(access_cookie).cookie(refresh_cookie).json(…)`
+   where the JSON body carries only non-secret fields (`session_id`, `expires_in`).
+
+The `RefreshRequest` struct (`tenant_id`, `org_id`, `refresh_token`) must drop
+the `refresh_token` field — the token arrives via cookie, not body.
+
+**File: `crates/axiam-api-rest/src/extractors/auth.rs`**
+
+`extract_user()` currently reads `Authorization: Bearer …`. It must be extended
+to also read the `access_token` cookie as a fallback (or primary) source.
+
+Priority order to maintain backward compatibility during transition:
+1. Check `Authorization: Bearer` header first (machine clients, device auth, SDK use).
+2. Fall back to `access_token` cookie for browser clients.
+
+This keeps the gRPC and service-account paths unchanged.
+
+**File: `crates/axiam-audit/src/middleware.rs`**
+
+`extract_or_cache_user_info()` currently reads only the `Authorization` header.
+It must mirror the extractor's dual-source logic.
+
+**Cookie attributes (non-negotiable for OWASP ASVS Level 2):**
+
+| Attribute | Value | Reason |
+|-----------|-------|--------|
+| `HttpOnly` | true | Blocks JS read — core of the migration |
+| `Secure` | true | HTTPS-only transmission |
+| `SameSite` | `Strict` | CSRF protection; admin UI is same-origin |
+| `Path` for access_token | `/` | Available on all API routes |
+| `Path` for refresh_token | `/auth/refresh` | Scoped to prevent unnecessary cookie send |
+| `Max-Age` for access_token | 900 (15 min) | Matches `access_token_lifetime_secs` in `AuthConfig` |
+| `Max-Age` for refresh_token | per config | Matches `refresh_token_lifetime_secs` |
+
+Actix-Web uses `actix_web::cookie::Cookie` and `actix_web::cookie::SameSite`. The
+`actix-web` 4.x crate includes `cookie` support natively; no new dependency needed.
+
+**Logout must explicitly clear both cookies:**
+
+```rust
+// In handlers/auth.rs logout handler
+let clear_access = Cookie::build("access_token", "")
+    .path("/")
+    .max_age(Duration::ZERO)
+    .finish();
+let clear_refresh = Cookie::build("refresh_token", "")
+    .path("/auth/refresh")
+    .max_age(Duration::ZERO)
+    .finish();
+HttpResponse::NoContent()
+    .cookie(clear_access)
+    .cookie(clear_refresh)
+    .finish()
+```
+
+### Frontend Changes Required
+
+**File: `frontend/src/stores/auth.ts`**
+
+Remove `accessToken` from state entirely. The Zustand store becomes:
+
+```typescript
+interface AuthState {
+  user: AuthUser | null;
+  tenantId: string | null;
+  orgId: string | null;
+  isAuthenticated: boolean;
+}
+```
+
+Remove `persist` middleware — there is nothing sensitive to persist, and
+`isAuthenticated` should be derived from a lightweight `/auth/me` call on
+page load rather than sessionStorage rehydration.
+
+**File: `frontend/src/lib/api.ts`**
+
+Remove the request interceptor that injects `Authorization: Bearer`. Replace with
+`withCredentials: true` on the Axios instance so cookies are sent automatically:
+
+```typescript
+const api: AxiosInstance = axios.create({
+  baseURL: "/",
+  withCredentials: true,  // send httpOnly cookies on every request
+  headers: { "Content-Type": "application/json" },
+});
+```
+
+The refresh interceptor logic is preserved but simplified — on 401, call
+`/auth/refresh` (which reads the cookie server-side), then retry. No token
+strings to pass around.
+
+**Backend must provide `/auth/me`:**
+
+The frontend needs to know if the user is still authenticated after a page
+reload (since the access token is no longer in sessionStorage). A lightweight
+`GET /auth/me` endpoint that validates the cookie and returns user identity
+replaces the "does sessionStorage have a token?" check.
+
+This endpoint lives in `axiam-api-rest/src/handlers/auth.rs` and uses
+`AuthenticatedUser` extractor (which reads the cookie).
+
+### Crates Modified
+
+| Crate | Change |
+|-------|--------|
+| `axiam-api-rest` | `extractors/auth.rs` — dual-source token extraction; `handlers/auth.rs` — cookie responses; add `/auth/me` |
+| `axiam-audit` | `middleware.rs` — mirror dual-source extraction |
+| frontend `src/stores/auth.ts` | Remove accessToken field and persist |
+| frontend `src/lib/api.ts` | Add `withCredentials`, remove Bearer injection |
+
+No new crate dependencies required for the Rust side.
+
+---
+
+## Change 2: Wire RBAC to All REST Endpoints
+
+### Problem
+
+`axiam-authz` contains a complete RBAC engine (`AuthorizationEngine`) with
+resource hierarchy, permission inheritance, and scope evaluation. It is registered
+as `web::Data<Arc<dyn AuthzChecker>>` in `axiam-server`.
+
+`RequirePermission` in `crates/axiam-api-rest/src/authz.rs` is the guard struct
+that handlers should call. The code is correct and complete. The problem is
+**zero handlers call it**. Every endpoint authenticates the user (via
+`AuthenticatedUser` extractor) but then performs no authorization check before
+proceeding to the repository.
+
+### Target Architecture
+
+Every state-modifying or sensitive-read endpoint follows this pattern:
+
+```rust
+pub async fn create_user<C: Connection>(
+    user: AuthenticatedUser,
+    authz: AuthzData,            // web::Data<Arc<dyn AuthzChecker>>
+    body: web::Json<CreateUserRequest>,
+    repo: web::Data<SurrealUserRepository<C>>,
+) -> Result<HttpResponse, AxiamApiError> {
+    // Resolve the resource ID for "users" in this tenant.
+    // The admin bootstrap populates a well-known resource ID per
+    // operation category (see Bootstrap section below).
+    RequirePermission::new("create", USERS_RESOURCE_ID)
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+
+    // ... handler body unchanged
+}
+```
+
+`AuthzData` is already defined as a type alias in `axiam-api-rest/src/authz.rs`.
+
+### Resource ID Convention
+
+The authorization engine checks access against a `resource_id: Uuid`. For
+admin UI operations these map to well-known resource categories, not individual
+database records. A bootstrap record must create these resources at startup.
+
+Recommended convention — one top-level resource per entity type:
+
+| Resource name | Action | Which endpoints |
+|---------------|--------|-----------------|
+| `users` | `create`, `read`, `update`, `delete`, `list` | `/api/v1/users/*` |
+| `groups` | `create`, `read`, `update`, `delete`, `list` | `/api/v1/groups/*` |
+| `roles` | `create`, `read`, `update`, `delete`, `list` | `/api/v1/roles/*` |
+| `permissions` | `create`, `read`, `update`, `delete`, `list` | `/api/v1/permissions/*` |
+| `resources` | `create`, `read`, `update`, `delete`, `list` | `/api/v1/resources/*` |
+| `scopes` | `create`, `read`, `update`, `delete`, `list` | `/api/v1/scopes/*` |
+| `organizations` | `create`, `read`, `update`, `delete`, `list` | `/api/v1/organizations/*` |
+| `tenants` | `create`, `read`, `update`, `delete`, `list` | `/api/v1/tenants/*` |
+| `audit` | `read` | `/api/v1/audit/*` |
+| `certificates` | `create`, `read`, `revoke` | `/api/v1/certs/*` |
+| `oauth2-clients` | `create`, `read`, `update`, `delete` | `/api/v1/oauth2-clients/*` |
+| `federation-configs` | `create`, `read`, `update`, `delete` | `/api/v1/federation/*` |
+| `webhooks` | `create`, `read`, `update`, `delete` | `/api/v1/webhooks/*` |
+| `settings` | `read`, `update` | `/api/v1/settings/*` |
+| `service-accounts` | `create`, `read`, `update`, `delete` | `/api/v1/service-accounts/*` |
+
+### Admin Bootstrap
+
+`axiam-server/src/main.rs` must call a bootstrap function at startup that:
+
+1. Creates the admin `Organization` and `Tenant` if none exist (already done in
+   earlier phases).
+2. Creates the set of well-known `Resource` records above (idempotent — only if
+   not already present) and records their UUIDs in a stable config structure.
+3. Creates an `admin` `Role` with all permissions on all resources.
+4. Assigns the `admin` role to the first admin `User`.
+
+The resource UUIDs should be stored as a `BootstrapIds` struct in
+`axiam-server` app state so handlers can resolve them without a DB query:
+
+```rust
+// axiam-server/src/bootstrap.rs
+pub struct BootstrapIds {
+    pub users_resource_id: Uuid,
+    pub groups_resource_id: Uuid,
+    // ... one field per resource category
+}
+```
+
+`BootstrapIds` is registered as `web::Data<BootstrapIds>` and injected into
+handlers that need it alongside `AuthzData`.
+
+### MFA Reset Special Case
+
+`handlers/auth.rs::reset_mfa` already has a TODO comment disabling it
+specifically because RBAC is not yet in place. Once RBAC is wired, remove the
+blanket deny and gate it with:
+
+```rust
+RequirePermission::new("reset-mfa", bootstrap.users_resource_id)
+    .check(&user, authz.get_ref().as_ref())
+    .await?;
+```
+
+### Crates Modified
+
+| Crate | Change |
+|-------|--------|
+| `axiam-api-rest` | All handlers in `src/handlers/` — add `AuthzData` parameter + `RequirePermission::check` call |
+| `axiam-server` | `src/main.rs` — add `BootstrapIds`; new `src/bootstrap.rs` for idempotent resource creation |
+| `axiam-core` | No change — `ResourceRepository`, `RoleRepository`, etc. already exist |
+| `axiam-db` | No change — repositories already implement the required traits |
+| `axiam-authz` | No change — engine is complete |
+
+---
+
+## Change 3: Federation Token Signature Verification (JWKS)
+
+### Problem
+
+`crates/axiam-federation/src/oidc.rs::decode_id_token_claims()` base64-decodes
+the JWT payload without verifying the signature. Lines 285-295 contain an
+explicit TODO(T19.6) and a `warn!` logging that verification is skipped. This
+means any attacker who can forge a JWT payload (e.g., via MITM on the token
+endpoint — which is protected by HTTPS, but defense in depth demands
+cryptographic verification) can provision arbitrary federated users.
+
+### Target Architecture
+
+```
+handle_callback()
+  1. Fetch discovery document (already done)
+  2. Fetch JWKS from discovery.jwks_uri  <-- NEW
+  3. Parse JWT header to get "kid" (key ID)
+  4. Find matching JWK in JWKS by kid
+  5. Verify JWT signature using JWK
+  6. Only then decode and trust claims
+```
+
+### Implementation: `jsonwebtoken` + manual JWKS parsing
+
+The project already uses `jsonwebtoken` (visible in `axiam-auth/src/service.rs`
+and `axiam-auth/src/token.rs`). The `jsonwebtoken` crate supports JWKS key
+decoding via `DecodingKey::from_jwk()` (available since v9).
+
+**New function in `crates/axiam-federation/src/oidc.rs`:**
+
+```rust
+/// Fetch the JWKS document and return a `DecodingKey` for the given `kid`.
+async fn fetch_jwks_key(
+    http_client: &reqwest::Client,
+    jwks_uri: &str,
+    kid: Option<&str>,
+) -> Result<jsonwebtoken::DecodingKey, FederationError>
+```
+
+**Updated flow in `handle_callback()`:**
+
+```rust
+// Replace the unsafe decode_id_token_claims() call with:
+let header = jsonwebtoken::decode_header(&id_token_str)
+    .map_err(|e| FederationError::IdTokenValidationFailed(...))?;
+
+let decoding_key = self
+    .fetch_jwks_key(&discovery.jwks_uri, header.kid.as_deref())
+    .await?;
+
+let mut validation = jsonwebtoken::Validation::new(header.alg);
+validation.set_audience(&[&config.client_id]);
+validation.set_issuer(&[&discovery.issuer]);
+
+let token_data = jsonwebtoken::decode::<IdTokenClaims>(
+    &id_token_str,
+    &decoding_key,
+    &validation,
+)?;
+let claims = token_data.claims;
+```
+
+The `exp`, `aud`, `iss`, and nonce checks that currently run manually on the
+decoded claims are replaced by `jsonwebtoken::Validation` fields — cleaner and
+less error-prone.
+
+**JWKS caching:**
+
+Fetching JWKS on every callback is wasteful and adds latency. Add a simple
+in-memory cache on `OidcFederationService`:
+
+```rust
+pub struct OidcFederationService<FC, FL, UR> {
+    federation_config_repo: FC,
+    federation_link_repo: FL,
+    user_repo: UR,
+    http_client: reqwest::Client,
+    jwks_cache: tokio::sync::RwLock<HashMap<String, CachedJwks>>,  // NEW
+}
+
+struct CachedJwks {
+    keys: Vec<jsonwebtoken::jwk::Jwk>,
+    fetched_at: std::time::Instant,
+}
+```
+
+Cache TTL: 5 minutes. On cache miss or key-not-found, re-fetch and update.
+This is the industry standard pattern (used by all major OIDC libraries).
+
+**Cargo.toml for `axiam-federation`:**
+
+`jsonwebtoken` version must be `>= 9.0` to have `DecodingKey::from_jwk()`.
+Verify the workspace-level version in `Cargo.toml`.
+
+**SAML signature verification** follows a different path (XML DSig) and is
+handled by the `samael` or `xmlsec` crate — this is separate from the OIDC
+JWKS work and should be scoped as a distinct task.
+
+### Crates Modified
+
+| Crate | Change |
+|-------|--------|
+| `axiam-federation` | `src/oidc.rs` — replace unsafe decode with JWKS verification; add JWKS cache; update `OidcFederationService` struct |
+| `Cargo.toml` (workspace) | Ensure `jsonwebtoken >= 9.0` |
+
+---
+
+## Change 4: Connect EmailService to Auth Flows
+
+### Problem
+
+Three handlers have TODO(T19) comments indicating email delivery was deliberately
+deferred:
+
+1. `handlers/password_reset.rs::request_reset()` — creates a reset token, has
+   the raw token, but calls `tracing::debug!` instead of sending an email.
+2. `handlers/email_verification.rs` — the `resend_verification` handler likely
+   has the same gap (token created, not sent).
+3. Session invalidation email (on password reset) — `confirm_reset` invalidates
+   sessions but does not notify the user.
+
+The `axiam-email` crate is complete — `EmailService::send()` works, templates
+exist via `render_email()`, and providers (SMTP, SendGrid, Postmark, Resend, Brevo)
+are all implemented.
+
+### Target Architecture
+
+**Email service injection:**
+
+`EmailService` is not `Clone` (it wraps a `Box<dyn EmailProvider>`). It must be
+wrapped in `Arc<EmailService>` and registered as `web::Data<Arc<EmailService>>`
+in `axiam-server`. The service is built from the resolved `EmailConfig` at
+startup (fetched from the `SettingsRepository`).
+
+```rust
+// axiam-server/src/main.rs (conceptual)
+let email_config = settings_repo
+    .get_effective_settings(org_id, tenant_id)
+    .await?;
+let email_service = Arc::new(
+    EmailService::from_config(&email_config.email)?
+);
+app_data.push(web::Data::new(email_service));
+```
+
+**Handler integration for password reset:**
+
+```rust
+// handlers/password_reset.rs::request_reset
+pub async fn request_reset<C: Connection>(
+    // ... existing params ...
+    email_svc: web::Data<Arc<EmailService>>,   // NEW
+    body: web::Json<RequestResetBody>,
+) -> Result<HttpResponse, AxiamApiError> {
+    match svc.initiate_reset(...).await {
+        Ok(Some((raw_token, user_id, expires_at))) => {
+            // Build message from template
+            let ctx = TemplateContext { /* token, expires_at */ };
+            let msg = render_email("password_reset", &ctx)?;
+            // Fire-and-forget — log errors but don't fail the response
+            if let Err(e) = email_svc.send(&msg).await {
+                tracing::warn!(error = %e, "password reset email delivery failed");
+            }
+        }
+        // ... rest unchanged
+    }
+}
+```
+
+Fire-and-forget (log + continue) is the correct pattern for password reset email
+delivery. The user already sees `{"sent": true}` regardless of outcome; failing
+to deliver should not block the API response or reveal delivery status
+(email enumeration prevention).
+
+**Handler integration for email verification:**
+
+Same pattern in `handlers/email_verification.rs::resend_verification()`:
+inject `Arc<EmailService>`, send the verification email with the token, log
+failures without propagating them.
+
+**Template resolution:**
+
+`axiam-email::template::resolve_template()` and `render_email()` are the
+integration points. The templates themselves need to exist in the templates
+directory with the correct names. Verify that `password_reset` and
+`email_verification` template names exist.
+
+**Multi-tenant email config:**
+
+The tricky part is that `EmailService` is configured at org/tenant level.
+The server holds one default service, but tenants may override the provider.
+For the MVP, a single org-level config is acceptable — tenant-level override
+can be deferred. Document this as a known limitation.
+
+**EmailService availability:**
+
+`EmailService::from_config()` returns `Err` if email is disabled. The server
+startup should tolerate a missing email config and register a `None` (or a
+`NoOpEmailService`). Handlers that need email should skip sending gracefully
+when no email service is available, not panic at startup.
+
+### Crates Modified
+
+| Crate | Change |
+|-------|--------|
+| `axiam-api-rest` | `handlers/password_reset.rs` — inject `Arc<EmailService>`, send email; `handlers/email_verification.rs` — same |
+| `axiam-server` | `src/main.rs` — build and register `Arc<EmailService>` from settings |
+| `axiam-email` | No functional change — potentially add `NoOpEmailService` for the disabled case |
+
+---
+
+## Component Boundary Map
+
+```
+axiam-server (composition root)
+  |
+  +-- registers: web::Data<Arc<dyn AuthzChecker>>
+  |              web::Data<BootstrapIds>
+  |              web::Data<Arc<EmailService>>  (new)
+  |
+  +-- axiam-api-rest
+  |     |
+  |     +-- extractors/auth.rs
+  |     |     reads: "access_token" cookie  (change)
+  |     |     reads: Authorization header   (existing, preserved)
+  |     |
+  |     +-- handlers/auth.rs
+  |     |     sets: httpOnly cookies on login/refresh/logout  (change)
+  |     |     adds: GET /auth/me  (new)
+  |     |
+  |     +-- handlers/password_reset.rs
+  |     |     uses: Arc<EmailService>  (change)
+  |     |
+  |     +-- handlers/email_verification.rs
+  |     |     uses: Arc<EmailService>  (change)
+  |     |
+  |     +-- handlers/* (all CRUD handlers)
+  |           uses: AuthzData + RequirePermission  (change)
+  |           uses: BootstrapIds  (change)
+  |
+  +-- axiam-audit
+  |     |
+  |     +-- middleware.rs
+  |           reads: "access_token" cookie  (change, mirrors extractor)
+  |
+  +-- axiam-federation
+        |
+        +-- oidc.rs
+              verifies: JWKS signature  (change)
+              caches: JWKS keys  (new)
+
+frontend/src/
+  |
+  +-- lib/api.ts
+  |     withCredentials: true  (change)
+  |     remove: Bearer injection  (change)
+  |
+  +-- stores/auth.ts
+        remove: accessToken, persist  (change)
+        add: session check via /auth/me  (change)
 ```
 
 ---
 
-## 7. Architectural Patterns
+## Data Flow: Hardened Login Sequence
 
-### Pattern 1: In-Memory Token + Proactive Refresh
-
-**What:** Access token stored in process memory. A background task (tokio task / asyncio
-task / goroutine / ExecutorService thread) wakes at `(exp_at - 30s)` and calls
-`/auth/refresh` before the token expires, eliminating 401s in steady-state.
-**When to use:** All SDKs. Avoids the "thundering herd" 401 problem when multiple
-concurrent calls hit an expired token simultaneously.
-**Trade-off:** In-process token means token is lost on process restart (expected for
-short-lived access tokens). Refresh token is in httpOnly cookie — browser manages it
-automatically; server-side SDK must store it explicitly (in a secure server-side store,
-not in-process for long-running services).
-
-### Pattern 2: TenantContext Injection via Header
-
-**What:** All REST requests include `X-Tenant-ID: <tenant_uuid>` (server uses this to
-scope DB queries). TenantContext is constructed once with org/tenant identifiers and
-injected into every HTTP client call via a middleware/interceptor.
-**When to use:** All SDKs. Don't pass tenant on every method call — that's error-prone.
-**Trade-off:** The tenant UUID must be resolved from the org+tenant slug before SDK
-initialization. The SDK should expose a `resolve_tenant(org_slug, tenant_slug) -> uuid`
-helper that calls `GET /api/v1/tenants?slug=…`.
-
-### Pattern 3: gRPC Fallback for AuthzClient
-
-**What:** gRPC `CheckAccess` is the primary path. If gRPC is not available (PHP, or
-environments where port 50051 is blocked), fall back to REST `POST /oauth2/introspect`
-for token validation and a REST authz-check stub.
-**When to use:** PHP SDK (gRPC optional); any SDK where the deployment blocks gRPC.
-**Trade-off:** REST fallback is ~2-5x higher latency than gRPC for high-frequency authz
-checks. Document clearly in SDK README.
+```
+Browser                   axiam-api-rest               axiam-auth       axiam-db
+   |                           |                            |               |
+   |-- POST /auth/login ------->|                            |               |
+   |   (JSON: credentials)     |                            |               |
+   |                           |-- AuthService.login() ---->|               |
+   |                           |                            |-- DB query --->|
+   |                           |                            |<-- User -------|
+   |                           |<-- LoginOutput (tokens) ---|               |
+   |                           |                            |               |
+   |<-- 200 OK                 |                            |               |
+   |   Set-Cookie: access_token=...; HttpOnly; Secure; SameSite=Strict
+   |   Set-Cookie: refresh_token=...; HttpOnly; Secure; SameSite=Strict; Path=/auth/refresh
+   |   Body: { session_id, expires_in }
+   |                           |
+   |-- GET /api/v1/users ------>|   (browser auto-sends cookie)
+   |                           |-- extract_user() reads "access_token" cookie
+   |                           |-- RequirePermission("list", users_resource_id).check()
+   |                           |       |-- AuthorizationEngine.check_access()
+   |                           |<-- Allow
+   |                           |-- UserRepository.list()
+   |<-- 200 OK (users list)    |
+```
 
 ---
 
-## 8. Anti-Patterns
+## Build Order (Dependency Constraints)
 
-### Anti-Pattern 1: Using openapi-generator for Full Client Logic
+The four changes have dependencies on each other. Build order must respect them:
 
-**What people do:** Run `openapi-generator generate -g typescript-fetch` and ship the
-output as the SDK.
-**Why it's wrong:** Auth flows (cookie refresh, MFA branching, PKCE), the TokenManager
-retry queue, and tenant context injection are not expressible in OpenAPI spec — the
-generated client has none of them. The output is also non-idiomatic in most target
-languages.
-**Do this instead:** Use openapi-generator for typed model/schema classes only. Write
-the AuthClient, TokenManager, and TenantContext by hand.
+### Stage 1: Cookie infrastructure (no other changes depend on this, but frontend depends on it)
 
-### Anti-Pattern 2: Storing Access Tokens in Persistent Storage
+- `axiam-api-rest`: `extractors/auth.rs` — add cookie source
+- `axiam-api-rest`: `handlers/auth.rs` — emit Set-Cookie on login/refresh/logout; add `/auth/me`
+- `axiam-audit`: `middleware.rs` — mirror cookie extraction
+- Frontend: `stores/auth.ts`, `lib/api.ts`
 
-**What people do:** Store the access token in localStorage, a file, or a DB row.
-**Why it's wrong:** AXIAM access tokens expire in 15 minutes. Persisting them creates
-a false cache. More critically, localStorage is XSS-readable; file storage leaks on
-shared systems.
-**Do this instead:** Keep access token in memory. Persist only the refresh token (httpOnly
-cookie in browser; encrypted file/keychain for CLI/desktop SDK consumers).
+**Gating condition:** Cookie extraction must work before frontend stops sending Bearer.
+Deploy backend cookie support first, then frontend change. During the transition
+window, the extractor accepts both. Remove Bearer-first fallback in a follow-up
+after frontend is deployed.
 
-### Anti-Pattern 3: Per-Request Tenant Resolution
+### Stage 2: RBAC bootstrap (RBAC wiring depends on bootstrap existing)
 
-**What people do:** Look up the tenant UUID on every API call from the org/tenant slug.
-**Why it's wrong:** Adds a DB round-trip on every request; tenants don't change during
-a session.
-**Do this instead:** Resolve and cache tenant UUID at SDK initialization in TenantContext.
+- `axiam-server`: `src/bootstrap.rs` — create well-known resources + admin role
+- `axiam-server`: `src/main.rs` — call bootstrap, register `BootstrapIds`
 
-### Anti-Pattern 4: One Giant CI Job for All SDKs
+**Gating condition:** `BootstrapIds` must be in app state before handlers use it.
 
-**What people do:** A single CI workflow builds and tests all 7 SDKs on every commit.
-**Why it's wrong:** A Rust change shouldn't trigger Java CI. Adds minutes to unrelated
-PRs and wastes CI minutes.
-**Do this instead:** Use GitHub Actions `paths:` filters — one workflow file per SDK,
-triggered only when `sdks/{lang}/**` or `sdks/openapi.json` changes.
+### Stage 3: RBAC endpoint wiring (depends on Stage 2)
+
+- `axiam-api-rest`: all handlers — add `AuthzData` + `RequirePermission`
+- `axiam-api-rest`: `handlers/auth.rs::reset_mfa` — remove blanket deny, add
+  proper permission check
+
+**Gating condition:** Do not wire RBAC before the admin bootstrap has run and
+created the admin role assignment — or every request will deny.
+
+### Stage 4: JWKS verification (independent, no cross-dependencies)
+
+- `axiam-federation`: `src/oidc.rs` — JWKS fetch, cache, verify
+
+### Stage 5: Email wiring (independent, no cross-dependencies)
+
+- `axiam-server`: register `Arc<EmailService>`
+- `axiam-api-rest`: `handlers/password_reset.rs`, `handlers/email_verification.rs`
+
+### Summary
+
+```
+Stage 1 (cookie)  ─────────────────────────────────────────────────── independent
+Stage 2 (bootstrap) ──┐                                                independent
+Stage 3 (RBAC wiring) ┘ (3 depends on 2)
+Stage 4 (JWKS) ────────────────────────────────────────────────────── independent
+Stage 5 (email) ───────────────────────────────────────────────────── independent
+```
+
+Stages 1, 4, and 5 can be parallelised across phases. Stage 3 must follow Stage 2.
+
+---
+
+## Anti-Patterns to Avoid
+
+### Anti-Pattern 1: Storing tokens in memory on the frontend after cookie migration
+
+**What:** Keeping `accessToken` in Zustand even as an in-memory (non-persisted) field.
+**Why bad:** `window.__zustandState` and React DevTools expose in-memory store contents.
+XSS can still exfiltrate from memory. The migration is only complete when the token
+never touches JS memory.
+**Instead:** The frontend holds zero token strings. All authenticated state is
+derived from `/auth/me` and user metadata returned at login.
+
+### Anti-Pattern 2: Wiring RBAC before the admin bootstrap
+
+**What:** Adding `RequirePermission` calls before the admin user has a role assignment.
+**Why bad:** Every API call returns 403 Forbidden, including the call needed to create
+roles. The system becomes locked.
+**Instead:** Bootstrap runs at server startup, creates admin role+assignment atomically,
+then RBAC checks are safe to enable.
+
+### Anti-Pattern 3: Global JWKS fetch without caching
+
+**What:** Calling `fetch_jwks_key()` on every federation callback.
+**Why bad:** Each OIDC login hits the external IdP's JWKS endpoint, adding 100–500ms
+latency and creating a dependency on IdP availability for every login.
+**Instead:** Cache JWKS with a 5-minute TTL. Re-fetch only on cache miss or
+unknown `kid`.
+
+### Anti-Pattern 4: Failing startup if email is not configured
+
+**What:** `EmailService::from_config()` returning `Err` causes `axiam-server` to
+panic if no email config exists.
+**Why bad:** Systems with no email config (test environments, early deployments)
+can't start.
+**Instead:** Register `Option<Arc<EmailService>>` or a `NoOpEmailService`.
+Handlers skip delivery when `None`.
+
+### Anti-Pattern 5: SameSite=None for the refresh cookie
+
+**What:** Setting `SameSite=None` to allow cross-origin cookie send.
+**Why bad:** Allows CSRF. The admin UI is same-origin (served from same domain
+as the API); `SameSite=Strict` is correct and sufficient.
+**Instead:** `SameSite=Strict` everywhere. If a third-party client needs token
+refresh, it uses the `Authorization: Bearer` flow with explicit refresh tokens
+(not cookies).
+
+---
+
+## Scalability Considerations
+
+These hardening changes do not affect scalability in the current single-cluster
+target. Notes for future reference:
+
+| Concern | Current | Implication of change |
+|---------|---------|----------------------|
+| Cookie parsing | O(1) per request | No change vs Bearer header parsing |
+| RBAC check | O(roles + ancestors) per request | Adds one DB round-trip per request — acceptable at current scale; add Redis cache if this becomes a bottleneck |
+| JWKS cache | Per-process in-memory | On multi-replica deployments, each replica maintains its own cache — no shared state needed |
+| Email delivery | Async, fire-and-forget | No request latency impact |
 
 ---
 
 ## Sources
 
-- AXIAM codebase: `crates/axiam-api-rest/src/openapi.rs` (utoipa ApiDoc, spec at `/api/docs/openapi.json`)
-- AXIAM codebase: `proto/axiam/v1/{authorization,token,user}.proto` (gRPC IDL)
-- AXIAM codebase: `.github/workflows/ci.yml` + `release.yml` (existing CI patterns)
-- [buf.build — Modern Protobuf toolchain](https://buf.build/)
-- [openapi-generator: 50+ language targets, best for model stubs](https://openapi-generator.tech/)
-- [Buf GitHub — buf.gen.yaml multi-language config](https://github.com/bufbuild/buf)
-- [Parser Digital: Managing Multi-Language Open Source SDKs on GitHub](https://parserdigital.com/2025/02/18/how-to-manage-multi-language-open-source-sdks-on-githug-best-practices-tools/)
-- [utoipa OpenAPI export issue #214](https://github.com/juhaku/utoipa/issues/214)
-
----
-*Architecture research for: AXIAM Client SDK layer (v1.1)*
-*Researched: 2026-06-28*
+- Direct inspection of codebase files (HIGH confidence — source of truth):
+  - `crates/axiam-api-rest/src/extractors/auth.rs`
+  - `crates/axiam-api-rest/src/authz.rs`
+  - `crates/axiam-api-rest/src/handlers/auth.rs`
+  - `crates/axiam-api-rest/src/handlers/password_reset.rs`
+  - `crates/axiam-audit/src/middleware.rs`
+  - `crates/axiam-federation/src/oidc.rs`
+  - `crates/axiam-auth/src/service.rs`
+  - `crates/axiam-email/src/service.rs`
+  - `frontend/src/stores/auth.ts`
+  - `frontend/src/lib/api.ts`
+- OWASP ASVS 4.0 §3.4 (Cookie-based session management requirements)
+- RFC 6265 §4.1.2 (Cookie attributes: HttpOnly, Secure, SameSite)
+- OIDC Core 1.0 §3.1.3.7 (ID Token validation requirements, including JWKS)
+- `jsonwebtoken` crate v9 changelog: `DecodingKey::from_jwk()` availability

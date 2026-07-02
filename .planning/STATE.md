@@ -6,14 +6,14 @@ current_phase: 22
 current_phase_name: php-sdk
 status: executing
 stopped_at: Completed 22-04-PLAN.md
-last_updated: "2026-07-02T18:47:02.237Z"
+last_updated: "2026-07-02T19:04:22.600Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 22 execution started
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 58
-  completed_plans: 53
+  completed_plans: 54
   percent: 88
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 22 (php-sdk) — EXECUTING
-Plan: 5 of 9
+Plan: 6 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 22 execution started
 
@@ -147,6 +147,7 @@ Last activity: 2026-07-02 — Phase 22 execution started
 | Phase 22-php-sdk P02 | 20min | 3 tasks | 7 files |
 | Phase 22-php-sdk P03 | 9min | 3 tasks | 6 files |
 | Phase 22-php-sdk P04 | 25min | 3 tasks | 5 files |
+| Phase 22-php-sdk P05 | 40min | 3 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -343,6 +344,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 22-php-sdk] 22-04: RefreshGuard::settle() takes the raw refresh Promise plus an onClear closure defined in Session.php (not a by-reference promise-slot param), so the nulling assignment stays literally visible in Session.php while the clear-on-both-paths mechanism is centrally enforced once in RefreshGuard
 - [Phase ?]: [Phase 22-php-sdk] 22-04: Session's internal http client is constructor-injected (not built internally) so tests can share the exact same MockHandler/Middleware::history instance with the decorated main client; production AxiamClient wiring must hand Session a client without RefreshMiddleware attached to avoid refresh-of-refresh recursion
 - [Phase ?]: [Phase 22-php-sdk] 22-04: AuthMiddleware reads the access token live from the shared CookieJar's axiam_access entry rather than caching a separate copy on Session, matching the Java/Go sibling SDKs' cookie-jar-is-source-of-truth pattern
+- [Phase ?]: PHP-only php_namespace/php_metadata_namespace proto file options land Grpc/Gen stubs at Axiam\Sdk\Grpc\Gen (PSR-4 match) with zero effect on Rust/Go/Python/TS codegen
+- [Phase ?]: AuthzGrpcClient hand-implements CheckAccess/BatchCheckAccess via Grpc\BaseStub::_simpleRequest() directly (no grpc_php_plugin available); AuthzDispatcher guards every reference behind extension_loaded('grpc') (Pitfall 4 / T-22-16), proven non-vacuously with a manual RED/GREEN removal test
 
 ### Pending Todos
 
@@ -364,6 +367,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T18:47:02.224Z
+Last session: 2026-07-02T19:03:34.002Z
 Stopped at: Completed 22-04-PLAN.md
 Resume file: None

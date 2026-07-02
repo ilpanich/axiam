@@ -227,3 +227,7 @@ No `{phase}-USER-SETUP.md` file was generated separately — this section docume
 ---
 *Phase: 20-java-sdk*
 *Completed: 2026-07-02*
+
+## Self-Check: PASSED
+
+All 14 created/modified files confirmed present on disk; all 4 commit hashes (`9983554`, `cbc8f2e`, `f3f9f69`, `ad5f90b`) confirmed present in `git log --oneline --all`.

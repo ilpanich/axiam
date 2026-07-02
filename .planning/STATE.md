@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 20
 current_phase_name: Java SDK
-status: executing
-stopped_at: Completed 20-06-PLAN.md
-last_updated: "2026-07-02T08:47:04.014Z"
+status: verifying
+stopped_at: Completed 20-09-PLAN.md — Phase 20 (Java SDK) complete, ready for verification
+last_updated: "2026-07-02T09:05:09.750Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 20 execution started
 progress:
   total_phases: 8
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 42
-  completed_plans: 41
-  percent: 63
+  completed_plans: 42
+  percent: 75
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 20 (Java SDK) — EXECUTING
 Plan: 9 of 9
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-02 — Phase 20 execution started
 
 ## Performance Metrics
@@ -134,6 +134,7 @@ Last activity: 2026-07-02 — Phase 20 execution started
 | Phase 20-java-sdk P06 | 10min | 2 tasks | 6 files |
 | Phase 20-java-sdk P07 | 8min | 2 tasks | 2 files |
 | Phase 20-java-sdk P08 | 25min | 2 tasks | 5 files |
+| Phase 20-java-sdk P09 | 14min | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -298,6 +299,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 20-java-sdk] 20-07: fake Channel/Logger test doubles implemented via java.lang.reflect.Proxy rather than adding a mocking framework dependency
 - [Phase 20-java-sdk]: 20-08: AuthClientInterceptor uses a Supplier<String> token accessor falling back RefreshGuard.cachedAccessToken() -> SessionState.cachedAccessToken(), so a gRPC call right after login() still carries the cookie-jar token — guard cache is empty until the first refresh ever runs
 - [Phase 20-java-sdk]: 20-08: gRPC wire tenant_id/subject_id resolved from access-token JWT claims, not the configured tenantId string — axiam-api-grpc authorization.rs cross-validates both body fields against verified claims and rejects PERMISSION_DENIED on mismatch
+- [Phase ?]: [Phase 20-java-sdk] 20-09: AxiamClient was missing a session() accessor entirely -- GrpcAuthzClient's public constructor requires SessionState as its third positional arg, but AxiamClient only exposed refreshGuard()/tenantId()/baseUrl()/okHttpClient()/customCa(); added session() so the gRPC transport can share the same guard/session pair (D-07/D-08 'one guard')
+- [Phase ?]: [Phase 20-java-sdk] 20-09: Spring Boot example's SecurityFilterChain adds exceptionHandling(...HttpStatusEntryPoint(UNAUTHORIZED)) -- without it, Spring Security's Http403ForbiddenEntryPoint fallback (no formLogin/httpBasic configured) returns 403 for missing credentials instead of the SC#3-required 401
+- [Phase ?]: [Phase 20-java-sdk] 20-09: added maven-failsafe-plugin to the example app's pom -- SpringBootExampleIT's *IT.java Failsafe naming convention is not picked up by the default maven-surefire-plugin, so a plain mvn verify was silently running zero tests
 
 ### Pending Todos
 
@@ -318,6 +322,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T08:46:12.765Z
-Stopped at: Completed 20-06-PLAN.md
+Last session: 2026-07-02T09:05:09.738Z
+Stopped at: Completed 20-09-PLAN.md — Phase 20 (Java SDK) complete, ready for verification
 Resume file: None

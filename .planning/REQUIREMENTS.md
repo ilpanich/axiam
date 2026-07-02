@@ -497,10 +497,10 @@ Deliver `sdks/python/` with sync + async interfaces.
 Deliver `sdks/java/` with Spring Security integration.
 
 ### Acceptance Criteria
-- [ ] Full baseline; `ReentrantLock` single-flight refresh; OkHttp `CookieManager`
-- [ ] OkHttp 4.12 + grpc-netty-shaded 1.82 + amqp-client 5.22; nimbus-jose-jwt 10.x + Tink for EdDSA
-- [ ] Spring Security filter integration; builder requires `tenantId`
-- [ ] Examples; **Maven Central publish** (`io.axiam:axiam-sdk` SDK jar **and** `io.axiam:axiam-bom` Bill-of-Materials — the BOM coordinate was added during Phase 20 discuss, D-23, to align consumer dependency versions) incl. **GPG signing setup** task
+- [x] Full baseline; `ReentrantLock` single-flight refresh; OkHttp `CookieManager`
+- [x] OkHttp 4.12 + grpc-netty-shaded 1.82 + amqp-client 5.22; nimbus-jose-jwt 10.x + Tink for EdDSA
+- [x] Spring Security filter integration; builder requires `tenantId`
+- [x] Examples; **Maven Central publish** (`io.axiam:axiam-sdk` SDK jar **and** `io.axiam:axiam-bom` Bill-of-Materials — the BOM coordinate was added during Phase 20 discuss, D-23, to align consumer dependency versions) incl. **GPG signing setup** task — CI/publish pipeline structurally proven (ephemeral-key `mvn verify -Dgpg.skip=false`); live first Central publish is a maintainer action pending namespace verification + CI secrets
 
 ---
 
@@ -558,7 +558,7 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
 | TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) | Pending |
 | GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Complete |
 | PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Complete |
-| JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Pending |
+| JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Complete |
 | CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Pending |
 | PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only | Pending |
 

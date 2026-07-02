@@ -594,7 +594,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 - [x] **Phase 17: TypeScript SDK** - Browser (REST-only) and Node (REST + gRPC + AMQP) personas; browser authz via FND-04 REST endpoint; Express + Fastify middleware; npm publish (6/6 plans executed 2026-07-01; verification found 4 critical security gaps CR-01..CR-04 — gap-closure plan 17-07 executed 2026-07-01 closing CR-02/CR-03; 17-08 pending for CR-01/CR-04) (completed 2026-07-01)
 - [x] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish (completed 2026-07-01)
 - [x] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish (completed 2026-07-01)
-- [ ] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing
+- [x] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing (completed 2026-07-02)
 - [ ] **Phase 21: C# SDK** - HttpClient + Grpc.Net.Client; Grpc.Tools MSBuild codegen; ASP.NET Core middleware; NuGet publish
 - [ ] **Phase 22: PHP SDK** - REST-first; gRPC guarded by runtime `extension_loaded('grpc')`; Laravel + Symfony middleware; Packagist publish
 
@@ -795,7 +795,7 @@ Plans:
   4. `OkHttpClient` uses `CookieManager` for cookie persistence; no `hostnameVerifier` or `sslSocketFactory` bypass is present anywhere in SDK source.
   5. Maven Central publish pipeline with GPG signing is documented and operational; `mvn verify` passes including signing.
 
-**Plans**: 8/9 plans executed
+**Plans**: 9/9 plans complete
 
 Plans:
 **Wave 1**
@@ -820,7 +820,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 20-09-PLAN.md — Deliverables: examples + complete Spring Boot app (SC#3) + README + BOM + GPG-signed Central Portal CI/publish (SC#5)
+- [x] 20-09-PLAN.md — Deliverables: examples + complete Spring Boot app (SC#3) + README + BOM + GPG-signed Central Portal CI/publish (SC#5)
 
 **Waves**: W1: 20-01 · W2: 20-02, 20-03, 20-04 · W3: 20-05, 20-06, 20-07 · W4: 20-08 · W5: 20-09
 
@@ -873,7 +873,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
-| 20. Java SDK | 8/9 | In Progress|  |
+| 20. Java SDK | 9/9 | Complete   | 2026-07-02 |
 | 21. C# SDK | 0/? | Not started | - |
 | 22. PHP SDK | 0/? | Not started | - |
 

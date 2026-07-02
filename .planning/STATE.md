@@ -5,16 +5,16 @@ milestone_name: — Client SDKs
 current_phase: 22
 current_phase_name: php-sdk
 status: executing
-stopped_at: Completed 22-01-PLAN.md
-last_updated: "2026-07-02T18:12:54.663Z"
+stopped_at: Completed 22-02-PLAN.md
+last_updated: "2026-07-02T18:22:36.876Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 22 execution started
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 58
-  completed_plans: 50
-  percent: 86
+  completed_plans: 51
+  percent: 88
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 22 (php-sdk) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 22 execution started
 
@@ -144,6 +144,7 @@ Last activity: 2026-07-02 — Phase 22 execution started
 | Phase 21-c-sdk P06 | 45min | 3 tasks | 11 files |
 | Phase 21-c-sdk P07 | 45min | 3 tasks | 10 files |
 | Phase 22 P01 | 35min | 3 tasks | 9 files |
+| Phase 22-php-sdk P02 | 20min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -332,6 +333,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 22-php-sdk] 22-01: symfony/event-dispatcher-contracts pinned ^2.5||^3.0 not ^7.0||^8.0 -- versions independently of the Symfony component line; security-core 7.x/8.x requires ^2.5|^3 of it
 - [Phase ?]: [Phase 22-php-sdk] 22-01: Sensitive stores its value in a private static WeakMap keyed by $this (not an instance property) so print_r()/var_export()/var_dump() enumerate zero properties -- required to satisfy the plan's print_r-must-not-leak behavior
 - [Phase ?]: [Phase 22-php-sdk] 22-01: NetworkError::fromException() never stores the caught Throwable as previous -- a wrapped Guzzle exception can itself carry a live PSR-7 response with the same sensitive headers, reopening the CR-04 leak path
+- [Phase ?]: firebase/php-jwt EdDSA sign/verify expects the key argument as standard (non-urlsafe) base64, not base64url — fixtures store base64url for portability but re-encode to standard base64 at call sites
+- [Phase ?]: JwksVerifier::ensureFresh() swallows discovery/JWKS fetch failures and leaves the existing cache untouched rather than propagating, relying on the existing unknown-kid-after-refetch fail-closed path
+- [Phase ?]: Committed tests/Fixtures/verify_fixture.php as a standalone CLI check (not part of files_modified frontmatter) to satisfy the plan's own Task 1 verify command
 
 ### Pending Todos
 
@@ -353,6 +357,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T18:12:54.649Z
-Stopped at: Completed 22-01-PLAN.md
+Last session: 2026-07-02T18:22:36.863Z
+Stopped at: Completed 22-02-PLAN.md
 Resume file: None

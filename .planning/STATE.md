@@ -6,14 +6,14 @@ current_phase: 21
 current_phase_name: c-sdk
 status: executing
 stopped_at: Completed 21-c-sdk-03-PLAN.md
-last_updated: "2026-07-02T13:15:15.028Z"
+last_updated: "2026-07-02T13:40:57.449Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 21 execution started
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 49
-  completed_plans: 46
+  completed_plans: 47
   percent: 75
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 21 (c-sdk) — EXECUTING
-Plan: 5 of 7
+Plan: 6 of 7
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 21 execution started
 
@@ -140,6 +140,7 @@ Last activity: 2026-07-02 — Phase 21 execution started
 | Phase 21-c-sdk P02 | 12min | 2 tasks | 5 files |
 | Phase 21-c-sdk P03 | 25min | 2 tasks | 6 files |
 | Phase 21-c-sdk P04 | 30min | 3 tasks | 8 files |
+| Phase 21-c-sdk P05 | 45min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -317,6 +318,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 21-c-sdk-04: AxiamClientOptions.BaseUrl/TenantId are required for the future AddAxiam() DI path (21-06); AxiamClient's own constructor always sources tenant/base-URL from its own positional parameters, so SC#1 never depends on what an options object carries
 - [Phase ?]: 21-c-sdk-04: Added OrgId/OrgSlug to AxiamClientOptions (Rule 2) — the real LoginRequest/RefreshRequest handlers require an organization identifier beyond CONTRACT.md §5's tenant-only minimum, without which LoginAsync/RefreshAsync cannot succeed against the real server
 - [Phase ?]: 21-c-sdk-04: AuthzRestClient.CheckAccessAsync signature is (action, resourceId, scope, subjectId, ct) rather than the plan text's literal ordering — matches the server's CheckAccessBody field priority and C#'s optional-params-trail-required-ones rule
+- [Phase ?]: gRPC transport shares AxiamClient's exact RefreshGuard/JwksVerifier via its exposed internal seam (never modifying AxiamClient.cs) — proving D-10's one-guard-across-REST-and-gRPC invariant end-to-end
+- [Phase ?]: gRPC wire tenant_id/subject_id sourced from token claims (verified via JwksVerifier, falling back to unverified decode) — never from the raw configured tenant string; the gRPC x-tenant-id Metadata header still uses the raw configured tenant, a deliberate different trust tier
 
 ### Pending Todos
 
@@ -337,6 +340,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T13:14:15.526Z
+Last session: 2026-07-02T13:40:23.613Z
 Stopped at: Completed 21-c-sdk-03-PLAN.md
 Resume file: None

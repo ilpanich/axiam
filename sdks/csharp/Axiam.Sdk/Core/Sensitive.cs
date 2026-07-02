@@ -8,6 +8,17 @@ using System.Text.Json.Serialization;
 // widening any public surface (CONTRACT.md §7 requires these stay internal-only).
 [assembly: InternalsVisibleTo("Axiam.Sdk.Tests")]
 
+// 21-06: grants the Axiam.Sdk.AspNetCore companion package access to AxiamClient's
+// internal seam (specifically JwksVerifier — AxiamAuthMiddleware's local
+// verification fast path, D-06/§10) without widening any public surface. Also
+// grants the Axiam.Sdk.AspNetCore.Tests project access to the internal
+// AxiamClient.CreateForTesting(...) seam so the SC#3 WebApplicationFactory
+// integration test can point the middleware's JwksVerifier/Authz client at a fake
+// transport instead of a real socket (mirrors the exact same test-only seam
+// Axiam.Sdk.Tests already uses).
+[assembly: InternalsVisibleTo("Axiam.Sdk.AspNetCore")]
+[assembly: InternalsVisibleTo("Axiam.Sdk.AspNetCore.Tests")]
+
 namespace Axiam.Sdk.Core;
 
 /// <summary>

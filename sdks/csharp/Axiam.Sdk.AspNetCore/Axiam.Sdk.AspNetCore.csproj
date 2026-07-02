@@ -13,10 +13,27 @@
     <LangVersion>latest</LangVersion>
     <Deterministic>true</Deterministic>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <!-- D-04 [LOCKED]: NuGet publish = SourceLink + deterministic build + snupkg
+         symbol packages, so `dotnet pack -c Release` produces a valid, debuggable
+         .nupkg + .snupkg (SC#5). Mirrors Axiam.Sdk.csproj's identical config. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- D-04: SourceLink (GitHub) — dev-only dependency (PrivateAssets=All, never
+       flows to consumers), mirrors Axiam.Sdk.csproj's identical config. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0">
+      <PrivateAssets>All</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
   <!-- D-03 [LOCKED]: keeps Axiam.Sdk (core) framework-free — the ASP.NET Core shared

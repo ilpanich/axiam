@@ -13,10 +13,28 @@
     <LangVersion>latest</LangVersion>
     <Deterministic>true</Deterministic>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <!-- D-04 [LOCKED]: NuGet publish = SourceLink + deterministic build + snupkg
+         symbol packages, so `dotnet pack -c Release` produces a valid, debuggable
+         .nupkg + .snupkg (SC#5). Deterministic is already set above. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- D-04: SourceLink (GitHub) — dev-only dependency (PrivateAssets=All, never
+       flows to consumers) embedding source-control metadata into the .pdb so
+       consumers can step through the SDK's actual source from nuget.org/GitHub. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0">
+      <PrivateAssets>All</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
   <!--

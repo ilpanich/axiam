@@ -6,14 +6,14 @@ current_phase: 20
 current_phase_name: Java SDK
 status: executing
 stopped_at: Completed 20-06-PLAN.md
-last_updated: "2026-07-02T08:23:13.687Z"
+last_updated: "2026-07-02T08:47:04.014Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 20 execution started
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 42
-  completed_plans: 40
+  completed_plans: 41
   percent: 63
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 20 (Java SDK) — EXECUTING
-Plan: 8 of 9
+Plan: 9 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 20 execution started
 
@@ -133,6 +133,7 @@ Last activity: 2026-07-02 — Phase 20 execution started
 | Phase 20-java-sdk P05 | 25min | 3 tasks | 11 files |
 | Phase 20-java-sdk P06 | 10min | 2 tasks | 6 files |
 | Phase 20-java-sdk P07 | 8min | 2 tasks | 2 files |
+| Phase 20-java-sdk P08 | 25min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -295,6 +296,8 @@ Recent decisions affecting current work:
 - [Phase 20-java-sdk]: 20-06: added test-scoped org.springframework:spring-test:6.2.11 (pinned to spring-security-web's transitive spring-core) for AxiamAuthenticationFilterIT's MockFilterChain-level test, avoiding a full spring-boot-starter-test dependency
 - [Phase ?]: [Phase 20-java-sdk] 20-07: deliverCallback built by a package-private static factory (AmqpConsumer.deliverCallback) so tests invoke it directly against synthesized Delivery objects without a live broker
 - [Phase ?]: [Phase 20-java-sdk] 20-07: fake Channel/Logger test doubles implemented via java.lang.reflect.Proxy rather than adding a mocking framework dependency
+- [Phase 20-java-sdk]: 20-08: AuthClientInterceptor uses a Supplier<String> token accessor falling back RefreshGuard.cachedAccessToken() -> SessionState.cachedAccessToken(), so a gRPC call right after login() still carries the cookie-jar token — guard cache is empty until the first refresh ever runs
+- [Phase 20-java-sdk]: 20-08: gRPC wire tenant_id/subject_id resolved from access-token JWT claims, not the configured tenantId string — axiam-api-grpc authorization.rs cross-validates both body fields against verified claims and rejects PERMISSION_DENIED on mismatch
 
 ### Pending Todos
 
@@ -315,6 +318,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T08:22:39.566Z
+Last session: 2026-07-02T08:46:12.765Z
 Stopped at: Completed 20-06-PLAN.md
 Resume file: None

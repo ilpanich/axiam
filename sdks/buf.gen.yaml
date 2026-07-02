@@ -41,10 +41,21 @@ plugins:
   - remote: buf.build/grpc/python
     out: python/axiam_sdk/gen
 
-  # Java: protobuf types + gRPC service stubs
-  # Verified against buf.build BSR — orchestrator-confirmed 2026-06-30
-  - remote: buf.build/protocolbuffers/java
-    out: java/src/main/java
-  - remote: buf.build/grpc/java
-    out: java/src/main/java
+  # Java: DRIFT-CHECK-ONLY, documentation reference — NOT the authoritative
+  # Java codegen path (Phase 20 D-21 / RESEARCH.md Pitfall 1). The `buf` CLI
+  # is unavailable in this development environment; Java's actual gRPC
+  # codegen is `mvn -f sdks/java/pom.xml generate-sources` via
+  # protobuf-maven-plugin + os-maven-plugin, which self-downloads protoc/
+  # protoc-gen-grpc-java and outputs into the gitignored
+  # sdks/java/target/generated-sources/protobuf (never the committed source
+  # tree). These two entries are commented out on purpose: an active
+  # `out: java/src/main/java` here would write generated stubs directly into
+  # the committed source tree, conflicting with D-21's generate-on-build/
+  # gitignored/bundle-compiled-into-jar model. Uncomment only for an
+  # optional CI drift-check comparing buf's output against the Maven build's
+  # output — never as the build's actual source of generated code.
+  # - remote: buf.build/protocolbuffers/java
+  #   out: java/src/main/java
+  # - remote: buf.build/grpc/java
+  #   out: java/src/main/java
 

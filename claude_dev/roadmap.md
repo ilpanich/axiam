@@ -545,6 +545,62 @@ The mail consumer (`axiam-amqp/src/mail_consumer.rs`) currently uses the built-i
 
 ---
 
+### Items deferred from PR #126 review (SDKs — phases 15–22)
+
+Findings from the Gemini review and CI triage on PR #126 that are **out of scope for the SDK PR** (they touch already-merged backend code, or are cross-cutting hardening best done as a focused pass). In-scope PR items (rustfmt, Python 3.10 `datetime.UTC`, mypy-strict config, D-04 Python stub drift, Rust-SDK protoc, CSRF header origin-gating in the Python SDK) were fixed directly in the PR.
+
+### T19.23 — Password-reset timing side-channel (user enumeration)
+`crates/axiam-auth/src/password_reset.rs::initiate_reset` returns early for unknown/federated users, so response time distinguishes valid from invalid emails. Add a constant-time fallback: perform a dummy Argon2/hash + equivalent async DB wait on the ineligible path so overall duration matches a real token generation. (Gemini review §1.A.)
+
+**Commit**: `security(auth): constant-time password-reset to close user-enumeration side-channel`
+
+### T19.24 — Zeroize peppered-password buffer
+`crates/axiam-auth/src/password.rs::hash_password` builds `format!("{p}{password}")`, leaving plaintext password + secret pepper in heap memory until reallocated. Wrap the peppered buffer with `zeroize` (and consider `secrecy` for the pepper) so it is wiped before the function returns. (Gemini review §1.B.)
+
+**Commit**: `security(auth): zeroize peppered-password buffer after hashing`
+
+### T19.25 — Public-path prefix-match hardening
+`crates/axiam-api-rest/src/middleware/authz.rs` matches public paths with a wildcard prefix, so an entry like `/api/v1/auth*` would also match `/api/v1/authz/...`. Require a path-segment boundary (trailing slash before the wildcard, e.g. `/api/v1/auth/*`) to prevent accidental namespace exposure. (Gemini review §1.D.)
+
+**Commit**: `fix(api-rest): require segment boundary in public-path wildcard matching`
+
+### T19.26 — HIBP circuit breaker + micro-opt
+`crates/axiam-auth/src/policy.rs::check_hibp` makes a 5s-timeout network call to the Pwned Passwords API; under a credential-stuffing burst thousands of tasks could block, starving legitimate flows. Wrap the call in a circuit breaker that trips on repeated failure/timeout and fails open (`Ok(None)`) for a cooldown window. Also pre-size `check_complexity`'s `violations` vec with `Vec::with_capacity(5)`. (Gemini review §2.A, §2.C.)
+
+**Commit**: `perf(auth): circuit-breaker HIBP checks and pre-size complexity violations`
+
+### T19.27 — GDPR audit durability (DLQ fallback)
+`crates/axiam-api-rest/src/handlers/gdpr.rs::append_gdpr_audit` is fire-and-forget; if the SurrealDB insert fails, the legally-significant Art. 15/17 event is only in a tracing log. On DB-insert failure, fall back to a persistent local dead-letter file / dedicated audit syslog for 100% durability. (Gemini review §3.A.)
+
+**Commit**: `feat(api-rest): dead-letter fallback for GDPR audit-write failures`
+
+### T19.28 — JWKS single-flight across SDKs
+Under a burst of invalid-`kid` tokens with an empty cache, per-SDK JWKS clients may each fetch concurrently (e.g. Python `PyJWKClient` does not coalesce), causing a fetch storm to the JWKS endpoint. Wrap the fetch in a single-flight promise/future so N concurrent misses await one network request. Apply consistently across Python, Go, Rust, Java, C#, TypeScript. (Gemini review §2.B; the once/60s forced-refetch rate-limit already caps *invalidation* but not the initial cache-fill.)
+
+**Commit**: `perf(sdks): single-flight JWKS fetch to prevent cache-stampede`
+
+### T19.29 — CSRF/tenant header origin-gating across all SDKs
+The Python SDK now withholds `X-Tenant-ID`/`X-CSRF-Token` from cross-origin requests (PR #126). Apply the same origin guard to the TypeScript, Go, Java, C#, and PHP SDK request decorators for consistency. (Gemini review §1.C rollout.)
+
+**Commit**: `security(sdks): gate tenant/CSRF headers by request origin across all SDKs`
+
+### T19.30 — buf workspace fix + cross-language stub regeneration
+`sdks/buf.yaml` uses `modules: [{path: ../proto}]`, which buf v2 rejects (module outside the workspace context) — this fails `buf lint + breaking`, `buf drift-check (D-01, Go)`, and the TypeScript `buf generate` codegen step. Relocate the buf workspace to the repo root (`buf.yaml` with `modules: [{path: proto}]`, `buf.gen.yaml` outputs prefixed with `sdks/`), update the affected workflow `input`/`working-directory`/path filters, and **regenerate the committed Go (and any descriptor-embedding) stubs** so they match the Phase-22 `php_namespace`/`php_metadata_namespace` proto options (those options pollute the language-agnostic serialized descriptor, staling the pre-Phase-22 Go stubs). Requires an environment with the `buf` CLI (unavailable in the current dev sandbox), so it could not be validated in PR #126.
+
+**Commit**: `ci(sdks): fix buf workspace root + regenerate cross-language gRPC stubs`
+
+### T19.31 — Root cargo-audit advisory remediation
+The `Security Scan` (`cargo audit`) job fails on a RUSTSEC advisory published after the last green `main` run (not introduced by PR #126 — the SDK PR adds no new root dependencies). Update the affected dependency, or add the advisory ID to the audit ignore-list with justification.
+
+**Commit**: `chore(security): remediate/triage new cargo-audit advisory`
+
+### T19.32 — Pin third-party GitHub Actions to commit SHAs
+The new SDK CI workflows reference third-party actions by tag rather than full commit SHA (`bufbuild/buf-action@v1.4.0`, `shivammathur/setup-php@v2`, `pypa/gh-action-pypi-publish@release/v1`). Pin each to a full-length commit SHA (supply-chain hardening) once an environment with network egress can resolve them.
+
+**Commit**: `ci(sdks): pin third-party GitHub Actions to commit SHAs`
+
+---
+
 ## Phase 20: Axiam website
 
 ### 20.1 - Generate Axiam website - Showcase
@@ -582,8 +638,8 @@ Generate the website to be deployed on github.io for the documentation. Produce 
 | Phase 16 | 3 | Docker, K8s, CD pipeline |
 | Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 18 | 4 | Security, compliance, performance, docs |
-| Phase 19 | 12 | Deferred improvements & optimizations from PR reviews |
+| Phase 19 | 22 | Deferred improvements & optimizations from PR reviews (incl. PR #126) |
 
-**Total: 89 tasks across 21 phases**
+**Total: 99 tasks across 21 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

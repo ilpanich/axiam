@@ -30,13 +30,8 @@ use crate::handlers::authz_check::{
 
 async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
     let db = Surreal::new::<Mem>(()).await.expect("in-memory db");
-    db.use_ns("test")
-        .use_db("test")
-        .await
-        .expect("use ns/db");
-    axiam_db::run_migrations(&db)
-        .await
-        .expect("run migrations");
+    db.use_ns("test").use_db("test").await.expect("use ns/db");
+    axiam_db::run_migrations(&db).await.expect("run migrations");
     db
 }
 
@@ -81,9 +76,7 @@ fn status_code(result: &Result<actix_web::HttpResponse, AxiamApiError>) -> u16 {
 async fn read_body_json(response: actix_web::HttpResponse) -> serde_json::Value {
     use actix_http::body::to_bytes;
 
-    let bytes = to_bytes(response.into_body())
-        .await
-        .expect("body to bytes");
+    let bytes = to_bytes(response.into_body()).await.expect("body to bytes");
     serde_json::from_slice(&bytes).expect("valid JSON body")
 }
 
@@ -114,7 +107,10 @@ async fn self_check_returns_allow() {
 
     let json = read_body_json(result.unwrap()).await;
     assert_eq!(json["allowed"], true, "AllowAll should return allowed=true");
-    assert!(json.get("reason").is_none() || json["reason"].is_null(), "reason should be absent on allow");
+    assert!(
+        json.get("reason").is_none() || json["reason"].is_null(),
+        "reason should be absent on allow"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +138,11 @@ async fn override_without_check_as_permission_returns_403() {
     });
 
     let result = check_access(user, authz, audit_repo, body).await;
-    assert_eq!(status_code(&result), 403, "override without authz:check_as must return 403");
+    assert_eq!(
+        status_code(&result),
+        403,
+        "override without authz:check_as must return 403"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -170,10 +170,17 @@ async fn override_with_check_as_permission_returns_decision_and_audits() {
     });
 
     let result = check_access(user, authz, audit_repo.clone(), body).await;
-    assert_eq!(status_code(&result), 200, "override with authz:check_as should return 200");
+    assert_eq!(
+        status_code(&result),
+        200,
+        "override with authz:check_as should return 200"
+    );
 
     let json = read_body_json(result.unwrap()).await;
-    assert_eq!(json["allowed"], true, "AllowAll engine should return allowed=true");
+    assert_eq!(
+        json["allowed"], true,
+        "AllowAll engine should return allowed=true"
+    );
 
     // Verify the audit row was written (T-15-04).
     // Small delay to ensure the fire-and-forget append completes.
@@ -248,11 +255,7 @@ async fn batch_check_returns_results_in_input_order() {
     );
     // AllowAll engine: all should be allowed
     for (i, res) in results.iter().enumerate() {
-        assert_eq!(
-            res["allowed"],
-            true,
-            "batch result[{i}] should be allowed"
-        );
+        assert_eq!(res["allowed"], true, "batch result[{i}] should be allowed");
     }
 }
 

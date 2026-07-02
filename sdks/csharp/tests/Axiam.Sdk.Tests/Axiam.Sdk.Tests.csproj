@@ -17,6 +17,22 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Moq" Version="4.20.72" />
+    <!-- 21-05: Grpc.AspNetCore.Server hosts the in-process fake AuthorizationService for
+         GrpcAuthzClientTests (a lightweight loopback Kestrel/HTTP2 test host — the
+         officially documented way to test a Grpc.Net.Client client against a real gRPC
+         server without a live AXIAM backend). Version-aligned with the core project's
+         Grpc.Net.Client/Grpc.Tools 2.80.0 line. -->
+    <PackageReference Include="Grpc.AspNetCore.Server" Version="2.80.0" />
+  </ItemGroup>
+
+  <!-- 21-05: ASP.NET Core shared framework reference, test-only — required for
+       Grpc.AspNetCore.Server's AddGrpc()/MapGrpcService<T>() and Kestrel's
+       ListenLocalhost/HttpProtocols APIs used by GrpcAuthzClientTests' in-process fake
+       gRPC server. Mirrors the exact same FrameworkReference pattern
+       Axiam.Sdk.AspNetCore.csproj already uses (D-03) — added here to the TEST project
+       only; Axiam.Sdk (core) itself stays framework-free. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>

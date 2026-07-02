@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 22
 current_phase_name: php-sdk
 status: executing
-stopped_at: Completed 22-02-PLAN.md
-last_updated: "2026-07-02T18:32:51.625Z"
+stopped_at: Completed 22-04-PLAN.md
+last_updated: "2026-07-02T18:47:02.237Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 22 execution started
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 58
-  completed_plans: 52
+  completed_plans: 53
   percent: 88
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 22 (php-sdk) — EXECUTING
-Plan: 4 of 9
+Plan: 5 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 22 execution started
 
@@ -146,6 +146,7 @@ Last activity: 2026-07-02 — Phase 22 execution started
 | Phase 22 P01 | 35min | 3 tasks | 9 files |
 | Phase 22-php-sdk P02 | 20min | 3 tasks | 7 files |
 | Phase 22-php-sdk P03 | 9min | 3 tasks | 6 files |
+| Phase 22-php-sdk P04 | 25min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -339,6 +340,9 @@ Recent decisions affecting current work:
 - [Phase ?]: Committed tests/Fixtures/verify_fixture.php as a standalone CLI check (not part of files_modified frontmatter) to satisfy the plan's own Task 1 verify command
 - [Phase ?]: [Phase 22-php-sdk] 22-03: Generated real fixture signatures via a throwaway cargo #[test] calling axiam-amqp's sign_payload directly, reverted after use -- PHP SDK has zero runtime/test dependency on axiam-amqp
 - [Phase ?]: [Phase 22-php-sdk] 22-03: Slash+non-ASCII HMAC regression payload placed inside AuthzRequest.action (plain String) rather than a new struct field -- reproduces Pitfall 1 without any server schema change
+- [Phase ?]: [Phase 22-php-sdk] 22-04: RefreshGuard::settle() takes the raw refresh Promise plus an onClear closure defined in Session.php (not a by-reference promise-slot param), so the nulling assignment stays literally visible in Session.php while the clear-on-both-paths mechanism is centrally enforced once in RefreshGuard
+- [Phase ?]: [Phase 22-php-sdk] 22-04: Session's internal http client is constructor-injected (not built internally) so tests can share the exact same MockHandler/Middleware::history instance with the decorated main client; production AxiamClient wiring must hand Session a client without RefreshMiddleware attached to avoid refresh-of-refresh recursion
+- [Phase ?]: [Phase 22-php-sdk] 22-04: AuthMiddleware reads the access token live from the shared CookieJar's axiam_access entry rather than caching a separate copy on Session, matching the Java/Go sibling SDKs' cookie-jar-is-source-of-truth pattern
 
 ### Pending Todos
 
@@ -360,6 +364,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T18:32:25.868Z
-Stopped at: Completed 22-02-PLAN.md
+Last session: 2026-07-02T18:47:02.224Z
+Stopped at: Completed 22-04-PLAN.md
 Resume file: None

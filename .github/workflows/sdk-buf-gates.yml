@@ -25,3 +25,8 @@ jobs:
           lint: true
           breaking: true
           breaking_against: "https://github.com/ilpanich/axiam.git#branch=main,subdir=proto"
+          # This job only has contents:read; disable the auto PR comment so the
+          # action does not fail with "Resource not accessible by integration".
+          pr_comment: false
+          # buf format is enforced via the format:true default; keep it explicit.
+          format: true

@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package axiam.v1;
 
+option php_metadata_namespace = "Axiam\\Sdk\\Grpc\\Gen\\Metadata";
 // PHP-only codegen options (ignored by all other language plugins — these
 // are standard protobuf FileOptions fields, ambient to protoc's PHP
 // backend, not a custom extension). Without these, protoc's --php_out
@@ -12,7 +13,6 @@ package axiam.v1;
 // other language's codegen (Rust/Go/Python/TypeScript) byte-for-byte
 // unaffected (22-05-PLAN.md Task 1).
 option php_namespace = "Axiam\\Sdk\\Grpc\\Gen";
-option php_metadata_namespace = "Axiam\\Sdk\\Grpc\\Gen\\Metadata";
 
 // Authorization service for low-latency access checks in service meshes.
 service AuthorizationService {

@@ -2,11 +2,11 @@ syntax = "proto3";
 
 package axiam.v1;
 
+option php_metadata_namespace = "Axiam\\Sdk\\Grpc\\Gen\\Metadata";
 // PHP-only codegen options — must match authorization.proto's values so all
 // files in package axiam.v1 agree (buf PACKAGE_SAME_PHP_NAMESPACE). Ignored
 // by every other language's codegen.
 option php_namespace = "Axiam\\Sdk\\Grpc\\Gen";
-option php_metadata_namespace = "Axiam\\Sdk\\Grpc\\Gen\\Metadata";
 
 // Token service for JWT validation and introspection.
 service TokenService {

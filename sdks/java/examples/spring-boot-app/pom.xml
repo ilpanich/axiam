@@ -75,6 +75,27 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
       </plugin>
+      <!-- Rule 1 fix: SpringBootExampleIT follows the classic Failsafe
+           *IT.java naming convention, but the default maven-surefire-plugin
+           (bound to `test`) does NOT match that pattern — a plain `mvn
+           verify` would silently compile the class and run ZERO tests.
+           maven-failsafe-plugin is bound to the integration-test/verify
+           phases and matches **/*IT.java by default, so `mvn verify`
+           actually boots the application context and exercises /hello
+           (SC#3), not just compiles it. Version managed by the
+           spring-boot-starter-parent pluginManagement BOM. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 </project>

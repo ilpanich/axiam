@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!-- D-15/D-16: Spring Boot 3.2+/Security 6.x, jakarta.* namespace. Pinned
+       to the same 3.5.6 line as sdks/java/pom.xml's spring-boot-starter-security
+       (provided/optional) dependency, so the example builds against the same
+       Spring Security major/minor the SDK's own filter/AutoConfiguration
+       target. -->
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.6</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>io.axiam.example</groupId>
+  <artifactId>spring-boot-app-example</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <name>axiam-sdk-example-spring-boot-app</name>
+  <description>Complete Spring Boot 3.x example wiring the AXIAM Java SDK's AxiamAuthenticationFilter explicitly in a SecurityFilterChain @Bean (SC#3)</description>
+
+  <properties>
+    <java.version>21</java.version>
+  </properties>
+
+  <dependencies>
+    <!-- Built against the phase version installed into the local Maven
+         repository by `mvn -f sdks/java/pom.xml install` (this example is
+         never published standalone; it exists to prove SC#3's "complete
+         working application context"). -->
+    <dependency>
+      <groupId>io.axiam</groupId>
+      <artifactId>axiam-sdk</artifactId>
+      <version>0.1.0</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Mocks the AXIAM server's /oauth2/jwks endpoint in SpringBootExampleIT
+         (D-28: matches the SDK's own OkHttp 4.12.0-line mockwebserver, NOT
+         the 5.x mockwebserver3 rewrite — Pitfall 3). -->
+    <dependency>
+      <groupId>com.squareup.okhttp3</groupId>
+      <artifactId>mockwebserver</artifactId>
+      <version>4.12.0</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

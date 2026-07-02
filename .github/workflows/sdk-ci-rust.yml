@@ -47,6 +47,13 @@ jobs:
         with:
           workspaces: sdks/rust
 
+      # build.rs runs tonic-prost-build gRPC codegen (grpc feature, pulled in
+      # by --all-features), which shells out to protoc. Without it, codegen
+      # is skipped and the crate's include!("../gen/axiam.v1.rs") fails to
+      # compile. Ubuntu's protobuf-compiler is sufficient for prost/tonic.
+      - name: Install protoc (build.rs gRPC codegen)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: Build (all features)
         working-directory: sdks/rust
         run: cargo build -p axiam-sdk --all-features
@@ -123,6 +130,9 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         with:
           workspaces: sdks/rust
+
+      - name: Install protoc (build.rs gRPC codegen)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       # D-09: regenerate-and-bundle the gRPC stubs before publishing so
       # crates.io consumers (who cannot run buf) get a self-contained crate.

@@ -605,6 +605,18 @@ pub fn register_api_v1_routes<C: surrealdb::Connection>(
                         web::post()
                             .to(handlers::gdpr::request_account_delete::<C>),
                     ),
+            )
+            // --- Authz check (FND-04) — dedicated higher rate-limit tier (D-07) ---
+            // AuthzMiddleware and CsrfMiddleware are inherited from the /api/v1 scope.
+            .service(
+                web::resource("/authz/check")
+                    .wrap(build_governor(rate_limit_cfg.authz_check_per_min))
+                    .route(web::post().to(handlers::authz_check::check_access::<C>)),
+            )
+            .service(
+                web::resource("/authz/check/batch")
+                    .wrap(build_governor(rate_limit_cfg.authz_check_per_min))
+                    .route(web::post().to(handlers::authz_check::batch_check_access::<C>)),
             );
     // Authenticated SAML SP routes — only when the `saml` feature is on.
     #[cfg(feature = "saml")]

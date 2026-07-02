@@ -439,11 +439,11 @@ Create the `sdks/` monorepo layout and per-SDK CI so each language builds/tests 
 Deliver `sdks/rust/` as the reference SDK proving the full capability baseline; establishes the `Sensitive<T>` and gRPC-channel patterns reused by the others.
 
 ### Acceptance Criteria
-- [ ] Full **SDK Capability Baseline** (above)
-- [ ] reqwest 0.12 REST + tonic 0.14 gRPC + lapin 4 AMQP (versions pinned to server workspace)
-- [ ] `reqwest::cookie::Jar` cookie persistence; Actix-Web middleware/extractor helper
-- [ ] Concurrency test: 5 concurrent requests on an expired token ⇒ exactly 1 refresh call
-- [ ] Examples + publish-ready `Cargo.toml`; **crates.io publish pipeline** in CI
+- [x] Full **SDK Capability Baseline** (above)
+- [x] reqwest 0.12 REST + tonic 0.14 gRPC + lapin 4 AMQP (versions pinned to server workspace)
+- [x] `reqwest::cookie::Jar` cookie persistence; Actix-Web middleware/extractor helper
+- [x] Concurrency test: 5 concurrent requests on an expired token ⇒ exactly 1 refresh call
+- [x] Examples + publish-ready `Cargo.toml`; **crates.io publish pipeline** in CI
 
 ---
 
@@ -454,11 +454,11 @@ Deliver `sdks/rust/` as the reference SDK proving the full capability baseline; 
 Deliver `sdks/typescript/` with distinct browser vs Node entry points.
 
 ### Acceptance Criteria
-- [ ] Full baseline; **browser persona** authz via REST endpoint (FND-04); **Node persona** authz via gRPC
-- [ ] axios 1.7 REST + @grpc/grpc-js 1.14 (Node) + amqplib (Node); `jose` for JWKS; ts-proto 2.x stubs
-- [ ] Separate `axiam-sdk/rest` / `axiam-sdk/grpc` / `axiam-sdk/amqp` export conditions (browser bundlers tree-shake Node-only)
-- [ ] CSRF interceptor auto-forwards `X-CSRF-Token`; promise-deduplicated refresh guard
-- [ ] Express + Fastify middleware; examples; **npm publish pipeline** (`axiam-sdk`)
+- [x] Full baseline; **browser persona** authz via REST endpoint (FND-04); **Node persona** authz via gRPC
+- [x] axios 1.7 REST + @grpc/grpc-js 1.14 (Node) + amqplib (Node); `jose` for JWKS; ts-proto 2.x stubs
+- [x] Separate `axiam-sdk/rest` / `axiam-sdk/grpc` / `axiam-sdk/amqp` export conditions (browser bundlers tree-shake Node-only)
+- [x] CSRF interceptor auto-forwards `X-CSRF-Token`; promise-deduplicated refresh guard (Node CSRF populated via `onAuthenticated()` jar-read — CR-01 closed in 17-08; refresh guard is per-session via `createRefreshGuard()` — CR-02 closed in 17-07)
+- [x] Express + Fastify middleware; examples; **npm publish pipeline** (`axiam-sdk`)
 
 ---
 
@@ -469,10 +469,10 @@ Deliver `sdks/typescript/` with distinct browser vs Node entry points.
 Deliver `sdks/go/` (second server-side reference).
 
 ### Acceptance Criteria
-- [ ] Full baseline; `sync.Mutex` single-flight refresh; `net/http/cookiejar`
-- [ ] net/http REST + grpc-go 1.81 + amqp091-go 1.10; lestrrat-go/jwx/v3 for EdDSA/JWKS
-- [ ] No `InsecureSkipVerify` anywhere (CI lint gate); net/http middleware
-- [ ] Examples; **Go module publish** (`github.com/axiam/axiam-go-sdk`, version tag `sdk/go/vX.Y.Z`)
+- [x] Full baseline; `sync.Mutex` single-flight refresh; `net/http/cookiejar`
+- [x] net/http REST + grpc-go 1.81 + amqp091-go 1.10; lestrrat-go/jwx/v3 for EdDSA/JWKS
+- [x] No `InsecureSkipVerify` anywhere (CI lint gate); net/http middleware
+- [x] Examples; **Go module publish** (`github.com/ilpanich/axiam/sdks/go`, version tag `sdks/go/vX.Y.Z`)
 
 ---
 
@@ -483,10 +483,10 @@ Deliver `sdks/go/` (second server-side reference).
 Deliver `sdks/python/` with sync + async interfaces.
 
 ### Acceptance Criteria
-- [ ] Full baseline; `asyncio.Lock` single-flight refresh; `httpx.Cookies` jar; `verify=True` hardcoded
-- [ ] httpx 0.27 (sync+async) + grpcio 1.78 + aio-pika 9.6; Pydantic v2 models; PyJWT for JWKS
-- [ ] FastAPI dependency + Django middleware helpers
-- [ ] Examples; **PyPI publish pipeline** (`axiam-sdk`)
+- [x] Full baseline; `asyncio.Lock` single-flight refresh; `httpx.Cookies` jar; `verify=True` hardcoded
+- [x] httpx 0.27 (sync+async) + grpcio 1.78 + aio-pika 9.6; Pydantic v2 models; PyJWT for JWKS
+- [x] FastAPI dependency + Django middleware helpers
+- [x] Examples; **PyPI publish pipeline** (`axiam-sdk`)
 
 ---
 
@@ -497,10 +497,10 @@ Deliver `sdks/python/` with sync + async interfaces.
 Deliver `sdks/java/` with Spring Security integration.
 
 ### Acceptance Criteria
-- [ ] Full baseline; `ReentrantLock` single-flight refresh; OkHttp `CookieManager`
-- [ ] OkHttp 4.12 + grpc-netty-shaded 1.82 + amqp-client 5.22; nimbus-jose-jwt 10.x + Tink for EdDSA
-- [ ] Spring Security filter integration; builder requires `tenantId`
-- [ ] Examples; **Maven Central publish** (`io.axiam:axiam-sdk`) incl. **GPG signing setup** task
+- [x] Full baseline; `ReentrantLock` single-flight refresh; OkHttp `CookieManager`
+- [x] OkHttp 4.12 + grpc-netty-shaded 1.82 + amqp-client 5.22; nimbus-jose-jwt 10.x + Tink for EdDSA
+- [x] Spring Security filter integration; builder requires `tenantId`
+- [x] Examples; **Maven Central publish** (`io.axiam:axiam-sdk` SDK jar **and** `io.axiam:axiam-bom` Bill-of-Materials — the BOM coordinate was added during Phase 20 discuss, D-23, to align consumer dependency versions) incl. **GPG signing setup** task — CI/publish pipeline structurally proven (ephemeral-key `mvn verify -Dgpg.skip=false`); live first Central publish is a maintainer action pending namespace verification + CI secrets
 
 ---
 
@@ -511,10 +511,10 @@ Deliver `sdks/java/` with Spring Security integration.
 Deliver `sdks/csharp/` with ASP.NET Core integration.
 
 ### Acceptance Criteria
-- [ ] Full baseline; `SemaphoreSlim(1,1)` single-flight refresh; `HttpClientHandler.CookieContainer`
-- [ ] HttpClient + Grpc.Net.Client 2.80 + RabbitMQ.Client 7.2; native EdDSA on .NET 8+ (BouncyCastle for netstandard2.0)
-- [ ] `Grpc.Tools` MSBuild codegen (documented buf exception); `Axiam.Sdk.AspNetCore` middleware sub-package
-- [ ] Examples; **NuGet publish pipeline** (`Axiam.Sdk`) incl. credential setup
+- [x] Full baseline; `SemaphoreSlim(1,1)` single-flight refresh; `HttpClientHandler.CookieContainer`
+- [x] HttpClient + Grpc.Net.Client 2.80 + RabbitMQ.Client 7.2; BouncyCastle.Cryptography for Ed25519 (native EdDSA confirmed unavailable on .NET 8+ — 21-RESEARCH.md; netstandard2.0 leg deferred, D-01)
+- [x] `Grpc.Tools` MSBuild codegen (documented buf exception); `Axiam.Sdk.AspNetCore` middleware sub-package
+- [x] Examples; **NuGet publish pipeline** (`Axiam.Sdk` + `Axiam.Sdk.AspNetCore`) incl. credential setup — CI/publish pipeline structurally proven (build/test/pack + tag-triggered `dotnet nuget push`); live first publish is a maintainer action pending `NUGET_API_KEY` secret configuration
 
 ---
 
@@ -525,10 +525,10 @@ Deliver `sdks/csharp/` with ASP.NET Core integration.
 Deliver `sdks/php/` (REST-first; gRPC guarded by runtime capability).
 
 ### Acceptance Criteria
-- [ ] Full baseline minus standard-FPM gRPC; Guzzle `HandlerStack` single-refresh middleware; Guzzle `CookieJar`; `verify: true`
-- [ ] Guzzle 7.x REST + php-amqplib 3.7 AMQP + firebase/php-jwt 6.11; optional grpc PECL behind `extension_loaded('grpc')` guard with documented Swoole/RoadRunner requirement
-- [ ] Laravel + Symfony middleware helpers
-- [ ] Examples; **Packagist publish** (`axiam/axiam-sdk`)
+- [x] Full baseline minus standard-FPM gRPC; Guzzle `HandlerStack` single-refresh middleware; Guzzle `CookieJar`; `verify: true`
+- [x] Guzzle 7.x REST + php-amqplib 3.7 AMQP + firebase/php-jwt 6.11; optional grpc PECL behind `extension_loaded('grpc')` guard with documented Swoole/RoadRunner requirement
+- [x] Laravel + Symfony middleware helpers
+- [x] Examples; **Packagist publish** (`axiam/axiam-sdk`) — publish pipeline shipped (`sdk-ci-php.yml`); live publish is a maintainer `user_setup` (mirror repo + `PHP_SDK_MIRROR_TOKEN`)
 
 ---
 
@@ -554,13 +554,13 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
 | FND-03 | Phase 15 | Cross-Language SDK Contract Document (`sdks/CONTRACT.md`) | Pending |
 | FND-04 | Phase 15 | REST Authorization-Check Endpoint (`POST /api/v1/authz/check`) | Pending |
 | FND-05 | Phase 15 | SDK Monorepo Scaffold & per-SDK path-filtered CI | Pending |
-| RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) | Pending |
+| RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) | Complete |
 | TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) | Pending |
-| GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Pending |
-| PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Pending |
-| JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Pending |
-| CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Pending |
-| PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only | Pending |
+| GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Complete |
+| PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Complete |
+| JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Complete |
+| CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Complete |
+| PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only | Complete |
 
 **Coverage: 12/12 v1.1 requirements mapped (100%)**
 

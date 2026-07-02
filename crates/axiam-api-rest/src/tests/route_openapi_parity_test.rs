@@ -45,6 +45,11 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     // compiled; listing it unconditionally is harmless (no reverse openapi
     // membership check) and mirrors the SAML entries in PUBLIC_PATHS.
     "/api/v1/federation/saml/authn-request",
+    // Authz check — JWT-authenticated; authz:check_as check is conditional
+    // inside the handler (not a route-level gate), so these paths are not
+    // in ROUTE_PERMISSION_MAP (see PATTERNS.md Pitfall 4).
+    "/api/v1/authz/check",
+    "/api/v1/authz/check/batch",
 ];
 
 /// Returns true if `openapi_path` is covered by any `PUBLIC_PATHS` entry.

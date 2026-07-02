@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.axiam</groupId>
+  <artifactId>axiam-bom</artifactId>
+  <version>0.1.0</version>
+  <packaging>pom</packaging>
+
+  <name>axiam-bom</name>
+  <description>Bill of Materials for AXIAM Java SDK artifacts. Import this
+    POM's dependencyManagement to keep io.axiam:axiam-sdk (and future
+    companion modules) version-aligned across a consumer's own dependency
+    tree (D-23).</description>
+  <url>https://github.com/ilpanich/axiam</url>
+
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <!-- Required by Sonatype Central Portal — every published POM must
+       declare at least one developer (D-22), mirroring sdks/java/pom.xml. -->
+  <developers>
+    <developer>
+      <name>AXIAM Maintainers</name>
+      <url>https://github.com/ilpanich/axiam</url>
+    </developer>
+  </developers>
+
+  <scm>
+    <url>https://github.com/ilpanich/axiam</url>
+    <connection>scm:git:https://github.com/ilpanich/axiam.git</connection>
+    <developerConnection>scm:git:https://github.com/ilpanich/axiam.git</developerConnection>
+  </scm>
+
+  <properties>
+    <!-- D-22/Pitfall 4: signing OFF by default; flipped to false only in the
+         PR-gate CI job (ephemeral key) and the tag-triggered publish job
+         (real CI-secret key) — mirrors sdks/java/pom.xml's identical
+         property; see 20-09 (this plan), not a prior one. -->
+    <gpg.skip>true</gpg.skip>
+  </properties>
+
+  <!-- Pins io.axiam:axiam-sdk for consumers who import this BOM (D-23). -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>io.axiam</groupId>
+        <artifactId>axiam-sdk</artifactId>
+        <version>0.1.0</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <plugins>
+      <!-- D-22, Pitfall 4: gpg.skip=true by default; flipped per-environment
+           (ephemeral key in PR-gate CI, real CI-secret key in the
+           tag-triggered publish job). A `pom`-packaged module has no jar to
+           sign, but Central Portal still requires the POM itself to be
+           GPG-signed for every published coordinate — the BOM included. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-gpg-plugin</artifactId>
+        <version>3.2.8</version>
+        <executions>
+          <execution>
+            <id>sign-artifacts</id>
+            <phase>verify</phase>
+            <goals><goal>sign</goal></goals>
+            <configuration>
+              <skip>${gpg.skip}</skip>
+              <gpgArguments>
+                <arg>--pinentry-mode</arg>
+                <arg>loopback</arg>
+              </gpgArguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- D-22: Sonatype Central Portal publish — same plugin/config as
+           sdks/java/pom.xml, publishing io.axiam:axiam-bom under the same
+           verified io.axiam namespace. -->
+      <plugin>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>0.9.0</version>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>central</publishingServerId>
+          <autoPublish>false</autoPublish> <!-- require a manual publish confirmation initially -->
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

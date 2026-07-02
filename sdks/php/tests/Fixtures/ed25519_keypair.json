@@ -1,0 +1,6 @@
+{
+    "kid": "axiam-test-key-2026-07-02",
+    "secret_key_b64url": "QsnagXAMxPU1W4sjzNwDO3gYi6y6nQR4TlUnNIFe_TDWwJIzwMB6nF2pAgk6kavPt1RQwmprlhkmzT29VxNYIg",
+    "public_key_b64url": "1sCSM8DAepxdqQIJOpGrz7dUUMJqa5YZJs09vVcTWCI",
+    "note": "secret_key is the 64-byte libsodium sign secret key (seed+pubkey); regenerate fixtures via sdks/php/tests/Fixtures/verify_fixture.php or a throwaway script using sodium_crypto_sign_keypair()."
+}

@@ -1,0 +1,55 @@
+name: SDK OpenAPI Drift Gate
+
+# D-03: Path-filtered per-PR drift gate — runs when REST API or server crates change.
+# D-04: Release-tag re-export — belt-and-suspenders final confirm before any release.
+# Fails the job if the committed sdks/openapi.json diverges from a fresh --dump-openapi
+# export built with --no-default-features (SAML excluded; deterministic across hosts).
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/axiam-api-rest/**'
+      - 'crates/axiam-server/**'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/axiam-api-rest/**'
+      - 'crates/axiam-server/**'
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  openapi-drift:
+    name: OpenAPI Drift Gate (SAML off)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+      # Install ONLY protobuf-compiler. libxmlsec1-dev / libxml2-dev are
+      # deliberately NOT installed: the `saml` feature (→ samael → libxmlsec1)
+      # is off here, so if SAML ever leaks back into the default-off build the
+      # compile must FAIL for lack of the native lib. This mirrors the
+      # build-no-saml guard in ci.yml and ensures sdks/openapi.json is always
+      # generated without SAML paths (deterministic on any host).
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build axiam-server (SAML off / --no-default-features)
+        run: cargo build -p axiam-server --no-default-features
+      - name: Export fresh OpenAPI spec
+        run: ./target/debug/axiam-server --dump-openapi > /tmp/openapi-fresh.json
+      - name: Check drift against committed sdks/openapi.json
+        # Fails with non-zero exit if there is any difference.
+        # Update sdks/openapi.json by running:
+        #   cargo build -p axiam-server --no-default-features
+        #   ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
+        run: diff sdks/openapi.json /tmp/openapi-fresh.json

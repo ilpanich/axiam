@@ -373,7 +373,7 @@ impl RateLimitConfig {
 
 ### `sdks/{rust,typescript,python,java,csharp,php,go}/LICENSE` (7 files, NEW)
 
-**Analog:** root `/home/emanuele/git/priv/axiam/LICENSE` (Apache-2.0)
+**Analog:** repo-root `LICENSE` (Apache-2.0; resolve via `git rev-parse --show-toplevel`)
 
 **Pattern:** Copy the root `LICENSE` file verbatim into each `sdks/<lang>/LICENSE`. Do NOT copy from `Cargo.toml` license field (known wrong — project memory `project_license_apache.md`).
 

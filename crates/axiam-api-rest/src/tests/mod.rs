@@ -2,4 +2,5 @@
 //! test modules under `src/tests/` (as opposed to the inline `#[cfg(test)]`
 //! blocks in individual source files).
 
+pub mod authz_check_test;
 pub mod route_openapi_parity_test;

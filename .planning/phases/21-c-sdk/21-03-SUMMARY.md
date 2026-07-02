@@ -154,3 +154,7 @@ None - no external service configuration required.
 ---
 *Phase: 21-c-sdk*
 *Completed: 2026-07-02*
+
+## Self-Check: PASSED
+
+All 6 created files (RefreshGuard.cs, LoginResult.cs, Jwk.cs, JwksVerifier.cs, RefreshGuardSingleFlightTests.cs, JwksVerifierTests.cs) confirmed present on disk; all 4 commit hashes (12ea627, 50e17ca, 37b025a, 1e36542) confirmed in git log.

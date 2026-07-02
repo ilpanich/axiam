@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 22
 current_phase_name: php-sdk
 status: executing
-stopped_at: Completed 22-04-PLAN.md
-last_updated: "2026-07-02T19:04:22.600Z"
+stopped_at: Completed 22-06-PLAN.md
+last_updated: "2026-07-02T19:24:36.371Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 22 execution started
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 58
-  completed_plans: 54
+  completed_plans: 55
   percent: 88
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 22 (php-sdk) — EXECUTING
-Plan: 6 of 9
+Plan: 7 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 22 execution started
 
@@ -148,6 +148,7 @@ Last activity: 2026-07-02 — Phase 22 execution started
 | Phase 22-php-sdk P03 | 9min | 3 tasks | 6 files |
 | Phase 22-php-sdk P04 | 25min | 3 tasks | 5 files |
 | Phase 22-php-sdk P05 | 40min | 3 tasks | 16 files |
+| Phase 22 P06 | 45min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -346,6 +347,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 22-php-sdk] 22-04: AuthMiddleware reads the access token live from the shared CookieJar's axiam_access entry rather than caching a separate copy on Session, matching the Java/Go sibling SDKs' cookie-jar-is-source-of-truth pattern
 - [Phase ?]: PHP-only php_namespace/php_metadata_namespace proto file options land Grpc/Gen stubs at Axiam\Sdk\Grpc\Gen (PSR-4 match) with zero effect on Rust/Go/Python/TS codegen
 - [Phase ?]: AuthzGrpcClient hand-implements CheckAccess/BatchCheckAccess via Grpc\BaseStub::_simpleRequest() directly (no grpc_php_plugin available); AuthzDispatcher guards every reference behind extension_loaded('grpc') (Pitfall 4 / T-22-16), proven non-vacuously with a manual RED/GREEN removal test
+- [Phase ?]: AxiamClient composes two Guzzle clients (plainHttp: AuthMiddleware only; authzHttp: AuthMiddleware+RefreshMiddleware) sharing one CookieJar, so login/verifyMfa/logout never trigger an unrelated refresh attempt and the refresh call itself can never recursively re-enter the single-flight guard
+- [Phase ?]: Added an optional trailing transportHandler constructor parameter (test-only seam) since AxiamClient's Guzzle-client properties are readonly and cannot be swapped post-construction via Reflection
 
 ### Pending Todos
 
@@ -367,6 +370,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T19:03:34.002Z
-Stopped at: Completed 22-04-PLAN.md
+Last session: 2026-07-02T19:24:36.356Z
+Stopped at: Completed 22-06-PLAN.md
 Resume file: None

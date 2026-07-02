@@ -11,10 +11,42 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!--
+    D-02/CS-01 divergence (21-RESEARCH.md Pitfall 1): CS-01 asserts "native EdDSA on
+    .NET 8+", but .NET has no native Ed25519/EdDSA support anywhere in
+    System.Security.Cryptography (dotnet/runtime #14741/#63174 remain unimplemented
+    through .NET 10 GA). BouncyCastle.Cryptography is the single, well-vetted,
+    verify-only crypto dependency used instead for local JWKS/Ed25519 signature
+    verification (JwksVerifier, added in a later plan). This is intentional — do not
+    "fix" this to a native-only path.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
+    <PackageReference Include="Google.Protobuf" Version="2.80.0" />
+    <PackageReference Include="RabbitMQ.Client" Version="7.2.1" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.3" />
+    <PackageReference Include="Grpc.Tools" Version="2.80.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- Client-only codegen (SDK never hosts a gRPC server) — the C# Grpc.Tools
+       exception to the repo-wide buf pipeline (D-05, sdks/CONTRACT.md closing note).
+       Generated stubs land under obj/ (gitignored) and are bundled compiled into the
+       published package; sdks/buf.gen.yaml is intentionally NOT touched for C#. -->
+  <ItemGroup>
+    <Protobuf Include="../../../proto/axiam/v1/*.proto" GrpcServices="Client" ProtoRoot="../../../proto" />
   </ItemGroup>
 
 </Project>

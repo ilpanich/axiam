@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>Axiam.Sdk.AspNetCore</PackageId>
+    <Version>0.0.0</Version>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <Description>ASP.NET Core middleware, DI extensions, and policy-based authorization for the AXIAM C# SDK (Axiam.Sdk).</Description>
+    <RepositoryUrl>https://github.com/ilpanich/axiam</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- D-03 [LOCKED]: keeps Axiam.Sdk (core) framework-free — the ASP.NET Core shared
+       framework reference and all middleware/DI/policy-authz surface live only here. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Axiam.Sdk/Axiam.Sdk.csproj" />
+  </ItemGroup>
+
+</Project>

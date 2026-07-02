@@ -6,7 +6,7 @@
 
   <groupId>io.axiam</groupId>
   <artifactId>axiam-sdk</artifactId>
-  <version>0.0.0</version>
+  <version>0.1.0</version>
   <packaging>jar</packaging>
 
   <name>axiam-sdk</name>
@@ -21,6 +21,15 @@
     </license>
   </licenses>
 
+  <!-- Required by Sonatype Central Portal — every published POM must declare
+       at least one developer (D-22). -->
+  <developers>
+    <developer>
+      <name>AXIAM Maintainers</name>
+      <url>https://github.com/ilpanich/axiam</url>
+    </developer>
+  </developers>
+
   <scm>
     <url>https://github.com/ilpanich/axiam</url>
     <connection>scm:git:https://github.com/ilpanich/axiam.git</connection>
@@ -28,11 +37,217 @@
   </scm>
 
   <properties>
-    <maven.compiler.source>11</maven.compiler.source>
-    <maven.compiler.target>11</maven.compiler.target>
+    <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- D-22/Pitfall 4: signing OFF by default; flipped to false only in the
+         PR-gate CI job (ephemeral key) and the tag-triggered publish job
+         (real CI-secret key) — see 20-09. -->
+    <gpg.skip>true</gpg.skip>
+    <!-- Aligned against grpc-protobuf 1.82.0's actual transitive protobuf-java
+         version, confirmed via `mvn dependency:tree` (com.google.protobuf:protobuf-java:3.25.8). -->
+    <protobuf.version>3.25.8</protobuf.version>
   </properties>
 
-  <dependencies/>
+  <dependencies>
+    <dependency>
+      <groupId>com.squareup.okhttp3</groupId>
+      <artifactId>okhttp</artifactId>
+      <version>4.12.0</version>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-netty-shaded</artifactId>
+      <version>1.82.0</version>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-protobuf</artifactId>
+      <version>1.82.0</version>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-stub</artifactId>
+      <version>1.82.0</version>
+    </dependency>
+    <dependency>
+      <!-- Java 9+ needs this explicitly for generated gRPC stub annotations
+           (javax.annotation.Generated was removed from the JDK). -->
+      <groupId>org.apache.tomcat</groupId>
+      <artifactId>annotations-api</artifactId>
+      <version>6.0.53</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.rabbitmq</groupId>
+      <artifactId>amqp-client</artifactId>
+      <version>5.22.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.nimbusds</groupId>
+      <artifactId>nimbus-jose-jwt</artifactId>
+      <version>10.7</version>
+    </dependency>
+    <dependency>
+      <groupId>com.google.crypto.tink</groupId>
+      <artifactId>tink</artifactId>
+      <version>1.15.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.22.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+      <version>2.22.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.jspecify</groupId>
+      <artifactId>jspecify</artifactId>
+      <version>1.0.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.17</version>
+    </dependency>
+    <!-- D-14: Spring Security deps are optional/provided so a non-Spring
+         consumer never pulls Spring transitively. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+      <version>3.5.6</version>
+      <scope>provided</scope>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>jakarta.servlet</groupId>
+      <artifactId>jakarta.servlet-api</artifactId>
+      <version>6.1.0</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Test scope: JUnit 5 + OkHttp-4.x-line MockWebServer (D-28; NOT the
+         OkHttp-5.x mockwebserver3 module — Pitfall 3). -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.14.4</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.squareup.okhttp3</groupId>
+      <artifactId>mockwebserver</artifactId>
+      <version>4.12.0</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
 
+  <build>
+    <extensions>
+      <extension>
+        <groupId>kr.motd.maven</groupId>
+        <artifactId>os-maven-plugin</artifactId>
+        <version>1.7.1</version>
+      </extension>
+    </extensions>
+    <plugins>
+      <!-- D-21: generate-on-build into target/generated-sources (gitignored);
+           buf CLI is unavailable in this environment (Pitfall 1) so this is
+           the SDK's actual gRPC codegen path — sdks/buf.gen.yaml's Java
+           entries are demoted to drift-check-only documentation (Task 2). -->
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <version>0.6.1</version>
+        <configuration>
+          <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+          <protoSourceRoot>${project.basedir}/../../proto</protoSourceRoot>
+          <pluginId>grpc-java</pluginId>
+          <pluginArtifact>io.grpc:protoc-gen-grpc-java:1.82.0:exe:${os.detected.classifier}</pluginArtifact>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>compile</goal>
+              <goal>compile-custom</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- D-24: Automatic-Module-Name, no full module-info.java. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Automatic-Module-Name>io.axiam.sdk</Automatic-Module-Name>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+
+      <!-- D-22: javadoc + sources jars — REQUIRED by Sonatype Central Portal. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.3.1</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals><goal>jar-no-fork</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.11.2</version>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- D-22, Pitfall 4: gpg.skip=true by default; flipped per-environment
+           (ephemeral key in PR-gate CI, real CI-secret key in tag-triggered
+           publish job — see 20-09, not this plan). -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-gpg-plugin</artifactId>
+        <version>3.2.8</version>
+        <executions>
+          <execution>
+            <id>sign-artifacts</id>
+            <phase>verify</phase>
+            <goals><goal>sign</goal></goals>
+            <configuration>
+              <skip>${gpg.skip}</skip>
+              <gpgArguments>
+                <arg>--pinentry-mode</arg>
+                <arg>loopback</arg>
+              </gpgArguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- D-22: Sonatype Central Portal publish. -->
+      <plugin>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>0.9.0</version>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>central</publishingServerId>
+          <autoPublish>false</autoPublish> <!-- require a manual publish confirmation initially -->
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
 </project>

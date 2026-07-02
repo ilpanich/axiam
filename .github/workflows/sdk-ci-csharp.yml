@@ -8,6 +8,9 @@ on:
       - 'sdks/openapi.json'
       - 'sdks/buf.yaml'
       - 'sdks/buf.gen.yaml'
+  push:
+    tags:
+      - 'sdks/csharp/v*'
 
 permissions:
   contents: read
@@ -15,8 +18,157 @@ permissions:
 jobs:
   scaffold-check:
     name: SDK Scaffold Check
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Verify LICENSE file
         run: test -f sdks/csharp/LICENSE
+
+  build-test:
+    name: Build, test, TLS-bypass gate, pack
+    # No event-name restriction: this job runs BOTH on a pull_request AND on a
+    # tag push (sdks/csharp/vX.Y.Z) — the publish job below is gated behind it
+    # via `needs:`, so a tag can only publish after restore/build/test/the
+    # SC#4 grep gate/pack have all passed on that exact tagged commit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # NOTE: actions/setup-dotnet has no pre-existing pin anywhere else in
+      # this repository's workflows to reuse (unlike actions/checkout, which
+      # is SHA-pinned repo-wide) and this environment has no GitHub network
+      # egress to source a new commit SHA (RESEARCH.md environment
+      # constraint). Using the major-version tag is a documented,
+      # narrowly-scoped exception — same precedent as sdk-ci-python.yml's
+      # actions/setup-python@v5 and sdk-ci-java.yml's actions/setup-java@v4.
+      # maintainer: repin to a commit SHA once GitHub network egress is
+      # available in this environment.
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: dotnet restore
+        run: dotnet restore sdks/csharp
+
+      # Builds the whole two-package solution (Axiam.Sdk, Axiam.Sdk.AspNetCore)
+      # plus both xUnit test projects (Axiam.Sdk.Tests,
+      # Axiam.Sdk.AspNetCore.Tests) via the solution file — this is the FIRST
+      # real compiler pass every prior plan in this phase (21-01..21-06) has
+      # been deferring to CI (dotnet was unavailable during authoring).
+      - name: dotnet build (Axiam.Sdk.sln, Release)
+        run: dotnet build sdks/csharp -c Release --no-restore
+
+      # SC#3: the runnable examples must compile under <Nullable>enable> against
+      # the CURRENT SDK source (ProjectReference, not the published packages).
+      # Neither example is part of Axiam.Sdk.sln, so each is built explicitly.
+      - name: dotnet build — AspNetCoreSample example (SC#3)
+        run: dotnet build sdks/csharp/examples/AspNetCoreSample -c Release
+
+      - name: dotnet build — Quickstart example
+        run: dotnet build sdks/csharp/examples/Quickstart -c Release
+
+      # Full solution test run — includes every test suite written across
+      # 21-01..21-06: SC#2 single-flight (RefreshGuardSingleFlightTests), the
+      # AMQP HMAC verify-before-handler matrix (HmacVerifyTests,
+      # AmqpConsumerTests), JWKS Ed25519 verification (JwksVerifierTests), the
+      # CR-04 redaction regression (SensitiveRedactionTests), REST/gRPC authz
+      # (AuthzRestClientTests, GrpcAuthzClientTests), SC#1 client construction
+      # (ClientConstructionTests), the SC#3 ASP.NET Core WebApplicationFactory
+      # integration (AspNetCoreMiddlewareTests), and this plan's own SC#4
+      # in-suite guard (TlsBypassGrepGateTests).
+      - name: dotnet test (full solution)
+        run: dotnet test sdks/csharp -c Release --no-build --logger "console;verbosity=normal"
+
+      # §6/SC#4/T-21-21: strict TLS is always on; the only escape hatch is the
+      # additive customCa chain-trust-store callback (CustomTrustStore /
+      # CustomRootTrust markers) — no unconditional-true
+      # ServerCertificateCustomValidationCallback bypass anywhere in
+      # sdks/csharp/Axiam.Sdk or sdks/csharp/Axiam.Sdk.AspNetCore. This is a
+      # belt-and-suspenders CI-native gate independent of the test runner,
+      # mirroring TlsBypassGrepGateTests.cs (which the `dotnet test` step
+      # above already ran).
+      - name: TLS-bypass gate — no TLS-bypass patterns (SC#4)
+        run: |
+          set +e
+          matches=$(grep -rn "ServerCertificateCustomValidationCallback" sdks/csharp/Axiam.Sdk sdks/csharp/Axiam.Sdk.AspNetCore --include=*.cs | grep -v "CustomTrustStore")
+          set -e
+          if [ -n "$matches" ]; then
+            echo "::error::TLS-bypass gate failed — disallowed ServerCertificateCustomValidationCallback usage found (only the additive customCa CustomTrustStore pattern is permitted):"
+            echo "$matches"
+            exit 1
+          fi
+          echo "TLS-bypass gate passed — no disallowed usage found."
+
+      # SC#5/D-04: dotnet pack produces a valid, SourceLink-enabled,
+      # deterministic .nupkg + .snupkg for both published packages. This is a
+      # dry-run/verification gate on every PR; the publish job below re-packs
+      # on the tagged commit before pushing to nuget.org.
+      - name: dotnet pack — Axiam.Sdk (SC#5)
+        run: dotnet pack sdks/csharp/Axiam.Sdk -c Release --no-build -o ./nupkgs
+
+      - name: dotnet pack — Axiam.Sdk.AspNetCore (SC#5)
+        run: dotnet pack sdks/csharp/Axiam.Sdk.AspNetCore -c Release --no-build -o ./nupkgs
+
+      # D-05: Grpc.Tools generates gRPC stubs at BUILD time into obj/
+      # (gitignored) rather than committing them (the documented C# exception
+      # to the repo-wide buf pipeline) — there is no committed-stub-vs-regen
+      # diff to check, unlike the buf-based SDKs' drift-check jobs. The
+      # `dotnet build`/`dotnet pack` steps above already prove the codegen
+      # against proto/axiam/v1/*.proto builds cleanly and ships compiled into
+      # the package; no separate drift-check job is needed (D-05 marks it
+      # optional).
+
+  publish:
+    name: Publish to NuGet
+    # Manual-on-tag, side-effecting job: only runs when a maintainer pushes a
+    # tag matching sdks/csharp/vX.Y.Z (Phase 15 D-13 monorepo tag convention),
+    # and only after build-test (restore/build/test/grep-gate/pack) has
+    # passed on that exact tagged commit.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/csharp/v')
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: dotnet restore
+        run: dotnet restore sdks/csharp
+
+      - name: dotnet build (Release)
+        run: dotnet build sdks/csharp -c Release --no-restore
+
+      - name: dotnet pack — Axiam.Sdk + Axiam.Sdk.AspNetCore (SC#5, D-04)
+        run: |
+          dotnet pack sdks/csharp/Axiam.Sdk -c Release --no-build -o ./nupkgs
+          dotnet pack sdks/csharp/Axiam.Sdk.AspNetCore -c Release --no-build -o ./nupkgs
+
+      # D-04: live first publish may be a maintainer action if NUGET_API_KEY
+      # is absent from CI secrets (namespace/credential setup not yet
+      # provisioned) — an absent key degrades this step to a no-op with a
+      # warning rather than failing the job or falling back to an insecure
+      # publish path. `dotnet nuget push` auto-detects and pushes the
+      # matching .snupkg alongside each .nupkg in the same output directory.
+      #
+      # Credential setup: repository Settings -> Secrets and variables ->
+      # Actions -> New repository secret -> NUGET_API_KEY (an API key scoped
+      # to the reserved Axiam.Sdk / Axiam.Sdk.AspNetCore package IDs on
+      # nuget.org). Tag scheme: sdks/csharp/vX.Y.Z (Phase 15 D-13).
+      - name: dotnet nuget push (requires NUGET_API_KEY secret)
+        if: ${{ secrets.NUGET_API_KEY != '' }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: dotnet nuget push "./nupkgs/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: NUGET_API_KEY absent — publish deferred to a maintainer action (D-04)
+        if: ${{ secrets.NUGET_API_KEY == '' }}
+        run: |
+          echo "::warning::NUGET_API_KEY is not configured — Axiam.Sdk/Axiam.Sdk.AspNetCore were built, tested, and packed successfully but NOT pushed to nuget.org."
+          echo "A maintainer must configure the NUGET_API_KEY repository secret (see this job's credential-setup comment above) and re-run this workflow, or push ./nupkgs/*.nupkg manually, to complete the first publish."

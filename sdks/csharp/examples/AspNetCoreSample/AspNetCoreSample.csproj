@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>AspNetCoreSample</RootNamespace>
+    <!-- Example only — demonstrates the SDK's public surface; never packed or
+         published as a NuGet package (SC#3). -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../Axiam.Sdk.AspNetCore/Axiam.Sdk.AspNetCore.csproj" />
+  </ItemGroup>
+
+</Project>

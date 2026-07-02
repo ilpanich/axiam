@@ -15,10 +15,10 @@
 //! returning, regardless of the engine's decision (T-15-04, D-06).
 
 use actix_web::{HttpResponse, web};
+use axiam_authz::types::{AccessDecision, AccessRequest};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
 use axiam_db::SurrealAuditLogRepository;
-use axiam_authz::types::{AccessDecision, AccessRequest};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -163,8 +163,7 @@ pub async fn check_access<C: Connection>(
             .check(&user, authz.get_ref().as_ref())
             .await?;
         // T-15-04: audit every cross-subject query before returning.
-        append_check_as_audit(&audit_repo, user.tenant_id, user.user_id, sid, resource_id)
-            .await;
+        append_check_as_audit(&audit_repo, user.tenant_id, user.user_id, sid, resource_id).await;
         sid
     } else {
         user.user_id
@@ -227,14 +226,8 @@ pub async fn batch_check_access<C: Connection>(
         let resource_id = check.resource_id;
         let effective_subject = if let Some(sid) = check.subject_id {
             // T-15-04: audit each cross-subject item individually.
-            append_check_as_audit(
-                &audit_repo,
-                user.tenant_id,
-                user.user_id,
-                sid,
-                resource_id,
-            )
-            .await;
+            append_check_as_audit(&audit_repo, user.tenant_id, user.user_id, sid, resource_id)
+                .await;
             sid
         } else {
             user.user_id

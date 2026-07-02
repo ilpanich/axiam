@@ -69,16 +69,31 @@ public sealed class AuthzRestClient
         string action, Guid resourceId, string? scope = null, Guid? subjectId = null, CancellationToken cancellationToken = default)
     {
         var wireRequest = new CheckAccessWireRequest(action, resourceId, scope, subjectId);
-        using HttpResponseMessage response = await _http.PostAsJsonAsync(CheckPath, wireRequest, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        HttpResponseMessage response;
+        try
         {
-            throw ErrorMapper.FromHttpResponse(response, "checkAccess failed");
+            response = await _http.PostAsJsonAsync(CheckPath, wireRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            // Transport-level failure (connection refused, DNS, TLS) — map to the
+            // documented NetworkError taxonomy (CONTRACT.md §2), matching
+            // AxiamClient.PostJsonAsync rather than leaking a raw HttpRequestException.
+            throw NetworkError.FromException(ex, "checkAccess failed");
         }
 
-        CheckAccessWireResponse? wire = await response.Content
-            .ReadFromJsonAsync<CheckAccessWireResponse>(cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
-        return wire?.Allowed ?? false;
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                throw ErrorMapper.FromHttpResponse(response, "checkAccess failed");
+            }
+
+            CheckAccessWireResponse? wire = await response.Content
+                .ReadFromJsonAsync<CheckAccessWireResponse>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            return wire?.Allowed ?? false;
+        }
     }
 
     /// <summary>
@@ -101,15 +116,29 @@ public sealed class AuthzRestClient
             .ToList();
         var wireRequest = new BatchCheckWireRequest(wireChecks);
 
-        using HttpResponseMessage response = await _http.PostAsJsonAsync(BatchCheckPath, wireRequest, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        HttpResponseMessage response;
+        try
         {
-            throw ErrorMapper.FromHttpResponse(response, "batchCheck failed");
+            response = await _http.PostAsJsonAsync(BatchCheckPath, wireRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            // Transport-level failure — map to NetworkError (CONTRACT.md §2), matching
+            // AxiamClient.PostJsonAsync rather than leaking a raw HttpRequestException.
+            throw NetworkError.FromException(ex, "batchCheck failed");
         }
 
-        BatchCheckWireResponse? wire = await response.Content
-            .ReadFromJsonAsync<BatchCheckWireResponse>(cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
-        return wire?.Results.Select(r => r.Allowed).ToList() ?? new List<bool>();
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                throw ErrorMapper.FromHttpResponse(response, "batchCheck failed");
+            }
+
+            BatchCheckWireResponse? wire = await response.Content
+                .ReadFromJsonAsync<BatchCheckWireResponse>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            return wire?.Results.Select(r => r.Allowed).ToList() ?? new List<bool>();
+        }
     }
 }

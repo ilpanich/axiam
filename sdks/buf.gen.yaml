@@ -41,6 +41,27 @@ plugins:
   - remote: buf.build/grpc/python
     out: python/axiam_sdk/gen
 
+  # PHP: protobuf types + gRPC service stubs
+  # Verified against buf.build BSR — 2026-07-02 (Phase 22, D-03: source-distributed,
+  # committed stubs — PHP consumers lack protoc+grpc_php_plugin locally). The `buf`
+  # CLI is unavailable in this development environment (consistent with every prior
+  # SDK phase); Task 1 of 22-05-PLAN.md instead used a local
+  # `protoc --php_out=<scratch> -I proto proto/axiam/v1/authorization.proto` invocation
+  # (protoc 3.21.12 ships native --php_out message codegen; no grpc_php_plugin was
+  # available to generate a service-client stub, so `AuthzGrpcClient` in
+  # `sdks/php/src/Grpc/AuthzGrpcClient.php` hand-implements the two RPCs directly via
+  # `Grpc\BaseStub::_simpleRequest()`, the same mechanism grpc_php_plugin's generated
+  # client classes use internally). `proto/axiam/v1/authorization.proto` carries
+  # PHP-only `php_namespace`/`php_metadata_namespace` file options (ignored by every
+  # other language's codegen) so generated classes land under `Axiam\Sdk\Grpc\Gen`
+  # (sdks/php/src/Grpc/Gen/, matching the PSR-4 `Axiam\Sdk\` -> `src/` root) instead of
+  # protoc's package-derived default `Axiam\V1`. See sdks/php/src/Grpc/Gen/ for the
+  # committed output and 22-05-SUMMARY.md for the exact reproducible command.
+  - remote: buf.build/protocolbuffers/php
+    out: php/src/Grpc/Gen
+  - remote: buf.build/grpc/php
+    out: php/src/Grpc/Gen
+
   # Java: DRIFT-CHECK-ONLY, documentation reference — NOT the authoritative
   # Java codegen path (Phase 20 D-21 / RESEARCH.md Pitfall 1). The `buf` CLI
   # is unavailable in this development environment; Java's actual gRPC

@@ -35,6 +35,22 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
     /// </summary>
     public const string RefreshPath = "/api/v1/auth/refresh";
 
+    /// <summary>
+    /// Auth endpoints whose own 401 is a domain outcome (bad credentials, bad TOTP,
+    /// already-invalid session), NOT an expired-access-token signal — exempted from the
+    /// reactive 401&#8594;refresh&#8594;retry below alongside <see cref="RefreshPath"/> so a
+    /// failed login/MFA/logout can never trigger an unrelated background token refresh
+    /// (which, if a stale-but-valid token were present, could silently mutate session
+    /// state) and never wastes a guard acquisition. Mirrors the Java/Go siblings'
+    /// auth-endpoint exemptions referenced in this file's comments.
+    /// </summary>
+    private const string LoginPath = "/api/v1/auth/login";
+    private const string MfaVerifyPath = "/api/v1/auth/mfa/verify";
+    private const string LogoutPath = "/api/v1/auth/logout";
+
+    private static readonly HashSet<string> ReactiveRefreshExemptPaths =
+        new(StringComparer.Ordinal) { RefreshPath, LoginPath, MfaVerifyPath, LogoutPath };
+
     private const string AccessCookieName = "axiam_access";
     private const string CsrfCookieName = "axiam_csrf";
     private const string CsrfHeaderName = "X-CSRF-Token";
@@ -73,7 +89,11 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
         ArgumentNullException.ThrowIfNull(request);
 
         bool isRetry = request.Options.TryGetValue(RetryMarkerKey, out bool retried) && retried;
-        bool isRefreshCall = string.Equals(request.RequestUri?.AbsolutePath, RefreshPath, StringComparison.Ordinal);
+        // Refresh itself must never recursively re-enter the guard (deadlock), and
+        // login/MFA/logout 401s are domain outcomes, not expired-token signals — all are
+        // exempt from the reactive refresh branch below (WR-03).
+        string? path = request.RequestUri?.AbsolutePath;
+        bool isRefreshExemptCall = path is not null && ReactiveRefreshExemptPaths.Contains(path);
 
         // Buffer the body up front (needed to build a single retry-clone below; every
         // request body this SDK sends is a small, fully-materialized JSON payload, not
@@ -91,7 +111,7 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
         HttpResponseMessage response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
         CaptureCsrfToken(response);
 
-        if (response.StatusCode == HttpStatusCode.Unauthorized && !isRefreshCall && !isRetry)
+        if (response.StatusCode == HttpStatusCode.Unauthorized && !isRefreshExemptCall && !isRetry)
         {
             TokenPair refreshed;
             try

@@ -149,6 +149,15 @@
       <version>4.12.0</version>
       <scope>test</scope>
     </dependency>
+    <!-- Test scope only: in-process gRPC transport for GrpcAuthzClientTest
+         (20-08) — grpc-java 1.62+ moved the in-process transport out of
+         grpc-core into this separate module; not a runtime SDK dependency. -->
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-inprocess</artifactId>
+      <version>1.82.0</version>
+      <scope>test</scope>
+    </dependency>
     <!-- Test scope only: MockHttpServletRequest/MockHttpServletResponse/
          MockFilterChain for AxiamAuthenticationFilterIT (20-06) — a
          MockFilterChain-level integration test, not a full Spring

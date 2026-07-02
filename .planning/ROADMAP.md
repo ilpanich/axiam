@@ -839,7 +839,30 @@ Plans:
   4. `Grpc.Tools` MSBuild integration generates gRPC stubs at build time (documented as the C# exception to the repo-wide buf pipeline); no `ServerCertificateCustomValidationCallback` bypass present in SDK source.
   5. `dotnet pack` succeeds and produces a valid `.nupkg`; NuGet publish pipeline with credential setup is documented and operational.
 
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 21-01-PLAN.md — Foundation: two-package solution (`Axiam.Sdk` + `Axiam.Sdk.AspNetCore`) + `Grpc.Tools` codegen + `Sensitive<T>`/error taxonomy (redact-before-wrap) + xUnit scaffold + HMAC/JWKS fixtures (D-01/D-03/D-05/D-12, SC#4 codegen, CR-04)
+
+**Wave 2** *(parallel; depend on 21-01)*
+
+- [ ] 21-02-PLAN.md — AMQP: wire-order HMAC verify + `RabbitMQ.Client` 7.2 `AsyncEventingBasicConsumer` verify-before-handler + ack/nack matrix (D-11, §8)
+- [ ] 21-03-PLAN.md — Auth utilities: `SemaphoreSlim(1,1)` single-flight `RefreshGuard` (SC#2) + BouncyCastle Ed25519 `JwksVerifier` (alg-pin + cross-tenant check) (D-02/D-10)
+
+**Wave 3** *(depends on 21-01 + 21-03)*
+
+- [ ] 21-04-PLAN.md — REST transport + `AxiamClient` facade: cookie jar + client-override safety + no-TLS-bypass + tenant-required ctor + async auth flow + FND-04 authz (SC#1, D-09/D-10, §3/§4/§5/§6)
+
+**Wave 4** *(parallel; depend on 21-04)*
+
+- [ ] 21-05-PLAN.md — gRPC: long-lived channel + sync-safe interceptor sharing the single guard + `CheckAccess`/`BatchCheckAccess` (D-10, §6)
+- [ ] 21-06-PLAN.md — `Axiam.Sdk.AspNetCore`: middleware → `ClaimsPrincipal` + DI extensions + policy-based authz + WebApplicationFactory test (SC#3, D-06/D-07/D-08, §10)
+
+**Wave 5** *(depends on 21-02 + 21-05 + 21-06)*
+
+- [ ] 21-07-PLAN.md — Examples (AspNetCore sample + quickstart) + SourceLink/snupkg packaging + TLS-bypass gate + CI build/test/pack + tag-triggered NuGet publish (SC#3/SC#4/SC#5, D-04/D-05)
 
 ---
 
@@ -874,7 +897,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
 | 20. Java SDK | 9/9 | Complete    | 2026-07-02 |
-| 21. C# SDK | 0/? | Not started | - |
+| 21. C# SDK | 0/7 | Planned | - |
 | 22. PHP SDK | 0/? | Not started | - |
 
 ---

@@ -1,0 +1,113 @@
+{
+  "_derivation": {
+    "description": "Real, server-computed HMAC-SHA256 fixture vectors proving byte-for-byte cross-language compatibility between axiam_sdk.amqp._hmac.verify_hmac (Python) and crates/axiam-amqp/src/messages.rs::sign_payload (Rust). Each vector's hmac_signature was NOT hand-written — it was emitted by the canonical Rust signer via a throwaway #[test] harness, then independently cross-checked with Python's hmac.new(...).hexdigest() before being recorded here.",
+    "reproduction_command": "cd /home/user/axiam && (temporarily add the `emit_python_sdk_hmac_fixture` test to crates/axiam-amqp/src/messages.rs's `tests` module, mirroring the AuthzRequest/AuditEventMessage construction below) && cargo test -p axiam-amqp emit_python_sdk_hmac_fixture -- --nocapture",
+    "note": "The field order in every 'message' object below is the Rust struct DECLARATION order (see AuthzRequest / AuditEventMessage in crates/axiam-amqp/src/messages.rs), NOT alphabetical order — e.g. AuthzRequest emits tenant_id before subject_id, and action before resource_id. This confirms 19-RESEARCH.md's Pitfall 2 finding: canonicalization MUST preserve wire/insertion order (json.dumps WITHOUT sort_keys), not sort keys alphabetically."
+  },
+  "vectors": [
+    {
+      "name": "authz_request_valid",
+      "message_type": "AuthzRequest",
+      "signing_key_hex": "617869616d2d707974686f6e2d73646b2d686d61632d666978747572652d6b6579",
+      "message": {
+        "correlation_id": "11111111-1111-1111-1111-111111111111",
+        "tenant_id": "22222222-2222-2222-2222-222222222222",
+        "subject_id": "33333333-3333-3333-3333-333333333333",
+        "action": "read",
+        "resource_id": "44444444-4444-4444-4444-444444444444",
+        "hmac_signature": "1cec2fad12c7545576eb17dc2fd5ba0cfebd8f5f1bba328ae36e895b918378e3"
+      },
+      "expected_valid": true
+    },
+    {
+      "name": "authz_request_tampered_action",
+      "message_type": "AuthzRequest",
+      "signing_key_hex": "617869616d2d707974686f6e2d73646b2d686d61632d666978747572652d6b6579",
+      "message": {
+        "correlation_id": "11111111-1111-1111-1111-111111111111",
+        "tenant_id": "22222222-2222-2222-2222-222222222222",
+        "subject_id": "33333333-3333-3333-3333-333333333333",
+        "action": "write",
+        "resource_id": "44444444-4444-4444-4444-444444444444",
+        "hmac_signature": "1cec2fad12c7545576eb17dc2fd5ba0cfebd8f5f1bba328ae36e895b918378e3"
+      },
+      "expected_valid": false,
+      "note": "Same signature as authz_request_valid but with action mutated from 'read' to 'write' after signing — proves verification is non-vacuous."
+    },
+    {
+      "name": "audit_event_valid",
+      "message_type": "AuditEventMessage",
+      "signing_key_hex": "617869616d2d707974686f6e2d73646b2d686d61632d666978747572652d6b6579",
+      "message": {
+        "tenant_id": "55555555-5555-5555-5555-555555555555",
+        "actor_id": "66666666-6666-6666-6666-666666666666",
+        "actor_type": "user",
+        "action": "user.login",
+        "outcome": "success",
+        "ip_address": "203.0.113.7",
+        "hmac_signature": "89a65922a64177f6d19a322a8cdd29d631527947c13cc1f93b978f7d5b28392a"
+      },
+      "expected_valid": true
+    },
+    {
+      "name": "audit_event_wrong_key",
+      "message_type": "AuditEventMessage",
+      "signing_key_hex": "77726f6e672d6b65792d666f722d746573742d6f6e6c79",
+      "message": {
+        "tenant_id": "55555555-5555-5555-5555-555555555555",
+        "actor_id": "66666666-6666-6666-6666-666666666666",
+        "actor_type": "user",
+        "action": "user.login",
+        "outcome": "success",
+        "ip_address": "203.0.113.7",
+        "hmac_signature": "89a65922a64177f6d19a322a8cdd29d631527947c13cc1f93b978f7d5b28392a"
+      },
+      "expected_valid": false,
+      "note": "Same body/signature as audit_event_valid but verified against a different signing key (hex-decodes to 'wrong-key-for-test-only') — proves the wrong key is rejected."
+    },
+    {
+      "name": "missing_hmac_signature",
+      "message_type": "AuthzRequest",
+      "signing_key_hex": "617869616d2d707974686f6e2d73646b2d686d61632d666978747572652d6b6579",
+      "message": {
+        "correlation_id": "11111111-1111-1111-1111-111111111111",
+        "tenant_id": "22222222-2222-2222-2222-222222222222",
+        "subject_id": "33333333-3333-3333-3333-333333333333",
+        "action": "read",
+        "resource_id": "44444444-4444-4444-4444-444444444444"
+      },
+      "expected_valid": false,
+      "note": "hmac_signature field entirely absent — strict mode default (CONTRACT.md §8.3) rejects, never silently accepts."
+    },
+    {
+      "name": "non_hex_signature",
+      "message_type": "AuthzRequest",
+      "signing_key_hex": "617869616d2d707974686f6e2d73646b2d686d61632d666978747572652d6b6579",
+      "message": {
+        "correlation_id": "11111111-1111-1111-1111-111111111111",
+        "tenant_id": "22222222-2222-2222-2222-222222222222",
+        "subject_id": "33333333-3333-3333-3333-333333333333",
+        "action": "read",
+        "resource_id": "44444444-4444-4444-4444-444444444444",
+        "hmac_signature": "not-hex-zzzz"
+      },
+      "expected_valid": false,
+      "note": "Non-hex signature value must be rejected without raising."
+    },
+    {
+      "name": "wrong_length_signature",
+      "message_type": "AuthzRequest",
+      "signing_key_hex": "617869616d2d707974686f6e2d73646b2d686d61632d666978747572652d6b6579",
+      "message": {
+        "correlation_id": "11111111-1111-1111-1111-111111111111",
+        "tenant_id": "22222222-2222-2222-2222-222222222222",
+        "subject_id": "33333333-3333-3333-3333-333333333333",
+        "action": "read",
+        "resource_id": "44444444-4444-4444-4444-444444444444",
+        "hmac_signature": "1cec2f"
+      },
+      "expected_valid": false,
+      "note": "Truncated (wrong-length) hex signature must be rejected without raising."
+    }
+  ]
+}

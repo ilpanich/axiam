@@ -10,8 +10,11 @@ namespace Axiam.Sdk.Rest;
 /// Cross-cutting REST transport concerns shared by every request an <c>AxiamClient</c>
 /// sends (CONTRACT.md &#167;3/&#167;5/&#167;9): injects <c>X-Tenant-Id</c> (&#167;5) and, when a
 /// session exists, <c>Authorization: Bearer &lt;access&gt;</c> read from the shared
-/// cookie jar; captures the <c>X-CSRF-Token</c> response header and echoes it on
-/// subsequent state-changing requests (&#167;3, non-browser SDK); and drives a single
+/// cookie jar; reads the <c>axiam_csrf</c> cookie the server sets and echoes it as the
+/// <c>X-CSRF-Token</c> request header on subsequent state-changing requests (&#167;3 cookie
+/// double-submit — the real AXIAM server only ever delivers the CSRF value via a cookie,
+/// never a response header, so the cookie-jar read is the load-bearing path; the
+/// response-header capture is kept as defense-in-depth); and drives a single
 /// reactive 401&#8594;refresh&#8594;retry through the shared <see cref="RefreshGuard"/> — never
 /// a second, independent guard, and never a retry loop (&#167;9.3).
 /// </summary>
@@ -33,6 +36,7 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
     public const string RefreshPath = "/api/v1/auth/refresh";
 
     private const string AccessCookieName = "axiam_access";
+    private const string CsrfCookieName = "axiam_csrf";
     private const string CsrfHeaderName = "X-CSRF-Token";
     private const string TenantHeaderName = "X-Tenant-Id";
     private const string AuthorizationHeaderName = "Authorization";
@@ -138,7 +142,11 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
             request.Headers.TryAddWithoutValidation(AuthorizationHeaderName, $"Bearer {access}");
         }
 
-        string? csrf = _csrfToken;
+        // The real AXIAM server delivers the CSRF value ONLY as the `axiam_csrf` cookie
+        // (never an X-CSRF-Token response header), so the cookie-jar read is the
+        // load-bearing source; `_csrfToken` (populated by CaptureCsrfToken) is kept as
+        // defense-in-depth should a future server version start echoing the header.
+        string? csrf = _csrfToken ?? ReadCsrfTokenFromCookieJar();
         if (csrf is not null && StateChangingMethods.Contains(request.Method.Method))
         {
             request.Headers.Remove(CsrfHeaderName);
@@ -164,6 +172,26 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
         foreach (Cookie cookie in cookies)
         {
             if (cookie.Name == AccessCookieName)
+            {
+                return cookie.Value;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Reads the <c>axiam_csrf</c> cookie from the same shared <see cref="CookieContainer"/>
+    /// used for <c>axiam_access</c> (mirrors <see cref="ReadAccessTokenFromCookieJar"/>).
+    /// This is the load-bearing CSRF source for cookie double-submit (&#167;3): the real
+    /// AXIAM server sets the CSRF value only via a <c>Set-Cookie</c> header, never as an
+    /// <c>X-CSRF-Token</c> response header.
+    /// </summary>
+    private string? ReadCsrfTokenFromCookieJar()
+    {
+        CookieCollection cookies = _cookieContainer.GetCookies(_baseUri);
+        foreach (Cookie cookie in cookies)
+        {
+            if (cookie.Name == CsrfCookieName)
             {
                 return cookie.Value;
             }

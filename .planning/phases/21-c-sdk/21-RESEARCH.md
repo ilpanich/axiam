@@ -896,19 +896,21 @@ See **Architecture Patterns** above (Patterns 1–7) — all seven include compl
 
 **If this table is empty:** N/A — see rows above.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Should the planner adopt the direct-BouncyCastle path or the `ScottBrady.IdentityModel` wrapper for JWKS verification?**
+> All three resolved during planning (Phase 21 plans, commit `41a882c`): Q1 → plan `21-03` Task 2 adopts direct BouncyCastle; Q2 → plan `21-01` Task 1 resolves-then-pins `Google.Protobuf`; Q3 → plan `21-04` Task 1 selects the warning-free net8.0 PEM-loading API at code-time. Recommendations below stand as authored.
+
+1. **[RESOLVED → 21-03 Task 2: direct BouncyCastle] Should the planner adopt the direct-BouncyCastle path or the `ScottBrady.IdentityModel` wrapper for JWKS verification?**
    - What we know: Direct BouncyCastle (Pattern 1) is simpler (one dependency, no Microsoft.IdentityModel.Tokens pipeline dependency), fully sufficient for the SDK's narrow needs (one algorithm, two claims checked), and avoids adding a single-maintainer package to the security-critical path. `ScottBrady.IdentityModel` offers `Microsoft.IdentityModel.Tokens` pipeline reuse (clock-skew handling, structured `TokenValidationParameters`) at the cost of a second, lower-profile dependency.
    - What's unclear: Whether the planner/team has an existing organizational preference for staying within the `Microsoft.IdentityModel.Tokens` ecosystem for consistency with other .NET auth code they may already run.
    - Recommendation: Default to direct BouncyCastle (this is what this research document's code examples and package table assume as primary); note this as an explicit, easily-reversible choice in the plan rather than something requiring a `checkpoint:human-verify` — the SUS flag is only relevant if the ScottBrady path is chosen instead.
 
-2. **Exact `Google.Protobuf` version to pin (see Assumption A3).**
+2. **[RESOLVED → 21-01 Task 1: resolve-then-pin] Exact `Google.Protobuf` version to pin (see Assumption A3).**
    - What we know: It must be compatible with `Grpc.Net.Client`/`Grpc.Tools` 2.80.0.
    - What's unclear: The precise latest patch version in the 2.80.x (or whether to track 2.81.x) line was not independently queried this session.
    - Recommendation: Planner/implementer should run `dotnet add package Google.Protobuf` without a version pin initially (letting NuGet resolve the compatible version against the already-pinned `Grpc.Net.Client`/`Grpc.Tools` 2.80.0), then lock the resolved version in the `.csproj`.
 
-3. **Exact PEM-loading API for the `customCa` escape hatch on net8.0 (see Assumption A2).**
+3. **[RESOLVED → 21-04 Task 1: warning-free net8.0 API chosen at code-time] Exact PEM-loading API for the `customCa` escape hatch on net8.0 (see Assumption A2).**
    - What we know: Some certificate-loading API exists and works on net8.0 either way.
    - What's unclear: Whether `X509CertificateLoader` (the newer, non-obsolete .NET 9+ API) has a net8.0-compatible path, or whether the implementation should use the classic `X509Certificate2` constructor (functional but obsolete-with-warning starting .NET 9) for a net8.0-only SDK.
    - Recommendation: Implementer verifies at code-time via `dotnet build` warnings (`CA` obsolete-API diagnostics) which constructor is warning-free on the net8.0 TFM baseline and uses that one; either choice is behaviorally correct.

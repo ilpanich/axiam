@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 20
 current_phase_name: Java SDK
 status: executing
-stopped_at: Completed 20-03-PLAN.md
-last_updated: "2026-07-02T07:24:10.219Z"
+stopped_at: Completed 20-04-PLAN.md
+last_updated: "2026-07-02T07:39:44.017Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 20 execution started
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 42
-  completed_plans: 36
+  completed_plans: 37
   percent: 63
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 20 (Java SDK) — EXECUTING
-Plan: 4 of 9
+Plan: 5 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 20 execution started
 
@@ -129,6 +129,7 @@ Last activity: 2026-07-02 — Phase 20 execution started
 | Phase 20-java-sdk P01 | 10min | 3 tasks | 6 files |
 | Phase 20-java-sdk P02 | 8min | 2 tasks | 5 files |
 | Phase 20-java-sdk P03 | 12min | 2 tasks | 10 files |
+| Phase 20-java-sdk P04 | 16min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -282,6 +283,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 20-java-sdk] 20-02: Hmac.verify canonicalizes via ObjectNode.remove in place preserving Rust struct-declaration field order (not alphabetized), re-proven against the real Phase-19 fixture in Java; manually confirmed (not committed) a TreeMap/sorted variant breaks the two valid vectors, proving the ordering invariant is test-enforced
 - [Phase 20-java-sdk]: 20-03: LoginResult.challengeToken typed as Sensitive (not raw String) — mirrors sdks/go's MFAToken Sensitive field, per §7's blanket token-carrying-field requirement — consistency with CONTRACT.md §7 across all token-carrying fields
 - [Phase 20-java-sdk]: 20-03: NetworkError exposes a single (message, sanitizedSummary) constructor with no okhttp3.Response overload — structural (compile-time) guarantee against raw-response leakage, not just convention — closes the CR-04 leak class at the type level
+- [Phase 20-java-sdk]: 20-04: nimbus-jose-jwt 10.7's DefaultJWTProcessor + JWSVerificationKeySelector(EdDSA) pipeline cannot verify OKP/Ed25519 keys (OctetKeyPair.toKeyPair() unconditionally throws, silently swallowed by KeyConverter.toJavaKeys; DefaultJWSVerifierFactory has no EdDSA branch) — JwksVerifier uses a direct JWKMatcher lookup against the same RemoteJWKSet paired with Ed25519Verifier(OctetKeyPair) instead — Confirmed empirically via a throwaway debug harness before committing; preserves D-19's RemoteJWKSet+DefaultJWKSetCache fetch/cache/rotation mandate
+- [Phase 20-java-sdk]: 20-04: RefreshGuard's join() path unwraps CompletionException so every waiter receives the SAME exception instance the refreshing thread threw (not a wrapped CompletionException) — Matches the plan's literal 'same exception to every waiter' requirement more precisely than the research pattern's unmodified join() call
 
 ### Pending Todos
 
@@ -302,6 +305,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T07:24:10.203Z
-Stopped at: Completed 20-03-PLAN.md
+Last session: 2026-07-02T07:39:44.005Z
+Stopped at: Completed 20-04-PLAN.md
 Resume file: None

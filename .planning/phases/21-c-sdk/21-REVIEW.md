@@ -37,7 +37,16 @@ findings:
   warning: 5
   info: 2
   total: 9
-status: issues_found
+status: fixes_applied
+resolution:
+  fixed: [CR-01, CR-02, WR-01, WR-02, WR-03, WR-04, WR-05]
+  open: [IN-01, IN-02]
+  fixed_at: 2026-07-02T00:00:00Z
+  note: >-
+    All 2 critical + 5 warning findings fixed, one atomic commit each (see
+    per-finding RESOLVED notes below). IN-01/IN-02 (info) intentionally left
+    open. Not built/tested: the .NET SDK is unavailable in this environment,
+    so the C# changes were verified by inspection only, not `dotnet test`.
 ---
 
 # Phase 21: Code Review Report
@@ -45,7 +54,7 @@ status: issues_found
 **Reviewed:** 2026-07-02T00:00:00Z
 **Depth:** deep
 **Files Reviewed:** 28
-**Status:** issues_found
+**Status:** fixes_applied (CR-01, CR-02, WR-01–WR-05 fixed; IN-01, IN-02 open)
 
 ## Summary
 
@@ -91,6 +100,13 @@ implemented.
 ## Critical Issues
 
 ### CR-01: CSRF-token capture is a no-op against the real server — refresh, logout, and all authz checks always fail
+
+> **RESOLVED** — `AxiamHttpMessageHandler.ApplyHeaders` now sources the CSRF token from
+> the shared cookie jar via a new `ReadCsrfTokenFromCookieJar()` (reads the `axiam_csrf`
+> cookie, mirroring `ReadAccessTokenFromCookieJar`), falling back to the captured response
+> header as defense-in-depth. Added `CsrfDoubleSubmitTests` integration coverage driving a
+> fake server that enforces the same double-submit check. Verified by inspection only
+> (dotnet unavailable).
 
 **File:** `sdks/csharp/Axiam.Sdk/Rest/AxiamHttpMessageHandler.cs:149-159` (also `:36`, `:141-146`)
 **Also depends on (ground truth, not part of this review's file list but load-bearing for the finding):**
@@ -218,6 +234,13 @@ appears not to exercise this, since no test would have caught it.
 
 ### CR-02: `Sensitive<T>`'s documented equality "mitigation" does not exist — default struct/record equality performs value comparison
 
+> **RESOLVED** — `Sensitive<T>` now implements `IEquatable<Sensitive<T>>` and overrides
+> `Equals(object?)`/`Equals(Sensitive<T>)`/`==`/`!=` to be never-equal and `GetHashCode()`
+> to a constant `0`, suppressing the inherited `ValueType` structural comparison side
+> channel (and its transitive leak into records carrying a `Sensitive<T>` field). XML
+> remarks corrected to describe the actual behavior. Added regression tests asserting two
+> `Sensitive.Of("x")` are not equal and hash to a constant. Verified by inspection only.
+
 **File:** `sdks/csharp/Axiam.Sdk/Core/Sensitive.cs:34-54`
 
 **Issue:** The type's remarks explicitly claim:
@@ -265,6 +288,10 @@ to describe what is actually implemented rather than the incorrect
 
 ### WR-01: `AuthzRestClient` never translates transport-level exceptions into `NetworkError`
 
+> **RESOLVED** — Both `CheckAccessAsync` and `BatchCheckAsync` now wrap `PostAsJsonAsync`
+> in `try/catch (HttpRequestException)` → `NetworkError.FromException(...)`, matching
+> `AxiamClient.PostJsonAsync` and CONTRACT.md §2. Verified by inspection only.
+
 **File:** `sdks/csharp/Axiam.Sdk/Rest/AuthzRestClient.cs:68-82, 96-114`
 
 **Issue:** `CheckAccessAsync`/`BatchCheckAsync` call `_http.PostAsJsonAsync(...)`
@@ -308,6 +335,11 @@ using (response) { ... }
 
 ### WR-02: A client-side request timeout is never mapped to `NetworkError` anywhere in the REST transport
 
+> **RESOLVED** — `AxiamClient.PostJsonAsync` now also catches `OperationCanceledException`
+> (covers `TaskCanceledException`) with a `when (ex.CancellationToken != cancellationToken)`
+> filter, mapping an `HttpClient.Timeout` expiry to `NetworkError` while letting a genuine
+> caller-supplied cancellation propagate as-is. Verified by inspection only.
+
 **File:** `sdks/csharp/Axiam.Sdk/AxiamClient.cs:342-352`
 
 **Issue:** `PostJsonAsync` only catches `HttpRequestException`:
@@ -335,6 +367,10 @@ expiry, which should become a `NetworkError`) — e.g. check
 the well-known .NET pattern for this exact ambiguity.
 
 ### WR-03: The reactive 401→refresh→retry is not exempted for Login/MfaVerify/Logout, only for the refresh path itself
+
+> **RESOLVED** — `AxiamHttpMessageHandler` now exempts `LoginPath`, `MfaVerifyPath`, and
+> `LogoutPath` alongside `RefreshPath` from the reactive-refresh branch via a shared
+> `ReactiveRefreshExemptPaths` set. Verified by inspection only.
 
 **File:** `sdks/csharp/Axiam.Sdk/Rest/AxiamHttpMessageHandler.cs:33, 90-124`
 
@@ -368,6 +404,10 @@ siblings referenced in this file's own comments exempt their auth
 endpoints.
 
 ### WR-04: `AuthInterceptor.InjectAuthMetadata` mutates a possibly caller-owned `Metadata` instance in place
+
+> **RESOLVED** — `InjectAuthMetadata` now builds a fresh `Metadata`, copying pre-existing
+> non-auth/non-tenant entries into it instead of mutating `context.Options.Headers` in
+> place (the now-unused `RemoveIfPresent` helper was removed). Verified by inspection only.
 
 **File:** `sdks/csharp/Axiam.Sdk/Grpc/AuthInterceptor.cs:118-139`
 
@@ -413,6 +453,10 @@ if (context.Options.Headers is { } existing)
 ```
 
 ### WR-05: The 401-retry request clone drops any headers/options beyond tenant/auth/CSRF/content-type
+
+> **RESOLVED** — The 401-retry clone now copies `request.Headers` onto `retryRequest`
+> (excluding the `ApplyHeaderManagedNames`: Authorization, X-Tenant-Id, X-CSRF-Token,
+> Content-Type) before calling `ApplyHeaders`. Verified by inspection only.
 
 **File:** `sdks/csharp/Axiam.Sdk/Rest/AxiamHttpMessageHandler.cs:107-121`
 

@@ -32,14 +32,19 @@ namespace Axiam.Sdk.Core;
 /// Per CONTRACT.md &#167;7's C# row ("Struct with <c>ToString()</c> override returning
 /// <c>"[SENSITIVE]"</c>"): <see cref="ToString"/> and the paired
 /// <see cref="SensitiveJsonConverter{T}"/> both always emit the literal
-/// <c>"[SENSITIVE]"</c>, regardless of the wrapped value. <see cref="Equals(object?)"/>
-/// and <see cref="GetHashCode"/> are intentionally NOT overridden to compare/hash the
-/// wrapped value — the default reference-identity behavior for the boxed comparison
-/// avoids opening a value-equality/timing side channel that could otherwise be used to
-/// probe the redacted value.
+/// <c>"[SENSITIVE]"</c>, regardless of the wrapped value. <see cref="Equals(object?)"/>,
+/// <see cref="IEquatable{T}.Equals(T)"/> and <see cref="GetHashCode"/> are overridden to
+/// make a <see cref="Sensitive{T}"/> <b>never value-comparable</b>: <see cref="Equals(object?)"/>
+/// always returns <c>false</c> and <see cref="GetHashCode"/> always returns a constant.
+/// This is deliberate — the default <see cref="System.ValueType"/> equality a struct would
+/// otherwise inherit performs a structural, field-by-field <em>value</em> comparison (via
+/// reflection, and, for a <c>string</c> field, a non-constant-time <c>string.Equals</c>),
+/// which would open a value-equality/timing side channel on the redacted value and would
+/// transitively leak into any compiler-synthesized record equality of a type that carries
+/// a <see cref="Sensitive{T}"/> field. Overriding to a constant closes that channel.
 /// </remarks>
 [JsonConverter(typeof(SensitiveJsonConverter<>))]
-public readonly struct Sensitive<T>
+public readonly struct Sensitive<T> : IEquatable<Sensitive<T>>
 {
     private readonly T _value;
 
@@ -51,6 +56,26 @@ public readonly struct Sensitive<T>
 
     /// <summary>Always returns the redacted literal, never the wrapped value.</summary>
     public override string ToString() => "[SENSITIVE]";
+
+    /// <summary>
+    /// A <see cref="Sensitive{T}"/> is intentionally never equal to anything — this
+    /// suppresses the structural value comparison a struct would otherwise inherit from
+    /// <see cref="System.ValueType"/>, which would be a value-equality/timing side channel
+    /// on the wrapped secret.
+    /// </summary>
+    public bool Equals(Sensitive<T> other) => false;
+
+    /// <inheritdoc cref="Equals(Sensitive{T})"/>
+    public override bool Equals(object? obj) => false;
+
+    /// <summary>Always returns a constant — never derives a hash from the wrapped value.</summary>
+    public override int GetHashCode() => 0;
+
+    /// <summary>Never equal (see <see cref="Equals(object?)"/>).</summary>
+    public static bool operator ==(Sensitive<T> left, Sensitive<T> right) => false;
+
+    /// <summary>Always unequal (see <see cref="Equals(object?)"/>).</summary>
+    public static bool operator !=(Sensitive<T> left, Sensitive<T> right) => true;
 }
 
 /// <summary>

@@ -108,4 +108,42 @@ public class SensitiveRedactionTests
     {
         Assert.Throws<NotSupportedException>(() => JsonSerializer.Deserialize<Sensitive<string>>("\"anything\""));
     }
+
+    // CR-02 regression: Sensitive<T> must NEVER be value-comparable. Left un-overridden,
+    // a struct inherits System.ValueType's structural (value) equality/hash, which is a
+    // side channel on the wrapped secret (and would leak into any record carrying a
+    // Sensitive<T> field). Overriding Equals/==/GetHashCode to constants closes it.
+
+    [Fact]
+    public void TwoSensitivesWrappingTheSameValueAreNeverEqual()
+    {
+        var a = Axiam.Sdk.Core.Sensitive.Of("secret1");
+        var b = Axiam.Sdk.Core.Sensitive.Of("secret1");
+
+        Assert.False(a.Equals(b));
+        Assert.False(a.Equals((object)b));
+        Assert.False(a == b);
+        Assert.True(a != b);
+    }
+
+    [Fact]
+    public void SensitiveIsNeverEqualEvenToItself()
+    {
+        var a = Axiam.Sdk.Core.Sensitive.Of("secret1");
+
+        // Not even a copy of itself compares equal — there is no value-equality path at all.
+        Assert.False(a.Equals(a));
+        Assert.False(a.Equals((object?)null));
+        Assert.False(a.Equals("secret1"));
+    }
+
+    [Fact]
+    public void SensitiveHashCodeIsAConstant_NeverDerivedFromTheValue()
+    {
+        int hashSecret1 = Axiam.Sdk.Core.Sensitive.Of("secret1").GetHashCode();
+        int hashSecret2 = Axiam.Sdk.Core.Sensitive.Of("a-totally-different-secret").GetHashCode();
+
+        Assert.Equal(0, hashSecret1);
+        Assert.Equal(hashSecret1, hashSecret2);
+    }
 }

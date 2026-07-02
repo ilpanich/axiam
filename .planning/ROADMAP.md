@@ -879,7 +879,18 @@ Plans:
   4. Laravel and Symfony middleware helpers are provided as runnable examples; AMQP consumer verifies HMAC-SHA256 and calls `nack` (no requeue) on signature failure.
   5. `composer test` passes; Packagist automation (`axiam/axiam-sdk`) runs on release tag.
 
-**Plans**: TBD
+**Plans**: 9 plans
+
+Plans:
+- [ ] 22-01-PLAN.md — Wave 1: scaffold + pinned deps + PHPUnit + Sensitive/error taxonomy (D-10/D-11, CR-04)
+- [ ] 22-02-PLAN.md — Wave 2: JWKS EdDSA verifier (alg-pin + tenant_id) + LoginResult DTO + crypto fixtures (D-08/D-09)
+- [ ] 22-03-PLAN.md — Wave 2: AMQP Hmac verify-before-handler + Consumer + CLI worker (D-04, SC#4-AMQP)
+- [ ] 22-04-PLAN.md — Wave 2: Session + shared-promise single-flight refresh middleware (D-06, SC#2)
+- [ ] 22-05-PLAN.md — Wave 3: AuthzRestClient + gRPC guard/dispatcher + committed stubs + buf.gen.yaml (D-03, SC#3)
+- [ ] 22-06-PLAN.md — Wave 4: AxiamClient facade + auth flows (login/verifyMfa/refresh/logout) (SC#1, D-13)
+- [ ] 22-07-PLAN.md — Wave 5: Laravel bridge (ServiceProvider + Middleware + Gate) + example (D-01/D-02, SC#4)
+- [ ] 22-08-PLAN.md — Wave 5: Symfony bridge (Bundle + Subscriber + Voter) + example (D-01/D-02, SC#4)
+- [ ] 22-09-PLAN.md — Wave 6: CI (test + TLS gate + subtree-split Packagist) + README (D-05/D-12, SC#5)
 
 ---
 
@@ -898,7 +909,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
 | 20. Java SDK | 9/9 | Complete    | 2026-07-02 |
 | 21. C# SDK | 7/7 | Complete   | 2026-07-02 |
-| 22. PHP SDK | 0/? | Not started | - |
+| 22. PHP SDK | 0/9 | Planned | - |
 
 ---
 

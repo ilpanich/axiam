@@ -72,6 +72,17 @@ final class Session
     }
 
     /**
+     * Clears the captured CSRF token — called by {@see \Axiam\Sdk\AxiamClient::logout()} so a
+     * logged-out session never echoes a stale `X-CSRF-Token` on a subsequent (re-authenticated)
+     * request. Purely additive: does not change {@see self::csrfToken()}'s or
+     * {@see self::refreshIfNeeded()}'s existing behavior in any other way.
+     */
+    public function resetCsrf(): void
+    {
+        $this->csrfToken = null;
+    }
+
+    /**
      * The current access token, read live from the shared cookie jar's `axiam_access`
      * entry rather than cached separately — avoids a second, potentially-stale, copy
      * of the token (mirrors `sdks/java`'s `SessionState::cachedAccessToken()` and

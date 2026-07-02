@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: — Client SDKs
-current_phase: 19
-current_phase_name: Python SDK
+current_phase: 20
+current_phase_name: Java SDK
 status: executing
 stopped_at: Phase 20 context gathered
-last_updated: "2026-07-02T06:40:39.228Z"
-last_activity: 2026-07-01
-last_activity_desc: Plan 19-03 (REST core — unified AxiamClient) complete
+last_updated: "2026-07-02T07:08:57.153Z"
+last_activity: 2026-07-02
+last_activity_desc: Phase 20 execution started
 progress:
   total_phases: 8
   completed_phases: 5
-  total_plans: 33
-  completed_plans: 33
+  total_plans: 42
+  completed_plans: 34
   percent: 63
 ---
 
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 18 — go-sdk
+**Current focus:** Phase 20 — Java SDK
 
 ## Current Position
 
-Phase: 19 — Python SDK
-Plan: 7 of 7
+Phase: 20 (Java SDK) — EXECUTING
+Plan: 2 of 9
 Status: Ready to execute
-Last activity: 2026-07-01 — Plan 19-03 (REST core — unified AxiamClient) complete
+Last activity: 2026-07-02 — Phase 20 execution started
 
 ## Performance Metrics
 
@@ -126,6 +126,7 @@ Last activity: 2026-07-01 — Plan 19-03 (REST core — unified AxiamClient) com
 | Phase 19 P05 | 15min | 1 tasks | 3 files |
 | Phase 19-python-sdk P06 | 40min | 3 tasks | 8 files |
 | Phase 19-python-sdk P07 | 45min | 3 tasks | 10 files |
+| Phase 20-java-sdk P01 | 10min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -273,6 +274,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 19-python-sdk] 19-07: Re-exported JwksVerifier from axiam_sdk.fastapi.__all__ so the FastAPI example imports only public entry points, never axiam_sdk._jwks directly
 - [Phase ?]: [Phase 19-python-sdk] 19-07: actions/setup-python and pypa/gh-action-pypi-publish pinned by major-version tag (@v5, @release/v1), not SHA -- no pre-existing pin to reuse and no GitHub network egress in this environment to source a new SHA; flagged for a maintainer follow-up
 - [Phase ?]: [Phase 19-python-sdk] 19-07: Added [tool.ruff] extend-exclude for src/axiam_sdk/grpc/gen, mirroring the existing mypy override, so the new CI lint job doesn't fail on pre-existing generated-code style debt from 19-01
+- [Phase 20-java-sdk]: protobuf.version pinned to 3.25.8 (verified via mvn dependency:tree against grpc-protobuf 1.82.0's actual transitive protobuf-java version, not the RESEARCH.md 4.29.0 placeholder)
+- [Phase 20-java-sdk]: buf.gen.yaml Java plugin entries commented out (drift-check-only) rather than deleted, per D-21's optional CI drift-check allowance -- authoritative Java gRPC codegen is protobuf-maven-plugin via mvn generate-sources
+- [Phase 20-java-sdk]: tls-bypass-gate.sh excludes sdks/java/src/test via grep --exclude-dir=test so a future reflection-based TLS regression test cannot self-trip the gate
 
 ### Pending Todos
 
@@ -293,6 +297,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T05:48:11.665Z
+Last session: 2026-07-02T07:08:24.808Z
 Stopped at: Phase 20 context gathered
 Resume file: .planning/phases/20-java-sdk/20-CONTEXT.md

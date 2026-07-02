@@ -795,12 +795,12 @@ Plans:
   4. `OkHttpClient` uses `CookieManager` for cookie persistence; no `hostnameVerifier` or `sslSocketFactory` bypass is present anywhere in SDK source.
   5. Maven Central publish pipeline with GPG signing is documented and operational; `mvn verify` passes including signing.
 
-**Plans**: 9 plans
+**Plans**: 1/9 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 20-01-PLAN.md — Maven scaffold: pom Java 11→21 + deps + plugin chain, protobuf-maven-plugin codegen, buf.gen.yaml demote, TLS grep gate, JAVA-01↔BOM reconcile
+- [x] 20-01-PLAN.md — Maven scaffold: pom Java 11→21 + deps + plugin chain, protobuf-maven-plugin codegen, buf.gen.yaml demote, TLS grep gate, JAVA-01↔BOM reconcile
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -873,7 +873,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 17. TypeScript SDK | 8/8 | Complete    | 2026-07-01 |
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
-| 20. Java SDK | 0/? | Not started | - |
+| 20. Java SDK | 1/9 | In Progress|  |
 | 21. C# SDK | 0/? | Not started | - |
 | 22. PHP SDK | 0/? | Not started | - |
 

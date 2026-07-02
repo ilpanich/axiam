@@ -584,10 +584,12 @@ The Python SDK now withholds `X-Tenant-ID`/`X-CSRF-Token` from cross-origin requ
 
 **Commit**: `security(sdks): gate tenant/CSRF headers by request origin across all SDKs`
 
-### T19.30 — buf workspace fix + cross-language stub regeneration
-`sdks/buf.yaml` uses `modules: [{path: ../proto}]`, which buf v2 rejects (module outside the workspace context) — this fails `buf lint + breaking`, `buf drift-check (D-01, Go)`, and the TypeScript `buf generate` codegen step. Relocate the buf workspace to the repo root (`buf.yaml` with `modules: [{path: proto}]`, `buf.gen.yaml` outputs prefixed with `sdks/`), update the affected workflow `input`/`working-directory`/path filters, and **regenerate the committed Go (and any descriptor-embedding) stubs** so they match the Phase-22 `php_namespace`/`php_metadata_namespace` proto options (those options pollute the language-agnostic serialized descriptor, staling the pre-Phase-22 Go stubs). Requires an environment with the `buf` CLI (unavailable in the current dev sandbox), so it could not be validated in PR #126.
+### T19.30 — Unify PHP/Python codegen under buf ✓ PARTIALLY RESOLVED (PR #126)
+The buf workspace break was **fixed in PR #126** once buf became available locally: `buf.yaml`/`buf.gen.yaml` relocated to the repo root (`modules: [{path: proto}]`), managed mode added for Go's `go_package`, `php_namespace` made consistent across all three protos, Go stubs regenerated (authorization drift + new token/user), and all buf invocations moved to the repo root. `buf lint + breaking`, `buf drift-check (D-01)`, and TS codegen now pass (validated locally).
 
-**Commit**: `ci(sdks): fix buf workspace root + regenerate cross-language gRPC stubs`
+**Residual:** buf currently drives only Rust/TS/Go. Python (`grpc_tools`, D-04) and PHP (manual `protoc --php_out`, D-03) keep separate toolchains because buf's output layout/paths conflict with their committed stubs. Unify all six languages under a single buf pipeline (reconcile the PHP flat-vs-nested `Gen/` layout and the Python output path) so there is one source of truth for codegen.
+
+**Commit**: `ci(sdks): unify PHP/Python gRPC codegen under the buf pipeline`
 
 ### T19.31 — Root cargo-audit advisory remediation
 The `Security Scan` (`cargo audit`) job fails on a RUSTSEC advisory published after the last green `main` run (not introduced by PR #126 — the SDK PR adds no new root dependencies). Update the affected dependency, or add the advisory ID to the audit ignore-list with justification.

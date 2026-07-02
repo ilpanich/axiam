@@ -2,6 +2,12 @@ syntax = "proto3";
 
 package axiam.v1;
 
+// PHP-only codegen options — must match authorization.proto's values so all
+// files in package axiam.v1 agree (buf PACKAGE_SAME_PHP_NAMESPACE). Ignored
+// by every other language's codegen.
+option php_namespace = "Axiam\\Sdk\\Grpc\\Gen";
+option php_metadata_namespace = "Axiam\\Sdk\\Grpc\\Gen\\Metadata";
+
 // User service for lookups and credential validation.
 service UserService {
   // Retrieve a user by ID.

@@ -5,8 +5,8 @@ on:
     branches: [main]
     paths:
       - 'proto/**'
-      - 'sdks/buf.yaml'
-      - 'sdks/buf.gen.yaml'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
 
 permissions:
   contents: read
@@ -21,7 +21,7 @@ jobs:
       - name: buf lint + breaking
         uses: bufbuild/buf-action@v1.4.0
         with:
-          input: sdks
+          input: .
           lint: true
           breaking: true
           breaking_against: "https://github.com/ilpanich/axiam.git#branch=main,subdir=proto"

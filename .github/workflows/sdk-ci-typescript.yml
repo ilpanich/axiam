@@ -6,8 +6,8 @@ on:
     paths:
       - 'sdks/typescript/**'
       - 'sdks/openapi.json'
-      - 'sdks/buf.yaml'
-      - 'sdks/buf.gen.yaml'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
   push:
     tags:
       - 'sdks/typescript/v*'

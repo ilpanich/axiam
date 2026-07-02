@@ -6,8 +6,8 @@ on:
     paths:
       - 'sdks/go/**'
       - 'sdks/openapi.json'
-      - 'sdks/buf.yaml'
-      - 'sdks/buf.gen.yaml'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
   push:
     tags:
       - 'sdks/go/v*'
@@ -90,8 +90,10 @@ jobs:
         with:
           setup_only: true
 
+      # Run from the repo root: buf.yaml + buf.gen.yaml live there now, and
+      # buf.gen.yaml's out: paths are sdks/-prefixed (resolved relative to the
+      # invocation CWD), so a subdir CWD would double-nest the output.
       - name: buf generate
-        working-directory: sdks
         run: buf generate
 
       - name: Fail on drift — committed stubs must match protos (D-01)
@@ -120,8 +122,10 @@ jobs:
         with:
           setup_only: true
 
+      # Run from the repo root: buf.yaml + buf.gen.yaml live there now, and
+      # buf.gen.yaml's out: paths are sdks/-prefixed (resolved relative to the
+      # invocation CWD), so a subdir CWD would double-nest the output.
       - name: buf generate
-        working-directory: sdks
         run: buf generate
 
       - name: Fail on drift — committed stubs must match protos (D-01)

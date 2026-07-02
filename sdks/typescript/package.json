@@ -81,7 +81,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "generate": "buf generate ../ --template ../buf.gen.yaml",
+    "generate": "cd ../.. && buf generate --template buf.gen.yaml",
     "prebuild": "npm run generate",
     "build": "tsup",
     "test": "vitest",

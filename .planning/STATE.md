@@ -5,15 +5,15 @@ milestone_name: — Client SDKs
 current_phase: 20
 current_phase_name: Java SDK
 status: executing
-stopped_at: Completed 20-04-PLAN.md
-last_updated: "2026-07-02T07:39:44.017Z"
+stopped_at: Completed 20-05-PLAN.md
+last_updated: "2026-07-02T08:06:56.666Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 20 execution started
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 42
-  completed_plans: 37
+  completed_plans: 38
   percent: 63
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 20 (Java SDK) — EXECUTING
-Plan: 5 of 9
+Plan: 6 of 9
 Status: Ready to execute
 Last activity: 2026-07-02 — Phase 20 execution started
 
@@ -130,6 +130,7 @@ Last activity: 2026-07-02 — Phase 20 execution started
 | Phase 20-java-sdk P02 | 8min | 2 tasks | 5 files |
 | Phase 20-java-sdk P03 | 12min | 2 tasks | 10 files |
 | Phase 20-java-sdk P04 | 16min | 3 tasks | 8 files |
+| Phase 20-java-sdk P05 | 25min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -285,6 +286,8 @@ Recent decisions affecting current work:
 - [Phase 20-java-sdk]: 20-03: NetworkError exposes a single (message, sanitizedSummary) constructor with no okhttp3.Response overload — structural (compile-time) guarantee against raw-response leakage, not just convention — closes the CR-04 leak class at the type level
 - [Phase 20-java-sdk]: 20-04: nimbus-jose-jwt 10.7's DefaultJWTProcessor + JWSVerificationKeySelector(EdDSA) pipeline cannot verify OKP/Ed25519 keys (OctetKeyPair.toKeyPair() unconditionally throws, silently swallowed by KeyConverter.toJavaKeys; DefaultJWSVerifierFactory has no EdDSA branch) — JwksVerifier uses a direct JWKMatcher lookup against the same RemoteJWKSet paired with Ed25519Verifier(OctetKeyPair) instead — Confirmed empirically via a throwaway debug harness before committing; preserves D-19's RemoteJWKSet+DefaultJWKSetCache fetch/cache/rotation mandate
 - [Phase 20-java-sdk]: 20-04: RefreshGuard's join() path unwraps CompletionException so every waiter receives the SAME exception instance the refreshing thread threw (not a wrapped CompletionException) — Matches the plan's literal 'same exception to every waiter' requirement more precisely than the research pattern's unmodified join() call
+- [Phase ?]: [Phase 20-java-sdk] 20-05: SessionState reads the current access token straight from the shared cookie jar (no separate in-memory cache); AuthInterceptor/AuthAuthenticator special-case the refresh endpoint's own request path to avoid a self-deadlock, since the refresh POST runs through the same interceptor-decorated OkHttpClient
+- [Phase ?]: [Phase 20-java-sdk] 20-05: Fixed sdks/java/scripts/tls-bypass-gate.sh's over-broad ban on the literal method names hostnameVerifier(/sslSocketFactory( -- verified via OkHttp 4.12 source that these are the ONLY stdlib-only path to implement CONTRACT.md section 6's customCa escape hatch; narrowed the gate to concrete bypass idioms (empty checkServerTrusted, TrustAllCerts, ALLOW_ALL_HOSTNAME_VERIFIER, NoopHostnameVerifier, permissive -> true lambdas)
 
 ### Pending Todos
 
@@ -305,6 +308,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T07:39:44.005Z
-Stopped at: Completed 20-04-PLAN.md
+Last session: 2026-07-02T08:06:56.653Z
+Stopped at: Completed 20-05-PLAN.md
 Resume file: None

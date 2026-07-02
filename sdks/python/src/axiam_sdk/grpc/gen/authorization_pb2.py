@@ -24,13 +24,14 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13\x61uthorization.proto\x12\x08\x61xiam.v1\"~\n\x12\x43heckAccessRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x12\n\nsubject_id\x18\x02 \x01(\t\x12\x0e\n\x06\x61\x63tion\x18\x03 \x01(\t\x12\x13\n\x0bresource_id\x18\x04 \x01(\t\x12\x12\n\x05scope\x18\x05 \x01(\tH\x00\x88\x01\x01\x42\x08\n\x06_scope\";\n\x13\x43heckAccessResponse\x12\x0f\n\x07\x61llowed\x18\x01 \x01(\x08\x12\x13\n\x0b\x64\x65ny_reason\x18\x02 \x01(\t\"I\n\x17\x42\x61tchCheckAccessRequest\x12.\n\x08requests\x18\x01 \x03(\x0b\x32\x1c.axiam.v1.CheckAccessRequest\"J\n\x18\x42\x61tchCheckAccessResponse\x12.\n\x07results\x18\x01 \x03(\x0b\x32\x1d.axiam.v1.CheckAccessResponse2\xbd\x01\n\x14\x41uthorizationService\x12J\n\x0b\x43heckAccess\x12\x1c.axiam.v1.CheckAccessRequest\x1a\x1d.axiam.v1.CheckAccessResponse\x12Y\n\x10\x42\x61tchCheckAccess\x12!.axiam.v1.BatchCheckAccessRequest\x1a\".axiam.v1.BatchCheckAccessResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13\x61uthorization.proto\x12\x08\x61xiam.v1\"~\n\x12\x43heckAccessRequest\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x12\n\nsubject_id\x18\x02 \x01(\t\x12\x0e\n\x06\x61\x63tion\x18\x03 \x01(\t\x12\x13\n\x0bresource_id\x18\x04 \x01(\t\x12\x12\n\x05scope\x18\x05 \x01(\tH\x00\x88\x01\x01\x42\x08\n\x06_scope\";\n\x13\x43heckAccessResponse\x12\x0f\n\x07\x61llowed\x18\x01 \x01(\x08\x12\x13\n\x0b\x64\x65ny_reason\x18\x02 \x01(\t\"I\n\x17\x42\x61tchCheckAccessRequest\x12.\n\x08requests\x18\x01 \x03(\x0b\x32\x1c.axiam.v1.CheckAccessRequest\"J\n\x18\x42\x61tchCheckAccessResponse\x12.\n\x07results\x18\x01 \x03(\x0b\x32\x1d.axiam.v1.CheckAccessResponse2\xbd\x01\n\x14\x41uthorizationService\x12J\n\x0b\x43heckAccess\x12\x1c.axiam.v1.CheckAccessRequest\x1a\x1d.axiam.v1.CheckAccessResponse\x12Y\n\x10\x42\x61tchCheckAccess\x12!.axiam.v1.BatchCheckAccessRequest\x1a\".axiam.v1.BatchCheckAccessResponseB3\xca\x02\x12\x41xiam\\Sdk\\Grpc\\Gen\xe2\x02\x1b\x41xiam\\Sdk\\Grpc\\Gen\\Metadatab\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'authorization_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
-  DESCRIPTOR._loaded_options = None
+  _globals['DESCRIPTOR']._loaded_options = None
+  _globals['DESCRIPTOR']._serialized_options = b'\312\002\022Axiam\\Sdk\\Grpc\\Gen\342\002\033Axiam\\Sdk\\Grpc\\Gen\\Metadata'
   _globals['_CHECKACCESSREQUEST']._serialized_start=33
   _globals['_CHECKACCESSREQUEST']._serialized_end=159
   _globals['_CHECKACCESSRESPONSE']._serialized_start=161

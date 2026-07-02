@@ -1,3 +1,6 @@
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Axiam.Sdk.Auth;
 using Axiam.Sdk.Core;
 using Xunit;

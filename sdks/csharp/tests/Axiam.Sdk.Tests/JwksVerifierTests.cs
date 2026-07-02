@@ -1,6 +1,9 @@
 using System.Net;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using Axiam.Sdk.Auth;
 using Axiam.Sdk.Tests.Fixtures;
 using Xunit;

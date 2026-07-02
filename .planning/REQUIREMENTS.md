@@ -511,10 +511,10 @@ Deliver `sdks/java/` with Spring Security integration.
 Deliver `sdks/csharp/` with ASP.NET Core integration.
 
 ### Acceptance Criteria
-- [ ] Full baseline; `SemaphoreSlim(1,1)` single-flight refresh; `HttpClientHandler.CookieContainer`
-- [ ] HttpClient + Grpc.Net.Client 2.80 + RabbitMQ.Client 7.2; native EdDSA on .NET 8+ (BouncyCastle for netstandard2.0)
-- [ ] `Grpc.Tools` MSBuild codegen (documented buf exception); `Axiam.Sdk.AspNetCore` middleware sub-package
-- [ ] Examples; **NuGet publish pipeline** (`Axiam.Sdk`) incl. credential setup
+- [x] Full baseline; `SemaphoreSlim(1,1)` single-flight refresh; `HttpClientHandler.CookieContainer`
+- [x] HttpClient + Grpc.Net.Client 2.80 + RabbitMQ.Client 7.2; BouncyCastle.Cryptography for Ed25519 (native EdDSA confirmed unavailable on .NET 8+ — 21-RESEARCH.md; netstandard2.0 leg deferred, D-01)
+- [x] `Grpc.Tools` MSBuild codegen (documented buf exception); `Axiam.Sdk.AspNetCore` middleware sub-package
+- [x] Examples; **NuGet publish pipeline** (`Axiam.Sdk` + `Axiam.Sdk.AspNetCore`) incl. credential setup — CI/publish pipeline structurally proven (build/test/pack + tag-triggered `dotnet nuget push`); live first publish is a maintainer action pending `NUGET_API_KEY` secret configuration
 
 ---
 
@@ -559,7 +559,7 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
 | GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Complete |
 | PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Complete |
 | JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Complete |
-| CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Pending |
+| CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Complete |
 | PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only | Pending |
 
 **Coverage: 12/12 v1.1 requirements mapped (100%)**

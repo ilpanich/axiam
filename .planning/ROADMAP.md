@@ -595,7 +595,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 - [x] **Phase 18: Go SDK** - Full REST + gRPC + AMQP; idiomatic `net/http` middleware; Go module publish (completed 2026-07-01)
 - [x] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish (completed 2026-07-01)
 - [x] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing (completed 2026-07-02)
-- [ ] **Phase 21: C# SDK** - HttpClient + Grpc.Net.Client; Grpc.Tools MSBuild codegen; ASP.NET Core middleware; NuGet publish
+- [x] **Phase 21: C# SDK** - HttpClient + Grpc.Net.Client; Grpc.Tools MSBuild codegen; ASP.NET Core middleware; NuGet publish (completed 2026-07-02)
 - [ ] **Phase 22: PHP SDK** - REST-first; gRPC guarded by runtime `extension_loaded('grpc')`; Laravel + Symfony middleware; Packagist publish
 
 ### Phase Details (v1.1)
@@ -839,7 +839,7 @@ Plans:
   4. `Grpc.Tools` MSBuild integration generates gRPC stubs at build time (documented as the C# exception to the repo-wide buf pipeline); no `ServerCertificateCustomValidationCallback` bypass present in SDK source.
   5. `dotnet pack` succeeds and produces a valid `.nupkg`; NuGet publish pipeline with credential setup is documented and operational.
 
-**Plans**: 6/7 plans executed
+**Plans**: 7/7 plans complete
 
 Plans:
 **Wave 1**
@@ -862,7 +862,7 @@ Plans:
 
 **Wave 5** *(depends on 21-02 + 21-05 + 21-06)*
 
-- [ ] 21-07-PLAN.md — Examples (AspNetCore sample + quickstart) + SourceLink/snupkg packaging + TLS-bypass gate + CI build/test/pack + tag-triggered NuGet publish (SC#3/SC#4/SC#5, D-04/D-05)
+- [x] 21-07-PLAN.md — Examples (AspNetCore sample + quickstart) + SourceLink/snupkg packaging + TLS-bypass gate + CI build/test/pack + tag-triggered NuGet publish (SC#3/SC#4/SC#5, D-04/D-05)
 
 ---
 
@@ -897,7 +897,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 18. Go SDK | 6/6 | Complete    | 2026-07-01 |
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
 | 20. Java SDK | 9/9 | Complete    | 2026-07-02 |
-| 21. C# SDK | 6/7 | In Progress|  |
+| 21. C# SDK | 7/7 | Complete   | 2026-07-02 |
 | 22. PHP SDK | 0/? | Not started | - |
 
 ---

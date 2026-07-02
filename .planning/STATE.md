@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 21
 current_phase_name: c-sdk
-status: executing
-stopped_at: Completed 21-c-sdk-06-PLAN.md
-last_updated: "2026-07-02T14:04:14.323Z"
+status: verifying
+stopped_at: Completed 21-07-PLAN.md
+last_updated: "2026-07-02T14:18:04.816Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 21 execution started
 progress:
   total_phases: 8
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 49
-  completed_plans: 48
-  percent: 75
+  completed_plans: 49
+  percent: 88
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 21 (c-sdk) — EXECUTING
 Plan: 7 of 7
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-02 — Phase 21 execution started
 
 ## Performance Metrics
@@ -142,6 +142,7 @@ Last activity: 2026-07-02 — Phase 21 execution started
 | Phase 21-c-sdk P04 | 30min | 3 tasks | 8 files |
 | Phase 21-c-sdk P05 | 45min | 2 tasks | 5 files |
 | Phase 21-c-sdk P06 | 45min | 3 tasks | 11 files |
+| Phase 21-c-sdk P07 | 45min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -324,6 +325,9 @@ Recent decisions affecting current work:
 - [Phase 21-c-sdk]: AxiamPolicyHandler calls the real 21-04 CheckAccessAsync(action, resourceId, scope, subjectId, ct) signature, passing the full resource:action policy name as action and the end-user's user_id as the check-as subjectId; resourceId resolved from a route value named 'id' via context.Resource as HttpContext, falling back to Guid.Empty — The server's AccessRequest always requires a concrete resource_id and the compile-time [Authorize(Policy=...)] attribute carries no per-request identifier of its own
 - [Phase 21-c-sdk]: AxiamAuthorizationMiddlewareResultHandler decides 401 vs 403 from HttpContext.User.Identity.IsAuthenticated rather than PolicyAuthorizationResult.Forbidden/Challenged — No ASP.NET Core authentication scheme is ever registered in this design, so PolicyEvaluator's internal AuthenticateResult is always non-succeeded, which would otherwise make every authorization failure surface as 401 and make the D-08 policy-deny-403 path unreachable
 - [Phase 21-c-sdk]: AddAxiamAspNetCore registers its own TryAddSingleton for IAuthorizationPolicyProvider/IAuthorizationMiddlewareResultHandler BEFORE calling the framework's AddAuthorization() — AddAuthorization() TryAdds its own defaults for the same single-slot service types; reversing the order would let the framework defaults silently win the TryAdd race
+- [Phase ?]: AspNetCoreSample uses MVC controllers with literal [Authorize]/[Authorize(Policy=documents:read)] attributes so the plan's literal source-assertion acceptance criteria are grep-satisfiable
+- [Phase ?]: build-test CI job has no PR-only if restriction so it re-runs on the tag-push trigger too; publish's needs: build-test gates the actual tagged commit
+- [Phase ?]: dotnet nuget push guarded by if: secrets.NUGET_API_KEY != '' at step level so an absent key degrades to a documented maintainer action instead of failing the pipeline (D-04)
 
 ### Pending Todos
 
@@ -344,6 +348,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T14:04:14.310Z
-Stopped at: Completed 21-c-sdk-06-PLAN.md
+Last session: 2026-07-02T14:18:04.803Z
+Stopped at: Completed 21-07-PLAN.md
 Resume file: None

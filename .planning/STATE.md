@@ -5,8 +5,8 @@ milestone_name: — Client SDKs
 current_phase: 21
 current_phase_name: c-sdk
 status: verifying
-stopped_at: Completed 21-07-PLAN.md
-last_updated: "2026-07-02T14:18:04.816Z"
+stopped_at: Phase 22 context gathered
+last_updated: "2026-07-02T16:27:19.995Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 21 execution started
 progress:
@@ -348,6 +348,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T14:18:04.803Z
-Stopped at: Completed 21-07-PLAN.md
-Resume file: None
+Last session: 2026-07-02T16:27:19.927Z
+Stopped at: Phase 22 context gathered
+Resume file: .planning/phases/22-php-sdk/22-CONTEXT.md

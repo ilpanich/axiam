@@ -307,6 +307,16 @@ manually, then commit test + implementation as their own atomic units" precedent
   `AxiamClient::currentClaimsOrNull()`) plus an update to `SingleFlightRefreshTest.php` to
   seed a claims-bearing token, ideally in a dedicated follow-up plan/PR review pass rather
   than folded silently into this one.
+  **RESOLVED** (2026-07-02, gap-closure follow-up to 22-VERIFICATION.md's SC#2 finding):
+  `Session::refreshIfNeeded()` now resolves `tenant_id`/`org_id` from the current access
+  token's unverified claims (a local base64url-decode helper, mirroring
+  `AxiamClient::currentClaimsOrNull()`/the C# sibling's `DecodeUnverifiedClaims`) and POSTs
+  `{tenant_id, org_id}` per `sdks/openapi.json`'s `RefreshRequest` schema; an unresolvable
+  claim now rejects through the same `RefreshGuard::settle()` single-flight path via
+  `AuthError`. `SingleFlightRefreshTest.php` was updated to seed a claims-bearing fixture
+  access token and assert the captured refresh request body. Fixed by commits `e05ea92`
+  (`fix(22-06)`) and `1da907b` (`test(22-04)`). Full suite re-confirmed green: 48 unit + 11
+  integration tests, all passing.
 - All other verification commands ran successfully — see the `coverage` block above.
 
 ## Known Stubs
@@ -341,11 +351,9 @@ None - no external service configuration required.
   $action)` is ready for their authorization Gate/Voter integration.
 - **Follow-up for a maintainer or a later plan:** (1) run
   `vendor/bin/phpstan analyse src/AxiamClient.php --level=6` on unrestricted CI
-  infrastructure (same deferral as every prior 22-* plan); (2) reconcile
+  infrastructure (same deferral as every prior 22-* plan); (2) ~~reconcile
   `Session::refreshIfNeeded()`'s refresh-POST wire body with `sdks/openapi.json`'s
-  `RefreshRequest` schema (`tenant_id`+`org_id` via unverified access-token-claim
-  decoding), updating `SingleFlightRefreshTest.php` to seed a claims-bearing token as part
-  of that fix (see Issues Encountered).
+  `RefreshRequest` schema~~ **RESOLVED** — see Issues Encountered.
 
 ---
 *Phase: 22-php-sdk*

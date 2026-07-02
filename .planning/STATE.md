@@ -359,6 +359,7 @@ Recent decisions affecting current work:
 - [Phase 22-php-sdk]: AxiamBundle ships zero DependencyInjection\Extension/auto-wiring logic -- subscriber/voter tagging is entirely the consuming app's own services.yaml, making the Pitfall 5 two-manual-steps registration story literally accurate — 22-08
 - [Phase 22-php-sdk]: 22-09: TLS-bypass CI grep gate excludes vendor/ (in addition to customCa) — composer install populates vendor/ with third-party test fixtures using verify_peer=>false in their own tests, which would false-positive a gate meant to police only this SDK's shipped surface
 - [Phase 22-php-sdk]: 22-09: Packagist publish job gates on both secrets.PHP_SDK_MIRROR_TOKEN and vars.PHP_SDK_MIRROR_REPO (repo variable naming mirror owner/repo) — either absent degrades to a documented no-op warning, never a pipeline failure (D-05)
+- [Phase 22-php-sdk]: Gap-closure (2026-07-02, post-22-VERIFICATION.md SC#2 finding): `Session::refreshIfNeeded()` now resolves `tenant_id`/`org_id` from the current access token's unverified claims before the `/api/v1/auth/refresh` POST (mirroring the C# sibling's `DecodeUnverifiedClaims`), fixing a real-server-breaking wire-format defect; `SingleFlightRefreshTest.php` now asserts the refresh request body — see 22-06-SUMMARY.md "Issues Encountered" (commits `e05ea92`, `1da907b`)
 
 ### Pending Todos
 

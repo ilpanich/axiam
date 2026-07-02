@@ -795,7 +795,20 @@ Plans:
   4. `OkHttpClient` uses `CookieManager` for cookie persistence; no `hostnameVerifier` or `sslSocketFactory` bypass is present anywhere in SDK source.
   5. Maven Central publish pipeline with GPG signing is documented and operational; `mvn verify` passes including signing.
 
-**Plans**: TBD
+**Plans**: 9 plans
+
+Plans:
+- [ ] 20-01-PLAN.md — Maven scaffold: pom Java 11→21 + deps + plugin chain, protobuf-maven-plugin codegen, buf.gen.yaml demote, TLS grep gate, JAVA-01↔BOM reconcile
+- [ ] 20-02-PLAN.md — AMQP HMAC foundation: Hmac.verify (wire-order canonicalization) + ErrDrop + real cross-language fixture + HmacVerifyTest
+- [ ] 20-03-PLAN.md — Token safety & error taxonomy: Sensitive (D-17) + AuthError/AuthzError/NetworkError + ErrorMapper redact-before-wrap (D-18/CR-04) + records
+- [ ] 20-04-PLAN.md — Verification & concurrency core: RefreshGuard single-flight (SC#2) + JwksVerifier EdDSA-pinned + cross-tenant helper (D-19)
+- [ ] 20-05-PLAN.md — REST core: SessionState + interceptors + AxiamClient builder (SC#1, D-27) + auth (login/verifyMfa/refresh/logout) + authz (checkAccess/can/batchCheck)
+- [ ] 20-06-PLAN.md — Spring Security: AxiamAuthenticationFilter (cross-tenant check) + @AutoConfiguration (SC#3 core)
+- [ ] 20-07-PLAN.md — AMQP consumer: verify-before-handler + §8 ack/nack matrix + built-in recovery (D-13)
+- [ ] 20-08-PLAN.md — gRPC transport: GrpcAuthzClient (shared guard, strict-TLS channel, deadline) + AuthClientInterceptor
+- [ ] 20-09-PLAN.md — Deliverables: examples + complete Spring Boot app (SC#3) + README + BOM + GPG-signed Central Portal CI/publish (SC#5)
+
+**Waves**: W1: 20-01 · W2: 20-02, 20-03, 20-04 · W3: 20-05, 20-06, 20-07 · W4: 20-08 · W5: 20-09
 
 ---
 

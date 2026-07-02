@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: — Client SDKs
 current_phase: 22
 current_phase_name: php-sdk
-status: executing
-stopped_at: Completed 22-php-sdk-08-PLAN.md
-last_updated: "2026-07-02T19:46:34.486Z"
+status: verifying
+stopped_at: Completed 22-php-sdk-09-PLAN.md (final plan of Phase 22)
+last_updated: "2026-07-02T19:55:04.945Z"
 last_activity: 2026-07-02
 last_activity_desc: Phase 22 execution started
 progress:
   total_phases: 8
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 58
-  completed_plans: 57
-  percent: 88
+  completed_plans: 58
+  percent: 100
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 22 (php-sdk) — EXECUTING
 Plan: 9 of 9
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-02 — Phase 22 execution started
 
 ## Performance Metrics
@@ -151,6 +151,7 @@ Last activity: 2026-07-02 — Phase 22 execution started
 | Phase 22 P06 | 45min | 3 tasks | 5 files |
 | Phase 22-php-sdk P07 | 35min | 3 tasks | 7 files |
 | Phase 22-php-sdk P08 | 30min | 3 tasks | 7 files |
+| Phase 22-php-sdk P09 | 20min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -356,6 +357,8 @@ Recent decisions affecting current work:
 - [Phase ?]: LaravelMiddlewareTest drives a real AxiamClient wired with the transportHandler MockHandler seam rather than a PHPUnit mock, since AxiamClient is final and cannot be doubled
 - [Phase 22-php-sdk]: Implemented AxiamVoter::voteOnAttribute() against the REAL installed symfony/security-core v8.1.1 signature (TokenInterface $token present) rather than RESEARCH.md's draft, which omitted it -- a signature mismatch on an abstract method is a fatal PHP error — 22-08: verified via vendor/symfony/security-core/Authorization/Voter/Voter.php before implementing
 - [Phase 22-php-sdk]: AxiamBundle ships zero DependencyInjection\Extension/auto-wiring logic -- subscriber/voter tagging is entirely the consuming app's own services.yaml, making the Pitfall 5 two-manual-steps registration story literally accurate — 22-08
+- [Phase 22-php-sdk]: 22-09: TLS-bypass CI grep gate excludes vendor/ (in addition to customCa) — composer install populates vendor/ with third-party test fixtures using verify_peer=>false in their own tests, which would false-positive a gate meant to police only this SDK's shipped surface
+- [Phase 22-php-sdk]: 22-09: Packagist publish job gates on both secrets.PHP_SDK_MIRROR_TOKEN and vars.PHP_SDK_MIRROR_REPO (repo variable naming mirror owner/repo) — either absent degrades to a documented no-op warning, never a pipeline failure (D-05)
 
 ### Pending Todos
 
@@ -377,6 +380,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T19:46:34.469Z
-Stopped at: Completed 22-php-sdk-08-PLAN.md
+Last session: 2026-07-02T19:55:04.931Z
+Stopped at: Completed 22-php-sdk-09-PLAN.md (final plan of Phase 22)
 Resume file: None

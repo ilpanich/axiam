@@ -596,7 +596,7 @@ This milestone ships 7 language-native client SDKs (Rust, TypeScript, Python, Ja
 - [x] **Phase 19: Python SDK** - Sync + async interfaces via httpx; FastAPI dependency + Django middleware; PyPI publish (completed 2026-07-01)
 - [x] **Phase 20: Java SDK** - OkHttp + grpc-netty; Spring Security filter; Maven Central publish with GPG signing (completed 2026-07-02)
 - [x] **Phase 21: C# SDK** - HttpClient + Grpc.Net.Client; Grpc.Tools MSBuild codegen; ASP.NET Core middleware; NuGet publish (completed 2026-07-02)
-- [ ] **Phase 22: PHP SDK** - REST-first; gRPC guarded by runtime `extension_loaded('grpc')`; Laravel + Symfony middleware; Packagist publish
+- [x] **Phase 22: PHP SDK** - REST-first; gRPC guarded by runtime `extension_loaded('grpc')`; Laravel + Symfony middleware; Packagist publish (completed 2026-07-02)
 
 ### Phase Details (v1.1)
 
@@ -879,7 +879,7 @@ Plans:
   4. Laravel and Symfony middleware helpers are provided as runnable examples; AMQP consumer verifies HMAC-SHA256 and calls `nack` (no requeue) on signature failure.
   5. `composer test` passes; Packagist automation (`axiam/axiam-sdk`) runs on release tag.
 
-**Plans**: 8/9 plans executed
+**Plans**: 9/9 plans complete
 
 Plans:
 **Wave 1**
@@ -907,7 +907,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 22-09-PLAN.md — Wave 6: CI (test + TLS gate + subtree-split Packagist) + README (D-05/D-12, SC#5)
+- [x] 22-09-PLAN.md — Wave 6: CI (test + TLS gate + subtree-split Packagist) + README (D-05/D-12, SC#5)
 
 ---
 
@@ -926,7 +926,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
 | 20. Java SDK | 9/9 | Complete    | 2026-07-02 |
 | 21. C# SDK | 7/7 | Complete   | 2026-07-02 |
-| 22. PHP SDK | 8/9 | In Progress|  |
+| 22. PHP SDK | 9/9 | Complete   | 2026-07-02 |
 
 ---
 

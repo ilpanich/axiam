@@ -96,15 +96,29 @@ public sealed class AxiamPolicyHandler : AuthorizationHandler<AxiamRequirement>
 /// <summary>
 /// Custom <see cref="IAuthorizationMiddlewareResultHandler"/> that writes the
 /// standardized JSON error body (CONTRACT.md &#167;10, PATTERNS.md "Standardized JSON
-/// error body") for both authorization outcomes ASP.NET Core's authorization
-/// middleware can produce: an unauthenticated/"Challenged" result (401 — mirrors
-/// <c>AxiamAuthMiddleware</c>'s own no-credential-passthrough &#8594; bare
-/// <c>[Authorize]</c> path, which never registers an authentication scheme and so must
-/// never fall through to the default handler's <c>ChallengeAsync</c>, which would throw
-/// without one) and a "Forbidden" result (403 — <c>AxiamPolicyHandler</c> left an
+/// error body") for both authorization outcomes: an unauthenticated result (401) and a
+/// "lacks permission" result (403 — <c>AxiamPolicyHandler</c> left an
 /// <see cref="AxiamRequirement"/> unsatisfied, i.e. <c>AuthzError</c>). On success, the
 /// pipeline continues exactly like the framework default.
 /// </summary>
+/// <remarks>
+/// This handler deliberately does NOT branch on
+/// <see cref="PolicyAuthorizationResult.Forbidden"/>/<see cref="PolicyAuthorizationResult.Challenged"/>.
+/// Neither this package nor a typical consumer registers an ASP.NET Core
+/// authentication scheme (<c>AddAuthentication()</c>/<c>UseAuthentication()</c>) —
+/// identity comes entirely from <see cref="AxiamAuthMiddleware"/> setting
+/// <see cref="HttpContext.User"/> directly. Because of that,
+/// <c>Microsoft.AspNetCore.Authorization.Policy.PolicyEvaluator</c>'s internal
+/// authentication step always resolves to <c>AuthenticateResult.NoResult()</c>
+/// (<c>Succeeded == false</c>) since the evaluated policy carries no
+/// <c>AuthenticationSchemes</c> — which means EVERY non-success outcome, including an
+/// authenticated-but-forbidden one, would surface as <c>Challenged</c>, never
+/// <c>Forbidden</c>. Branching on <see cref="HttpContext.User"/>'s own
+/// <c>Identity.IsAuthenticated</c> instead sidesteps that ambiguity entirely and is
+/// the authoritative signal: <see cref="AxiamAuthMiddleware"/> is the only code path
+/// that ever sets an authenticated identity, and it only does so after `JwksVerifier`
+/// signature+tenant verification succeeds.
+/// </remarks>
 public sealed class AxiamAuthorizationMiddlewareResultHandler : IAuthorizationMiddlewareResultHandler
 {
     public Task HandleAsync(
@@ -122,17 +136,10 @@ public sealed class AxiamAuthorizationMiddlewareResultHandler : IAuthorizationMi
             return next(context);
         }
 
-        if (authorizeResult.Forbidden)
-        {
-            return WriteJsonAsync(context, StatusCodes.Status403Forbidden, "authorization_denied", "insufficient permissions");
-        }
-
-        // Challenged (or any other non-success outcome): no valid credential reached
-        // this far. AxiamAuthMiddleware already 401s an invalid/expired/wrong-tenant
-        // token itself; this branch specifically covers a bare [Authorize] with NO
-        // token at all, where AxiamAuthMiddleware intentionally passed the request
-        // through per the "no-credential passthrough" rule.
-        return WriteJsonAsync(context, StatusCodes.Status401Unauthorized, "authentication_failed", "authentication required");
+        bool isAuthenticated = context.User.Identity?.IsAuthenticated == true;
+        return isAuthenticated
+            ? WriteJsonAsync(context, StatusCodes.Status403Forbidden, "authorization_denied", "insufficient permissions")
+            : WriteJsonAsync(context, StatusCodes.Status401Unauthorized, "authentication_failed", "authentication required");
     }
 
     private static Task WriteJsonAsync(HttpContext context, int statusCode, string error, string message)

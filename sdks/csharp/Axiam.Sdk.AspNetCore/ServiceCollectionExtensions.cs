@@ -57,10 +57,20 @@ public static class ServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         services.AddAxiam(configure);
-        services.AddAuthorization();
+
+        // IMPORTANT: register our own TryAdd* singletons for the single-slot
+        // IAuthorizationPolicyProvider/IAuthorizationMiddlewareResultHandler services
+        // BEFORE calling AddAuthorization() below. AddAuthorization() itself registers
+        // its OWN defaults (DefaultAuthorizationPolicyProvider, the framework's default
+        // result handler) via TryAdd — whichever registration for a given service type
+        // runs FIRST wins the TryAdd race. Calling AddAuthorization() first here would
+        // silently lock in the framework defaults and AxiamPolicyProvider would never
+        // be used, even though our own TryAddSingleton call would appear to "succeed"
+        // (TryAdd never throws) — order is load-bearing, not just style.
         services.TryAddSingleton<IAuthorizationHandler, AxiamPolicyHandler>();
         services.TryAddSingleton<IAuthorizationPolicyProvider, AxiamPolicyProvider>();
         services.TryAddSingleton<Microsoft.AspNetCore.Authorization.Policy.IAuthorizationMiddlewareResultHandler, AxiamAuthorizationMiddlewareResultHandler>();
+        services.AddAuthorization();
         return services;
     }
 

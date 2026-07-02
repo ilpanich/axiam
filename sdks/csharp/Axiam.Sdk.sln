@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Axiam.Sdk.AspNetCore", "Axi
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Axiam.Sdk.Tests", "tests\Axiam.Sdk.Tests\Axiam.Sdk.Tests.csproj", "{579394A2-44DA-4300-B601-EC7D97810D92}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Axiam.Sdk.AspNetCore.Tests", "tests\Axiam.Sdk.AspNetCore.Tests\Axiam.Sdk.AspNetCore.Tests.csproj", "{5CDBD6C1-0342-46A3-832B-17E61C28616E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,6 +29,10 @@ Global
 		{579394A2-44DA-4300-B601-EC7D97810D92}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{579394A2-44DA-4300-B601-EC7D97810D92}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{579394A2-44DA-4300-B601-EC7D97810D92}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5CDBD6C1-0342-46A3-832B-17E61C28616E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5CDBD6C1-0342-46A3-832B-17E61C28616E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5CDBD6C1-0342-46A3-832B-17E61C28616E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5CDBD6C1-0342-46A3-832B-17E61C28616E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

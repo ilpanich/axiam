@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <!-- WebApplicationFactory/TestServer host for the SC#3 integration test (Task 3) —
+         Microsoft.AspNetCore.Mvc.Testing transitively brings in Microsoft.AspNetCore.TestHost. -->
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="8.0.11" />
+  </ItemGroup>
+
+  <!-- Hosting/TestHost/Routing/Authorization APIs used to build the in-memory ASP.NET
+       Core 8+ test host — mirrors the exact FrameworkReference pattern
+       Axiam.Sdk.AspNetCore.csproj (D-03) and the core Axiam.Sdk.Tests.csproj (21-05,
+       for its Grpc.AspNetCore.Server-hosted Kestrel test server) already use. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../Axiam.Sdk.AspNetCore/Axiam.Sdk.AspNetCore.csproj" />
+    <ProjectReference Include="../../Axiam.Sdk/Axiam.Sdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Glob so fixtures added later are copied automatically without csproj edits
+         (mirrors Axiam.Sdk.Tests.csproj's identical pattern). -->
+    <None Include="Fixtures/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

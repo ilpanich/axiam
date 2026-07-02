@@ -879,7 +879,7 @@ Plans:
   4. Laravel and Symfony middleware helpers are provided as runnable examples; AMQP consumer verifies HMAC-SHA256 and calls `nack` (no requeue) on signature failure.
   5. `composer test` passes; Packagist automation (`axiam/axiam-sdk`) runs on release tag.
 
-**Plans**: 7/9 plans executed
+**Plans**: 8/9 plans executed
 
 Plans:
 **Wave 1**
@@ -903,7 +903,7 @@ Plans:
 **Wave 5** *(blocked on Wave 4 completion)*
 
 - [x] 22-07-PLAN.md — Wave 5: Laravel bridge (ServiceProvider + Middleware + Gate) + example (D-01/D-02, SC#4)
-- [ ] 22-08-PLAN.md — Wave 5: Symfony bridge (Bundle + Subscriber + Voter) + example (D-01/D-02, SC#4)
+- [x] 22-08-PLAN.md — Wave 5: Symfony bridge (Bundle + Subscriber + Voter) + example (D-01/D-02, SC#4)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
@@ -926,7 +926,7 @@ Phase 16 (Rust SDK) establishes the reference implementation patterns; Phases 17
 | 19. Python SDK | 7/7 | Complete   | 2026-07-01 |
 | 20. Java SDK | 9/9 | Complete    | 2026-07-02 |
 | 21. C# SDK | 7/7 | Complete   | 2026-07-02 |
-| 22. PHP SDK | 7/9 | In Progress|  |
+| 22. PHP SDK | 8/9 | In Progress|  |
 
 ---
 

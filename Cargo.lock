@@ -951,6 +951,7 @@ dependencies = [
  "chrono",
  "flate2",
  "jsonwebtoken",
+ "libxml",
  "pem",
  "rcgen",
  "reqwest 0.12.28",

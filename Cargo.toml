@@ -104,6 +104,12 @@ pem = "3"
 # SAML
 samael = { version = "0.0.19", features = ["xmlsec"] }
 flate2 = "1"
+# XSW (XML Signature Wrapping) binding check (SECFIX-04/SEC-005). Already
+# resolved transitively via samael's `xmlsec` feature (Cargo.lock pins
+# 0.3.3) — pinned here to the EXACT resolved version so promoting it to a
+# direct dependency of axiam-federation does not introduce a second copy
+# of the FFI bindings.
+libxml = "=0.3.3"
 
 # Email
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }

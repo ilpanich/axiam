@@ -619,10 +619,10 @@ The REST `POST /api/v1/roles/{role_id}/permissions` calls `grant_to_role_with_sc
 Remove the `unwrap_or([0u8; 32])` all-zero encryption-key fallback and actually encrypt webhook HMAC secrets on write.
 
 ### Acceptance Criteria
-- [ ] `main.rs:389-390` no longer substitutes an all-zero key; webhook subsystem fails closed (or disables webhook registration) when `AXIAM__PKI__ENCRYPTION_KEY` is unset — mirror the PKI `Option<[u8;32]>` pattern
-- [ ] `encrypt_webhook_secret` is called on create AND update paths (`webhook.rs`, `handlers/webhooks.rs`); secret never bound verbatim
-- [ ] Response exclusion (`skip_serializing`) retained; secret rotation exposed in the update DTO
-- [ ] Round-trip test: stored ciphertext ≠ plaintext; delivery decrypt succeeds
+- [x] `main.rs:389-390` no longer substitutes an all-zero key; webhook subsystem fails closed (or disables webhook registration) when `AXIAM__PKI__ENCRYPTION_KEY` is unset — mirror the PKI `Option<[u8;32]>` pattern
+- [x] `encrypt_webhook_secret` is called on create AND update paths (`webhook.rs`, `handlers/webhooks.rs`); secret never bound verbatim
+- [x] Response exclusion (`skip_serializing`) retained; secret rotation exposed in the update DTO
+- [x] Round-trip test: stored ciphertext ≠ plaintext; delivery decrypt succeeds
 
 ## SECFIX-04: SAML Signature-to-Assertion Binding
 
@@ -1072,7 +1072,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 |-------------|-------|-------------|--------|
 | SECFIX-01 | Phase 23 | gRPC UserService/TokenService auth (SEC-003) | Complete |
 | SECFIX-02 | Phase 23 | Tenant guard on live grant path (SEC-058) | Complete |
-| SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Pending |
+| SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Complete |
 | SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Pending |
 | SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Pending |
 | SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Pending |

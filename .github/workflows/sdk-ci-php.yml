@@ -1,0 +1,174 @@
+name: SDK CI — PHP
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'sdks/php/**'
+      - 'sdks/openapi.json'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
+  push:
+    tags:
+      - 'sdks/php/v*'
+
+permissions:
+  contents: read
+
+jobs:
+  scaffold-check:
+    name: SDK Scaffold Check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Verify LICENSE file
+        run: test -f sdks/php/LICENSE
+
+  build-test:
+    name: Build, test, TLS-bypass gate
+    # No event-name restriction: this job runs BOTH on a pull_request AND on
+    # a tag push (sdks/php/vX.Y.Z) — the publish job below is gated behind it
+    # via `needs:`, so a tag can only publish after validate/install/test/the
+    # SC#4 TLS-bypass grep gate have all passed on that exact tagged commit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # NOTE: shivammathur/setup-php has no pre-existing pin anywhere else in
+      # this repository's workflows to reuse (unlike actions/checkout, which
+      # is SHA-pinned repo-wide) and this environment has no GitHub network
+      # egress to source a new commit SHA (RESEARCH.md environment
+      # constraint). Using the major-version tag is a documented,
+      # narrowly-scoped exception — same precedent as sdk-ci-python.yml's
+      # actions/setup-python@v5, sdk-ci-java.yml's actions/setup-java@v4, and
+      # sdk-ci-csharp.yml's actions/setup-dotnet@v4.
+      # maintainer: repin to a commit SHA once GitHub network egress is
+      # available in this environment.
+      - name: Set up PHP 8.1
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240  # v2.37.2
+        with:
+          php-version: '8.1'
+          extensions: sodium
+          coverage: none
+
+      # SC#5: composer validate + install + the full PHPUnit suite this phase
+      # built across plans 01-08 — SC#2 single-flight refresh
+      # (SingleFlightRefreshTest), CR-04 redaction (SensitiveRedactionTest),
+      # the AMQP HMAC verify-before-handler matrix (HmacVerifyTest), JWKS
+      # EdDSA verification (JwksVerifierTest), the extension_loaded('grpc')
+      # REST-fallback proof (AuthzDispatcherFallbackTest), and both
+      # framework-bridge tests (LaravelMiddlewareTest,
+      # SymfonyAuthSubscriberTest).
+      - name: composer validate (SC#5)
+        working-directory: sdks/php
+        run: composer validate --no-check-publish
+
+      - name: composer install
+        working-directory: sdks/php
+        run: composer install --no-interaction --prefer-dist
+
+      - name: composer test (SC#5)
+        working-directory: sdks/php
+        run: composer test
+
+      # PHPStan level 6 (sdks/php/phpstan.neon.dist, excludes generated
+      # src/Grpc/Gen). Deferred to CI in every prior 22-* plan because this
+      # sandbox's egress proxy returns a GitHub-auth 403 on phpstan/phpstan's
+      # dist download and the package ships no Packagist "source" field for a
+      # git-clone fallback (see 22-01-SUMMARY.md / 22-05-SUMMARY.md "Issues
+      # Encountered") — this unrestricted GitHub Actions runner is the first
+      # place this check can actually execute.
+      - name: PHPStan level 6
+        working-directory: sdks/php
+        run: vendor/bin/phpstan analyse --memory-limit=512M
+
+      # D-12/SC#4: strict TLS is always on; the ONLY escape hatch is the
+      # additive `customCa` CA-bundle-path pattern — there must be no Guzzle
+      # `verify => false` (or equivalent TLS-verification-disable) surface
+      # anywhere in the SDK's OWN source tree, including examples and tests.
+      # `vendor/` is excluded — by this point in the job `composer install`
+      # (above) has populated it with third-party dependency test/demo fixtures
+      # (e.g. php-amqplib's SSLConnectionTest, Guzzle's own test suite) that
+      # legitimately use `verify_peer`/`verify => false` in their OWN test
+      # code; the gate's purpose is to police this SDK's shipped surface, not
+      # third-party dependencies bundled for local development.
+      - name: TLS-bypass gate — no TLS-bypass patterns (D-12/SC#4)
+        run: |
+          set +e
+          matches=$(grep -rn 'verify.*=>.*false' sdks/php --include=*.php --exclude-dir=vendor | grep -v customCa)
+          set -e
+          if [ -n "$matches" ]; then
+            echo "::error::TLS-bypass gate failed — disallowed 'verify => false' usage found (only the additive customCa CA-bundle pattern is permitted):"
+            echo "$matches"
+            exit 1
+          fi
+          echo "TLS-bypass gate passed — no disallowed usage found."
+
+  publish:
+    name: Publish to Packagist (subtree-split -> mirror)
+    # Manual-on-tag, side-effecting job: only runs when a maintainer pushes a
+    # tag matching sdks/php/vX.Y.Z (Phase 15 D-13 monorepo tag convention),
+    # and only after build-test (validate/install/test/PHPStan/TLS-gate) has
+    # passed on that exact tagged commit.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/php/v')
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # D-05: `git subtree split` needs the full history of sdks/php/ to
+      # extract a faithful standalone branch — the default shallow checkout
+      # (fetch-depth: 1) would produce a single-commit split with no history.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/sdks/php/v}" >> "$GITHUB_OUTPUT"
+
+      # D-05: Packagist has no native monorepo-subdirectory support, and this
+      # repo's root is a Rust Cargo workspace — sdks/php/ cannot be published
+      # directly. `git subtree split` extracts sdks/php/'s own history onto a
+      # standalone branch (splitsh-lite would be a faster alternative but is
+      # not preinstalled on ubuntu-latest runners; subtree split ships with
+      # git itself and is sufficient at this monorepo's history size), which
+      # is then pushed to a read-only mirror repo and re-tagged — Packagist
+      # points at the mirror via its registered GitHub webhook and
+      # auto-updates.
+      - name: git subtree split sdks/php/
+        run: |
+          git subtree split --prefix=sdks/php -b sdks-php-split
+          echo "Subtree split produced $(git rev-list --count sdks-php-split) commit(s) on sdks-php-split"
+
+      # Credential-absent posture (D-05): mirrors sdk-ci-csharp.yml's
+      # NUGET_API_KEY-absent branch exactly — an absent mirror push token (or
+      # unconfigured mirror repo) degrades this step to a documented
+      # `::warning::` no-op, never a pipeline failure and never a fallback to
+      # an unauthenticated/insecure push path (T-22-31).
+      #
+      # Credential setup: repository Settings -> Secrets and variables ->
+      # Actions -> New repository secret -> PHP_SDK_MIRROR_TOKEN (a token
+      # scoped to push to the read-only mirror repo, e.g.
+      # ilpanich/axiam-php-sdk) and a repository variable
+      # PHP_SDK_MIRROR_REPO set to that mirror's "owner/repo". Tag scheme:
+      # sdks/php/vX.Y.Z (Phase 15 D-13).
+      - name: Push split branch to the read-only mirror repo (requires PHP_SDK_MIRROR_TOKEN secret)
+        if: ${{ secrets.PHP_SDK_MIRROR_TOKEN != '' && vars.PHP_SDK_MIRROR_REPO != '' }}
+        env:
+          PHP_SDK_MIRROR_TOKEN: ${{ secrets.PHP_SDK_MIRROR_TOKEN }}
+          PHP_SDK_MIRROR_REPO: ${{ vars.PHP_SDK_MIRROR_REPO }}
+          PHP_SDK_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "v${PHP_SDK_VERSION}" sdks-php-split
+          git push "https://x-access-token:${PHP_SDK_MIRROR_TOKEN}@github.com/${PHP_SDK_MIRROR_REPO}.git" \
+            "sdks-php-split:refs/heads/main" \
+            "v${PHP_SDK_VERSION}"
+          echo "Pushed sdks/php/ subtree (v${PHP_SDK_VERSION}) to https://github.com/${PHP_SDK_MIRROR_REPO} -- Packagist will auto-update axiam/axiam-sdk via its registered GitHub webhook."
+
+      - name: PHP_SDK_MIRROR_TOKEN / PHP_SDK_MIRROR_REPO absent — publish deferred to a maintainer action (D-05)
+        if: ${{ secrets.PHP_SDK_MIRROR_TOKEN == '' || vars.PHP_SDK_MIRROR_REPO == '' }}
+        run: |
+          echo "::warning::PHP_SDK_MIRROR_TOKEN and/or the PHP_SDK_MIRROR_REPO repository variable are not configured -- sdks/php/ was built, tested, and subtree-split successfully but NOT pushed to a mirror repo, so Packagist was NOT updated."
+          echo "A maintainer must: (1) create a read-only mirror repo (e.g. ilpanich/axiam-php-sdk), (2) register it on Packagist (packagist.org 'Submit') with the GitHub webhook enabled, (3) add a push token as the PHP_SDK_MIRROR_TOKEN repository secret and the mirror's 'owner/repo' as the PHP_SDK_MIRROR_REPO repository variable, then re-run this workflow (or push the sdks-php-split branch/tag to the mirror manually) to complete the first publish."

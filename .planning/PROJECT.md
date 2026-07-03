@@ -4,6 +4,21 @@
 
 AXIAM is an open-source Identity and Access Management (IAM) system built with Rust and SurrealDB, targeting microservices and IoT environments. It provides multi-tenant authentication, authorization, OAuth2/OIDC, federation (SAML/OIDC), certificate management, and an admin UI. This milestone focuses on hardening AXIAM for community beta release — closing all security gaps, resolving deferred TODOs, and ensuring compliance with OAuth2, OIDC, OWASP ASVS, and GDPR standards.
 
+## Current Milestone: v1.1 Client SDKs (Starters)
+
+**Goal:** Ship idiomatic starter client SDKs in 7 languages (Rust, TypeScript, Python, Java, C#, PHP, Go) that wrap the stable v1.0 REST / gRPC / AMQP APIs with auth flows, token management, tenant context, and framework integration helpers.
+
+**Target features:**
+- Rust SDK — REST + gRPC + AMQP client; auth/token/tenant helpers; examples; publish-ready `Cargo.toml`
+- TypeScript SDK — REST (+ gRPC/AMQP where viable) client; token refresh; Express/Fastify middleware
+- Python SDK — REST + gRPC + AMQP client; FastAPI/Django middleware
+- Java SDK — REST + gRPC + AMQP client; Spring Security integration
+- C# SDK — REST + gRPC + AMQP client; ASP.NET Core middleware
+- PHP SDK — REST (+ gRPC/AMQP where viable) client; Laravel/Symfony middleware
+- Go SDK — REST + gRPC + AMQP client; net/http middleware
+
+**Scope decisions (2026-06-28):** All 7 languages in this milestone; full multi-protocol coverage where the language ecosystem supports it; domain research precedes requirements. Source: `claude_dev/roadmap.md` Phase 17 (T17.1–T17.7).
+
 ## Core Value
 
 AXIAM must be secure enough for production use as an IAM system — any security vulnerability in an identity provider is a vulnerability in every system that depends on it. **No beta user should be at risk.**
@@ -76,9 +91,12 @@ See `.planning/REQUIREMENTS.md` for detailed REQ-IDs.
 - [x] PKI/certificate tests — Validated in Phase 7: Compliance Verification & Test Closure
 - [x] Federation flow tests — Validated in Phase 7 (pre-existing OIDC/SAML e2e suites cited in SC#4)
 
+**SDKs (Milestone v1.1):**
+- [ ] Client SDKs for Rust, TypeScript, Python, Java, C#, PHP, Go — full multi-protocol where supported; see `.planning/REQUIREMENTS.md` (SDK-* REQ-IDs)
+
 ### Out of Scope
 
-- SDK development (Rust, TypeScript, Python, Java, C#, PHP, Go) — deferred to Phase 17 after hardening
+- ~~SDK development (Rust, TypeScript, Python, Java, C#, PHP, Go)~~ — **now in scope as Milestone v1.1** (hardening complete; see Current Milestone above)
 - Performance benchmarking and load testing — separate phase after MVP
 - Mobile app — web-first
 - Multi-region deployment — single-cluster for beta
@@ -117,7 +135,8 @@ AXIAM has completed 16 development phases with a working backend and frontend. H
 | Full per-endpoint RBAC (not simplified admin/user check) | MVP users will expect granular permissions; simplification would need rework later | — Pending |
 | Consolidate Phase 18 + 19 into single hardening milestone | Security items span both phases; treating as one prevents gaps | — Pending |
 | SMTP + external provider support for email | User wants configurable email delivery, not just logging | — Pending |
-| Defer SDKs until after hardening | Security must come before API consumption libraries | — Pending |
+| Defer SDKs until after hardening | Security must come before API consumption libraries | ✓ Done — opened as v1.1 |
+| All 7 SDKs in one milestone, full multi-protocol | User wants complete language coverage (Rust, TS, Python, Java, C#, PHP, Go) wrapping the stable v1.0 API surface | — v1.1 (2026-06-28) |
 
 ## Evolution
 
@@ -137,4 +156,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-13 after Phase 11 completion — REQ-15 medium-severity remediation (5/5 plans, 24/25 must-haves verified in code); 4 live-verification items tracked in 11-HUMAN-UAT.md.*
+*Last updated: 2026-06-28 — opened Milestone v1.1 (Client SDKs / Phase 17). v1.0 hardening core complete (14/14 GSD phases); 12-HUMAN-UAT.md live smoke still pending closure independently.*

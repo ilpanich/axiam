@@ -545,6 +545,93 @@ The mail consumer (`axiam-amqp/src/mail_consumer.rs`) currently uses the built-i
 
 ---
 
+### Items deferred from PR #126 review (SDKs — phases 15–22)
+
+Findings from the Gemini review and CI triage on PR #126 that are **out of scope for the SDK PR** (they touch already-merged backend code, or are cross-cutting hardening best done as a focused pass). In-scope PR items (rustfmt, Python 3.10 `datetime.UTC`, mypy-strict config, D-04 Python stub drift, Rust-SDK protoc, CSRF header origin-gating in the Python SDK) were fixed directly in the PR.
+
+**Follow-up review rounds (PR #126, two further Gemini passes + CI triage) resolved several of these in-PR** — see the ✓ RESOLVED entries below: cross-SDK header origin-gating (T19.29), Security-Scan remediation (cargo-audit + Trivy, T19.31), and GitHub Actions SHA-pinning (T19.32). Least-privilege workflow permissions (Gemini R2 §1.B) were verified already-clean (every SDK workflow declares top-level `permissions: contents: read`, with `id-token: write` scoped to publish jobs only) — no change needed. The remaining backend items (T19.23–T19.28, T19.33–T19.34) stay deferred.
+
+### T19.23 — Password-reset timing side-channel (user enumeration)
+`crates/axiam-auth/src/password_reset.rs::initiate_reset` returns early for unknown/federated users, so response time distinguishes valid from invalid emails. Add a constant-time fallback: perform a dummy Argon2/hash + equivalent async DB wait on the ineligible path so overall duration matches a real token generation. (Gemini review §1.A.)
+
+**Commit**: `security(auth): constant-time password-reset to close user-enumeration side-channel`
+
+### T19.24 — Zeroize peppered-password buffer
+`crates/axiam-auth/src/password.rs::hash_password` builds `format!("{p}{password}")`, leaving plaintext password + secret pepper in heap memory until reallocated. Wrap the peppered buffer with `zeroize` (and consider `secrecy` for the pepper) so it is wiped before the function returns. (Gemini review §1.B.)
+
+**Commit**: `security(auth): zeroize peppered-password buffer after hashing`
+
+### T19.25 — Public-path prefix-match hardening
+`crates/axiam-api-rest/src/middleware/authz.rs` matches public paths with a wildcard prefix, so an entry like `/api/v1/auth*` would also match `/api/v1/authz/...`. Require a path-segment boundary (trailing slash before the wildcard, e.g. `/api/v1/auth/*`) to prevent accidental namespace exposure. (Gemini review §1.D; R2 §3.A.) A second review pass added: also normalize the path **before** the exclusion check — collapse double slashes (`//`) and reject/resolve `..` traversal segments — so a crafted route can't slip past the allowlist via a non-canonical form. (Current state: `is_public_path` already exact-matches by default and only prefix-matches explicit `*` entries; the segment-boundary + normalization hardening is the deferred delta.)
+
+**Commit**: `fix(api-rest): require segment boundary in public-path wildcard matching`
+
+### T19.26 — HIBP circuit breaker + micro-opt
+`crates/axiam-auth/src/policy.rs::check_hibp` makes a 5s-timeout network call to the Pwned Passwords API; under a credential-stuffing burst thousands of tasks could block, starving legitimate flows. Wrap the call in a circuit breaker that trips on repeated failure/timeout and fails open (`Ok(None)`) for a cooldown window. Also pre-size `check_complexity`'s `violations` vec with `Vec::with_capacity(5)`. (Gemini review §2.A, §2.C.) Both follow-up passes reiterated the pre-allocation point and broadened it (R1 §2.C, R2 §3.B) to any hot-path collection that gathers rule violations / path segments in the authorization middleware, and to SDK serialization paths building multi-tenant object maps / long list contracts — pre-size with `Vec::with_capacity(n)` to avoid heap reallocation churn under load.
+
+**Commit**: `perf(auth): circuit-breaker HIBP checks and pre-size complexity violations`
+
+### T19.27 — GDPR audit durability (DLQ fallback)
+`crates/axiam-api-rest/src/handlers/gdpr.rs::append_gdpr_audit` is fire-and-forget; if the SurrealDB insert fails, the legally-significant Art. 15/17 event is only in a tracing log. On DB-insert failure, fall back to a persistent local dead-letter file / dedicated audit syslog for 100% durability. (Gemini review §3.A.)
+
+**Commit**: `feat(api-rest): dead-letter fallback for GDPR audit-write failures`
+
+### T19.28 — JWKS single-flight across SDKs
+Under a burst of invalid-`kid` tokens with an empty cache, per-SDK JWKS clients may each fetch concurrently (e.g. Python `PyJWKClient` does not coalesce), causing a fetch storm to the JWKS endpoint. Wrap the fetch in a single-flight promise/future so N concurrent misses await one network request. Apply consistently across Python, Go, Rust, Java, C#, TypeScript. (Gemini review §2.B; the once/60s forced-refetch rate-limit already caps *invalidation* but not the initial cache-fill.)
+
+**Commit**: `perf(sdks): single-flight JWKS fetch to prevent cache-stampede`
+
+### T19.29 — CSRF/tenant header origin-gating across all SDKs ✓ RESOLVED (PR #126)
+The Python SDK already withheld `X-Tenant-ID`/`X-CSRF-Token` from cross-origin requests. **Resolved in a follow-up review round (Gemini R1 §3.A):** the same host-isolation guard was extended to the remaining six SDKs so the tenant id, CSRF token, and (where applicable) bearer token are attached only to same-origin requests — an absolute third-party URL or a followed cross-host redirect gets nothing. Per-SDK implementation:
+- **Go** — host guard in `decorateRequest` **plus** a `CheckRedirect` that strips the headers on any cross-host redirect hop (net/http otherwise forwards custom headers across hosts). +2 tests.
+- **TypeScript** — `SharedSession.isForeignHost()` gates the tenant + CSRF request interceptors. +test.
+- **Java** — `SessionState.isBaseHost()` gates tenant/bearer/CSRF in the OkHttp interceptor. +test.
+- **C#** — `IsForeignHost()` short-circuits `ApplyHeaders` in the message handler.
+- **PHP** — base-host check in the Guzzle `AuthMiddleware`.
+- **Rust** — reqwest redirect policy refuses cross-host redirects (capped at 10, matching the default).
+
+**Commit**: `fix(sdks): host-isolation guard for tenant/CSRF/bearer headers (Gemini 3A)`
+
+### T19.30 — Unify PHP/Python codegen under buf ✓ PARTIALLY RESOLVED (PR #126)
+The buf workspace break was **fixed in PR #126** once buf became available locally: `buf.yaml`/`buf.gen.yaml` relocated to the repo root (`modules: [{path: proto}]`), managed mode added for Go's `go_package`, `php_namespace` made consistent across all three protos, Go stubs regenerated (authorization drift + new token/user), and all buf invocations moved to the repo root. `buf lint + breaking`, `buf drift-check (D-01)`, and TS codegen now pass (validated locally).
+
+**Residual:** buf currently drives only Rust/TS/Go. Python (`grpc_tools`, D-04) and PHP (manual `protoc --php_out`, D-03) keep separate toolchains because buf's output layout/paths conflict with their committed stubs. Unify all six languages under a single buf pipeline (reconcile the PHP flat-vs-nested `Gen/` layout and the Python output path) so there is one source of truth for codegen.
+
+**Commit**: `ci(sdks): unify PHP/Python gRPC codegen under the buf pipeline`
+
+### T19.31 — Security Scan remediation (cargo-audit + Trivy) ✓ RESOLVED (PR #126)
+The `Security Scan` job failed on advisories published **after** the last green `main` run (not introduced by PR #126). Both scanners were remediated in-PR:
+
+**cargo-audit** (RUSTSEC, published 2026-06-29/30):
+- `RUSTSEC-2026-0193` — `ammonia` 4.1.2 mXSS: **real fix**, bumped to `ammonia 4.1.3` via `cargo update` (also modernizes its parser stack, dropping the phf/futf/mac chain).
+- `RUSTSEC-2026-0194` / `RUSTSEC-2026-0195` — `quick-xml` 0.37.5 two HIGH DoS: **unfixable transitively** (only fix is quick-xml ≥0.41, but the latest `samael` 0.0.21 still pins `quick-xml ^0.37.2`). Added both to `deny.toml` **and** the CI `cargo-audit` ignore list with justification (SAML/samael is opt-in and off by default; DoS-only; review date 2026-07-03), keeping the two ignore lists in sync.
+
+**Trivy filesystem scan** (Go SDK, surfaced once cargo-audit passed and the job progressed): `golang.org/x/net v0.51.0` carried five HIGH CVEs (CVE-2026-25681/-27136/-33814/-39821/-42502). **Real fix**, bumped `golang.org/x/net` → `0.55.0` (pulling `x/sys 0.45.0`, `x/text 0.37.0`) via `go get` + `go mod tidy`; all Go SDK tests pass.
+
+**Commits**: `fix(security): resolve cargo audit failures blocking PR #126` · `fix(security): bump golang.org/x/net to 0.55.0 in Go SDK (Trivy HIGH CVEs)`
+
+### T19.32 — Pin third-party GitHub Actions to commit SHAs ✓ RESOLVED (PR #126)
+The new SDK CI workflows referenced third-party actions by mutable tag rather than full commit SHA, while the repo's own `ci.yml` already pins to SHAs. **Resolved in a follow-up review round (Gemini R2 §1.A):** all 19 occurrences across the seven SDK workflows pinned to full commit SHAs (resolved via `git ls-remote`) with the concrete version in a trailing comment, matching the `ci.yml` convention:
+- `actions/setup-python` `@v5` → `@a26af69…` (v5.6.0)
+- `actions/setup-java` `@v4` → `@c1e3236…` (v4.8.0)
+- `actions/setup-dotnet` `@v4` → `@67a3573…` (v4.3.1)
+- `shivammathur/setup-php` `@v2` → `@f3e473d…` (v2.37.2, annotated-tag deref)
+- `bufbuild/buf-action` `@v1.4.0` → `@fd21066…` (v1.4.0)
+
+**Commit**: `ci(sdks): pin SDK workflow actions to commit SHAs (Gemini 1A)`
+
+### T19.33 — SurrealDB reconnect exponential backoff + full jitter
+The SurrealDB connection layer's reconnection path should defend against connection stampedes when a cluster recovers or re-elects a leader. Verify the disconnect-mitigation loop uses **exponential backoff with randomized full jitter** (not flat retry intervals), a `max_backoff` ceiling, and a bounded retry count that surfaces a critical error rather than spinning — so competing workers desynchronize instead of hammering the DB port and exhausting async executor threads. (Gemini review R1 §2.A, R2 §2.A. Pre-existing `axiam-db`; out of scope for the SDK PR.)
+
+**Commit**: `perf(db): exponential-backoff-with-jitter reconnect for SurrealDB`
+
+### T19.34 — Poisoned connection-pool purging
+On a critical network-topology anomaly or an authentication-handshake timeout, the SurrealDB pool manager should explicitly **drop and regenerate** the affected connection instances instead of returning stale/poisoned handles to concurrent callers. Ensure failed connections are evicted (not recycled) so a partition or handshake failure can't leak a broken handle into the healthy pool. (Gemini review R2 §2.B. Pre-existing `axiam-db`; out of scope for the SDK PR.)
+
+**Commit**: `fix(db): evict and regenerate poisoned connections from the pool`
+
+---
+
 ## Phase 20: Axiam website
 
 ### 20.1 - Generate Axiam website - Showcase
@@ -582,8 +669,8 @@ Generate the website to be deployed on github.io for the documentation. Produce 
 | Phase 16 | 3 | Docker, K8s, CD pipeline |
 | Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 18 | 4 | Security, compliance, performance, docs |
-| Phase 19 | 12 | Deferred improvements & optimizations from PR reviews |
+| Phase 19 | 24 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 
-**Total: 87 tasks across 20 phases**
+**Total: 101 tasks across 21 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

@@ -1,0 +1,263 @@
+using System.Net;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+using Axiam.Sdk.Auth;
+
+namespace Axiam.Sdk.Rest;
+
+/// <summary>
+/// Cross-cutting REST transport concerns shared by every request an <c>AxiamClient</c>
+/// sends (CONTRACT.md &#167;3/&#167;5/&#167;9): injects <c>X-Tenant-Id</c> (&#167;5) and, when a
+/// session exists, <c>Authorization: Bearer &lt;access&gt;</c> read from the shared
+/// cookie jar; reads the <c>axiam_csrf</c> cookie the server sets and echoes it as the
+/// <c>X-CSRF-Token</c> request header on subsequent state-changing requests (&#167;3 cookie
+/// double-submit — the real AXIAM server only ever delivers the CSRF value via a cookie,
+/// never a response header, so the cookie-jar read is the load-bearing path; the
+/// response-header capture is kept as defense-in-depth); and drives a single
+/// reactive 401&#8594;refresh&#8594;retry through the shared <see cref="RefreshGuard"/> — never
+/// a second, independent guard, and never a retry loop (&#167;9.3).
+/// </summary>
+/// <remarks>
+/// Registered as the outermost link of <c>AxiamClient</c>'s <see cref="HttpClient"/>
+/// handler chain, with the SDK's own <see cref="HttpClientHandler"/> (cookie jar +
+/// TLS policy, <c>AxiamHttpClientFactory.CreatePrimaryHandler</c>) as
+/// <see cref="DelegatingHandler.InnerHandler"/>.
+/// </remarks>
+public sealed class AxiamHttpMessageHandler : DelegatingHandler
+{
+    /// <summary>
+    /// The refresh endpoint's own request path — exempted from the reactive
+    /// 401&#8594;refresh retry below so a refresh call can never recursively re-enter
+    /// <see cref="RefreshGuard.RefreshIfNeededAsync"/> on itself and deadlock on its own
+    /// in-flight task (mirrors the Java sibling's <c>AuthInterceptor</c>/
+    /// <c>AuthAuthenticator</c> refresh-path exemption).
+    /// </summary>
+    public const string RefreshPath = "/api/v1/auth/refresh";
+
+    /// <summary>
+    /// Auth endpoints whose own 401 is a domain outcome (bad credentials, bad TOTP,
+    /// already-invalid session), NOT an expired-access-token signal — exempted from the
+    /// reactive 401&#8594;refresh&#8594;retry below alongside <see cref="RefreshPath"/> so a
+    /// failed login/MFA/logout can never trigger an unrelated background token refresh
+    /// (which, if a stale-but-valid token were present, could silently mutate session
+    /// state) and never wastes a guard acquisition. Mirrors the Java/Go siblings'
+    /// auth-endpoint exemptions referenced in this file's comments.
+    /// </summary>
+    private const string LoginPath = "/api/v1/auth/login";
+    private const string MfaVerifyPath = "/api/v1/auth/mfa/verify";
+    private const string LogoutPath = "/api/v1/auth/logout";
+
+    private static readonly HashSet<string> ReactiveRefreshExemptPaths =
+        new(StringComparer.Ordinal) { RefreshPath, LoginPath, MfaVerifyPath, LogoutPath };
+
+    private const string AccessCookieName = "axiam_access";
+    private const string CsrfCookieName = "axiam_csrf";
+    private const string CsrfHeaderName = "X-CSRF-Token";
+    private const string TenantHeaderName = "X-Tenant-Id";
+    private const string AuthorizationHeaderName = "Authorization";
+
+    private static readonly HashSet<string> StateChangingMethods =
+        new(StringComparer.OrdinalIgnoreCase) { "POST", "PUT", "PATCH", "DELETE" };
+
+    /// <summary>
+    /// Header names that <see cref="ApplyHeaders"/> owns and re-derives on every request —
+    /// excluded when copying a caller's headers onto the 401-retry clone (WR-05) so the
+    /// retry never carries a stale copy of a managed header. Content-Type is included for
+    /// completeness (it rides on the copied body content, not the request headers).
+    /// </summary>
+    private static readonly HashSet<string> ApplyHeaderManagedNames =
+        new(StringComparer.OrdinalIgnoreCase) { AuthorizationHeaderName, TenantHeaderName, CsrfHeaderName, "Content-Type" };
+
+    private static readonly HttpRequestOptionsKey<bool> RetryMarkerKey = new("axiam-sdk-retried-once");
+
+    private readonly CookieContainer _cookieContainer;
+    private readonly Uri _baseUri;
+    private readonly string _tenantId;
+    private readonly RefreshGuard _refreshGuard;
+
+    private volatile string? _csrfToken;
+
+    public AxiamHttpMessageHandler(CookieContainer cookieContainer, Uri baseUri, string tenantId, RefreshGuard refreshGuard)
+    {
+        _cookieContainer = cookieContainer ?? throw new ArgumentNullException(nameof(cookieContainer));
+        _baseUri = baseUri ?? throw new ArgumentNullException(nameof(baseUri));
+        _tenantId = tenantId ?? throw new ArgumentNullException(nameof(tenantId));
+        _refreshGuard = refreshGuard ?? throw new ArgumentNullException(nameof(refreshGuard));
+    }
+
+    /// <summary>
+    /// Clears locally-cached derived state after logout. The cookie jar itself is
+    /// cleared by the server's clear-cookie <c>Set-Cookie</c> response headers,
+    /// captured automatically by the shared <see cref="CookieContainer"/>.
+    /// </summary>
+    internal void ResetCsrfToken() => _csrfToken = null;
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        bool isRetry = request.Options.TryGetValue(RetryMarkerKey, out bool retried) && retried;
+        // Refresh itself must never recursively re-enter the guard (deadlock), and
+        // login/MFA/logout 401s are domain outcomes, not expired-token signals — all are
+        // exempt from the reactive refresh branch below (WR-03).
+        string? path = request.RequestUri?.AbsolutePath;
+        bool isRefreshExemptCall = path is not null && ReactiveRefreshExemptPaths.Contains(path);
+
+        // Buffer the body up front (needed to build a single retry-clone below; every
+        // request body this SDK sends is a small, fully-materialized JSON payload, not
+        // a one-shot stream).
+        byte[]? bodyBytes = null;
+        string? contentType = null;
+        if (request.Content is not null)
+        {
+            bodyBytes = await request.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            contentType = request.Content.Headers.ContentType?.ToString();
+        }
+
+        ApplyHeaders(request);
+
+        HttpResponseMessage response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        CaptureCsrfToken(response);
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized && !isRefreshExemptCall && !isRetry)
+        {
+            TokenPair refreshed;
+            try
+            {
+                refreshed = await _refreshGuard.RefreshIfNeededAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Refresh itself failed — surface the ORIGINAL 401 to the caller, no
+                // retry loop (CONTRACT.md §9.3). `response` already holds that original
+                // 401; nothing further to do here.
+                return response;
+            }
+
+            response.Dispose();
+
+            var retryRequest = new HttpRequestMessage(request.Method, request.RequestUri);
+            if (bodyBytes is not null)
+            {
+                var retryContent = new ByteArrayContent(bodyBytes);
+                if (contentType is not null)
+                {
+                    retryContent.Headers.TryAddWithoutValidation("Content-Type", contentType);
+                }
+                retryRequest.Content = retryContent;
+            }
+            // Preserve any caller-set request headers on the retry clone, EXCEPT the ones
+            // ApplyHeaders manages itself (Authorization/X-Tenant-Id/X-CSRF-Token; and
+            // Content-Type, which travels with the copied body) — otherwise a future
+            // consumer of the internal TransportHttpClient seam that set custom headers
+            // would silently lose them on a 401 retry (WR-05).
+            foreach (var header in request.Headers)
+            {
+                if (ApplyHeaderManagedNames.Contains(header.Key))
+                {
+                    continue;
+                }
+                retryRequest.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            }
+
+            // Marks this clone so a second 401 on the retry itself does NOT trigger yet
+            // another refresh attempt — exactly one retry, never a loop (§9.3).
+            retryRequest.Options.Set(RetryMarkerKey, true);
+            ApplyHeaders(retryRequest, refreshed.AccessToken.Reveal());
+
+            response = await base.SendAsync(retryRequest, cancellationToken).ConfigureAwait(false);
+            CaptureCsrfToken(response);
+        }
+
+        return response;
+    }
+
+    /// <summary>
+    /// Host-isolation guard (3A): <c>true</c> when the request targets a host
+    /// other than this handler's own origin. A relative request URI (the normal
+    /// case, resolved against the client's <c>BaseAddress</c>) is treated as
+    /// same-origin. Host comparison is case-insensitive.
+    /// </summary>
+    private bool IsForeignHost(HttpRequestMessage request) =>
+        request.RequestUri is { IsAbsoluteUri: true } uri
+        && !string.Equals(uri.Host, _baseUri.Host, StringComparison.OrdinalIgnoreCase);
+
+    private void ApplyHeaders(HttpRequestMessage request, string? overrideAccessToken = null)
+    {
+        // Host-isolation (3A, defense in depth): a request bound for a host
+        // other than this handler's own origin (an absolute third-party URL)
+        // must never carry the tenant id, bearer token, or CSRF token. Mirrors
+        // the Python SDK's _prepare_request guard.
+        if (IsForeignHost(request))
+        {
+            return;
+        }
+
+        request.Headers.Remove(TenantHeaderName);
+        request.Headers.TryAddWithoutValidation(TenantHeaderName, _tenantId);
+
+        string? access = overrideAccessToken ?? ReadAccessTokenFromCookieJar();
+        if (access is not null)
+        {
+            request.Headers.Remove(AuthorizationHeaderName);
+            request.Headers.TryAddWithoutValidation(AuthorizationHeaderName, $"Bearer {access}");
+        }
+
+        // The real AXIAM server delivers the CSRF value ONLY as the `axiam_csrf` cookie
+        // (never an X-CSRF-Token response header), so the cookie-jar read is the
+        // load-bearing source; `_csrfToken` (populated by CaptureCsrfToken) is kept as
+        // defense-in-depth should a future server version start echoing the header.
+        string? csrf = _csrfToken ?? ReadCsrfTokenFromCookieJar();
+        if (csrf is not null && StateChangingMethods.Contains(request.Method.Method))
+        {
+            request.Headers.Remove(CsrfHeaderName);
+            request.Headers.TryAddWithoutValidation(CsrfHeaderName, csrf);
+        }
+    }
+
+    private void CaptureCsrfToken(HttpResponseMessage response)
+    {
+        if (response.Headers.TryGetValues(CsrfHeaderName, out IEnumerable<string>? values))
+        {
+            string? newToken = values.FirstOrDefault();
+            if (!string.IsNullOrEmpty(newToken))
+            {
+                _csrfToken = newToken;
+            }
+        }
+    }
+
+    private string? ReadAccessTokenFromCookieJar()
+    {
+        CookieCollection cookies = _cookieContainer.GetCookies(_baseUri);
+        foreach (Cookie cookie in cookies)
+        {
+            if (cookie.Name == AccessCookieName)
+            {
+                return cookie.Value;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Reads the <c>axiam_csrf</c> cookie from the same shared <see cref="CookieContainer"/>
+    /// used for <c>axiam_access</c> (mirrors <see cref="ReadAccessTokenFromCookieJar"/>).
+    /// This is the load-bearing CSRF source for cookie double-submit (&#167;3): the real
+    /// AXIAM server sets the CSRF value only via a <c>Set-Cookie</c> header, never as an
+    /// <c>X-CSRF-Token</c> response header.
+    /// </summary>
+    private string? ReadCsrfTokenFromCookieJar()
+    {
+        CookieCollection cookies = _cookieContainer.GetCookies(_baseUri);
+        foreach (Cookie cookie in cookies)
+        {
+            if (cookie.Name == CsrfCookieName)
+            {
+                return cookie.Value;
+            }
+        }
+        return null;
+    }
+}

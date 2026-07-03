@@ -34,3 +34,48 @@ login-page.png
 docker/.secrets/
 **/*.pem
 **/*.key
+
+# Claude Code dev tooling — generated/ephemeral, reprovisioned by
+# scripts/bootstrap-dev-tools.sh (GSD installs globally to ~/.claude).
+.claude/
+.claude-flow/
+.mcp.json
+CLAUDE.md.pre-ruflo
+.swarm/
+
+# buf-generated gRPC stubs — generate-on-build (D-01); run `cd sdks && buf generate`
+# Each SDK build and CI regenerates these; they are never committed.
+sdks/rust/src/gen/
+sdks/typescript/src/gen/
+sdks/java/src/main/java/io/axiam/sdk/gen/
+
+# Go and Python are documented codegen-distribution exceptions (Phase 18 D-01,
+# Phase 19 D-04): `go get`/`pip install` fetch source (or a built wheel) only,
+# so the generated stubs at sdks/go/internal/gen and
+# sdks/python/src/axiam_sdk/grpc/gen MUST be committed (not gitignored),
+# shipped as package-data, and drift-checked in CI against
+# sdks/buf.gen.yaml + proto/axiam/v1.
+# Do NOT add sdks/go/internal/gen/ or sdks/python/src/axiam_sdk/grpc/gen/ here.
+
+# GSD research web-fetch cache (transient)
+.planning/research/.cache/
+
+# Go SDK example binaries — `go build ./examples/...` (run without -o)
+# compiles each example main package to a same-named binary in the current
+# directory; these are build artifacts, never source.
+/sdks/go/login-mfa
+/sdks/go/authz-check
+/sdks/go/grpc-checkaccess
+/sdks/go/amqp-consumer
+/sdks/go/middleware-guard
+
+# Python build/tooling artifacts (Phase 19 python-sdk)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+sdks/python/dist/
+sdks/python/build/

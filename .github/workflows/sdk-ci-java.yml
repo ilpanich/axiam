@@ -1,0 +1,207 @@
+name: SDK CI — Java
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'sdks/java/**'
+      - 'sdks/java-bom/**'
+      - 'sdks/openapi.json'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
+  push:
+    tags:
+      - 'sdks/java/v*'
+
+permissions:
+  contents: read
+
+jobs:
+  scaffold-check:
+    name: SDK Scaffold Check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Verify LICENSE file
+        run: test -f sdks/java/LICENSE
+
+  test:
+    name: Test (mvn test)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # NOTE: actions/setup-java has no pre-existing pin anywhere else in
+      # this repository's workflows to reuse (unlike actions/checkout,
+      # which is SHA-pinned repo-wide) and this environment has no GitHub
+      # network egress to source a new commit SHA (RESEARCH.md environment
+      # constraint). Using the major-version tag is a documented,
+      # narrowly-scoped exception — same precedent as sdk-ci-python.yml's
+      # actions/setup-python@v5 (see 19-07-SUMMARY.md).
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  # v4.8.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: mvn test (fast unit tier, no GPG signing)
+        run: mvn -f sdks/java/pom.xml test
+
+  tls-bypass-gate:
+    name: TLS-bypass gate (SC#4)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # §6/SC#4: strict TLS is always on; the only escape hatch is
+      # Builder.customCa(pem) — no hostnameVerifier/sslSocketFactory bypass,
+      # trust-all X509TrustManager, or permissive HostnameVerifier lambda
+      # anywhere in sdks/java/src or sdks/java/examples.
+      - name: TLS-bypass gate — no TLS-bypass patterns (SC#4)
+        run: bash sdks/java/scripts/tls-bypass-gate.sh
+
+  verify-signed:
+    name: mvn verify incl. GPG signing (ephemeral key) (SC#5)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  # v4.8.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      # Pitfall 4: an ephemeral, throwaway GPG key (disposable, CI-only
+      # passphrase, never committed) proves `mvn verify -Dgpg.skip=false`
+      # structurally succeeds — incl. javadoc/sources jar attachment
+      # (D-22) — WITHOUT ever exposing the real signing key to a
+      # PR-triggered job. The signature itself is discarded, never
+      # published; this job has no publish step.
+      - name: Generate an ephemeral GPG signing key
+        run: |
+          gpg --batch --pinentry-mode loopback --passphrase "" \
+              --quick-generate-key "AXIAM CI (ephemeral, do not trust)" ed25519 sign 1d
+
+      - name: mvn verify -Dgpg.skip=false (ephemeral key; javadoc/sources jars, SC#5)
+        run: mvn -f sdks/java/pom.xml verify -Dgpg.skip=false -Dgpg.passphrase=""
+
+      # RESEARCH.md Assumptions A1/A6: a post-verify dependency-tree
+      # re-verification sanity check — the resolved graph must remain
+      # inspectable (no drifted/unresolved transitive versions) after the
+      # full verify lifecycle (incl. codegen + signing) has run.
+      - name: mvn dependency:tree re-verification
+        run: mvn -f sdks/java/pom.xml dependency:tree
+
+  grpc-drift-check:
+    name: gRPC codegen drift-check (D-21)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  # v4.8.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      # D-21/Pitfall 1: the buf CLI is unavailable in this environment, so
+      # protobuf-maven-plugin (bound to generate-sources) is the SDK's
+      # actual gRPC codegen path — generated stubs land in
+      # target/generated-sources (gitignored, no committed stubs to diff
+      # against). sdks/buf.gen.yaml's Java plugin entries are demoted to
+      # documentation/drift-check-only. This step proves codegen against
+      # the shared proto/axiam/v1/*.proto tree still builds cleanly.
+      - name: mvn generate-sources (proves gRPC codegen builds cleanly)
+        run: mvn -f sdks/java/pom.xml generate-sources compile
+
+  bom-validate:
+    name: BOM validate (D-22/D-23)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  # v4.8.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: mvn validate (io.axiam:axiam-bom)
+        run: mvn -f sdks/java-bom/pom.xml validate
+
+  spring-boot-example:
+    name: Spring Boot example app (SC#3)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  # v4.8.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      # The example's io.axiam:axiam-sdk dependency is this phase's
+      # not-yet-published version — install it into the local Maven
+      # repository first so the example resolves + builds against the
+      # just-built SDK (mirrors this plan's local verification sequence).
+      - name: mvn install (axiam-sdk into the local repo, tests already covered by the test job)
+        run: mvn -f sdks/java/pom.xml install -DskipTests
+
+      - name: mvn verify (spring-boot-app example — compiles + boots the complete app context, SC#3)
+        run: mvn -f sdks/java/examples/spring-boot-app/pom.xml verify
+
+  publish:
+    name: Publish to Maven Central
+    # Manual-on-tag, side-effecting step: this job only runs when a
+    # maintainer pushes a tag matching sdks/java/vX.Y.Z (Phase 15 D-13
+    # monorepo tag convention, mirroring sdk-ci-python.yml's identical
+    # publish-job gating). It is never triggered by a pull_request, so the
+    # real GPG_PRIVATE_KEY/GPG_PASSPHRASE/CENTRAL_TOKEN_* secrets referenced
+    # below are NEVER exposed to a PR-triggered job (T-20-12, Pitfall 4).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/java/v')
+    runs-on: ubuntu-latest
+    environment: maven-central
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  # v4.8.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          server-id: central
+          server-username: CENTRAL_TOKEN_USERNAME
+          server-password: CENTRAL_TOKEN_PASSWORD
+          cache: 'maven'
+
+      # Real signing key — CI-secret only, imported ONLY in this
+      # tag-triggered job (Pitfall 4). Base64-encoded ASCII-armored key.
+      - name: Import the real GPG signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: echo "${GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
+
+      - name: mvn deploy (io.axiam:axiam-sdk)
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          CENTRAL_TOKEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          CENTRAL_TOKEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+        run: mvn -f sdks/java/pom.xml deploy -Dgpg.skip=false -Dgpg.passphrase="${GPG_PASSPHRASE}"
+
+      - name: mvn deploy (io.axiam:axiam-bom)
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          CENTRAL_TOKEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          CENTRAL_TOKEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+        run: mvn -f sdks/java-bom/pom.xml deploy -Dgpg.skip=false -Dgpg.passphrase="${GPG_PASSPHRASE}"

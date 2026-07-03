@@ -331,3 +331,238 @@ REQ-11 (Testing) ──────────── runs after each REQ as ver
 
 ---
 *Last updated: 2026-06-19 (Phase 14 REQ-18 — frontend list-contract alignment — added)*
+
+---
+---
+
+# Requirements — Milestone v1.1: Client SDKs (Phase 17)
+
+> Milestone: v1.1
+> Created: 2026-06-28
+> Source: `claude_dev/roadmap.md` Phase 17 (T17.1–T17.7) + `.planning/research/SUMMARY.md`
+> Scope decisions (user, 2026-06-28): all 7 languages; full multi-protocol incl. AMQP; auth flows P1+P2; publish pipelines included; add REST authz-check endpoint for the browser SDK.
+
+These SDKs wrap the **frozen v1.0 server API** (REST `/api/v1` + OAuth2/OIDC, gRPC `AuthorizationService`/`TokenService`/`UserService`, AMQP events). They are stateful auth clients, not thin codegen wrappers.
+
+## SDK Capability Baseline (parity contract — applies to every per-language requirement below)
+
+Every SDK requirement's acceptance criteria includes this baseline unless a language-specific protocol caveat applies (see protocol viability matrix in SUMMARY.md). The authoritative spec is **FND-03** (the written contract document).
+
+- **Auth flows:** password login → typed `LoginResult{ mfa_required }`; two-phase MFA (`verify_mfa`); OAuth2 Client Credentials (M2M, Bearer); OAuth2 Authorization Code + PKCE (S256 only, no `plain`); OIDC discovery auto-config from `/.well-known/openid-configuration`; logout clears cookies/CSRF/local state.
+- **Token lifecycle:** in-memory token manager; **single-flight refresh guard** (single-use rotating refresh token — concurrent 401s trigger exactly ONE refresh); proactive refresh at `exp − 60s` for server personas; tokens wrapped in a `Sensitive<T>`-style type that suppresses debug/display/log output.
+- **Authorization:** gRPC `CheckAccess` + `BatchCheckAccess` (server personas); browser persona uses the REST authz-check endpoint (FND-04); optional TTL decision cache invalidated on logout.
+- **Tenant context:** `tenant_slug`/`tenant_id` is a **non-optional constructor parameter**, injected on every request.
+- **Transport security:** TLS verification strict by default; NO insecure-skip option; `with_custom_ca(pem)` for dev self-signed certs only.
+- **AMQP (where viable):** event consumer for `AuditEventMessage` / `NotificationEvent` (schema: `crates/axiam-amqp/src/messages.rs`); **mandatory HMAC-SHA256 verification** of `hmac_signature` before processing; signature failure ⇒ nack without requeue.
+- **Errors:** typed taxonomy — `AuthError`, `AuthzError`, `NetworkError` (per-language idioms).
+- **Deliverables:** framework middleware/route guard; runnable usage examples; README/getting-started; publish-ready package metadata.
+
+---
+
+## FND-01: OpenAPI Spec Export
+
+**Priority:** Critical | **Source:** research ARCHITECTURE.md (codegen source of truth)
+
+Add a `--dump-openapi` flag to the server binary that prints `api_doc().to_pretty_json()` and exits WITHOUT starting SurrealDB or AMQP, and commit the first export as the SDK REST codegen source of truth.
+
+### Acceptance Criteria
+- [ ] `axiam-server --dump-openapi` writes the utoipa OpenAPI JSON to stdout/file with no DB/AMQP connection
+- [ ] `sdks/openapi.json` committed (first export)
+- [ ] CI workflow re-exports on release and **fails on drift** vs the committed file
+- [ ] Flag documented in server `--help`
+
+---
+
+## FND-02: Multi-Language Proto Codegen (buf)
+
+**Priority:** Critical | **Source:** research STACK.md / ARCHITECTURE.md
+
+Establish a single `buf`-driven gRPC codegen pipeline over `proto/axiam/v1/` for all gRPC-capable SDKs, with breaking-change protection in CI.
+
+### Acceptance Criteria
+- [ ] `sdks/buf.yaml` + `sdks/buf.gen.yaml` generate stubs for Rust/TS/Go/Python/Java (C# uses `Grpc.Tools` MSBuild — documented exception)
+- [ ] `buf lint` + `buf breaking` run in CI on `proto/**` changes
+- [ ] Generated stubs are reproducible from a clean checkout (documented command)
+
+---
+
+## FND-03: Cross-Language SDK Contract Document
+
+**Priority:** Critical | **Source:** research (arch + pitfalls converged independently)
+
+Author the written behavioral contract all 7 SDKs conform to, so naming/behavior do not diverge across languages.
+
+### Acceptance Criteria
+- [ ] Method naming map (login/verify_mfa/refresh/logout/check_access/etc.) per language idiom
+- [ ] Error taxonomy (`AuthError`/`AuthzError`/`NetworkError`) and mapping from HTTP/gRPC status
+- [ ] CSRF behavior (browser), cookie-jar requirement (non-browser), `tenant_*` constructor contract
+- [ ] TLS policy (strict default; `with_custom_ca`); `Sensitive<T>` token-redaction requirement
+- [ ] AMQP consumer contract (HMAC verify, nack-no-requeue on failure)
+- [ ] Middleware/route-guard interface expectation per framework
+- [ ] Document lives at `sdks/CONTRACT.md` (or equivalent) and is referenced by every SDK README
+
+---
+
+## FND-04: REST Authorization-Check Endpoint
+
+**Priority:** High | **Source:** user decision (browser SDK authz path); codebase gap (no REST authz query exists)
+
+Add a permission-guarded, tenant-scoped REST endpoint exposing the authorization decision so the browser (REST-only) TypeScript SDK can offer a `can()` method. Mirrors gRPC `CheckAccess` semantics.
+
+### Acceptance Criteria
+- [ ] `POST /api/v1/authz/check` accepts `{ action, resource_id, scope? }`, returns `{ allowed, reason? }`
+- [ ] Decision computed via the same `AuthzChecker`/`AuthorizationEngine` as gRPC (no divergent logic)
+- [ ] Tenant-scoped from the authenticated session; subject is the caller (or admin-specified with permission)
+- [ ] Rate-limited and included in the OpenAPI spec (so it flows into FND-01 export)
+- [ ] OpenAPI route↔spec parity test updated (consistent with the Phase-6 parity gate)
+
+---
+
+## FND-05: SDK Monorepo Scaffold & CI
+
+**Priority:** High | **Source:** research ARCHITECTURE.md (monorepo + path-filtered CI)
+
+Create the `sdks/` monorepo layout and per-SDK CI so each language builds/tests independently and cheaply.
+
+### Acceptance Criteria
+- [ ] `sdks/{rust,typescript,python,java,csharp,php,go}/` directories scaffolded
+- [ ] Per-SDK GitHub Actions build/test workflow, triggered by `paths:` filter (O(1) CI per change)
+- [ ] Shared codegen artifacts (`openapi.json`, buf output) wired into each SDK's build
+- [ ] Apache-2.0 LICENSE present in each SDK package (matches repo license)
+
+---
+
+## RUST-01: Rust SDK (reference implementation)
+
+**Priority:** Critical | **Source:** roadmap T17.1 | **Protocols:** REST + gRPC + AMQP
+
+Deliver `sdks/rust/` as the reference SDK proving the full capability baseline; establishes the `Sensitive<T>` and gRPC-channel patterns reused by the others.
+
+### Acceptance Criteria
+- [x] Full **SDK Capability Baseline** (above)
+- [x] reqwest 0.12 REST + tonic 0.14 gRPC + lapin 4 AMQP (versions pinned to server workspace)
+- [x] `reqwest::cookie::Jar` cookie persistence; Actix-Web middleware/extractor helper
+- [x] Concurrency test: 5 concurrent requests on an expired token ⇒ exactly 1 refresh call
+- [x] Examples + publish-ready `Cargo.toml`; **crates.io publish pipeline** in CI
+
+---
+
+## TS-01: TypeScript SDK
+
+**Priority:** Critical | **Source:** roadmap T17.2 | **Protocols:** REST (browser+Node); gRPC + AMQP Node-only
+
+Deliver `sdks/typescript/` with distinct browser vs Node entry points.
+
+### Acceptance Criteria
+- [x] Full baseline; **browser persona** authz via REST endpoint (FND-04); **Node persona** authz via gRPC
+- [x] axios 1.7 REST + @grpc/grpc-js 1.14 (Node) + amqplib (Node); `jose` for JWKS; ts-proto 2.x stubs
+- [x] Separate `axiam-sdk/rest` / `axiam-sdk/grpc` / `axiam-sdk/amqp` export conditions (browser bundlers tree-shake Node-only)
+- [x] CSRF interceptor auto-forwards `X-CSRF-Token`; promise-deduplicated refresh guard (Node CSRF populated via `onAuthenticated()` jar-read — CR-01 closed in 17-08; refresh guard is per-session via `createRefreshGuard()` — CR-02 closed in 17-07)
+- [x] Express + Fastify middleware; examples; **npm publish pipeline** (`axiam-sdk`)
+
+---
+
+## GO-01: Go SDK
+
+**Priority:** High | **Source:** roadmap T17.7 | **Protocols:** REST + gRPC + AMQP
+
+Deliver `sdks/go/` (second server-side reference).
+
+### Acceptance Criteria
+- [x] Full baseline; `sync.Mutex` single-flight refresh; `net/http/cookiejar`
+- [x] net/http REST + grpc-go 1.81 + amqp091-go 1.10; lestrrat-go/jwx/v3 for EdDSA/JWKS
+- [x] No `InsecureSkipVerify` anywhere (CI lint gate); net/http middleware
+- [x] Examples; **Go module publish** (`github.com/ilpanich/axiam/sdks/go`, version tag `sdks/go/vX.Y.Z`)
+
+---
+
+## PY-01: Python SDK
+
+**Priority:** High | **Source:** roadmap T17.3 | **Protocols:** REST + gRPC + AMQP
+
+Deliver `sdks/python/` with sync + async interfaces.
+
+### Acceptance Criteria
+- [x] Full baseline; `asyncio.Lock` single-flight refresh; `httpx.Cookies` jar; `verify=True` hardcoded
+- [x] httpx 0.27 (sync+async) + grpcio 1.78 + aio-pika 9.6; Pydantic v2 models; PyJWT for JWKS
+- [x] FastAPI dependency + Django middleware helpers
+- [x] Examples; **PyPI publish pipeline** (`axiam-sdk`)
+
+---
+
+## JAVA-01: Java SDK
+
+**Priority:** High | **Source:** roadmap T17.4 | **Protocols:** REST + gRPC + AMQP
+
+Deliver `sdks/java/` with Spring Security integration.
+
+### Acceptance Criteria
+- [x] Full baseline; `ReentrantLock` single-flight refresh; OkHttp `CookieManager`
+- [x] OkHttp 4.12 + grpc-netty-shaded 1.82 + amqp-client 5.22; nimbus-jose-jwt 10.x + Tink for EdDSA
+- [x] Spring Security filter integration; builder requires `tenantId`
+- [x] Examples; **Maven Central publish** (`io.axiam:axiam-sdk` SDK jar **and** `io.axiam:axiam-bom` Bill-of-Materials — the BOM coordinate was added during Phase 20 discuss, D-23, to align consumer dependency versions) incl. **GPG signing setup** task — CI/publish pipeline structurally proven (ephemeral-key `mvn verify -Dgpg.skip=false`); live first Central publish is a maintainer action pending namespace verification + CI secrets
+
+---
+
+## CS-01: C# SDK
+
+**Priority:** High | **Source:** roadmap T17.5 | **Protocols:** REST + gRPC + AMQP
+
+Deliver `sdks/csharp/` with ASP.NET Core integration.
+
+### Acceptance Criteria
+- [x] Full baseline; `SemaphoreSlim(1,1)` single-flight refresh; `HttpClientHandler.CookieContainer`
+- [x] HttpClient + Grpc.Net.Client 2.80 + RabbitMQ.Client 7.2; BouncyCastle.Cryptography for Ed25519 (native EdDSA confirmed unavailable on .NET 8+ — 21-RESEARCH.md; netstandard2.0 leg deferred, D-01)
+- [x] `Grpc.Tools` MSBuild codegen (documented buf exception); `Axiam.Sdk.AspNetCore` middleware sub-package
+- [x] Examples; **NuGet publish pipeline** (`Axiam.Sdk` + `Axiam.Sdk.AspNetCore`) incl. credential setup — CI/publish pipeline structurally proven (build/test/pack + tag-triggered `dotnet nuget push`); live first publish is a maintainer action pending `NUGET_API_KEY` secret configuration
+
+---
+
+## PHP-01: PHP SDK
+
+**Priority:** Medium | **Source:** roadmap T17.6 | **Protocols:** REST + AMQP; gRPC long-running runtimes only
+
+Deliver `sdks/php/` (REST-first; gRPC guarded by runtime capability).
+
+### Acceptance Criteria
+- [x] Full baseline minus standard-FPM gRPC; Guzzle `HandlerStack` single-refresh middleware; Guzzle `CookieJar`; `verify: true`
+- [x] Guzzle 7.x REST + php-amqplib 3.7 AMQP + firebase/php-jwt 6.11; optional grpc PECL behind `extension_loaded('grpc')` guard with documented Swoole/RoadRunner requirement
+- [x] Laravel + Symfony middleware helpers
+- [x] Examples; **Packagist publish** (`axiam/axiam-sdk`) — publish pipeline shipped (`sdk-ci-php.yml`); live publish is a maintainer `user_setup` (mirror repo + `PHP_SDK_MIRROR_TOKEN`)
+
+---
+
+## v1.1 Dependency Map
+
+```
+FND-01 (OpenAPI export) ─┐
+FND-02 (buf codegen) ────┼──→ all per-language SDKs
+FND-03 (contract doc) ───┤
+FND-04 (REST authz) ─────┘ (unblocks TS-01 browser can())
+FND-05 (monorepo + CI) ──┘
+
+RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01, JAVA-01, CS-01, PHP-01
+                                                  (these 6 can parallelize once FND + RUST land)
+```
+
+## v1.1 Traceability (confirmed — roadmap created 2026-06-28)
+
+| Requirement | Phase | Description | Status |
+|-------------|-------|-------------|--------|
+| FND-01 | Phase 15 | OpenAPI Spec Export (`--dump-openapi` + `sdks/openapi.json` + drift gate) | Pending |
+| FND-02 | Phase 15 | Multi-Language Proto Codegen (buf pipeline + lint/breaking gate) | Pending |
+| FND-03 | Phase 15 | Cross-Language SDK Contract Document (`sdks/CONTRACT.md`) | Pending |
+| FND-04 | Phase 15 | REST Authorization-Check Endpoint (`POST /api/v1/authz/check`) | Pending |
+| FND-05 | Phase 15 | SDK Monorepo Scaffold & per-SDK path-filtered CI | Pending |
+| RUST-01 | Phase 16 | Rust SDK — REST + gRPC + AMQP (reference implementation) | Complete |
+| TS-01 | Phase 17 | TypeScript SDK — browser (REST) + Node (REST + gRPC + AMQP) | Pending |
+| GO-01 | Phase 18 | Go SDK — REST + gRPC + AMQP | Complete |
+| PY-01 | Phase 19 | Python SDK — REST + gRPC + AMQP (sync + async) | Complete |
+| JAVA-01 | Phase 20 | Java SDK — REST + gRPC + AMQP + Maven Central | Complete |
+| CS-01 | Phase 21 | C# SDK — REST + gRPC + AMQP + NuGet | Complete |
+| PHP-01 | Phase 22 | PHP SDK — REST + AMQP; gRPC long-running runtimes only | Complete |
+
+**Coverage: 12/12 v1.1 requirements mapped (100%)**
+
+---
+*v1.1 requirements added 2026-06-28 — Client SDKs milestone (phases 15–22). Foundation-first; 7 SDKs full multi-protocol where viable; auth flows P1+P2; publish pipelines included. Roadmap confirmed 2026-06-28.*

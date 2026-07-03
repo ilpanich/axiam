@@ -24,6 +24,10 @@ pub struct RateLimitConfig {
     /// Max oauth2/revoke requests per minute per IP (default: 10).
     /// SEC-020: revoke endpoint rate-limited to prevent DoS via token flooding.
     pub revoke_per_min: u32,
+    /// Max authz-check requests per minute per IP (default: 300).
+    /// Authz checks are read-only and high-frequency — used by UI permission gating.
+    /// Kept in a dedicated bucket so heavy UI use does not consume the login/token limit (D-07).
+    pub authz_check_per_min: u32,
 }
 
 impl Default for RateLimitConfig {
@@ -36,6 +40,7 @@ impl Default for RateLimitConfig {
             mfa_per_min: 5,
             introspect_per_min: 10,
             revoke_per_min: 10,
+            authz_check_per_min: 300,
         }
     }
 }
@@ -56,5 +61,9 @@ impl RateLimitConfig {
             "introspect_per_min must be >= 1"
         );
         assert!(self.revoke_per_min >= 1, "revoke_per_min must be >= 1");
+        assert!(
+            self.authz_check_per_min >= 1,
+            "authz_check_per_min must be >= 1"
+        );
     }
 }

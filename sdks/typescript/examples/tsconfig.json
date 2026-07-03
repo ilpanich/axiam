@@ -1,0 +1,22 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    // The SDK is resolved via source rather than dist/ here: `npm run build`
+    // cannot complete end-to-end in environments without the `buf` CLI
+    // (src/gen is never generated — see 17-01/17-03 notes), so these
+    // examples type-check against source directly instead of the package's
+    // own `exports` map (which points at unbuilt dist/ paths). A buf-enabled
+    // CI run additionally verifies the built package resolves the same way.
+    "paths": {
+      "axiam-sdk": ["../src/index.ts"],
+      "axiam-sdk/rest": ["../src/rest/index.ts"],
+      "axiam-sdk/grpc": ["../src/grpc/index.ts"],
+      "axiam-sdk/amqp": ["../src/amqp/index.ts"],
+      "axiam-sdk/middleware": ["../src/middleware/index.ts"]
+    }
+  },
+  "include": ["*.ts"],
+  "exclude": ["node_modules", "../dist", "../src/gen"]
+}

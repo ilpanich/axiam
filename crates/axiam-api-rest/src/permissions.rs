@@ -174,6 +174,11 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "users:erase",
         "Request GDPR Art. 17 erasure of a user account",
     ),
+    // Authz check-as override (FND-04, D-06)
+    (
+        "authz:check_as",
+        "Perform an authorization check on behalf of another subject (admin override)",
+    ),
 ];
 
 // ---------------------------------------------------------------------------

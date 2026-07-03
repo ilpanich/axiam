@@ -2,6 +2,18 @@ syntax = "proto3";
 
 package axiam.v1;
 
+option php_metadata_namespace = "Axiam\\Sdk\\Grpc\\Gen\\Metadata";
+// PHP-only codegen options (ignored by all other language plugins — these
+// are standard protobuf FileOptions fields, ambient to protoc's PHP
+// backend, not a custom extension). Without these, protoc's --php_out
+// derives the namespace from the proto package ("axiam.v1" -> "Axiam\V1"),
+// which does not match this SDK's PSR-4 root (Axiam\Sdk\ -> src/). Setting
+// them explicitly lands the generated classes' `namespace` declarations at
+// Axiam\Sdk\Grpc\Gen (sdks/php/src/Grpc/Gen/, D-03) while leaving every
+// other language's codegen (Rust/Go/Python/TypeScript) byte-for-byte
+// unaffected (22-05-PLAN.md Task 1).
+option php_namespace = "Axiam\\Sdk\\Grpc\\Gen";
+
 // Authorization service for low-latency access checks in service meshes.
 service AuthorizationService {
   // Check whether a subject can perform an action on a resource.

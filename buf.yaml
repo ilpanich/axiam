@@ -1,0 +1,18 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - FILE
+  except:
+    # php_namespace/php_metadata_namespace are codegen-only file options (no
+    # wire/JSON impact). They are new in this milestone (added Phase 22), so a
+    # breaking comparison against the pre-Phase-22 main flags them; exempt the
+    # PHP-namespace rules rather than block on a non-wire-breaking change.
+    - FILE_SAME_PHP_NAMESPACE
+    - FILE_SAME_PHP_METADATA_NAMESPACE

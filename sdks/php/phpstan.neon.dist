@@ -1,0 +1,18 @@
+parameters:
+    level: 6
+    paths:
+        - src
+    excludePaths:
+        # Machine-generated protoc output (D-03) — not hand-authored, held to codegen's
+        # own quality bar, not this SDK's. Autoloading still works normally (these are
+        # real PSR-4 files); this only skips analysis-for-errors bookkeeping on them.
+        - src/Grpc/Gen/*
+    stubFiles:
+        # Grpc\BaseStub / Grpc\ChannelCredentials / Google\Protobuf\Internal\Message
+        # signature-only stubs (Pitfall 4 / T-22-16) — lets PHPStan type-check
+        # src/Grpc/AuthzGrpcClient.php and src/AuthzDispatcher.php at level 6 without
+        # ext-grpc/grpc/grpc/google-protobuf actually installed (D-03: never a runtime
+        # `require`, only `suggest`). This file is NEVER autoloaded/executed — see its
+        # own header comment.
+        - stubs/grpc.stub.php
+    treatPhpDocTypesAsCertain: false

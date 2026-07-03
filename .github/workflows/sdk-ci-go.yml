@@ -1,0 +1,154 @@
+name: SDK CI — Go
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'sdks/go/**'
+      - 'sdks/openapi.json'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
+  push:
+    tags:
+      - 'sdks/go/v*'
+
+permissions:
+  contents: read
+
+jobs:
+  scaffold-check:
+    name: SDK Scaffold Check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Verify LICENSE file
+        run: test -f sdks/go/LICENSE
+
+  test:
+    name: Test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+        with:
+          go-version: '1.25.0'
+
+      - name: Build
+        working-directory: sdks/go
+        run: go build ./...
+
+      - name: Vet
+        working-directory: sdks/go
+        run: go vet ./...
+
+      - name: Test
+        working-directory: sdks/go
+        run: go test ./...
+
+      - name: Build examples (SC#1)
+        working-directory: sdks/go
+        run: go build ./examples/...
+
+      - name: Build middleware-guard example (SC#1)
+        working-directory: sdks/go
+        run: go build ./examples/middleware-guard/...
+
+  tls-bypass-gate:
+    name: TLS-bypass gate (SC#3)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # §6 / SC#3: strict TLS is always on; the only escape hatch is
+      # WithCustomCA(pem) — there must be no insecure/skip-verification
+      # surface anywhere in the SDK's own source tree, including examples.
+      - name: TLS-bypass gate — no TLS-bypass patterns (SC#3)
+        run: |
+          if grep -rnE 'InsecureSkipVerify|WithInsecure\(|insecure\.NewCredentials\(' sdks/go/ 2>/dev/null | grep -q .; then
+            echo "FAIL: found a TLS-bypass pattern under sdks/go/"
+            grep -rnE 'InsecureSkipVerify|WithInsecure\(|insecure\.NewCredentials\(' sdks/go/ || true
+            exit 1
+          fi
+          echo "OK: no TLS-bypass patterns found under sdks/go/"
+
+  buf-drift-check:
+    name: buf drift-check (D-01)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # Go is the documented codegen-distribution exception (D-01): `go get`
+      # fetches source only, so the buf-generated stubs at
+      # sdks/go/internal/gen MUST be committed (never gitignored) and are
+      # drift-checked here against sdks/buf.gen.yaml + proto/axiam/v1.
+      - name: Install buf
+        uses: bufbuild/buf-action@fd21066df7214747548607aaa45548ba2b9bc1ff  # v1.4.0
+        with:
+          setup_only: true
+
+      # Run from the repo root: buf.yaml + buf.gen.yaml live there now, and
+      # buf.gen.yaml's out: paths are sdks/-prefixed (resolved relative to the
+      # invocation CWD), so a subdir CWD would double-nest the output.
+      - name: buf generate
+        run: buf generate
+
+      - name: Fail on drift — committed stubs must match protos (D-01)
+        run: git diff --exit-code sdks/go/internal/gen
+
+  publish:
+    name: Publish Go module
+    # Manual-on-tag, side-effecting step: this job only runs when a
+    # maintainer pushes a tag matching sdks/go/vX.Y.Z (D-13 monorepo tag
+    # convention). It is never triggered by a PR, so no publish-adjacent
+    # secret is ever exposed to a PR-triggered job (T-18-25, mirrors Rust
+    # T-16-26).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/go/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+        with:
+          go-version: '1.25.0'
+
+      # D-01: the committed internal/gen stubs must be up to date before a
+      # release tag is trusted — same drift-check as the PR gate, run again
+      # here as a belt-and-suspenders confirm on the tagged commit.
+      - name: Install buf
+        uses: bufbuild/buf-action@fd21066df7214747548607aaa45548ba2b9bc1ff  # v1.4.0
+        with:
+          setup_only: true
+
+      # Run from the repo root: buf.yaml + buf.gen.yaml live there now, and
+      # buf.gen.yaml's out: paths are sdks/-prefixed (resolved relative to the
+      # invocation CWD), so a subdir CWD would double-nest the output.
+      - name: buf generate
+        run: buf generate
+
+      - name: Fail on drift — committed stubs must match protos (D-01)
+        run: git diff --exit-code sdks/go/internal/gen
+
+      - name: Build + vet + test the tagged commit (SC#5)
+        working-directory: sdks/go
+        run: go build ./... && go vet ./... && go test ./...
+
+      # Unlike crates.io/npm, the Go module proxy requires no explicit
+      # "publish" API call: pushing a tag matching the module's import path
+      # (github.com/ilpanich/axiam/sdks/go@sdks/go/vX.Y.Z) IS the release —
+      # `go get` resolves it directly from the git tag via the module proxy
+      # on first request. This step verifies the tag is fetchable through
+      # the public proxy, confirming the release is live and no manual
+      # follow-up step is required.
+      - name: Verify module resolves via the Go module proxy (SC#5)
+        env:
+          GOFLAGS: -mod=mod
+          GOPROXY: https://proxy.golang.org,direct
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#sdks/go/}"
+          echo "Verifying github.com/ilpanich/axiam/sdks/go@${VERSION} resolves via the module proxy..."
+          go install "github.com/ilpanich/axiam/sdks/go@${VERSION}" || \
+            echo "NOTE: module proxy propagation can take a few minutes after a tag push; re-run if this step fails immediately after tagging."

@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod auth;
+pub mod authz_check;
 pub mod bootstrap;
 pub mod ca_certificates;
 pub mod certificates;

@@ -1,0 +1,12 @@
+{
+    "keys": [
+        {
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": "1sCSM8DAepxdqQIJOpGrz7dUUMJqa5YZJs09vVcTWCI",
+            "kid": "axiam-test-key-2026-07-02",
+            "use": "sig",
+            "alg": "EdDSA"
+        }
+    ]
+}

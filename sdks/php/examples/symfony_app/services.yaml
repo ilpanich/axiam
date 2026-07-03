@@ -1,0 +1,40 @@
+# examples/symfony_app/services.yaml — the MANUAL service wiring Symfony requires
+# (Pitfall 5, D-01). Registering AxiamBundle in config/bundles.php (see bundles.php in
+# this directory) does NOT, by itself, tag AxiamAuthSubscriber as a kernel event
+# subscriber or AxiamVoter as a security voter — this bundle ships no container
+# extension of its own (see src/Symfony/AxiamBundle.php's own doc comment). A real
+# Symfony application MUST copy (or import) this file's `services:` block into its own
+# config/services.yaml by hand. This is the accurate, non-auto-discovered half of D-01
+# the README documents explicitly — do not assume Symfony gets the Laravel bridge's
+# zero-config experience.
+#
+# %env(AXIAM_BASE_URL)%/%env(AXIAM_TENANT)% resolve the same required env vars the
+# Laravel bridge's examples/laravel_app/README.md documents (AXIAM_BASE_URL, AXIAM_TENANT,
+# D-13 -- AXIAM is multi-tenant, there is no default tenant). %env(AXIAM_CUSTOM_CA)% is
+# the §6/D-12 CA-bundle-file-path escape hatch only -- never a TLS-disable flag.
+parameters:
+    env(AXIAM_CUSTOM_CA): ''
+
+services:
+    Axiam\Sdk\AxiamClient:
+        arguments:
+            $baseUrl: '%env(AXIAM_BASE_URL)%'
+            $tenant: '%env(AXIAM_TENANT)%'
+            $customCa: '%env(AXIAM_CUSTOM_CA)%'
+
+    # Authentication (D-02, §10): kernel.request subscriber -- local-JWKS verify +
+    # reactive-refresh fallback via AxiamClient::verifyLocallyOrFallback(), 401 on
+    # any failure. MUST be tagged manually -- no auto-discovery.
+    Axiam\Sdk\Symfony\AxiamAuthSubscriber:
+        arguments:
+            $client: '@Axiam\Sdk\AxiamClient'
+            $tenant: '%env(AXIAM_TENANT)%'
+        tags: ['kernel.event_subscriber']
+
+    # Authorization (D-02): security.voter -- delegates every resource:action attribute
+    # to AxiamClient::can(); the server's additive-only RBAC is always authoritative.
+    # MUST be tagged manually -- no auto-discovery.
+    Axiam\Sdk\Symfony\AxiamVoter:
+        arguments:
+            $client: '@Axiam\Sdk\AxiamClient'
+        tags: ['security.voter']

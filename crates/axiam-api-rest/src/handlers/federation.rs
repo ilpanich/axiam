@@ -872,9 +872,9 @@ pub async fn saml_acs<C: Connection>(
             req.config_id,
             &req.saml_response,
             req.relay_state.as_deref(),
-            None,                    // no stored request ID on the authenticated ACS path
-            Some(&req.acs_url),      // SECFIX-04: validate Destination against the real ACS URL
-            true,                    // SECFIX-04: require InResponseTo presence (reject unsolicited)
+            None,               // no stored request ID on the authenticated ACS path
+            Some(&req.acs_url), // SECFIX-04: validate Destination against the real ACS URL
+            true,               // SECFIX-04: require InResponseTo presence (reject unsolicited)
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;

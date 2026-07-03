@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: — MVP Release Hardening
 current_phase: 23
-current_phase_name: planned — ready to execute
-status: ready_to_execute
+current_phase_name: security-regressions-high-findings
+status: executing
 stopped_at: Phase 23 planned (6 SECFIX plans, checker PASS)
-last_updated: "2026-07-03T18:10:01.749Z"
+last_updated: "2026-07-03T18:21:15.512Z"
 last_activity: 2026-07-03
-last_activity_desc: "Phase 23 planned: research → 6 plans → plan-checker passed → coverage gates green"
+last_activity_desc: Phase 23 execution started
 progress:
   total_phases: 8
   completed_phases: 0
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 23 — Security Regressions & HIGH Findings (v1.2, final milestone)
+**Current focus:** Phase 23 — security-regressions-high-findings
 
 ## Current Position
 
-Phase: Phase 23 — Security Regressions & HIGH Findings (planned — ready to execute)
-Plan: 6 plans (23-01..23-06), all Wave 1 (fully parallel, depends_on: [])
-Status: Planned — 6 SECFIX plans verified (VERIFICATION PASSED), requirements + decision coverage 12/12
-Last activity: 2026-07-03 — Phase 23 planned: research → 6 plans → plan-checker passed → coverage gates green
+Phase: 23 (security-regressions-high-findings) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 23
+Last activity: 2026-07-03 — Phase 23 execution started
 
 ## Performance Metrics
 

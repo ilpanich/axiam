@@ -1055,7 +1055,18 @@ Plans:
   4. A non-canonical or wrong-segment request path (e.g. `/api/v1/authz/...` must not match a `/api/v1/auth/*` entry; `//` and `..` variants are collapsed/rejected) cannot slip past the public-path allowlist (SECHRD-11)
   5. A password-reset request for an ineligible/unknown/federated account is time-indistinguishable from a valid one (dummy hash + async wait), the peppered password buffer is zeroized, and the unauthenticated reset path blocks reuse of the current password (SECHRD-12)
 
-**Plans**: TBD
+**Plans**: 9 plans
+
+Plans:
+- [ ] 24-01-PLAN.md — SECHRD-01 TOTP atomic replay CAS + skew-step recording + enrollment seed (wave 1)
+- [ ] 24-02-PLAN.md — SECHRD-11 public-path allowlist segment-boundary + normalization (wave 1)
+- [ ] 24-03-PLAN.md — SECHRD-03 XFF client-IP keying fix (peer_addr fallback) (wave 1)
+- [ ] 24-04-PLAN.md — SECHRD-03 shared SurrealDB rate-limit store, fail-open (REST) (wave 1)
+- [ ] 24-05-PLAN.md — SECHRD-12 secret hygiene: zeroize buffer + secrecy pepper (wave 1)
+- [ ] 24-06-PLAN.md — SECHRD-12 GDPR audit-write dead-letter (file + structured event) (wave 1)
+- [ ] 24-07-PLAN.md — SECHRD-03 gRPC rate-limit parity (store + key extractor) (wave 2)
+- [ ] 24-08-PLAN.md — SECHRD-04 bootstrap atomicity + mandatory gate + setup token (wave 2)
+- [ ] 24-09-PLAN.md — SECHRD-12 constant-time reset + current-password block + history seed (wave 3)
 
 ---
 

@@ -101,11 +101,6 @@ pub struct RefreshRequest {
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct LogoutRequest {
-    pub session_id: Uuid,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MfaConfirmRequest {
     pub totp_code: String,
 }
@@ -338,7 +333,6 @@ pub async fn login<C: Connection>(
     post,
     path = "/api/v1/auth/logout",
     tag = "auth",
-    request_body = LogoutRequest,
     responses(
         (status = 204, description = "Logged out"),
         (status = 401, description = "Unauthorized"),
@@ -348,17 +342,12 @@ pub async fn login<C: Connection>(
 pub async fn logout<C: Connection>(
     user: AuthenticatedUser,
     svc: web::Data<AuthSvc<C>>,
-    body: web::Json<LogoutRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    // SEC-051: a caller may only revoke their own session (JWT jti must match).
-    // Rejecting cross-session revocation prevents session fixation attacks where
-    // an authenticated user deletes another user's active session.
-    if body.session_id != user.session_id {
-        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
-            reason: "cannot revoke another user's session".into(),
-        }));
-    }
-    svc.logout(user.tenant_id, body.session_id).await?;
+    // D-03 (SECFIX-05): the session to revoke is derived solely from the
+    // caller's verified JWT `jti` (`AuthenticatedUser.session_id`, D-15).
+    // No client-supplied session_id — there is no IDOR surface to guard,
+    // so the prior cross-session comparison is gone along with the body.
+    svc.logout(user.tenant_id, user.session_id).await?;
     Ok(HttpResponse::NoContent()
         .cookie(clear_access_cookie())
         .cookie(clear_refresh_cookie())

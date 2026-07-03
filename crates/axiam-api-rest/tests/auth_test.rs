@@ -157,6 +157,10 @@ macro_rules! test_app {
                     $db.clone(),
                 )))
                 .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
+                .app_data(web::Data::new(
+                    Arc::new(SurrealSessionRepository::new($db.clone()))
+                        as Arc<dyn axiam_api_rest::SessionValidator>,
+                ))
                 .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
                     $db.clone(),
                 )))
@@ -540,10 +544,10 @@ async fn logout_clears_cookies() {
 
     let access_token = extract_cookie_value(&resp, "axiam_access").unwrap();
     let csrf_token = extract_cookie_value(&resp, "axiam_csrf").unwrap();
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    let session_id = body["session_id"].as_str().unwrap().to_owned();
 
-    // POST /auth/logout with cookies + CSRF header.
+    // POST /auth/logout with cookies + CSRF header — no request body (D-03 /
+    // SECFIX-05): the session to revoke is derived solely from the caller's
+    // verified JWT `jti`, never a client-supplied session_id.
     let req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/logout")
@@ -552,7 +556,6 @@ async fn logout_clears_cookies() {
             cookie_header(&[("axiam_access", &access_token), ("axiam_csrf", &csrf_token)]),
         ))
         .insert_header(("X-CSRF-Token", csrf_token))
-        .set_json(serde_json::json!({ "session_id": session_id }))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -581,6 +584,24 @@ async fn logout_clears_cookies() {
             "{name} Set-Cookie header must indicate cookie removal (Max-Age=0 or past Expires): {hdr}"
         );
     }
+
+    // SECFIX-05 defining negative signal: replaying the OLD access cookie
+    // after logout must be unauthenticated. The session row behind the JWT
+    // `jti` is hard-deleted by `AuthService::logout`, so `SessionValidator`'s
+    // per-request liveness check (extractors/auth.rs) must reject the replay
+    // even though the JWT itself has not expired.
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/me")
+        .insert_header(("Cookie", format!("axiam_access={access_token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "replaying the pre-logout access cookie must be unauthenticated (session revoked)"
+    );
 }
 
 // ---------------------------------------------------------------------------

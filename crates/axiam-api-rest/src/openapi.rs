@@ -189,7 +189,6 @@ use crate::handlers;
         handlers::auth::LoginSuccessResponse,
         handlers::auth::MfaRequiredResponse,
         handlers::auth::RefreshRequest,
-        handlers::auth::LogoutRequest,
         handlers::auth::MfaConfirmRequest,
         handlers::auth::MfaVerifyRequest,
         handlers::auth::MfaEnrollResponse,

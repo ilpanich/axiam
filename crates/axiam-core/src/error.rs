@@ -46,6 +46,9 @@ pub enum AxiamError {
     #[error("Rate limit exceeded")]
     RateLimited,
 
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     #[error("SAML assertion replay detected")]
     ReplayDetected,
 

@@ -45,6 +45,7 @@ impl actix_web::ResponseError for AxiamApiError {
             AxiamError::PasswordPolicy { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AxiamError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             AxiamError::EmailConfig(_) => StatusCode::BAD_REQUEST,
+            AxiamError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             AxiamError::Database(_)
             | AxiamError::Certificate(_)
             | AxiamError::Crypto(_)
@@ -69,6 +70,7 @@ impl actix_web::ResponseError for AxiamApiError {
             AxiamError::TenantContext => "tenant_context",
             AxiamError::RateLimited => "rate_limited",
             AxiamError::EmailConfig(_) => "email_config_error",
+            AxiamError::ServiceUnavailable(_) => "service_unavailable",
             // Server-error variants: log detail, return generic message.
             _ => "internal_error",
         };
@@ -86,7 +88,8 @@ impl actix_web::ResponseError for AxiamApiError {
             | AxiamError::PasswordPolicy { .. }
             | AxiamError::TenantContext
             | AxiamError::RateLimited
-            | AxiamError::EmailConfig(_) => self.0.to_string(),
+            | AxiamError::EmailConfig(_)
+            | AxiamError::ServiceUnavailable(_) => self.0.to_string(),
             // 5xx variants: log the detail server-side, return only a generic message.
             _ => {
                 error!(

@@ -399,11 +399,13 @@ async fn main() -> std::io::Result<()> {
         SurrealCaCertificateRepository::new(db.client().clone()),
     );
     let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
-    // SEC-031: Webhook secrets stored AES-256-GCM encrypted using the same PKI
-    // encryption key. Falls back to an all-zero key if env var is absent so the
-    // server still starts (will fail to decrypt secrets set under a real key).
-    let webhook_enc_key: [u8; 32] =
-        load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY").unwrap_or([0u8; 32]);
+    // SEC-031/SEC-059: Webhook secrets stored AES-256-GCM encrypted using the
+    // same PKI encryption key. Absent key -> None (SEC-012 fail-closed
+    // pattern, mirrors `pki_config.encryption_key` above): the server still
+    // boots, but webhook registration and delivery are refused with an
+    // explicit error + `warn!` until a real key is configured. NEVER an
+    // all-zero/constant fallback key.
+    let webhook_enc_key: Option<[u8; 32]> = load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY");
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone(), webhook_enc_key);
     let settings_repo = SurrealSettingsRepository::new(db.client().clone());

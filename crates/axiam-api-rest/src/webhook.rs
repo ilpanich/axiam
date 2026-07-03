@@ -26,6 +26,27 @@ pub enum WebhookError {
     SsrfBlocked,
     #[error("secret decrypt failed: {0}")]
     SecretDecrypt(String),
+    #[error("secret encrypt failed: {0}")]
+    SecretEncrypt(String),
+    #[error("webhook encryption key is not configured (AXIAM__PKI__ENCRYPTION_KEY unset)")]
+    EncryptionKeyMissing,
+}
+
+impl From<WebhookError> for crate::error::AxiamApiError {
+    fn from(err: WebhookError) -> Self {
+        match err {
+            // D-01/SEC-059: fail-closed, not an internal 500 — the caller can
+            // retry once an operator configures the key. Never leaks crypto
+            // internals, just states the subsystem is unavailable.
+            WebhookError::EncryptionKeyMissing => {
+                axiam_core::error::AxiamError::ServiceUnavailable(
+                    "webhook subsystem unavailable: encryption key not configured".to_string(),
+                )
+                .into()
+            }
+            other => axiam_core::error::AxiamError::Crypto(other.to_string()).into(),
+        }
+    }
 }
 
 /// Returns `true` for IPv4/IPv6 addresses that must never be contacted
@@ -84,13 +105,17 @@ async fn resolve_and_validate_host(url: &str) -> Result<(), WebhookError> {
 pub struct WebhookDeliveryService<W> {
     repo: W,
     client: reqwest::Client,
-    /// AES-256-GCM key used to decrypt webhook secrets stored at rest.
-    /// Corresponds to `AXIAM__PKI__ENCRYPTION_KEY` (SEC-031).
-    encryption_key: [u8; 32],
+    /// AES-256-GCM key used to encrypt/decrypt webhook secrets stored at
+    /// rest. Corresponds to `AXIAM__PKI__ENCRYPTION_KEY` (SEC-031/SEC-059).
+    /// `None` when the env var is unset — the server still boots (this is
+    /// an optional subsystem), but registration (`encrypt_secret`) and
+    /// delivery (`deliver`) both refuse to operate rather than falling
+    /// back to an all-zero/constant key.
+    encryption_key: Option<[u8; 32]>,
 }
 
 impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
-    pub fn new(repo: W, encryption_key: [u8; 32]) -> Self {
+    pub fn new(repo: W, encryption_key: Option<[u8; 32]>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
@@ -103,6 +128,18 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
         }
     }
 
+    /// Encrypt a plaintext webhook secret with AES-256-GCM for storage
+    /// (SEC-031/D-02). Fail-closed: returns `WebhookError::EncryptionKeyMissing`
+    /// when no encryption key is configured, rather than storing the secret
+    /// in plaintext or falling back to a constant key.
+    pub fn encrypt_secret(&self, plaintext: &str) -> Result<String, WebhookError> {
+        let key = self
+            .encryption_key
+            .ok_or(WebhookError::EncryptionKeyMissing)?;
+        encrypt_webhook_secret(&key, plaintext)
+            .map_err(|e| WebhookError::SecretEncrypt(e.to_string()))
+    }
+
     /// Fire webhook deliveries for the given event type and payload.
     ///
     /// Spawns a background task per matching webhook. Does not block.
@@ -112,6 +149,18 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
         let encryption_key = self.encryption_key;
 
         tokio::spawn(async move {
+            // D-01/SEC-059: refuse delivery (log + return) when no encryption
+            // key is configured — never decrypt stored secrets with a
+            // placeholder/all-zero key.
+            let Some(encryption_key) = encryption_key else {
+                tracing::error!(
+                    %tenant_id, %event_type,
+                    "webhook delivery refused: encryption key not configured \
+                     (AXIAM__PKI__ENCRYPTION_KEY unset)"
+                );
+                return;
+            };
+
             let webhooks = match repo.get_by_event(tenant_id, &event_type).await {
                 Ok(w) => w,
                 Err(e) => {

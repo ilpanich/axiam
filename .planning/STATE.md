@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 23
 current_phase_name: security-regressions-high-findings
 status: executing
-stopped_at: Completed 23-03-PLAN.md
-last_updated: "2026-07-03T19:20:47.252Z"
+stopped_at: Completed 23-04-PLAN.md
+last_updated: "2026-07-03T20:20:43.250Z"
 last_activity: 2026-07-03
 last_activity_desc: Phase 23 execution started
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 6
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 23 (security-regressions-high-findings) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-07-03 — Phase 23 execution started
 
@@ -156,6 +156,7 @@ Last activity: 2026-07-03 — Phase 23 execution started
 | Phase 23 P01 | 25min | 3 tasks | 6 files |
 | Phase 23 P02 | 20min | 2 tasks | 2 files |
 | Phase 23 P03 | 30min | 3 tasks | 9 files |
+| Phase 23 P04 | 27min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -369,6 +370,7 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 23-02] grant_to_role_with_scopes scope-ownership check done inline in SurrealQL (no ScopeRepository dependency injected) — mirrors grant_to_role's existing LET/IF/THROW pattern
 - [Phase ?]: [Phase 23-03]: Added AxiamError::ServiceUnavailable (503) rather than reusing Internal (500) for a missing webhook encryption key — operator-actionable, safe to echo to caller
 - [Phase ?]: [Phase 23-03]: register_api_v1_routes<C> gained a Clone bound to let generic webhook handlers call WebhookDeliveryService.encrypt_secret(), satisfied transparently by DbClient/local Db
+- [Phase ?]: SECFIX-04: libxml promoted transitive->direct dep of axiam-federation (pinned =0.3.3 via workspace table, matching samael convention); bind_signature_to_assertion (raw-XML libxml XPath) closes the XSW gap between verify_signature and claims trust; SamlAcsRequest gained required acs_url field (plan assumed it existed; it did not); Recipient/SubjectConfirmationData validation recorded as SEC-005 residual, deferred to a future phase.
 
 ### Pending Todos
 
@@ -390,7 +392,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-03T19:20:42.244Z
-Stopped at: Completed 23-03-PLAN.md
+Last session: 2026-07-03T20:20:43.235Z
+Stopped at: Completed 23-04-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

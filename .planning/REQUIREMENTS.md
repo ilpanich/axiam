@@ -631,11 +631,11 @@ Remove the `unwrap_or([0u8; 32])` all-zero encryption-key fallback and actually 
 Bind the verified XML signature to the consumed assertion and enforce the remaining protocol checks (defends against XML Signature Wrapping).
 
 ### Acceptance Criteria
-- [ ] `handle_saml_response` consumes only the assertion whose ID equals the signed element's reference (no independent `response.assertion` read)
-- [ ] `Destination` validated against the real ACS URL (call sites stop passing `None` — `handlers/federation.rs:869,1524`)
-- [ ] `Recipient` / `SubjectConfirmationData` validated
-- [ ] Authenticated ACS path rejects unsolicited responses (`InResponseTo` required)
-- [ ] XSW negative test: a wrapped/duplicated-assertion response is rejected; Destination/InResponseTo negative tests added
+- [x] `handle_saml_response` consumes only the assertion whose ID equals the signed element's reference (no independent `response.assertion` read) — `bind_signature_to_assertion` (saml.rs) rejects unless exactly one `<Assertion>` exists and a verified `<Signature>` Reference resolves to it
+- [x] `Destination` validated against the real ACS URL (authenticated call site `handlers/federation.rs` `saml_acs` now passes `Some(&req.acs_url)` instead of `None`; public path `saml_acs_public` unchanged, out of scope)
+- [ ] `Recipient` / `SubjectConfirmationData` validated — **DEFERRED**: out of scope for 23-04 per 23-CONTEXT.md `<deferred>` / 23-RESEARCH.md "Deferred Ideas"; tracked as the SEC-005 residual for a future phase (see 23-04-SUMMARY.md "SEC-005 Residual")
+- [x] Authenticated ACS path rejects unsolicited responses (`InResponseTo` required) — `handle_saml_response` gained `require_in_response_to: bool`, `saml_acs` passes `true`
+- [x] XSW negative test: a wrapped/duplicated-assertion response is rejected; Destination/InResponseTo negative tests added — `req5_saml_e2e.rs`: `saml_rejects_xsw_wrapped_assertion`, `saml_rejects_wrong_destination_on_authenticated_path`, `saml_rejects_missing_in_response_to_on_authenticated_path`
 
 ## SECFIX-05: Logout Revokes the Caller's Session
 
@@ -1073,7 +1073,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECFIX-01 | Phase 23 | gRPC UserService/TokenService auth (SEC-003) | Complete |
 | SECFIX-02 | Phase 23 | Tenant guard on live grant path (SEC-058) | Complete |
 | SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Complete |
-| SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Pending |
+| SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Complete (residual: Recipient/SubjectConfirmationData deferred) |
 | SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Pending |
 | SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Pending |
 | SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Pending |

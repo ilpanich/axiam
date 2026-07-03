@@ -1027,14 +1027,14 @@ NEGATIVE test passing.
   4. A SAML response with a wrapped/duplicated assertion, a wrong `Destination`, or a missing `InResponseTo` on the authenticated ACS path is rejected (SECFIX-04)
   5. After `POST /api/v1/auth/logout` a request replaying the old cookies is unauthenticated (frontend logout returns no 400), and password-reset/resend requests carry `tenant_id`/`email`, succeed, and stay enumeration-safe with a constant response (SECFIX-05, SECFIX-06)
 
-**Plans**: 3/6 plans executed
+**Plans**: 4/6 plans executed
 
 Plans:
 
 - [x] 23-01-PLAN.md — SECFIX-01: gRPC UserService/TokenService auth + tenant cross-validation + shared always-on lockout helper
 - [x] 23-02-PLAN.md — SECFIX-02: tenant + scope-ownership guard on the live grant_to_role_with_scopes path
 - [x] 23-03-PLAN.md — SECFIX-03: webhook fail-closed encryption key + encrypt-at-rest on create/update
-- [ ] 23-04-PLAN.md — SECFIX-04: SAML XSW signature↔assertion binding (samael 0.0.21) + authenticated-path Destination/InResponseTo
+- [x] 23-04-PLAN.md — SECFIX-04: SAML XSW signature↔assertion binding (samael 0.0.21) + authenticated-path Destination/InResponseTo
 - [ ] 23-05-PLAN.md — SECFIX-05: logout revokes the caller's session from the JWT jti (no body)
 - [ ] 23-06-PLAN.md — SECFIX-06: reset/resend flows thread tenant_id/email, stay enumeration-safe
 
@@ -1173,7 +1173,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 23. Security Regressions & HIGH Findings | 3/6 | In Progress|  |
+| 23. Security Regressions & HIGH Findings | 4/6 | In Progress|  |
 | 24. Security Hardening I — Auth & Access-Control | 0/? | Not started | - |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 0/? | Not started | - |
 | 26. Correctness & Resilience | 0/? | Not started | - |

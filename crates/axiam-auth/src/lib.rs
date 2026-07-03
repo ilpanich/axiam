@@ -4,6 +4,7 @@
 pub mod config;
 pub mod crypto;
 pub mod error;
+pub mod lockout;
 pub mod mfa_methods;
 pub mod password;
 pub mod password_reset;

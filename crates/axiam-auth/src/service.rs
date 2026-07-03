@@ -1037,19 +1037,10 @@ impl<
         tenant_id: Uuid,
         user: &axiam_core::models::user::User,
     ) -> AxiamResult<()> {
-        // SEC-032: atomic increment — single SurrealQL UPDATE avoids TOCTOU race.
-        // Lockout duration escalates exponentially per repeated lockout, capped
-        // at max_lockout_duration_secs (brute-force protection).
-        self.user_repo
-            .increment_failed_logins(
-                tenant_id,
-                user.id,
-                self.config.max_failed_login_attempts,
-                self.config.lockout_duration_secs as i64,
-                self.config.lockout_backoff_multiplier,
-                self.config.max_lockout_duration_secs as i64,
-            )
-            .await
+        // D-06: delegate to the shared lockout helper — the single source of
+        // truth for failed-attempt accrual, also called by gRPC
+        // `UserService::validate_credentials` (SEC-026b).
+        crate::lockout::record_failed_login(&self.user_repo, &self.config, tenant_id, user).await
     }
 
     async fn reset_failed_logins(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {

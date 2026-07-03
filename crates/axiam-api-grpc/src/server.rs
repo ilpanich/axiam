@@ -66,8 +66,18 @@ where
         AuthorizationServiceImpl::new(engine),
         AuthInterceptor::new(auth_config.clone()),
     );
-    let user_svc = UserServiceServer::new(UserServiceImpl::new(user_repo, auth_config.clone()));
-    let token_svc = TokenServiceServer::new(TokenServiceImpl::new(auth_config));
+    // SECFIX-01: UserService and TokenService previously had zero auth —
+    // any unauthenticated mesh peer could call GetUser/ValidateCredentials/
+    // IntrospectToken. Wrap them with the same AuthInterceptor chokepoint
+    // as AuthorizationService so every gRPC call requires a verified bearer JWT.
+    let user_svc = UserServiceServer::with_interceptor(
+        UserServiceImpl::new(user_repo, auth_config.clone()),
+        AuthInterceptor::new(auth_config.clone()),
+    );
+    let token_svc = TokenServiceServer::with_interceptor(
+        TokenServiceImpl::new(auth_config.clone()),
+        AuthInterceptor::new(auth_config),
+    );
 
     // CQ-B20: Apply transport limits to the gRPC server builder.
     // Note: tonic 0.14 does not expose max_decoding_message_size / max_encoding_message_size

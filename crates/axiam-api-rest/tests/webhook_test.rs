@@ -6,12 +6,16 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::webhook::WebhookDeliveryService;
 use axiam_auth::config::AuthConfig;
+use axiam_auth::crypto::aes256gcm_decrypt;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
-use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+use axiam_core::repository::{
+    OrganizationRepository, TenantRepository, UserRepository, WebhookRepository,
+};
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
     SurrealWebhookRepository,
@@ -19,6 +23,11 @@ use axiam_db::repository::{
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
+
+/// Fixed AES-256-GCM key used by tests that need a *present* webhook
+/// encryption key (D-02 ciphertext-at-rest proof). Distinct from any
+/// production key; never used outside this test module.
+const TEST_WEBHOOK_ENC_KEY: [u8; 32] = [0x42u8; 32];
 
 type TestDb = surrealdb::engine::local::Db;
 
@@ -109,12 +118,18 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
 }
 
 macro_rules! test_app {
-    ($db:expr, $auth:expr) => {{
+    ($db:expr, $auth:expr) => {
+        test_app!($db, $auth, Some(TEST_WEBHOOK_ENC_KEY))
+    };
+    ($db:expr, $auth:expr, $enc_key:expr) => {{
         let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
+        let webhook_repo = SurrealWebhookRepository::new($db.clone());
+        let webhook_delivery = WebhookDeliveryService::new(webhook_repo.clone(), $enc_key);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(SurrealWebhookRepository::new($db.clone())))
+                .app_data(web::Data::new(webhook_repo))
+                .app_data(web::Data::new(webhook_delivery))
                 .app_data(web::Data::new(authz))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
@@ -706,4 +721,93 @@ async fn create_webhook_rejects_invalid_retry_policy() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 400);
+}
+
+// ---------------------------------------------------------------------------
+// SECFIX-03 (SEC-059/SEC-031) negative tests — D-01 fail-closed key handling
+// and D-02 encrypt-on-write.
+// ---------------------------------------------------------------------------
+
+/// D-01: webhook registration must be refused (explicit error, never a
+/// silent 201) when no encryption key is configured — proves the
+/// fail-closed posture that replaced the old `unwrap_or([0u8; 32])`
+/// all-zero fallback.
+#[actix_rt::test]
+async fn create_webhook_fails_closed_without_encryption_key() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    // No encryption key configured — mirrors AXIAM__PKI__ENCRYPTION_KEY unset.
+    let app = test_app!(db, auth, None::<[u8; 32]>);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/webhooks")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["user.created"],
+            "secret": "my-webhook-secret"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        503,
+        "registration must be refused (not a silent 201) when the encryption key is absent"
+    );
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "service_unavailable");
+}
+
+/// D-02: the secret persisted to the DB must be ciphertext, never the
+/// submitted plaintext, and must decrypt back to the original plaintext —
+/// proving encrypt-on-write plus the delivery-side decrypt round trip.
+#[actix_rt::test]
+async fn create_webhook_stores_ciphertext_not_plaintext() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let plaintext_secret = "my-webhook-secret";
+    let req = test::TestRequest::post()
+        .uri("/api/v1/webhooks")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["user.created"],
+            "secret": plaintext_secret
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    let id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+
+    // Read the persisted row directly from the repository (bypasses the
+    // API response, which never serializes the secret at all).
+    let webhook_repo = SurrealWebhookRepository::new(db.clone());
+    let stored = webhook_repo.get_by_id(tenant_id, id).await.unwrap();
+
+    assert_ne!(
+        stored.secret, plaintext_secret,
+        "stored secret must be ciphertext, not the submitted plaintext"
+    );
+
+    let decrypted_bytes = aes256gcm_decrypt(&TEST_WEBHOOK_ENC_KEY, &stored.secret)
+        .expect("stored secret must decrypt with the configured key");
+    let decrypted = String::from_utf8(decrypted_bytes).expect("utf8");
+    assert_eq!(
+        decrypted, plaintext_secret,
+        "decrypting the stored ciphertext must round-trip to the original plaintext"
+    );
 }

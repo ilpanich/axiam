@@ -57,7 +57,7 @@ pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
 ///
 /// This allows tests to use an in-memory DB while production uses WebSocket.
 /// The `rate_limit_cfg` parameter controls per-endpoint rate limits.
-pub fn register_api_v1_routes<C: surrealdb::Connection>(
+pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
     cfg: &mut web::ServiceConfig,
     rate_limit_cfg: &RateLimitConfig,
 ) {

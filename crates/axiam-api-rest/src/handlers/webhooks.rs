@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
+use crate::webhook::WebhookDeliveryService;
 
 // ---------------------------------------------------------------------------
 // Request / response DTOs
@@ -37,6 +38,10 @@ pub struct UpdateWebhookRequest {
     pub events: Option<Vec<String>>,
     pub enabled: Option<bool>,
     pub retry_policy: Option<RetryPolicy>,
+    /// New HMAC-SHA256 shared secret (D-02 secret rotation). Encrypted
+    /// server-side with AES-256-GCM before storage; omit to leave the
+    /// existing secret untouched.
+    pub secret: Option<String>,
 }
 
 /// Webhook response — omits the shared secret.
@@ -83,10 +88,11 @@ impl From<Webhook> for WebhookResponse {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     repo: web::Data<SurrealWebhookRepository<C>>,
+    webhook_delivery: web::Data<WebhookDeliveryService<SurrealWebhookRepository<C>>>,
     body: web::Json<CreateWebhookRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:create", Uuid::nil())
@@ -103,12 +109,17 @@ pub async fn create<C: Connection>(
         validate_retry_policy(rp)?;
     }
 
+    // D-01/D-02: encrypt before persisting — fails closed with a 503 when
+    // no encryption key is configured, rather than ever storing the
+    // plaintext secret.
+    let encrypted_secret = webhook_delivery.encrypt_secret(&req.secret)?;
+
     let webhook = repo
         .create(CreateWebhook {
             tenant_id: user.tenant_id,
             url: req.url,
             events: req.events,
-            secret: req.secret,
+            secret: encrypted_secret,
             retry_policy: req.retry_policy,
         })
         .await?;
@@ -189,11 +200,12 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
     repo: web::Data<SurrealWebhookRepository<C>>,
+    webhook_delivery: web::Data<WebhookDeliveryService<SurrealWebhookRepository<C>>>,
     body: web::Json<UpdateWebhookRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:update", Uuid::nil())
@@ -210,6 +222,15 @@ pub async fn update<C: Connection>(
     if let Some(ref rp) = req.retry_policy {
         validate_retry_policy(rp)?;
     }
+    // D-02: secret rotation — encrypt the new secret (fail-closed) when the
+    // caller supplies one; otherwise leave the stored secret untouched.
+    let encrypted_secret = match req.secret {
+        Some(ref s) if s.is_empty() => {
+            return Err(validation_err("secret must not be empty"));
+        }
+        Some(ref s) => Some(webhook_delivery.encrypt_secret(s)?),
+        None => None,
+    };
     let webhook = repo
         .update(
             user.tenant_id,
@@ -219,6 +240,7 @@ pub async fn update<C: Connection>(
                 events: req.events,
                 enabled: req.enabled,
                 retry_policy: req.retry_policy,
+                secret: encrypted_secret,
             },
         )
         .await?;

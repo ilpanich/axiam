@@ -66,4 +66,8 @@ pub struct UpdateWebhook {
     pub events: Option<Vec<String>>,
     pub enabled: Option<bool>,
     pub retry_policy: Option<RetryPolicy>,
+    /// New HMAC-SHA256 shared secret (already encrypted by the caller before
+    /// reaching the repository — D-02 secret rotation). `None` leaves the
+    /// stored secret untouched.
+    pub secret: Option<String>,
 }

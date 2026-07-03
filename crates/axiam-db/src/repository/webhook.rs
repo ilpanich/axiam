@@ -209,6 +209,13 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
                 serde_json::json!(retry.backoff_multiplier),
             ));
         }
+        // D-02: secret rotation — only SET when the caller supplied a new
+        // (already-encrypted) secret; otherwise the stored secret is left
+        // untouched.
+        if let Some(ref secret) = input.secret {
+            set_clauses.push("secret = $secret".into());
+            binds.push(("secret".into(), serde_json::json!(secret)));
+        }
 
         let sql = format!(
             "UPDATE type::record('webhook', $id) SET {} \

@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 23
 current_phase_name: security-regressions-high-findings
 status: executing
-stopped_at: Phase 23 planned (6 SECFIX plans, checker PASS)
-last_updated: "2026-07-03T18:21:15.512Z"
+stopped_at: Completed 23-01-PLAN.md
+last_updated: "2026-07-03T18:43:22.332Z"
 last_activity: 2026-07-03
 last_activity_desc: Phase 23 execution started
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 6
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 23 (security-regressions-high-findings) — EXECUTING
-Plan: 1 of 6
-Status: Executing Phase 23
+Plan: 2 of 6
+Status: Ready to execute
 Last activity: 2026-07-03 — Phase 23 execution started
 
 ## Performance Metrics
@@ -153,6 +153,7 @@ Last activity: 2026-07-03 — Phase 23 execution started
 | Phase 22-php-sdk P07 | 35min | 3 tasks | 7 files |
 | Phase 22-php-sdk P08 | 30min | 3 tasks | 7 files |
 | Phase 22-php-sdk P09 | 20min | 2 tasks | 2 files |
+| Phase 23 P01 | 25min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -362,6 +363,7 @@ Recent decisions affecting current work:
 - [Phase 22-php-sdk]: 22-09: TLS-bypass CI grep gate excludes vendor/ (in addition to customCa) — composer install populates vendor/ with third-party test fixtures using verify_peer=>false in their own tests, which would false-positive a gate meant to police only this SDK's shipped surface
 - [Phase 22-php-sdk]: 22-09: Packagist publish job gates on both secrets.PHP_SDK_MIRROR_TOKEN and vars.PHP_SDK_MIRROR_REPO (repo variable naming mirror owner/repo) — either absent degrades to a documented no-op warning, never a pipeline failure (D-05)
 - [Phase 22-php-sdk]: Gap-closure (2026-07-02, post-22-VERIFICATION.md SC#2 finding): `Session::refreshIfNeeded()` now resolves `tenant_id`/`org_id` from the current access token's unverified claims before the `/api/v1/auth/refresh` POST (mirroring the C# sibling's `DecodeUnverifiedClaims`), fixing a real-server-breaking wire-format defect; `SingleFlightRefreshTest.php` now asserts the refresh request body — see 22-06-SUMMARY.md "Issues Encountered" (commits `e05ea92`, `1da907b`)
+- [Phase ?]: 23-01: per-service with_interceptor chosen over unverified shared tower Layer for gRPC UserService/TokenService auth
 
 ### Pending Todos
 
@@ -383,7 +385,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-03T18:10:01.734Z
-Stopped at: Phase 23 planned (6 SECFIX plans, checker PASS)
-Resume file: .planning/phases/23-security-regressions-high-findings/23-01-PLAN.md
+Last session: 2026-07-03T18:43:22.318Z
+Stopped at: Completed 23-01-PLAN.md
+Resume file: None
 Next action: /gsd-execute-phase 23

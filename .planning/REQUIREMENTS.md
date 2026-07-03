@@ -594,11 +594,11 @@ This milestone remediates the **open findings against `ea85872`** (both post-rem
 Attach the existing `AuthInterceptor` to `UserService` and `TokenService`; derive identity from verified JWT claims, not the request body.
 
 ### Acceptance Criteria
-- [ ] `UserServiceServer` and `TokenServiceServer` wrapped with `AuthInterceptor` (or a shared layer) — `server.rs`
-- [ ] `GetUser`, `ValidateCredentials`, `IntrospectToken` read `tenant_id`/`user_id` from `ValidatedClaims` and reject any mismatched body field (mirror `authorization.rs:73-99`)
-- [ ] `ValidateCredentials` accrues failed-login/lockout state via the shared helper (closes SEC-026b / T19.5 on the gRPC path)
-- [ ] Reject-without-token negative tests added for both services
-- [ ] Cross-tenant `GetUser` read returns permission error, proven by test
+- [x] `UserServiceServer` and `TokenServiceServer` wrapped with `AuthInterceptor` (or a shared layer) — `server.rs`
+- [x] `GetUser`, `ValidateCredentials`, `IntrospectToken` read `tenant_id`/`user_id` from `ValidatedClaims` and reject any mismatched body field (mirror `authorization.rs:73-99`)
+- [x] `ValidateCredentials` accrues failed-login/lockout state via the shared helper (closes SEC-026b / T19.5 on the gRPC path)
+- [x] Reject-without-token negative tests added for both services
+- [x] Cross-tenant `GetUser` read returns permission error, proven by test
 
 ## SECFIX-02: Tenant Guard on Live REST Grant Path
 
@@ -1070,7 +1070,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 
 | Requirement | Phase | Description | Status |
 |-------------|-------|-------------|--------|
-| SECFIX-01 | Phase 23 | gRPC UserService/TokenService auth (SEC-003) | Pending |
+| SECFIX-01 | Phase 23 | gRPC UserService/TokenService auth (SEC-003) | Complete |
 | SECFIX-02 | Phase 23 | Tenant guard on live grant path (SEC-058) | Pending |
 | SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Pending |
 | SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Pending |

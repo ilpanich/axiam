@@ -86,7 +86,7 @@ jobs:
       # sdks/go/internal/gen MUST be committed (never gitignored) and are
       # drift-checked here against sdks/buf.gen.yaml + proto/axiam/v1.
       - name: Install buf
-        uses: bufbuild/buf-action@v1.4.0
+        uses: bufbuild/buf-action@fd21066df7214747548607aaa45548ba2b9bc1ff  # v1.4.0
         with:
           setup_only: true
 
@@ -118,7 +118,7 @@ jobs:
       # release tag is trusted — same drift-check as the PR gate, run again
       # here as a belt-and-suspenders confirm on the tagged commit.
       - name: Install buf
-        uses: bufbuild/buf-action@v1.4.0
+        uses: bufbuild/buf-action@fd21066df7214747548607aaa45548ba2b9bc1ff  # v1.4.0
         with:
           setup_only: true
 

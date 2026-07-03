@@ -128,6 +128,7 @@ export function ProfilePage() {
   const [verificationMessage, setVerificationMessage] = useState<string | null>(null);
 
   const userId = useAuthStore((s) => s.user?.id);
+  const currentUser = useAuthStore((s) => s.user);
 
   const { data: profile, isLoading, error: loadError } = useQuery({
     queryKey: ["currentUser", userId],
@@ -141,8 +142,16 @@ export function ProfilePage() {
     enabled: !!userId,
   });
 
+  // 23-RESEARCH Pitfall 4: `resendVerification` is a PUBLIC/unauthenticated
+  // backend route that requires BOTH `tenant_id` AND `email` in the body —
+  // both are already available from the authenticated auth store.
   const resendMutation = useMutation({
-    mutationFn: authService.resendVerification,
+    mutationFn: () => {
+      if (!currentUser?.tenant_id || !currentUser?.email) {
+        return Promise.reject(new Error("missing tenant context or email"));
+      }
+      return authService.resendVerification(currentUser.tenant_id, currentUser.email);
+    },
     onSuccess: () => {
       setVerificationMessage("Verification email sent. Please check your inbox.");
     },

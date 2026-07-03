@@ -23,6 +23,7 @@ interface LoginResponse {
     id: string;
     username: string;
     email: string;
+    tenant_id: string;
   };
   session_id?: string;
   expires_in?: number;
@@ -331,7 +332,17 @@ export function LoginPage() {
                 <div className="flex items-center justify-between">
                   <Label htmlFor="password">Password</Label>
                   <Link
-                    to="/auth/forgot-password"
+                    to={{
+                      pathname: "/auth/forgot-password",
+                      search: new URLSearchParams({
+                        ...(orgTenantData.orgSlug.trim()
+                          ? { org: orgTenantData.orgSlug.trim() }
+                          : {}),
+                        ...(orgTenantData.tenantSlug.trim()
+                          ? { tenant: orgTenantData.tenantSlug.trim() }
+                          : {}),
+                      }).toString(),
+                    }}
                     className="text-xs text-primary hover:underline"
                   >
                     Forgot password?

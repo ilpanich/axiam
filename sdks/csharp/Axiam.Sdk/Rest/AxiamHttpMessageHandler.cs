@@ -173,8 +173,27 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
         return response;
     }
 
+    /// <summary>
+    /// Host-isolation guard (3A): <c>true</c> when the request targets a host
+    /// other than this handler's own origin. A relative request URI (the normal
+    /// case, resolved against the client's <c>BaseAddress</c>) is treated as
+    /// same-origin. Host comparison is case-insensitive.
+    /// </summary>
+    private bool IsForeignHost(HttpRequestMessage request) =>
+        request.RequestUri is { IsAbsoluteUri: true } uri
+        && !string.Equals(uri.Host, _baseUri.Host, StringComparison.OrdinalIgnoreCase);
+
     private void ApplyHeaders(HttpRequestMessage request, string? overrideAccessToken = null)
     {
+        // Host-isolation (3A, defense in depth): a request bound for a host
+        // other than this handler's own origin (an absolute third-party URL)
+        // must never carry the tenant id, bearer token, or CSRF token. Mirrors
+        // the Python SDK's _prepare_request guard.
+        if (IsForeignHost(request))
+        {
+            return;
+        }
+
         request.Headers.Remove(TenantHeaderName);
         request.Headers.TryAddWithoutValidation(TenantHeaderName, _tenantId);
 

@@ -177,8 +177,27 @@ impl AxiamClientBuilder {
 
         let jar = Arc::new(reqwest::cookie::Jar::default());
 
+        // Host-isolation (3A, defense in depth): never follow a redirect that
+        // leaves our own origin. reqwest strips Authorization/Cookie on a
+        // cross-host redirect but forwards custom headers (X-Tenant-ID /
+        // X-CSRF-Token) — so a redirect to a third-party host would leak the
+        // tenant identifier and CSRF token. Same-host redirects are followed
+        // (capped at 10, matching reqwest's default); cross-host redirects are
+        // not followed (the 3xx is returned as-is).
+        let redirect_base_host = base_url.host_str().map(str::to_owned);
+        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            match (attempt.url().host_str(), redirect_base_host.as_deref()) {
+                (Some(next), Some(base)) if !next.eq_ignore_ascii_case(base) => attempt.stop(),
+                _ => attempt.follow(),
+            }
+        });
+
         let mut client_builder = reqwest::Client::builder()
             .cookie_provider(Arc::clone(&jar))
+            .redirect(redirect_policy)
             .connect_timeout(self.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT))
             .timeout(self.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
 

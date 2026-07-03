@@ -97,6 +97,18 @@ public final class SessionState {
         return baseUrl;
     }
 
+    /**
+     * Host-isolation guard (3A, defense in depth): returns {@code true} when
+     * {@code host} is this session's own origin host. The tenant identifier,
+     * bearer token, and CSRF token are attached only to same-origin requests,
+     * so they never leak to an absolute third-party URL or a followed
+     * cross-host redirect. Host comparison is case-insensitive; a {@code null}
+     * host fails closed (treated as foreign).
+     */
+    public boolean isBaseHost(@Nullable String host) {
+        return host != null && host.equalsIgnoreCase(baseUri.getHost());
+    }
+
     public @Nullable String configuredOrgSlug() {
         return configuredOrgSlug;
     }

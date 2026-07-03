@@ -28,6 +28,10 @@ type RetryableRequestConfig = InternalAxiosRequestConfig & { _retry?: boolean };
  */
 export function installCsrfInterceptor(axiosInstance: AxiosInstance, session: SharedSession): void {
   axiosInstance.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+    // Host-isolation (3A): never echo the CSRF token to an off-origin host.
+    if (session.isForeignHost(config.url)) {
+      return config;
+    }
     const method = (config.method ?? 'get').toLowerCase();
     const cookieString = typeof document !== 'undefined' ? document.cookie : '';
     const csrfToken =

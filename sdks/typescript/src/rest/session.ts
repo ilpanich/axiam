@@ -51,6 +51,28 @@ export class SharedSession {
    * the cached access token.
    */
   onAuthenticated?(): Promise<void>;
+
+  /**
+   * Host-isolation guard (3A, defense in depth): returns `true` when `url`
+   * targets a host other than this session's base origin — an absolute
+   * third-party URL, or a redirect that axios/the browser resolved off-origin.
+   * The tenant identifier and CSRF token must never be attached to such a
+   * request. A relative/host-less `url` (the normal case, merged against
+   * `baseUrl`) is same-origin and returns `false`. Mirrors the Python SDK's
+   * `_prepare_request` guard. Malformed input fails closed (treated as
+   * foreign).
+   */
+  isForeignHost(url: string | undefined): boolean {
+    if (!url) {
+      return false;
+    }
+    try {
+      const target = new URL(url, this.baseUrl);
+      return target.host !== new URL(this.baseUrl).host;
+    } catch {
+      return true;
+    }
+  }
 }
 
 /**
@@ -119,8 +141,12 @@ export function createSession(options: AxiamClientOptions): SharedSession {
 
   const session = new SharedSession(options, axiosInstance, tenantHeaderValue);
 
-  // Attach X-Tenant-ID to every outgoing request (§5.2).
+  // Attach X-Tenant-ID to every outgoing request (§5.2) — except when the
+  // request targets a host other than our own origin (host-isolation, 3A).
   axiosInstance.interceptors.request.use((config) => {
+    if (session.isForeignHost(config.url)) {
+      return config;
+    }
     config.headers = config.headers ?? {};
     config.headers['X-Tenant-ID'] = session.tenantHeaderValue;
     return config;

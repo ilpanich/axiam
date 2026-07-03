@@ -192,6 +192,66 @@ func bypassFieldName() string {
 	return "Insecure" + "SkipVerify"
 }
 
+// TestDecorateRequest_SkipsForeignHost proves the host-isolation guard: a
+// request bound for a host other than the client's own origin is NOT
+// decorated with the tenant identifier or CSRF token (3A defense in depth).
+func TestDecorateRequest_SkipsForeignHost(t *testing.T) {
+	client, err := NewClient("https://api.axiam.test", "acme")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	h := http.Header{}
+	h.Set("X-CSRF-Token", "csrf-secret")
+	client.captureCSRFFromResponse(&http.Response{Header: h})
+
+	req := newTestRequest(t, http.MethodPost, "https://evil.example/steal", nil)
+	client.decorateRequest(req)
+
+	if got := req.Header.Get("X-Tenant-ID"); got != "" {
+		t.Fatalf("X-Tenant-ID leaked to foreign host: %q", got)
+	}
+	if got := req.Header.Get("X-CSRF-Token"); got != "" {
+		t.Fatalf("X-CSRF-Token leaked to foreign host: %q", got)
+	}
+}
+
+// TestRedirect_DoesNotLeakTenantOrCSRFCrossHost proves the SDK strips the
+// tenant + CSRF headers when a response redirects to a different host, so
+// those values never reach an off-origin target (3A host-isolation).
+func TestRedirect_DoesNotLeakTenantOrCSRFCrossHost(t *testing.T) {
+	var evilTenant, evilCSRF string
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		evilTenant = r.Header.Get("X-Tenant-ID")
+		evilCSRF = r.Header.Get("X-CSRF-Token")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer evil.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL+"/stolen", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	client, err := NewClient(origin.URL, "acme-corp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	h := http.Header{}
+	h.Set("X-CSRF-Token", "csrf-secret")
+	client.captureCSRFFromResponse(&http.Response{Header: h})
+
+	if _, err := client.doRequest(newTestRequest(t, http.MethodPost, origin.URL+"/", nil)); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+
+	if evilTenant != "" {
+		t.Fatalf("X-Tenant-ID leaked to redirect target: %q", evilTenant)
+	}
+	if evilCSRF != "" {
+		t.Fatalf("X-CSRF-Token leaked to redirect target: %q", evilCSRF)
+	}
+}
+
 func newTestRequest(t *testing.T, method, url string, body []byte) *http.Request {
 	t.Helper()
 	req, err := http.NewRequest(method, url, nil)

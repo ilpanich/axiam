@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -203,6 +204,24 @@ func buildHTTPClient(cfg *clientConfig) (*http.Client, error) {
 	transport.TLSClientConfig = tlsConfig
 	httpc.Transport = transport
 
+	// Cross-host redirect hardening (D-09: SDK security config always wins).
+	// net/http forwards custom request headers across redirect hops and only
+	// strips Authorization/Cookie when the host changes — X-Tenant-ID and
+	// X-CSRF-Token would otherwise leak to a redirect target on a different
+	// host. Delete them on any hop that leaves the original origin. The
+	// 10-redirect ceiling reproduces net/http's default (which no longer
+	// applies once CheckRedirect is set).
+	httpc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+			req.Header.Del("X-Tenant-ID")
+			req.Header.Del("X-CSRF-Token")
+		}
+		return nil
+	}
+
 	if cfg.requestTimeout > 0 {
 		httpc.Timeout = cfg.requestTimeout
 	}
@@ -230,6 +249,15 @@ var stateChangingMethods = map[string]bool{
 // echoes the captured X-CSRF-Token on state-changing verbs (§3
 // non-browser: capture-from-response-header, echo-on-request).
 func (c *Client) decorateRequest(req *http.Request) {
+	// Host-isolation (defense in depth): never inject the tenant identifier
+	// or CSRF token into a request bound for a host other than this client's
+	// own origin (e.g. one built against an absolute third-party URL). The
+	// normal path — requests built from c.baseURL via c.url() — shares the
+	// base host and is decorated as usual. Mirrors the Python SDK's
+	// _prepare_request host guard.
+	if req.URL != nil && req.URL.Host != "" && req.URL.Host != c.baseURL.Host {
+		return
+	}
 	req.Header.Set("X-Tenant-ID", c.tenantSlug)
 	if stateChangingMethods[strings.ToUpper(req.Method)] {
 		if token := c.getCSRFToken(); token != "" {

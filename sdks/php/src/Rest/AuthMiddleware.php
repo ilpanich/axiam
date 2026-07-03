@@ -29,7 +29,19 @@ final class AuthMiddleware
 
     public function __invoke(callable $handler): callable
     {
-        return function (RequestInterface $request, array $options) use ($handler) {
+        $baseHost = parse_url($this->session->baseUrl(), PHP_URL_HOST);
+
+        return function (RequestInterface $request, array $options) use ($handler, $baseHost) {
+            // Host-isolation (3A, defense in depth): only same-origin requests
+            // are decorated, so the tenant id, bearer token, and CSRF token
+            // never leak to an absolute third-party URL or a followed cross-host
+            // redirect. A request whose host differs from our base origin is
+            // forwarded untouched. Mirrors the Python SDK's _prepare_request guard.
+            $requestHost = $request->getUri()->getHost();
+            if (\is_string($baseHost) && $requestHost !== '' && strcasecmp($requestHost, $baseHost) !== 0) {
+                return $handler($request, $options);
+            }
+
             $request = $request->withHeader('X-Tenant-ID', $this->session->tenant());
 
             $accessToken = $this->session->accessToken();

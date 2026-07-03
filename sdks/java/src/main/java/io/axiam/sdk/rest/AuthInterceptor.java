@@ -56,20 +56,28 @@ public final class AuthInterceptor implements Interceptor {
         Request original = chain.request();
         boolean isRefreshCall = SessionState.isRefreshPath(original.url().encodedPath());
 
+        // Host-isolation (3A): only same-origin requests receive the tenant id,
+        // bearer token, and CSRF token. A request built against an absolute
+        // third-party URL (or a redirect resolved off-origin) is left
+        // undecorated so those secrets never leave our own host.
+        boolean sameHost = session.isBaseHost(original.url().host());
+
         // Non-blocking read — never session/guard.lock() synchronously here.
         String access = session.cachedAccessToken();
-        if (!isRefreshCall && access != null && session.isNearExpiry(access, NEAR_EXPIRY_BUFFER_MILLIS)) {
+        if (sameHost && !isRefreshCall && access != null && session.isNearExpiry(access, NEAR_EXPIRY_BUFFER_MILLIS)) {
             access = guard.refreshIfNeeded(access, session::doHttpRefresh).access();
         }
 
-        Request.Builder builder = original.newBuilder()
-                .header("X-Tenant-Id", session.tenantId());
-        if (access != null) {
-            builder.header("Authorization", "Bearer " + access);
-        }
-        String csrf = session.csrfToken();
-        if (csrf != null && STATE_CHANGING_METHODS.contains(original.method())) {
-            builder.header("X-CSRF-Token", csrf);
+        Request.Builder builder = original.newBuilder();
+        if (sameHost) {
+            builder.header("X-Tenant-Id", session.tenantId());
+            if (access != null) {
+                builder.header("Authorization", "Bearer " + access);
+            }
+            String csrf = session.csrfToken();
+            if (csrf != null && STATE_CHANGING_METHODS.contains(original.method())) {
+                builder.header("X-CSRF-Token", csrf);
+            }
         }
 
         Response response = chain.proceed(builder.build());

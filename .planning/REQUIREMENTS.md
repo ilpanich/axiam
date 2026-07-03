@@ -607,10 +607,10 @@ Attach the existing `AuthInterceptor` to `UserService` and `TokenService`; deriv
 The REST `POST /api/v1/roles/{role_id}/permissions` calls `grant_to_role_with_scopes`, which is unguarded; the SEC-007 tenant guard landed only on `grant_to_role`.
 
 ### Acceptance Criteria
-- [ ] `grant_to_role_with_scopes` applies the `LET … IF array::len = 0 { THROW }` tenant predicate on both the empty-scope and scoped branches — `permission.rs:428-459`
-- [ ] Every scope id is validated to belong to the caller's tenant before `RELATE`
-- [ ] The tenant-isolation test is repointed at the REST-reachable `grant_to_role_with_scopes` path (not the guarded `grant_to_role`)
-- [ ] Negative test: caller with `permissions:grant` in tenant A cannot attach tenant B's permission to a tenant A role
+- [x] `grant_to_role_with_scopes` applies the `LET … IF array::len = 0 { THROW }` tenant predicate on both the empty-scope and scoped branches — `permission.rs:428-459`
+- [x] Every scope id is validated to belong to the caller's tenant before `RELATE`
+- [x] The tenant-isolation test is repointed at the REST-reachable `grant_to_role_with_scopes` path (not the guarded `grant_to_role`)
+- [x] Negative test: caller with `permissions:grant` in tenant A cannot attach tenant B's permission to a tenant A role
 
 ## SECFIX-03: Webhook Secret — Fail-Closed Key & Encrypt-at-Rest
 
@@ -1071,7 +1071,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | Requirement | Phase | Description | Status |
 |-------------|-------|-------------|--------|
 | SECFIX-01 | Phase 23 | gRPC UserService/TokenService auth (SEC-003) | Complete |
-| SECFIX-02 | Phase 23 | Tenant guard on live grant path (SEC-058) | Pending |
+| SECFIX-02 | Phase 23 | Tenant guard on live grant path (SEC-058) | Complete |
 | SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Pending |
 | SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Pending |
 | SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Pending |

@@ -798,6 +798,7 @@ dependencies = [
  "axiam-authz",
  "axiam-core",
  "axiam-db",
+ "axiam-email",
  "axiam-federation",
  "axiam-oauth2",
  "axiam-pki",

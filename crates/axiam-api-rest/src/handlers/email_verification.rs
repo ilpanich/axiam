@@ -121,6 +121,16 @@ pub async fn resend_verification<C: Connection>(
                 }
             };
 
+            // PHASE-DEFINING (23-RESEARCH Pattern 6 / Pitfall 3): build the
+            // action_url the same way gdpr.rs builds cancel_url — a
+            // relative-path frontend route carrying the raw token plus the
+            // raw tenant_id UUID (Open Question 2, mirroring the
+            // already-shipped VerifyEmailPage `?token=…&tenant_id=…`).
+            let verify_url = format!(
+                "/auth/verify-email?token={}&tenant_id={}",
+                raw_token, req.tenant_id
+            );
+
             let msg = OutboundMailMessage {
                 mail_type: MailType::EmailVerification,
                 tenant_id: req.tenant_id,
@@ -129,6 +139,7 @@ pub async fn resend_verification<C: Connection>(
                 to_address: req.email.clone(),
                 template_context: serde_json::json!({
                     "token": raw_token,
+                    "action_url": verify_url,
                     "expiry_time": expires_at.to_rfc3339(),
                 }),
                 attempt_count: 0,
@@ -262,5 +273,68 @@ mod tests {
             "response body MUST NOT contain token (D-15 / T-5-token-leak)"
         );
         assert_eq!(response_body["sent"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // PHASE-DEFINING (23-RESEARCH Pattern 6 / Pitfall 3): action_url
+    // substitution — a runtime assertion on the RENDERED email string, not
+    // a source-file grep.
+    // -----------------------------------------------------------------------
+
+    /// The action_url built by `resend_verification` (mirroring gdpr.rs's
+    /// cancel_url) fully substitutes into the rendered verification email
+    /// (`MailType::EmailVerification` -> `TemplateKind::Activation`): the
+    /// rendered link contains the token + tenant_id, and the literal
+    /// `{{action_url}}` mustache placeholder is gone.
+    #[tokio::test]
+    async fn action_url_is_substituted_in_rendered_verification_email() {
+        use axiam_core::models::email_template::TemplateKind;
+        use axiam_email::template::{TemplateContext, render_email, resolve_template};
+
+        let raw_token = "verify-token-substitution-check";
+        let tenant_id = Uuid::new_v4();
+        let expires_at = Utc::now() + chrono::Duration::hours(24);
+
+        // Exactly what `resend_verification` now builds into template_context.
+        let verify_url = format!("/auth/verify-email?token={raw_token}&tenant_id={tenant_id}");
+        let template_context = serde_json::json!({
+            "token": raw_token,
+            "action_url": verify_url,
+            "expiry_time": expires_at.to_rfc3339(),
+        });
+
+        // Mirror `axiam-amqp::mail_consumer::build_template_context`'s
+        // JSON-object -> TemplateContext conversion (string values as-is).
+        let mut ctx = TemplateContext::new();
+        if let serde_json::Value::Object(obj) = &template_context {
+            for (k, v) in obj {
+                if let serde_json::Value::String(s) = v {
+                    ctx.insert(k.clone(), s.clone());
+                }
+            }
+        }
+
+        // MailType::EmailVerification -> TemplateKind::Activation
+        // (crates/axiam-amqp/src/mail_consumer.rs::template_kind_for).
+        let template = resolve_template(TemplateKind::Activation, None, None);
+        let rendered = render_email(&template, "user@example.com", &ctx);
+        let html = rendered.html_body.expect("html body must be rendered");
+        let text = rendered.text_body.expect("text body must be rendered");
+
+        for body in [&html, &text] {
+            assert!(
+                body.contains(raw_token),
+                "rendered email must contain the raw verification token: {body}"
+            );
+            assert!(
+                body.contains(&tenant_id.to_string()),
+                "rendered email must contain the tenant_id: {body}"
+            );
+            assert!(
+                !body.contains("{{action_url}}"),
+                "rendered email MUST NOT contain the unsubstituted action_url \
+                 placeholder (23-RESEARCH Pitfall 3): {body}"
+            );
+        }
     }
 }

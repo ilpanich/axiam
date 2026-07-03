@@ -58,3 +58,7 @@ surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }
 totp-rs = { workspace = true }
 jsonwebtoken = { workspace = true }
+# 23-06: real template rendering in the action_url substitution test — proves
+# the emailed link is fully substituted, not a source-file grep (23-RESEARCH
+# Pitfall 3).
+axiam-email = { workspace = true }

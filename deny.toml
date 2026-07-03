@@ -23,6 +23,15 @@ ignore = [
     # Risk: maintenance only — no known exploitable CVE.
     # Review date: 2026-06-04.
     { id = "RUSTSEC-2023-0089", reason = "Transitive dep via surrealdb; no upstream fix; unmaintained only (no CVE). Review: 2026-06-04" },
+    # RUSTSEC-2026-0194: quick-xml quadratic run time when checking a start tag for duplicate attribute names (DoS).
+    # RUSTSEC-2026-0195: quick-xml unbounded namespace-declaration allocation in NsReader (memory-exhaustion DoS).
+    # Both affect quick-xml 0.37.x, pulled in transitively by samael (SAML SP) in axiam-federation.
+    # Solution: upgrade to quick-xml >=0.41.0 — NOT reachable: latest samael (0.0.21) still pins `quick-xml ^0.37.2`.
+    # Mitigated: samael/SAML is opt-in behind the `saml` feature and OFF by default (api-rest and axiam-server build
+    # with default-features = false); DoS-only, no key/data compromise. No direct AXIAM dependency on quick-xml.
+    # Review date: 2026-07-03. Re-evaluate when samael upstream bumps quick-xml to >=0.41.0.
+    { id = "RUSTSEC-2026-0194", reason = "Transitive via samael (quick-xml ^0.37, no >=0.41 path); SAML opt-in/off by default; DoS-only. Review: 2026-07-03" },
+    { id = "RUSTSEC-2026-0195", reason = "Transitive via samael (quick-xml ^0.37, no >=0.41 path); SAML opt-in/off by default; DoS-only. Review: 2026-07-03" },
 ]
 
 [licenses]

@@ -6,7 +6,7 @@ status: planning
 last_updated: "2026-07-03T15:02:34.688Z"
 last_activity: 2026-07-03
 progress:
-  total_phases: 0
+  total_phases: 8
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 22 — php-sdk
+**Current focus:** Phase 23 — Security Regressions & HIGH Findings (v1.2, final milestone)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: Phase 23 — Security Regressions & HIGH Findings (not started)
 Plan: —
-Status: Defining requirements
-Last activity: 2026-07-03 — Milestone v1.2 started
+Status: Roadmap created — ready to plan Phase 23
+Last activity: 2026-07-03 — v1.2 roadmap created (Phases 23–30; 44 requirement IDs mapped, 100%)
 
 ## Performance Metrics
 
@@ -163,6 +163,7 @@ Last activity: 2026-07-03 — Milestone v1.2 started
 - Sequential, green-build gated (8→9→10→11→12). Per-finding atomic commits happen during execute-phase.
 - Note: `gsd-sdk phase.add` mis-numbered (returned 100) because the `99-followups/` sentinel dir inflates its `max+1` counter; phases were authored directly as `08`–`12` instead.
 - 2026-06-28 — Milestone v1.1 Client SDKs roadmap created (phases 15–22). Foundation-first structure: Phase 15 (shared artifacts) → Phase 16 (Rust reference impl) → Phases 17–22 (parallelizable per-language SDKs). 12/12 requirements mapped. FND-04 REST authz-check endpoint added to server as part of Phase 15 scope (browser SDK authz path, Q1 resolved). `gsd-sdk phase.add` sentinel bug still present — phase dirs must be authored directly as `15`–`22`.
+- 2026-07-03 — Milestone v1.2 (MVP Release Hardening — FINAL milestone) roadmap created (Phases 23–30). Priority-banded per Core Value: security > correctness > performance > compliance > structural quality > docs. Phase 23 (SECFIX critical/HIGH regressions, each with a negative test) → Phases 24/25 (SECHRD medium/low hardening; auth/access-control vs federation/PKI/data/infra; parallel-capable after 23) → Phase 26 (CORR correctness + resilience) → Phase 27 (PERF) → Phase 28 (FUNC completeness) → Phase 29 (QUAL structural refactors, sequenced AFTER security/correctness so refactors don't churn unreviewed code; QUAL-03/04 security-adjacent land before/with QUAL-01) → Phase 30 (CMPL + DOCS, certifying/documenting the finished hardened state). Deps honored: SECFIX-03→CORR-03, SECFIX-06→CORR-04, CORR-05 backend-before-frontend, SECHRD-06→CMPL-02. Enumerated set is 44 REQ-IDs (the "42" label in REQUIREMENTS.md undercounted by 2); all 44 mapped. `gsd-sdk phase.add` sentinel bug still present — author phase dirs `23`–`30` directly.
 
 ### Decisions
 

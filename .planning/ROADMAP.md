@@ -970,3 +970,288 @@ Phase 16: Rust SDK (reference implementation — validates full pattern)
         (TS)   (Go)   (Py)  (Java) (C#)   (PHP)
         [phases 17-22 can parallelize after 15+16 complete]
 ```
+
+
+---
+
+## Milestone v1.2 — MVP Release Hardening (final milestone)
+
+> Milestone: v1.2
+> Phase range: 23–30 | Granularity: standard
+> Created: 2026-07-03
+> Source: `claude_dev/roadmap.md` Phases 18–19 + `security-review-postremediation.md` + `code-review-postremediation.md`
+
+### Overview (v1.2)
+
+The final push to a production-credible MVP. This milestone remediates every open security regression,
+correctness bug, performance gap, and compliance/documentation item from the two post-remediation reviews
+(2026-07-01) plus the outstanding roadmap Phases 18–19 — with **no new domain features**. Phases are
+priority-banded per Core Value: **security > correctness > performance > compliance > structural quality > docs.**
+The critical/HIGH security regressions (SECFIX-*) land first (Phase 23), medium/low security hardening
+follows (Phases 24–25), then correctness+resilience (Phase 26), performance (Phase 27), functional
+completeness (Phase 28), structural-quality refactors *after* the security/correctness work so refactors
+never churn unreviewed security code (Phase 29), and finally compliance + documentation which certify the
+*finished, hardened* state (Phase 30). Every security phase's success criteria include the relevant
+NEGATIVE test passing.
+
+> Coverage note: the enumerated v1.2 REQ-ID set is **44** IDs (SECFIX 6 + SECHRD 12 + CORR 6 + PERF 5 +
+> FUNC 5 + QUAL 7 + CMPL 2 + DOCS 1). The earlier "42" summary in REQUIREMENTS.md undercounted by 2;
+> all 44 are mapped below (100%).
+
+### Phases (v1.2)
+
+- [ ] **Phase 23: Security Regressions & HIGH Findings** - Close the critical/HIGH SEC regressions (gRPC service auth, live-grant tenant guard, webhook fail-closed encrypt-at-rest, SAML XSW binding, logout revocation, reset/resend tenant_id) — each proven by a negative test
+- [ ] **Phase 24: Security Hardening I — Authentication & Access-Control Surfaces** - Harden the auth front door: TOTP atomic replay, XFF rate-limit keying, bootstrap atomicity+gate, public-path allowlist, reset/crypto side-channels
+- [ ] **Phase 25: Security Hardening II — Federation, PKI, Data-Protection & Infra** - Fail-closed trust boundaries: SSRF address pinning, mTLS CA status, GDPR erasure durability, federation nonce+secret handling, AMQP per-tenant signing, cluster egress/secret completeness
+- [ ] **Phase 26: Correctness & Resilience** - gRPC governor throughput, SurrealDB token renewal, durable webhook delivery, Playwright-in-CI with body assertions, frontend tenant/MFA/residual flows
+- [ ] **Phase 27: Performance & Load Hardening** - HIBP circuit breaker + hot-path pre-sizing, concurrent bounded BatchCheckAccess, JWKS single-flight across SDKs, SurrealDB reconnect backoff-with-jitter, load-test + profiling report
+- [ ] **Phase 28: Functional Completeness** - Unauthenticated first-time federation login, session invalidation on reset, admin email-config API + templates, admin user/MFA endpoints + service-account token type, OpenAPI login schema
+- [ ] **Phase 29: Structural Quality** - AppState extraction, generic paginate + shared repo helpers, error-taxonomy correctness, transactional multi-statement mutations, PKI/frontend dedup, dead-code cleanup — no behavior change
+- [ ] **Phase 30: Compliance & Documentation** - OWASP ASVS/ISO 27001/CyberSecurity Act audit checklist, GDPR export/deletion/consent completeness, consolidated REST/gRPC/AMQP + deployment + admin + PKI + SDK docs
+
+> v1.2 roadmap created 2026-07-03. Phase numbering continues from Phase 22 (v1.1). Sequential execution with
+> a green-build gate between phases; Phases 24 and 25 are parallel-capable once Phase 23 lands. `gsd-sdk
+> phase.add` sentinel bug still present — author phase dirs `23`–`30` directly.
+
+### Phase Details (v1.2)
+
+### Phase 23: Security Regressions & HIGH Findings
+
+**Goal**: Every critical/HIGH security regression surfaced by the two post-remediation reviews is closed and fail-closed, each proven by a negative test — no known exploitable defect remains in the gRPC, grant, webhook, SAML, logout, or reset control paths
+**Depends on**: Phase 22 (v1.1 complete; v1.2 opens) — first phase of the milestone
+**Requirements**: SECFIX-01, SECFIX-02, SECFIX-03, SECFIX-04, SECFIX-05, SECFIX-06
+**Success Criteria** (what must be TRUE):
+
+  1. A gRPC `GetUser`/`ValidateCredentials`/`IntrospectToken` call with no bearer token / mTLS identity is rejected, and a cross-tenant `GetUser` (tenant-A caller, tenant-B target) returns permission-denied (SECFIX-01)
+  2. A caller holding `permissions:grant` in tenant A cannot attach tenant B's permission or scope to a tenant-A role via `POST /api/v1/roles/{id}/permissions` — the scoped `grant_to_role_with_scopes` path rejects it (SECFIX-02)
+  3. Webhook registration fails closed when `AXIAM__PKI__ENCRYPTION_KEY` is unset (no all-zero key), and a stored webhook secret is ciphertext (≠ plaintext) that still decrypts correctly at delivery (SECFIX-03)
+  4. A SAML response with a wrapped/duplicated assertion, a wrong `Destination`, or a missing `InResponseTo` on the authenticated ACS path is rejected (SECFIX-04)
+  5. After `POST /api/v1/auth/logout` a request replaying the old cookies is unauthenticated (frontend logout returns no 400), and password-reset/resend requests carry `tenant_id`/`email`, succeed, and stay enumeration-safe with a constant response (SECFIX-05, SECFIX-06)
+
+**Plans**: TBD
+
+**UI hint**: yes
+
+---
+
+### Phase 24: Security Hardening I — Authentication & Access-Control Surfaces
+
+**Goal**: The authentication and access-control front door resists replay, IP-spoofing, race, path-smuggling, and timing attacks — every fix fails closed and ships with a negative test
+**Depends on**: Phase 23
+**Requirements**: SECHRD-01, SECHRD-03, SECHRD-04, SECHRD-11, SECHRD-12
+**Success Criteria** (what must be TRUE):
+
+  1. N parallel submissions of one valid TOTP code succeed at most once (DB compare-and-set), and a code accepted via the −1 skew window cannot be replayed in a later wall-clock step (SECHRD-01)
+  2. Rotating `X-Forwarded-For` per request no longer yields a fresh rate-limit bucket — when `trusted_hops >= hops.len()` the limiter keys off `peer_addr()`, not the client-controlled leftmost hop (SECHRD-03)
+  3. Two concurrent first-run bootstrap requests create at most one super-admin, and bootstrap is refused when `AXIAM_BOOTSTRAP_ADMIN_EMAIL` / setup token is unset (no unconditional bootstrap) (SECHRD-04)
+  4. A non-canonical or wrong-segment request path (e.g. `/api/v1/authz/...` must not match a `/api/v1/auth/*` entry; `//` and `..` variants are collapsed/rejected) cannot slip past the public-path allowlist (SECHRD-11)
+  5. A password-reset request for an ineligible/unknown/federated account is time-indistinguishable from a valid one (dummy hash + async wait), the peppered password buffer is zeroized, and the unauthenticated reset path blocks reuse of the current password (SECHRD-12)
+
+**Plans**: TBD
+
+---
+
+### Phase 25: Security Hardening II — Federation, PKI, Data-Protection & Infra
+
+**Goal**: The outbound-fetch, federation, mTLS, GDPR-erasure, AMQP, and cluster-egress trust boundaries all fail closed and never leak, strand, or cross-contaminate tenant data — proven by negative tests
+**Depends on**: Phase 23 (parallel-capable with Phase 24)
+**Requirements**: SECHRD-02, SECHRD-05, SECHRD-06, SECHRD-07, SECHRD-08, SECHRD-09, SECHRD-10
+**Success Criteria** (what must be TRUE):
+
+  1. A discovery document whose `token_endpoint` resolves to a loopback/internal/link-local/ULA address is rejected, and the validated `IpAddr` is pinned into the connection for webhook + OIDC/SAML fetches (no DNS-rebind between check and send) (SECHRD-02)
+  2. Device-cert (mTLS) auth against an issuing CA that is not Active or is outside its validity window fails closed (SECHRD-05)
+  3. A GDPR purge whose `pseudonymize_actor` step fails leaves the user re-selectable and writes NO erasure proof; a duplicate export request (queued/ready-undownloaded/failed) is rejected; export contains real `sessions` data (SECHRD-06)
+  4. An account-linking OIDC callback ignores a request-supplied nonce and validates against server-side login state (replay rejected), and federation/PKI secrets are never serialized or printed in Debug/list paths (SECHRD-07, SECHRD-09)
+  5. AMQP message signing is mandatory in production and per-tenant (a tenant-A signature cannot validate a tenant-B message), ExportReady mail is deliverable end-to-end (real `org_id`, backoff retry), and SMTP egress + the completed k8s secret set work under the tightened default-deny NetworkPolicy (SECHRD-08, SECHRD-10)
+
+**Plans**: TBD
+
+---
+
+### Phase 26: Correctness & Resilience
+
+**Goal**: Control-plane throughput, database/token resilience, durable webhook delivery, and the frontend auth/tenant flows behave correctly under real conditions and are gated by CI that actually runs
+**Depends on**: Phase 23 (SECFIX-03 must precede CORR-03 webhook decrypt; SECFIX-06 is verified by CORR-04 body assertions) — recommended after Phases 24–25
+**Requirements**: CORR-01, CORR-02, CORR-03, CORR-04, CORR-05, CORR-06
+**Success Criteria** (what must be TRUE):
+
+  1. Raising `grpc_authz_per_sec` increases sustained gRPC throughput (governor no longer inverted to ~1 token/100 s); a test asserts sustained throughput ≈ configured rate (CORR-01)
+  2. The SurrealDB client recovers after root-token expiry without a process restart (periodic re-signin or reconnect-on-auth-error), and `health_check` surfaces auth-expiry as unhealthy (CORR-02)
+  3. A registered webhook receives an HMAC-SHA256-signed delivery driven from a durable AMQP queue that survives restart, and a failed delivery retries with exponential backoff while writing status to the audit trail (CORR-03)
+  4. The CI e2e job runs `npx playwright test` against the seeded backend (vitest kept separate), the auth/login/contract specs gate the build, and the contract spec asserts request **bodies** — catching a SECFIX-06 regression (CORR-04)
+  5. After a hard reload the Topbar restores the tenant from `/auth/me` slugs, an MFA-mandated user reaches the setup landing via `setup_token` (no dead end), and VerifyEmail/Dashboard/Org-settings no longer misfire under StrictMode/query-key-collision/refocus (CORR-05, CORR-06)
+
+**Plans**: TBD
+
+**UI hint**: yes
+
+---
+
+### Phase 27: Performance & Load Hardening
+
+**Goal**: Hot paths withstand load — HIBP failures degrade gracefully, batch authz parallelizes, JWKS fetches coalesce, DB reconnects back off with jitter, and critical paths are profiled with documented numbers
+**Depends on**: Phase 26 (PERF-04 reconnect resilience builds on CORR-02 token-renewal/reconnect work in `connection.rs`)
+**Requirements**: PERF-01, PERF-02, PERF-03, PERF-04, PERF-05
+**Success Criteria** (what must be TRUE):
+
+  1. A credential-stuffing burst trips the `check_hibp` circuit breaker, which fails open (`Ok(None)`) for a cooldown window and does not starve legitimate auth flows; hot-path vectors are pre-sized (PERF-01)
+  2. `BatchCheckAccess` evaluates requests with bounded concurrency, preserves result order, matches per-item `CheckAccess` results, and benchmarks faster than the sequential baseline (PERF-02)
+  3. A burst of concurrent cache-miss JWKS lookups (invalid-`kid` tokens) triggers exactly one network fetch, consistently across the Python/Go/Rust/Java/C#/TypeScript SDKs (PERF-03)
+  4. A failed SurrealDB handshake / poisoned connection is dropped and never recycled into the healthy pool, and the reconnect loop uses full-jitter exponential backoff with a `max_backoff` ceiling and bounded retry (PERF-04)
+  5. `claude_dev/performance-report.md` records baseline-vs-optimized numbers from the load-test harness (k6/criterion) for auth, authz-check, and certificate validation (PERF-05)
+
+**Plans**: TBD
+
+---
+
+### Phase 28: Functional Completeness
+
+**Goal**: The remaining MVP feature gaps are complete and RBAC-gated — first-time federation SSO, session invalidation on reset, admin email-config/user/MFA management, service-account token type, and an SDK-accurate login response schema
+**Depends on**: Phase 23 (per-endpoint RBAC re-verified; FUNC-02 session invalidation aligns with the SECFIX-05 session work)
+**Requirements**: FUNC-01, FUNC-02, FUNC-03, FUNC-04, FUNC-05
+**Success Criteria** (what must be TRUE):
+
+  1. A first-time SSO user with no pre-existing local account completes `POST /auth/federation/oidc/login` (or `/saml/login`) and receives AXIAM access/refresh tokens; the federation metadata endpoint is public (FUNC-01)
+  2. After a password reset, all prior sessions/refresh tokens for that user are rejected (`SessionRepository` threaded into `PasswordResetService`) (FUNC-02)
+  3. An admin can CRUD org/tenant `email_config` (gated by `email_config:write`), the mail consumer renders a per-tenant custom template, and `backfill_plaintext_secrets` encrypts NULL-ciphertext rows (FUNC-03)
+  4. An admin can list users and list/delete another user's MFA methods (RBAC-gated), and service-account tokens carry `sub_kind: "ServiceAccount"` (FUNC-04)
+  5. `POST /auth/login` OpenAPI documents both the success and MFA-required responses (via `oneOf`/distinct status) so generated SDKs model them correctly (FUNC-05)
+
+**Plans**: TBD
+
+---
+
+### Phase 29: Structural Quality
+
+**Goal**: Clear the structural-quality debt at GA — AppState, generic pagination, error taxonomy, transactional mutations, PKI/frontend dedup, dead-code — with no behavior change (tests stay green). Sequenced AFTER security/correctness so refactors never churn unreviewed security code; within the phase, error-taxonomy (QUAL-03) and transaction (QUAL-04) work on security-adjacent paths lands before/with the AppState extraction (QUAL-01)
+**Depends on**: Phase 26 (security + correctness complete before structural refactors)
+**Requirements**: QUAL-01, QUAL-02, QUAL-03, QUAL-04, QUAL-05, QUAL-06, QUAL-07
+**Success Criteria** (what must be TRUE):
+
+  1. `main.rs` composes a single `AppState` instead of ~45 inline `app_data` registrations, and the full existing test suite stays green (no behavior change) (QUAL-01)
+  2. Index/unique violations on mainstream create paths return HTTP 409 (`AlreadyExists`, not `Migration`→500), OAuth2 handlers distinguish a DB outage from `invalid_client`, and `helpers::parse_uuid` no longer mislabels a corrupt read as "Migration failed" (QUAL-03)
+  3. Role/permission edge deletes and `resource::delete` child-guard run in a single tenant-predicated transaction (no cross-tenant strip, no TOCTOU), and GDPR deletion setup is transactional so a mid-setup failure cannot strand an uncancellable purge (QUAL-04)
+  4. The 24 duplicated `CountRow` definitions collapse to `helpers::CountRow`, repos adopt a generic `paginate<T>` + `helpers::parse_uuid`/`take_first_or_not_found`, and `CertService` reconstructs the CA via `from_ca_cert_pem` with shared keypair/fingerprint/encrypt helpers (QUAL-02, QUAL-05)
+  5. Frontend pages import the extracted shared components/hooks (`ToggleField`/`SectionCard`/`useCrudMutations`/…) or the dead modules are deleted and profile/MFA pages call a typed users service; the pepper-less second `verify_password` impl and per-request federation/reset/verification service construction are removed (QUAL-06, QUAL-07)
+
+**Plans**: TBD
+
+**UI hint**: yes
+
+---
+
+### Phase 30: Compliance & Documentation
+
+**Goal**: Document and certify the finished, hardened MVP — a security-audit checklist mapped to the compliance frameworks, GDPR export/deletion/consent completeness, and consolidated API/deployment/admin/PKI/SDK documentation covering the final state
+**Depends on**: Phases 23–29 (documents the completed hardened state; CMPL-02 ties to SECHRD-06 GDPR erasure durability from Phase 25)
+**Requirements**: CMPL-01, CMPL-02, DOCS-01
+**Success Criteria** (what must be TRUE):
+
+  1. `claude_dev/security-audit.md` maps every authentication, session, access-control, cryptography, and PKI control to a pass/fail with an evidence pointer against OWASP ASVS L2, ISO 27001, and the CyberSecurity Act, with open items cross-referenced to v1.2 REQ-IDs (CMPL-01)
+  2. `GET /api/v1/users/:id/export` covers every table incl. real sessions (optional PGP encryption), account deletion durably pseudonymizes audit PII (ties to SECHRD-06), and consent is recorded and exportable (CMPL-02)
+  3. `docs/` consolidates REST (OpenAPI) / gRPC (proto) / AMQP (AsyncAPI) API docs, a Docker/K8s deployment guide (env/secrets/NetworkPolicies), admin + PKI/certificate guides, and links to the 7 SDK getting-started READMEs (DOCS-01)
+
+**Plans**: TBD
+
+---
+
+### Progress (v1.2)
+
+**Execution Order:**
+Phases execute in numeric order 23 → 24 → 25 → 26 → 27 → 28 → 29 → 30 with a green-build gate between phases.
+Phases 24 and 25 (SECHRD hardening) are parallel-capable once Phase 23 lands. Structural-quality (Phase 29)
+is intentionally sequenced after security (23–25) and correctness (26) so refactors never churn unreviewed
+security code. Compliance + docs (Phase 30) run last to certify/document the finished, hardened state.
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 23. Security Regressions & HIGH Findings | 0/? | Not started | - |
+| 24. Security Hardening I — Auth & Access-Control | 0/? | Not started | - |
+| 25. Security Hardening II — Federation/PKI/Data/Infra | 0/? | Not started | - |
+| 26. Correctness & Resilience | 0/? | Not started | - |
+| 27. Performance & Load Hardening | 0/? | Not started | - |
+| 28. Functional Completeness | 0/? | Not started | - |
+| 29. Structural Quality | 0/? | Not started | - |
+| 30. Compliance & Documentation | 0/? | Not started | - |
+
+---
+
+### Coverage Matrix (v1.2)
+
+| Requirement | Phase | Description |
+|-------------|-------|-------------|
+| SECFIX-01 | Phase 23 | gRPC UserService/TokenService authentication (SEC-003) |
+| SECFIX-02 | Phase 23 | Tenant guard on live REST grant path (SEC-058) |
+| SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) |
+| SECFIX-04 | Phase 23 | SAML signature↔assertion binding / XSW (SEC-005) |
+| SECFIX-05 | Phase 23 | Logout revokes caller's session (SEC-015) |
+| SECFIX-06 | Phase 23 | Reset/resend flows threaded with tenant_id (SEC-044) |
+| SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) |
+| SECHRD-03 | Phase 24 | Rate-limit client-IP keying / XFF (SEC-048/060) |
+| SECHRD-04 | Phase 24 | Bootstrap atomicity + mandatory gate (SEC-049) |
+| SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) |
+| SECHRD-12 | Phase 24 | Auth crypto & recovery side-channels (T19.23/24/27) |
+| SECHRD-02 | Phase 25 | SSRF address pinning — webhook + federation (SEC-019/064) |
+| SECHRD-05 | Phase 25 | mTLS CA status & validity enforcement (SEC-061) |
+| SECHRD-06 | Phase 25 | GDPR erasure durability & ledger integrity (SEC-063/065/066) |
+| SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) |
+| SECHRD-08 | Phase 25 | AMQP signing key + ExportReady delivery (SEC-022/055) |
+| SECHRD-09 | Phase 25 | Federation secret non-serialization (SEC-017) |
+| SECHRD-10 | Phase 25 | Network egress + k8s secret completeness (SEC-053/052) |
+| CORR-01 | Phase 26 | gRPC governor throughput semantics (CQ-B44) |
+| CORR-02 | Phase 26 | SurrealDB token renewal / reconnect (CQ-B45) |
+| CORR-03 | Phase 26 | Webhook delivery wiring via AMQP (CQ-B22) |
+| CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) |
+| CORR-05 | Phase 26 | Frontend tenant context + MFA-setup landing (CQ-F29/F31) |
+| CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) |
+| PERF-01 | Phase 27 | HIBP circuit breaker + hot-path pre-sizing (T19.26) |
+| PERF-02 | Phase 27 | Concurrent bounded BatchCheckAccess (T19.2/CQ-B20) |
+| PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) |
+| PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) |
+| PERF-05 | Phase 27 | Load testing & critical-path profiling (T18.3) |
+| FUNC-01 | Phase 28 | Unauthenticated first-time federation login (T19.9) |
+| FUNC-02 | Phase 28 | Session invalidation on password reset (T19.10) |
+| FUNC-03 | Phase 28 | Admin email-config API & template delivery (T19.20/21/22) |
+| FUNC-04 | Phase 28 | Admin user & MFA management + SA token type |
+| FUNC-05 | Phase 28 | OpenAPI login response schema (T19.4) |
+| QUAL-01 | Phase 29 | AppState extraction (CQ-B43) |
+| QUAL-02 | Phase 29 | Generic pagination & shared repo helpers (CQ-B10) |
+| QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) |
+| QUAL-04 | Phase 29 | Transactional multi-statement mutations (CQ-B07/46) |
+| QUAL-05 | Phase 29 | PKI helper deduplication (CQ-B15) |
+| QUAL-06 | Phase 29 | Frontend shared components & services (CQ-F15/17/39) |
+| QUAL-07 | Phase 29 | Dead-code & per-request-construction cleanup (CQ-B47/27) |
+| CMPL-01 | Phase 30 | Security audit checklist (T18.1) |
+| CMPL-02 | Phase 30 | GDPR completeness (T18.2) |
+| DOCS-01 | Phase 30 | Comprehensive documentation (T18.4) |
+
+**Coverage: 44/44 v1.2 requirement IDs mapped (100%).** (The enumerated set totals 44 — SECFIX 6 + SECHRD 12 + CORR 6 + PERF 5 + FUNC 5 + QUAL 7 + CMPL 2 + DOCS 1; the earlier "42" label undercounted by 2.)
+
+---
+
+### Dependency Graph (v1.2)
+
+```
+Priority band ordering (Core Value): security > correctness > performance > compliance > structural quality > docs
+
+Phase 23: SECFIX critical/HIGH regressions  (first — highest priority)
+    |
+    +--> Phase 24: SECHRD auth/access-control hardening  ┐ (24 & 25 parallel-capable after 23)
+    +--> Phase 25: SECHRD federation/PKI/data/infra       ┘
+    |
+    v
+Phase 26: CORR correctness + resilience
+    (SECFIX-03 -> CORR-03 webhook decrypt; SECFIX-06 -> CORR-04 body assertions; CORR-05 backend /auth/me before frontend restore)
+    |
+    v
+Phase 27: PERF  (PERF-04 reconnect builds on CORR-02)
+    |
+    v
+Phase 28: FUNC completeness  (depends on per-endpoint RBAC from Phase 23)
+    |
+    v
+Phase 29: QUAL structural refactors  (AFTER security/correctness; QUAL-03/04 security-adjacent, before/with QUAL-01)
+    |
+    v
+Phase 30: CMPL + DOCS  (certifies/documents the finished hardened state; CMPL-02 <- SECHRD-06)
+```

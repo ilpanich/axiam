@@ -1070,52 +1070,52 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 
 | Requirement | Phase | Description | Status |
 |-------------|-------|-------------|--------|
-| SECFIX-01 | TBD | gRPC UserService/TokenService auth (SEC-003) | Pending |
-| SECFIX-02 | TBD | Tenant guard on live grant path (SEC-058) | Pending |
-| SECFIX-03 | TBD | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Pending |
-| SECFIX-04 | TBD | SAML signature↔assertion binding (SEC-005) | Pending |
-| SECFIX-05 | TBD | Logout revokes session (SEC-015) | Pending |
-| SECFIX-06 | TBD | Reset/resend tenant_id (SEC-044) | Pending |
-| SECHRD-01 | TBD | TOTP atomic replay protection (SEC-008) | Pending |
-| SECHRD-02 | TBD | SSRF address pinning (SEC-019/064) | Pending |
-| SECHRD-03 | TBD | Rate-limit client-IP keying (SEC-048/060) | Pending |
-| SECHRD-04 | TBD | Bootstrap atomicity + gate (SEC-049) | Pending |
-| SECHRD-05 | TBD | mTLS CA status/validity (SEC-061) | Pending |
-| SECHRD-06 | TBD | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |
-| SECHRD-07 | TBD | Federation nonce from server state (SEC-004) | Pending |
-| SECHRD-08 | TBD | AMQP key + ExportReady delivery (SEC-022/055) | Pending |
-| SECHRD-09 | TBD | Federation secret skip_serializing (SEC-017) | Pending |
-| SECHRD-10 | TBD | Egress + k8s secret completeness (SEC-053/052) | Pending |
-| SECHRD-11 | TBD | Public-path allowlist hardening (T19.25) | Pending |
-| SECHRD-12 | TBD | Auth crypto/recovery side-channels (T19.23/24/27) | Pending |
-| CORR-01 | TBD | gRPC governor throughput (CQ-B44) | Pending |
-| CORR-02 | TBD | SurrealDB token renewal/reconnect (CQ-B45) | Pending |
-| CORR-03 | TBD | Webhook delivery wiring (CQ-B22) | Pending |
-| CORR-04 | TBD | Playwright in CI + body assertions (CQ-F36) | Pending |
-| CORR-05 | TBD | Tenant context + MFA-setup landing (CQ-F29/F31) | Pending |
-| CORR-06 | TBD | Frontend residual correctness (CQ-F19/37/38) | Pending |
-| PERF-01 | TBD | HIBP circuit breaker + pre-sizing (T19.26) | Pending |
-| PERF-02 | TBD | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Pending |
-| PERF-03 | TBD | JWKS single-flight across SDKs (T19.28) | Pending |
-| PERF-04 | TBD | SurrealDB reconnect resilience (T19.33/34) | Pending |
-| PERF-05 | TBD | Load testing + profiling (T18.3) | Pending |
-| FUNC-01 | TBD | Unauthenticated federation login (T19.9) | Pending |
-| FUNC-02 | TBD | Session invalidation on reset (T19.10) | Pending |
-| FUNC-03 | TBD | Admin email-config API + templates (T19.20/21/22) | Pending |
-| FUNC-04 | TBD | Admin user/MFA endpoints + SA token | Pending |
-| FUNC-05 | TBD | OpenAPI login response schema (T19.4) | Pending |
-| QUAL-01 | TBD | AppState extraction (CQ-B43) | Pending |
-| QUAL-02 | TBD | Generic paginate + shared helpers (CQ-B10) | Pending |
-| QUAL-03 | TBD | Error taxonomy correctness (CQ-B11/17/18) | Pending |
-| QUAL-04 | TBD | Transactional mutations (CQ-B07/46) | Pending |
-| QUAL-05 | TBD | PKI helper dedup (CQ-B15) | Pending |
-| QUAL-06 | TBD | Frontend shared components (CQ-F15/17/39) | Pending |
-| QUAL-07 | TBD | Dead-code cleanup (CQ-B47/27) | Pending |
-| CMPL-01 | TBD | Security audit checklist (T18.1) | Pending |
-| CMPL-02 | TBD | GDPR completeness (T18.2) | Pending |
-| DOCS-01 | TBD | Comprehensive documentation (T18.4) | Pending |
+| SECFIX-01 | Phase 23 | gRPC UserService/TokenService auth (SEC-003) | Pending |
+| SECFIX-02 | Phase 23 | Tenant guard on live grant path (SEC-058) | Pending |
+| SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Pending |
+| SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Pending |
+| SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Pending |
+| SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Pending |
+| SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Pending |
+| SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |
+| SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Pending |
+| SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Pending |
+| SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Pending |
+| SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |
+| SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Pending |
+| SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | Pending |
+| SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Pending |
+| SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Pending |
+| SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Pending |
+| SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Pending |
+| CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Pending |
+| CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Pending |
+| CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Pending |
+| CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Pending |
+| CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Pending |
+| CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Pending |
+| PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Pending |
+| PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Pending |
+| PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Pending |
+| PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) | Pending |
+| PERF-05 | Phase 27 | Load testing + profiling (T18.3) | Pending |
+| FUNC-01 | Phase 28 | Unauthenticated federation login (T19.9) | Pending |
+| FUNC-02 | Phase 28 | Session invalidation on reset (T19.10) | Pending |
+| FUNC-03 | Phase 28 | Admin email-config API + templates (T19.20/21/22) | Pending |
+| FUNC-04 | Phase 28 | Admin user/MFA endpoints + SA token | Pending |
+| FUNC-05 | Phase 28 | OpenAPI login response schema (T19.4) | Pending |
+| QUAL-01 | Phase 29 | AppState extraction (CQ-B43) | Pending |
+| QUAL-02 | Phase 29 | Generic paginate + shared helpers (CQ-B10) | Pending |
+| QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) | Pending |
+| QUAL-04 | Phase 29 | Transactional mutations (CQ-B07/46) | Pending |
+| QUAL-05 | Phase 29 | PKI helper dedup (CQ-B15) | Pending |
+| QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Pending |
+| QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Pending |
+| CMPL-01 | Phase 30 | Security audit checklist (T18.1) | Pending |
+| CMPL-02 | Phase 30 | GDPR completeness (T18.2) | Pending |
+| DOCS-01 | Phase 30 | Comprehensive documentation (T18.4) | Pending |
 
-**Coverage: 42 v1.2 requirements defined; phase mapping pending roadmapper.**
+**Coverage: 44/44 v1.2 requirement IDs mapped to Phases 23–30 (100%).** NOTE: the enumerated set totals **44** (SECFIX 6 + SECHRD 12 + CORR 6 + PERF 5 + FUNC 5 + QUAL 7 + CMPL 2 + DOCS 1); the earlier "42" summary undercounted by 2. Roadmap: Phase 23 SECFIX · 24–25 SECHRD · 26 CORR · 27 PERF · 28 FUNC · 29 QUAL · 30 CMPL+DOCS.
 
 ---
 *v1.2 requirements added 2026-07-03 — final MVP milestone. Consolidates roadmap Phases 18–19 + all open findings from `security-review-postremediation.md` and `code-review-postremediation.md`. Priority: security > correctness > performance > compliance > structural quality > docs.*

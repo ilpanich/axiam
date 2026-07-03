@@ -173,6 +173,7 @@ async fn saml_rejects_missing_signing_cert() {
             None,
             None,
             None,
+            false,
         )
         .await;
 
@@ -205,6 +206,7 @@ async fn saml_rejects_tampered_response() {
             None,
             None,
             None,
+            false,
         )
         .await;
 
@@ -285,6 +287,7 @@ async fn saml_rejects_expired_not_on_or_after() {
             None,
             None,
             None,
+            false,
         )
         .await;
 
@@ -320,12 +323,12 @@ async fn saml_rejects_replayed_assertion() {
 
     // First submission: should succeed (or fail for non-xmlsec signature reasons).
     let first = svc
-        .handle_saml_response(tenant_id, config_id, &b64, None, None, None)
+        .handle_saml_response(tenant_id, config_id, &b64, None, None, None, false)
         .await;
 
     // Second submission: must fail with AssertionReplay.
     let second = svc
-        .handle_saml_response(tenant_id, config_id, &b64, None, None, None)
+        .handle_saml_response(tenant_id, config_id, &b64, None, None, None, false)
         .await;
 
     match first {
@@ -408,6 +411,7 @@ async fn saml_clock_skew_documents_current_behaviour() {
             None,
             None,
             None,
+            false,
         )
         .await;
 
@@ -437,6 +441,7 @@ async fn saml_happy_path() {
             None,
             None,
             None,
+            false,
         )
         .await;
 

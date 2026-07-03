@@ -749,6 +749,10 @@ pub struct SamlAcsRequest {
     pub saml_response: String,
     /// Relay state returned by the IdP.
     pub relay_state: Option<String>,
+    /// The real Assertion Consumer Service URL this response was posted to.
+    /// Required so the handler can validate `Response.Destination` against
+    /// it (SECFIX-04/SEC-005) instead of skipping the check.
+    pub acs_url: String,
 }
 
 /// Query parameters for SP metadata generation.
@@ -850,6 +854,9 @@ pub async fn saml_acs<C: Connection>(
     if req.saml_response.is_empty() {
         return Err(validation_err("saml_response must not be empty"));
     }
+    if req.acs_url.is_empty() {
+        return Err(validation_err("acs_url must not be empty"));
+    }
 
     let service = SamlFederationService::new(
         (**config_repo).clone(),
@@ -865,8 +872,9 @@ pub async fn saml_acs<C: Connection>(
             req.config_id,
             &req.saml_response,
             req.relay_state.as_deref(),
-            None, // no request ID available in the authenticated ACS path
-            None, // no expected destination in the authenticated ACS path
+            None,                    // no stored request ID on the authenticated ACS path
+            Some(&req.acs_url),      // SECFIX-04: validate Destination against the real ACS URL
+            true,                    // SECFIX-04: require InResponseTo presence (reject unsolicited)
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -1522,6 +1530,11 @@ pub async fn saml_acs_public<C: Connection>(
             // Destination check: pass empty string (ACS URL not available here;
             // callers that know the ACS URL should pass it explicitly).
             None,
+            // require_in_response_to has no effect when expected_request_id is
+            // Some (this path already enforces presence-and-equality above) —
+            // pass false for clarity; this call site is unchanged (out of
+            // SECFIX-04 scope per 23-04-PLAN.md Task 2).
+            false,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;

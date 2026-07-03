@@ -644,10 +644,10 @@ Bind the verified XML signature to the consumed assertion and enforce the remain
 Make logout revoke the caller's own session from the JWT `jti` without requiring a client-supplied body.
 
 ### Acceptance Criteria
-- [ ] `POST /api/v1/auth/logout` derives the session from the authenticated JWT `jti`; no required `{session_id}` body (or client sends the correct body)
-- [ ] Session invalidated and all three cookies cleared server-side; a subsequent request with the old cookies is unauthenticated
-- [ ] Frontend `handleLogout` succeeds (no 400); query cache + auth store cleared
-- [ ] Test: logout then reload does not re-authenticate from surviving cookies
+- [x] `POST /api/v1/auth/logout` derives the session from the authenticated JWT `jti`; no required `{session_id}` body (or client sends the correct body) — `LogoutRequest` DTO removed; handler revokes via `user.session_id` only
+- [x] Session invalidated and all three cookies cleared server-side; a subsequent request with the old cookies is unauthenticated — `logout_clears_cookies` replay-after-logout assertion (401 on `/api/v1/auth/me`)
+- [x] Frontend `handleLogout` succeeds (no 400); query cache + auth store cleared — `Topbar.tsx` posts with no body
+- [x] Test: logout then reload does not re-authenticate from surviving cookies — `frontend/e2e/logout.spec.ts` (authored + tsc/eslint clean; local Playwright run deferred per CORR-04, see 23-05-SUMMARY.md)
 
 ## SECFIX-06: Password-Reset / Resend Flows Threaded with tenant_id
 
@@ -1074,7 +1074,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECFIX-02 | Phase 23 | Tenant guard on live grant path (SEC-058) | Complete |
 | SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Complete |
 | SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Complete (residual: Recipient/SubjectConfirmationData deferred) |
-| SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Pending |
+| SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Complete |
 | SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Pending |
 | SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Pending |
 | SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |

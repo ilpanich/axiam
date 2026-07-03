@@ -1,10 +1,13 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.2
-milestone_name: MVP Release Hardening
+milestone_name: — MVP Release Hardening
+current_phase: 23
 status: planning
-last_updated: "2026-07-03T15:02:34.688Z"
+stopped_at: Phase 23 context gathered
+last_updated: "2026-07-03T15:51:11.164Z"
 last_activity: 2026-07-03
+last_activity_desc: v1.2 roadmap created (Phases 23–30; 44 requirement IDs mapped, 100%)
 progress:
   total_phases: 8
   completed_phases: 0
@@ -379,6 +382,6 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-02T19:55:04.931Z
-Stopped at: Completed 22-php-sdk-09-PLAN.md (final plan of Phase 22)
-Resume file: None
+Last session: 2026-07-03T15:51:11.145Z
+Stopped at: Phase 23 context gathered
+Resume file: .planning/phases/23-security-regressions-high-findings/23-CONTEXT.md

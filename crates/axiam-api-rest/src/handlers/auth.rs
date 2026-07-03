@@ -67,6 +67,13 @@ pub struct LoginUserInfo {
     pub id: Uuid,
     pub username: String,
     pub email: String,
+    /// 23-06: exposes the caller's raw tenant_id UUID so the frontend can
+    /// carry it into tenant-scoped unauthenticated calls that require it
+    /// (e.g. `resendVerification`'s `ResendVerificationRequest.tenant_id`)
+    /// without re-deriving it from a slug. Already known server-side from
+    /// the validated JWT / AuthenticatedUser extractor — this only exposes
+    /// it, it does not widen trust.
+    pub tenant_id: Uuid,
 }
 
 /// Login success response body.
@@ -204,6 +211,7 @@ pub async fn cookie_response_from_output<C: Connection>(
                 id: user.id,
                 username: user.username,
                 email: user.email,
+                tenant_id,
             },
             session_id: out.session_id,
             expires_in: out.expires_in,
@@ -652,6 +660,7 @@ pub async fn me<C: Connection>(
             id: user.user_id,
             username: u.username,
             email: u.email,
+            tenant_id: user.tenant_id,
         },
         permissions,
     }))

@@ -1,20 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.1
-milestone_name: — Client SDKs
-current_phase: 22
-status: verifying
-stopped_at: Completed 22-php-sdk-09-PLAN.md (final plan of Phase 22)
-last_updated: "2026-07-02T20:09:51.285Z"
-last_activity: 2026-07-02
-last_activity_desc: Phase 22 complete
+milestone: v1.2
+milestone_name: MVP Release Hardening
+status: planning
+last_updated: "2026-07-03T15:02:34.688Z"
+last_activity: 2026-07-03
 progress:
-  total_phases: 8
-  completed_phases: 8
-  total_plans: 58
-  completed_plans: 58
-  percent: 100
-current_phase_name: php-sdk
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -28,10 +24,10 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 22
-Plan: Not started
-Status: Phase complete — ready for verification
-Last activity: 2026-07-02 — Phase 22 complete
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-07-03 — Milestone v1.2 started
 
 ## Performance Metrics
 

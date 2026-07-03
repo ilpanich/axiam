@@ -4,20 +4,21 @@
 
 AXIAM is an open-source Identity and Access Management (IAM) system built with Rust and SurrealDB, targeting microservices and IoT environments. It provides multi-tenant authentication, authorization, OAuth2/OIDC, federation (SAML/OIDC), certificate management, and an admin UI. This milestone focuses on hardening AXIAM for community beta release — closing all security gaps, resolving deferred TODOs, and ensuring compliance with OAuth2, OIDC, OWASP ASVS, and GDPR standards.
 
-## Current Milestone: v1.1 Client SDKs (Starters)
+## Current Milestone: v1.2 MVP Release Hardening
 
-**Goal:** Ship idiomatic starter client SDKs in 7 languages (Rust, TypeScript, Python, Java, C#, PHP, Go) that wrap the stable v1.0 REST / gRPC / AMQP APIs with auth flows, token management, tenant context, and framework integration helpers.
+**Goal:** Close every open security finding, correctness bug, performance gap, and compliance/documentation item from the two post-remediation reviews (2026-07-01) plus roadmap Phases 18–19, so AXIAM reaches a production-credible MVP/beta release with no known exploitable defect in the identity/authorization control plane.
 
-**Target features:**
-- Rust SDK — REST + gRPC + AMQP client; auth/token/tenant helpers; examples; publish-ready `Cargo.toml`
-- TypeScript SDK — REST (+ gRPC/AMQP where viable) client; token refresh; Express/Fastify middleware
-- Python SDK — REST + gRPC + AMQP client; FastAPI/Django middleware
-- Java SDK — REST + gRPC + AMQP client; Spring Security integration
-- C# SDK — REST + gRPC + AMQP client; ASP.NET Core middleware
-- PHP SDK — REST (+ gRPC/AMQP where viable) client; Laravel/Symfony middleware
-- Go SDK — REST + gRPC + AMQP client; net/http middleware
+**Target feature groups:**
+- **Security regressions & HIGH findings** — gRPC UserService/TokenService authentication (SEC-003), live REST grant-path tenant guard (SEC-058), webhook encryption-key fail-closed (SEC-059), SAML signature↔assertion binding + Destination/Recipient checks (SEC-005), logout that actually revokes the session (SEC-015), password-reset/resend flows threaded with `tenant_id` (SEC-044)
+- **Security MEDIUM/LOW hardening** — TOTP atomic compare-and-set + skew boundary (SEC-008), webhook/discovery/token/metadata SSRF address-pinning (SEC-019/064), XFF rate-limit `peer_addr` fallback + shared store (SEC-048/060), bootstrap TOCTOU + mandatory gate (SEC-049), mTLS CA status/validity (SEC-061), GDPR audit-pseudonymize durability (SEC-063), federation nonce from server state (SEC-004), AMQP mandatory/per-tenant signing key (SEC-022), federation secret `skip_serializing` (SEC-017), SMTP egress NetworkPolicy (SEC-053), erasure-ledger + export-dedup fixes (SEC-065/066)
+- **Correctness** — gRPC governor throughput semantics (CQ-B44), SurrealDB token renewal/reconnect loop (CQ-B45), webhook delivery wired via AMQP with secret-at-rest (CQ-B22/SEC-031), Playwright specs actually run in CI with body assertions (CQ-F36), frontend auth-flow bodies / logout / tenant-slug-on-reload / MFA-setup landing (CQ-F27/F05/F29/F31), GDPR export sessions + per-item shutdown (CQ-B38 residual)
+- **Performance** — HIBP circuit breaker + hot-path pre-sizing (T19.26), concurrent bounded BatchCheckAccess (T19.2/CQ-B20), JWKS single-flight across SDKs (T19.28), SurrealDB reconnect exponential-backoff-with-jitter + poisoned-connection eviction (T19.33/34), load testing + critical-path profiling → `claude_dev/performance-report.md` (T18.3)
+- **Compliance** — OWASP ASVS / ISO 27001 / CyberSecurity Act audit checklist → `claude_dev/security-audit.md` (T18.1), GDPR export/deletion/consent completeness (T18.2)
+- **Remaining functional gaps** — unauthenticated first-time federation login endpoints (T19.9), session invalidation on password reset (T19.10), admin email-config CRUD API + custom-template resolution + secret backfill (T19.20/21/22), admin user-listing & admin-MFA-management endpoints (gated on RBAC)
+- **Structural quality** — `AppState` extraction (CQ-B43), generic `paginate<T>` + shared `CountRow` (CQ-B10), error taxonomy `AlreadyExists`→409 / no `Migration` catch-all (CQ-B11), transactions around multi-statement mutations (CQ-B07/B46), OAuth2 error mapping (CQ-B18), PKI helper dedup (CQ-B15), adopt extracted shared frontend components (CQ-F15/F39)
+- **Documentation** — comprehensive REST/gRPC/AMQP API, deployment, admin, PKI, and SDK getting-started docs consolidated under `docs/` (T18.4)
 
-**Scope decisions (2026-06-28):** All 7 languages in this milestone; full multi-protocol coverage where the language ecosystem supports it; domain research precedes requirements. Source: `claude_dev/roadmap.md` Phase 17 (T17.1–T17.7).
+**Scope decisions (2026-07-03):** This is the FINAL milestone to MVP. Structural-quality debt is in scope (dedicated phase) per "enforce code quality." Domain research skipped — this milestone remediates known, enumerated findings rather than adding new domain features. Sources: `claude_dev/roadmap.md` Phases 18–19, `claude_dev/security-review-postremediation.md`, `claude_dev/code-review-postremediation.md`. Phase numbering continues from Phase 23.
 
 ## Core Value
 
@@ -136,7 +137,10 @@ AXIAM has completed 16 development phases with a working backend and frontend. H
 | Consolidate Phase 18 + 19 into single hardening milestone | Security items span both phases; treating as one prevents gaps | — Pending |
 | SMTP + external provider support for email | User wants configurable email delivery, not just logging | — Pending |
 | Defer SDKs until after hardening | Security must come before API consumption libraries | ✓ Done — opened as v1.1 |
-| All 7 SDKs in one milestone, full multi-protocol | User wants complete language coverage (Rust, TS, Python, Java, C#, PHP, Go) wrapping the stable v1.0 API surface | — v1.1 (2026-06-28) |
+| All 7 SDKs in one milestone, full multi-protocol | User wants complete language coverage (Rust, TS, Python, Java, C#, PHP, Go) wrapping the stable v1.0 API surface | ✓ v1.1 (Phases 15–22) |
+| v1.2 is the FINAL milestone to MVP; consolidates Phases 18–19 + both post-remediation reviews | Ship a production-credible IAM with no known exploitable control-plane defect; security > correctness > performance > compliance > structural quality > docs | — v1.2 (2026-07-03) |
+| Include structural-quality refactors (AppState, generic paginate, error taxonomy, shared components) in the MVP milestone | User directive to "enforce code quality"; clearing this debt at GA avoids reworking security-adjacent paths later | — v1.2 (dedicated quality phase) |
+| Skip domain research for v1.2 | Milestone remediates enumerated SEC-*/CQ-*/T19.x findings — no new domain features to research; codebase intel in `.planning/codebase/` already covers the surface | — v1.2 (2026-07-03) |
 
 ## Evolution
 
@@ -156,4 +160,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-28 — opened Milestone v1.1 (Client SDKs / Phase 17). v1.0 hardening core complete (14/14 GSD phases); 12-HUMAN-UAT.md live smoke still pending closure independently.*
+*Last updated: 2026-07-03 — opened Milestone v1.2 (MVP Release Hardening / final milestone). v1.1 Client SDKs complete (Phases 15–22, 58/58 plans). v1.2 consolidates roadmap Phases 18–19 and all open findings from `security-review-postremediation.md` + `code-review-postremediation.md` into the final push to a production-credible MVP.*

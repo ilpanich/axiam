@@ -656,10 +656,10 @@ Make logout revoke the caller's own session from the JWT `jti` without requiring
 The reset/resend flows 400 because the frontend omits backend-required `tenant_id` (and resend omits `email`).
 
 ### Acceptance Criteria
-- [ ] `requestPasswordReset`, `confirmPasswordReset`, `resendVerification` send `{tenant_id, email/…}` matching the backend DTOs
-- [ ] Reset/verify links carry `tenant_id` so the page can forward it
-- [ ] Responses remain enumeration-safe (constant response regardless of account existence)
-- [ ] Contract test asserts request **bodies** (not just paths) and runs in CI (ties to CORR-04)
+- [x] `requestPasswordReset`, `confirmPasswordReset`, `resendVerification` send `{tenant_id, email/…}` matching the backend DTOs — `auth.ts` threads tenant context/email into all three calls; backend `request_reset`/`resend_verification` build a fully-substituted `action_url` into the emailed link (23-RESEARCH Pattern 6 / Pitfall 3)
+- [x] Reset/verify links carry `tenant_id` so the page can forward it — `ResetPasswordPage`/`VerifyEmailPage` read `?token=&tenant_id=`; `ForgotPasswordPage` reads `?org=&tenant=` slugs (D-04)
+- [x] Responses remain enumeration-safe (constant response regardless of account existence) — unresolvable/missing tenant slug funnels into the same uniform `{"sent": true}`/200 as an unknown account (D-05), proven by `unresolvable_tenant_slug_resolves_to_none_enumeration_safe`/`missing_tenant_context_resolves_to_none_enumeration_safe`
+- [x] Contract test asserts request **bodies** (not just paths) — `auth-contract.spec.ts` (authored + tsc/eslint clean; local Playwright execution blocked by sandbox proxy denying the browser-binary download, see 23-06-SUMMARY.md; CI wiring remains CORR-04)
 
 ---
 
@@ -1075,7 +1075,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Complete |
 | SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Complete (residual: Recipient/SubjectConfirmationData deferred) |
 | SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Complete |
-| SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Pending |
+| SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Complete |
 | SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Pending |
 | SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |
 | SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Pending |

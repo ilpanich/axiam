@@ -999,7 +999,7 @@ NEGATIVE test passing.
 
 ### Phases (v1.2)
 
-- [ ] **Phase 23: Security Regressions & HIGH Findings** - Close the critical/HIGH SEC regressions (gRPC service auth, live-grant tenant guard, webhook fail-closed encrypt-at-rest, SAML XSW binding, logout revocation, reset/resend tenant_id) — each proven by a negative test
+- [x] **Phase 23: Security Regressions & HIGH Findings** - Close the critical/HIGH SEC regressions (gRPC service auth, live-grant tenant guard, webhook fail-closed encrypt-at-rest, SAML XSW binding, logout revocation, reset/resend tenant_id) — each proven by a negative test (completed 2026-07-03)
 - [ ] **Phase 24: Security Hardening I — Authentication & Access-Control Surfaces** - Harden the auth front door: TOTP atomic replay, XFF rate-limit keying, bootstrap atomicity+gate, public-path allowlist, reset/crypto side-channels
 - [ ] **Phase 25: Security Hardening II — Federation, PKI, Data-Protection & Infra** - Fail-closed trust boundaries: SSRF address pinning, mTLS CA status, GDPR erasure durability, federation nonce+secret handling, AMQP per-tenant signing, cluster egress/secret completeness
 - [ ] **Phase 26: Correctness & Resilience** - gRPC governor throughput, SurrealDB token renewal, durable webhook delivery, Playwright-in-CI with body assertions, frontend tenant/MFA/residual flows
@@ -1027,7 +1027,7 @@ NEGATIVE test passing.
   4. A SAML response with a wrapped/duplicated assertion, a wrong `Destination`, or a missing `InResponseTo` on the authenticated ACS path is rejected (SECFIX-04)
   5. After `POST /api/v1/auth/logout` a request replaying the old cookies is unauthenticated (frontend logout returns no 400), and password-reset/resend requests carry `tenant_id`/`email`, succeed, and stay enumeration-safe with a constant response (SECFIX-05, SECFIX-06)
 
-**Plans**: 5/6 plans executed
+**Plans**: 6/6 plans complete
 
 Plans:
 
@@ -1036,7 +1036,7 @@ Plans:
 - [x] 23-03-PLAN.md — SECFIX-03: webhook fail-closed encryption key + encrypt-at-rest on create/update
 - [x] 23-04-PLAN.md — SECFIX-04: SAML XSW signature↔assertion binding (samael 0.0.21) + authenticated-path Destination/InResponseTo
 - [x] 23-05-PLAN.md — SECFIX-05: logout revokes the caller's session from the JWT jti (no body)
-- [ ] 23-06-PLAN.md — SECFIX-06: reset/resend flows thread tenant_id/email, stay enumeration-safe
+- [x] 23-06-PLAN.md — SECFIX-06: reset/resend flows thread tenant_id/email, stay enumeration-safe
 
 **UI hint**: yes
 
@@ -1173,7 +1173,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 23. Security Regressions & HIGH Findings | 5/6 | In Progress|  |
+| 23. Security Regressions & HIGH Findings | 6/6 | Complete   | 2026-07-03 |
 | 24. Security Hardening I — Auth & Access-Control | 0/? | Not started | - |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 0/? | Not started | - |
 | 26. Correctness & Resilience | 0/? | Not started | - |

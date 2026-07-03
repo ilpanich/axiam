@@ -4,17 +4,17 @@ milestone: v1.2
 milestone_name: — MVP Release Hardening
 current_phase: 23
 current_phase_name: security-regressions-high-findings
-status: executing
-stopped_at: Completed 23-05-PLAN.md
-last_updated: "2026-07-03T20:39:06.945Z"
+status: verifying
+stopped_at: Completed 23-06-PLAN.md -- Phase 23 (all 6 SECFIX) complete
+last_updated: "2026-07-03T21:10:28.990Z"
 last_activity: 2026-07-03
 last_activity_desc: Phase 23 execution started
 progress:
   total_phases: 8
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 6
-  completed_plans: 5
-  percent: 0
+  completed_plans: 6
+  percent: 13
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 23 (security-regressions-high-findings) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-03 — Phase 23 execution started
 
 ## Performance Metrics
@@ -158,6 +158,7 @@ Last activity: 2026-07-03 — Phase 23 execution started
 | Phase 23 P03 | 30min | 3 tasks | 9 files |
 | Phase 23 P04 | 27min | 3 tasks | 6 files |
 | Phase 23 P05 | 35min | 2 tasks | 5 files |
+| Phase 23 P06 | ~90min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -373,6 +374,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 23-03]: register_api_v1_routes<C> gained a Clone bound to let generic webhook handlers call WebhookDeliveryService.encrypt_secret(), satisfied transparently by DbClient/local Db
 - [Phase ?]: SECFIX-04: libxml promoted transitive->direct dep of axiam-federation (pinned =0.3.3 via workspace table, matching samael convention); bind_signature_to_assertion (raw-XML libxml XPath) closes the XSW gap between verify_signature and claims trust; SamlAcsRequest gained required acs_url field (plan assumed it existed; it did not); Recipient/SubjectConfirmationData validation recorded as SEC-005 residual, deferred to a future phase.
 - [Phase ?]: SECFIX-05: logout revokes session from verified JWT jti (AuthenticatedUser.session_id), no client-supplied session_id; removed LogoutRequest DTO entirely (D-03)
+- [Phase ?]: Exposed tenant_id on LoginUserInfo (login + /auth/me) so resendVerification's ProfilePage call site can source the raw tenant_id UUID from the auth store
+- [Phase ?]: resolve_reset_tenant_id() returns Option<Uuid> (never a Result) so enumeration-safety is structurally enforced -- there is no Err variant to accidentally propagate for a bad/unknown tenant slug
 
 ### Pending Todos
 
@@ -394,7 +397,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-03T20:39:06.929Z
-Stopped at: Completed 23-05-PLAN.md
+Last session: 2026-07-03T21:10:28.974Z
+Stopped at: Completed 23-06-PLAN.md -- Phase 23 (all 6 SECFIX) complete
 Resume file: None
 Next action: /gsd-execute-phase 23

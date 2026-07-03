@@ -12,7 +12,7 @@ use axiam_auth::token::{AUD_USER, issue_access_token};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
-use axiam_core::models::user::CreateUser;
+use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
     SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
@@ -27,10 +27,16 @@ use tonic::transport::{Channel, Server};
 use uuid::Uuid;
 
 use axiam_api_grpc::middleware::auth::AuthInterceptor;
-use axiam_api_grpc::proto::CheckAccessRequest;
 use axiam_api_grpc::proto::authorization_service_client::AuthorizationServiceClient;
 use axiam_api_grpc::proto::authorization_service_server::AuthorizationServiceServer;
-use axiam_api_grpc::services::AuthorizationServiceImpl;
+use axiam_api_grpc::proto::token_service_client::TokenServiceClient;
+use axiam_api_grpc::proto::token_service_server::TokenServiceServer;
+use axiam_api_grpc::proto::user_service_client::UserServiceClient;
+use axiam_api_grpc::proto::user_service_server::UserServiceServer;
+use axiam_api_grpc::proto::{
+    CheckAccessRequest, GetUserRequest, IntrospectTokenRequest, ValidateCredentialsRequest,
+};
+use axiam_api_grpc::services::{AuthorizationServiceImpl, TokenServiceImpl, UserServiceImpl};
 
 // ---------------------------------------------------------------------------
 // Type aliases
@@ -153,6 +159,45 @@ async fn setup() -> (Surreal<TestDb>, Uuid, Uuid) {
     (db, tenant.id, user.id)
 }
 
+/// Create a second organization/tenant/user in the same DB — used to prove
+/// cross-tenant `GetUser` is rejected (SECFIX-01 / T-23-01-B).
+async fn setup_second_tenant(db: &Surreal<TestDb>) -> (Uuid, Uuid) {
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org = org_repo
+        .create(CreateOrganization {
+            name: "Auth Test Org B".into(),
+            slug: "auth-test-org-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let tenant = tenant_repo
+        .create(CreateTenant {
+            organization_id: org.id,
+            name: "Auth Test Tenant B".into(),
+            slug: "auth-test-tenant-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id: tenant.id,
+            username: "auth-tester-b".into(),
+            email: "auth-tester-b@example.com".into(),
+            password: "pass123456789".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    (tenant.id, user.id)
+}
+
 fn make_engine(db: &Surreal<TestDb>) -> TestEngine {
     AuthorizationEngine::new(
         SurrealRoleRepository::new(db.clone()),
@@ -169,8 +214,9 @@ fn make_engine(db: &Surreal<TestDb>) -> TestEngine {
 // a real peer IP on in-process connections.
 // ---------------------------------------------------------------------------
 
-async fn start_test_server(
+async fn start_test_server<U: UserRepository + Clone + 'static>(
     engine: TestEngine,
+    user_repo: U,
     auth_config: AuthConfig,
 ) -> (String, tokio::sync::oneshot::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -180,12 +226,24 @@ async fn start_test_server(
 
     let authz_svc = AuthorizationServiceServer::with_interceptor(
         AuthorizationServiceImpl::new(engine),
+        AuthInterceptor::new(auth_config.clone()),
+    );
+    // SECFIX-01: UserService and TokenService are registered behind the same
+    // AuthInterceptor chokepoint as AuthorizationService — mirrors server.rs.
+    let user_svc = UserServiceServer::with_interceptor(
+        UserServiceImpl::new(user_repo, auth_config.clone()),
+        AuthInterceptor::new(auth_config.clone()),
+    );
+    let token_svc = TokenServiceServer::with_interceptor(
+        TokenServiceImpl::new(auth_config.clone()),
         AuthInterceptor::new(auth_config),
     );
 
     tokio::spawn(
         Server::builder()
             .add_service(authz_svc)
+            .add_service(user_svc)
+            .add_service(token_svc)
             .serve_with_incoming_shutdown(incoming, async {
                 rx.await.ok();
             }),
@@ -204,6 +262,26 @@ async fn bare_client(endpoint: String) -> AuthorizationServiceClient<Channel> {
     AuthorizationServiceClient::new(channel)
 }
 
+/// Bare (unauthenticated) UserService client — no authorization header.
+async fn bare_user_client(endpoint: String) -> UserServiceClient<Channel> {
+    let channel = Channel::from_shared(endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    UserServiceClient::new(channel)
+}
+
+/// Bare (unauthenticated) TokenService client — no authorization header.
+async fn bare_token_client(endpoint: String) -> TokenServiceClient<Channel> {
+    let channel = Channel::from_shared(endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    TokenServiceClient::new(channel)
+}
+
 // ---------------------------------------------------------------------------
 // SEC-003 interceptor tests
 // ---------------------------------------------------------------------------
@@ -214,7 +292,8 @@ async fn grpc_rejects_call_without_bearer_token() {
     let (db, tenant_id, user_id) = setup().await;
     let auth_config = test_auth_config();
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
     let mut client = bare_client(endpoint).await;
 
     let result = client
@@ -247,7 +326,8 @@ async fn grpc_accepts_call_with_valid_bearer_token() {
     let auth_config = test_auth_config();
     let token = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
 
     let channel = Channel::from_shared(endpoint)
         .unwrap()
@@ -284,7 +364,8 @@ async fn grpc_rejects_call_with_malformed_token() {
     let (db, tenant_id, user_id) = setup().await;
     let auth_config = test_auth_config();
     let engine = make_engine(&db);
-    let (endpoint, _shutdown) = start_test_server(engine, auth_config).await;
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
 
     let channel = Channel::from_shared(endpoint)
         .unwrap()
@@ -314,5 +395,222 @@ async fn grpc_rejects_call_with_malformed_token() {
         tonic::Code::Unauthenticated,
         "expected Unauthenticated, got {:?}",
         err.code()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SECFIX-01 tests — UserService/TokenService auth + cross-tenant + lockout
+// ---------------------------------------------------------------------------
+
+/// SECFIX-01 — `UserService::GetUser` with NO authorization metadata returns
+/// UNAUTHENTICATED (the service previously had zero auth: server.rs:69-70).
+#[tokio::test]
+async fn grpc_user_service_get_user_rejects_without_bearer_token() {
+    let (db, tenant_id, user_id) = setup().await;
+    let auth_config = test_auth_config();
+    let engine = make_engine(&db);
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let mut client = bare_user_client(endpoint).await;
+
+    let result = client
+        .get_user(GetUserRequest {
+            tenant_id: tenant_id.to_string(),
+            user_id: user_id.to_string(),
+        })
+        .await;
+
+    let err = result.expect_err("expected UNAUTHENTICATED for GetUser without token");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Unauthenticated,
+        "expected Unauthenticated, got {:?}",
+        err.code()
+    );
+}
+
+/// SECFIX-01 — `UserService::ValidateCredentials` with NO authorization
+/// metadata returns UNAUTHENTICATED.
+#[tokio::test]
+async fn grpc_user_service_validate_credentials_rejects_without_bearer_token() {
+    let (db, tenant_id, _user_id) = setup().await;
+    let auth_config = test_auth_config();
+    let engine = make_engine(&db);
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let mut client = bare_user_client(endpoint).await;
+
+    let result = client
+        .validate_credentials(ValidateCredentialsRequest {
+            tenant_id: tenant_id.to_string(),
+            username_or_email: "auth-tester".into(),
+            password: "pass123456789".into(),
+        })
+        .await;
+
+    let err = result.expect_err("expected UNAUTHENTICATED for ValidateCredentials without token");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Unauthenticated,
+        "expected Unauthenticated, got {:?}",
+        err.code()
+    );
+}
+
+/// SECFIX-01 — `TokenService::IntrospectToken` with NO authorization metadata
+/// (i.e. the CALLER is unauthenticated) returns UNAUTHENTICATED, even though
+/// the token BEING introspected is otherwise valid.
+#[tokio::test]
+async fn grpc_token_service_introspect_rejects_without_bearer_token() {
+    let (db, tenant_id, user_id) = setup().await;
+    let auth_config = test_auth_config();
+    let token_to_introspect = mint_test_token(tenant_id, user_id, &auth_config);
+    let engine = make_engine(&db);
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let mut client = bare_token_client(endpoint).await;
+
+    let result = client
+        .introspect_token(IntrospectTokenRequest {
+            access_token: token_to_introspect,
+        })
+        .await;
+
+    let err = result.expect_err("expected UNAUTHENTICATED for caller without a bearer token");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Unauthenticated,
+        "expected Unauthenticated, got {:?}",
+        err.code()
+    );
+}
+
+/// SECFIX-01 / T-23-01-B — a tenant-A-authenticated caller requesting
+/// `GetUser` for a tenant-B target is rejected with PERMISSION_DENIED. This
+/// is the defining SECFIX-01 negative signal: identity must come from
+/// verified JWT claims, never the request body.
+#[tokio::test]
+async fn grpc_get_user_cross_tenant_denied() {
+    let (db, tenant_a, user_a) = setup().await;
+    let (tenant_b, user_b) = setup_second_tenant(&db).await;
+
+    let auth_config = test_auth_config();
+    let token_a = mint_test_token(tenant_a, user_a, &auth_config);
+    let engine = make_engine(&db);
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+
+    let channel = Channel::from_shared(endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client =
+        UserServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+            req.metadata_mut().insert(
+                "authorization",
+                format!("Bearer {token_a}").parse().unwrap(),
+            );
+            Ok(req)
+        });
+
+    // Tenant-A caller attempts to read a tenant-B user by presenting
+    // tenant-B's tenant_id/user_id in the request body.
+    let result = client
+        .get_user(GetUserRequest {
+            tenant_id: tenant_b.to_string(),
+            user_id: user_b.to_string(),
+        })
+        .await;
+
+    let err = result.expect_err("expected PERMISSION_DENIED for cross-tenant GetUser");
+    assert_eq!(
+        err.code(),
+        tonic::Code::PermissionDenied,
+        "expected PermissionDenied, got {:?}",
+        err.code()
+    );
+}
+
+/// SECFIX-01 / SEC-026b / D-06 — gRPC `ValidateCredentials` accrues
+/// failed-login/lockout state via the shared `axiam_auth::lockout` helper on
+/// a wrong password, exactly like REST login. Repeated wrong-password calls
+/// eventually lock the account (proving the accrual, not just a single
+/// increment).
+#[tokio::test]
+async fn grpc_validate_credentials_wrong_password_accrues_lockout() {
+    let (db, tenant_id, user_id) = setup().await;
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
+    let engine = make_engine(&db);
+    let user_repo = SurrealUserRepository::new(db.clone());
+
+    // ValidateCredentials only reaches the password check (and thus lockout
+    // accrual) for Active accounts; setup() creates PendingVerification
+    // users by default (mirrors the account-status ordering already present
+    // in UserServiceImpl::validate_credentials pre-Task-2).
+    user_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let (endpoint, _shutdown) =
+        start_test_server(engine, user_repo.clone(), auth_config.clone()).await;
+
+    let channel = Channel::from_shared(endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client =
+        UserServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+            req.metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            Ok(req)
+        });
+
+    let before = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert_eq!(
+        before.failed_login_attempts, 0,
+        "test user must start with zero failed attempts"
+    );
+
+    // max_failed_login_attempts is 5 in test_auth_config() — drive it to lockout.
+    for attempt in 1..=auth_config.max_failed_login_attempts {
+        let response = client
+            .validate_credentials(ValidateCredentialsRequest {
+                tenant_id: tenant_id.to_string(),
+                username_or_email: "auth-tester".into(),
+                password: "definitely-wrong-password".into(),
+            })
+            .await
+            .expect("ValidateCredentials call itself must succeed (valid=false)")
+            .into_inner();
+
+        assert!(
+            !response.valid,
+            "wrong password must never validate (attempt {attempt})"
+        );
+    }
+
+    let after = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert!(
+        after.failed_login_attempts > 0,
+        "gRPC ValidateCredentials must accrue failed_login_attempts on wrong \
+         password via the shared axiam_auth::lockout helper (SEC-026b)"
+    );
+    assert!(
+        after
+            .locked_until
+            .is_some_and(|locked_until| locked_until > chrono::Utc::now()),
+        "account must be locked after {} consecutive wrong-password attempts",
+        auth_config.max_failed_login_attempts
     );
 }

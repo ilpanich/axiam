@@ -427,7 +427,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
     async fn grant_to_role_with_scopes(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         role_id: Uuid,
         permission_id: Uuid,
         scope_ids: Vec<Uuid>,
@@ -435,24 +435,54 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         let role_id_str = role_id.to_string();
         let perm_id_str = permission_id.to_string();
 
-        if scope_ids.is_empty() {
+        // SEC-058/SECFIX-02: mirror grant_to_role's tenant guard on BOTH branches —
+        // this method is the REST-reachable path (POST /api/v1/roles/{id}/permissions).
+        let result = if scope_ids.is_empty() {
             // Wildcard — same as grant_to_role
             let query = format!(
-                "RELATE role:`{role_id_str}` -> grants -> \
+                "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+                 LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
+                 IF array::len($ro) = 0 OR array::len($pe) = 0 {{\
+                     THROW 'cross-tenant edge denied';\
+                 }};\
+                 RELATE role:`{role_id_str}` -> grants -> \
                  permission:`{perm_id_str}` SET scope_ids = NONE;"
             );
-            self.db.query(query).await.map_err(DbError::from)?;
+            self.db
+                .query(query)
+                .bind(("tid", tenant_id.to_string()))
+                .await
+                .map_err(DbError::from)?
         } else {
             let scope_strs: Vec<String> = scope_ids.iter().map(|id| id.to_string()).collect();
+            // Also verify every scope_id belongs to the caller's tenant before RELATE.
             let query = format!(
-                "RELATE role:`{role_id_str}` -> grants -> \
+                "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
+                 LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
+                 LET $sc = (SELECT id FROM scope WHERE tenant_id = $tid AND meta::id(id) IN $scope_ids);\
+                 IF array::len($ro) = 0 OR array::len($pe) = 0 \
+                    OR array::len($sc) != array::len($scope_ids) {{\
+                     THROW 'cross-tenant edge denied';\
+                 }};\
+                 RELATE role:`{role_id_str}` -> grants -> \
                  permission:`{perm_id_str}` SET scope_ids = $scope_ids;"
             );
             self.db
                 .query(query)
+                .bind(("tid", tenant_id.to_string()))
                 .bind(("scope_ids", scope_strs))
                 .await
-                .map_err(DbError::from)?;
+                .map_err(DbError::from)?
+        };
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cross-tenant edge denied") {
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "cross-tenant permission grant denied".into(),
+                });
+            }
+            return Err(DbError::Migration(msg).into());
         }
 
         Ok(())

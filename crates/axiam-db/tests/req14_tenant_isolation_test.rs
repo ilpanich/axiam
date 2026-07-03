@@ -19,8 +19,7 @@ use axiam_core::repository::{
 };
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealPermissionRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealTenantRepository,
-    SurrealUserRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;

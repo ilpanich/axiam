@@ -51,7 +51,7 @@ created: 2026-07-03
 | {23-03-01} | 03 | 1 | SECFIX-03 | T-23-03 | webhook register fails closed when key unset; stored secret ciphertext ≠ plaintext, decrypts at delivery | integration | `cargo test -p axiam-api-rest --test webhook_test` | ✅ file / ❌ new fns | ⬜ pending |
 | {23-04-01} | 04 | 1 | SECFIX-04 | T-23-04 | wrapped/duplicated assertion, wrong `Destination`, missing `InResponseTo` on ACS path all rejected | integration | `cargo test -p axiam-server --test req5_saml_e2e` | ✅ file / ❌ new fns | ⬜ pending |
 | {23-05-01} | 05 | 1 | SECFIX-05 | T-23-05 | replay of old cookies after logout → 401; frontend logout no longer 400s | integration + e2e | `cargo test -p axiam-api-rest --test auth_test` · `npx playwright test <logout spec>` | ✅ file / ❌ new fns | ⬜ pending |
-| {23-06-01} | 06 | 1 | SECFIX-06 | T-23-06 | reset/confirm/resend carry `tenant_id`/`email`, succeed, stay enumeration-safe for unresolvable slug | integration + e2e | `cargo test -p axiam-api-rest` · `npx playwright test auth-contract.spec.ts` | ✅ file / ❌ body asserts | ⬜ pending |
+| {23-06-01} | 06 | 1 | SECFIX-06 | T-23-06-A/B/C/D/E | reset/confirm/resend carry `tenant_id`/`email`, succeed, stay enumeration-safe for unresolvable slug; **rendered reset/verify email link is fully substituted — backend test asserts the built `action_url` (token + tenant_id) is present and the unsubstituted mustache action-link placeholder is gone** (T-23-06-E, Pattern 6 / Pitfall 3) | integration + e2e | `cargo test -p axiam-api-rest --lib handlers::password_reset` · `cargo test -p axiam-api-rest --lib handlers::email_verification` · `npx playwright test auth-contract.spec.ts` | ✅ file / ❌ body + substitution asserts | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 

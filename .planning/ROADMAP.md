@@ -1091,7 +1091,24 @@ Plans:
   4. An account-linking OIDC callback ignores a request-supplied nonce and validates against server-side login state (replay rejected), and federation/PKI secrets are never serialized or printed in Debug/list paths (SECHRD-07, SECHRD-09)
   5. AMQP message signing is mandatory in production and per-tenant (a tenant-A signature cannot validate a tenant-B message), ExportReady mail is deliverable end-to-end (real `org_id`, backoff retry), and SMTP egress + the completed k8s secret set work under the tightened default-deny NetworkPolicy (SECHRD-08, SECHRD-10)
 
-**Plans**: TBD
+**Plans**: 10 plans
+
+Plans:
+**Wave 1** *(8 parallel — disjoint files/crates)*
+
+- [ ] 25-01-PLAN.md — SECHRD-02: shared SSRF resolve-and-pin guard (axiam-federation) + JWKS/OIDC/SAML call sites
+- [ ] 25-03-PLAN.md — SECHRD-05: mTLS issuing-CA status/validity gate before verify_signature (axiam-pki)
+- [ ] 25-04-PLAN.md — SECHRD-06: DB layer — SessionRepository::list_by_user + export dedup widen + erasure_proof UNIQUE index
+- [ ] 25-06-PLAN.md — SECHRD-07: account-linking OIDC callback nonce-from-server-state + replay test
+- [ ] 25-07-PLAN.md — SECHRD-08: per-tenant HKDF AMQP signing (mandatory, no fail-open) + cross-tenant/unsigned tests
+- [ ] 25-08-PLAN.md — SECHRD-08: mail-consumer backoff + ExportReady end-to-end deliverability test
+- [ ] 25-09-PLAN.md — SECHRD-09: FederationConfig + CaCertificate secret non-serialization/Debug-redaction + narrowed list()
+- [ ] 25-10-PLAN.md — SECHRD-10: SMTP egress + 443 CIDR exclusions + k8s secret set + CI AXIAM__ prefix (human-verify)
+
+**Wave 2** *(depend on Wave 1)*
+
+- [ ] 25-02-PLAN.md — SECHRD-02: webhook delivery IP-pinning via the shared guard + pin test (depends 25-01)
+- [ ] 25-05-PLAN.md — SECHRD-06/08: proof-last erasure pipeline (fatal pseudonymize) + real-sessions export + ExportReady org_id (depends 25-04)
 
 ---
 
@@ -1194,7 +1211,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 |-------|----------------|--------|-----------|
 | 23. Security Regressions & HIGH Findings | 6/6 | Complete   | 2026-07-03 |
 | 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete    | 2026-07-04 |
-| 25. Security Hardening II — Federation/PKI/Data/Infra | 0/? | Not started | - |
+| 25. Security Hardening II — Federation/PKI/Data/Infra | 0/10 | Not started | - |
 | 26. Correctness & Resilience | 0/? | Not started | - |
 | 27. Performance & Load Hardening | 0/? | Not started | - |
 | 28. Functional Completeness | 0/? | Not started | - |

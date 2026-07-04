@@ -13,7 +13,9 @@ use axiam_core::models::certificate::{
     CertificateType, CreateCaCertificate, CreateCertificate, KeyAlgorithm, StoreCertificate,
 };
 use axiam_core::models::service_account::CreateServiceAccount;
-use axiam_core::repository::{CertificateRepository, ServiceAccountRepository};
+use axiam_core::repository::{
+    CaCertificateRepository, CertificateRepository, ServiceAccountRepository,
+};
 use axiam_db::repository::{
     SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealServiceAccountRepository,
 };
@@ -256,5 +258,187 @@ async fn mtls_chain_reject_when_no_ca_cert_found() {
             || err_msg.contains("Certificate")
             || err_msg.contains("chain verify"),
         "error must indicate CA lookup failure, got: {err_msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Case 4: Reject — issuing CA has been revoked (SECHRD-05)
+// ---------------------------------------------------------------------------
+//
+// The leaf cert is genuinely signed by the CA and would otherwise pass chain
+// verification, but the issuing CA itself has since been revoked. Device
+// auth must fail closed before `verify_signature` runs.
+
+#[tokio::test]
+async fn mtls_rejects_revoked_issuing_ca() {
+    let db = setup_db().await;
+
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let ca_svc = CaService::new(ca_repo.clone(), test_pki_config(), sem.clone());
+    let ca = ca_svc
+        .generate(CreateCaCertificate {
+            organization_id: org_id,
+            subject: "Revoked CA Test".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        })
+        .await
+        .expect("CA generation must succeed");
+
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let cert_svc = CertService::new(
+        ca_repo.clone(),
+        cert_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+    );
+    let leaf = cert_svc
+        .generate(
+            org_id,
+            CreateCertificate {
+                tenant_id,
+                issuer_ca_id: ca.certificate.id,
+                subject: "CN=revoked-ca-device".into(),
+                cert_type: CertificateType::Device,
+                key_algorithm: KeyAlgorithm::Ed25519,
+                validity_days: 30,
+                metadata: None,
+            },
+            None,
+        )
+        .await
+        .expect("leaf cert generation must succeed");
+
+    let sa_repo = SurrealServiceAccountRepository::new(db.clone());
+    let (sa, _secret) = sa_repo
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "Revoked CA Test SA".into(),
+        })
+        .await
+        .expect("service account creation must succeed");
+    cert_repo
+        .bind_to_service_account(tenant_id, leaf.certificate.id, sa.id)
+        .await
+        .expect("cert bind must succeed");
+
+    // Revoke the issuing CA via the repository's own revoke method (no direct
+    // SurrealDB escape hatch needed here — a real production path exists).
+    ca_repo
+        .revoke(org_id, ca.certificate.id)
+        .await
+        .expect("CA revoke must succeed");
+
+    let svc_auth = DeviceAuthService::new(cert_repo, ca_repo);
+    let result = svc_auth
+        .authenticate(&leaf.certificate.public_cert_pem)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "device auth against a revoked issuing CA must fail closed"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("issuing CA is not active") || err_msg.contains("Certificate"),
+        "error must indicate the issuing CA is not active, got: {err_msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Case 5: Reject — issuing CA is outside its validity window (SECHRD-05)
+// ---------------------------------------------------------------------------
+//
+// The leaf cert is genuinely signed by the CA and would otherwise pass chain
+// verification, but the issuing CA's own `not_after` has passed. Device auth
+// must fail closed before `verify_signature` runs.
+
+#[tokio::test]
+async fn mtls_rejects_expired_issuing_ca() {
+    let db = setup_db().await;
+
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let ca_svc = CaService::new(ca_repo.clone(), test_pki_config(), sem.clone());
+    let ca = ca_svc
+        .generate(CreateCaCertificate {
+            organization_id: org_id,
+            subject: "Expired CA Test".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        })
+        .await
+        .expect("CA generation must succeed");
+
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let cert_svc = CertService::new(
+        ca_repo.clone(),
+        cert_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+    );
+    let leaf = cert_svc
+        .generate(
+            org_id,
+            CreateCertificate {
+                tenant_id,
+                issuer_ca_id: ca.certificate.id,
+                subject: "CN=expired-ca-device".into(),
+                cert_type: CertificateType::Device,
+                key_algorithm: KeyAlgorithm::Ed25519,
+                validity_days: 30,
+                metadata: None,
+            },
+            None,
+        )
+        .await
+        .expect("leaf cert generation must succeed");
+
+    let sa_repo = SurrealServiceAccountRepository::new(db.clone());
+    let (sa, _secret) = sa_repo
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "Expired CA Test SA".into(),
+        })
+        .await
+        .expect("service account creation must succeed");
+    cert_repo
+        .bind_to_service_account(tenant_id, leaf.certificate.id, sa.id)
+        .await
+        .expect("cert bind must succeed");
+
+    // Test-only escape hatch: no repo method sets an arbitrary validity
+    // window, so backdate the CA's `not_after` via a direct SurrealDB
+    // UPDATE. This is NOT a new production API — it exists solely to
+    // simulate an issuing CA that has aged out of its validity window.
+    let past = Utc::now() - Duration::days(1);
+    db.query("UPDATE type::record('ca_certificate', $id) SET not_after = $not_after")
+        .bind(("id", ca.certificate.id.to_string()))
+        .bind(("not_after", past))
+        .await
+        .expect("test-only backdate query must succeed")
+        .check()
+        .expect("test-only backdate update must succeed");
+
+    let svc_auth = DeviceAuthService::new(cert_repo, ca_repo);
+    let result = svc_auth
+        .authenticate(&leaf.certificate.public_cert_pem)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "device auth against an expired issuing CA must fail closed"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("issuing CA certificate is expired") || err_msg.contains("Certificate"),
+        "error must indicate the issuing CA is expired, got: {err_msg}"
     );
 }

@@ -1078,7 +1078,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Complete |
 | SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Complete |
 | SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |
-| SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Pending (REST keying + shared store complete 24-03/24-04; gRPC parity pending 24-07) |
+| SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Complete (REST keying + shared store 24-03/24-04; gRPC key-extractor parity live + shared-store layer implemented+tested 24-07 — prod wiring of the gRPC shared-store layer into start_grpc_server is a follow-up, see 24-07-SUMMARY.md) |
 | SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Pending |
 | SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Pending |
 | SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |

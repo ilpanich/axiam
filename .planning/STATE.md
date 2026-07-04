@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 24
 current_phase_name: security-hardening-i-authentication-access-control-surfaces
 status: executing
-stopped_at: Completed 24-06-PLAN.md
-last_updated: "2026-07-04T10:44:08.512Z"
+stopped_at: Completed 24-07-PLAN.md
+last_updated: "2026-07-04T11:19:54.406Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 24 execution started
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 15
-  completed_plans: 12
+  completed_plans: 13
   percent: 13
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 24 (security-hardening-i-authentication-access-control-surfaces) — EXECUTING
-Plan: 7 of 9
+Plan: 8 of 9
 Status: Ready to execute
 Last activity: 2026-07-04 — Phase 24 execution started
 
@@ -165,6 +165,7 @@ Last activity: 2026-07-04 — Phase 24 execution started
 | Phase 24 P04 | 28min | 2 tasks | 8 files |
 | Phase 24 P05 | 55min | 2 tasks | 12 files |
 | Phase 24 P06 | 25min | 1 tasks | 4 files |
+| Phase 24 P07 | 33min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -394,6 +395,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 24-05]: Fixed two AuthConfig.pepper call sites the plan's files_modified list missed (axiam-api-grpc UserServiceImpl, req14_pepper_test.rs) via the same expose_secret-at-boundary pattern
 - [Phase ?]: [Phase 24-06]: "Audit syslog" (A4) resolved as a structured tracing::error! JSON event on target axiam.audit.dlq, not a literal syslog(3) socket
 - [Phase ?]: [Phase 24-06]: AuditWriteSink seam + write_erasure_audit_with_dlq live in axiam-api-rest::handlers::gdpr (not axiam-core/repository.rs, owned by another plan this wave); cleanup.rs calls it directly since axiam-server already depends on axiam-api-rest
+- [Phase ?]: [Phase 24-07] gRPC key-extractor fix (GrpcTrustedHopsKeyExtractor) is live in production immediately (build_grpc_governor_layer already wired in server.rs); the shared-store layer (GrpcSharedRateLimitLayer) is implemented+tested but NOT yet wired into start_grpc_server/main.rs — plan file scope excluded server.rs, and start_grpc_server has no Surreal<C> handle threaded through it at all; follow-up plan needed to close this gap
+- [Phase ?]: [Phase 24-07] Discovered SmartIpKeyExtractor could never resolve tonic's peer address at all (checks axum::extract::ConnectInfo<SocketAddr>/bare SocketAddr, but tonic inserts TcpConnectInfo/TlsConnectInfo<TcpConnectInfo>) — fixed as part of the planned key-extractor swap, stronger than the plan's literal leftmost-hop framing
+- [Phase ?]: [Phase 24-07] axiam-db/surrealdb promoted from dev- to regular dependencies of axiam-api-grpc; http crate added as explicit dependency — both needed for the shared-store layer to compile as production library code
 
 ### Pending Todos
 
@@ -412,10 +416,11 @@ Raised 2026-06-02 (SAML feature-flag work):
 - Tracking note: `02-VERIFICATION.md` status field still reads `human_needed`, but the lone human item was closed via Playwright UAT (`02-HUMAN-UAT.md` status: complete, result: pass, evidence in uat-evidence/) — Phase 2 is complete despite the stale verification-file field
 - `gsd-sdk phase.add` sentinel bug: `99-followups/` dir inflates max+1 counter → returns 100; create phase dirs 15–22 directly, do NOT use phase.add for this milestone
 - [Phase 22-php-sdk] 22-01: PHPStan level-6 verification could not run in this sandbox -- api.github.com zipball for phpstan/phpstan returns 403 'GitHub access to this repository is not enabled for this session'; git-clone fallback requires an impractical 7GB+ full-history mirror. Deferred to sdk-ci-php.yml CI (unrestricted infra).
+- [Phase 24-07] gRPC shared rate-limit store (GrpcSharedRateLimitLayer) is implemented and tested but not wired into start_grpc_server/main.rs — production gRPC path still has the per-replica in-memory-only multi-replica gap until a follow-up plan threads a Surreal<C> handle through start_grpc_server and adds the .layer(...) call in server.rs
 
 ## Session Continuity
 
-Last session: 2026-07-04T10:44:08.498Z
-Stopped at: Completed 24-06-PLAN.md
+Last session: 2026-07-04T11:19:54.392Z
+Stopped at: Completed 24-07-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

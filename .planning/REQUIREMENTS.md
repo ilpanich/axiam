@@ -727,11 +727,11 @@ Assert the issuing CA is Active and within its validity window before trusting i
 Never certify an erasure while PII survives; make the erasure ledger and export dedup correct.
 
 ### Acceptance Criteria
-- [ ] `audit_repo.pseudonymize_actor` failure is fatal to the purge (leave re-selection flags set) — proof written only after every PII-bearing step succeeds — `cleanup.rs:327-344`
-- [ ] Erasure-proof rows are unique per user (no duplicate proof on late-stage retry) — `cleanup.rs:337-380`
-- [ ] Export dedup also blocks when a `ready`-but-undownloaded or `failed` job exists (not only `queued`) — `export_job.rs:102-126`
-- [ ] Export includes real `sessions` data (not hardcoded `[]`) and honors per-item shutdown checks
-- [ ] Tests: failed pseudonymize ⇒ user re-selected, no proof; duplicate export request rejected
+- [x] `audit_repo.pseudonymize_actor` failure is fatal to the purge (leave re-selection flags set) — proof written only after every PII-bearing step succeeds — `cleanup.rs:327-344` (25-05, extracted `run_erasure_pipeline`)
+- [x] Erasure-proof rows are unique per user (no duplicate proof on late-stage retry) — `cleanup.rs:337-380` (25-04 DB UNIQUE index on `(tenant_id, user_id)`; 25-05 proof-last ordering makes a retry's duplicate CREATE idempotently rejected)
+- [x] Export dedup also blocks when a `ready`-but-undownloaded or `failed` job exists (not only `queued`) — `export_job.rs:102-126` (25-04)
+- [x] Export includes real `sessions` data (not hardcoded `[]`) and honors per-item shutdown checks (25-05: `session_repo.list_by_user` projection, `token_hash` excluded; sweep-level shutdown handling is the pre-existing top-level `tokio::select!`/watch-channel behavior, unchanged by this plan)
+- [x] Tests: failed pseudonymize ⇒ user re-selected, no proof (25-05: `erasure_pipeline_fatal_on_pseudonymize_failure`); duplicate export request rejected (25-04: `export_job_dedup_blocks_ready_and_failed`)
 
 ## SECHRD-07: Federation Nonce From Server State (authenticated path)
 
@@ -752,7 +752,7 @@ Make AMQP message signing mandatory in production, per-tenant, and fix undeliver
 ### Acceptance Criteria
 - [x] `AXIAM__AMQP__SIGNING_KEY` mandatory in production (fail closed; no warn-and-process) — 25-07
 - [x] Signing key scoped per tenant (or per-tenant queues + broker ACLs) so a tenant-A signature can't validate a tenant-B message — 25-07 (HKDF-derived per-tenant subkey, D-05a/b)
-- [ ] ExportReady producer resolves real `org_id` from tenant (or consumer resolves it) — `cleanup.rs:510` no longer enqueues `Uuid::nil()` — pending 25-05
+- [x] ExportReady producer resolves real `org_id` from tenant (or consumer resolves it) — `cleanup.rs:510` no longer enqueues `Uuid::nil()` — 25-05 (`tenant_repo.get_by_id(tenant_id).organization_id`)
 - [x] Mail-retry republish uses a backoff delay — 25-08 (in-process `tokio::time::sleep`, scaled by `attempt_count`, mirrors `webhook.rs`)
 - [x] Test: ExportReady mail is deliverable end-to-end — 25-08 (`export_ready_resolves_real_org_id`; consumer-side proof, producer-side org_id fix still pending 25-05)
 
@@ -1083,9 +1083,9 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Complete (REST keying + shared store 24-03/24-04; gRPC key-extractor parity live + shared-store layer implemented+tested+wired 24-07 + 24-07 gap-closure — `GrpcSharedRateLimitLayer` now `.layer()`'d into `start_grpc_server`/`main.rs`, fail-open ahead of the in-memory governor) |
 | SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Complete |
 | SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Complete |
-| SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |
+| SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Complete |
 | SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Complete |
-| SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | In Progress (mandatory per-tenant HKDF signing 25-07; mail-retry backoff + deliverability test done 25-08; producer-side org_id resolution pending 25-05) |
+| SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | Complete (mandatory per-tenant HKDF signing 25-07; mail-retry backoff + deliverability test 25-08; producer-side org_id resolution 25-05) |
 | SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Complete |
 | SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Complete (code) — cluster NetworkPolicy/secret verification deferred (99-followups/25-10-networkpolicy-cluster-verification.md) |
 | SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Complete |

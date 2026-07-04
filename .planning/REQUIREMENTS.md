@@ -752,9 +752,9 @@ Make AMQP message signing mandatory in production, per-tenant, and fix undeliver
 ### Acceptance Criteria
 - [x] `AXIAM__AMQP__SIGNING_KEY` mandatory in production (fail closed; no warn-and-process) — 25-07
 - [x] Signing key scoped per tenant (or per-tenant queues + broker ACLs) so a tenant-A signature can't validate a tenant-B message — 25-07 (HKDF-derived per-tenant subkey, D-05a/b)
-- [ ] ExportReady producer resolves real `org_id` from tenant (or consumer resolves it) — `cleanup.rs:510` no longer enqueues `Uuid::nil()`
-- [ ] Mail-retry republish uses a backoff delay
-- [ ] Test: ExportReady mail is deliverable end-to-end
+- [ ] ExportReady producer resolves real `org_id` from tenant (or consumer resolves it) — `cleanup.rs:510` no longer enqueues `Uuid::nil()` — pending 25-05
+- [x] Mail-retry republish uses a backoff delay — 25-08 (in-process `tokio::time::sleep`, scaled by `attempt_count`, mirrors `webhook.rs`)
+- [x] Test: ExportReady mail is deliverable end-to-end — 25-08 (`export_ready_resolves_real_org_id`; consumer-side proof, producer-side org_id fix still pending 25-05)
 
 ## SECHRD-09: Federation Secret Non-Serialization
 
@@ -1083,7 +1083,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Complete |
 | SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |
 | SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Complete |
-| SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | In Progress (mandatory per-tenant HKDF signing 25-07; ExportReady org_id/backoff pending 25-08) |
+| SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | In Progress (mandatory per-tenant HKDF signing 25-07; mail-retry backoff + deliverability test done 25-08; producer-side org_id resolution pending 25-05) |
 | SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Pending |
 | SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Pending |
 | SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Complete |

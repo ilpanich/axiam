@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 25
 current_phase_name: Security Hardening II — Federation, PKI, Data-Protection & Infra
 status: executing
-stopped_at: Completed 25-07-PLAN.md
-last_updated: "2026-07-04T17:50:17.070Z"
+stopped_at: Completed 25-08-PLAN.md
+last_updated: "2026-07-04T18:06:30.904Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 25 execution resumed (wave continue)
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 25
-  completed_plans: 20
+  completed_plans: 21
   percent: 25
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — EXECUTING
-Plan: 6 of 10
+Plan: 7 of 10
 Status: Ready to execute
 Last activity: 2026-07-04 — Phase 25 execution resumed (wave continue)
 
@@ -174,6 +174,7 @@ Last activity: 2026-07-04 — Phase 25 execution resumed (wave continue)
 | Phase 25 P04 | 25min | 2 tasks | 8 files |
 | Phase 25 P06 | 20min | 2 tasks | 2 files |
 | Phase 25 P07 | 20min | 2 tasks | 8 files |
+| Phase 25 P08 | 25min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -422,6 +423,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25-07]: Pinned hkdf = "0.12" instead of the plan-cited 0.13.0 — 0.13 pulls in hmac 0.13/digest 0.11, conflicting with the workspace's existing hmac 0.12/sha2 0.10 (digest 0.10) pins; 0.12.4 is the same RustCrypto crate with an identical API and resolves cleanly
 - [Phase ?]: [Phase 25-07]: Used cfg!(debug_assertions) as the production-flagged signal for AmqpConfig::resolve_signing_key() (no existing environment/production config flag in the codebase; docker/Dockerfile.server builds the shipped production binary with cargo build --release)
 - [Phase ?]: [Phase 25-07]: Extracted the previously-duplicated fail-open verify logic into a single messages::verify_tenant_signature() helper shared by audit_consumer.rs and authz_consumer.rs
+- [Phase ?]: [Phase 25-08]: backoff_delay_secs(attempt_count) uses the POST-increment retry attempt number (1 for first retry) mirroring webhook.rs's attempt-1 exponent shape; local constants (10s initial, 2.0 multiplier, 3600s cap) since mail has no per-message RetryPolicy analog
+- [Phase ?]: [Phase 25-08]: export_ready_resolves_real_org_id proves org_id reaches the rendered template context indirectly via the config-resolution gate (get_effective_config keyed on org_id, None/SendError before render for an unseeded id) rather than exposing private build_template_context/render_email as pub -- keeps file scope to the test file only
 
 ### Pending Todos
 
@@ -444,7 +447,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T17:50:09.392Z
-Stopped at: Completed 25-07-PLAN.md
+Last session: 2026-07-04T18:06:30.889Z
+Stopped at: Completed 25-08-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

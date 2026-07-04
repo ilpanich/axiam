@@ -227,10 +227,10 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      AXIAM_DATABASE__URL: "ws://localhost:8000"
-      AXIAM_DATABASE__USERNAME: root
-      AXIAM_DATABASE__PASSWORD: root
-      AXIAM_AMQP__URL: "amqp://localhost:5672"
+      AXIAM__DB__URL: "ws://localhost:8000"
+      AXIAM__DB__USERNAME: root
+      AXIAM__DB__PASSWORD: root
+      AXIAM__AMQP__URL: "amqp://localhost:5672"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)

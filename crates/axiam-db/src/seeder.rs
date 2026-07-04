@@ -11,12 +11,15 @@
 
 use axiam_core::models::role::CreateRole;
 use axiam_core::repository::{Pagination, PermissionRepository, RoleRepository};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::CountRow;
 use crate::repository::{SurrealPermissionRepository, SurrealRoleRepository};
 
 /// Row struct for reading a seeder_state record.
@@ -127,6 +130,66 @@ pub async fn seed_permissions<C: Connection>(
     .map_err(|e| DbError::Migration(format!("seeder_state upsert check: {e}")))?;
 
     Ok(())
+}
+
+/// Mint a one-time first-run bootstrap setup token if the database has
+/// never been bootstrapped (SECHRD-04 / D-03b).
+///
+/// # Behavior
+///
+/// - On a fresh (never-bootstrapped) database — no `bootstrap_setup_token`
+///   row yet AND no `user` row anywhere — a cryptographically random token
+///   is generated, its sha256 hash is persisted as the
+///   `bootstrap_setup_token` record ID, and the returned `Some(token)`
+///   carries the PLAINTEXT token so the caller can log it exactly once
+///   (the one deliberate secret-log exception, per D-03b). Only the HASH
+///   is ever persisted to the database.
+/// - On any subsequent boot — a setup token already exists, or at least
+///   one user already exists — this is a no-op and returns `Ok(None)`;
+///   nothing is minted or re-logged.
+pub async fn mint_bootstrap_setup_token_if_needed<C: Connection>(
+    db: &Surreal<C>,
+) -> Result<Option<String>, DbError> {
+    // A setup token was already minted — no-op.
+    let existing_tokens: Vec<CountRow> = db
+        .query("SELECT count() AS total FROM bootstrap_setup_token GROUP ALL")
+        .await
+        .map_err(|e| DbError::Migration(format!("bootstrap_setup_token count failed: {e}")))?
+        .take(0)
+        .map_err(|e| DbError::Migration(format!("bootstrap_setup_token count take failed: {e}")))?;
+    if existing_tokens.first().map(|r| r.total).unwrap_or(0) > 0 {
+        return Ok(None);
+    }
+
+    // Bootstrap already completed somewhere — no-op.
+    let existing_users: Vec<CountRow> = db
+        .query("SELECT count() AS total FROM user GROUP ALL")
+        .await
+        .map_err(|e| DbError::Migration(format!("user count failed: {e}")))?
+        .take(0)
+        .map_err(|e| DbError::Migration(format!("user count take failed: {e}")))?;
+    if existing_users.first().map(|r| r.total).unwrap_or(0) > 0 {
+        return Ok(None);
+    }
+
+    // Generate a cryptographically random 32-byte token, base64url-encoded
+    // (same shape as `axiam_auth::token::generate_refresh_token`).
+    let mut rng = rand::rng();
+    let bytes: [u8; 32] = rand::Rng::random(&mut rng);
+    let token = URL_SAFE_NO_PAD.encode(bytes);
+
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let token_hash = hex::encode(hasher.finalize());
+
+    db.query("CREATE type::record('bootstrap_setup_token', $hash) SET created_at = time::now()")
+        .bind(("hash", token_hash))
+        .await
+        .map_err(|e| DbError::Migration(format!("bootstrap_setup_token mint failed: {e}")))?
+        .check()
+        .map_err(|e| DbError::Migration(format!("bootstrap_setup_token mint check failed: {e}")))?;
+
+    Ok(Some(token))
 }
 
 /// Seed the three default roles — super-admin, admin, and viewer — for the

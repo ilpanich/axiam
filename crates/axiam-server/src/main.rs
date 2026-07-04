@@ -215,6 +215,31 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("Database connected and migrations applied");
 
+    // Boot: mint a one-time bootstrap setup token if this database has never
+    // been bootstrapped (SECHRD-04 / D-03b). No-op on every subsequent boot.
+    // Errors are logged, never fatal — an unminted token just means the
+    // env-var gate (AXIAM_BOOTSTRAP_ADMIN_EMAIL) remains the only way in,
+    // which is a safe (fail-closed) degraded state, not a startup blocker.
+    match axiam_db::mint_bootstrap_setup_token_if_needed(db.client()).await {
+        Ok(Some(token)) => {
+            // D-03b: the ONE deliberate secret-log exception — logged exactly
+            // once, at first boot only. Only the sha256 hash is ever
+            // persisted to the database (see `mint_bootstrap_setup_token_if_needed`).
+            tracing::info!(
+                setup_token = %token,
+                "AXIAM first-run bootstrap setup token minted. Use this token \
+                 ONCE to complete first-admin bootstrap (POST \
+                 /api/v1/admin/bootstrap, `setup_token` field) if \
+                 AXIAM_BOOTSTRAP_ADMIN_EMAIL is not set. This token will not \
+                 be shown again."
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to mint bootstrap setup token");
+        }
+    }
+
     // Boot backfill: encrypt any legacy plaintext federation client_secret rows (D-12).
     // Idempotent — rows that are already encrypted are skipped. Runs before HTTP bind
     // to avoid serving plaintext-secret rows after this deploy.

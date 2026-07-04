@@ -147,6 +147,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "rate_limit_bucket",
         sql: SCHEMA_V21,
     },
+    Migration {
+        version: 22,
+        name: "bootstrap_atomicity_gate",
+        sql: SCHEMA_V22,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1113,6 +1118,44 @@ DEFINE TABLE IF NOT EXISTS rate_limit_bucket SCHEMAFULL TYPE NORMAL;
 DEFINE FIELD IF NOT EXISTS count ON TABLE rate_limit_bucket TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS window_start ON TABLE rate_limit_bucket TYPE datetime;
 DEFINE FIELD IF NOT EXISTS updated_at ON TABLE rate_limit_bucket TYPE datetime
+    DEFAULT time::now();
+";
+
+// -----------------------------------------------------------------------
+// Schema v22 — bootstrap atomicity + mandatory gate (SECHRD-04 / SEC-049)
+// -----------------------------------------------------------------------
+//
+// Three additive tables backing the atomic single-super-admin invariant
+// and the mandatory first-run gate:
+//
+// - `bootstrap_lock`: record ID = tenant_id. The bootstrap transaction
+//   CREATEs a lock record for the target tenant; a concurrent second
+//   request racing on the SAME tenant_id hits a UNIQUE-index violation on
+//   this CREATE (the record ID itself IS the uniqueness constraint) and
+//   its whole transaction rolls back — no partial admin, no orphan role
+//   RELATE (D-03c).
+// - `bootstrap_setup_token`: record ID = sha256(token) hex. Stores ONLY
+//   the token hash — the plaintext token is never persisted, only logged
+//   once at first boot (D-03b).
+// - `bootstrap_setup_token_consumed`: record ID = sha256(token) hex.
+//   Consumption-by-existence: the bootstrap transaction CREATEs this
+//   record in the SAME transaction as the admin user, so a replay of the
+//   same token also loses to the same UNIQUE-index violation.
+
+const SCHEMA_V22: &str = "\
+-- =======================================================================
+-- Bootstrap atomicity + mandatory gate (SECHRD-04 / SEC-049)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS bootstrap_lock SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS locked_at ON TABLE bootstrap_lock TYPE datetime
+    DEFAULT time::now();
+
+DEFINE TABLE IF NOT EXISTS bootstrap_setup_token SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE bootstrap_setup_token TYPE datetime
+    DEFAULT time::now();
+
+DEFINE TABLE IF NOT EXISTS bootstrap_setup_token_consumed SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS consumed_at ON TABLE bootstrap_setup_token_consumed TYPE datetime
     DEFAULT time::now();
 ";
 

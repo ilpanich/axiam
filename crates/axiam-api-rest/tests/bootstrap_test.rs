@@ -227,6 +227,80 @@ macro_rules! test_app {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// `bootstrap_setup_token`
+///
+/// SECHRD-04 (Task 1, D-03b): on a fresh, never-bootstrapped database the
+/// mint routine mints a first-run setup token exactly once and persists
+/// only its sha256 hash — the plaintext token is never written to the
+/// database. Once minted (or once any user exists), subsequent calls are a
+/// no-op.
+#[actix_rt::test]
+async fn bootstrap_setup_token() {
+    use chrono::{DateTime, Utc};
+    use sha2::{Digest, Sha256};
+    use surrealdb::types::SurrealValue;
+
+    #[derive(Debug, SurrealValue)]
+    struct CountRow {
+        total: u64,
+    }
+
+    #[derive(Debug, SurrealValue)]
+    struct TokenRow {
+        #[allow(dead_code)]
+        created_at: DateTime<Utc>,
+    }
+
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    // Fresh DB, no users: mint must produce a token.
+    let minted = axiam_db::mint_bootstrap_setup_token_if_needed(&db)
+        .await
+        .unwrap();
+    let token = minted.expect("first mint on a fresh DB must produce a token");
+
+    // The persisted record ID is the token's sha256 hash, never the
+    // plaintext — verify the record exists at exactly that hash.
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let expected_hash = hex::encode(hasher.finalize());
+
+    let mut result = db
+        .query("SELECT created_at FROM type::record('bootstrap_setup_token', $hash)")
+        .bind(("hash", expected_hash))
+        .await
+        .unwrap();
+    let rows: Vec<TokenRow> = result.take(0).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the setup token's sha256 hash must be the exact persisted record ID"
+    );
+
+    // Second call: already minted -> no-op, no new token returned.
+    let second = axiam_db::mint_bootstrap_setup_token_if_needed(&db)
+        .await
+        .unwrap();
+    assert!(
+        second.is_none(),
+        "a setup token must be minted at most once per database"
+    );
+
+    // Exactly one row exists in the table overall after two mint calls.
+    let mut count_result = db
+        .query("SELECT count() AS total FROM bootstrap_setup_token GROUP ALL")
+        .await
+        .unwrap();
+    let counts: Vec<CountRow> = count_result.take(0).unwrap();
+    assert_eq!(
+        counts.first().map(|c| c.total).unwrap_or(0),
+        1,
+        "exactly one setup token row must exist after two mint calls"
+    );
+}
+
 /// `bootstrap_creates_admin`
 ///
 /// A fresh tenant with no users accepts the bootstrap request and creates the

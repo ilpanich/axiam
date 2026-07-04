@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: — MVP Release Hardening
-current_phase: 25
-current_phase_name: Security Hardening II — Federation, PKI, Data-Protection & Infra
-status: executing
+current_phase: 26
+current_phase_name: Correctness & Resilience
+status: planning
 stopped_at: Completed 25-05-PLAN.md (proof-last GDPR erasure pipeline, fatal pseudonymize_actor, real-sessions export, ExportReady org_id) — Phase 25 now 10/10 complete
-last_updated: "2026-07-04T20:08:36.696Z"
+last_updated: "2026-07-04T20:26:22.510Z"
 last_activity: 2026-07-04
-last_activity_desc: "25-05 completed: run_erasure_pipeline extracted (fatal pseudonymize_actor, proof written strictly last), GDPR export now carries real redacted session metadata, ExportReady resolves a real org_id — Phase 25 complete (10/10 plans)"
+last_activity_desc: Phase 25 complete, transitioned to Phase 26
 progress:
   total_phases: 8
   completed_phases: 3
@@ -28,16 +28,16 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — COMPLETE (Wave 1 + Wave 2 both fully executed: 10/10 plans)
-Plan: 25-05 of Wave 2 — COMPLETE (all 3 tasks executed: run_erasure_pipeline extracted with fatal pseudonymize_actor + proof-last ordering; real-sessions export with token_hash redacted; ExportReady org_id resolved from tenant)
-Status: Phase 25 fully executed (10/10 plans). Next: Phase 26 (Correctness & Resilience). 25-10's runtime NetworkPolicy/secret cluster verification remains a tracked followup (not a blocker; see 99-followups/25-10-networkpolicy-cluster-verification.md)
-Last activity: 2026-07-04 — 25-05 completed: GDPR erasure pipeline made atomic (fatal pseudonymize, proof-last), export sessions real + redacted, ExportReady org_id fixed
+Phase: 26 — Correctness & Resilience
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-07-04 — Phase 25 complete, transitioned to Phase 26
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 68
+- Total plans completed: 78
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -55,6 +55,7 @@ Last activity: 2026-07-04 — 25-05 completed: GDPR erasure pipeline made atomic
 | 20 | 9 | - | - |
 | 22 | 9 | - | - |
 | 24 | 9 | - | - |
+| 25 | 10 | - | - |
 
 **Recent Trend:**
 

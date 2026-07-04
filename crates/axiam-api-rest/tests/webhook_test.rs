@@ -811,3 +811,119 @@ async fn create_webhook_stores_ciphertext_not_plaintext() {
         "decrypting the stored ciphertext must round-trip to the original plaintext"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 25-02 (SECHRD-02 / D-01c) negative test — webhook delivery pins the
+// resolved IP; no second DNS resolution occurs at send time.
+// ---------------------------------------------------------------------------
+
+/// Proves the exact property `webhook.rs`'s delivery loop now depends on:
+/// once `axiam_federation::ssrf` resolves and validates a delivery target,
+/// the actual POST is pinned to that validated `IpAddr` — a second,
+/// independent DNS resolution at send time (the DNS-rebind TOCTOU
+/// RESEARCH Pitfall 1 describes: "re-resolves per retry but does NOT pin
+/// per send") cannot silently redirect the connection elsewhere.
+///
+/// Hermetic (loopback only, no live external egress): Linux routes the
+/// entire `127.0.0.0/8` range to `lo`, so `127.0.0.2` is a valid, bindable
+/// loopback address without any extra host configuration.
+///
+/// - `"localhost"` genuinely, deterministically resolves to `127.0.0.1` —
+///   that's where the REAL mock server listens.
+/// - `ssrf::pinned_client` is the exact mechanism `guarded_fetch` (and
+///   therefore `webhook.rs`'s delivery loop) uses to build the per-attempt
+///   client. Pinning it to `127.0.0.2` (deliberately NOT where "localhost"
+///   truly resolves, and where nothing listens) simulates a stale/rebind-
+///   immune pin: if the client independently re-resolved "localhost" at
+///   send time instead of honoring the pin, the request would succeed
+///   against the real listener at `127.0.0.1`. Because the override is
+///   authoritative, the request instead fails against `127.0.0.2` —
+///   proving no second resolution occurs.
+/// - A companion positive case pins to the correct `127.0.0.1` and proves
+///   delivery reaches the real listener, ruling out "the test just always
+///   fails" as an explanation.
+/// - Finally, the full production code path — `ssrf::guarded_fetch` used
+///   exactly as `webhook.rs` uses it (resolve + validate + pin + send in
+///   one call) — is exercised end-to-end and proven to reach the real
+///   listener, confirming the wiring `webhook.rs` now relies on works.
+#[tokio::test]
+async fn webhook_pins_resolved_ip() {
+    use axiam_federation::ssrf;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    // The REAL destination: what "localhost" genuinely, deterministically
+    // resolves to. A legitimate, correctly-pinned send lands here.
+    let real_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind real listener");
+    let real_port = real_listener.local_addr().expect("local_addr").port();
+
+    let real_hit = Arc::new(AtomicBool::new(false));
+    let real_hit_writer = real_hit.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = real_listener.accept().await else {
+                break;
+            };
+            real_hit_writer.store(true, Ordering::SeqCst);
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(response).await;
+        }
+    });
+
+    let url = format!("http://localhost:{real_port}/webhook");
+
+    // --- Negative case: pin to the WRONG loopback address -----------------
+    // Nothing listens on 127.0.0.2:{real_port}. If the client were to
+    // independently re-resolve "localhost" at send time instead of honoring
+    // the pin, this would still succeed (reaching the real listener at
+    // 127.0.0.1). It must instead fail, proving the pin — not a fresh DNS
+    // lookup — determines where the connection lands.
+    let wrong_pin = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+    let wrong_client =
+        ssrf::pinned_client("localhost", wrong_pin, real_port).expect("build wrong-pin client");
+    let wrong_result = wrong_client.post(&url).body("{}").send().await;
+    assert!(
+        wrong_result.is_err(),
+        "request pinned to 127.0.0.2 (nothing listening) must fail — if it \
+         succeeded, the client re-resolved \"localhost\" independently \
+         instead of honoring the pin, got: {wrong_result:?}"
+    );
+    assert!(
+        !real_hit.load(Ordering::SeqCst),
+        "the real listener at 127.0.0.1 must NOT have been reached by the \
+         127.0.0.2-pinned request"
+    );
+
+    // --- Positive control: pin to the CORRECT loopback address ------------
+    // Proves the mechanism genuinely works (rules out "always fails").
+    let correct_pin = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let correct_client = ssrf::pinned_client("localhost", correct_pin, real_port)
+        .expect("build correctly-pinned client");
+    let correct_result = correct_client.post(&url).body("{}").send().await;
+    assert!(
+        correct_result.is_ok(),
+        "request pinned to 127.0.0.1 (real listener) must succeed, got: {correct_result:?}"
+    );
+    assert!(
+        real_hit.load(Ordering::SeqCst),
+        "the real listener at 127.0.0.1 must have been reached by the correctly-pinned request"
+    );
+
+    // --- End-to-end: the exact call shape webhook.rs's delivery loop uses --
+    // `allow_private=true` is the documented first-hop test seam (mirrors
+    // production `deliver()`'s use of `guarded_fetch`, which passes `false`
+    // against real, non-loopback targets).
+    let e2e_result = ssrf::guarded_fetch(&url, true, |c, u| c.post(u).body("{}")).await;
+    assert!(
+        e2e_result.is_ok(),
+        "guarded_fetch (the exact function webhook.rs's delivery loop calls) \
+         must resolve \"localhost\" to 127.0.0.1, pin it, and reach the real \
+         listener, got: {e2e_result:?}"
+    );
+}

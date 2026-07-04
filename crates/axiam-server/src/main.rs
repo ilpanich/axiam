@@ -34,6 +34,7 @@ use axiam_federation::jwks_cache::JwksCache;
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
 use tracing_subscriber::EnvFilter;
@@ -181,9 +182,10 @@ async fn main() -> std::io::Result<()> {
 
     // Load auth pepper from env (REQ-14 AC-1). Plain string — no hex decode.
     // The pepper is prepended to passwords before Argon2id hashing/verification.
-    // SECURITY: do NOT log the pepper value.
+    // SECURITY: do NOT log the pepper value. Wrapped in `SecretString`
+    // (SECHRD-12) so the value can never be accidentally `Debug`-printed.
     if let Ok(value) = std::env::var("AXIAM__AUTH__PEPPER") {
-        config.auth.pepper = Some(value);
+        config.auth.pepper = Some(secrecy::SecretString::from(value));
         tracing::info!("Auth pepper loaded");
     } else {
         tracing::info!(
@@ -327,7 +329,12 @@ async fn main() -> std::io::Result<()> {
     let tenant_repo = SurrealTenantRepository::new(db.client().clone());
     let user_repo = SurrealUserRepository::with_pepper(
         db.client().clone(),
-        config.auth.pepper.clone().unwrap_or_default(),
+        config
+            .auth
+            .pepper
+            .as_ref()
+            .map(|p| p.expose_secret().to_string())
+            .unwrap_or_default(),
     );
     let group_repo = SurrealGroupRepository::new(db.client().clone());
     let role_repo = SurrealRoleRepository::new(db.client().clone());

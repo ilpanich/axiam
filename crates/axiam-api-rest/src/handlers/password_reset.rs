@@ -16,6 +16,7 @@ use axiam_db::{
     SurrealTenantRepository, SurrealUserRepository,
 };
 use chrono::Utc;
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -296,7 +297,7 @@ pub async fn confirm_reset<C: Connection>(
         &req.token,
         &req.new_password,
         &settings.password,
-        auth_config.pepper.as_deref(),
+        auth_config.pepper.as_ref().map(|p| p.expose_secret()),
         Some(http_client.as_ref()),
     )
     .await?;

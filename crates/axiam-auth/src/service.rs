@@ -10,6 +10,7 @@ use axiam_core::repository::{
     UserRepository,
 };
 use chrono::{Duration, Utc};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -217,7 +218,7 @@ impl<
                             password::verify_password(
                                 "dummy",
                                 password::DUMMY_HASH,
-                                pepper_owned.as_deref(),
+                                pepper_owned.as_ref().map(|p| p.expose_secret()),
                             )
                         })
                         .await;
@@ -247,7 +248,11 @@ impl<
         let hash_owned = user.password_hash.clone();
         let pepper_owned = self.config.pepper.clone();
         let valid = tokio::task::spawn_blocking(move || {
-            password::verify_password(&pw_owned, &hash_owned, pepper_owned.as_deref())
+            password::verify_password(
+                &pw_owned,
+                &hash_owned,
+                pepper_owned.as_ref().map(|p| p.expose_secret()),
+            )
         })
         .await
         .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
@@ -704,7 +709,11 @@ impl<
         let hash_owned = user.password_hash.clone();
         let pepper_owned = self.config.pepper.clone();
         let valid = tokio::task::spawn_blocking(move || {
-            password::verify_password(&pw_owned, &hash_owned, pepper_owned.as_deref())
+            password::verify_password(
+                &pw_owned,
+                &hash_owned,
+                pepper_owned.as_ref().map(|p| p.expose_secret()),
+            )
         })
         .await
         .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
@@ -720,7 +729,11 @@ impl<
         let current_hash_owned = user.password_hash.clone();
         let pepper_owned2 = self.config.pepper.clone();
         let is_same = tokio::task::spawn_blocking(move || {
-            password::verify_password(&new_pw_owned, &current_hash_owned, pepper_owned2.as_deref())
+            password::verify_password(
+                &new_pw_owned,
+                &current_hash_owned,
+                pepper_owned2.as_ref().map(|p| p.expose_secret()),
+            )
         })
         .await
         .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
@@ -732,7 +745,7 @@ impl<
         // 2. Evaluate new password against policy.
         let check = crate::policy::evaluate_password(
             new_password,
-            self.config.pepper.as_deref(),
+            self.config.pepper.as_ref().map(|p| p.expose_secret()),
             policy,
             tenant_id,
             user_id,
@@ -748,7 +761,10 @@ impl<
         }
 
         // 3. Hash new password.
-        let new_hash = password::hash_password(new_password, self.config.pepper.as_deref())?;
+        let new_hash = password::hash_password(
+            new_password,
+            self.config.pepper.as_ref().map(|p| p.expose_secret()),
+        )?;
 
         // 4. Store old password in history before overwriting.
         history_repo

@@ -7,6 +7,7 @@ use axiam_core::error::AxiamError;
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::UserRepository;
 use chrono::Utc;
+use secrecy::ExposeSecret;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -163,7 +164,7 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         let valid = password::verify_password(
             &req.password,
             &user.password_hash,
-            self.auth_config.pepper.as_deref(),
+            self.auth_config.pepper.as_ref().map(|p| p.expose_secret()),
         )
         .map_err(|e| Status::internal(e.to_string()))?;
 

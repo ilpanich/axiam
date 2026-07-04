@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use jsonwebtoken::{DecodingKey, EncodingKey};
+use secrecy::SecretString;
 use serde::Deserialize;
 
 fn default_true() -> bool {
@@ -29,7 +30,10 @@ pub struct AuthConfig {
     /// OIDC discovery endpoint URLs. Falls back to `jwt_issuer` if unset.
     pub oauth2_issuer_url: String,
     /// Optional pepper prepended to passwords before Argon2id verification.
-    pub pepper: Option<String>,
+    /// Wrapped in `SecretString` so `Debug`/logging never leaks it by
+    /// accident (SECHRD-12) — exposed only via `.expose_secret()` at the
+    /// `&str` boundary where a pepper value is consumed.
+    pub pepper: Option<SecretString>,
     /// Minimum password length for policy enforcement.
     pub min_password_length: usize,
     /// 256-bit AES-GCM key for encrypting TOTP secrets at rest.

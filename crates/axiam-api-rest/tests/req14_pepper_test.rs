@@ -64,7 +64,7 @@ fn make_auth_config(pepper: Option<&str>) -> AuthConfig {
         jwt_public_key_pem: pub_pem,
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
-        pepper: pepper.map(|p| p.to_owned()),
+        pepper: pepper.map(secrecy::SecretString::from),
         ..AuthConfig::default()
     }
 }

@@ -82,6 +82,20 @@ impl<CR: CertificateRepository, CCR: CaCertificateRepository> DeviceAuthService<
                 )
             })?;
 
+        // SECHRD-05: Assert the issuing CA itself is Active and within its
+        // validity window before trusting it to verify the client cert's
+        // signature. Mirrors the leaf-cert check above (:59-70) applied to
+        // the immediate issuer. Full chain-walk beyond the immediate issuer
+        // is out of scope (D-02 — flat org/tenant-CA -> device hierarchy).
+        if ca_cert.status != CertificateStatus::Active {
+            return Err(AxiamError::Certificate("issuing CA is not active".into()));
+        }
+        if now < ca_cert.not_before || now > ca_cert.not_after {
+            return Err(AxiamError::Certificate(
+                "issuing CA certificate is expired or not yet valid".into(),
+            ));
+        }
+
         // Parse the CA PEM to obtain the public key.
         let (_, ca_pem_obj) = parse_x509_pem(ca_cert.public_cert_pem.as_bytes())
             .map_err(|e| AxiamError::Certificate(format!("invalid CA certificate PEM: {e}")))?;

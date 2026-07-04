@@ -697,7 +697,7 @@ Fix the XFF fallback that returns the client-controlled leftmost hop and reconci
 - [x] When `trusted_hops >= hops.len()`, ignore XFF and use `peer_addr()` (do not return `hops[0]`) — `XForwardedForKeyExtractor::extract` (24-03)
 - [x] `trusted_hops` docs corrected for nginx `proxy_add_x_forwarded_for` (rightmost = real client) (24-03)
 - [x] Rotating `X-Forwarded-For` per request no longer yields a fresh bucket (test) — `rate_limit_xff_rotation_rejected` (24-03)
-- [x] Multi-replica shared rate-limit store implemented, or the per-replica multiplier documented loudly — `rate_limit_bucket` table + `RateLimitShared` middleware (24-04); gRPC parity tracked separately (24-07)
+- [x] Multi-replica shared rate-limit store implemented, or the per-replica multiplier documented loudly — `rate_limit_bucket` table + `RateLimitShared` middleware (24-04); gRPC parity implemented+tested (24-07) and wired into production `start_grpc_server`/`main.rs` (24-07 gap-closure)
 
 ## SECHRD-04: Bootstrap Atomicity & Mandatory Gate
 
@@ -1078,7 +1078,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Complete |
 | SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Complete |
 | SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |
-| SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Complete (REST keying + shared store 24-03/24-04; gRPC key-extractor parity live + shared-store layer implemented+tested 24-07 — prod wiring of the gRPC shared-store layer into start_grpc_server is a follow-up, see 24-07-SUMMARY.md) |
+| SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Complete (REST keying + shared store 24-03/24-04; gRPC key-extractor parity live + shared-store layer implemented+tested+wired 24-07 + 24-07 gap-closure — `GrpcSharedRateLimitLayer` now `.layer()`'d into `start_grpc_server`/`main.rs`, fail-open ahead of the in-memory governor) |
 | SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Complete |
 | SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Pending |
 | SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |

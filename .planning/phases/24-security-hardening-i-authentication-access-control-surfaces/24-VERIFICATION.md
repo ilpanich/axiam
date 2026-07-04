@@ -1,15 +1,41 @@
 ---
 phase: 24-security-hardening-i-authentication-access-control-surfaces
 verified: 2026-07-04T13:09:46Z
-status: gaps_found
-score: 5/5 roadmap success criteria verified; 1 plan-level must-have (24-07) failed
+reverified: 2026-07-04T14:04:12Z
+status: passed
+score: 5/5 roadmap success criteria verified; 1 plan-level must-have (24-07) resolved via gap-closure commit fc382d7
 behavior_unverified: 0
 overrides_applied: 0
 gaps:
   - truth: "The gRPC limiter shares the same SurrealDB rate-limit bucket store, failing OPEN to the existing in-memory GovernorLayer on DB error (24-07 must_haves.truths)"
-    status: failed
+    status: resolved
+    resolution: >
+      Gap-closure fix (commit fc382d7, "fix(24-07): wire GrpcSharedRateLimitLayer
+      into start_grpc_server (close verification gap)"): `start_grpc_server` now
+      takes a new `C: Connection + 'static` generic and `db: Surreal<C>`
+      parameter, threaded from `main.rs`'s existing `db_handle`. `.layer(
+      GrpcSharedRateLimitLayer::new(db, "grpc_authz",
+      grpc_config.grpc_authz_per_sec, trusted_hops_from_env()))` is applied
+      BEFORE `.layer(build_grpc_governor_layer(...))` on the same
+      `Server::builder()` (tower's first-`.layer()`-call-is-outermost
+      convention, confirmed against tonic 0.14.6 source — `Server::layer`
+      delegates directly to `tower::ServiceBuilder::layer`), so the
+      shared-store pre-check now runs first and fails OPEN to the in-memory
+      governor on any SurrealDB error. `trusted_hops_from_env()` was made
+      `pub(crate)` so both layers derive the SAME `AXIAM__RATE_LIMIT__TRUSTED_HOPS`-sourced
+      key. Along the way, `#[derive(Clone)]` on `GrpcSharedRateLimitLayer`/
+      `GrpcSharedRateLimitService` was replaced with manual `Clone` impls (Rule
+      1 auto-fix): the derive macro added a spurious `C: Clone` bound that
+      only surfaced once the layer was used in `start_grpc_server`'s generic
+      context — `Surreal<C>` is `Clone` for every `C` unconditionally, and
+      `axiam_db::DbClient` has no `Clone` impl of its own. Re-verified:
+      `cargo test -p axiam-api-grpc --test rate_limit_shared_store_test`
+      (3/3 pass), `cargo test -p axiam-api-grpc --lib rate_limit` (3/3 pass),
+      `cargo build -p axiam-server` (compiles clean with the new wiring),
+      `cargo clippy -p axiam-api-grpc -- -D warnings` and `cargo fmt -p
+      axiam-api-grpc -p axiam-server -- --check` (both clean).
     reason: >
-      GrpcSharedRateLimitLayer / GrpcSharedRateLimitService are fully implemented and
+      [PRE-FIX, retained for history] GrpcSharedRateLimitLayer / GrpcSharedRateLimitService are fully implemented and
       unit/integration-tested in crates/axiam-api-grpc/src/middleware/rate_limit.rs, but
       are never constructed or `.layer()`'d anywhere outside test files. `start_grpc_server`
       (crates/axiam-api-grpc/src/server.rs) only calls `build_grpc_governor_layer(...)`
@@ -30,8 +56,8 @@ gaps:
 
 **Phase Goal:** The authentication and access-control front door resists replay, IP-spoofing, race, path-smuggling, and timing attacks — every fix fails closed and ships with a negative test
 **Verified:** 2026-07-04T13:09:46Z
-**Status:** gaps_found
-**Re-verification:** No — initial verification
+**Status:** passed
+**Re-verification:** Yes — 2026-07-04T14:04:12Z, gap-closure commit `fc382d7` ("fix(24-07): wire GrpcSharedRateLimitLayer into start_grpc_server (close verification gap)") wired the previously-orphaned `GrpcSharedRateLimitLayer` into production. See the `gaps[0].resolution` field in this file's frontmatter and the "Plan-Level Must-Have — RESOLVED" section below.
 
 ## Goal Achievement
 
@@ -47,11 +73,15 @@ gaps:
 
 **Score:** 5/5 ROADMAP success criteria verified. 0 behavior-unverified.
 
-### Plan-Level Must-Have (Beyond Roadmap SC Wording) — FAILED
+### Plan-Level Must-Have (Beyond Roadmap SC Wording) — RESOLVED (re-verified 2026-07-04T14:04:12Z)
+
+**Gap-closure summary:** Commit `fc382d7` ("fix(24-07): wire GrpcSharedRateLimitLayer into start_grpc_server (close verification gap)") threads a new `C: Connection + 'static` generic + `db: Surreal<C>` parameter through `start_grpc_server`, sourced from `main.rs`'s existing `db_handle`, and applies `.layer(GrpcSharedRateLimitLayer::new(db, "grpc_authz", grpc_config.grpc_authz_per_sec, trusted_hops_from_env()))` BEFORE `.layer(build_grpc_governor_layer(...))` on the same `Server::builder()` — outermost, fail-open on any SurrealDB error, exactly as this report's original `missing:` instruction specified. `trusted_hops_from_env()` was made `pub(crate)` so both layers key off the identical `AXIAM__RATE_LIMIT__TRUSTED_HOPS` value. Re-verification: `cargo test -p axiam-api-grpc --test rate_limit_shared_store_test` (3/3 pass), `cargo test -p axiam-api-grpc --lib rate_limit` (3/3 pass), `cargo build -p axiam-server` (compiles clean), `cargo clippy -p axiam-api-grpc -- -D warnings` and `cargo fmt -p axiam-api-grpc -p axiam-server -- --check` (both clean). The multi-replica shared-store mitigation is now production-live for gRPC, closing the last open item of SECHRD-03.
+
+The original failure analysis is retained below for history.
 
 Plan 24-07's frontmatter declared a must-have truth in addition to the ROADMAP wording: *"The gRPC limiter shares the same SurrealDB rate-limit bucket store, failing OPEN to the existing in-memory GovernorLayer on DB error (parity with 24-04's REST shared store)."* This directly maps to SECHRD-04's REQUIREMENTS.md sibling requirement SECHRD-03's 4th acceptance criterion: *"Multi-replica shared rate-limit store implemented, or the per-replica multiplier documented loudly."*
 
-Investigation of the `<known_gap_to_assess>` item:
+Investigation of the `<known_gap_to_assess>` item (pre-fix state, retained for history):
 
 - `GrpcSharedRateLimitLayer` / `GrpcSharedRateLimitService` (crates/axiam-api-grpc/src/middleware/rate_limit.rs) are real, substantive, and covered by 3 passing integration tests (`crates/axiam-api-grpc/tests/rate_limit_shared_store_test.rs`: cross-instance enforcement, peer-parity under rotating XFF, fail-open on DB error).
 - A repo-wide grep for `GrpcSharedRateLimitLayer` confirms it is referenced ONLY in `rate_limit.rs`'s own doc comment/definition and in the test file — **never** in `crates/axiam-api-grpc/src/server.rs`, `crates/axiam-server/src/main.rs`, or anywhere else. `start_grpc_server` has no `Surreal<C>` parameter through which the shared store could even be constructed.
@@ -72,7 +102,7 @@ Investigation of the `<known_gap_to_assess>` item:
 | `crates/axiam-db/src/repository/rate_limit.rs::SurrealRateLimitBucketRepository` | Windowed-CAS counter (REST) | ✓ VERIFIED | Exists, wired into `RateLimitShared` middleware, wired onto all 20 REST governor call sites in server.rs |
 | `crates/axiam-api-rest/src/middleware/rate_limit_shared.rs::RateLimitShared` | Shared-store pre-check (REST) | ✓ VERIFIED | Wired, tested (cross-instance + fail-open) |
 | `crates/axiam-api-grpc/src/middleware/rate_limit.rs::GrpcTrustedHopsKeyExtractor` | trusted_hops-aware gRPC key extractor | ✓ VERIFIED | Wired into `build_grpc_governor_layer` → `start_grpc_server` → `main.rs` |
-| `crates/axiam-api-grpc/src/middleware/rate_limit.rs::GrpcSharedRateLimitLayer` | Shared-store pre-check (gRPC) | ⚠️ ORPHANED | Exists, substantive, tested — but NEVER referenced outside its own module and the test file. Not wired into `start_grpc_server`/`main.rs`. See gap above. |
+| `crates/axiam-api-grpc/src/middleware/rate_limit.rs::GrpcSharedRateLimitLayer` | Shared-store pre-check (gRPC) | ✓ VERIFIED | Wired into `start_grpc_server`/`main.rs` (gap-closure commit `fc382d7`) — `.layer()`'d before `build_grpc_governor_layer(...)`, fail-open on DB error; 3/3 integration tests still pass |
 | `crates/axiam-api-rest/src/middleware/authz.rs::is_public_path`/`matches_public_allowlist`/`normalize_for_public_check` | Segment-boundary + normalization | ✓ VERIFIED | Wired as the default-deny gate; 5 negative unit tests present and pass by inspection of logic (direct-call matcher tests) |
 | `crates/axiam-auth/src/password.rs::hash_password`/`verify_password` | Zeroizing peppered buffer | ✓ VERIFIED | `Zeroizing<String>` wraps the peppered concatenation on both functions |
 | `crates/axiam-auth/src/config.rs::AuthConfig.pepper` | `SecretString` | ✓ VERIFIED | `Option<secrecy::SecretString>`; every call site (auth, api-rest, api-grpc, server) uses `.expose_secret()` at the `&str` boundary |
@@ -89,7 +119,7 @@ Investigation of the `<known_gap_to_assess>` item:
 | `XForwardedForKeyExtractor` | `build_governor` (REST) | `.key_extractor(...)` | WIRED | server.rs |
 | `RateLimitShared` middleware | `SurrealRateLimitBucketRepository::increment` | async pre-check before Governor | WIRED | 20 call sites in server.rs |
 | `GrpcTrustedHopsKeyExtractor` | `build_grpc_governor_layer` → `start_grpc_server` → `main.rs` | `.key_extractor(...)` / fn call chain | WIRED | Confirmed all 3 hops present |
-| `GrpcSharedRateLimitLayer` | `start_grpc_server` / `main.rs` | `.layer(...)` | **NOT_WIRED** | Zero non-test/non-doc call sites found repo-wide |
+| `GrpcSharedRateLimitLayer` | `start_grpc_server` / `main.rs` | `.layer(...)` | WIRED | Gap-closure commit `fc382d7`: `.layer(GrpcSharedRateLimitLayer::new(db, "grpc_authz", grpc_config.grpc_authz_per_sec, trusted_hops_from_env()))` applied before `.layer(build_grpc_governor_layer(...))`; `db: Surreal<C>` threaded from `main.rs`'s `db_handle` |
 | `is_public_path` | `AuthzMiddlewareService::call` | direct call on `req.path()` before credential check | WIRED | authz.rs:169 |
 | `PasswordResetService::dummy_hash_wait` | `initiate_reset`'s `Ok(None)` branches | direct call before return | WIRED | password_reset.rs:131, 146 |
 | `bootstrap_lock` CREATE | admin-creation transaction | same `BEGIN...COMMIT` block | WIRED | bootstrap.rs:215-271 |
@@ -110,7 +140,7 @@ Full-crate test suites for `axiam-auth`, `axiam-api-rest` (rate_limit_keying_tes
 | Requirement | Source Plan(s) | Description | Status | Evidence |
 |-------------|-----------------|--------------|--------|----------|
 | SECHRD-01 | 24-01 | TOTP atomic replay protection | ✓ SATISFIED | CAS + matched-step recording + enrollment seed, all confirmed live and test-passing |
-| SECHRD-03 | 24-03, 24-04, 24-07 | Rate-limit client-IP keying + multi-replica store | ⚠️ PARTIALLY SATISFIED | Keying fix (the literal ROADMAP SC wording) fully satisfied for REST + gRPC. Multi-replica shared store fully satisfied for REST; implemented+tested but NOT production-wired for gRPC (see gap above) |
+| SECHRD-03 | 24-03, 24-04, 24-07 | Rate-limit client-IP keying + multi-replica store | ✓ SATISFIED | Keying fix fully satisfied for REST + gRPC. Multi-replica shared store fully satisfied for REST (24-04) and now for gRPC too — `GrpcSharedRateLimitLayer` wired into `start_grpc_server`/`main.rs` via gap-closure commit `fc382d7` (24-07 follow-up) |
 | SECHRD-04 | 24-08 | Bootstrap atomicity + mandatory gate | ✓ SATISFIED | Atomicity + gate confirmed live and test-passing |
 | SECHRD-11 | 24-02 | Public-path allowlist hardening | ✓ SATISFIED | Segment-boundary + normalization confirmed, 5 negative tests present |
 | SECHRD-12 | 24-05, 24-06, 24-09 | Auth crypto/recovery side-channels | ✓ SATISFIED | Zeroizing buffer, SecretString pepper, GDPR DLQ, constant-time reset, current-password-reuse block, history seeding — all confirmed |
@@ -134,11 +164,12 @@ None. All 5 ROADMAP success criteria and their supporting artifacts/wiring were 
 
 Phase 24 fully achieves its literal ROADMAP goal and all 5 stated Success Criteria: the TOTP, XFF-keying (REST + gRPC), bootstrap, public-path-allowlist, and password-reset/pepper-hygiene defenses are all live, wired, and each backed by at least one passing negative/concurrency test. Every fix fails closed as required.
 
-One gap remains, narrower than the phase's own SC wording but real: plan 24-07's own declared must-have — that the gRPC rate limiter "shares the same SurrealDB rate-limit bucket store" — is false in the currently running server. The shared-store code is fully built and tested but sits unreferenced outside its own module and test file; `start_grpc_server`/`main.rs` never construct or `.layer()` it. This means the multi-replica rate-limit-evasion gap that 24-04 closed for REST remains open for gRPC in production. It is not a silent gap — both `24-07-SUMMARY.md` and `.planning/REQUIREMENTS.md`'s own traceability table already flag it as an outstanding follow-up — but no concrete phase/plan currently owns closing it, so it is recorded here as a gap rather than deferred.
+**Gap RESOLVED (re-verified 2026-07-04T14:04:12Z):** plan 24-07's own declared must-have — that the gRPC rate limiter "shares the same SurrealDB rate-limit bucket store" — was false in the running server at initial verification time. Gap-closure commit `fc382d7` ("fix(24-07): wire GrpcSharedRateLimitLayer into start_grpc_server (close verification gap)") threaded a `Surreal<C>` handle through `start_grpc_server` and now applies `.layer(GrpcSharedRateLimitLayer::new(db, "grpc_authz", grpc_config.grpc_authz_per_sec, trusted_hops_from_env()))` before `.layer(build_grpc_governor_layer(...))` in `crates/axiam-api-grpc/src/server.rs`, exactly as originally recommended below. The multi-replica rate-limit-evasion gap that 24-04 closed for REST is now also closed for gRPC in production. Re-verification: 3/3 `rate_limit_shared_store_test.rs` tests pass, 3/3 `GrpcTrustedHopsKeyExtractor` unit tests pass, `axiam-server` compiles with the new wiring, `cargo clippy -p axiam-api-grpc -- -D warnings` and `cargo fmt` clean.
 
-**Recommended resolution:** a small follow-up plan (in Phase 24, Phase 26, or a dedicated fast-follow) that threads a `Surreal<C>` handle through `start_grpc_server` and adds `.layer(GrpcSharedRateLimitLayer::new(db, "grpc_authz", grpc_config.grpc_authz_per_sec, trusted_hops))` before `.layer(build_grpc_governor_layer(...))` in `crates/axiam-api-grpc/src/server.rs`, exactly as `24-07-SUMMARY.md` already specifies.
+**Original recommended resolution (as applied):** a small follow-up plan (in Phase 24, Phase 26, or a dedicated fast-follow) that threads a `Surreal<C>` handle through `start_grpc_server` and adds `.layer(GrpcSharedRateLimitLayer::new(db, "grpc_authz", grpc_config.grpc_authz_per_sec, trusted_hops))` before `.layer(build_grpc_governor_layer(...))` in `crates/axiam-api-grpc/src/server.rs`, exactly as `24-07-SUMMARY.md` already specified.
 
 ---
 
 _Verified: 2026-07-04T13:09:46Z_
+_Re-verified: 2026-07-04T14:04:12Z (gap-closure commit fc382d7)_
 _Verifier: Claude (gsd-verifier)_

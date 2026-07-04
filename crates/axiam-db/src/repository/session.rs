@@ -236,6 +236,24 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
         Ok(deleted.len() as u64)
     }
 
+    async fn list_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<Vec<Session>> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM session \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<SessionRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|r| r.try_into_session().map_err(Into::into))
+            .collect()
+    }
+
     async fn cleanup_expired(&self, tenant_id: Uuid) -> AxiamResult<u64> {
         // Count expired sessions first, then delete.
         let mut count_result = self
@@ -258,5 +276,79 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(DbError::from)?;
 
         Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::models::session::CreateSession;
+    use chrono::Duration;
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::Mem;
+
+    async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        crate::schema::run_migrations(&db).await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn list_by_user_returns_only_target_users_sessions() {
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let other_tenant_id = Uuid::new_v4();
+        let target_user_id = Uuid::new_v4();
+        let other_user_id = Uuid::new_v4();
+
+        let expires = Utc::now() + Duration::hours(1);
+
+        // 2 sessions for the target user in the target tenant.
+        for i in 0..2 {
+            repo.create(CreateSession {
+                tenant_id,
+                user_id: target_user_id,
+                token_hash: format!("target-token-hash-{i}"),
+                ip_address: Some("127.0.0.1".into()),
+                user_agent: Some("test-agent".into()),
+                expires_at: expires,
+            })
+            .await
+            .unwrap();
+        }
+
+        // 1 session for a different user in the same tenant.
+        repo.create(CreateSession {
+            tenant_id,
+            user_id: other_user_id,
+            token_hash: "other-user-token-hash".into(),
+            ip_address: Some("127.0.0.1".into()),
+            user_agent: Some("test-agent".into()),
+            expires_at: expires,
+        })
+        .await
+        .unwrap();
+
+        // 1 session for the target user but in a DIFFERENT tenant — must be
+        // excluded (tenant isolation).
+        repo.create(CreateSession {
+            tenant_id: other_tenant_id,
+            user_id: target_user_id,
+            token_hash: "cross-tenant-token-hash".into(),
+            ip_address: Some("127.0.0.1".into()),
+            user_agent: Some("test-agent".into()),
+            expires_at: expires,
+        })
+        .await
+        .unwrap();
+
+        let sessions = repo.list_by_user(tenant_id, target_user_id).await.unwrap();
+        assert_eq!(sessions.len(), 2, "expected exactly the target user's 2 sessions");
+        for session in &sessions {
+            assert_eq!(session.tenant_id, tenant_id);
+            assert_eq!(session.user_id, target_user_id);
+        }
     }
 }

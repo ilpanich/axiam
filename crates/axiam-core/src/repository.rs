@@ -491,6 +491,18 @@ pub trait SessionRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
     /// Remove all expired sessions.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// List all sessions for a user, tenant-scoped.
+    ///
+    /// Returns complete `Session` rows (including `token_hash`) — this method
+    /// is a raw metadata read; redacting the token/hash before surfacing the
+    /// rows to a caller (e.g. the GDPR export) is the caller's responsibility
+    /// (D-03c, SECHRD-06).
+    fn list_by_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Session>>> + Send;
 }
 
 // ---------------------------------------------------------------------------

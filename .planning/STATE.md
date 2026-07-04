@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 25
 current_phase_name: Security Hardening II — Federation, PKI, Data-Protection & Infra
 status: executing
-stopped_at: Completed 25-01-PLAN.md
-last_updated: "2026-07-04T16:18:56.072Z"
+stopped_at: Completed 25-03-PLAN.md
+last_updated: "2026-07-04T16:32:28.808Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 25 execution resumed (wave continue)
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 25
-  completed_plans: 16
+  completed_plans: 17
   percent: 25
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — EXECUTING
-Plan: 2 of 10
+Plan: 3 of 10
 Status: Ready to execute
 Last activity: 2026-07-04 — Phase 25 execution resumed (wave continue)
 
@@ -170,6 +170,7 @@ Last activity: 2026-07-04 — Phase 25 execution resumed (wave continue)
 | Phase 24 P08 | 50min | 3 tasks | 6 files |
 | Phase 24 P09 | 43min | 3 tasks | 4 files |
 | Phase 25 P01 | 25min | 2 tasks | 5 files |
+| Phase 25 P03 | 12min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -409,6 +410,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 24-09]: confirm_reset's evaluate_password (history+HIBP) call is wrapped in its own crypto_semaphore permit for its full duration rather than plumbing the semaphore into policy.rs, staying within this plan's declared file scope while closing the ungated-Argon2 gap
 - [Phase ?]: [Phase 25-01]: allow_private SSRF test seam scoped to guarded_fetch's first hop only — every redirect hop always runs the strict check, otherwise the redirect-bypass negative test would be vacuous
 - [Phase ?]: [Phase 25-01]: SamlFederationService.http_client retained with #[allow(dead_code)] rather than removed — avoids touching ~9 out-of-scope call sites in axiam-api-rest/axiam-server; guarded_fetch now builds its own fresh pinned client per D-01c
+- [Phase ?]: [Phase 25-03]: Mirrored the leaf-cert status/validity check exactly onto the issuing CA (same AxiamError::Certificate type, same Utc::now() clock source) before verify_signature — closes SECHRD-05 (revoked/expired issuing CA still trusted)
+- [Phase ?]: [Phase 25-03]: mtls_rejects_expired_issuing_ca backdates CA not_after via a direct SurrealDB UPDATE test-only escape hatch (no production API sets an arbitrary validity window); mtls_rejects_revoked_issuing_ca uses the real CaCertificateRepository::revoke() method
 
 ### Pending Todos
 
@@ -431,7 +434,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T16:18:48.708Z
-Stopped at: Completed 25-01-PLAN.md
+Last session: 2026-07-04T16:32:28.794Z
+Stopped at: Completed 25-03-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

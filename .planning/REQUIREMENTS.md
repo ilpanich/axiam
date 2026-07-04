@@ -717,8 +717,8 @@ Close the initialized-check TOCTOU and require the bootstrap gate unconditionall
 Assert the issuing CA is Active and within its validity window before trusting it for device-cert auth.
 
 ### Acceptance Criteria
-- [ ] `mtls.rs` checks CA `status == Active` and current time within CA validity before `verify_signature`
-- [ ] Revoked/expired CA ⇒ device auth fails closed (test)
+- [x] `mtls.rs` checks CA `status == Active` and current time within CA validity before `verify_signature` (25-03)
+- [x] Revoked/expired CA ⇒ device auth fails closed (test) — `mtls_rejects_revoked_issuing_ca`, `mtls_rejects_expired_issuing_ca` (25-03)
 
 ## SECHRD-06: GDPR Erasure Durability & Ledger Integrity
 
@@ -1080,7 +1080,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |
 | SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Complete (REST keying + shared store 24-03/24-04; gRPC key-extractor parity live + shared-store layer implemented+tested+wired 24-07 + 24-07 gap-closure — `GrpcSharedRateLimitLayer` now `.layer()`'d into `start_grpc_server`/`main.rs`, fail-open ahead of the in-memory governor) |
 | SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Complete |
-| SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Pending |
+| SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Complete |
 | SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |
 | SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Pending |
 | SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | Pending |

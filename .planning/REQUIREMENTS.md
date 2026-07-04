@@ -784,9 +784,9 @@ Allow required egress under default-deny and complete the k8s secret set.
 Require a segment boundary in public-path wildcard matching and normalize the path before the exclusion check.
 
 ### Acceptance Criteria
-- [ ] Wildcard public entries match only on a path-segment boundary (e.g. `/api/v1/auth/*` does not match `/api/v1/authz/...`)
-- [ ] Path normalized before the allowlist check — collapse `//`, resolve/reject `..` traversal
-- [ ] Negative test: a non-canonical route cannot slip past the allowlist
+- [x] Wildcard public entries match only on a path-segment boundary (e.g. `/api/v1/auth/*` does not match `/api/v1/authz/...`)
+- [x] Path normalized before the allowlist check — collapse `//`, resolve/reject `..` traversal
+- [x] Negative test: a non-canonical route cannot slip past the allowlist
 
 ## SECHRD-12: Auth Crypto & Recovery Side-Channels
 
@@ -1086,7 +1086,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | Pending |
 | SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Pending |
 | SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Pending |
-| SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Pending |
+| SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Complete |
 | SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Pending |
 | CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Pending |
 | CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Pending |

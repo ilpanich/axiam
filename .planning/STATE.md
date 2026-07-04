@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 24
 current_phase_name: security-hardening-i-authentication-access-control-surfaces
 status: executing
-stopped_at: Completed 24-01-PLAN.md
-last_updated: "2026-07-04T08:23:02.019Z"
+stopped_at: Completed 24-02-PLAN.md
+last_updated: "2026-07-04T08:56:17.378Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 24 execution started
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 15
-  completed_plans: 7
+  completed_plans: 8
   percent: 13
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 24 (security-hardening-i-authentication-access-control-surfaces) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-07-04 — Phase 24 execution started
 
@@ -160,6 +160,7 @@ Last activity: 2026-07-04 — Phase 24 execution started
 | Phase 23 P05 | 35min | 2 tasks | 5 files |
 | Phase 23 P06 | ~90min | 3 tasks | 11 files |
 | Phase 24 P01 | 65min | 3 tasks | 7 files |
+| Phase 24 P02 | 20min | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -379,6 +380,8 @@ Recent decisions affecting current work:
 - [Phase ?]: resolve_reset_tenant_id() returns Option<Uuid> (never a Result) so enumeration-safety is structurally enforced -- there is no Err variant to accidentally propagate for a bad/unknown tenant slug
 - [Phase ?]: 24-01: Fix applied in AuthService::verify_mfa/confirm_mfa (axiam-auth/src/service.rs), not handlers/auth.rs — plan named the wrong file for the actual MFA verify/confirm call site
 - [Phase ?]: 24-01: Reversed prior Phase 10 decision (10-05) that kept confirm_mfa on plain verify_code to avoid a same-step collision; SECHRD-01 now seeds totp_last_used_step at enrollment-confirm and correctly rejects the same-step collision as a replay instead
+- [Phase ?]: [Phase 24-02] Segment-boundary wildcard matching + //  collapse + .. rejection in is_public_path (fail-closed on ambiguity), closing the /api/v1/auth/* vs /api/v1/authz/... prefix-confusion bypass (SECHRD-11)
+- [Phase ?]: [Phase 24-02] Extracted matches_public_allowlist(path, entries) as a pure matcher so tests can prove the segment-boundary property against a synthetic allowlist (real PUBLIC_PATHS has no adjacent-prefix wildcard collision to exploit today)
 
 ### Pending Todos
 
@@ -400,7 +403,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T08:23:02.006Z
-Stopped at: Completed 24-01-PLAN.md
+Last session: 2026-07-04T08:56:17.365Z
+Stopped at: Completed 24-02-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

@@ -172,3 +172,10 @@ None - no external service configuration required. Operators deploying to produc
 ---
 *Phase: 25-security-hardening-ii-federation-pki-data-protection-infra*
 *Completed: 2026-07-04*
+
+## Self-Check: PASSED
+
+- FOUND: commit `974ec70` (Task 1)
+- FOUND: commit `0b30407` (Task 2)
+- FOUND: commit `7c2f4d8` (this SUMMARY)
+- FOUND: `crates/axiam-amqp/src/messages.rs` with `derive_tenant_key` symbol present

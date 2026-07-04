@@ -5,8 +5,8 @@ milestone_name: — MVP Release Hardening
 current_phase: 26
 current_phase_name: Correctness & Resilience
 status: planning
-stopped_at: Completed 25-05-PLAN.md (proof-last GDPR erasure pipeline, fatal pseudonymize_actor, real-sessions export, ExportReady org_id) — Phase 25 now 10/10 complete
-last_updated: "2026-07-04T20:26:22.510Z"
+stopped_at: Phase 26 context gathered
+last_updated: "2026-07-04T20:43:19.981Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 25 complete, transitioned to Phase 26
 progress:
@@ -458,7 +458,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T20:08:36.682Z
-Stopped at: Completed 25-05-PLAN.md (proof-last GDPR erasure pipeline, fatal pseudonymize_actor, real-sessions export, ExportReady org_id) — Phase 25 now 10/10 complete
-Resume file: None
+Last session: 2026-07-04T20:43:19.966Z
+Stopped at: Phase 26 context gathered
+Resume file: .planning/phases/26-correctness-resilience/26-CONTEXT.md
 Next action: /gsd-execute-phase 23

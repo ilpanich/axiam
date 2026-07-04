@@ -1,7 +1,19 @@
 //! Admin bootstrap endpoint — first-run setup.
 //!
-//! Creates the initial admin user and seeds default roles when no admin exists.
-//! After the first admin is created, this endpoint returns 404 (per D-09).
+//! Creates the initial admin user and seeds default roles when no admin
+//! exists. First-super-admin creation is atomic (SECHRD-04 / SEC-049 /
+//! D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same
+//! transaction that creates the admin user means two concurrent first-run
+//! requests can create AT MOST ONE super-admin — the loser gets
+//! `AxiamError::AlreadyExists` (409) and its whole transaction rolls back.
+//! After the first admin is created, every subsequent call also hits the
+//! same `bootstrap_lock` uniqueness violation and is refused with 409.
+//!
+//! The endpoint is also gated (D-03a): a request is refused (fail-closed,
+//! no admin created) unless EITHER `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set and
+//! matches the request email, OR the request carries a valid one-time
+//! setup token (server-minted at first boot, logged once, consumed once —
+//! D-03b). An unset/absent gate never allows bootstrap.
 
 use actix_web::{HttpResponse, web};
 use axiam_auth::password;
@@ -13,7 +25,10 @@ use axiam_db::{
     SurrealOrganizationRepository, SurrealRoleRepository, SurrealTenantRepository,
     SurrealUserRepository, seed_default_roles, seed_permissions,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use surrealdb::types::SurrealValue;
 use surrealdb::{Connection, Surreal};
 use uuid::Uuid;
 
@@ -31,6 +46,65 @@ pub struct BootstrapRequest {
     pub email: String,
     pub username: String,
     pub password: String,
+    /// One-time first-run setup token (D-03a/D-03b). Required when
+    /// `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is not set; ignored otherwise.
+    #[serde(default)]
+    pub setup_token: Option<String>,
+}
+
+// -----------------------------------------------------------------------
+// Setup-token validation
+// -----------------------------------------------------------------------
+
+#[derive(Debug, SurrealValue)]
+struct SetupTokenRow {
+    #[allow(dead_code)]
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, SurrealValue)]
+struct ConsumedTokenRow {
+    #[allow(dead_code)]
+    consumed_at: DateTime<Utc>,
+}
+
+/// sha256 hex hash of `token`.
+fn hash_setup_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Returns `Ok(true)` iff `token`'s hash exists in `bootstrap_setup_token`
+/// and has NOT already been consumed. This is a fast-fail pre-check only —
+/// the authoritative single-use guarantee is the `bootstrap_setup_token_consumed`
+/// CREATE inside the same atomic transaction that creates the admin user
+/// (Task 3): a replayed token still loses to a UNIQUE-index violation even
+/// if two requests race past this pre-check simultaneously.
+async fn setup_token_is_valid<C: Connection>(
+    db: &Surreal<C>,
+    token_hash: &str,
+) -> Result<bool, AxiamApiError> {
+    let minted: Vec<SetupTokenRow> = db
+        .query("SELECT created_at FROM type::record('bootstrap_setup_token', $hash)")
+        .bind(("hash", token_hash.to_string()))
+        .await
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?
+        .take(0)
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+    if minted.is_empty() {
+        return Ok(false);
+    }
+
+    let consumed: Vec<ConsumedTokenRow> = db
+        .query("SELECT consumed_at FROM type::record('bootstrap_setup_token_consumed', $hash)")
+        .bind(("hash", token_hash.to_string()))
+        .await
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?
+        .take(0)
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+
+    Ok(consumed.is_empty())
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -73,13 +147,43 @@ pub async fn bootstrap<C: Connection>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
 
-    // 1. Check AXIAM_BOOTSTRAP_ADMIN_EMAIL env gate (D-10).
-    if let Ok(expected) = std::env::var("AXIAM_BOOTSTRAP_ADMIN_EMAIL")
-        && req.email != expected
-    {
-        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
-            reason: "email does not match AXIAM_BOOTSTRAP_ADMIN_EMAIL".into(),
-        }));
+    // 1. Mandatory fail-closed gate (SECHRD-04 / D-03a): EITHER
+    //    AXIAM_BOOTSTRAP_ADMIN_EMAIL must be set and match the request
+    //    email (D-10, existing behavior — preserved verbatim), OR the
+    //    request must carry a setup token whose hash is minted and not yet
+    //    consumed. Both unset/invalid => refuse. An unset gate never
+    //    allows bootstrap.
+    let mut consumed_token_hash: Option<String> = None;
+    match std::env::var("AXIAM_BOOTSTRAP_ADMIN_EMAIL") {
+        Ok(expected) => {
+            // Env gate IS set — preserve the existing email-match behavior.
+            if req.email != expected {
+                return Err(AxiamApiError(AxiamError::AuthorizationDenied {
+                    reason: "email does not match AXIAM_BOOTSTRAP_ADMIN_EMAIL".into(),
+                }));
+            }
+        }
+        Err(_) => {
+            // Env gate NOT set — fall back to the one-time setup token.
+            let token = req.setup_token.as_deref().filter(|t| !t.is_empty());
+            let token_hash = match token {
+                Some(t) => hash_setup_token(t),
+                None => {
+                    return Err(AxiamApiError(AxiamError::AuthorizationDenied {
+                        reason: "bootstrap gate not satisfied: set \
+                                 AXIAM_BOOTSTRAP_ADMIN_EMAIL or provide a valid \
+                                 setup_token"
+                            .into(),
+                    }));
+                }
+            };
+            if !setup_token_is_valid(db.get_ref(), &token_hash).await? {
+                return Err(AxiamApiError(AxiamError::AuthorizationDenied {
+                    reason: "setup token is invalid, unknown, or already consumed".into(),
+                }));
+            }
+            consumed_token_hash = Some(token_hash);
+        }
     }
 
     // 2. Verify org and tenant exist.

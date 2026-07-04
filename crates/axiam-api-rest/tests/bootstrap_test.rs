@@ -308,10 +308,11 @@ async fn bootstrap_setup_token() {
 #[actix_rt::test]
 async fn bootstrap_creates_admin() {
     let _guard = env_guard().await;
-    // Ensure the email gate is OFF for this test.
+    // SECHRD-04: the gate is now mandatory — set the env var to match the
+    // request email so the env-var gate path (D-10) is satisfied.
     // SAFETY: serialized via env_lock; no other thread reads env in this binary.
     unsafe {
-        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "first-admin@example.com");
     }
 
     let (db, org_id, tenant_id) = setup_empty_tenant().await;
@@ -335,6 +336,12 @@ async fn bootstrap_creates_admin() {
     let resp = test::call_service(&app, req).await;
     let status = resp.status().as_u16();
     let body = test::read_body(resp).await;
+
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+
     assert_eq!(
         status,
         201,
@@ -351,15 +358,19 @@ async fn bootstrap_creates_admin() {
 
 /// `bootstrap_returns_404_after_admin`
 ///
-/// A second bootstrap call, against a tenant that already has an admin, must
-/// be rejected with 404 even with a different email. The endpoint is
-/// one-shot per tenant (D-09).
+/// A second bootstrap call, against a tenant that already has an admin
+/// (with the gate satisfied both times), must be rejected. The endpoint is
+/// one-shot per tenant (D-09) — mismatched-email gate refusal is covered
+/// separately by `bootstrap_rejects_wrong_email`.
 #[actix_rt::test]
 async fn bootstrap_returns_404_after_admin() {
     let _guard = env_guard().await;
+    // SECHRD-04: the gate is now mandatory — both calls use the same
+    // matching email so the "already bootstrapped" check (not the gate) is
+    // what's under test here.
     // SAFETY: serialized via env_lock.
     unsafe {
-        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "first@example.com");
     }
 
     let (db, org_id, tenant_id) = setup_empty_tenant().await;
@@ -384,20 +395,26 @@ async fn bootstrap_returns_404_after_admin() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 201, "first bootstrap must succeed");
 
-    // Second bootstrap — must be refused with 404.
+    // Second bootstrap — must be refused even though the gate is satisfied.
     let req = test::TestRequest::post()
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
         .set_json(serde_json::json!({
             "org_id": org_id,
             "tenant_id": tenant_id,
-            "email": "second@example.com",
+            "email": "first@example.com",
             "username": "secondadmin",
             "password": TEST_PASSWORD,
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     let status = resp.status().as_u16();
+
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+
     assert_eq!(
         status, 404,
         "second bootstrap must be refused with 404, got {status}"
@@ -450,6 +467,86 @@ async fn bootstrap_rejects_wrong_email() {
     );
 }
 
+/// `bootstrap_refused_when_gate_unset`
+///
+/// SECHRD-04 (Task 2, D-03a): when `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is unset
+/// AND no (valid) setup token is presented, bootstrap must fail closed —
+/// a non-2xx response and zero admins created. An unset gate must never
+/// allow arbitrary bootstrap.
+#[actix_rt::test]
+async fn bootstrap_refused_when_gate_unset() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock; ensure the email gate is OFF.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+
+    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let peer: SocketAddr = TEST_PEER.parse().unwrap();
+
+    // No setup_token field at all — neither gate is satisfied.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "email": "nobody@example.com",
+            "username": "nobody",
+            "password": TEST_PASSWORD,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    assert!(
+        !(200..300).contains(&status),
+        "bootstrap with no gate satisfied must be refused (non-2xx), got {status}"
+    );
+
+    // An invalid/unknown setup token must also be refused.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "email": "nobody2@example.com",
+            "username": "nobody2",
+            "password": TEST_PASSWORD,
+            "setup_token": "not-a-real-token",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    assert!(
+        !(200..300).contains(&status),
+        "bootstrap with an invalid setup token must be refused (non-2xx), got {status}"
+    );
+
+    // No admin was created by either attempt.
+    use axiam_core::repository::{Pagination, UserRepository};
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let users = user_repo
+        .list(
+            tenant_id,
+            Pagination {
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        users.total, 0,
+        "no admin should be created when the gate is unset/invalid, got {} users",
+        users.total
+    );
+}
+
 /// `bootstrap_admin_can_login`
 ///
 /// After a successful bootstrap, the new admin can log in via `/auth/login`
@@ -459,9 +556,11 @@ async fn bootstrap_rejects_wrong_email() {
 #[actix_rt::test]
 async fn bootstrap_admin_can_login() {
     let _guard = env_guard().await;
+    // SECHRD-04: the gate is now mandatory — set the env var to match the
+    // request email so the env-var gate path (D-10) is satisfied.
     // SAFETY: serialized via env_lock.
     unsafe {
-        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "root@example.com");
     }
 
     let (db, org_id, tenant_id) = setup_empty_tenant().await;
@@ -484,6 +583,10 @@ async fn bootstrap_admin_can_login() {
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
     assert_eq!(resp.status().as_u16(), 201, "bootstrap must succeed");
 
     // 2. Activate the user directly — bootstrap creates them in

@@ -664,6 +664,8 @@ async fn main() -> std::io::Result<()> {
         Arc::new(password_history_repo.clone()),
         Arc::new(export_job_repo.clone()),
         Arc::new(consent_repo.clone()),
+        Arc::new(tenant_repo.clone()),
+        Arc::new(session_repo.clone()),
         cleanup_mail_publisher,
         config.gdpr_pseudonym_pepper,
         config.email_encryption_key,

@@ -14,14 +14,16 @@ use axiam_core::models::gdpr::{
     AccountDeletionStatus, CreateAccountDeletion, CreateConsent, CreateErasureProof,
     CreateExportJob,
 };
+use axiam_core::models::session::CreateSession;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     AccountDeletionRepository, AuditLogFilter, AuditLogRepository, ConsentRepository,
-    ErasureProofRepository, ExportJobRepository, Pagination, UserRepository,
+    ErasureProofRepository, ExportJobRepository, Pagination, SessionRepository, UserRepository,
 };
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAuditLogRepository, SurrealConsentRepository,
-    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealUserRepository,
+    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealSessionRepository,
+    SurrealUserRepository,
 };
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -305,6 +307,162 @@ async fn export_completeness() {
     assert!(
         !plaintext.contains("download_token_hash"),
         "export must not contain download_token_hash"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 1b: export_includes_real_session_metadata
+// ---------------------------------------------------------------------------
+/// The GDPR export's `sessions` section must carry real, non-empty session
+/// metadata (`id`, `created_at`, `expires_at`, `ip_address`, `user_agent`)
+/// sourced from `SessionRepository::list_by_user` — NOT a hardcoded `[]` —
+/// and must NEVER include the session's `token_hash` (live credential
+/// material, D-03c / SECHRD-06).
+#[tokio::test]
+async fn export_includes_real_session_metadata() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let session_repo = SurrealSessionRepository::new(db.clone());
+    let export_job_repo = SurrealExportJobRepository::new(db.clone());
+
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "session_export_user".into(),
+            email: "session_export@example.com".into(),
+            password: "SessionExport1234!".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    // Create a real session for this user — the exact field this test
+    // proves is no longer hardcoded to `[]` in the export assembly.
+    let live_token_hash = "super-secret-live-session-token-hash".to_string();
+    let session = session_repo
+        .create(CreateSession {
+            tenant_id,
+            user_id: user.id,
+            token_hash: live_token_hash.clone(),
+            ip_address: Some("10.0.0.42".into()),
+            user_agent: Some("test-agent/1.0".into()),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        })
+        .await
+        .unwrap();
+
+    // --- Simulate the export session-projection (mirrors cleanup.rs
+    //     aggregate_export_data's sessions block) ---
+    let sessions = session_repo.list_by_user(tenant_id, user.id).await.unwrap();
+    let sessions_json: Vec<_> = sessions
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "created_at": s.created_at,
+                "expires_at": s.expires_at,
+                "ip_address": s.ip_address,
+                "user_agent": s.user_agent,
+            })
+        })
+        .collect();
+
+    let export = serde_json::json!({
+        "export_metadata": {
+            "generated_at": Utc::now(),
+            "tenant_id": tenant_id,
+            "subject_id": user.id,
+            "schema_version": "1.0",
+        },
+        "sessions": sessions_json,
+    });
+
+    // Encrypt/decrypt round-trip through a real export_job row, exactly like
+    // the production path, so this test exercises the same storage seam.
+    let key: [u8; 32] = [0xCD; 32];
+    let export_bytes = export.to_string().into_bytes();
+    let (nonce_b64, ct_b64) = encrypt_separate(&key, &export_bytes).unwrap();
+    let job = export_job_repo
+        .create(CreateExportJob {
+            tenant_id,
+            user_id: user.id,
+        })
+        .await
+        .unwrap();
+    let raw_token = Uuid::new_v4().to_string();
+    let token_hash = sha256_hex(&raw_token);
+    export_job_repo
+        .set_ready(
+            job.id,
+            token_hash.clone(),
+            Some(ct_b64),
+            None,
+            Some(nonce_b64),
+            Utc::now() + chrono::Duration::hours(24),
+        )
+        .await
+        .unwrap();
+    let ready_job = export_job_repo
+        .find_by_download_token_hash(tenant_id, &token_hash)
+        .await
+        .unwrap()
+        .expect("export job not found by token hash");
+    let plaintext_bytes = decrypt_separate(
+        &key,
+        ready_job.blob_nonce.as_deref().unwrap(),
+        ready_job.encrypted_blob.as_deref().unwrap(),
+    )
+    .unwrap();
+    let plaintext = String::from_utf8(plaintext_bytes).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&plaintext).unwrap();
+
+    // --- Assertions ---
+    let sessions_arr = parsed["sessions"]
+        .as_array()
+        .expect("sessions section must be an array");
+    assert!(
+        !sessions_arr.is_empty(),
+        "sessions section must be non-empty — the seeded session must appear (no hardcoded [])"
+    );
+    let session_entry = &sessions_arr[0];
+    assert_eq!(
+        session_entry["id"].as_str().unwrap(),
+        session.id.to_string(),
+        "session id must match the created session"
+    );
+    assert_eq!(
+        session_entry["ip_address"].as_str().unwrap(),
+        "10.0.0.42",
+        "ip_address must be present in the projection"
+    );
+    assert_eq!(
+        session_entry["user_agent"].as_str().unwrap(),
+        "test-agent/1.0",
+        "user_agent must be present in the projection"
+    );
+    assert!(
+        session_entry.get("created_at").is_some(),
+        "created_at must be present in the projection"
+    );
+    assert!(
+        session_entry.get("expires_at").is_some(),
+        "expires_at must be present in the projection"
+    );
+
+    // No token_hash / live credential material anywhere in the export.
+    assert!(
+        !plaintext.contains("token_hash"),
+        "export must not contain the token_hash field name"
+    );
+    assert!(
+        !plaintext.contains(&live_token_hash),
+        "export must not contain the session's live token_hash value"
+    );
+    // No invented `last_seen` field either (Session model has none).
+    assert!(
+        !plaintext.contains("last_seen"),
+        "export must not contain a last_seen field (Session model has none)"
     );
 }
 

@@ -24,14 +24,16 @@ use axiam_core::repository::{
     AccountDeletionRepository, AssertionReplayRepository, AuditLogFilter, AuditLogRepository,
     ConsentRepository, ErasureProofRepository, ExportJobRepository, FederationLinkRepository,
     FederationLoginStateRepository, GroupRepository, MailPublisher, Pagination,
-    PasswordHistoryRepository, RoleRepository, UserRepository, WebauthnCredentialRepository,
+    PasswordHistoryRepository, RoleRepository, SessionRepository, TenantRepository, UserRepository,
+    WebauthnCredentialRepository,
 };
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
     SurrealConsentRepository, SurrealErasureProofRepository, SurrealExportJobRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealPasswordHistoryRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
-    SurrealSessionRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnCredentialRepository,
 };
 use chrono::Utc;
 use surrealdb::Connection;
@@ -71,6 +73,10 @@ pub struct CleanupTask<C: Connection> {
     // GDPR export sweep (D-12).
     export_job_repo: Arc<SurrealExportJobRepository<C>>,
     consent_repo: Arc<SurrealConsentRepository<C>>,
+    // Real (metadata-only) session data for the export + org_id resolution
+    // for the ExportReady mail producer (SECHRD-06/SECHRD-08, D-03c/D-05d).
+    tenant_repo: Arc<SurrealTenantRepository<C>>,
+    session_repo: Arc<SurrealSessionRepository<C>>,
     mail_publisher: Arc<MailOutboundPublisher>,
     // Keys (None = skip the respective sweep with a warning).
     gdpr_pepper: Option<[u8; 32]>,
@@ -166,6 +172,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
         export_job_repo: Arc<SurrealExportJobRepository<C>>,
         consent_repo: Arc<SurrealConsentRepository<C>>,
+        tenant_repo: Arc<SurrealTenantRepository<C>>,
+        session_repo: Arc<SurrealSessionRepository<C>>,
         mail_publisher: Arc<MailOutboundPublisher>,
         gdpr_pepper: Option<[u8; 32]>,
         export_encryption_key: Option<[u8; 32]>,
@@ -187,6 +195,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             password_history_repo,
             export_job_repo,
             consent_repo,
+            tenant_repo,
+            session_repo,
             mail_publisher,
             gdpr_pepper,
             export_encryption_key,
@@ -569,12 +579,28 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             )
             .await?;
 
+        // Resolve the real org_id from the tenant before enqueuing the mail
+        // (SECHRD-08 / D-05d) — a Uuid::nil() org_id leaves the mail
+        // consumer unable to resolve the sending organization, producing
+        // undeliverable ExportReady mail.
+        let org_id = match self.tenant_repo.get_by_id(tenant_id).await {
+            Ok(tenant) => tenant.organization_id,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    %tenant_id,
+                    "failed to resolve org_id for ExportReady mail — falling back to nil (mail may be undeliverable)"
+                );
+                Uuid::nil()
+            }
+        };
+
         // (e) Enqueue ExportReady email.
         let download_url = format!("/api/v1/account/export/{}", raw_download_token);
         let msg = OutboundMailMessage {
             mail_type: MailType::ExportReady,
             tenant_id,
-            org_id: Uuid::nil(), // mail consumer resolves from tenant at delivery
+            org_id,
             user_id,
             to_address: String::new(), // mail consumer resolves from user_id
             template_context: serde_json::json!({
@@ -672,6 +698,25 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             })
             .collect();
 
+        // Sessions — real, metadata-only rows (D-03c, SECHRD-06). Token/hash
+        // material is live credential data and must NEVER appear in a GDPR
+        // export, so `token_hash` is deliberately excluded from the
+        // projection below. Propagate errors (CQ-B38 / SEC-056 convention):
+        // a section that fails to query must fail the whole export job.
+        let sessions = self.session_repo.list_by_user(tenant_id, user_id).await?;
+        let sessions_json: Vec<_> = sessions
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "created_at": s.created_at,
+                    "expires_at": s.expires_at,
+                    "ip_address": s.ip_address,
+                    "user_agent": s.user_agent,
+                })
+            })
+            .collect();
+
         // Federation identities — propagate errors (CQ-B38 / SEC-056).
         let fed_links = self
             .federation_link_repo
@@ -744,7 +789,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             },
             "profile": profile,
             "consents": consents_json,
-            "sessions": [],           // metadata only; short-lived, not retained
+            "sessions": sessions_json, // metadata only; NO token_hash (D-03c)
             "mfa": { "enabled": user.mfa_enabled }, // NO mfa_secret
             "federation_identities": fed_json,
             "assignments": assignments_json,

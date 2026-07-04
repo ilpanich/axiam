@@ -4,8 +4,14 @@
 //!
 //! - `POST /api/v1/admin/bootstrap` creates the first admin user when the
 //!   tenant has no users yet.
-//! - After the first admin is created, the endpoint is disabled (returns 404).
+//! - After the first admin is created, the endpoint is disabled (returns 409
+//!   Conflict — SECHRD-04's `bootstrap_lock` uniqueness invariant, not the
+//!   old TOCTOU SELECT-then-branch check).
 //! - When `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set, a mismatching email returns 403.
+//! - The mandatory gate refuses bootstrap when neither the env var nor a
+//!   valid setup token is presented (SECHRD-04 / D-03a).
+//! - Two concurrent first-run requests create at most one super-admin
+//!   (SECHRD-04 / D-03c).
 //! - The newly-bootstrapped admin can authenticate via `/auth/login`.
 
 use std::net::SocketAddr;
@@ -356,14 +362,16 @@ async fn bootstrap_creates_admin() {
     );
 }
 
-/// `bootstrap_returns_404_after_admin`
+/// `bootstrap_returns_409_after_admin`
 ///
 /// A second bootstrap call, against a tenant that already has an admin
-/// (with the gate satisfied both times), must be rejected. The endpoint is
-/// one-shot per tenant (D-09) — mismatched-email gate refusal is covered
-/// separately by `bootstrap_rejects_wrong_email`.
+/// (with the gate satisfied both times), must be rejected with 409 Conflict
+/// — the `bootstrap_lock` uniqueness invariant (SECHRD-04 / D-03c), not the
+/// old TOCTOU SELECT-then-branch check. The endpoint is one-shot per tenant
+/// (D-09) — mismatched-email gate refusal is covered separately by
+/// `bootstrap_rejects_wrong_email`.
 #[actix_rt::test]
-async fn bootstrap_returns_404_after_admin() {
+async fn bootstrap_returns_409_after_admin() {
     let _guard = env_guard().await;
     // SECHRD-04: the gate is now mandatory — both calls use the same
     // matching email so the "already bootstrapped" check (not the gate) is
@@ -416,8 +424,95 @@ async fn bootstrap_returns_404_after_admin() {
     }
 
     assert_eq!(
-        status, 404,
-        "second bootstrap must be refused with 404, got {status}"
+        status, 409,
+        "second bootstrap must be refused with 409 Conflict, got {status}"
+    );
+}
+
+/// `bootstrap_concurrent_race_single_admin`
+///
+/// SECHRD-04 (Task 3, D-03c): two concurrent first-run bootstrap requests
+/// against the SAME tenant must produce AT MOST ONE super-admin. The race
+/// loser gets `AxiamError::AlreadyExists` (409) and its whole transaction
+/// rolls back — no partial admin, no orphan role RELATE.
+#[actix_rt::test]
+async fn bootstrap_concurrent_race_single_admin() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+
+    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+
+    // Mint a single setup token both racers will present — proves the
+    // gate's fast-fail pre-check and the transaction's consumption-by-
+    // existence CREATE both tolerate/resolve the race correctly (the
+    // loser still loses on `bootstrap_lock`, independent of the token).
+    let token = axiam_db::mint_bootstrap_setup_token_if_needed(&db)
+        .await
+        .unwrap()
+        .expect("fresh tenant DB should mint a setup token");
+
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let peer: SocketAddr = TEST_PEER.parse().unwrap();
+
+    let make_req = |username: &str, email: &str, token: &str| {
+        test::TestRequest::post()
+            .uri("/api/v1/admin/bootstrap")
+            .peer_addr(peer)
+            .set_json(serde_json::json!({
+                "org_id": org_id,
+                "tenant_id": tenant_id,
+                "email": email,
+                "username": username,
+                "password": TEST_PASSWORD,
+                "setup_token": token,
+            }))
+            .to_request()
+    };
+
+    let req1 = make_req("racer-one", "racer-one@example.com", &token);
+    let req2 = make_req("racer-two", "racer-two@example.com", &token);
+
+    let (resp1, resp2) = tokio::join!(
+        test::call_service(&app, req1),
+        test::call_service(&app, req2)
+    );
+
+    let statuses = [resp1.status().as_u16(), resp2.status().as_u16()];
+    let created_count = statuses.iter().filter(|s| **s == 201).count();
+    let conflict_count = statuses.iter().filter(|s| **s == 409).count();
+
+    assert_eq!(
+        created_count, 1,
+        "exactly one concurrent bootstrap request must succeed (201), got statuses {statuses:?}"
+    );
+    assert_eq!(
+        conflict_count, 1,
+        "the race loser must get 409 AlreadyExists, got statuses {statuses:?}"
+    );
+
+    // Exactly one super-admin exists after the race.
+    use axiam_core::repository::{Pagination, UserRepository};
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let users = user_repo
+        .list(
+            tenant_id,
+            Pagination {
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        users.total, 1,
+        "exactly one super-admin must exist after a concurrent bootstrap race, got {}",
+        users.total
     );
 }
 

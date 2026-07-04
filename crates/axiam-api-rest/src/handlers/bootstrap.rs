@@ -18,12 +18,9 @@
 use actix_web::{HttpResponse, web};
 use axiam_auth::password;
 use axiam_core::error::AxiamError;
-use axiam_core::repository::{
-    OrganizationRepository, Pagination, RoleRepository, TenantRepository, UserRepository,
-};
+use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::{
-    SurrealOrganizationRepository, SurrealRoleRepository, SurrealTenantRepository,
-    SurrealUserRepository, seed_default_roles, seed_permissions,
+    SurrealOrganizationRepository, SurrealTenantRepository, seed_default_roles, seed_permissions,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -120,11 +117,16 @@ pub struct BootstrapResponse {
 /// `POST /api/v1/admin/bootstrap` — first-run admin setup.
 ///
 /// Creates the initial admin user with the super-admin role and seeds the
-/// default permission set. Returns 404 once an admin already exists (D-09).
-/// No token is issued — the user must authenticate via `/api/v1/auth/login` (D-11).
+/// default permission set. First-super-admin creation is atomic (SECHRD-04
+/// / D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same
+/// transaction means a second call — concurrent OR sequential — against a
+/// tenant that already has an admin is refused with 409 Conflict; no
+/// partial admin or orphan role RELATE can result. No token is issued —
+/// the user must authenticate via `/api/v1/auth/login` (D-11).
 ///
-/// Guarded by the `AXIAM_BOOTSTRAP_ADMIN_EMAIL` environment variable (D-10):
-/// if set, requests with a non-matching email are rejected with 403.
+/// Mandatory gate (D-03a): requires EITHER `AXIAM_BOOTSTRAP_ADMIN_EMAIL` set
+/// and matching the request email (403 on mismatch), OR a valid setup_token
+/// (403 if missing/invalid/already consumed).
 #[utoipa::path(
     post,
     path = "/api/v1/admin/bootstrap",
@@ -132,14 +134,12 @@ pub struct BootstrapResponse {
     request_body = BootstrapRequest,
     responses(
         (status = 201, description = "Admin user created", body = BootstrapResponse),
-        (status = 403, description = "Email does not match AXIAM_BOOTSTRAP_ADMIN_EMAIL"),
-        (status = 404, description = "Bootstrap already completed"),
+        (status = 403, description = "Bootstrap gate not satisfied (email mismatch or invalid/missing setup token)"),
+        (status = 409, description = "Bootstrap already completed for this tenant"),
         (status = 400, description = "Organization or tenant not found"),
     )
 )]
 pub async fn bootstrap<C: Connection>(
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    role_repo: web::Data<SurrealRoleRepository<C>>,
     org_repo: web::Data<SurrealOrganizationRepository<C>>,
     tenant_repo: web::Data<SurrealTenantRepository<C>>,
     db: web::Data<Surreal<C>>,
@@ -198,65 +198,31 @@ pub async fn bootstrap<C: Connection>(
         })
     })?;
 
-    // 3. Check if bootstrap has already been completed (D-09).
-    //    Look for any role named "super-admin" in this tenant; if one exists and
-    //    any user has been assigned to it, the bootstrap endpoint is disabled.
-    let existing_roles = role_repo
-        .list(
-            req.tenant_id,
-            Pagination {
-                offset: 0,
-                limit: 1000,
-            },
-        )
-        .await?;
-
-    let super_admin_role = existing_roles
-        .items
-        .into_iter()
-        .find(|r| r.name == "super-admin");
-
-    if let Some(sa_role) = super_admin_role {
-        // Check if any user has this role assigned.
-        let existing_users = user_repo
-            .list(
-                req.tenant_id,
-                Pagination {
-                    offset: 0,
-                    limit: 1,
-                },
-            )
-            .await?;
-
-        // If users exist in the tenant, bootstrap is already done.
-        // (The first user created via bootstrap always has super-admin.)
-        // We use a more precise check: attempt get_user_roles for any user.
-        // Simpler and sufficient: if any users exist with super-admin role assigned.
-        // Use role's get_user_roles indirectly: check if super-admin role exists
-        // and users exist — if both, bootstrap is completed.
-        let _ = sa_role; // role exists — now check if any users exist
-        if existing_users.total > 0 {
-            return Err(AxiamApiError(AxiamError::NotFound {
-                entity: "bootstrap".into(),
-                id: "already initialized".into(),
-            }));
-        }
-    }
-
-    // 4. Seed permissions (idempotent).
+    // 3. Seed permissions (idempotent).
     seed_permissions(db.get_ref(), req.tenant_id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
-    // 5. Seed default roles and get their IDs.
+    // 4. Seed default roles and get their IDs.
     let seed_result = seed_default_roles(db.get_ref(), req.tenant_id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
-    // 6+7. SEC-049: create admin user and assign super-admin role atomically.
+    // 5+6. SECHRD-04 / D-03c: create the admin user and assign the
+    // super-admin role atomically, keyed on a uniqueness invariant instead
+    // of the old SELECT-then-branch TOCTOU check.
     //
-    // Using a single BEGIN/COMMIT transaction so that no partial state
-    // (user created but role not assigned) can result from a mid-flight error.
+    // `CREATE type::record('bootstrap_lock', $tenant_id)` is the uniqueness
+    // invariant: a concurrent OR sequential second request racing/retrying
+    // on the SAME tenant_id hits a UNIQUE-index violation on this CREATE
+    // (the record ID itself IS the constraint) and its WHOLE transaction
+    // rolls back — no partial admin, no orphan role RELATE. When a setup
+    // token was used, its hash is consumed in the SAME transaction
+    // (`bootstrap_setup_token_consumed`), so a replay of the same token
+    // also loses to the same violation. The admin's initial password hash
+    // is seeded into `password_history` in the same transaction too
+    // (Pitfall 5 — bootstrap bypasses `create_with_consent`).
+    //
     // Password hashing is Argon2id and must happen before the transaction.
     //
     // SurrealDB v3 quirk: BEGIN TRANSACTION occupies result slot 0;
@@ -265,16 +231,17 @@ pub async fn bootstrap<C: Connection>(
     let user_id_str = user_id.to_string();
     let role_id_str = seed_result.super_admin_role_id.to_string();
     let tenant_id_str = req.tenant_id.to_string();
+    let ph_id_str = Uuid::new_v4().to_string();
 
     let password_hash = password::hash_password(&req.password, None)
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
-    // Build transaction: CREATE user + RELATE user→role in one atomic block.
     // The RELATE uses backtick record IDs (required when type::record() is not
     // supported inside RELATE per SurrealDB v3 quirk).
-    let txn_query = format!(
-        "BEGIN TRANSACTION; \
-         CREATE type::record('user', $user_id) SET \
+    let mut txn_stmts = vec![
+        "BEGIN TRANSACTION".to_string(),
+        "CREATE type::record('bootstrap_lock', $tenant_id) SET locked_at = time::now()".to_string(),
+        "CREATE type::record('user', $user_id) SET \
            tenant_id = $tenant_id, \
            username = $username, email = $email, \
            password_hash = $password_hash, \
@@ -284,27 +251,63 @@ pub async fn bootstrap<C: Connection>(
            last_failed_login_at = NONE, \
            locked_until = NONE, \
            email_verified_at = NONE, \
-           metadata = {{}}; \
-         RELATE user:`{user_id_str}` -> has_role -> role:`{role_id_str}` \
-           SET resource_id = NONE; \
-         COMMIT TRANSACTION"
-    );
+           metadata = {}"
+            .to_string(),
+        format!(
+            "RELATE user:`{user_id_str}` -> has_role -> role:`{role_id_str}` \
+             SET resource_id = NONE"
+        ),
+        "CREATE type::record('password_history', $ph_id) SET \
+           tenant_id = $tenant_id, user_id = $user_id, password_hash = $password_hash"
+            .to_string(),
+    ];
+    if consumed_token_hash.is_some() {
+        txn_stmts.push(
+            "CREATE type::record('bootstrap_setup_token_consumed', $token_hash) \
+             SET consumed_at = time::now()"
+                .to_string(),
+        );
+    }
+    txn_stmts.push("COMMIT TRANSACTION".to_string());
+    let txn_query = txn_stmts.join("; ");
 
-    let result = db
+    let mut query = db
         .query(txn_query)
-        .bind(("user_id", user_id_str.clone()))
         .bind(("tenant_id", tenant_id_str))
+        .bind(("user_id", user_id_str.clone()))
         .bind(("username", req.username))
         .bind(("email", req.email))
         .bind(("password_hash", password_hash))
+        .bind(("ph_id", ph_id_str));
+    if let Some(token_hash) = consumed_token_hash {
+        query = query.bind(("token_hash", token_hash));
+    }
+
+    let result = query
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
-    result
-        .check()
-        .map_err(|e| AxiamApiError(AxiamError::Internal(format!("bootstrap transaction: {e}"))))?;
+    result.check().map_err(|e| {
+        let msg = e.to_string();
+        // SurrealDB v3 UNIQUE index violation message contains "already
+        // contains" (e.g. bootstrap_lock's implicit record-ID uniqueness
+        // constraint). Also match "already exists" and "unique" as
+        // fallback patterns (mirrors saml_replay.rs::insert_assertion).
+        if msg.contains("already contains")
+            || msg.contains("already exists")
+            || msg.contains("unique")
+        {
+            AxiamApiError(AxiamError::AlreadyExists {
+                entity: "bootstrap".into(),
+            })
+        } else {
+            AxiamApiError(AxiamError::Internal(format!(
+                "bootstrap transaction: {msg}"
+            )))
+        }
+    })?;
 
-    // 8. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
+    // 7. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
     Ok(HttpResponse::Created().json(BootstrapResponse {
         message: "Admin user created. Login via /api/v1/auth/login.".into(),
         user_id,

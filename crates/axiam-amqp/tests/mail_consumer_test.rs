@@ -195,6 +195,69 @@ async fn missing_email_config_returns_send_error() {
     );
 }
 
+/// SECHRD-08 / D-05d: an ExportReady message carrying a real (non-nil)
+/// `org_id` is deliverable end-to-end. `send_with_retry_and_audit` resolves
+/// the effective email config via `msg.org_id` *before* the template is
+/// rendered and a delivery attempt is made — so a successful render+send
+/// attempt (proven here by `RetryNeeded` against a fake/unreachable SMTP
+/// sink, not a `SendError` config failure) is only reachable when the real
+/// `org_id` resolves an email config. This proves the real `org_id` reaches
+/// (gates) the rendered template context on the consumer side.
+///
+/// The producer-side fix (cleanup.rs no longer enqueuing `Uuid::nil()`)
+/// lands in plan 25-05; this test is scoped to the consumer/rendering half
+/// per this plan (25-08).
+///
+/// Negative control: the identical message with `Uuid::nil()` as `org_id`
+/// (the pre-D-05d producer placeholder) must fail closed with a `SendError`
+/// *before* any template is rendered — reproducing the exact "ExportReady
+/// mail silently undeliverable" bug D-05d fixes.
+#[tokio::test]
+async fn export_ready_resolves_real_org_id() {
+    let db = setup_db().await;
+    let org_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+
+    // Seed an org-level email config keyed to the REAL org_id, pointing at a
+    // fake/unreachable SMTP sink (127.0.0.1:1 — nothing listens there, so
+    // delivery fails transiently but rendering/config-resolution succeeds).
+    seed_failing_email_config(&db, org_id, tenant_id).await;
+
+    let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let user_repo = SurrealUserRepository::new(db.clone());
+
+    // ExportReady message carrying the real org_id, mirroring cleanup.rs's
+    // post-25-05 enqueue shape (action_url/expiry_time template context).
+    let mut msg = make_msg(MailType::ExportReady, org_id, tenant_id, 0);
+    msg.user_id = user_id;
+
+    let outcome = send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo)
+        .await
+        .expect("a real org_id must resolve an email config and reach the render/send attempt");
+
+    assert!(
+        matches!(outcome, SendOutcome::RetryNeeded { .. }),
+        "real org_id must resolve config, render the ExportReady template, and attempt \
+         delivery (RetryNeeded against the fake sink) — got {:?}",
+        outcome
+    );
+
+    // Negative control: same message, but org_id reset to Uuid::nil().
+    let mut nil_org_msg = msg.clone();
+    nil_org_msg.org_id = Uuid::nil();
+    let nil_result =
+        send_with_retry_and_audit(&nil_org_msg, &email_repo, &audit_repo, &user_repo).await;
+
+    assert!(
+        nil_result.is_err(),
+        "Uuid::nil() org_id must NOT resolve an email config (pre-D-05d bug reproduction) — \
+         mail would be silently undeliverable; got {:?}",
+        nil_result
+    );
+}
+
 /// Successful delivery via MockProvider → Delivered outcome.
 ///
 /// Uses a mock-backed EmailService built directly (bypassing email config repo)

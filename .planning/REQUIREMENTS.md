@@ -763,8 +763,8 @@ Make AMQP message signing mandatory in production, per-tenant, and fix undeliver
 Prevent any future handler from leaking encrypted federation/PKI secrets by serializing the model directly.
 
 ### Acceptance Criteria
-- [ ] `#[serde(skip_serializing)]` on `FederationConfig` `client_secret` / `client_secret_ciphertext` / `_nonce` / `_key_version`
-- [ ] `Debug` impls do not print CA/PGP/secret blobs; list queries do not hydrate encrypted columns needlessly
+- [x] `#[serde(skip_serializing)]` on `FederationConfig` `client_secret` / `client_secret_ciphertext` / `_nonce` / `_key_version`
+- [x] `Debug` impls do not print CA/PGP/secret blobs; list queries do not hydrate encrypted columns needlessly
 
 ## SECHRD-10: Network Egress & K8s Secret Completeness
 
@@ -1084,7 +1084,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |
 | SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Complete |
 | SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | In Progress (mandatory per-tenant HKDF signing 25-07; mail-retry backoff + deliverability test done 25-08; producer-side org_id resolution pending 25-05) |
-| SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Pending |
+| SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Complete |
 | SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Pending |
 | SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Complete |
 | SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Complete |

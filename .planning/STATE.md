@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 25
 current_phase_name: Security Hardening II — Federation, PKI, Data-Protection & Infra
 status: executing
-stopped_at: "Paused at 25-10 Task 3 checkpoint:human-verify (NetworkPolicy + secret cluster verification pending)"
-last_updated: "2026-07-04T18:27:03.108Z"
+stopped_at: Completed 25-10-PLAN.md (Task 3 checkpoint deferred to deploy time, tracked in 99-followups)
+last_updated: "2026-07-04T18:33:25.056Z"
 last_activity: 2026-07-04
-last_activity_desc: Phase 25 execution resumed (wave continue)
+last_activity_desc: "25-10 completed: SUMMARY.md written, REQUIREMENTS.md SECHRD-10 updated, followup filed"
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 25
-  completed_plans: 22
+  completed_plans: 23
   percent: 25
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — EXECUTING
-Plan: 10 of 10 — Tasks 1-2 complete, PAUSED at Task 3 checkpoint:human-verify
-Status: Awaiting human cluster verification (NetworkPolicy enforcement + secret resolution)
-Last activity: 2026-07-04 — 25-10 Tasks 1-2 executed and committed; Task 3 human-verify checkpoint reached
+Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — EXECUTING (Wave 1 complete, Wave 2 pending: 25-02, 25-05)
+Plan: 25-10 of 10 — COMPLETE (Tasks 1-2 executed; Task 3 checkpoint:human-verify deferred to deploy time per user decision, tracked in 99-followups)
+Status: Wave 1 (8 plans, incl. 25-10) fully executed; Wave 2 plans 25-02/25-05 still outstanding; 25-10's runtime NetworkPolicy/secret cluster verification deferred as a tracked followup (not a blocker)
+Last activity: 2026-07-04 — 25-10 completed: SUMMARY.md written, REQUIREMENTS.md SECHRD-10 updated, followup filed
 
 ## Performance Metrics
 
@@ -176,6 +176,7 @@ Last activity: 2026-07-04 — 25-10 Tasks 1-2 executed and committed; Task 3 hum
 | Phase 25 P07 | 20min | 2 tasks | 8 files |
 | Phase 25 P08 | 25min | 2 tasks | 2 files |
 | Phase 25 P09 | 20min | 2 tasks | 3 files |
+| Phase 25 P10 | 4min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -427,6 +428,7 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25-08]: backoff_delay_secs(attempt_count) uses the POST-increment retry attempt number (1 for first retry) mirroring webhook.rs's attempt-1 exponent shape; local constants (10s initial, 2.0 multiplier, 3600s cap) since mail has no per-message RetryPolicy analog
 - [Phase ?]: [Phase 25-08]: export_ready_resolves_real_org_id proves org_id reaches the rendered template context indirectly via the config-resolution gate (get_effective_config keyed on org_id, None/SendError before render for an unseeded id) rather than exposing private build_template_context/render_email as pub -- keeps file scope to the test file only
 - [Phase ?]: [Phase 25-09]: Manual Debug impl pattern (derive Clone/Serialize/Deserialize without Debug, then manual impl redacting secret fields to [REDACTED]) established for secret-bearing models; federation_config::list() uses a dedicated narrower row struct rather than defaulting unselected columns at runtime
+- [Phase ?]: [Phase 25-10]: SMTP egress rule defaults to RFC 5737 TEST-NET-1 (192.0.2.0/24) placeholder CIDR — fail-closed by construction until operator sets real relay CIDR; Task 3 checkpoint:human-verify (cluster NetworkPolicy/secret verification) deferred to deploy time per user decision, tracked in 99-followups/25-10-networkpolicy-cluster-verification.md
 
 ### Pending Todos
 
@@ -450,7 +452,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T18:27:02.954Z
-Stopped at: Paused at 25-10 Task 3 checkpoint:human-verify (NetworkPolicy + secret cluster verification pending)
-Resume file: .planning/phases/25-security-hardening-ii-federation-pki-data-protection-infra/25-10-PLAN.md
+Last session: 2026-07-04T18:32:36.705Z
+Stopped at: Completed 25-10-PLAN.md (Task 3 checkpoint deferred to deploy time, tracked in 99-followups)
+Resume file: None
 Next action: /gsd-execute-phase 23

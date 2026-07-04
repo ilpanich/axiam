@@ -773,9 +773,11 @@ Prevent any future handler from leaking encrypted federation/PKI secrets by seri
 Allow required egress under default-deny and complete the k8s secret set.
 
 ### Acceptance Criteria
-- [ ] SMTP egress NetworkPolicy (ports 25/465/587) added so verification/GDPR-export mail works in-cluster
-- [ ] `0.0.0.0/0:443` egress rule tightened with pod/service cluster-CIDR exclusions
-- [ ] K8s secret includes federation/email/GDPR/pepper keys; CI `test` job uses the correct `AXIAM__…` prefix
+- [x] SMTP egress NetworkPolicy (ports 25/465/587) added so verification/GDPR-export mail works in-cluster — fail-closed default (RFC 5737 TEST-NET-1 placeholder CIDR); runtime enforcement on a real relay CIDR deferred (see note below)
+- [x] `0.0.0.0/0:443` egress rule tightened with pod/service cluster-CIDR exclusions
+- [x] K8s secret includes federation/email/GDPR/pepper keys; CI `test` job uses the correct `AXIAM__…` prefix
+
+**Note (25-10):** Code/manifest deliverables above are complete and YAML-valid/fail-closed by construction. The plan's `checkpoint:human-verify` gate (NetworkPolicy enforcement + secret resolution on a real/kind cluster) could not be executed — no cluster was available — and was deferred to deploy time per user decision. Tracked as `.planning/phases/99-followups/25-10-networkpolicy-cluster-verification.md`.
 
 ## SECHRD-11: Public-Path Allowlist Hardening
 
@@ -1085,7 +1087,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Complete |
 | SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | In Progress (mandatory per-tenant HKDF signing 25-07; mail-retry backoff + deliverability test done 25-08; producer-side org_id resolution pending 25-05) |
 | SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Complete |
-| SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Pending |
+| SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Complete (code) — cluster NetworkPolicy/secret verification deferred (99-followups/25-10-networkpolicy-cluster-verification.md) |
 | SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Complete |
 | SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Complete |
 | CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Pending |

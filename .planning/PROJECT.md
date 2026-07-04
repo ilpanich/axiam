@@ -77,7 +77,7 @@ See `.planning/REQUIREMENTS.md` for detailed REQ-IDs.
 - [x] OWASP ASVS audit checklist and remediation — Validated in Phase 7: Compliance Verification & Test Closure
 - [x] OAuth2 RFC compliance verification — Validated in Phase 7: Compliance Verification & Test Closure
 - [x] OIDC conformance verification — Validated in Phase 7: Compliance Verification & Test Closure
-- [ ] GDPR data export and right-to-deletion
+- [x] GDPR data export and right-to-deletion — Validated in Phase 25: Security Hardening II (proof-last durable erasure with fatal pseudonymize + complete token-redacted export, SECHRD-06)
 
 **Infrastructure:**
 - [ ] CI hardening (security scanning, dependency audit, frontend tests)
@@ -160,4 +160,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-03 — opened Milestone v1.2 (MVP Release Hardening / final milestone). v1.1 Client SDKs complete (Phases 15–22, 58/58 plans). v1.2 consolidates roadmap Phases 18–19 and all open findings from `security-review-postremediation.md` + `code-review-postremediation.md` into the final push to a production-credible MVP.*
+*Last updated: 2026-07-04 — Phase 25 complete (Security Hardening II — Federation, PKI, Data-Protection & Infra; 10/10 plans, goal verified): SSRF address-pinning, mTLS issuing-CA status/validity gate, durable GDPR erasure + complete export, OIDC nonce from server state, federation/PKI secret non-leak, mandatory per-tenant HKDF AMQP signing, mail-retry backoff, and cluster egress/secret hardening (cluster NetworkPolicy runtime check deferred — tracked in 99-followups). Prior: opened Milestone v1.2 (MVP Release Hardening / final milestone). v1.1 Client SDKs complete (Phases 15–22, 58/58 plans).*

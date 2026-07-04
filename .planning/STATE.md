@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 25
 current_phase_name: Security Hardening II — Federation, PKI, Data-Protection & Infra
 status: executing
-stopped_at: Completed 25-10-PLAN.md (Task 3 checkpoint deferred to deploy time, tracked in 99-followups)
-last_updated: "2026-07-04T18:33:25.056Z"
+stopped_at: "Completed 25-02-PLAN.md (webhook SSRF address-pinning via shared axiam_federation::ssrf guard)"
+last_updated: "2026-07-04T18:58:28.795Z"
 last_activity: 2026-07-04
-last_activity_desc: "25-10 completed: SUMMARY.md written, REQUIREMENTS.md SECHRD-10 updated, followup filed"
+last_activity_desc: "25-02 completed: webhook delivery routed through shared axiam_federation::ssrf guard (IP pinning), webhook_pins_resolved_ip negative test added"
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 25
-  completed_plans: 23
+  completed_plans: 24
   percent: 25
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 ## Current Position
 
-Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — EXECUTING (Wave 1 complete, Wave 2 pending: 25-02, 25-05)
-Plan: 25-10 of 10 — COMPLETE (Tasks 1-2 executed; Task 3 checkpoint:human-verify deferred to deploy time per user decision, tracked in 99-followups)
-Status: Wave 1 (8 plans, incl. 25-10) fully executed; Wave 2 plans 25-02/25-05 still outstanding; 25-10's runtime NetworkPolicy/secret cluster verification deferred as a tracked followup (not a blocker)
-Last activity: 2026-07-04 — 25-10 completed: SUMMARY.md written, REQUIREMENTS.md SECHRD-10 updated, followup filed
+Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — EXECUTING (Wave 1 complete, Wave 2 in progress: 25-02 complete, 25-05 pending)
+Plan: 25-02 of Wave 2 — COMPLETE (both tasks executed: webhook delivery routed through axiam_federation::ssrf::guarded_fetch for IP pinning; webhook_pins_resolved_ip negative test added and passing)
+Status: Wave 1 (8 plans, incl. 25-10) fully executed; Wave 2: 25-02 now complete, 25-05 (mTLS CA status/validity) still outstanding; 25-10's runtime NetworkPolicy/secret cluster verification remains a tracked followup (not a blocker)
+Last activity: 2026-07-04 — 25-02 completed: webhook delivery routed through shared axiam_federation::ssrf guard (IP pinning), webhook_pins_resolved_ip negative test added
 
 ## Performance Metrics
 
@@ -177,6 +177,7 @@ Last activity: 2026-07-04 — 25-10 completed: SUMMARY.md written, REQUIREMENTS.
 | Phase 25 P08 | 25min | 2 tasks | 2 files |
 | Phase 25 P09 | 20min | 2 tasks | 3 files |
 | Phase 25 P10 | 4min | 3 tasks | 3 files |
+| Phase 25 P02 | 35min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -429,6 +430,7 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25-08]: export_ready_resolves_real_org_id proves org_id reaches the rendered template context indirectly via the config-resolution gate (get_effective_config keyed on org_id, None/SendError before render for an unseeded id) rather than exposing private build_template_context/render_email as pub -- keeps file scope to the test file only
 - [Phase ?]: [Phase 25-09]: Manual Debug impl pattern (derive Clone/Serialize/Deserialize without Debug, then manual impl redacting secret fields to [REDACTED]) established for secret-bearing models; federation_config::list() uses a dedicated narrower row struct rather than defaulting unselected columns at runtime
 - [Phase ?]: [Phase 25-10]: SMTP egress rule defaults to RFC 5737 TEST-NET-1 (192.0.2.0/24) placeholder CIDR — fail-closed by construction until operator sets real relay CIDR; Task 3 checkpoint:human-verify (cluster NetworkPolicy/secret verification) deferred to deploy time per user decision, tracked in 99-followups/25-10-networkpolicy-cluster-verification.md
+- [Phase ?]: [Phase 25-02]: Removed WebhookDeliveryService's pooled reqwest::Client field entirely (guarded_fetch builds its own pinned client per attempt) rather than keeping it #[allow(dead_code)] as 25-01 did for SamlFederationService::http_client — no external call sites made the field genuinely dead
 
 ### Pending Todos
 
@@ -452,7 +454,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T18:32:36.705Z
-Stopped at: Completed 25-10-PLAN.md (Task 3 checkpoint deferred to deploy time, tracked in 99-followups)
+Last session: 2026-07-04T18:58:28.780Z
+Stopped at: Completed 25-02-PLAN.md (webhook SSRF address-pinning via shared axiam_federation::ssrf guard)
 Resume file: None
 Next action: /gsd-execute-phase 23

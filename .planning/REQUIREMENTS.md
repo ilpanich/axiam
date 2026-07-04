@@ -682,7 +682,7 @@ Make the TOTP step check-and-update atomic and close the skew-boundary and enrol
 Pin the validated IP and extend the private-IP guard beyond JWKS to all federation outbound fetches.
 
 ### Acceptance Criteria
-- [ ] Webhook delivery pins the validated `IpAddr` into the connection (custom resolver / `resolve()`) — no DNS-rebind between check and send (plan 25-02)
+- [x] Webhook delivery pins the validated `IpAddr` into the connection (custom resolver / `resolve()`) — no DNS-rebind between check and send — `ssrf::guarded_fetch` in `webhook.rs`'s delivery loop, proven by `webhook_pins_resolved_ip` (25-02)
 - [x] Private/loopback/link-local/ULA guard applied to OIDC discovery, token exchange, and SAML-metadata fetches (not just JWKS) — shared `axiam_federation::ssrf` module (25-01)
 - [x] Resolved address pinned for those fetches too (close the JWKS DNS-rebind TOCTOU) — `ssrf::pinned_client` via `ClientBuilder::resolve()` (25-01)
 - [x] Negative test: an internal/loopback `token_endpoint` from a discovery document is rejected — `ssrf_rejects_loopback_token_endpoint`, `ssrf_rejects_redirect_to_internal` (25-01)
@@ -1079,7 +1079,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Complete |
 | SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Complete |
 | SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Complete |
-| SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |
+| SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Complete |
 | SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Complete (REST keying + shared store 24-03/24-04; gRPC key-extractor parity live + shared-store layer implemented+tested+wired 24-07 + 24-07 gap-closure — `GrpcSharedRateLimitLayer` now `.layer()`'d into `start_grpc_server`/`main.rs`, fail-open ahead of the in-memory governor) |
 | SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Complete |
 | SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Complete |

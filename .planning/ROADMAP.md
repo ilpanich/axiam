@@ -1091,7 +1091,7 @@ Plans:
   4. An account-linking OIDC callback ignores a request-supplied nonce and validates against server-side login state (replay rejected), and federation/PKI secrets are never serialized or printed in Debug/list paths (SECHRD-07, SECHRD-09)
   5. AMQP message signing is mandatory in production and per-tenant (a tenant-A signature cannot validate a tenant-B message), ExportReady mail is deliverable end-to-end (real `org_id`, backoff retry), and SMTP egress + the completed k8s secret set work under the tightened default-deny NetworkPolicy (SECHRD-08, SECHRD-10)
 
-**Plans**: 8/10 plans executed
+**Plans**: 9/10 plans executed
 
 Plans:
 **Wave 1** *(8 parallel — disjoint files/crates)*
@@ -1107,7 +1107,7 @@ Plans:
 
 **Wave 2** *(depend on Wave 1)*
 
-- [ ] 25-02-PLAN.md — SECHRD-02: webhook delivery IP-pinning via the shared guard + pin test (depends 25-01)
+- [x] 25-02-PLAN.md — SECHRD-02: webhook delivery IP-pinning via the shared guard + pin test (depends 25-01)
 - [ ] 25-05-PLAN.md — SECHRD-06/08: proof-last erasure pipeline (fatal pseudonymize) + real-sessions export + ExportReady org_id (depends 25-04)
 
 ---
@@ -1211,7 +1211,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 |-------|----------------|--------|-----------|
 | 23. Security Regressions & HIGH Findings | 6/6 | Complete   | 2026-07-03 |
 | 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete    | 2026-07-04 |
-| 25. Security Hardening II — Federation/PKI/Data/Infra | 8/10 | In Progress|  |
+| 25. Security Hardening II — Federation/PKI/Data/Infra | 9/10 | In Progress|  |
 | 26. Correctness & Resilience | 0/? | Not started | - |
 | 27. Performance & Load Hardening | 0/? | Not started | - |
 | 28. Functional Completeness | 0/? | Not started | - |

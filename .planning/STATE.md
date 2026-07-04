@@ -5,8 +5,8 @@ milestone_name: — MVP Release Hardening
 current_phase: 25
 current_phase_name: Security Hardening II — Federation, PKI, Data-Protection & Infra
 status: executing
-stopped_at: Completed 25-09-PLAN.md
-last_updated: "2026-07-04T18:22:20.306Z"
+stopped_at: "Paused at 25-10 Task 3 checkpoint:human-verify (NetworkPolicy + secret cluster verification pending)"
+last_updated: "2026-07-04T18:27:03.108Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 25 execution resumed (wave continue)
 progress:
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — EXECUTING
-Plan: 8 of 10
-Status: Ready to execute
-Last activity: 2026-07-04 — Phase 25 execution resumed (wave continue)
+Plan: 10 of 10 — Tasks 1-2 complete, PAUSED at Task 3 checkpoint:human-verify
+Status: Awaiting human cluster verification (NetworkPolicy enforcement + secret resolution)
+Last activity: 2026-07-04 — 25-10 Tasks 1-2 executed and committed; Task 3 human-verify checkpoint reached
 
 ## Performance Metrics
 
@@ -446,10 +446,11 @@ Raised 2026-06-02 (SAML feature-flag work):
 - `gsd-sdk phase.add` sentinel bug: `99-followups/` dir inflates max+1 counter → returns 100; create phase dirs 15–22 directly, do NOT use phase.add for this milestone
 - [Phase 22-php-sdk] 22-01: PHPStan level-6 verification could not run in this sandbox -- api.github.com zipball for phpstan/phpstan returns 403 'GitHub access to this repository is not enabled for this session'; git-clone fallback requires an impractical 7GB+ full-history mirror. Deferred to sdk-ci-php.yml CI (unrestricted infra).
 - [Phase 24-07 gap-closure, RESOLVED] gRPC shared rate-limit store (GrpcSharedRateLimitLayer) is now wired into start_grpc_server/main.rs (Surreal<C> threaded through, `.layer()`'d before build_grpc_governor_layer, fail-open on DB error). Closed the 24-VERIFICATION.md NOT_WIRED gap; SECHRD-03 multi-replica mitigation is now production-live for both REST and gRPC.
+- 25-10 Task 3: awaiting human-verify checkpoint — operator must apply k8s manifests to a cluster to confirm SMTP-relay allow / non-allowlisted-egress deny / secret-key resolution / CI env prefix, per 25-10-PLAN.md how-to-verify steps
 
 ## Session Continuity
 
-Last session: 2026-07-04T18:22:20.291Z
-Stopped at: Completed 25-09-PLAN.md
-Resume file: None
+Last session: 2026-07-04T18:27:02.954Z
+Stopped at: Paused at 25-10 Task 3 checkpoint:human-verify (NetworkPolicy + secret cluster verification pending)
+Resume file: .planning/phases/25-security-hardening-ii-federation-pki-data-protection-infra/25-10-PLAN.md
 Next action: /gsd-execute-phase 23

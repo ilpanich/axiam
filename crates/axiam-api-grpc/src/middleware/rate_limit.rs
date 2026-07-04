@@ -56,7 +56,12 @@ use tower_governor::{
 /// pre-check (`axiam-api-rest::middleware::rate_limit_shared::trusted_hops`)
 /// and `server.rs::build_governor` use, so the gRPC key and the REST key are
 /// derived identically from the same deployment-topology configuration.
-fn trusted_hops_from_env() -> usize {
+///
+/// `pub(crate)` so `server.rs::start_grpc_server` can pass the SAME value to
+/// both [`build_grpc_governor_layer`] (via this function internally) and
+/// [`GrpcSharedRateLimitLayer::new`] — the key-extraction logic in the
+/// shared-store pre-check and the in-memory governor MUST stay in lockstep.
+pub(crate) fn trusted_hops_from_env() -> usize {
     std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -230,7 +235,6 @@ fn too_many_requests_response() -> Response<tonic::body::Body> {
 /// `StateStore` implementation and never calls `block_on` — it performs its
 /// own async SurrealDB round-trip as a plain `tower::Layer`/`Service`, then
 /// delegates to the inner service.
-#[derive(Clone)]
 pub struct GrpcSharedRateLimitLayer<C: Connection> {
     db: Surreal<C>,
     endpoint: &'static str,
@@ -248,6 +252,28 @@ impl<C: Connection> GrpcSharedRateLimitLayer<C> {
             endpoint,
             limit,
             trusted_hops,
+        }
+    }
+}
+
+// Manual `Clone` impl (NOT `#[derive(Clone)]`): `Surreal<C>` is `Clone` for
+// EVERY `C` unconditionally (it's an `Arc`-backed handle internally — see
+// `surrealdb::Surreal<C>`'s own `impl<C> Clone for Surreal<C>`, no `C: Clone`
+// bound). A derived `Clone` incorrectly adds a spurious `C: Clone` bound
+// (derive macros bound every generic type parameter that appears in a
+// field), which broke `start_grpc_server<..., C>`'s generic wiring — the
+// concrete `C` there (`surrealdb::engine::remote::http::Client`) has no
+// `Clone` impl, and forcing this layer to require one would leak into the
+// caller's generic bounds for no reason. Mirrors the REST
+// `RateLimitShared`/`RateLimitSharedService` precedent
+// (`axiam-api-rest::middleware::rate_limit_shared`).
+impl<C: Connection> Clone for GrpcSharedRateLimitLayer<C> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            endpoint: self.endpoint,
+            limit: self.limit,
+            trusted_hops: self.trusted_hops,
         }
     }
 }
@@ -270,13 +296,27 @@ where
 }
 
 /// Inner `tower::Service` produced by [`GrpcSharedRateLimitLayer`].
-#[derive(Clone)]
 pub struct GrpcSharedRateLimitService<S, C: Connection> {
     inner: S,
     db: Surreal<C>,
     endpoint: &'static str,
     limit: u32,
     trusted_hops: usize,
+}
+
+// Manual `Clone` impl for the same reason as `GrpcSharedRateLimitLayer`
+// above: only `S: Clone` should be required, never `C: Clone` (`Surreal<C>`
+// clones unconditionally regardless of `C`).
+impl<S: Clone, C: Connection> Clone for GrpcSharedRateLimitService<S, C> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            db: self.db.clone(),
+            endpoint: self.endpoint,
+            limit: self.limit,
+            trusted_hops: self.trusted_hops,
+        }
+    }
 }
 
 impl<S, C> Service<Request<tonic::body::Body>> for GrpcSharedRateLimitService<S, C>

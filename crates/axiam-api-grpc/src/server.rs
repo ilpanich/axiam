@@ -16,11 +16,14 @@ use axiam_core::repository::{
     GroupRepository, PermissionRepository, ResourceRepository, RoleRepository, ScopeRepository,
     UserRepository,
 };
+use surrealdb::{Connection, Surreal};
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 use crate::config::GrpcConfig;
 use crate::middleware::auth::AuthInterceptor;
-use crate::middleware::rate_limit::build_grpc_governor_layer;
+use crate::middleware::rate_limit::{
+    GrpcSharedRateLimitLayer, build_grpc_governor_layer, trusted_hops_from_env,
+};
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
 use crate::proto::token_service_server::TokenServiceServer;
 use crate::proto::user_service_server::UserServiceServer;
@@ -28,8 +31,13 @@ use crate::services::{AuthorizationServiceImpl, TokenServiceImpl, UserServiceImp
 
 /// Start the gRPC server with all registered services.
 ///
-/// Applies a tower-governor rate limiting layer (per D-10) using the
-/// `grpc_authz_per_sec` setting from `GrpcConfig`.
+/// Applies two cooperating rate-limit layers (SECHRD-03, D-01a/b/c — gap
+/// closure for 24-07): the SurrealDB-backed [`GrpcSharedRateLimitLayer`]
+/// shared-store pre-check runs FIRST (outermost), failing OPEN on any DB
+/// error to the per-replica in-memory `GovernorLayer` (per D-10) built via
+/// `grpc_authz_per_sec` from `GrpcConfig`. Both layers derive their client-IP
+/// key from the SAME `trusted_hops` value so gRPC keying stays in lockstep
+/// across the shared store and the in-memory fallback.
 ///
 /// Transport limits (CQ-B20):
 /// - Max message size: 4 MiB decode / 4 MiB encode
@@ -39,12 +47,13 @@ use crate::services::{AuthorizationServiceImpl, TokenServiceImpl, UserServiceImp
 /// TLS (REQ-15 AC-1): env-gated via `AXIAM__GRPC_TLS_CERT_PATH` /
 /// `AXIAM__GRPC_TLS_KEY_PATH`. When absent, TLS is disabled and a warning
 /// is logged (acceptable for in-mesh/loopback deployments).
-pub async fn start_grpc_server<R, P, Res, S, G, U>(
+pub async fn start_grpc_server<R, P, Res, S, G, U, C>(
     addr: SocketAddr,
     engine: AuthorizationEngine<R, P, Res, S, G>,
     user_repo: U,
     auth_config: AuthConfig,
     grpc_config: &GrpcConfig,
+    db: Surreal<C>,
 ) -> Result<(), tonic::transport::Error>
 where
     R: RoleRepository + 'static,
@@ -53,6 +62,7 @@ where
     S: ScopeRepository + 'static,
     G: GroupRepository + 'static,
     U: UserRepository + 'static,
+    C: Connection + 'static,
 {
     tracing::info!(
         bind = %addr,
@@ -60,6 +70,18 @@ where
         "Starting gRPC server",
     );
 
+    // SECHRD-03 gap closure (24-07 follow-up): the shared-store pre-check
+    // MUST use the same trusted_hops value as the in-memory governor's key
+    // extractor (both ultimately key off GrpcTrustedHopsKeyExtractor logic)
+    // so a rotating XFF cannot mint a fresh bucket in one layer while being
+    // correctly collapsed in the other.
+    let trusted_hops = trusted_hops_from_env();
+    let shared_rate_limit_layer = GrpcSharedRateLimitLayer::new(
+        db,
+        "grpc_authz",
+        grpc_config.grpc_authz_per_sec,
+        trusted_hops,
+    );
     let governor_layer = build_grpc_governor_layer(grpc_config.grpc_authz_per_sec);
 
     let authz_svc = AuthorizationServiceServer::with_interceptor(
@@ -85,10 +107,17 @@ where
     // limit (max_frame_size) is the closest available per-connection cap in 0.14. Upgrade
     // to tonic ≥0.12 to use per-service max_decoding_message_size / max_encoding_message_size.
     // Tracked: max_decoding_message_size (CQ-B20, pending tonic upgrade in Phase 19).
+    // SECHRD-03 (D-01a/b/c): the shared-store pre-check is `.layer()`'d
+    // FIRST so it is OUTERMOST (tower's ServiceBuilder/Server::builder()
+    // convention — first `.layer()` call = outermost = runs first, the
+    // opposite of actix's last-`.wrap()`-is-outermost rule). It fails OPEN
+    // to `governor_layer` on any SurrealDB error or missing key, so a DB
+    // blip degrades to the in-memory limiter rather than hard-blocking.
     let mut builder = Server::builder()
         .max_frame_size(4 * 1024 * 1024) // CQ-B20: 4 MiB frame cap (tonic-0.14 equivalent of max_decoding_message_size)
         .timeout(Duration::from_secs(30))
         .concurrency_limit_per_connection(256)
+        .layer(shared_rate_limit_layer)
         .layer(governor_layer);
 
     // REQ-15 AC-1 / CQ-B20: Env-gated TLS.

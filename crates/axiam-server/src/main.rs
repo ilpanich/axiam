@@ -617,6 +617,12 @@ async fn main() -> std::io::Result<()> {
     let grpc_user_repo = user_repo.clone();
     let grpc_auth_config = config.auth.clone();
     let grpc_config = config.grpc.clone();
+    // SECHRD-03 gap closure (24-07 follow-up): thread the same shared
+    // Surreal<C> handle used by the REST repositories so the gRPC shared
+    // rate-limit pre-check can enforce the multi-replica bucket store
+    // (GrpcSharedRateLimitLayer), not just the per-replica in-memory
+    // governor.
+    let grpc_db = db_handle.clone();
     tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
@@ -624,6 +630,7 @@ async fn main() -> std::io::Result<()> {
             grpc_user_repo,
             grpc_auth_config,
             &grpc_config,
+            grpc_db,
         )
         .await
         {

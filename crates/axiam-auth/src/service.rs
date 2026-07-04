@@ -364,10 +364,20 @@ impl<
             return Err(AuthError::MfaInvalidCode.into());
         }
 
-        // Persist the used step to prevent replay within this window (SEC-008).
-        self.user_repo
+        // Persist the used step to prevent replay within this window
+        // (SEC-008/SECHRD-01). `update_totp_step` is an atomic
+        // compare-and-set: `Ok(false)` means the CAS was lost — either this
+        // exact step was already consumed (replay) or a concurrent
+        // submission of the same code already won. Either way, surface the
+        // SAME rejection as an invalid code so a replay/CAS-miss is
+        // indistinguishable from a wrong code.
+        let advanced = self
+            .user_repo
             .update_totp_step(tenant_id, user_id, used_step)
             .await?;
+        if !advanced {
+            return Err(AuthError::MfaInvalidCode.into());
+        }
 
         // 3. Create session and issue tokens.
         self.create_session_and_tokens(

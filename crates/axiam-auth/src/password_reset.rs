@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::error::AuthError;
-use crate::password::{self, DUMMY_HASH, hash_password};
+use crate::password::{self, DUMMY_HASH, hash_password, verify_password};
 use crate::policy::{PolicyCheckResult, evaluate_password};
 use crate::token;
 
@@ -217,18 +217,60 @@ where
             return Err(AuthError::FederatedUserPasswordReset.into());
         }
 
-        // Evaluate password policy, including HIBP breach check
-        // when the policy has it enabled and a client is provided.
-        let check: PolicyCheckResult = evaluate_password(
-            new_password,
-            pepper,
-            policy,
-            tenant_id,
-            user.id,
-            &self.history_repo,
-            http_client,
-        )
-        .await?;
+        // T-24-92 / RESEARCH Pitfall 4: explicit current-password-reuse
+        // rejection, independent of and in addition to the
+        // password_history_count-based check below. The history check
+        // alone is insufficient because the pre-reset hash is not yet in
+        // `password_history` at check time (it's written further down),
+        // so a user with zero prior history rows could otherwise reset
+        // straight back to their own current password. CPU-bound Argon2,
+        // run under the crypto_semaphore-gated spawn_blocking path (A3)
+        // consistent with every other Argon2 call site in this codebase.
+        {
+            let _permit = self
+                .crypto_semaphore
+                .acquire()
+                .await
+                .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+            let new_pw_owned = new_password.to_string();
+            let current_hash_owned = user.password_hash.clone();
+            let pepper_owned = pepper.map(str::to_string);
+            let is_current_password = tokio::task::spawn_blocking(move || {
+                verify_password(&new_pw_owned, &current_hash_owned, pepper_owned.as_deref())
+            })
+            .await
+            .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
+            .map_err(|e| AxiamError::Crypto(e.to_string()))?;
+            if is_current_password {
+                return Err(AuthError::PasswordReusedCurrent.into());
+            }
+        }
+
+        // Evaluate password policy, including the password_history_count
+        // check (which performs its own CPU-bound Argon2 verifies against
+        // recent history entries) and the HIBP breach check when the
+        // policy has it enabled and a client is provided. Held under the
+        // crypto_semaphore for the duration of the call so the history
+        // check's Argon2 work is CPU-isolated like every other crypto
+        // call site (A3) — `confirm_reset` previously performed this work
+        // fully ungated.
+        let check: PolicyCheckResult = {
+            let _permit = self
+                .crypto_semaphore
+                .acquire()
+                .await
+                .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+            evaluate_password(
+                new_password,
+                pepper,
+                policy,
+                tenant_id,
+                user.id,
+                &self.history_repo,
+                http_client,
+            )
+            .await?
+        };
 
         if !check.is_ok() {
             return Err(AxiamError::Validation {
@@ -829,6 +871,86 @@ mod tests {
         assert!(
             matches!(result, Err(AxiamError::Validation { .. })),
             "expected Validation error, got: {result:?}"
+        );
+    }
+
+    /// T-24-92 / RESEARCH Pitfall 4: a user who has NEVER reset before
+    /// (zero `password_history` rows — the fresh-signup password from
+    /// `create_test_user`) must be rejected when resetting to that SAME
+    /// current password. The history-count check alone cannot catch this
+    /// (the pre-reset hash isn't in history yet), so this proves the
+    /// explicit `verify_password(new, current_hash)` comparison added to
+    /// `confirm_reset` is truly independent of history depth.
+    #[tokio::test]
+    async fn confirm_reset_rejects_current_password() {
+        let (
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            tid,
+            user,
+        ) = full_setup().await;
+
+        // Sanity: zero history rows for this freshly-created user.
+        let history = hist_repo.get_recent(tid, user.id, 5).await.unwrap();
+        assert!(
+            history.is_empty(),
+            "expected zero prior password_history rows for a fresh signup"
+        );
+
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            Arc::new(Semaphore::new(4)),
+        );
+
+        let (raw_token, _uid, _exp) = svc
+            .initiate_reset(tid, &user.email, 1, None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let policy = relaxed_policy();
+        // `create_test_user` sets the current password to "OldPassw0rd!Strong".
+        let result = svc
+            .confirm_reset(tid, &raw_token, "OldPassw0rd!Strong", &policy, None, None)
+            .await;
+
+        assert!(
+            matches!(result, Err(AxiamError::Validation { .. })),
+            "expected current-password reuse to be rejected as Validation, got: {result:?}"
+        );
+
+        // A genuinely NEW password must still succeed with the same
+        // (still-unconsumed... no — the token above was already atomically
+        // consumed on the failed attempt) — issue a fresh token to prove
+        // the rejection above wasn't a false-positive that also blocks
+        // legitimate resets.
+        let (raw_token2, _uid, _exp) = svc
+            .initiate_reset(tid, &user.email, 1, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let ok_result = svc
+            .confirm_reset(
+                tid,
+                &raw_token2,
+                "BrandNewStr0ngPassword",
+                &policy,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            ok_result.is_ok(),
+            "resetting to a genuinely new password must still succeed: {ok_result:?}"
         );
     }
 

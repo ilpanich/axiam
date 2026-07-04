@@ -21,12 +21,6 @@ use crate::error::AuthError;
 use crate::token::AUD_USER;
 use crate::{password, token, totp};
 
-/// Constant Argon2id hash of "dummy" used for timing equalization on
-/// user-not-found (SEC-026). Must be a valid Argon2 PHC string so that
-/// `verify_password` executes the full Argon2 computation.
-const DUMMY_HASH: &str =
-    "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaasfNiu6f6WSz0n28";
-
 // -----------------------------------------------------------------------
 // Input / output types
 // -----------------------------------------------------------------------
@@ -220,7 +214,11 @@ impl<
                         let _permit = self.crypto_semaphore.acquire().await.ok();
                         let pepper_owned = self.config.pepper.clone();
                         let _ = tokio::task::spawn_blocking(move || {
-                            password::verify_password("dummy", DUMMY_HASH, pepper_owned.as_deref())
+                            password::verify_password(
+                                "dummy",
+                                password::DUMMY_HASH,
+                                pepper_owned.as_deref(),
+                            )
                         })
                         .await;
                         return Err(AuthError::InvalidCredentials.into());

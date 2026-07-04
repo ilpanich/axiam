@@ -76,6 +76,8 @@ webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"]
 webauthn-rs-proto = "0.5"
 aes-gcm = "0.10"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+zeroize = "1"
+secrecy = { version = "0.10", features = ["serde"] }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

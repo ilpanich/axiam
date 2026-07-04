@@ -32,6 +32,41 @@ use tracing::{error, info, warn};
 pub const MAX_RETRIES: u32 = 3;
 
 // ---------------------------------------------------------------------------
+// Retry backoff (SECHRD-08 / D-05d)
+// ---------------------------------------------------------------------------
+//
+// In-process exponential backoff before a `RetryNeeded` republish, mirroring
+// the only in-repo backoff precedent (`axiam-api-rest/src/webhook.rs`'s
+// `initial_delay * multiplier.powi((attempt - 1) as i32)` shape). No RabbitMQ
+// delayed-exchange plugin or TTL+DLX parking-lot is introduced — the "no new
+// infra" constraint (25-RESEARCH.md Pitfall 6 / Assumptions Log A2). Note the
+// single-consumer throughput tradeoff already flagged there: the consumer
+// loop blocks on `tokio::time::sleep` for the backoff duration before
+// republishing, so a burst of failing sends serializes through this delay.
+
+/// Initial backoff delay (seconds) applied before the first retry republish.
+const MAIL_RETRY_INITIAL_DELAY_SECS: f64 = 10.0;
+
+/// Exponential backoff multiplier applied per subsequent retry attempt.
+const MAIL_RETRY_BACKOFF_MULTIPLIER: f64 = 2.0;
+
+/// Upper bound on any single backoff delay, to avoid unbounded sleeps.
+const MAIL_RETRY_MAX_DELAY_SECS: f64 = 3600.0;
+
+/// Compute the exponential backoff delay (seconds) before republishing a
+/// `RetryNeeded` mail message, given the retry's `attempt_count` (the
+/// *post-increment* value about to be published: `1` for the first retry,
+/// `2` for the second, ...).
+///
+/// Mirrors `webhook.rs`'s shape: `initial_delay * multiplier.powi(attempt - 1)`,
+/// clamped to `[0, MAIL_RETRY_MAX_DELAY_SECS]`.
+fn backoff_delay_secs(attempt_count: u32) -> f64 {
+    let exponent = attempt_count.saturating_sub(1) as i32;
+    let delay = MAIL_RETRY_INITIAL_DELAY_SECS * MAIL_RETRY_BACKOFF_MULTIPLIER.powi(exponent);
+    delay.clamp(0.0, MAIL_RETRY_MAX_DELAY_SECS)
+}
+
+// ---------------------------------------------------------------------------
 // MailType → TemplateKind mapping
 // ---------------------------------------------------------------------------
 
@@ -330,6 +365,17 @@ pub async fn start_mail_consumer<E, A, U>(
                 // Re-publish with incremented attempt_count for backoff.
                 let mut retry_msg = msg.clone();
                 retry_msg.attempt_count += 1;
+
+                // SECHRD-08 / D-05d: wait an in-process exponential backoff
+                // BEFORE republishing — no zero-delay hot-retry loop against
+                // a possibly-down SMTP relay.
+                let delay_secs = backoff_delay_secs(retry_msg.attempt_count);
+                info!(
+                    attempt = retry_msg.attempt_count,
+                    delay_secs, "Backing off before mail retry republish"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+
                 match serde_json::to_vec(&retry_msg) {
                     Ok(payload) => {
                         let publish_result = channel
@@ -390,4 +436,55 @@ pub async fn start_mail_consumer<E, A, U>(
     }
 
     warn!("Mail AMQP consumer stream ended");
+}
+
+// ---------------------------------------------------------------------------
+// Tests: retry backoff (SECHRD-08 / D-05d)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod mail_retry_backoff_tests {
+    use super::*;
+
+    /// The `RetryNeeded` branch must sleep a nonzero, increasing backoff
+    /// delay before `basic_publish` — no zero-delay hot-retry loop.
+    #[test]
+    fn mail_retry_backoff_is_nonzero_and_increasing() {
+        let first = backoff_delay_secs(1);
+        let second = backoff_delay_secs(2);
+        let third = backoff_delay_secs(3);
+
+        assert!(
+            first > 0.0,
+            "first retry delay must not be a zero-delay hot-retry (D-05d)"
+        );
+        assert!(
+            second > first,
+            "backoff must increase exponentially between attempts"
+        );
+        assert!(
+            third > second,
+            "backoff must increase exponentially between attempts"
+        );
+    }
+
+    /// Backoff must be clamped so a runaway attempt_count can never produce
+    /// an unbounded sleep.
+    #[test]
+    fn mail_retry_backoff_is_clamped() {
+        let delay = backoff_delay_secs(1_000);
+        assert!(
+            delay <= MAIL_RETRY_MAX_DELAY_SECS,
+            "backoff delay must be clamped to MAIL_RETRY_MAX_DELAY_SECS, got {delay}"
+        );
+        assert!(delay >= 0.0, "backoff delay must never be negative");
+    }
+
+    /// `attempt_count = 0` (defensive — the retry branch always passes
+    /// `attempt_count >= 1`) must not panic or produce a negative delay.
+    #[test]
+    fn mail_retry_backoff_handles_zero_attempt_defensively() {
+        let delay = backoff_delay_secs(0);
+        assert!(delay >= 0.0);
+    }
 }

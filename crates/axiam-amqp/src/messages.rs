@@ -13,6 +13,7 @@
 //! `user_id` + `tenant_id` to prevent recipient hijacking.
 
 use chrono::{DateTime, Utc};
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -21,6 +22,51 @@ use uuid::Uuid;
 pub use axiam_core::models::mail::{MailType, OutboundMailMessage};
 
 type HmacSha256 = Hmac<Sha256>;
+
+// ---------------------------------------------------------------------------
+// HKDF per-tenant key derivation (SECHRD-08 / D-05a/b)
+// ---------------------------------------------------------------------------
+
+/// Fixed application-level salt for HKDF tenant-key derivation. HKDF salts
+/// are not secret; domain separation comes from the `info` parameter below.
+const APP_SALT: &[u8] = b"axiam-amqp-hkdf-salt-v1";
+
+/// Fixed domain-separation tag mixed into HKDF's `info` parameter so a
+/// derived AMQP signing subkey can never collide with a subkey derived for
+/// any other purpose from the same master key.
+const DOMAIN_TAG: &[u8] = b"axiam-amqp-v1";
+
+/// Current message envelope key version (SECHRD-08 / D-05b). Bump this when
+/// rotating the master signing key; `key_version` travels on the wire so a
+/// verifier always derives the subkey the publisher actually used.
+pub const CURRENT_KEY_VERSION: u8 = 1;
+
+fn default_key_version() -> u8 {
+    CURRENT_KEY_VERSION
+}
+
+/// Derive a per-tenant AMQP signing subkey from the shared master key
+/// (SECHRD-08 / D-05a/b, T-25-19).
+///
+/// Uses HKDF-SHA256 (`hkdf::Hkdf<Sha256>`) — never hand-rolled concatenation
+/// hashing. The `info` parameter is domain-separated (fixed tag) and
+/// versioned (`key_version`) then tenant-scoped (`tenant_id`), so:
+/// - A signature produced with tenant A's subkey never verifies under
+///   tenant B's subkey, even though both derive from the same master key.
+/// - Bumping `key_version` (master key rotation) yields an entirely
+///   different subkey for the same tenant, without breaking in-flight
+///   messages signed under the prior version (D-05b).
+pub fn derive_tenant_key(master: &[u8], tenant_id: Uuid, key_version: u8) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(APP_SALT), master);
+    let mut info = Vec::with_capacity(DOMAIN_TAG.len() + 1 + 16);
+    info.extend_from_slice(DOMAIN_TAG);
+    info.push(key_version);
+    info.extend_from_slice(tenant_id.as_bytes());
+    let mut okm = [0u8; 32];
+    hk.expand(&info, &mut okm)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    okm
+}
 
 // ---------------------------------------------------------------------------
 // HMAC helpers (SEC-022)
@@ -49,6 +95,27 @@ pub fn verify_payload(key: &[u8], payload_json: &[u8], signature_hex: &str) -> b
     mac.verify_slice(&expected).is_ok()
 }
 
+/// Verify a signed AMQP envelope against its per-tenant derived subkey
+/// (SECHRD-08 / D-05a/b/c).
+///
+/// Derives the tenant's subkey from `master_key` + `tenant_id` +
+/// `key_version`, then verifies `signature` over `canonical_bytes`.
+///
+/// Returns `false` when `signature` is `None` (unsigned) OR the signature
+/// does not verify — there is no accept-when-absent code path. Consumers
+/// MUST reject (nack, never process) whenever this returns `false`
+/// (T-25-20).
+pub fn verify_tenant_signature(
+    master_key: &[u8],
+    tenant_id: Uuid,
+    key_version: u8,
+    canonical_bytes: &[u8],
+    signature: Option<&str>,
+) -> bool {
+    let subkey = derive_tenant_key(master_key, tenant_id, key_version);
+    signature.is_some_and(|sig| verify_payload(&subkey, canonical_bytes, sig))
+}
+
 // ---------------------------------------------------------------------------
 // Message types
 // ---------------------------------------------------------------------------
@@ -64,10 +131,14 @@ pub struct AuthzRequest {
     pub resource_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// HKDF master-key rotation version (SECHRD-08 / D-05b). Selects which
+    /// per-tenant subkey derivation the signature was produced with.
+    #[serde(default = "default_key_version")]
+    pub key_version: u8,
     /// HMAC-SHA256 of the JSON-serialized message body (this field set to null).
-    /// Computed with the per-tenant AMQP signing key (SEC-022).
-    /// Consumer MUST verify this before processing. Missing signature is
-    /// acceptable during a rolling deployment but should be rejected in strict mode.
+    /// Computed with the per-tenant subkey derived via [`derive_tenant_key`]
+    /// (SECHRD-08 / D-05a/b). Mandatory — the consumer rejects both unsigned
+    /// and invalid-signature messages; there is no fail-open path (D-05c).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac_signature: Option<String>,
 }
@@ -97,7 +168,14 @@ pub struct AuditEventMessage {
     pub ip_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// HKDF master-key rotation version (SECHRD-08 / D-05b). Selects which
+    /// per-tenant subkey derivation the signature was produced with.
+    #[serde(default = "default_key_version")]
+    pub key_version: u8,
     /// HMAC-SHA256 of the JSON-serialized message body (SEC-022/055).
+    /// Computed with the per-tenant subkey derived via [`derive_tenant_key`]
+    /// (SECHRD-08 / D-05a/b). Mandatory — the consumer rejects both unsigned
+    /// and invalid-signature messages; there is no fail-open path (D-05c).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac_signature: Option<String>,
 }
@@ -228,6 +306,7 @@ mod tests {
             action: "read".into(),
             resource_id: Uuid::nil(),
             scope: None,
+            key_version: CURRENT_KEY_VERSION,
             hmac_signature: Some("abc123".into()),
         };
         let json = serde_json::to_string(&req).expect("serialize");
@@ -246,12 +325,122 @@ mod tests {
             action: "read".into(),
             resource_id: Uuid::nil(),
             scope: None,
+            key_version: CURRENT_KEY_VERSION,
             hmac_signature: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(
             !json.contains("hmac_signature"),
             "hmac_signature must be omitted when None"
+        );
+    }
+
+    // SECHRD-08 / D-05a/b: HKDF per-tenant key derivation.
+    #[test]
+    fn derive_tenant_key_is_deterministic_and_versioned() {
+        let master = b"shared-amqp-master-key";
+        let tenant = Uuid::new_v4();
+
+        let k1 = derive_tenant_key(master, tenant, 1);
+        let k2 = derive_tenant_key(master, tenant, 1);
+        assert_eq!(k1, k2, "same inputs must derive the same key");
+
+        let k_v2 = derive_tenant_key(master, tenant, 2);
+        assert_ne!(
+            k1, k_v2,
+            "a different key_version must derive a different key"
+        );
+    }
+
+    // SECHRD-08 / T-25-19 (SC #5a): a tenant-A signature must not validate
+    // under tenant-B's derived subkey, even from the same master key.
+    #[test]
+    fn per_tenant_signature_cross_tenant_rejected() {
+        let master = b"shared-amqp-master-key";
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+        let key_version = 1;
+
+        let subkey_a = derive_tenant_key(master, tenant_a, key_version);
+        let subkey_b = derive_tenant_key(master, tenant_b, key_version);
+        assert_ne!(
+            subkey_a, subkey_b,
+            "different tenants must derive different subkeys"
+        );
+
+        let payload = b"{\"tenant_id\":\"a\",\"action\":\"read\"}";
+        let sig = sign_payload(&subkey_a, payload);
+
+        assert!(
+            verify_payload(&subkey_a, payload, &sig),
+            "tenant A's own signature must verify under tenant A's subkey"
+        );
+        assert!(
+            !verify_payload(&subkey_b, payload, &sig),
+            "tenant A's signature must NOT verify under tenant B's subkey (T-25-19)"
+        );
+
+        // Exercise via the consumer-facing wrapper too.
+        assert!(verify_tenant_signature(
+            master,
+            tenant_a,
+            key_version,
+            payload,
+            Some(&sig)
+        ));
+        assert!(!verify_tenant_signature(
+            master,
+            tenant_b,
+            key_version,
+            payload,
+            Some(&sig)
+        ));
+    }
+
+    // SECHRD-08 / T-25-20: unsigned messages must be rejected — no fail-open
+    // "accept when absent" branch.
+    #[test]
+    fn verify_tenant_signature_rejects_unsigned_message() {
+        let master = b"shared-amqp-master-key";
+        let tenant = Uuid::new_v4();
+        let payload = b"unsigned-audit-event";
+
+        assert!(
+            !verify_tenant_signature(master, tenant, CURRENT_KEY_VERSION, payload, None),
+            "absent signature must be rejected — no fail-open path (SECHRD-08 / T-25-20)"
+        );
+    }
+
+    #[test]
+    fn verify_tenant_signature_rejects_tampered_payload() {
+        let master = b"shared-amqp-master-key";
+        let tenant = Uuid::new_v4();
+        let payload = b"original-authz-request";
+        let tampered = b"tampered-authz-request";
+        let subkey = derive_tenant_key(master, tenant, CURRENT_KEY_VERSION);
+        let sig = sign_payload(&subkey, payload);
+
+        assert!(
+            !verify_tenant_signature(master, tenant, CURRENT_KEY_VERSION, tampered, Some(&sig)),
+            "tampered payload must not verify"
+        );
+    }
+
+    #[test]
+    fn verify_tenant_signature_rejects_invalid_hex_signature() {
+        let master = b"shared-amqp-master-key";
+        let tenant = Uuid::new_v4();
+        let payload = b"some-audit-event";
+
+        assert!(
+            !verify_tenant_signature(
+                master,
+                tenant,
+                CURRENT_KEY_VERSION,
+                payload,
+                Some("not-valid-hex!!")
+            ),
+            "malformed signature hex must not verify"
         );
     }
 }

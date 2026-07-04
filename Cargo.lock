@@ -743,6 +743,7 @@ dependencies = [
  "chrono",
  "futures-lite",
  "hex",
+ "hkdf",
  "hmac",
  "lapin",
  "serde",

@@ -5,8 +5,8 @@ milestone_name: — MVP Release Hardening
 current_phase: 25
 current_phase_name: Security Hardening II — Federation, PKI, Data-Protection & Infra
 status: planning
-stopped_at: Completed 24-09-PLAN.md
-last_updated: "2026-07-04T14:07:04.087Z"
+stopped_at: Phase 25 context gathered
+last_updated: "2026-07-04T14:22:07.897Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 24 complete, transitioned to Phase 25
 progress:
@@ -428,7 +428,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T12:51:33.425Z
-Stopped at: Completed 24-09-PLAN.md
-Resume file: None
+Last session: 2026-07-04T14:22:07.881Z
+Stopped at: Phase 25 context gathered
+Resume file: .planning/phases/25-security-hardening-ii-federation-pki-data-protection-infra/25-CONTEXT.md
 Next action: /gsd-execute-phase 23

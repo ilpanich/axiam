@@ -1193,7 +1193,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 23. Security Regressions & HIGH Findings | 6/6 | Complete   | 2026-07-03 |
-| 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete   | 2026-07-04 |
+| 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete    | 2026-07-04 |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 0/? | Not started | - |
 | 26. Correctness & Resilience | 0/? | Not started | - |
 | 27. Performance & Load Hardening | 0/? | Not started | - |

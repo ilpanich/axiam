@@ -694,10 +694,10 @@ Pin the validated IP and extend the private-IP guard beyond JWKS to all federati
 Fix the XFF fallback that returns the client-controlled leftmost hop and reconcile `trusted_hops` guidance with nginx's append semantics.
 
 ### Acceptance Criteria
-- [ ] When `trusted_hops >= hops.len()`, ignore XFF and use `peer_addr()` (do not return `hops[0]`)
-- [ ] `trusted_hops` docs corrected for nginx `proxy_add_x_forwarded_for` (rightmost = real client)
-- [ ] Rotating `X-Forwarded-For` per request no longer yields a fresh bucket (test)
-- [ ] Multi-replica shared rate-limit store implemented, or the per-replica multiplier documented loudly
+- [x] When `trusted_hops >= hops.len()`, ignore XFF and use `peer_addr()` (do not return `hops[0]`) — `XForwardedForKeyExtractor::extract` (24-03)
+- [x] `trusted_hops` docs corrected for nginx `proxy_add_x_forwarded_for` (rightmost = real client) (24-03)
+- [x] Rotating `X-Forwarded-For` per request no longer yields a fresh bucket (test) — `rate_limit_xff_rotation_rejected` (24-03)
+- [x] Multi-replica shared rate-limit store implemented, or the per-replica multiplier documented loudly — `rate_limit_bucket` table + `RateLimitShared` middleware (24-04); gRPC parity tracked separately (24-07)
 
 ## SECHRD-04: Bootstrap Atomicity & Mandatory Gate
 
@@ -1078,7 +1078,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Complete |
 | SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Complete |
 | SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |
-| SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Pending |
+| SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Pending (REST keying + shared store complete 24-03/24-04; gRPC parity pending 24-07) |
 | SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Pending |
 | SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Pending |
 | SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |

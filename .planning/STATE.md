@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 24
 current_phase_name: security-hardening-i-authentication-access-control-surfaces
 status: executing
-stopped_at: Completed 24-03-PLAN.md
-last_updated: "2026-07-04T09:11:19.618Z"
+stopped_at: Completed 24-04-PLAN.md
+last_updated: "2026-07-04T09:41:51.250Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 24 execution started
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 15
-  completed_plans: 9
+  completed_plans: 10
   percent: 13
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 24 (security-hardening-i-authentication-access-control-surfaces) — EXECUTING
-Plan: 4 of 9
+Plan: 5 of 9
 Status: Ready to execute
 Last activity: 2026-07-04 — Phase 24 execution started
 
@@ -162,6 +162,7 @@ Last activity: 2026-07-04 — Phase 24 execution started
 | Phase 24 P01 | 65min | 3 tasks | 7 files |
 | Phase 24 P02 | 20min | 1 tasks | 1 files |
 | Phase 24 P03 | 12min | 1 tasks | 2 files |
+| Phase 24 P04 | 28min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -384,6 +385,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 24-02] Segment-boundary wildcard matching + //  collapse + .. rejection in is_public_path (fail-closed on ambiguity), closing the /api/v1/auth/* vs /api/v1/authz/... prefix-confusion bypass (SECHRD-11)
 - [Phase ?]: [Phase 24-02] Extracted matches_public_allowlist(path, entries) as a pure matcher so tests can prove the segment-boundary property against a synthetic allowlist (real PUBLIC_PATHS has no adjacent-prefix wildcard collision to exploit today)
 - [Phase ?]: [Phase 24-03] Fixed XForwardedForKeyExtractor's trusted_hops >= hops.len() branch to skip XFF entirely and fall through to peer_addr(), never hops[0] (SECHRD-03, T-24-31/T-24-32); nginx proxy_add_x_forwarded_for doc comment corrected (rightmost = real client)
+- [Phase ?]: [Phase 24-04] seeder.rs left untouched -- rate_limit_bucket schema applied via existing run_migrations startup path, not seeder.rs (which only seeds tenant permissions/roles)
+- [Phase ?]: [Phase 24-04] RateLimitShared wired onto all 20 REST build_governor(...) call sites in server.rs (not just /login), per D-01c REST-coverage; middleware reads Surreal<C> from req.app_data() at request time rather than changing register_api_v1_routes's signature
 
 ### Pending Todos
 
@@ -405,7 +408,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T09:11:19.605Z
-Stopped at: Completed 24-03-PLAN.md
+Last session: 2026-07-04T09:41:51.237Z
+Stopped at: Completed 24-04-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

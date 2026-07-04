@@ -340,6 +340,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             .create(CreateErasureProof {
                 pseudonym: pseudonym.clone(),
                 tenant_id,
+                user_id,
                 erased_at: Utc::now(),
             })
             .await?;

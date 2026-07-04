@@ -345,7 +345,11 @@ mod tests {
         .unwrap();
 
         let sessions = repo.list_by_user(tenant_id, target_user_id).await.unwrap();
-        assert_eq!(sessions.len(), 2, "expected exactly the target user's 2 sessions");
+        assert_eq!(
+            sessions.len(),
+            2,
+            "expected exactly the target user's 2 sessions"
+        );
         for session in &sessions {
             assert_eq!(session.tenant_id, tenant_id);
             assert_eq!(session.user_id, target_user_id);

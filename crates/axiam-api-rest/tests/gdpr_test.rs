@@ -411,12 +411,14 @@ async fn deletion_pseudonymization() {
         .create(CreateErasureProof {
             pseudonym: pseudonym.clone(),
             tenant_id,
+            user_id,
             erased_at: Utc::now(),
         })
         .await
         .unwrap();
     assert_eq!(proof.pseudonym, pseudonym);
     assert_eq!(proof.tenant_id, tenant_id);
+    assert_eq!(proof.user_id, user_id);
 
     // --- Verify: user row is anonymized ---
     let anon_user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();

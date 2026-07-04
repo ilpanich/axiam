@@ -969,10 +969,18 @@ DEFINE INDEX IF NOT EXISTS idx_export_job_token ON TABLE export_job
 DEFINE TABLE IF NOT EXISTS erasure_proof SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS pseudonym ON TABLE erasure_proof TYPE string;
 DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE erasure_proof TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE erasure_proof TYPE string;
 DEFINE FIELD IF NOT EXISTS erased_at ON TABLE erasure_proof TYPE datetime
     DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_erasure_proof_tenant ON TABLE erasure_proof
     COLUMNS tenant_id;
+-- Erasure proofs are tenant-scoped (like every other domain entity in this
+-- codebase — e.g. idx_user_tenant_username above), so uniqueness is defined
+-- on (tenant_id, user_id) rather than a bare user_id: a retried erasure's
+-- duplicate proof CREATE for the same user in the same tenant no-ops/fails
+-- idempotently at the schema level (D-03b/SECHRD-06).
+DEFINE INDEX IF NOT EXISTS idx_erasure_proof_tenant_user ON TABLE erasure_proof
+    COLUMNS tenant_id, user_id UNIQUE;
 
 -- =======================================================================
 -- ALTER user table: add GDPR deletion fields

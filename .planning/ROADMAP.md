@@ -1128,6 +1128,7 @@ Plans:
 **Plans**: 8 plans (2 waves)
 
 Plans:
+**Wave 1**
 
 - [ ] 26-01-PLAN.md — CORR-01: gRPC governor throughput fix (Quota::per_second) + sustained-throughput test [wave 1]
 - [ ] 26-02-PLAN.md — CORR-02: SurrealDB proactive re-signin + reactive reconnect + auth-aware health_check [wave 1]
@@ -1135,6 +1136,9 @@ Plans:
 - [ ] 26-04-PLAN.md — CORR-04: Playwright in CI (blocking) + spec triage + contract body assertions [wave 1]
 - [ ] 26-05-PLAN.md — CORR-05a: backend /auth/me tenant_slug/org_slug emission (graceful degrade) [wave 1]
 - [ ] 26-06-PLAN.md — CORR-06: VerifyEmail useRef guard + Dashboard query key + org-settings dirty-tracking [wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 26-07-PLAN.md — CORR-03b: webhook consumer + retry/DLQ config + main.rs wiring + integration test [wave 2, depends 26-03]
 - [ ] 26-08-PLAN.md — CORR-05b: MFA-setup landing route + TotpSetupPanel + tenant-restore e2e [wave 2, depends 26-05]
 

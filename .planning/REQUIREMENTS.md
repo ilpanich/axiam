@@ -682,10 +682,10 @@ Make the TOTP step check-and-update atomic and close the skew-boundary and enrol
 Pin the validated IP and extend the private-IP guard beyond JWKS to all federation outbound fetches.
 
 ### Acceptance Criteria
-- [ ] Webhook delivery pins the validated `IpAddr` into the connection (custom resolver / `resolve()`) — no DNS-rebind between check and send
-- [ ] Private/loopback/link-local/ULA guard applied to OIDC discovery, token exchange, and SAML-metadata fetches (not just JWKS)
-- [ ] Resolved address pinned for those fetches too (close the JWKS DNS-rebind TOCTOU)
-- [ ] Negative test: an internal/loopback `token_endpoint` from a discovery document is rejected
+- [ ] Webhook delivery pins the validated `IpAddr` into the connection (custom resolver / `resolve()`) — no DNS-rebind between check and send (plan 25-02)
+- [x] Private/loopback/link-local/ULA guard applied to OIDC discovery, token exchange, and SAML-metadata fetches (not just JWKS) — shared `axiam_federation::ssrf` module (25-01)
+- [x] Resolved address pinned for those fetches too (close the JWKS DNS-rebind TOCTOU) — `ssrf::pinned_client` via `ClientBuilder::resolve()` (25-01)
+- [x] Negative test: an internal/loopback `token_endpoint` from a discovery document is rejected — `ssrf_rejects_loopback_token_endpoint`, `ssrf_rejects_redirect_to_internal` (25-01)
 
 ## SECHRD-03: Rate-Limit Client-IP Keying
 

@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 25
 current_phase_name: Security Hardening II — Federation, PKI, Data-Protection & Infra
 status: executing
-stopped_at: Phase 25 context gathered
-last_updated: "2026-07-04T15:59:54.142Z"
+stopped_at: Completed 25-01-PLAN.md
+last_updated: "2026-07-04T16:18:56.072Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 25 execution resumed (wave continue)
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 25
-  completed_plans: 15
+  completed_plans: 16
   percent: 25
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — EXECUTING
-Plan: 1 of 10
-Status: Executing Phase 25
+Plan: 2 of 10
+Status: Ready to execute
 Last activity: 2026-07-04 — Phase 25 execution resumed (wave continue)
 
 ## Performance Metrics
@@ -169,6 +169,7 @@ Last activity: 2026-07-04 — Phase 25 execution resumed (wave continue)
 | Phase 24 P07 | 33min | 2 tasks | 5 files |
 | Phase 24 P08 | 50min | 3 tasks | 6 files |
 | Phase 24 P09 | 43min | 3 tasks | 4 files |
+| Phase 25 P01 | 25min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -406,6 +407,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 24-08]: already-bootstrapped tenant now returns 409 Conflict (AlreadyExists) instead of the old 404 -- direct consequence of the bootstrap_lock uniqueness invariant replacing the TOCTOU check
 - [Phase ?]: [Phase 24-09]: initiate_reset's valid-account branch intentionally does NOT get a matching dummy_hash_wait — only the two Ok(None) branches (unknown email, federated user) do, per RESEARCH Pattern 4's literal SEC-026 mirroring
 - [Phase ?]: [Phase 24-09]: confirm_reset's evaluate_password (history+HIBP) call is wrapped in its own crypto_semaphore permit for its full duration rather than plumbing the semaphore into policy.rs, staying within this plan's declared file scope while closing the ungated-Argon2 gap
+- [Phase ?]: [Phase 25-01]: allow_private SSRF test seam scoped to guarded_fetch's first hop only — every redirect hop always runs the strict check, otherwise the redirect-bypass negative test would be vacuous
+- [Phase ?]: [Phase 25-01]: SamlFederationService.http_client retained with #[allow(dead_code)] rather than removed — avoids touching ~9 out-of-scope call sites in axiam-api-rest/axiam-server; guarded_fetch now builds its own fresh pinned client per D-01c
 
 ### Pending Todos
 
@@ -428,7 +431,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T14:22:07.881Z
-Stopped at: Phase 25 context gathered
-Resume file: .planning/phases/25-security-hardening-ii-federation-pki-data-protection-infra/25-CONTEXT.md
+Last session: 2026-07-04T16:18:48.708Z
+Stopped at: Completed 25-01-PLAN.md
+Resume file: None
 Next action: /gsd-execute-phase 23

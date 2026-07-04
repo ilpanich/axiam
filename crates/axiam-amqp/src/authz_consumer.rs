@@ -12,7 +12,7 @@ use lapin::{BasicProperties, Channel, Confirmation};
 use tracing::{error, info, warn};
 
 use crate::connection::queues;
-use crate::messages::{AuthzRequest, AuthzResponse, verify_payload};
+use crate::messages::{AuthzRequest, AuthzResponse, verify_tenant_signature};
 
 /// Start consuming authorization requests from the `axiam.authz.request` queue.
 ///
@@ -20,14 +20,15 @@ use crate::messages::{AuthzRequest, AuthzResponse, verify_payload};
 /// and the result is published to `axiam.authz.response`. Messages are
 /// acknowledged on success or nacked on failure.
 ///
-/// SEC-022: When `signing_key` is `Some`, the `hmac_signature` in each
-/// `AuthzRequest` is verified before processing. Messages with an invalid
-/// or missing signature are nacked. When `None`, signatures are not required
-/// (migration / development mode) but a warning is logged.
+/// SEC-022/SECHRD-08: Every `AuthzRequest` is verified before processing —
+/// the per-tenant subkey is derived from `master_signing_key` + the
+/// message's `tenant_id` + `key_version`, then the `hmac_signature` is
+/// checked against it. Messages with an invalid or missing signature are
+/// nacked and never processed; there is no fail-open path (D-05c).
 pub async fn start_authz_consumer<R, P, Res, S, G>(
     channel: Channel,
     engine: AuthorizationEngine<R, P, Res, S, G>,
-    signing_key: Option<Vec<u8>>,
+    master_signing_key: Vec<u8>,
 ) where
     R: RoleRepository + 'static,
     P: PermissionRepository + 'static,
@@ -84,37 +85,40 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
             }
         };
 
-        // SEC-022: Verify HMAC signature when a signing key is configured.
-        if let Some(ref key) = signing_key {
-            // Extract the signature before building the canonical form (signature = None).
-            let received_sig = request.hmac_signature.take();
+        // SEC-022/SECHRD-08: Verify the per-tenant derived HMAC signature.
+        // Unsigned or invalid-signature messages are always rejected —
+        // there is no fail-open path (D-05c, T-25-20).
+        // Extract the signature before building the canonical form (signature = None).
+        let received_sig = request.hmac_signature.take();
+        let tenant_id = request.tenant_id;
+        let key_version = request.key_version;
 
-            // Canonical payload has hmac_signature = None to reproduce what was signed.
-            let canonical_bytes =
-                serde_json::to_vec(&request).unwrap_or_else(|_| delivery.data.clone());
+        // Canonical payload has hmac_signature = None to reproduce what was signed.
+        let canonical_bytes =
+            serde_json::to_vec(&request).unwrap_or_else(|_| delivery.data.clone());
 
-            let valid = received_sig
-                .as_deref()
-                .is_some_and(|sig| verify_payload(key, &canonical_bytes, sig));
+        let valid = verify_tenant_signature(
+            &master_signing_key,
+            tenant_id,
+            key_version,
+            &canonical_bytes,
+            received_sig.as_deref(),
+        );
 
-            if !valid {
-                warn!(
-                    delivery_tag = tag,
-                    "AuthzRequest HMAC verification failed — nacking (SEC-022)"
-                );
-                let _ = delivery
-                    .acker
-                    .nack(BasicNackOptions {
-                        requeue: false,
-                        ..BasicNackOptions::default()
-                    })
-                    .await;
-                continue;
-            }
-        } else {
+        if !valid {
             warn!(
-                "AMQP signing key not configured — AuthzRequest signatures not verified (SEC-022)"
+                delivery_tag = tag,
+                tenant_id = %tenant_id,
+                "AuthzRequest unsigned or HMAC verification failed — rejecting (SEC-022/SECHRD-08)"
             );
+            let _ = delivery
+                .acker
+                .nack(BasicNackOptions {
+                    requeue: false,
+                    ..BasicNackOptions::default()
+                })
+                .await;
+            continue;
         }
 
         let correlation_id = request.correlation_id;

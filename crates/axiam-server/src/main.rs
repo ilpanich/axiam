@@ -518,20 +518,15 @@ async fn main() -> std::io::Result<()> {
         scope_repo.clone(),
         group_repo.clone(),
     );
-    // SEC-022: Decode AMQP signing key (hex) for HMAC message verification.
-    let amqp_signing_key: Option<Vec<u8>> =
-        config.amqp.signing_key.as_deref().and_then(|hex| {
-            hex::decode(hex).map_err(|e| {
-                tracing::warn!(error = %e, "AXIAM__AMQP__SIGNING_KEY is not valid hex — ignoring");
-            }).ok()
-        });
-    if amqp_signing_key.is_some() {
-        tracing::info!("AMQP signing key loaded (SEC-022)");
-    } else {
-        tracing::warn!(
-            "AMQP signing key not configured — messages will not be HMAC-verified (SEC-022)"
-        );
-    }
+    // SEC-022/SECHRD-08: Resolve the mandatory AMQP master signing key. In a
+    // debug build this falls back to a documented dev-only default when
+    // unset; in a release build (the production container image) an unset
+    // key fails closed at startup — there is no unsigned code path (D-05c).
+    let amqp_signing_key: Vec<u8> = config
+        .amqp
+        .resolve_signing_key()
+        .expect("AMQP signing key must resolve (SECHRD-08 / D-05c) — see AXIAM__AMQP__SIGNING_KEY");
+    tracing::info!("AMQP signing key resolved (SEC-022/SECHRD-08)");
     let amqp_signing_key_clone = amqp_signing_key.clone();
     tokio::spawn(async move {
         axiam_amqp::authz_consumer::start_authz_consumer(

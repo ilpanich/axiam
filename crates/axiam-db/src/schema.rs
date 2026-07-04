@@ -142,6 +142,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "seeder_state",
         sql: SCHEMA_V20,
     },
+    Migration {
+        version: 21,
+        name: "rate_limit_bucket",
+        sql: SCHEMA_V21,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1085,6 +1090,29 @@ DEFINE TABLE IF NOT EXISTS seeder_state SCHEMAFULL TYPE NORMAL;
 DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE seeder_state TYPE string;
 DEFINE FIELD IF NOT EXISTS hash ON TABLE seeder_state TYPE string;
 DEFINE FIELD IF NOT EXISTS updated_at ON TABLE seeder_state TYPE datetime
+    DEFAULT time::now();
+";
+
+// -----------------------------------------------------------------------
+// Schema v21 — rate_limit_bucket (SECHRD-03 / D-01a shared rate-limit store)
+// -----------------------------------------------------------------------
+//
+// Backs the multi-replica shared rate-limit counter (windowed CAS via
+// UPSERT ... RETURN AFTER). Record IDs are `format!("{endpoint}:{ip}")` so
+// per-endpoint limits are preserved across replicas under HPA. This table
+// is read/written ONLY by the REST shared-store pre-check middleware
+// (`axiam-api-rest::middleware::rate_limit_shared`), which fails OPEN to
+// the existing per-replica in-memory Governor on any error (D-01b) — never
+// a hard block on auth traffic.
+
+const SCHEMA_V21: &str = "\
+-- =======================================================================
+-- Rate limit bucket (global scope) — shared multi-replica counter
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS rate_limit_bucket SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS count ON TABLE rate_limit_bucket TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS window_start ON TABLE rate_limit_bucket TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE rate_limit_bucket TYPE datetime
     DEFAULT time::now();
 ";
 

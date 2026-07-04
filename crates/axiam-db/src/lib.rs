@@ -27,11 +27,11 @@ pub use repository::{
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
-    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnCredentialRepository, SurrealWebhookRepository, hash_client_secret,
-    verify_password,
+    SurrealRateLimitBucketRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    hash_client_secret, verify_password,
 };
 pub use schema::{run_migrations, schema_v1};
 pub use seeder::{

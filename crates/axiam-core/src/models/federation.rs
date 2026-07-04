@@ -13,7 +13,7 @@ pub enum FederationProtocol {
     Saml,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FederationConfig {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -24,6 +24,7 @@ pub struct FederationConfig {
     pub metadata_url: Option<String>,
     pub client_id: String,
     /// Legacy plaintext client secret (kept for back-compat; nulled by plan 04-02 backfill).
+    #[serde(skip_serializing)]
     pub client_secret: String,
     /// Maps external IdP attributes to AXIAM user fields.
     pub attribute_map: serde_json::Value,
@@ -40,14 +41,43 @@ pub struct FederationConfig {
     pub idp_signing_cert_pem: Option<String>,
     /// AES-256-GCM ciphertext of the OAuth2 client secret (base64, no nonce prefix).
     /// Stored separately from `client_secret_nonce` — see `axiam_auth::crypto::encrypt_separate`.
+    #[serde(skip_serializing)]
     pub client_secret_ciphertext: Option<String>,
     /// Base64-encoded 12-byte AES-256-GCM nonce corresponding to `client_secret_ciphertext`.
+    #[serde(skip_serializing)]
     pub client_secret_nonce: Option<String>,
     /// Key version used when encrypting `client_secret_ciphertext`.
     /// Enables key rotation without re-encrypting all secrets at once.
+    #[serde(skip_serializing)]
     pub client_secret_key_version: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Manual `Debug` impl (SECHRD-09 / D-06): redacts the four secret-bearing
+/// fields so `{:?}` never prints the plaintext or encrypted client secret,
+/// while keeping all other fields human-readable for logs/traces.
+impl std::fmt::Debug for FederationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FederationConfig")
+            .field("id", &self.id)
+            .field("tenant_id", &self.tenant_id)
+            .field("provider", &self.provider)
+            .field("protocol", &self.protocol)
+            .field("metadata_url", &self.metadata_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("attribute_map", &self.attribute_map)
+            .field("enabled", &self.enabled)
+            .field("allowed_algorithms", &self.allowed_algorithms)
+            .field("idp_signing_cert_pem", &self.idp_signing_cert_pem)
+            .field("client_secret_ciphertext", &"[REDACTED]")
+            .field("client_secret_nonce", &"[REDACTED]")
+            .field("client_secret_key_version", &"[REDACTED]")
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

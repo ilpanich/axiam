@@ -39,7 +39,7 @@ pub enum CertificateType {
 /// within the organization. Private keys for signing CAs are encrypted
 /// with AES-256-GCM and stored separately; non-signing CAs only store
 /// the public certificate.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CaCertificate {
     pub id: Uuid,
     /// The organization this CA belongs to.
@@ -62,6 +62,30 @@ pub struct CaCertificate {
     #[schema(read_only)]
     pub encrypted_private_key: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
+}
+
+/// Manual `Debug` impl (SECHRD-09 / D-06): `#[serde(skip_serializing)]` only
+/// affects `Serialize`, not `{:?}` — this closes that residual leak by
+/// redacting `encrypted_private_key` while keeping other fields readable.
+impl std::fmt::Debug for CaCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaCertificate")
+            .field("id", &self.id)
+            .field("organization_id", &self.organization_id)
+            .field("subject", &self.subject)
+            .field("public_cert_pem", &self.public_cert_pem)
+            .field("fingerprint", &self.fingerprint)
+            .field("key_algorithm", &self.key_algorithm)
+            .field("not_before", &self.not_before)
+            .field("not_after", &self.not_after)
+            .field("status", &self.status)
+            .field(
+                "encrypted_private_key",
+                &self.encrypted_private_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 /// Fields required to generate a new CA certificate (user-facing DTO).
@@ -94,12 +118,24 @@ pub struct StoreCaCertificate {
 ///
 /// Includes the private key PEM, which is returned **once** and never
 /// stored or retrievable again.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GeneratedCaCertificate {
     #[serde(flatten)]
     pub certificate: CaCertificate,
     /// PEM-encoded private key — returned only on generation.
     pub private_key_pem: String,
+}
+
+/// Manual `Debug` impl (SECHRD-09 / D-06): redacts `private_key_pem` (raw
+/// key material returned only once on generation); delegates to
+/// `CaCertificate`'s own redacting `Debug` for the nested `certificate` field.
+impl std::fmt::Debug for GeneratedCaCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedCaCertificate")
+            .field("certificate", &self.certificate)
+            .field("private_key_pem", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// A tenant-level certificate for users, services, or IoT devices.

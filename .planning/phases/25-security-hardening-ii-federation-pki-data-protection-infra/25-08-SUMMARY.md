@@ -117,3 +117,10 @@ None - no external service configuration required.
 ---
 *Phase: 25-security-hardening-ii-federation-pki-data-protection-infra*
 *Completed: 2026-07-04*
+
+## Self-Check: PASSED
+
+- FOUND: 25-08-SUMMARY.md
+- FOUND: 9972d7b (fix commit)
+- FOUND: 5d69372 (test commit)
+- FOUND: fbee75c (docs/SUMMARY commit)

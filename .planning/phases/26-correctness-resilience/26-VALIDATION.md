@@ -1,11 +1,18 @@
 ---
 phase: 26
 slug: correctness-resilience
-status: draft
-nyquist_compliant: false
+status: plan-verified
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-07-04
 ---
+
+> **Plan-level Nyquist: PASS (gsd-plan-checker, 2026-07-04).** Every task in all 8 PLAN.md
+> files carries an `<automated>`/`<verify>` block; no watch-mode flags; no 3-consecutive-task
+> sampling gaps. The per-task verification map and Wave-0 checklist below are populated with
+> concrete Task IDs during `/gsd-execute-phase` (`wave_0_complete` flips true once Wave-0 test
+> seams exist). `nyquist_compliant: true` here asserts the *plan* satisfies Dimension 8, not
+> that execution is finished.
 
 # Phase 26 — Validation Strategy
 

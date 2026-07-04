@@ -673,9 +673,11 @@ phase; all changes are internal wiring corrections.
 **If this table is empty:** N/A — see entries above; none of them threaten
 the core fixes' correctness, all are low-risk/no-decision-impact notes.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **13 vs. 12 Playwright specs**
+> Both questions were resolved during planning (2026-07-04) — resolutions inline below.
+
+1. **13 vs. 12 Playwright specs** — **RESOLVED:** 26-04-PLAN.md enumerates the actual spec files at plan/execution time rather than hardcoding "12," and gates every spec (fixing or `test.skip`-with-tracking-note any covering unfinished features per D-12). No fixed count is assumed.
    - What we know: `frontend/e2e/*.spec.ts` currently contains 13 files
      (`auth-contract, certificates, dashboard, federation, identity, login,
      logout, organizations, roles, service-accounts, settings, tenants,
@@ -701,6 +703,11 @@ the core fixes' correctness, all are low-risk/no-decision-impact notes.
    - Recommendation: out of this phase's scope to fix; recommend the
      planner file a follow-up tracking note (not a blocking task) so a
      future phase verifies it against a live RabbitMQ instance.
+   - **RESOLVED:** The NEW webhook topology avoids the bug (default-exchange +
+     `x-dead-letter-routing-key` form — see 26-03 / 26-07). The pre-existing
+     `AUDIT_EVENTS`/`AUTHZ_REQUEST`/`MAIL_OUTBOUND` gap is documented as an
+     explicit out-of-scope follow-up in `26-07-PLAN.md` `<residual_scope_notes>`
+     for a future phase to verify against a live broker.
 
 ## Environment Availability
 

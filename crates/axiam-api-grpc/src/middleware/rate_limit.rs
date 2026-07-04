@@ -1,33 +1,56 @@
 //! gRPC rate limiting via tower-governor (per D-10, D-11), brought to parity
-//! with the fixed REST limiter's key-extraction logic (SECHRD-03, D-01c).
+//! with the fixed REST limiter (SECHRD-03, D-01c).
 //!
-//! [`GrpcTrustedHopsKeyExtractor`] is a custom `tower_governor::KeyExtractor`
-//! that replaces `SmartIpKeyExtractor`. `SmartIpKeyExtractor` unconditionally
-//! trusts the LEFTMOST `X-Forwarded-For` hop and, more fundamentally, can
-//! never find tonic's real peer address at all (it only looks for an
-//! `axum::extract::ConnectInfo<SocketAddr>` extension or a bare `SocketAddr`
-//! extension — tonic inserts `TcpConnectInfo`/`TlsConnectInfo<TcpConnectInfo>`
-//! instead). This extractor mirrors the fixed REST `XForwardedForKeyExtractor`
-//! (plan 24-03): a configured `trusted_hops` selects the rightmost trusted
-//! XFF hop, and when there are NOT enough hops to trust, XFF is ignored
-//! entirely and the verified tonic connection peer address is used instead
-//! (never `hops[0]` — SECHRD-03/D-01d).
+//! Two layers cooperate here (mirroring
+//! `axiam-api-rest::middleware::rate_limit_shared` / `extractors::rate_limit`):
+//!
+//! - [`GrpcTrustedHopsKeyExtractor`] — a custom `tower_governor::KeyExtractor`
+//!   that replaces `SmartIpKeyExtractor`. `SmartIpKeyExtractor` unconditionally
+//!   trusts the LEFTMOST `X-Forwarded-For` hop and, more fundamentally, can
+//!   never find tonic's real peer address at all (it only looks for an
+//!   `axum::extract::ConnectInfo<SocketAddr>` extension or a bare `SocketAddr`
+//!   extension — tonic inserts `TcpConnectInfo`/`TlsConnectInfo<TcpConnectInfo>`
+//!   instead). This extractor mirrors the fixed REST
+//!   `XForwardedForKeyExtractor` (plan 24-03): a configured `trusted_hops`
+//!   selects the rightmost trusted XFF hop, and when there are NOT enough
+//!   hops to trust, XFF is ignored entirely and the verified tonic connection
+//!   peer address is used instead (never `hops[0]` — SECHRD-03/D-01d).
+//! - [`GrpcSharedRateLimitLayer`] — an async pre-check `tower::Layer` that
+//!   reuses the plan-24-04 `SurrealRateLimitBucketRepository` shared-store
+//!   counter, run BEFORE the existing per-replica in-memory `GovernorLayer`
+//!   (kept byte-for-byte unchanged as the fail-open fallback, D-01b). This is
+//!   deliberately NOT a `governor::StateStore` impl and never calls
+//!   `block_on` — `StateStore::measure_and_replace` is a *synchronous* trait
+//!   method (RESEARCH Pitfall 1), so the shared-store check is a separate
+//!   async tower service that performs its own SurrealDB round-trip and then
+//!   delegates to the inner service.
 //!
 //! HARD CONSTRAINT (D-01c coordination note): the `Quota::per_second(...)
 //! .burst_size(...)` throughput/quota math in [`build_grpc_governor_layer`]
 //! is untouched by this module — CORR-01/Phase 26 owns it.
 
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
+use axiam_db::repository::SurrealRateLimitBucketRepository;
+use chrono::{DateTime, Utc};
 use governor::clock::QuantaInstant;
 use governor::middleware::NoOpMiddleware;
-use http::Request;
+use http::{Request, Response};
+use surrealdb::{Connection, Surreal};
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
+use tower::{Layer, Service};
 use tower_governor::{
     GovernorLayer, errors::GovernorError, governor::GovernorConfigBuilder,
     key_extractor::KeyExtractor,
 };
+
+// ---------------------------------------------------------------------------
+// Custom trusted_hops-aware KeyExtractor (Task 1 — replaces SmartIpKeyExtractor)
+// ---------------------------------------------------------------------------
 
 /// Reads the SAME `AXIAM__RATE_LIMIT__TRUSTED_HOPS` env var the REST shared
 /// pre-check (`axiam-api-rest::middleware::rate_limit_shared::trusted_hops`)
@@ -148,6 +171,182 @@ pub fn build_grpc_governor_layer(authz_per_sec: u32) -> GrpcGovernorLayer {
     );
 
     GovernorLayer::new(config)
+}
+
+// ---------------------------------------------------------------------------
+// Shared SurrealDB-backed pre-check layer (Task 2 — D-01a/b/c parity)
+// ---------------------------------------------------------------------------
+
+/// Fixed-window duration (seconds) for the shared bucket — same value and
+/// rationale as the REST shared pre-check
+/// (`axiam-api-rest::middleware::rate_limit_shared::WINDOW_SECS`): a simple
+/// fixed-window counter is acceptable here since this layer only needs to be
+/// *approximately* right (it fails open by design).
+const WINDOW_SECS: i64 = 60;
+
+/// Truncates `now` down to the start of the current fixed
+/// [`WINDOW_SECS`]-second window.
+fn window_start(now: DateTime<Utc>) -> DateTime<Utc> {
+    let epoch = now.timestamp();
+    let start_epoch = epoch - epoch.rem_euclid(WINDOW_SECS);
+    DateTime::<Utc>::from_timestamp(start_epoch, 0).unwrap_or(now)
+}
+
+/// Builds a gRPC `RESOURCE_EXHAUSTED` response — the same status the
+/// in-memory `GovernorLayer` returns for `GovernorError::TooManyRequests`
+/// (see `tower_governor::errors::GovernorError`'s `Response<tonic::body::Body>`
+/// conversion) — so clients see one consistent rate-limit contract
+/// regardless of which layer rejected the request.
+fn too_many_requests_response() -> Response<tonic::body::Body> {
+    tonic::Status::resource_exhausted("rate limit exceeded").into_http()
+}
+
+/// Async SurrealDB-backed shared rate-limit pre-check `tower::Layer` for the
+/// gRPC path (SECHRD-03 / D-01a, D-01b, D-01c, D-01d).
+///
+/// Reuses [`SurrealRateLimitBucketRepository::increment`] (plan 24-04) —
+/// there is no reimplemented counter here. Wire this layer BEFORE (i.e.
+/// `.layer()` it FIRST — tower's `ServiceBuilder`/`Server::builder()`
+/// executes the FIRST-added layer with the request FIRST, the opposite of
+/// actix's last-`.wrap()`-is-outermost rule) the existing
+/// [`build_grpc_governor_layer`] `GovernorLayer` on the same
+/// `Server::builder()`, e.g.:
+///
+/// ```ignore
+/// Server::builder()
+///     .layer(GrpcSharedRateLimitLayer::new(db, "grpc_authz", grpc_config.grpc_authz_per_sec, trusted_hops))
+///     .layer(build_grpc_governor_layer(grpc_config.grpc_authz_per_sec))
+///     .add_service(authz_svc)
+/// ```
+///
+/// **Fail-open (D-01b, T-24-73 accepted risk):** when the shared store is
+/// unreachable, or no client IP can be extracted, this layer logs a
+/// `warn`-level alarm and forwards the request unchanged so the existing
+/// in-memory governor makes the decision instead — a counter-store outage
+/// must never hard-block gRPC authz traffic.
+///
+/// **CRITICAL (RESEARCH Pitfall 1):** `governor::StateStore::measure_and_replace`
+/// is a *synchronous* trait method. This layer is deliberately NOT a
+/// `StateStore` implementation and never calls `block_on` — it performs its
+/// own async SurrealDB round-trip as a plain `tower::Layer`/`Service`, then
+/// delegates to the inner service.
+#[derive(Clone)]
+pub struct GrpcSharedRateLimitLayer<C: Connection> {
+    db: Surreal<C>,
+    endpoint: &'static str,
+    limit: u32,
+    trusted_hops: usize,
+}
+
+impl<C: Connection> GrpcSharedRateLimitLayer<C> {
+    /// `endpoint` MUST be unique per rate-limited gRPC surface so the shared
+    /// bucket key (`"{endpoint}:{ip}"`) preserves per-surface granularity —
+    /// never collapse distinct surfaces into one global bucket.
+    pub fn new(db: Surreal<C>, endpoint: &'static str, limit: u32, trusted_hops: usize) -> Self {
+        Self {
+            db,
+            endpoint,
+            limit,
+            trusted_hops,
+        }
+    }
+}
+
+impl<S, C> Layer<S> for GrpcSharedRateLimitLayer<C>
+where
+    C: Connection + 'static,
+{
+    type Service = GrpcSharedRateLimitService<S, C>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        GrpcSharedRateLimitService {
+            inner,
+            db: self.db.clone(),
+            endpoint: self.endpoint,
+            limit: self.limit,
+            trusted_hops: self.trusted_hops,
+        }
+    }
+}
+
+/// Inner `tower::Service` produced by [`GrpcSharedRateLimitLayer`].
+#[derive(Clone)]
+pub struct GrpcSharedRateLimitService<S, C: Connection> {
+    inner: S,
+    db: Surreal<C>,
+    endpoint: &'static str,
+    limit: u32,
+    trusted_hops: usize,
+}
+
+impl<S, C> Service<Request<tonic::body::Body>> for GrpcSharedRateLimitService<S, C>
+where
+    S: Service<Request<tonic::body::Body>, Response = Response<tonic::body::Body>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+    C: Connection + 'static,
+{
+    type Response = Response<tonic::body::Body>;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<tonic::body::Body>) -> Self::Future {
+        // Standard clone-and-swap so the returned future owns an
+        // independent, ready-to-call copy of the inner service (mirrors
+        // tower-http's convention for async-wrapping middlewares).
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+
+        let db = self.db.clone();
+        let endpoint = self.endpoint;
+        let limit = self.limit;
+        let key_extractor = GrpcTrustedHopsKeyExtractor::new(self.trusted_hops);
+
+        Box::pin(async move {
+            let ip = key_extractor.extract(&req).ok();
+
+            let allow = match ip {
+                Some(ip) => {
+                    let repo = SurrealRateLimitBucketRepository::new(db);
+                    let key = format!("{endpoint}:{ip}");
+                    let window = window_start(Utc::now());
+                    match repo.increment(&key, window).await {
+                        Ok(count) => count <= limit as u64,
+                        Err(err) => {
+                            // Fail OPEN (D-01b): a counter-store outage must
+                            // never hard-block gRPC authz traffic. Do NOT
+                            // log the raw key (endpoint:ip) at info+ (mirrors
+                            // the REST T-24-43 note) — this warn-level alarm
+                            // omits it.
+                            tracing::warn!(
+                                endpoint,
+                                error = %err,
+                                "shared gRPC rate-limit store unreachable; falling back \
+                                 to per-replica in-memory governor"
+                            );
+                            true
+                        }
+                    }
+                }
+                // No client-IP key available — fail open; the in-memory
+                // governor still makes the real decision.
+                None => true,
+            };
+
+            if allow {
+                inner.call(req).await
+            } else {
+                Ok(too_many_requests_response())
+            }
+        })
+    }
 }
 
 #[cfg(test)]

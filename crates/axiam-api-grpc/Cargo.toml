@@ -26,12 +26,13 @@ http-body-util = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
 secrecy = { workspace = true }
+axiam-db = { workspace = true }
+surrealdb = { workspace = true }
 
 [features]
 client = []
 
 [dev-dependencies]
-axiam-db = { path = "../axiam-db" }
 axiam-auth = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-stream = { version = "0.1", features = ["net"] }

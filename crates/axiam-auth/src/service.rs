@@ -477,23 +477,38 @@ impl<
             .ok_or(AuthError::MfaNotEnrolled)?;
 
         let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
-        // confirm_mfa is enrollment confirmation only — use plain verify_code (no
-        // replay tracking).  Replay protection (SEC-008) applies to login via
-        // verify_mfa, not to enrollment confirmation.
-        let valid = totp::verify_code(
+        // SECHRD-01/T-24-03: reuse the same matched-step verification and
+        // atomic CAS as `verify_mfa` so replay tracking begins at
+        // enrollment-confirm time rather than at first login. A
+        // freshly-enrolled user always has `totp_last_used_step = NONE`, so
+        // this always succeeds on first use — it only closes the gap where
+        // the enrollment code itself could otherwise be replayed before the
+        // user's first full login.
+        let (valid, used_step) = totp::verify_code_with_replay_check(
             &secret_bytes,
             totp_code,
             &self.config.totp_issuer,
             &user.email,
+            user.totp_last_used_step,
         )?;
 
         if !valid {
             return Err(AuthError::MfaInvalidCode.into());
         }
 
-        // Activate MFA.  totp_last_used_step is intentionally NOT set here:
-        // the user must complete a full login (verify_mfa) for replay tracking
-        // to begin.
+        // Seed totp_last_used_step atomically. A lost CAS here means the
+        // enrollment code was already consumed (e.g. a concurrent duplicate
+        // submission) — reject with the same enrollment-failure error rather
+        // than introduce a new response shape.
+        let advanced = self
+            .user_repo
+            .update_totp_step(tenant_id, user_id, used_step)
+            .await?;
+        if !advanced {
+            return Err(AuthError::MfaInvalidCode.into());
+        }
+
+        // Activate MFA.
         self.user_repo
             .update(
                 tenant_id,

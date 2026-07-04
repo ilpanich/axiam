@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 24
 current_phase_name: security-hardening-i-authentication-access-control-surfaces
 status: executing
-stopped_at: Completed 24-05-PLAN.md
-last_updated: "2026-07-04T10:16:31.857Z"
+stopped_at: Completed 24-06-PLAN.md
+last_updated: "2026-07-04T10:44:08.512Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 24 execution started
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 15
-  completed_plans: 11
+  completed_plans: 12
   percent: 13
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 24 (security-hardening-i-authentication-access-control-surfaces) — EXECUTING
-Plan: 6 of 9
+Plan: 7 of 9
 Status: Ready to execute
 Last activity: 2026-07-04 — Phase 24 execution started
 
@@ -164,6 +164,7 @@ Last activity: 2026-07-04 — Phase 24 execution started
 | Phase 24 P03 | 12min | 1 tasks | 2 files |
 | Phase 24 P04 | 28min | 2 tasks | 8 files |
 | Phase 24 P05 | 55min | 2 tasks | 12 files |
+| Phase 24 P06 | 25min | 1 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -391,6 +392,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 24-05]: DUMMY_HASH relocated to pub(crate) const in crates/axiam-auth/src/password.rs (was private in service.rs) so AuthService and the future 24-09 constant-time reset share the identical constant
 - [Phase ?]: [Phase 24-05]: secrecy added with the serde feature (not default) so SecretString gets a Deserialize impl for AuthConfig's derive(Deserialize)
 - [Phase ?]: [Phase 24-05]: Fixed two AuthConfig.pepper call sites the plan's files_modified list missed (axiam-api-grpc UserServiceImpl, req14_pepper_test.rs) via the same expose_secret-at-boundary pattern
+- [Phase ?]: [Phase 24-06]: "Audit syslog" (A4) resolved as a structured tracing::error! JSON event on target axiam.audit.dlq, not a literal syslog(3) socket
+- [Phase ?]: [Phase 24-06]: AuditWriteSink seam + write_erasure_audit_with_dlq live in axiam-api-rest::handlers::gdpr (not axiam-core/repository.rs, owned by another plan this wave); cleanup.rs calls it directly since axiam-server already depends on axiam-api-rest
 
 ### Pending Todos
 
@@ -412,7 +415,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T10:16:31.844Z
-Stopped at: Completed 24-05-PLAN.md
+Last session: 2026-07-04T10:44:08.498Z
+Stopped at: Completed 24-06-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

@@ -1055,7 +1055,7 @@ Plans:
   4. A non-canonical or wrong-segment request path (e.g. `/api/v1/authz/...` must not match a `/api/v1/auth/*` entry; `//` and `..` variants are collapsed/rejected) cannot slip past the public-path allowlist (SECHRD-11)
   5. A password-reset request for an ineligible/unknown/federated account is time-indistinguishable from a valid one (dummy hash + async wait), the peppered password buffer is zeroized, and the unauthenticated reset path blocks reuse of the current password (SECHRD-12)
 
-**Plans**: 5/9 plans executed
+**Plans**: 6/9 plans executed
 
 Plans:
 **Wave 1**
@@ -1065,7 +1065,7 @@ Plans:
 - [x] 24-03-PLAN.md — SECHRD-03 XFF client-IP keying fix (peer_addr fallback) (wave 1)
 - [x] 24-04-PLAN.md — SECHRD-03 shared SurrealDB rate-limit store, fail-open (REST) (wave 1)
 - [x] 24-05-PLAN.md — SECHRD-12 secret hygiene: zeroize buffer + secrecy pepper (wave 1)
-- [ ] 24-06-PLAN.md — SECHRD-12 GDPR audit-write dead-letter (file + structured event) (wave 1)
+- [x] 24-06-PLAN.md — SECHRD-12 GDPR audit-write dead-letter (file + structured event) (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -1193,7 +1193,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 23. Security Regressions & HIGH Findings | 6/6 | Complete   | 2026-07-03 |
-| 24. Security Hardening I — Auth & Access-Control | 5/9 | In Progress|  |
+| 24. Security Hardening I — Auth & Access-Control | 6/9 | In Progress|  |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 0/? | Not started | - |
 | 26. Correctness & Resilience | 0/? | Not started | - |
 | 27. Performance & Load Hardening | 0/? | Not started | - |

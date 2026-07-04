@@ -109,3 +109,12 @@ None - no external service configuration required.
 ---
 *Phase: 25-security-hardening-ii-federation-pki-data-protection-infra*
 *Completed: 2026-07-04*
+
+## Self-Check: PASSED
+
+- FOUND: crates/axiam-pki/src/mtls.rs
+- FOUND: crates/axiam-pki/tests/mtls_chain_test.rs
+- FOUND: .planning/phases/25-security-hardening-ii-federation-pki-data-protection-infra/25-03-SUMMARY.md
+- FOUND commit: 2d2490e
+- FOUND commit: 653d8a8
+- FOUND commit: 07956bb

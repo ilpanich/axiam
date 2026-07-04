@@ -140,7 +140,14 @@ pub struct OidcCallbackRequest {
     pub code: String,
     /// Redirect URI that was used in the authorization request.
     pub redirect_uri: String,
-    /// The nonce originally sent in the authorization request.
+    /// CSRF state value from the authorization request. Used to look up the
+    /// server-side `FederationLoginState` row that holds the real nonce
+    /// (SECHRD-07/D-04) — required so the callback can find its login state.
+    pub state: String,
+    /// Client-supplied nonce (SECHRD-07/D-04: retained for backward
+    /// compatibility with older callers, but IGNORED for verification —
+    /// `expected_nonce` always comes from the server-side `FederationLoginState`
+    /// row looked up via `state`, never from this field).
     pub nonce: String,
 }
 
@@ -523,11 +530,13 @@ pub async fn delete<C: Connection>(
     ),
     security(("bearer" = []))
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn oidc_authorize<C: Connection>(
     user: AuthenticatedUser,
     config_repo: web::Data<SurrealFederationConfigRepository<C>>,
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     jwks_cache: web::Data<Arc<JwksCache>>,
     auth_config: web::Data<AuthConfig>,
@@ -562,16 +571,35 @@ pub async fn oidc_authorize<C: Connection>(
         enc_key,
     );
 
+    // SECHRD-07/D-04: generate a server-side nonce and persist it in
+    // FederationLoginState keyed by `req.state`. `req.nonce` (client-supplied)
+    // is never stored or used for verification — mirrors
+    // `oidc_start_public` (:1160-1211).
+    let server_nonce = random_base64url();
+    let expires_at = Utc::now() + chrono::Duration::minutes(10);
+
     let auth_url = service
         .build_authorization_url(
             user.tenant_id,
             req.config_id,
             &req.redirect_uri,
             &req.state,
-            &req.nonce,
+            &server_nonce,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
+
+    login_state_repo
+        .insert(&axiam_core::repository::FederationLoginState {
+            state: req.state,
+            nonce: server_nonce,
+            tenant_id: user.tenant_id,
+            federation_config_id: req.config_id,
+            redirect_uri: req.redirect_uri,
+            expires_at,
+            request_id: String::new(), // OIDC — no request ID
+        })
+        .await?;
 
     Ok(HttpResponse::Ok().json(OidcAuthorizeResponse { url: auth_url.url }))
 }
@@ -592,11 +620,13 @@ pub async fn oidc_authorize<C: Connection>(
     ),
     security(("bearer" = []))
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn oidc_callback<C: Connection>(
     user: AuthenticatedUser,
     config_repo: web::Data<SurrealFederationConfigRepository<C>>,
     link_repo: web::Data<SurrealFederationLinkRepository<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
     http_client: web::Data<reqwest::Client>,
     jwks_cache: web::Data<Arc<JwksCache>>,
     auth_config: web::Data<AuthConfig>,
@@ -610,8 +640,8 @@ pub async fn oidc_callback<C: Connection>(
     if req.redirect_uri.is_empty() {
         return Err(validation_err("redirect_uri must not be empty"));
     }
-    if req.nonce.is_empty() {
-        return Err(validation_err("nonce must not be empty"));
+    if req.state.is_empty() {
+        return Err(validation_err("state must not be empty"));
     }
 
     let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
@@ -619,6 +649,20 @@ pub async fn oidc_callback<C: Connection>(
             message: "federation encryption key not configured".into(),
         })
     })?;
+
+    // SECHRD-07/D-04: consume the server-side login state and derive
+    // expected_nonce from it — req.nonce (client/attacker-supplied) is
+    // IGNORED entirely for verification. Mirrors `oidc_callback_public`
+    // (:1254-1267).
+    let login_state = login_state_repo
+        .consume_by_state(&req.state)
+        .await?
+        .ok_or_else(|| {
+            AxiamApiError(AxiamError::AuthenticationFailed {
+                reason: "state not found or expired".into(),
+            })
+        })?;
+    let expected_nonce = login_state.nonce.clone();
 
     let service = OidcFederationService::new(
         (**config_repo).clone(),
@@ -635,7 +679,7 @@ pub async fn oidc_callback<C: Connection>(
             req.config_id,
             &req.code,
             &req.redirect_uri,
-            &req.nonce,
+            &expected_nonce,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;

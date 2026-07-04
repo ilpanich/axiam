@@ -63,3 +63,6 @@ jsonwebtoken = { workspace = true }
 # the emailed link is fully substituted, not a source-file grep (23-RESEARCH
 # Pitfall 3).
 axiam-email = { workspace = true }
+# 24-06: captures the structured tracing audit DLQ event as a plain writer in
+# gdpr_audit_dlq_test.rs, asserting the "audit syslog" sink fires (SECHRD-12).
+tracing-subscriber = { workspace = true }

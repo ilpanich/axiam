@@ -822,6 +822,7 @@ dependencies = [
  "totp-rs",
  "tracing",
  "tracing-actix-web",
+ "tracing-subscriber",
  "url",
  "utoipa",
  "utoipa-swagger-ui",

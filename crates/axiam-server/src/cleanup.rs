@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axiam_amqp::MailOutboundPublisher;
+use axiam_api_rest::handlers::gdpr::write_erasure_audit_with_dlq;
 use axiam_auth::AuthService;
 use axiam_auth::crypto::{encrypt_separate, gdpr_pseudonym};
 use axiam_core::error::AxiamError;
@@ -380,9 +381,12 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             .await?;
 
         // (h) Emit gdpr.user_pseudonymized audit event (actor = System/nil UUID).
-        if let Err(e) = self
-            .audit_repo
-            .append(CreateAuditLogEntry {
+        // A DB-write failure here is dead-lettered to BOTH an append-only
+        // file AND a structured audit event (SECHRD-12 / D-02, T-24-61) —
+        // this legally-significant record must never be silently lost.
+        write_erasure_audit_with_dlq(
+            self.audit_repo.as_ref(),
+            CreateAuditLogEntry {
                 tenant_id,
                 actor_id: Uuid::nil(),
                 actor_type: ActorType::System,
@@ -393,15 +397,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 metadata: Some(serde_json::json!({
                     "pseudonym": pseudonym,
                 })),
-            })
-            .await
-        {
-            tracing::error!(
-                error = %e,
-                %tenant_id,
-                "cleanup: failed to emit gdpr.user_pseudonymized audit event (GDPR legally significant)"
-            );
-        }
+            },
+        )
+        .await;
 
         tracing::info!(
             pseudonym = %pseudonym,

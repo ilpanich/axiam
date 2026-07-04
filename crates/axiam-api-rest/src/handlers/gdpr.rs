@@ -6,12 +6,16 @@
 //! - `POST /api/v1/account/delete`  — request account erasure / 30-day grace (D-07/D-08)
 //! - `GET  /api/v1/auth/account/delete/cancel?token=<opaque>` — public cancel (D-09)
 
+use std::fs::OpenOptions;
+use std::future::Future;
+use std::io::Write as _;
+
 use actix_web::{HttpResponse, web};
 use axiam_amqp::MailOutboundPublisher;
 use axiam_auth::AuthService;
 use axiam_auth::crypto::decrypt_separate;
-use axiam_core::error::AxiamError;
-use axiam_core::models::audit::{ActorType, AuditOutcome};
+use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::gdpr::{AccountDeletionStatus, CreateAccountDeletion, CreateExportJob};
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::repository::{
@@ -142,6 +146,118 @@ async fn append_gdpr_audit<C: Connection>(
             "gdpr: failed to write audit log for GDPR request (legally significant)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Erasure audit dead-letter queue (SECHRD-12 / T-24-61, T-24-62, D-02)
+// ---------------------------------------------------------------------------
+
+/// Environment variable naming the append-only dead-letter file for the GDPR
+/// erasure audit event. Intended to point at a mounted volume so the file
+/// survives container restarts. Absent = the file sink is skipped for this
+/// event (the structured tracing event sink below still fires
+/// unconditionally on failure).
+pub const GDPR_AUDIT_DLQ_FILE_ENV: &str = "AXIAM__GDPR_AUDIT_DLQ_FILE";
+
+/// Injectable seam for the erasure audit DB-write (SECHRD-12).
+///
+/// `SurrealAuditLogRepository<C>` is the production implementation (forwards
+/// to [`AuditLogRepository::append`]); tests inject a failing double to drive
+/// the dead-letter path in [`write_erasure_audit_with_dlq`] without a live
+/// broken database. Defined here (not in `axiam-core::repository`) so it
+/// stays out of the generic repository trait surface owned by another plan.
+pub trait AuditWriteSink: Send + Sync {
+    fn write(
+        &self,
+        entry: CreateAuditLogEntry,
+    ) -> impl Future<Output = AxiamResult<AuditLogEntry>> + Send;
+}
+
+impl<C: Connection> AuditWriteSink for SurrealAuditLogRepository<C> {
+    fn write(
+        &self,
+        entry: CreateAuditLogEntry,
+    ) -> impl Future<Output = AxiamResult<AuditLogEntry>> + Send {
+        self.append(entry)
+    }
+}
+
+/// Write the erasure audit record via `sink`. If the DB write fails, the
+/// record is dead-lettered to BOTH an append-only local file AND a
+/// structured `tracing` audit event (D-02), so a legally-significant
+/// erasure event is never silently lost to a transient DB failure (T-24-61).
+///
+/// Never propagates the DB error — the caller (the cleanup ticker, T-04-36)
+/// must not panic or abort the sweep on this failure path; the two
+/// dead-letter sinks ARE the durability guarantee for this branch.
+pub async fn write_erasure_audit_with_dlq<S: AuditWriteSink>(sink: &S, entry: CreateAuditLogEntry) {
+    let dlq_entry = entry.clone();
+    if let Err(e) = sink.write(entry).await {
+        tracing::error!(
+            error = %e,
+            tenant_id = %dlq_entry.tenant_id,
+            action = %dlq_entry.action,
+            "gdpr: erasure audit DB-write failed — dead-lettering to append-only file + \
+             structured event (legally significant, SECHRD-12)"
+        );
+        dead_letter_erasure_audit(&dlq_entry, &e);
+    }
+}
+
+/// Dead-letter a failed erasure audit record to the two durable sinks (D-02).
+fn dead_letter_erasure_audit(entry: &CreateAuditLogEntry, db_error: &AxiamError) {
+    // Sink 1: append-only local file on a mounted volume (T-24-62). Opened
+    // with `.append(true)` — an existing file is never truncated/rewritten,
+    // matching AXIAM's append-only audit posture.
+    match std::env::var(GDPR_AUDIT_DLQ_FILE_ENV) {
+        Ok(path) => match serde_json::to_string(entry) {
+            Ok(line) => match OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(mut file) => {
+                    if let Err(e) = writeln!(file, "{line}") {
+                        tracing::error!(
+                            error = %e,
+                            path = %path,
+                            "gdpr: failed to append erasure audit dead-letter file"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        path = %path,
+                        "gdpr: failed to open erasure audit dead-letter file"
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "gdpr: failed to serialize erasure audit dead-letter record"
+                );
+            }
+        },
+        Err(_) => {
+            tracing::warn!(
+                env_var = GDPR_AUDIT_DLQ_FILE_ENV,
+                "gdpr: erasure audit dead-letter FILE sink skipped (env var not set); \
+                 structured event sink below still fires"
+            );
+        }
+    }
+
+    // Sink 2: structured `tracing` audit event — the "audit syslog" sink
+    // (RESEARCH Assumption A4: satisfied by a structured tracing JSON event
+    // captured by the container log driver, NOT a literal syslog(3) socket;
+    // the distroless deployment has no local syslogd, per 06-01 decisions).
+    tracing::error!(
+        target: "axiam.audit.dlq",
+        tenant_id = %entry.tenant_id,
+        actor_id = %entry.actor_id,
+        action = %entry.action,
+        resource_id = ?entry.resource_id,
+        db_error = %db_error,
+        "gdpr_audit_dlq"
+    );
 }
 
 // ---------------------------------------------------------------------------

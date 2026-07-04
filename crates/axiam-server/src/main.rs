@@ -731,6 +731,12 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(federation_login_state_repo.clone()))
             .app_data(web::Data::new(http_client.clone()))
             .app_data(web::Data::new(jwks_cache.clone()))
+            // SECHRD-12/T-24-91: crypto_semaphore was already constructed and
+            // cloned into AuthService/CaService/PgpService/CertService above,
+            // but never separately registered as web::Data — the password-reset
+            // handlers need direct access to gate their own Argon2 dummy-hash
+            // and current-password-reuse checks.
+            .app_data(web::Data::new(Arc::clone(&crypto_semaphore)))
             .configure(health_routes)
             .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
             .configure(openapi_routes)

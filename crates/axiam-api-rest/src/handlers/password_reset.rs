@@ -18,7 +18,9 @@ use axiam_db::{
 use chrono::Utc;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
+use std::sync::Arc;
 use surrealdb::Connection;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
@@ -127,6 +129,7 @@ pub async fn request_reset<C: Connection>(
     org_repo: web::Data<SurrealOrganizationRepository<C>>,
     mail_publisher: web::Data<MailOutboundPublisher>,
     auth_config: web::Data<axiam_auth::AuthConfig>,
+    crypto_semaphore: web::Data<Arc<Semaphore>>,
     body: web::Json<RequestResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -163,12 +166,14 @@ pub async fn request_reset<C: Connection>(
         history_repo.as_ref().clone(),
         session_repo.as_ref().clone(),
         refresh_token_repo.as_ref().clone(),
+        Arc::clone(crypto_semaphore.as_ref()),
     );
 
     let expiry_hours = auth_config.password_reset_token_expiry_hours;
+    let pepper = auth_config.pepper.as_ref().map(|p| p.expose_secret());
 
     match svc
-        .initiate_reset(tenant_id, &req.email, expiry_hours)
+        .initiate_reset(tenant_id, &req.email, expiry_hours, pepper)
         .await
     {
         Ok(Some((raw_token, user_id, expires_at))) => {
@@ -269,6 +274,7 @@ pub async fn confirm_reset<C: Connection>(
     settings_repo: web::Data<SurrealSettingsRepository<C>>,
     auth_config: web::Data<axiam_auth::AuthConfig>,
     http_client: web::Data<reqwest::Client>,
+    crypto_semaphore: web::Data<Arc<Semaphore>>,
     body: web::Json<ConfirmResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use axiam_core::repository::{SettingsRepository, TenantRepository};
@@ -290,6 +296,7 @@ pub async fn confirm_reset<C: Connection>(
         history_repo.as_ref().clone(),
         session_repo.as_ref().clone(),
         refresh_token_repo.as_ref().clone(),
+        Arc::clone(crypto_semaphore.as_ref()),
     );
 
     svc.confirm_reset(

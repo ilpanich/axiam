@@ -14,6 +14,7 @@ use crate::extractors::rate_limit::XForwardedForKeyExtractor;
 use crate::handlers;
 use crate::middleware::authz::AuthzMiddleware;
 use crate::middleware::csrf::CsrfMiddleware;
+use crate::middleware::rate_limit_shared::RateLimitShared;
 use crate::openapi::api_doc;
 
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
@@ -68,6 +69,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/login")
                     .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new("login", rate_limit_cfg.login_per_min))
                     .route(web::post().to(handlers::auth::login::<C>)),
             )
             .route("/logout", web::post().to(handlers::auth::logout::<C>))
@@ -77,26 +79,37 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/mfa/enroll")
                     .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .wrap(RateLimitShared::<C>::new("mfa_enroll", rate_limit_cfg.mfa_per_min))
                     .route(web::post().to(handlers::auth::enroll_mfa::<C>)),
             )
             .service(
                 web::resource("/mfa/confirm")
                     .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .wrap(RateLimitShared::<C>::new("mfa_confirm", rate_limit_cfg.mfa_per_min))
                     .route(web::post().to(handlers::auth::confirm_mfa::<C>)),
             )
             .service(
                 web::resource("/mfa/verify")
                     .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .wrap(RateLimitShared::<C>::new("mfa_verify", rate_limit_cfg.mfa_per_min))
                     .route(web::post().to(handlers::auth::verify_mfa::<C>)),
             )
             .service(
                 web::resource("/mfa/setup/enroll")
                     .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "mfa_setup_enroll",
+                        rate_limit_cfg.mfa_per_min,
+                    ))
                     .route(web::post().to(handlers::auth::setup_enroll_mfa::<C>)),
             )
             .service(
                 web::resource("/mfa/setup/confirm")
                     .wrap(build_governor(rate_limit_cfg.mfa_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "mfa_setup_confirm",
+                        rate_limit_cfg.mfa_per_min,
+                    ))
                     .route(web::post().to(handlers::auth::setup_confirm_mfa::<C>)),
             )
             .route("/device", web::post().to(handlers::auth::device_auth::<C>))
@@ -127,6 +140,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/reset")
                     .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "password_reset",
+                        rate_limit_cfg.password_reset_per_min,
+                    ))
                     .route(web::post().to(handlers::password_reset::request_reset::<C>)),
             )
             .route(
@@ -138,6 +155,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/account/delete/cancel")
                     .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "account_delete_cancel",
+                        rate_limit_cfg.login_per_min,
+                    ))
                     .route(
                         web::get()
                             .to(handlers::gdpr::cancel_account_delete::<C>),
@@ -146,6 +167,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/password/change")
                     .wrap(build_governor(rate_limit_cfg.password_reset_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "password_change",
+                        rate_limit_cfg.password_reset_per_min,
+                    ))
                     .route(web::post().to(handlers::auth::change_password::<C>)),
             )
             // --- First-time SSO — public (Phase 4 D-22) ---
@@ -154,6 +179,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/federation/oidc/start")
                     .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "federation_oidc_start",
+                        rate_limit_cfg.login_per_min,
+                    ))
                     .route(
                         web::post()
                             .to(handlers::federation::oidc_start_public::<C>),
@@ -162,6 +191,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/federation/oidc/callback")
                     .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "federation_oidc_callback",
+                        rate_limit_cfg.login_per_min,
+                    ))
                     .route(
                         web::post()
                             .to(handlers::federation::oidc_callback_public::<C>),
@@ -173,11 +206,19 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/federation/saml/login")
                 .wrap(build_governor(rate_limit_cfg.login_per_min))
+                .wrap(RateLimitShared::<C>::new(
+                    "federation_saml_login",
+                    rate_limit_cfg.login_per_min,
+                ))
                 .route(web::post().to(handlers::federation::saml_login_public::<C>)),
         )
         .service(
             web::resource("/federation/saml/acs")
                 .wrap(build_governor(rate_limit_cfg.login_per_min))
+                .wrap(RateLimitShared::<C>::new(
+                    "federation_saml_acs",
+                    rate_limit_cfg.login_per_min,
+                ))
                 .route(web::post().to(handlers::federation::saml_acs_public::<C>)),
         );
     cfg.service(auth_scope);
@@ -196,6 +237,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/token")
                     .wrap(build_governor(rate_limit_cfg.token_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_token",
+                        rate_limit_cfg.token_per_min,
+                    ))
                     .route(web::post().to(handlers::oauth2::token::<C>)),
             )
             // SEC-020: revoke and introspect rate-limited to prevent DoS via token flooding
@@ -203,11 +248,19 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/revoke")
                     .wrap(build_governor(rate_limit_cfg.revoke_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_revoke",
+                        rate_limit_cfg.revoke_per_min,
+                    ))
                     .route(web::post().to(handlers::oauth2::revoke::<C>)),
             )
             .service(
                 web::resource("/introspect")
                     .wrap(build_governor(rate_limit_cfg.introspect_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_introspect",
+                        rate_limit_cfg.introspect_per_min,
+                    ))
                     .route(web::post().to(handlers::oauth2::introspect::<C>)),
             )
             .route("/jwks", web::get().to(handlers::oauth2::jwks))
@@ -266,6 +319,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/users")
                     .wrap(build_governor(rate_limit_cfg.register_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "users_create",
+                        rate_limit_cfg.register_per_min,
+                    ))
                     .route(web::post().to(handlers::users::create::<C>))
                     .route(web::get().to(handlers::users::list::<C>)),
             )
@@ -585,6 +642,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/account/export")
                     .wrap(build_governor(rate_limit_cfg.register_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "account_export",
+                        rate_limit_cfg.register_per_min,
+                    ))
                     .route(
                         web::post()
                             .to(handlers::gdpr::request_account_export::<C>),
@@ -601,6 +662,10 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/account/delete")
                     .wrap(build_governor(rate_limit_cfg.register_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "account_delete",
+                        rate_limit_cfg.register_per_min,
+                    ))
                     .route(
                         web::post()
                             .to(handlers::gdpr::request_account_delete::<C>),
@@ -611,11 +676,19 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/authz/check")
                     .wrap(build_governor(rate_limit_cfg.authz_check_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "authz_check",
+                        rate_limit_cfg.authz_check_per_min,
+                    ))
                     .route(web::post().to(handlers::authz_check::check_access::<C>)),
             )
             .service(
                 web::resource("/authz/check/batch")
                     .wrap(build_governor(rate_limit_cfg.authz_check_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "authz_check_batch",
+                        rate_limit_cfg.authz_check_per_min,
+                    ))
                     .route(web::post().to(handlers::authz_check::batch_check_access::<C>)),
             );
     // Authenticated SAML SP routes — only when the `saml` feature is on.

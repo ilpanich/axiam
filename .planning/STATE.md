@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 24
 current_phase_name: security-hardening-i-authentication-access-control-surfaces
 status: executing
-stopped_at: Completed 24-04-PLAN.md
-last_updated: "2026-07-04T09:41:51.250Z"
+stopped_at: Completed 24-05-PLAN.md
+last_updated: "2026-07-04T10:16:31.857Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 24 execution started
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 15
-  completed_plans: 10
+  completed_plans: 11
   percent: 13
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 24 (security-hardening-i-authentication-access-control-surfaces) — EXECUTING
-Plan: 5 of 9
+Plan: 6 of 9
 Status: Ready to execute
 Last activity: 2026-07-04 — Phase 24 execution started
 
@@ -163,6 +163,7 @@ Last activity: 2026-07-04 — Phase 24 execution started
 | Phase 24 P02 | 20min | 1 tasks | 1 files |
 | Phase 24 P03 | 12min | 1 tasks | 2 files |
 | Phase 24 P04 | 28min | 2 tasks | 8 files |
+| Phase 24 P05 | 55min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -387,6 +388,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 24-03] Fixed XForwardedForKeyExtractor's trusted_hops >= hops.len() branch to skip XFF entirely and fall through to peer_addr(), never hops[0] (SECHRD-03, T-24-31/T-24-32); nginx proxy_add_x_forwarded_for doc comment corrected (rightmost = real client)
 - [Phase ?]: [Phase 24-04] seeder.rs left untouched -- rate_limit_bucket schema applied via existing run_migrations startup path, not seeder.rs (which only seeds tenant permissions/roles)
 - [Phase ?]: [Phase 24-04] RateLimitShared wired onto all 20 REST build_governor(...) call sites in server.rs (not just /login), per D-01c REST-coverage; middleware reads Surreal<C> from req.app_data() at request time rather than changing register_api_v1_routes's signature
+- [Phase ?]: [Phase 24-05]: DUMMY_HASH relocated to pub(crate) const in crates/axiam-auth/src/password.rs (was private in service.rs) so AuthService and the future 24-09 constant-time reset share the identical constant
+- [Phase ?]: [Phase 24-05]: secrecy added with the serde feature (not default) so SecretString gets a Deserialize impl for AuthConfig's derive(Deserialize)
+- [Phase ?]: [Phase 24-05]: Fixed two AuthConfig.pepper call sites the plan's files_modified list missed (axiam-api-grpc UserServiceImpl, req14_pepper_test.rs) via the same expose_secret-at-boundary pattern
 
 ### Pending Todos
 
@@ -408,7 +412,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T09:41:51.237Z
-Stopped at: Completed 24-04-PLAN.md
+Last session: 2026-07-04T10:16:31.844Z
+Stopped at: Completed 24-05-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

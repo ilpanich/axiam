@@ -796,7 +796,7 @@ Close remaining auth-path timing/memory/durability side-channels.
 
 ### Acceptance Criteria
 - [ ] Constant-time password-reset: ineligible/unknown/federated path performs an equivalent dummy hash + async wait so response time doesn't distinguish valid emails (T19.23)
-- [ ] Peppered-password buffer wrapped with `zeroize` (pepper via `secrecy`) and wiped before return (T19.24)
+- [x] Peppered-password buffer wrapped with `zeroize` (pepper via `secrecy`) and wiped before return (T19.24) — 24-05
 - [ ] GDPR audit-write failure falls back to a persistent dead-letter file / audit syslog for durability (T19.27)
 - [ ] Unauthenticated reset path blocks reuse of the current password; initial passwords seeded into history (SEC-028 residual)
 

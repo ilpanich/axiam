@@ -1055,12 +1055,12 @@ Plans:
   4. A non-canonical or wrong-segment request path (e.g. `/api/v1/authz/...` must not match a `/api/v1/auth/*` entry; `//` and `..` variants are collapsed/rejected) cannot slip past the public-path allowlist (SECHRD-11)
   5. A password-reset request for an ineligible/unknown/federated account is time-indistinguishable from a valid one (dummy hash + async wait), the peppered password buffer is zeroized, and the unauthenticated reset path blocks reuse of the current password (SECHRD-12)
 
-**Plans**: 9 plans
+**Plans**: 1/9 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 24-01-PLAN.md — SECHRD-01 TOTP atomic replay CAS + skew-step recording + enrollment seed (wave 1)
+- [x] 24-01-PLAN.md — SECHRD-01 TOTP atomic replay CAS + skew-step recording + enrollment seed (wave 1)
 - [ ] 24-02-PLAN.md — SECHRD-11 public-path allowlist segment-boundary + normalization (wave 1)
 - [ ] 24-03-PLAN.md — SECHRD-03 XFF client-IP keying fix (peer_addr fallback) (wave 1)
 - [ ] 24-04-PLAN.md — SECHRD-03 shared SurrealDB rate-limit store, fail-open (REST) (wave 1)
@@ -1193,7 +1193,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 23. Security Regressions & HIGH Findings | 6/6 | Complete   | 2026-07-03 |
-| 24. Security Hardening I — Auth & Access-Control | 0/? | Not started | - |
+| 24. Security Hardening I — Auth & Access-Control | 1/9 | In Progress|  |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 0/? | Not started | - |
 | 26. Correctness & Resilience | 0/? | Not started | - |
 | 27. Performance & Load Hardening | 0/? | Not started | - |

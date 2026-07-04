@@ -670,10 +670,10 @@ The reset/resend flows 400 because the frontend omits backend-required `tenant_i
 Make the TOTP step check-and-update atomic and close the skew-boundary and enrollment-confirm replay windows.
 
 ### Acceptance Criteria
-- [ ] Step update is a conditional compare-and-set in the DB (`WHERE totp_last_used_step < $step`) — concurrent submissions of one code succeed at most once
-- [ ] The step actually matched (incl. the −1 skew window) is recorded, so a code accepted via skew is not replayable in later wall-clock steps
-- [ ] `totp_last_used_step` seeded at enrollment-confirm time
-- [ ] Concurrency test: N parallel submissions of one valid code ⇒ exactly one success
+- [x] Step update is a conditional compare-and-set in the DB (`WHERE totp_last_used_step < $step`) — concurrent submissions of one code succeed at most once — `SurrealUserRepository::update_totp_step` (24-01)
+- [x] The step actually matched (incl. the −1 skew window) is recorded, so a code accepted via skew is not replayable in later wall-clock steps — `verify_code_with_replay_check` (24-01)
+- [x] `totp_last_used_step` seeded at enrollment-confirm time — `AuthService::confirm_mfa` (24-01)
+- [x] Concurrency test: N parallel submissions of one valid code ⇒ exactly one success — `totp_step_cas_test.rs::totp_step_cas_concurrent` (24-01)
 
 ## SECHRD-02: SSRF Address Pinning (webhook + federation fetches)
 
@@ -1076,7 +1076,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Complete (residual: Recipient/SubjectConfirmationData deferred) |
 | SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Complete |
 | SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Complete |
-| SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Pending |
+| SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Complete |
 | SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |
 | SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Pending |
 | SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Pending |

@@ -23,6 +23,7 @@ tower_governor = { workspace = true }
 governor = { workspace = true }
 tower = { workspace = true }
 http-body-util = { workspace = true }
+http = { workspace = true }
 bytes = { workspace = true }
 secrecy = { workspace = true }
 

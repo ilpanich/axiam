@@ -767,6 +767,7 @@ dependencies = [
  "bytes",
  "chrono",
  "governor",
+ "http 1.4.2",
  "http-body-util",
  "prost",
  "secrecy",

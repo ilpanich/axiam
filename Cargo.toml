@@ -42,6 +42,7 @@ tower_governor = { version = "0.8", features = ["tonic"] }
 governor = "0.10"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+http = "1"
 bytes = "1"
 tracing-actix-web = "0.7"
 

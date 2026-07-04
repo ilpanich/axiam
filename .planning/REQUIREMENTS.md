@@ -795,10 +795,10 @@ Require a segment boundary in public-path wildcard matching and normalize the pa
 Close remaining auth-path timing/memory/durability side-channels.
 
 ### Acceptance Criteria
-- [ ] Constant-time password-reset: ineligible/unknown/federated path performs an equivalent dummy hash + async wait so response time doesn't distinguish valid emails (T19.23)
+- [x] Constant-time password-reset: ineligible/unknown/federated path performs an equivalent dummy hash + async wait so response time doesn't distinguish valid emails (T19.23) — 24-09
 - [x] Peppered-password buffer wrapped with `zeroize` (pepper via `secrecy`) and wiped before return (T19.24) — 24-05
 - [x] GDPR audit-write failure falls back to a persistent dead-letter file / audit syslog for durability (T19.27) — 24-06
-- [ ] Unauthenticated reset path blocks reuse of the current password; initial passwords seeded into history (SEC-028 residual)
+- [x] Unauthenticated reset path blocks reuse of the current password; initial passwords seeded into history (SEC-028 residual) — 24-09
 
 ---
 
@@ -1087,7 +1087,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Pending |
 | SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Pending |
 | SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Complete |
-| SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Pending |
+| SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Complete |
 | CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Pending |
 | CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Pending |
 | CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Pending |

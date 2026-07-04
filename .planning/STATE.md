@@ -4,17 +4,17 @@ milestone: v1.2
 milestone_name: — MVP Release Hardening
 current_phase: 24
 current_phase_name: security-hardening-i-authentication-access-control-surfaces
-status: executing
-stopped_at: Completed 24-08-PLAN.md
-last_updated: "2026-07-04T12:07:49.337Z"
+status: verifying
+stopped_at: Completed 24-09-PLAN.md
+last_updated: "2026-07-04T12:51:33.439Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 24 execution started
 progress:
   total_phases: 8
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 15
-  completed_plans: 14
-  percent: 13
+  completed_plans: 15
+  percent: 25
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 24 (security-hardening-i-authentication-access-control-surfaces) — EXECUTING
 Plan: 9 of 9
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-04 — Phase 24 execution started
 
 ## Performance Metrics
@@ -167,6 +167,7 @@ Last activity: 2026-07-04 — Phase 24 execution started
 | Phase 24 P06 | 25min | 1 tasks | 4 files |
 | Phase 24 P07 | 33min | 2 tasks | 5 files |
 | Phase 24 P08 | 50min | 3 tasks | 6 files |
+| Phase 24 P09 | 43min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -401,6 +402,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 24-07] axiam-db/surrealdb promoted from dev- to regular dependencies of axiam-api-grpc; http crate added as explicit dependency — both needed for the shared-store layer to compile as production library code
 - [Phase ?]: [Phase 24-08]: seed_default_roles made concurrency-safe (find_or_create_role + grant_to_role_idempotent) after removing the bootstrap TOCTOU made it reachable twice for one tenant
 - [Phase ?]: [Phase 24-08]: already-bootstrapped tenant now returns 409 Conflict (AlreadyExists) instead of the old 404 -- direct consequence of the bootstrap_lock uniqueness invariant replacing the TOCTOU check
+- [Phase ?]: [Phase 24-09]: initiate_reset's valid-account branch intentionally does NOT get a matching dummy_hash_wait — only the two Ok(None) branches (unknown email, federated user) do, per RESEARCH Pattern 4's literal SEC-026 mirroring
+- [Phase ?]: [Phase 24-09]: confirm_reset's evaluate_password (history+HIBP) call is wrapped in its own crypto_semaphore permit for its full duration rather than plumbing the semaphore into policy.rs, staying within this plan's declared file scope while closing the ungated-Argon2 gap
 
 ### Pending Todos
 
@@ -423,7 +426,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T12:07:49.323Z
-Stopped at: Completed 24-08-PLAN.md
+Last session: 2026-07-04T12:51:33.425Z
+Stopped at: Completed 24-09-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

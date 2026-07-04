@@ -1000,7 +1000,7 @@ NEGATIVE test passing.
 ### Phases (v1.2)
 
 - [x] **Phase 23: Security Regressions & HIGH Findings** - Close the critical/HIGH SEC regressions (gRPC service auth, live-grant tenant guard, webhook fail-closed encrypt-at-rest, SAML XSW binding, logout revocation, reset/resend tenant_id) — each proven by a negative test (completed 2026-07-03)
-- [ ] **Phase 24: Security Hardening I — Authentication & Access-Control Surfaces** - Harden the auth front door: TOTP atomic replay, XFF rate-limit keying, bootstrap atomicity+gate, public-path allowlist, reset/crypto side-channels
+- [x] **Phase 24: Security Hardening I — Authentication & Access-Control Surfaces** - Harden the auth front door: TOTP atomic replay, XFF rate-limit keying, bootstrap atomicity+gate, public-path allowlist, reset/crypto side-channels (completed 2026-07-04)
 - [ ] **Phase 25: Security Hardening II — Federation, PKI, Data-Protection & Infra** - Fail-closed trust boundaries: SSRF address pinning, mTLS CA status, GDPR erasure durability, federation nonce+secret handling, AMQP per-tenant signing, cluster egress/secret completeness
 - [ ] **Phase 26: Correctness & Resilience** - gRPC governor throughput, SurrealDB token renewal, durable webhook delivery, Playwright-in-CI with body assertions, frontend tenant/MFA/residual flows
 - [ ] **Phase 27: Performance & Load Hardening** - HIBP circuit breaker + hot-path pre-sizing, concurrent bounded BatchCheckAccess, JWKS single-flight across SDKs, SurrealDB reconnect backoff-with-jitter, load-test + profiling report
@@ -1055,7 +1055,7 @@ Plans:
   4. A non-canonical or wrong-segment request path (e.g. `/api/v1/authz/...` must not match a `/api/v1/auth/*` entry; `//` and `..` variants are collapsed/rejected) cannot slip past the public-path allowlist (SECHRD-11)
   5. A password-reset request for an ineligible/unknown/federated account is time-indistinguishable from a valid one (dummy hash + async wait), the peppered password buffer is zeroized, and the unauthenticated reset path blocks reuse of the current password (SECHRD-12)
 
-**Plans**: 8/9 plans executed
+**Plans**: 9/9 plans complete
 
 Plans:
 **Wave 1**
@@ -1074,7 +1074,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 24-09-PLAN.md — SECHRD-12 constant-time reset + current-password block + history seed (wave 3)
+- [x] 24-09-PLAN.md — SECHRD-12 constant-time reset + current-password block + history seed (wave 3)
 
 ---
 
@@ -1193,7 +1193,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 23. Security Regressions & HIGH Findings | 6/6 | Complete   | 2026-07-03 |
-| 24. Security Hardening I — Auth & Access-Control | 8/9 | In Progress|  |
+| 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete   | 2026-07-04 |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 0/? | Not started | - |
 | 26. Correctness & Resilience | 0/? | Not started | - |
 | 27. Performance & Load Hardening | 0/? | Not started | - |

@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 25
 current_phase_name: Security Hardening II — Federation, PKI, Data-Protection & Infra
 status: executing
-stopped_at: Completed 25-04-PLAN.md
-last_updated: "2026-07-04T16:58:58.645Z"
+stopped_at: Completed 25-06-PLAN.md
+last_updated: "2026-07-04T17:29:01.675Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 25 execution resumed (wave continue)
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 25
-  completed_plans: 18
+  completed_plans: 19
   percent: 25
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 25 (Security Hardening II — Federation, PKI, Data-Protection & Infra) — EXECUTING
-Plan: 4 of 10
+Plan: 5 of 10
 Status: Ready to execute
 Last activity: 2026-07-04 — Phase 25 execution resumed (wave continue)
 
@@ -172,6 +172,7 @@ Last activity: 2026-07-04 — Phase 25 execution resumed (wave continue)
 | Phase 25 P01 | 25min | 2 tasks | 5 files |
 | Phase 25 P03 | 12min | 2 tasks | 2 files |
 | Phase 25 P04 | 25min | 2 tasks | 8 files |
+| Phase 25 P06 | 20min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -415,6 +416,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25-03]: mtls_rejects_expired_issuing_ca backdates CA not_after via a direct SurrealDB UPDATE test-only escape hatch (no production API sets an arbitrary validity window); mtls_rejects_revoked_issuing_ca uses the real CaCertificateRepository::revoke() method
 - [Phase ?]: [Phase 25-04]: Added erasure_proof.user_id column (model+schema+repo) since D-03b requires a UNIQUE index on it and the column didn't previously exist; scoped to (tenant_id, user_id) matching existing tenant-scoped UNIQUE index convention
 - [Phase ?]: [Phase 25-04]: SessionRepository::list_by_user returns full Session rows (incl. token_hash); redaction is the caller's responsibility per D-03c, exercised in plan 25-05
+- [Phase ?]: [Phase 25-06]: OidcCallbackRequest gained a required state field (previously absent) so the authenticated account-linking callback can look up its FederationLoginState row and derive expected_nonce server-side (SECHRD-07/D-04); req.nonce is retained on the wire for backward compatibility but is never read for verification
+- [Phase ?]: [Phase 25-06]: SECHRD-07 negative test split across HTTP-handler-level (unknown state -> 401) and crypto-nonce-comparison-level (real FederationLoginStateRepository + real verify_id_token) checks instead of one full wiremock round-trip, since OidcFederationService::discover/exchange_code hardcode allow_private=false with no test seam (SECHRD-02/plan 25-01), making a full network round-trip against a loopback mock IdP structurally impossible in any environment
 
 ### Pending Todos
 
@@ -437,7 +440,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T16:58:58.630Z
-Stopped at: Completed 25-04-PLAN.md
+Last session: 2026-07-04T17:29:01.661Z
+Stopped at: Completed 25-06-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

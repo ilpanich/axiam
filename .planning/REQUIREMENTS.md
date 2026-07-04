@@ -740,8 +740,8 @@ Never certify an erasure while PII survives; make the erasure ledger and export 
 The account-linking OIDC callback must derive the expected nonce from server-side state, not the request body.
 
 ### Acceptance Criteria
-- [ ] `handlers/federation.rs:595-648` derives `expected_nonce` from stored login state (same as the public path), ignoring `req.nonce`
-- [ ] Replay test: a request-supplied nonce cannot satisfy verification
+- [x] `handlers/federation.rs:595-648` derives `expected_nonce` from stored login state (same as the public path), ignoring `req.nonce`
+- [x] Replay test: a request-supplied nonce cannot satisfy verification
 
 ## SECHRD-08: AMQP Signing Key & ExportReady Delivery
 
@@ -1082,7 +1082,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Complete |
 | SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Complete |
 | SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |
-| SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Pending |
+| SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Complete |
 | SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | Pending |
 | SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Pending |
 | SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Pending |

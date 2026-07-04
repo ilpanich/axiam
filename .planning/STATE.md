@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 24
 current_phase_name: security-hardening-i-authentication-access-control-surfaces
 status: executing
-stopped_at: Completed 24-07-PLAN.md
-last_updated: "2026-07-04T11:19:54.406Z"
+stopped_at: Completed 24-08-PLAN.md
+last_updated: "2026-07-04T12:07:49.337Z"
 last_activity: 2026-07-04
 last_activity_desc: Phase 24 execution started
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 15
-  completed_plans: 13
+  completed_plans: 14
   percent: 13
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 24 (security-hardening-i-authentication-access-control-surfaces) — EXECUTING
-Plan: 8 of 9
+Plan: 9 of 9
 Status: Ready to execute
 Last activity: 2026-07-04 — Phase 24 execution started
 
@@ -166,6 +166,7 @@ Last activity: 2026-07-04 — Phase 24 execution started
 | Phase 24 P05 | 55min | 2 tasks | 12 files |
 | Phase 24 P06 | 25min | 1 tasks | 4 files |
 | Phase 24 P07 | 33min | 2 tasks | 5 files |
+| Phase 24 P08 | 50min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -398,6 +399,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 24-07] gRPC key-extractor fix (GrpcTrustedHopsKeyExtractor) is live in production immediately (build_grpc_governor_layer already wired in server.rs); the shared-store layer (GrpcSharedRateLimitLayer) is implemented+tested but NOT yet wired into start_grpc_server/main.rs — plan file scope excluded server.rs, and start_grpc_server has no Surreal<C> handle threaded through it at all; follow-up plan needed to close this gap
 - [Phase ?]: [Phase 24-07] Discovered SmartIpKeyExtractor could never resolve tonic's peer address at all (checks axum::extract::ConnectInfo<SocketAddr>/bare SocketAddr, but tonic inserts TcpConnectInfo/TlsConnectInfo<TcpConnectInfo>) — fixed as part of the planned key-extractor swap, stronger than the plan's literal leftmost-hop framing
 - [Phase ?]: [Phase 24-07] axiam-db/surrealdb promoted from dev- to regular dependencies of axiam-api-grpc; http crate added as explicit dependency — both needed for the shared-store layer to compile as production library code
+- [Phase ?]: [Phase 24-08]: seed_default_roles made concurrency-safe (find_or_create_role + grant_to_role_idempotent) after removing the bootstrap TOCTOU made it reachable twice for one tenant
+- [Phase ?]: [Phase 24-08]: already-bootstrapped tenant now returns 409 Conflict (AlreadyExists) instead of the old 404 -- direct consequence of the bootstrap_lock uniqueness invariant replacing the TOCTOU check
 
 ### Pending Todos
 
@@ -420,7 +423,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T11:19:54.392Z
-Stopped at: Completed 24-07-PLAN.md
+Last session: 2026-07-04T12:07:49.323Z
+Stopped at: Completed 24-08-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

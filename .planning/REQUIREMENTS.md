@@ -706,9 +706,9 @@ Fix the XFF fallback that returns the client-controlled leftmost hop and reconci
 Close the initialized-check TOCTOU and require the bootstrap gate unconditionally.
 
 ### Acceptance Criteria
-- [ ] First-super-admin creation is a single conditional/transactional operation keyed on a uniqueness invariant (two concurrent first-run requests ⇒ at most one super-admin)
-- [ ] `AXIAM_BOOTSTRAP_ADMIN_EMAIL` (or a one-time setup token) is required unconditionally — an unset var does NOT allow arbitrary bootstrap
-- [ ] Concurrency test proves single-admin invariant
+- [x] First-super-admin creation is a single conditional/transactional operation keyed on a uniqueness invariant (two concurrent first-run requests ⇒ at most one super-admin) — `bootstrap_lock` uniqueness-invariant CREATE folded into the admin-creation transaction (24-08)
+- [x] `AXIAM_BOOTSTRAP_ADMIN_EMAIL` (or a one-time setup token) is required unconditionally — an unset var does NOT allow arbitrary bootstrap — mandatory fail-closed gate (24-08)
+- [x] Concurrency test proves single-admin invariant — `bootstrap_test.rs::bootstrap_concurrent_race_single_admin` (24-08)
 
 ## SECHRD-05: mTLS CA Status & Validity Enforcement
 
@@ -1079,7 +1079,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Complete |
 | SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Pending |
 | SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Complete (REST keying + shared store 24-03/24-04; gRPC key-extractor parity live + shared-store layer implemented+tested 24-07 — prod wiring of the gRPC shared-store layer into start_grpc_server is a follow-up, see 24-07-SUMMARY.md) |
-| SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Pending |
+| SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Complete |
 | SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Pending |
 | SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Pending |
 | SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Pending |

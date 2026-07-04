@@ -660,6 +660,15 @@ impl<C: Connection> SurrealUserRepository<C> {
         let id_str = id.to_string();
         let consent_id = Uuid::new_v4().to_string();
         let tenant_id_str = input.tenant_id.to_string();
+        // SECHRD-12/T-24-93 (RESEARCH Pitfall 5): admin-created users go
+        // through this write path, so their initial password must be seeded
+        // into `password_history` in the SAME transaction — otherwise the
+        // unauthenticated reset path's current-password-reuse check
+        // (`PasswordResetService::confirm_reset`) has zero history rows to
+        // work against for these users. Federated-user creation paths
+        // (oidc.rs/saml.rs) have no local password and are intentionally
+        // left untouched.
+        let ph_id_str = Uuid::new_v4().to_string();
 
         let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
             .map_err(|e| DbError::Migration(e.to_string()))?;
@@ -668,7 +677,8 @@ impl<C: Connection> SurrealUserRepository<C> {
             .metadata
             .unwrap_or(serde_json::Value::Object(Default::default()));
 
-        // Result slots: BEGIN=0, CREATE user=1, CREATE consent=2, COMMIT=3.
+        // Result slots: BEGIN=0, CREATE user=1, CREATE consent=2,
+        // CREATE password_history=3, COMMIT=4.
         let result = self
             .db
             .query(
@@ -692,10 +702,15 @@ impl<C: Connection> SurrealUserRepository<C> {
                  accepted_at = time::now(), \
                  ip_address = $ip_address, \
                  user_agent = $user_agent; \
+                 CREATE type::record('password_history', $ph_id) SET \
+                 tenant_id = $tenant_id, \
+                 user_id = $id, \
+                 password_hash = $password_hash; \
                  COMMIT TRANSACTION",
             )
             .bind(("id", id_str.clone()))
             .bind(("consent_id", consent_id))
+            .bind(("ph_id", ph_id_str))
             .bind(("tenant_id", tenant_id_str))
             .bind(("username", input.username))
             .bind(("email", input.email))
@@ -957,6 +972,55 @@ mod tests {
         assert!(
             !anon.deletion_pending,
             "deletion_pending cleared after anonymization"
+        );
+    }
+
+    /// SECHRD-12/T-24-93 (RESEARCH Pitfall 5): `create_with_consent` must
+    /// seed exactly one `password_history` row from the user's initial
+    /// password hash, in the SAME transaction as the user/consent creation,
+    /// so the unauthenticated reset path's current-password-reuse check has
+    /// data for admin-created users.
+    #[tokio::test]
+    async fn create_with_consent_seeds_history() {
+        use crate::SurrealPasswordHistoryRepository;
+        use axiam_core::repository::PasswordHistoryRepository;
+
+        let db = setup_db().await;
+        let repo = SurrealUserRepository::new(db.clone());
+        let history_repo = SurrealPasswordHistoryRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+
+        let user = repo
+            .create_with_consent(
+                CreateUser {
+                    tenant_id,
+                    username: "admin-created".into(),
+                    email: "admin-created@example.com".into(),
+                    password: "InitialStr0ngPassword!".into(),
+                    metadata: None,
+                },
+                "terms_of_service",
+                "v1",
+                Some("127.0.0.1".into()),
+                Some("test-agent".into()),
+            )
+            .await
+            .unwrap();
+
+        let history = history_repo
+            .get_recent(tenant_id, user.id, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            history.len(),
+            1,
+            "expected exactly one seeded password_history row, got: {history:?}"
+        );
+        assert_eq!(history[0].tenant_id, tenant_id);
+        assert_eq!(history[0].user_id, user.id);
+        assert_eq!(
+            history[0].password_hash, user.password_hash,
+            "seeded history hash must match the user's initial password_hash"
         );
     }
 }

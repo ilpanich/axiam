@@ -1125,7 +1125,18 @@ Plans:
   4. The CI e2e job runs `npx playwright test` against the seeded backend (vitest kept separate), the auth/login/contract specs gate the build, and the contract spec asserts request **bodies** — catching a SECFIX-06 regression (CORR-04)
   5. After a hard reload the Topbar restores the tenant from `/auth/me` slugs, an MFA-mandated user reaches the setup landing via `setup_token` (no dead end), and VerifyEmail/Dashboard/Org-settings no longer misfire under StrictMode/query-key-collision/refocus (CORR-05, CORR-06)
 
-**Plans**: TBD
+**Plans**: 8 plans (2 waves)
+
+Plans:
+
+- [ ] 26-01-PLAN.md — CORR-01: gRPC governor throughput fix (Quota::per_second) + sustained-throughput test [wave 1]
+- [ ] 26-02-PLAN.md — CORR-02: SurrealDB proactive re-signin + reactive reconnect + auth-aware health_check [wave 1]
+- [ ] 26-03-PLAN.md — CORR-03a: webhook emit/deliver_once split + Stripe-style signature + AMQP topology/publisher [wave 1]
+- [ ] 26-04-PLAN.md — CORR-04: Playwright in CI (blocking) + spec triage + contract body assertions [wave 1]
+- [ ] 26-05-PLAN.md — CORR-05a: backend /auth/me tenant_slug/org_slug emission (graceful degrade) [wave 1]
+- [ ] 26-06-PLAN.md — CORR-06: VerifyEmail useRef guard + Dashboard query key + org-settings dirty-tracking [wave 1]
+- [ ] 26-07-PLAN.md — CORR-03b: webhook consumer + retry/DLQ config + main.rs wiring + integration test [wave 2, depends 26-03]
+- [ ] 26-08-PLAN.md — CORR-05b: MFA-setup landing route + TotpSetupPanel + tenant-restore e2e [wave 2, depends 26-05]
 
 **UI hint**: yes
 

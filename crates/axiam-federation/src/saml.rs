@@ -91,6 +91,13 @@ pub struct SamlFederationService<FC, FL, UR, AR> {
     federation_link_repo: FL,
     user_repo: UR,
     replay_repo: AR,
+    /// Retained for constructor API stability across the ~9 call sites in
+    /// `axiam-api-rest::handlers::federation` and the `axiam-server`
+    /// integration tests (out of this plan's scope). No longer read
+    /// directly: `fetch_idp_metadata` now routes through
+    /// `ssrf::guarded_fetch`, which builds its own fresh, IP-pinned client
+    /// per request rather than reusing an injected pooled client (D-01c).
+    #[allow(dead_code)]
     http_client: reqwest::Client,
 }
 
@@ -127,15 +134,13 @@ where
     ) -> Result<IdpMetadata, FederationError> {
         validate_metadata_url(metadata_url)?;
 
-        let response = self
-            .http_client
-            .get(metadata_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
+        // SECHRD-02: route the metadata GET through the shared, IP-pinning
+        // SSRF guard (D-01a/b/c). Production always fails closed against
+        // private/loopback/link-local addresses and internal redirect
+        // targets — `allow_private=false`.
+        let response = crate::ssrf::guarded_fetch(metadata_url, false, |c, u| c.get(u))
             .await
-            .map_err(|e| {
-                FederationError::SamlMetadataFailed(format!("HTTP request failed: {e}"))
-            })?;
+            .map_err(|e| FederationError::SamlMetadataFailed(e.to_string()))?;
 
         if !response.status().is_success() {
             return Err(FederationError::SamlMetadataFailed(format!(

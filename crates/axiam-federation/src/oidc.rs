@@ -130,13 +130,13 @@ where
     ) -> Result<OidcDiscoveryDocument, FederationError> {
         validate_metadata_url(metadata_url)?;
 
-        let response = self
-            .http_client
-            .get(metadata_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
+        // SECHRD-02: route the discovery-document GET through the shared,
+        // IP-pinning SSRF guard (D-01a/b/c). Production always fails closed
+        // against private/loopback/link-local addresses and internal
+        // redirect targets — `allow_private=false`.
+        let response = crate::ssrf::guarded_fetch(metadata_url, false, |c, u| c.get(u))
             .await
-            .map_err(|e| FederationError::DiscoveryFailed(format!("HTTP request failed: {e}")))?;
+            .map_err(|e| FederationError::DiscoveryFailed(e.to_string()))?;
 
         if !response.status().is_success() {
             return Err(FederationError::DiscoveryFailed(format!(
@@ -439,22 +439,21 @@ where
         client_id: &str,
         client_secret: &str,
     ) -> Result<TokenResponse, FederationError> {
-        let response = self
-            .http_client
-            .post(token_endpoint)
-            .timeout(std::time::Duration::from_secs(10))
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", redirect_uri),
-                ("client_id", client_id),
-                ("client_secret", client_secret),
-            ])
-            .send()
-            .await
-            .map_err(|e| {
-                FederationError::TokenExchangeFailed(format!("HTTP request failed: {e}"))
-            })?;
+        // SECHRD-02: route the token-endpoint POST through the shared,
+        // IP-pinning SSRF guard (D-01a/b/c) — the token endpoint comes from
+        // the (already HTTPS-validated) discovery document, not just the
+        // configured issuer, so it must be guarded here too.
+        let form_params = [
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ];
+        let response =
+            crate::ssrf::guarded_fetch(token_endpoint, false, |c, u| c.post(u).form(&form_params))
+                .await
+                .map_err(|e| FederationError::TokenExchangeFailed(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();

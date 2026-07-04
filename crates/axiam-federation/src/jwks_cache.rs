@@ -219,74 +219,30 @@ impl Default for JwksCache {
 /// document with a dozen keys is typically < 10 KiB.
 const MAX_JWKS_BODY_BYTES: usize = 512 * 1024;
 
-/// Returns `true` for IP addresses that must not be contacted as JWKS endpoints.
-///
-/// SEC-054: Prevents SSRF via malicious JWKS URL pointing to internal services.
-fn is_private_jwks_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (v6.segments()[0] & 0xffc0 == 0xfe80) // link-local fe80::/10
-                || (v6.segments()[0] & 0xfe00 == 0xfc00) // unique-local fc00::/7
-        }
-    }
-}
-
-/// Validate that the JWKS URL does not resolve to a private/loopback IP (SEC-054).
-///
-/// When `allow_private_networks` is `true` (integration tests only) the check
-/// is skipped so a loopback mock server can be used. Production always passes
-/// `false`.
-async fn validate_jwks_url(
-    jwks_uri: &str,
-    allow_private_networks: bool,
-) -> Result<(), FederationError> {
-    if allow_private_networks {
-        return Ok(());
-    }
-    let parsed = url::Url::parse(jwks_uri)
-        .map_err(|_| FederationError::JwksFetchFailed("invalid JWKS URL".into()))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| FederationError::JwksFetchFailed("JWKS URL has no host".into()))?;
-    let port = parsed.port_or_known_default().unwrap_or(443);
-
-    let addrs = tokio::net::lookup_host((host, port)).await.map_err(|e| {
-        FederationError::JwksFetchFailed(format!("JWKS host resolution failed: {e}"))
-    })?;
-
-    for addr in addrs {
-        if is_private_jwks_ip(addr.ip()) {
-            return Err(FederationError::JwksFetchFailed(format!(
-                "SSRF blocked: JWKS URL '{jwks_uri}' resolves to a private/loopback IP"
-            )));
-        }
-    }
-    Ok(())
-}
+// SEC-054/SECHRD-02: the private/loopback IP classifier and the
+// resolve-then-validate logic that used to live here have been generalized
+// into the shared `crate::ssrf` module (`ssrf::is_disallowed_ip` /
+// `ssrf::resolve_and_pick`) — this was a byte-identical duplicate of
+// `axiam-api-rest::webhook`'s copy of the same logic (D-01a dedup). See
+// `fetch_jwks` below, which now routes through `ssrf::guarded_fetch`
+// instead of validating-then-independently-resolving (that gap is exactly
+// the DNS-rebind TOCTOU `ssrf::guarded_fetch` closes via IP pinning).
 
 async fn fetch_jwks(
-    http: &reqwest::Client,
+    // Retained for API stability of `get_or_fetch`/`force_refetch_if_allowed`
+    // (still forwarded here from both call sites) — no longer used directly:
+    // `ssrf::guarded_fetch` builds its own fresh, IP-pinned client per
+    // request rather than reusing an injected pooled client (D-01c).
+    _http: &reqwest::Client,
     jwks_uri: &str,
     allow_private_networks: bool,
 ) -> Result<JwkSet, FederationError> {
-    // SEC-054: Block JWKS URLs that resolve to private/loopback IPs.
-    validate_jwks_url(jwks_uri, allow_private_networks).await?;
-
-    let response = http
-        .get(jwks_uri)
-        .timeout(Duration::from_secs(5))
-        .send()
+    // SEC-054/SECHRD-02: resolve, validate (unless allow_private_networks —
+    // the loopback mock-server test seam), and PIN the validated IP into the
+    // connection via the shared guard.
+    let response = crate::ssrf::guarded_fetch(jwks_uri, allow_private_networks, |c, u| c.get(u))
         .await
-        .map_err(|e| FederationError::JwksFetchFailed(format!("HTTP request failed: {e}")))?;
+        .map_err(|e| FederationError::JwksFetchFailed(e.to_string()))?;
 
     let response = response
         .error_for_status()

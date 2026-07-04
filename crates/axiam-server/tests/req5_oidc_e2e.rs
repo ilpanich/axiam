@@ -539,3 +539,321 @@ async fn oidc_jwks_served_stale_on_idp_outage() {
         "stale JWKS within 24h window must serve cached keys: {result:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SECHRD-07: OIDC nonce from server-side login state (account-linking)
+// ---------------------------------------------------------------------------
+
+/// SECHRD-07 / D-04 — the account-linking OIDC callback (`oidc_callback`)
+/// must derive `expected_nonce` from the server-side `FederationLoginState`
+/// row (looked up by `state`), never from the request body's `nonce` field.
+///
+/// This test proves the fix at two levels:
+///
+/// 1. **HTTP handler level** (`handlers::federation::oidc_callback`, the
+///    real production handler — no test double): a callback whose `state`
+///    has no matching `FederationLoginState` row (attacker never went
+///    through a genuine `oidc_authorize`, or fabricates an arbitrary
+///    `state`) is rejected with 401 "state not found or expired",
+///    regardless of what `code`/`nonce` values are supplied. Before this
+///    fix, `OidcCallbackRequest` had no `state` field at all — there was no
+///    server-side gate an attacker needed to pass; only a config_id + any
+///    non-empty `nonce` were required to reach `handle_callback`.
+///
+/// 2. **Cryptographic nonce-comparison level**
+///    (`OidcFederationService::verify_id_token`, the exact JWKS-verified
+///    code path `handle_callback` uses at `oidc.rs:317-339` before its
+///    nonce comparison): a real `SurrealFederationLoginStateRepository`
+///    (the identical type wired into the handler in production) stores the
+///    server-generated nonce; an attacker who fully controls the external
+///    IdP's ID token (and hence its `nonce` claim, and the callback
+///    request's `nonce` field) cannot make a mismatched nonce claim satisfy
+///    verification — only a nonce claim equal to `login_state.nonce` (the
+///    server-stored value) does. This mirrors `handle_callback`'s own
+///    comparison at `oidc.rs:329-334`.
+///
+/// Levels 1 and 2 together cover the full `oidc_callback` contract. The
+/// code-exchange/discovery network calls inside `handle_callback` are
+/// excluded from this test: `OidcFederationService::discover`/`exchange_code`
+/// route through `ssrf::guarded_fetch(url, false, ..)` (SECHRD-02, plan
+/// 25-01), which hardcodes `allow_private=false` with no test seam, so they
+/// always reject a loopback wiremock server — this is true in every
+/// environment, not just a local-compile limitation. Every other test in
+/// this file tests at the same `verify_id_token` boundary for the identical
+/// reason (see file header).
+#[actix_rt::test]
+async fn oidc_linking_ignores_client_supplied_nonce() {
+    use actix_web::{App, test as actix_test, web};
+    use axiam_api_rest::RateLimitConfig;
+    use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+    use axiam_api_rest::register_api_v1_routes;
+    use axiam_auth::config::AuthConfig;
+    use axiam_core::models::organization::CreateOrganization;
+    use axiam_core::models::tenant::CreateTenant;
+    use axiam_core::models::user::CreateUser;
+    use axiam_core::repository::{
+        FederationLoginState, FederationLoginStateRepository, OrganizationRepository,
+        TenantRepository, UserRepository,
+    };
+
+    type HttpTestDb = surrealdb::engine::local::Db;
+
+    const CSRF_TOKEN: &str = "test-csrf-token";
+    /// Test-only AES-256-GCM key (32 bytes of 0x2a) — not a secret. gitleaks:allow
+    const TEST_FED_ENC_KEY: [u8; 32] = [0x2a; 32];
+
+    // Test-only Ed25519 keypair with no real-world value. nosemgrep
+    let auth_config = AuthConfig {
+        jwt_private_key_pem: concat!(
+            "-----BEGIN PRIVATE KEY-----\n",
+            "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n",
+            "-----END PRIVATE KEY-----"
+        )
+        .into(),
+        jwt_public_key_pem: concat!(
+            "-----BEGIN PUBLIC KEY-----\n",
+            "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
+            "-----END PUBLIC KEY-----"
+        )
+        .into(),
+        access_token_lifetime_secs: 900,
+        jwt_issuer: "axiam-test".into(),
+        federation_encryption_key: Some(TEST_FED_ENC_KEY),
+        ..AuthConfig::default()
+    };
+
+    let http_db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(())
+        .await
+        .expect("in-memory DB");
+    http_db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&http_db).await.unwrap();
+
+    let org_repo = axiam_db::SurrealOrganizationRepository::new(http_db.clone());
+    let org = org_repo
+        .create(CreateOrganization {
+            name: "Test Org".into(),
+            slug: "sechrd07-org".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_repo = axiam_db::SurrealTenantRepository::new(http_db.clone());
+    let tenant = tenant_repo
+        .create(CreateTenant {
+            organization_id: org.id,
+            name: "Test Tenant".into(),
+            slug: "sechrd07-tenant".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let user_repo = axiam_db::SurrealUserRepository::new(http_db.clone());
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id: tenant.id,
+            username: "linker".into(),
+            email: "linker@example.com".into(),
+            password: "password12345".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let bearer_token = axiam_auth::token::issue_access_token(
+        user.id,
+        tenant.id,
+        org.id,
+        &[],
+        &auth_config,
+        Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
+
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth_config.clone()))
+            .app_data(web::Data::new(
+                axiam_db::SurrealFederationConfigRepository::new(http_db.clone()),
+            ))
+            .app_data(web::Data::new(
+                axiam_db::SurrealFederationLinkRepository::new(http_db.clone()),
+            ))
+            .app_data(web::Data::new(axiam_db::SurrealUserRepository::new(
+                http_db.clone(),
+            )))
+            .app_data(web::Data::new(
+                axiam_db::SurrealFederationLoginStateRepository::new(http_db.clone()),
+            ))
+            .app_data(web::Data::new(
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .unwrap(),
+            ))
+            .app_data(web::Data::new(Arc::new(
+                JwksCache::new_allow_private_networks(),
+            )))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| {
+                register_api_v1_routes::<HttpTestDb>(cfg, &RateLimitConfig::default())
+            }),
+    )
+    .await;
+
+    // --- Level 1: no FederationLoginState row exists for this `state` — the
+    // callback must be rejected before ever considering the attacker-supplied
+    // nonce/code. ---
+    let req = actix_test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/callback")
+        .insert_header(("Authorization", format!("Bearer {bearer_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "code": "attacker-code",
+            "redirect_uri": "https://spa.example.com/callback",
+            "state": "attacker-fabricated-state-never-authorized",
+            "nonce": "attacker-supplied-nonce-xyz",
+        }))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "callback with no matching FederationLoginState row must be rejected \
+         regardless of the attacker-supplied nonce/code"
+    );
+
+    // --- Level 2: real login-state repo + real JWKS-verified ID-token path.
+    // Proves the nonce COMPARISON itself is immune to an attacker-controlled
+    // nonce claim (and the identically attacker-controlled `req.nonce`,
+    // which the fix never even reads). ---
+    let login_state_repo = axiam_db::SurrealFederationLoginStateRepository::new(http_db.clone());
+
+    let (_server, doc, keys, client_id, cache) = setup("test-kid").await;
+    let svc = make_oidc_svc(cache).await;
+    let cache_key = (Uuid::new_v4(), Uuid::new_v4());
+
+    // Simulates what a genuine `oidc_authorize` call stores server-side.
+    let state = "genuine-state-from-oidc-authorize".to_string();
+    let server_nonce = "server-generated-nonce-abc123".to_string();
+    login_state_repo
+        .insert(&FederationLoginState {
+            state: state.clone(),
+            nonce: server_nonce.clone(),
+            tenant_id: tenant.id,
+            federation_config_id: Uuid::new_v4(),
+            redirect_uri: "https://spa.example.com/callback".into(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+            request_id: String::new(),
+        })
+        .await
+        .expect("insert login state (simulates oidc_authorize)");
+
+    // Attacker fully controls the external IdP's ID token in this scenario
+    // (e.g. a rogue/compromised IdP, or a replayed token from a different
+    // flow) — its nonce claim is attacker-chosen and differs from the
+    // server-stored nonce.
+    let attacker_nonce = "attacker-chosen-nonce-in-id-token";
+    let now = now_secs();
+    let claims_attacker = valid_claims(&doc.issuer, &client_id, attacker_nonce, now + 3600, now);
+    let token_attacker = sign_jwt(
+        &claims_attacker,
+        &keys.encoding_key(),
+        "test-kid",
+        Algorithm::RS256,
+    );
+
+    // Consume the state row exactly as oidc_callback does — expected_nonce
+    // comes from server state, never from any request-supplied value.
+    let login_state = login_state_repo
+        .consume_by_state(&state)
+        .await
+        .expect("consume_by_state")
+        .expect("state row must exist");
+    let expected_nonce = login_state.nonce.clone();
+    assert_eq!(
+        expected_nonce, server_nonce,
+        "expected_nonce must come from server-side FederationLoginState"
+    );
+
+    let claims = svc
+        .verify_id_token(
+            &token_attacker,
+            &doc,
+            &client_id,
+            &["RS256".to_string()],
+            cache_key,
+        )
+        .await
+        .expect(
+            "signature/claims must verify — the attack is in the nonce VALUE, \
+             not the signature",
+        );
+
+    // Mirror handle_callback's own comparison (oidc.rs:329-334).
+    let accepted = claims.nonce.as_deref() == Some(expected_nonce.as_str());
+    assert!(
+        !accepted,
+        "an ID token whose nonce claim is attacker-chosen (and differs from the \
+         server-stored FederationLoginState nonce) must be REJECTED — proving a \
+         client/attacker-supplied nonce can never satisfy verification (SECHRD-07)"
+    );
+
+    // --- Positive companion path: state row + ID token nonce claim ==
+    // server-stored nonce -> accepted. ---
+    let state2 = "genuine-state-2".to_string();
+    let server_nonce2 = "server-generated-nonce-def456".to_string();
+    login_state_repo
+        .insert(&FederationLoginState {
+            state: state2.clone(),
+            nonce: server_nonce2.clone(),
+            tenant_id: tenant.id,
+            federation_config_id: Uuid::new_v4(),
+            redirect_uri: "https://spa.example.com/callback".into(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+            request_id: String::new(),
+        })
+        .await
+        .expect("insert login state 2");
+    let login_state2 = login_state_repo
+        .consume_by_state(&state2)
+        .await
+        .expect("consume_by_state 2")
+        .expect("state row 2 must exist");
+    let expected_nonce2 = login_state2.nonce.clone();
+
+    let claims_matching = valid_claims(&doc.issuer, &client_id, &expected_nonce2, now + 3600, now);
+    let token_matching = sign_jwt(
+        &claims_matching,
+        &keys.encoding_key(),
+        "test-kid",
+        Algorithm::RS256,
+    );
+    let claims2 = svc
+        .verify_id_token(
+            &token_matching,
+            &doc,
+            &client_id,
+            &["RS256".to_string()],
+            cache_key,
+        )
+        .await
+        .expect("token must verify");
+    assert_eq!(
+        claims2.nonce.as_deref(),
+        Some(expected_nonce2.as_str()),
+        "companion positive path: ID token nonce == server-stored nonce must succeed"
+    );
+
+    // Single-use: replaying the first state again returns None (already deleted).
+    let replay = login_state_repo
+        .consume_by_state(&state)
+        .await
+        .expect("consume_by_state replay");
+    assert!(replay.is_none(), "state row must be single-use");
+}

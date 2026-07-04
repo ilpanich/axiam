@@ -128,6 +128,15 @@ impl std::fmt::Debug for UserRowWithId {
     }
 }
 
+/// Minimal row shape for the `update_totp_step` CAS query — only the record
+/// ID is projected since the caller only needs to know whether the guarded
+/// UPDATE affected a row (CAS won) or not (CAS lost).
+#[derive(Debug, SurrealValue)]
+struct TotpStepCasRow {
+    #[allow(dead_code)]
+    record_id: String,
+}
+
 fn parse_status(s: &str) -> Result<UserStatus, DbError> {
     match s {
         "Active" => Ok(UserStatus::Active),
@@ -481,19 +490,35 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         Ok(())
     }
 
-    async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<()> {
-        self.db
+    async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<bool> {
+        // Atomic compare-and-set (SEC-008/SECHRD-01): the UPDATE only matches
+        // when the stored step is unset (NONE, first-ever verification —
+        // mirrors `increment_failed_logins`'s NONE-handling) or strictly less
+        // than the incoming step. Wrapping the UPDATE in a SELECT FROM (...)
+        // subquery (same shape as `oauth2_auth_code.rs::consume`) makes the
+        // read-of-affected-rows atomic with the write: exactly one concurrent
+        // caller observes a non-empty row set for a given step.
+        let result = self
+            .db
             .query(
-                "UPDATE type::record('user', $id) SET \
-                 totp_last_used_step = $step, updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id",
+                "SELECT meta::id(id) AS record_id FROM \
+                 (UPDATE type::record('user', $id) SET \
+                  totp_last_used_step = $step, updated_at = time::now() \
+                  WHERE tenant_id = $tenant_id \
+                    AND (totp_last_used_step = NONE OR totp_last_used_step < $step))",
             )
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("step", step))
             .await
             .map_err(DbError::from)?;
-        Ok(())
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
+        Ok(!rows.is_empty())
     }
 
     async fn list(

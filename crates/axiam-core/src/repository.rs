@@ -158,16 +158,25 @@ pub trait UserRepository: Send + Sync {
     /// Soft-delete: sets status to Inactive.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// Persist the last-used TOTP step after a successful verification.
+    /// Atomically persist the last-used TOTP step after a successful
+    /// verification, guarded by a compare-and-set on the stored step.
     ///
     /// Called by `AuthService` after a TOTP code is accepted to prevent replay
-    /// within the same time window (SEC-008 / REQ-14 AC-5).
+    /// within the same time window (SEC-008 / SECHRD-01 / REQ-14 AC-5).
+    ///
+    /// The advance only applies `WHERE totp_last_used_step = NONE OR
+    /// totp_last_used_step < step`, so N concurrent submissions of one valid
+    /// code succeed at most once: returns `Ok(true)` if this call won the
+    /// CAS (the step advanced), `Ok(false)` if the guard did not match
+    /// (replay, or a concurrent caller already won). Callers MUST treat
+    /// `Ok(false)` as a rejected verification (e.g. `MfaInvalidCode`), not a
+    /// silent no-op.
     fn update_totp_step(
         &self,
         tenant_id: Uuid,
         id: Uuid,
         step: u64,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,

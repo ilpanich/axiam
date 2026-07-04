@@ -1137,7 +1137,7 @@ mod tests {
             _: Uuid,
             _: Uuid,
             _: u64,
-        ) -> axiam_core::error::AxiamResult<()> {
+        ) -> axiam_core::error::AxiamResult<bool> {
             unimplemented!()
         }
         async fn list(

@@ -1163,6 +1163,15 @@ mod tests {
         ) -> axiam_core::error::AxiamResult<()> {
             unimplemented!()
         }
+        async fn anonymize_user(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> axiam_core::error::AxiamResult<()> {
+            unimplemented!()
+        }
     }
 
     fn make_service()

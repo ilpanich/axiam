@@ -631,6 +631,57 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
         Ok(())
     }
+
+    /// Anonymize a user row in-place (D-05).
+    ///
+    /// Scrubs every PII column:
+    /// - email → `email_hash` (SHA-256 hex of original email, passed by caller)
+    /// - username → `pseudonym` (DELETED_USER_<hmac>)
+    /// - password_hash → NULL (login permanently blocked)
+    /// - mfa_secret → NULL
+    /// - metadata → `{}`
+    /// - locked_until / last_failed_login_at → NULL
+    /// - status → `Anonymized`
+    ///
+    /// The row and its `id` are kept to preserve referential integrity for
+    /// `created_by`/owner foreign-key references.
+    async fn anonymize_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+    ) -> AxiamResult<()> {
+        // password_hash is TYPE string (not nullable) — use empty string as
+        // tombstone value. Argon2 output is never empty, so login is permanently
+        // blocked without needing to make the column nullable.
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 email = $email_hash, \
+                 username = $pseudonym, \
+                 password_hash = '', \
+                 mfa_secret = NONE, \
+                 mfa_enabled = false, \
+                 metadata = {}, \
+                 locked_until = NONE, \
+                 last_failed_login_at = NONE, \
+                 deletion_pending = false, \
+                 scheduled_purge_at = NONE, \
+                 status = 'Anonymized', \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("email_hash", email_hash.to_string()))
+            .bind(("pseudonym", pseudonym.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -759,57 +810,6 @@ impl<C: Connection> SurrealUserRepository<C> {
             )
             .bind(("id", user_id.to_string()))
             .bind(("purge_at", scheduled_purge_at))
-            .bind(("tenant_id", tenant_id.to_string()))
-            .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Anonymize a user row in-place (D-05).
-    ///
-    /// Scrubs every PII column:
-    /// - email → `email_hash` (SHA-256 hex of original email, passed by caller)
-    /// - username → `pseudonym` (DELETED_USER_<hmac>)
-    /// - password_hash → NULL (login permanently blocked)
-    /// - mfa_secret → NULL
-    /// - metadata → `{}`
-    /// - locked_until / last_failed_login_at → NULL
-    /// - status → `Anonymized`
-    ///
-    /// The row and its `id` are kept to preserve referential integrity for
-    /// `created_by`/owner foreign-key references.
-    pub async fn anonymize_user(
-        &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-        email_hash: &str,
-        pseudonym: &str,
-    ) -> AxiamResult<()> {
-        // password_hash is TYPE string (not nullable) — use empty string as
-        // tombstone value. Argon2 output is never empty, so login is permanently
-        // blocked without needing to make the column nullable.
-        self.db
-            .query(
-                "UPDATE type::record('user', $id) SET \
-                 email = $email_hash, \
-                 username = $pseudonym, \
-                 password_hash = '', \
-                 mfa_secret = NONE, \
-                 mfa_enabled = false, \
-                 metadata = {}, \
-                 locked_until = NONE, \
-                 last_failed_login_at = NONE, \
-                 deletion_pending = false, \
-                 scheduled_purge_at = NONE, \
-                 status = 'Anonymized', \
-                 updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id",
-            )
-            .bind(("id", user_id.to_string()))
-            .bind(("email_hash", email_hash.to_string()))
-            .bind(("pseudonym", pseudonym.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
             .await
             .map_err(DbError::from)?

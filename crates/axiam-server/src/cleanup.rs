@@ -79,6 +79,75 @@ pub struct CleanupTask<C: Connection> {
     shutdown: watch::Receiver<bool>,
 }
 
+// ---------------------------------------------------------------------------
+// Erasure pipeline (test-seam extraction — RESEARCH.md Pattern 3, SECHRD-06)
+// ---------------------------------------------------------------------------
+
+/// Run the GDPR erasure pipeline for a single user: pseudonymize audit actor
+/// references, anonymize the user row, then write the erasure proof
+/// STRICTLY LAST.
+///
+/// Extracted as a free function generic over the three repo traits it needs
+/// (rather than a `CleanupTask` method) so a unit test can inject a
+/// synthetic failing `AuditLogRepository` double without depending on
+/// `CleanupTask`'s concrete `Arc<SurrealXxxRepository<C>>` fields — `pub` so
+/// `axiam-server`'s integration tests (which link this crate's library
+/// target) can call it directly.
+///
+/// Ordering is a hard security invariant (D-03a, SECHRD-06 / T-25-13):
+/// - `pseudonymize_actor` is now FATAL (`?`, no swallow-and-continue). A
+///   failed audit-actor scrub must abort the erasure — no PII-bearing step
+///   may ever be silently skipped (RESEARCH Pitfall 2).
+/// - `anonymize_user` runs BEFORE the proof (not after). It is the ONLY
+///   step that clears the user's `deletion_pending` flag that
+///   `find_due_for_purge` selects on, so if it never runs (an earlier step
+///   failed and aborted via `?`), the user remains re-selectable for a
+///   retry (RESEARCH Assumption A3).
+/// - `erasure_proof_repo.create` is the LITERAL LAST statement. It only
+///   fires once every PII-bearing step above has succeeded — a proof must
+///   never certify an erasure that did not fully happen (Pitfall 3). The DB
+///   UNIQUE index on `(tenant_id, user_id)` (plan 25-04) makes a retried
+///   erasure's duplicate proof insert an idempotent rejection (D-03b), not
+///   a silent overwrite.
+pub async fn run_erasure_pipeline<A, EP, U>(
+    audit_repo: &A,
+    erasure_proof_repo: &EP,
+    user_repo: &U,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    pseudonym: &str,
+    email_hash: &str,
+) -> Result<(), AxiamError>
+where
+    A: AuditLogRepository,
+    EP: ErasureProofRepository,
+    U: UserRepository,
+{
+    // FATAL now (was: `if let Err(e) = ... { tracing::warn!(...) }`).
+    audit_repo
+        .pseudonymize_actor(tenant_id, user_id, pseudonym)
+        .await?;
+
+    // Clears `deletion_pending` — the re-selection anchor. Must run before
+    // the proof so a failure here (unreachable in practice since this is
+    // now the second of three fallible steps) still leaves the user due.
+    user_repo
+        .anonymize_user(tenant_id, user_id, email_hash, pseudonym)
+        .await?;
+
+    // Written STRICTLY LAST — only reached once every step above succeeded.
+    erasure_proof_repo
+        .create(CreateErasureProof {
+            pseudonym: pseudonym.to_string(),
+            tenant_id,
+            user_id,
+            erased_at: Utc::now(),
+        })
+        .await?;
+
+    Ok(())
+}
+
 impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// Construct a new `CleanupTask`.
     #[allow(clippy::too_many_arguments)]
@@ -204,10 +273,11 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// (b2) Hard-delete WebAuthn credentials and password history (SEC-056).
     /// (b3) Prune `member_of` and `has_role` graph edges (isolated tombstone).
     /// (c) Compute deterministic GDPR pseudonym via `gdpr_pseudonym`.
-    /// (d) Anonymize user row in-place (D-05).
-    /// (e) Pseudonymize all audit entries for this user (D-01/D-03/D-04).
-    /// (f) Insert a PII-free erasure-proof record (D-06).
-    /// (g) Mark the account_deletion row as completed.
+    /// (d)/(e)/(g) Run [`run_erasure_pipeline`]: pseudonymize all audit
+    ///     entries for this user (now FATAL, D-01/D-03/D-04) -> anonymize the
+    ///     user row in-place (D-05) -> insert a PII-free erasure-proof
+    ///     record STRICTLY LAST (D-06, D-03a/D-03b — SECHRD-06).
+    /// (f) Mark the account_deletion row as completed.
     /// (h) Emit `gdpr.user_pseudonymized` audit event (actor = System).
     ///
     /// Returns the count of users purged.
@@ -325,29 +395,29 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         h.update(user_id.as_bytes());
         let email_hash = hex::encode(h.finalize());
 
-        // (d) Pseudonymize audit entries (D-01/D-03/D-04).
-        // Errors here are logged but not fatal.
-        if let Err(e) = self
-            .audit_repo
-            .pseudonymize_actor(tenant_id, user_id, &pseudonym)
-            .await
-        {
-            tracing::warn!(error = ?e, user_id = %user_id, "audit pseudonymization failed");
-        }
-
-        // (e) Insert erasure-proof record (D-06).
-        self.erasure_proof_repo
-            .create(CreateErasureProof {
-                pseudonym: pseudonym.clone(),
-                tenant_id,
-                user_id,
-                erased_at: Utc::now(),
-            })
-            .await?;
+        // (d)/(e)/(g) Run the erasure pipeline: pseudonymize audit actor refs
+        // (now FATAL, was swallowed) -> anonymize the user row -> write the
+        // erasure proof STRICTLY LAST (SECHRD-06 / D-03a, T-25-13). A failure
+        // anywhere in this call propagates with `?` and aborts the purge:
+        // `anonymize_user` (the only step that clears `deletion_pending`)
+        // never ran, so the user stays due for a retry via
+        // `find_due_for_purge`, and NO erasure proof is ever written for an
+        // incomplete erasure.
+        run_erasure_pipeline(
+            self.audit_repo.as_ref(),
+            self.erasure_proof_repo.as_ref(),
+            self.user_repo.as_ref(),
+            tenant_id,
+            user_id,
+            &pseudonym,
+            &email_hash,
+        )
+        .await?;
 
         // (f) Mark the account_deletion row as completed (lookup by user_id).
-        // Done BEFORE anonymize_user so that on a re-run (if anonymize fails),
-        // the row is already completed and will not be re-processed.
+        // Run AFTER the erasure pipeline succeeds — if the pipeline failed
+        // above, this is never reached and the deletion row stays pending
+        // for the next retry too.
         match self
             .account_deletion_repo
             .find_pending_by_user_id(tenant_id, user_id)
@@ -375,13 +445,11 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             }
         }
 
-        // (g) Anonymize the user row in-place — LAST so that prior steps can
-        // still access the user row on a partial-failure re-run (CQ-B38 / D-05).
-        self.user_repo
-            .anonymize_user(tenant_id, user_id, &email_hash, &pseudonym)
-            .await?;
-
-        // (h) Emit gdpr.user_pseudonymized audit event (actor = System/nil UUID).
+        // (h) Emit gdpr.user_pseudonymized audit event. actor_id is the
+        // erased subject's own (now-anonymized) row id — a real, resolvable
+        // identifier rather than a fabricated nil UUID (Task 1 fix); the row
+        // still exists (anonymize-in-place preserves referential integrity),
+        // so this is a legitimate audit-trail reference, not PII leakage.
         // A DB-write failure here is dead-lettered to BOTH an append-only
         // file AND a structured audit event (SECHRD-12 / D-02, T-24-61) —
         // this legally-significant record must never be silently lost.
@@ -389,7 +457,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             self.audit_repo.as_ref(),
             CreateAuditLogEntry {
                 tenant_id,
-                actor_id: Uuid::nil(),
+                actor_id: user_id,
                 actor_type: ActorType::System,
                 action: "gdpr.user_pseudonymized".into(),
                 resource_id: None,

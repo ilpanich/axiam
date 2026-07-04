@@ -1,6 +1,6 @@
 //! AXIAM Server — Application entry point.
 
-mod cleanup;
+use axiam_server::cleanup;
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -208,6 +208,22 @@ pub trait UserRepository: Send + Sync {
         backoff_multiplier: f64,
         max_lockout_secs: i64,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Anonymize a user row in-place for GDPR Art. 17 erasure (D-05).
+    ///
+    /// Implementations MUST scrub every PII column (email, username,
+    /// password_hash, mfa_secret, metadata, lockout state) and clear
+    /// `deletion_pending`/`scheduled_purge_at` — this is the step that
+    /// clears the re-selection anchor `find_due_for_purge` keys on, so a
+    /// purge pipeline that fails before reaching this call leaves the user
+    /// due for a retry (SECHRD-06 / D-03a).
+    fn anonymize_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 pub trait RoleRepository: Send + Sync {

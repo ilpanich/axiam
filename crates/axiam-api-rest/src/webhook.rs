@@ -1,16 +1,22 @@
 //! Webhook delivery service — async HTTP delivery with HMAC-SHA256 signing
 //! and exponential backoff retry.
 //!
-//! SEC-019: The URL host is re-resolved at each delivery attempt and rejected
-//! if it resolves to a private/loopback/link-local IP (DNS rebinding defence).
+//! SEC-019/SECHRD-02: Delivery is routed through the shared
+//! `axiam_federation::ssrf::guarded_fetch` guard, which resolves the host
+//! fresh on every attempt, rejects private/loopback/link-local resolved
+//! addresses (DNS-rebinding defence), and — critically — pins the exact
+//! validated `IpAddr` into the connection via a fresh single-use client, so
+//! `reqwest` cannot independently re-resolve DNS between the SSRF check and
+//! the actual send (D-01c; this closes the pin gap the previous
+//! `resolve_and_validate_host` + separate `client.post()` pair left open).
 //! SEC-031: The webhook secret is stored AES-256-GCM encrypted; it is decrypted
 //! in memory for HMAC computation and never serialised in API responses.
 
 use axiam_auth::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
 use axiam_core::repository::WebhookRepository;
+use axiam_federation::ssrf::{self, SsrfError};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::net::IpAddr;
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -49,52 +55,24 @@ impl From<WebhookError> for crate::error::AxiamApiError {
     }
 }
 
-/// Returns `true` for IPv4/IPv6 addresses that must never be contacted
-/// from a server-side webhook delivery.
-///
-/// Covers: RFC1918 private ranges, loopback (127/8 and ::1), link-local
-/// (169.254/16 and fe80::/10), and broadcast (255.255.255.255).
-/// Does NOT use unstable `is_global` — all checks are stable API.
-fn is_private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // fe80::/10 link-local range — not a stable method, checked manually
-                || (v6.segments()[0] & 0xffc0 == 0xfe80)
-                // fc00::/7 unique-local range
-                || (v6.segments()[0] & 0xfe00 == 0xfc00)
+/// Maps the shared guard's error type onto `WebhookError` so a blocked or
+/// unresolvable delivery target flows through the existing fail-closed
+/// `From<WebhookError> for AxiamApiError` mapping — never a panic or a raw
+/// 500 (D-01a: single shared guard, single error-mapping style).
+impl From<SsrfError> for WebhookError {
+    fn from(err: SsrfError) -> Self {
+        match err {
+            SsrfError::InvalidUrl => WebhookError::InvalidUrl,
+            SsrfError::ResolveFailed => WebhookError::ResolveFailed,
+            SsrfError::Blocked => WebhookError::SsrfBlocked,
+            // A request/client-build/redirect failure at send time is not
+            // itself an SSRF verdict — surface it as a resolve failure so it
+            // still fails closed rather than panicking or leaking internals.
+            SsrfError::ClientBuildFailed
+            | SsrfError::RequestFailed(_)
+            | SsrfError::TooManyRedirects => WebhookError::ResolveFailed,
         }
     }
-}
-
-/// Resolve the host in `url` and return an error if any resolved IP is
-/// private/loopback/link-local (SEC-019 — DNS rebinding defence).
-///
-/// Called at the **start of each delivery attempt** so that a rebind that
-/// occurs after webhook creation is still caught.
-async fn resolve_and_validate_host(url: &str) -> Result<(), WebhookError> {
-    let parsed = url::Url::parse(url).map_err(|_| WebhookError::InvalidUrl)?;
-    let host = parsed.host_str().ok_or(WebhookError::InvalidUrl)?;
-    let port = parsed.port_or_known_default().unwrap_or(443);
-
-    let addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|_| WebhookError::ResolveFailed)?;
-
-    for addr in addrs {
-        if is_private_ip(addr.ip()) {
-            return Err(WebhookError::SsrfBlocked);
-        }
-    }
-    Ok(())
 }
 
 /// Async webhook delivery service.
@@ -104,7 +82,6 @@ async fn resolve_and_validate_host(url: &str) -> Result<(), WebhookError> {
 #[derive(Clone)]
 pub struct WebhookDeliveryService<W> {
     repo: W,
-    client: reqwest::Client,
     /// AES-256-GCM key used to encrypt/decrypt webhook secrets stored at
     /// rest. Corresponds to `AXIAM__PKI__ENCRYPTION_KEY` (SEC-031/SEC-059).
     /// `None` when the env var is unset — the server still boots (this is
@@ -116,14 +93,13 @@ pub struct WebhookDeliveryService<W> {
 
 impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
     pub fn new(repo: W, encryption_key: Option<[u8; 32]>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("failed to build reqwest client");
+        // No `reqwest::Client` is stored here any more: `ssrf::guarded_fetch`
+        // (D-01c) builds a fresh, single-use, IP-pinned client per delivery
+        // attempt, so a long-lived pooled client here would sit unused for
+        // sends and only invite drift back toward the un-pinned pre-25-02
+        // behavior.
         Self {
             repo,
-            client,
             encryption_key,
         }
     }
@@ -145,7 +121,6 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
     /// Spawns a background task per matching webhook. Does not block.
     pub fn deliver(&self, tenant_id: Uuid, event_type: String, payload: serde_json::Value) {
         let repo = self.repo.clone();
-        let client = self.client.clone();
         let encryption_key = self.encryption_key;
 
         tokio::spawn(async move {
@@ -173,7 +148,6 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
             };
 
             for webhook in webhooks {
-                let client = client.clone();
                 let event_type = event_type.clone();
                 let payload = payload.clone();
 
@@ -219,27 +193,28 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
                                 .await;
                         }
 
-                        // SEC-019: Re-resolve host at each delivery attempt to defeat
-                        // DNS rebinding attacks. Abort all retries on SSRF block.
-                        if let Err(e) = resolve_and_validate_host(&webhook.url).await {
-                            tracing::warn!(
-                                webhook_id = %webhook.id,
-                                %delivery_id,
-                                error = %e,
-                                "SSRF check failed — aborting all delivery retries"
-                            );
-                            return;
-                        }
-
-                        let result = client
-                            .post(&webhook.url)
-                            .header("Content-Type", "application/json")
-                            .header("X-Axiam-Signature", &signature)
-                            .header("X-Axiam-Event", &event_type)
-                            .header("X-Axiam-Delivery", delivery_id.to_string())
-                            .body(body.clone())
-                            .send()
-                            .await;
+                        // SEC-019/SECHRD-02: `guarded_fetch` resolves the host
+                        // fresh on this attempt, rejects a private/loopback/
+                        // link-local resolved address, and pins the exact
+                        // validated IpAddr into a fresh single-use client for
+                        // the POST — no separate, independently-resolving
+                        // `client.post()` call remains, so `reqwest` cannot
+                        // re-resolve DNS between the check and the send
+                        // (D-01c). `allow_private=false`: this is the
+                        // production delivery path, never the test seam.
+                        let body_for_send = body.clone();
+                        let delivery_id_header = delivery_id.to_string();
+                        let signature_header = signature.clone();
+                        let event_type_header = event_type.clone();
+                        let result = ssrf::guarded_fetch(&webhook.url, false, move |c, u| {
+                            c.post(u)
+                                .header("Content-Type", "application/json")
+                                .header("X-Axiam-Signature", &signature_header)
+                                .header("X-Axiam-Event", &event_type_header)
+                                .header("X-Axiam-Delivery", &delivery_id_header)
+                                .body(body_for_send.clone())
+                        })
+                        .await;
 
                         match result {
                             Ok(resp) if resp.status().is_success() => {
@@ -263,6 +238,29 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
                                     "webhook delivery failed"
                                 );
                             }
+                            // SSRF block/invalid-url/resolve-failure is a
+                            // fail-closed verdict on the target itself —
+                            // retrying would just repeat the same rejection,
+                            // so abort all remaining attempts (preserves the
+                            // pre-existing "abort on SSRF block" behavior).
+                            Err(
+                                e @ (SsrfError::Blocked
+                                | SsrfError::InvalidUrl
+                                | SsrfError::ResolveFailed),
+                            ) => {
+                                let webhook_err: WebhookError = e.into();
+                                tracing::warn!(
+                                    webhook_id = %webhook.id,
+                                    %delivery_id,
+                                    error = %webhook_err,
+                                    "SSRF check failed — aborting all delivery retries"
+                                );
+                                return;
+                            }
+                            // A transport-level failure (connection refused,
+                            // timeout, TLS error, too-many-redirects) is not
+                            // an SSRF verdict — allow the existing
+                            // exponential-backoff retry loop to try again.
                             Err(e) => {
                                 tracing::warn!(
                                     webhook_id = %webhook.id,
@@ -323,61 +321,73 @@ mod tests {
         assert_ne!(sig1, sig2);
     }
 
-    // ---- SSRF protection tests (SEC-019) ----
+    // ---- SSRF protection tests (SEC-019/SECHRD-02) ----
+    //
+    // These exercise the shared `axiam_federation::ssrf` guard directly
+    // (rather than a local duplicate) to prove webhook.rs genuinely forwards
+    // to it and no byte-identical copy of the classification logic remains
+    // (D-01a). Guard-internal edge cases already have their own coverage in
+    // `axiam_federation::ssrf`'s test module (25-01).
 
     #[test]
     fn webhook_ssrf_loopback_v4_blocked() {
         let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-        assert!(is_private_ip(ip), "127.0.0.1 must be blocked");
+        assert!(ssrf::is_disallowed_ip(ip), "127.0.0.1 must be blocked");
     }
 
     #[test]
     fn webhook_ssrf_rfc1918_10x_blocked() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        assert!(is_private_ip(ip), "10.x must be blocked");
+        assert!(ssrf::is_disallowed_ip(ip), "10.x must be blocked");
     }
 
     #[test]
     fn webhook_ssrf_rfc1918_172_blocked() {
         let ip = IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1));
-        assert!(is_private_ip(ip), "172.16.x must be blocked");
+        assert!(ssrf::is_disallowed_ip(ip), "172.16.x must be blocked");
     }
 
     #[test]
     fn webhook_ssrf_rfc1918_192168_blocked() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
-        assert!(is_private_ip(ip), "192.168.x must be blocked");
+        assert!(ssrf::is_disallowed_ip(ip), "192.168.x must be blocked");
     }
 
     #[test]
     fn webhook_ssrf_link_local_blocked() {
         let ip = IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1));
-        assert!(is_private_ip(ip), "169.254.x link-local must be blocked");
+        assert!(
+            ssrf::is_disallowed_ip(ip),
+            "169.254.x link-local must be blocked"
+        );
     }
 
     #[test]
     fn webhook_ssrf_broadcast_blocked() {
         let ip = IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255));
-        assert!(is_private_ip(ip), "broadcast must be blocked");
+        assert!(ssrf::is_disallowed_ip(ip), "broadcast must be blocked");
     }
 
     #[test]
     fn webhook_ssrf_loopback_v6_blocked() {
         let ip = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
-        assert!(is_private_ip(ip), "::1 must be blocked");
+        assert!(ssrf::is_disallowed_ip(ip), "::1 must be blocked");
     }
 
     #[test]
     fn webhook_ssrf_link_local_v6_blocked() {
         // fe80::1
         let ip = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
-        assert!(is_private_ip(ip), "fe80:: link-local must be blocked");
+        assert!(
+            ssrf::is_disallowed_ip(ip),
+            "fe80:: link-local must be blocked"
+        );
     }
 
     #[test]
     fn webhook_ssrf_public_ipv4_allowed() {
         let ip = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)); // example.com
-        assert!(!is_private_ip(ip), "public IP must be allowed");
+        assert!(!ssrf::is_disallowed_ip(ip), "public IP must be allowed");
     }
 
     #[test]
@@ -390,9 +400,9 @@ mod tests {
     #[tokio::test]
     async fn webhook_ssrf_resolve_loopback_url_blocked() {
         // 127.0.0.1 resolves directly to loopback
-        let result = resolve_and_validate_host("http://127.0.0.1/evil").await;
+        let result = ssrf::resolve_and_pick("127.0.0.1", 443, false).await;
         assert!(
-            matches!(result, Err(WebhookError::SsrfBlocked)),
+            matches!(result, Err(SsrfError::Blocked)),
             "127.0.0.1 must be SSRF-blocked, got: {:?}",
             result
         );
@@ -400,9 +410,9 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_ssrf_resolve_rfc1918_url_blocked() {
-        let result = resolve_and_validate_host("http://10.0.0.1/evil").await;
+        let result = ssrf::resolve_and_pick("10.0.0.1", 443, false).await;
         assert!(
-            matches!(result, Err(WebhookError::SsrfBlocked)),
+            matches!(result, Err(SsrfError::Blocked)),
             "10.x must be SSRF-blocked, got: {:?}",
             result
         );
@@ -410,11 +420,21 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_ssrf_resolve_192168_blocked() {
-        let result = resolve_and_validate_host("http://192.168.1.1/test").await;
+        let result = ssrf::resolve_and_pick("192.168.1.1", 443, false).await;
         assert!(
-            matches!(result, Err(WebhookError::SsrfBlocked)),
+            matches!(result, Err(SsrfError::Blocked)),
             "192.168.x must be blocked"
         );
+    }
+
+    /// SECHRD-02: a blocked target must map through `WebhookError::SsrfBlocked`
+    /// (and therefore the existing fail-closed `AxiamApiError` mapping), not a
+    /// panic or a generic error — proving the `From<SsrfError> for WebhookError`
+    /// bridge added in this plan.
+    #[test]
+    fn ssrf_error_blocked_maps_to_webhook_error_ssrf_blocked() {
+        let err: WebhookError = SsrfError::Blocked.into();
+        assert!(matches!(err, WebhookError::SsrfBlocked));
     }
 
     // SEC-031: round-trip encrypt/decrypt of webhook secret

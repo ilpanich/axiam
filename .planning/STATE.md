@@ -4,17 +4,17 @@ milestone: v1.2
 milestone_name: — MVP Release Hardening
 current_phase: 27
 current_phase_name: performance-load-hardening
-status: executing
-stopped_at: Completed 27-06-PLAN.md
-last_updated: "2026-07-05T15:22:11.920Z"
+status: verifying
+stopped_at: Completed 27-07-PLAN.md
+last_updated: "2026-07-05T15:50:53.574Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 27 execution started
 progress:
   total_phases: 8
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 40
-  completed_plans: 39
-  percent: 50
+  completed_plans: 40
+  percent: 63
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 27 (performance-load-hardening) — EXECUTING
 Plan: 7 of 7
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-05 — Phase 27 execution started
 
 ## Performance Metrics
@@ -194,6 +194,7 @@ Last activity: 2026-07-05 — Phase 27 execution started
 | Phase 27 P04 | 20min | 2 tasks | 4 files |
 | Phase 27 P05 | 44min | 3 tasks | 11 files |
 | Phase 27 P06 | 25min | 3 tasks | 3 files |
+| Phase 27 P07 | 40min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -482,6 +483,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 27-05]: futures added as std-only direct dep to axiam-api-grpc/axiam-api-rest (already-resolved 0.3.32 transitive) for bounded stream::buffer_unordered batch concurrency; AuthzConfig.batch_max_concurrency (default 16) config-driven per D-06/D-07
 - [Phase ?]: [Phase 27-06]: DbManager.db swapped to Arc<tokio::sync::RwLock<Surreal<Client>>> for atomic poisoned-handle eviction (D-12); client() removed in favor of async client_cloned()
 - [Phase ?]: [Phase 27-06]: Poisoned-handle unit test uses the kv-mem embedded engine (not a live HTTP connection) since Surreal::new::<Http>() performs a real network health-check at construction time
+- [Phase ?]: [Phase 27-performance-load-hardening] 27-07: criterion resolved to 0.8.2 (not RESEARCH-assumed 0.5.x) — confirmed via cargo add --dry-run at execution time
+- [Phase ?]: [Phase 27-performance-load-hardening] 27-07: switched all three benches to std::hint::black_box since criterion 0.8.2 deprecates its own black_box re-export — keeps cargo clippy -D warnings clean
+- [Phase ?]: [Phase 27-performance-load-hardening] 27-07: authz_bench injects a bench-only tokio::time::sleep(2ms) per check_access call (engine.rs untouched) to make the sequential-vs-concurrent batch comparison meaningful against near-zero-latency kv-mem
 
 ### Pending Todos
 
@@ -505,7 +509,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T15:22:11.904Z
-Stopped at: Completed 27-06-PLAN.md
+Last session: 2026-07-05T15:50:53.558Z
+Stopped at: Completed 27-07-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

@@ -1003,7 +1003,7 @@ NEGATIVE test passing.
 - [x] **Phase 24: Security Hardening I — Authentication & Access-Control Surfaces** - Harden the auth front door: TOTP atomic replay, XFF rate-limit keying, bootstrap atomicity+gate, public-path allowlist, reset/crypto side-channels (completed 2026-07-04)
 - [x] **Phase 25: Security Hardening II — Federation, PKI, Data-Protection & Infra** - Fail-closed trust boundaries: SSRF address pinning, mTLS CA status, GDPR erasure durability, federation nonce+secret handling, AMQP per-tenant signing, cluster egress/secret completeness (completed 2026-07-04)
 - [x] **Phase 26: Correctness & Resilience** - gRPC governor throughput, SurrealDB token renewal, durable webhook delivery, Playwright-in-CI with body assertions, frontend tenant/MFA/residual flows (completed 2026-07-05)
-- [ ] **Phase 27: Performance & Load Hardening** - HIBP circuit breaker + hot-path pre-sizing, concurrent bounded BatchCheckAccess, JWKS single-flight across SDKs, SurrealDB reconnect backoff-with-jitter, load-test + profiling report
+- [x] **Phase 27: Performance & Load Hardening** - HIBP circuit breaker + hot-path pre-sizing, concurrent bounded BatchCheckAccess, JWKS single-flight across SDKs, SurrealDB reconnect backoff-with-jitter, load-test + profiling report (completed 2026-07-05)
 - [ ] **Phase 28: Functional Completeness** - Unauthenticated first-time federation login, session invalidation on reset, admin email-config API + templates, admin user/MFA endpoints + service-account token type, OpenAPI login schema
 - [ ] **Phase 29: Structural Quality** - AppState extraction, generic paginate + shared repo helpers, error-taxonomy correctness, transactional multi-statement mutations, PKI/frontend dedup, dead-code cleanup — no behavior change
 - [ ] **Phase 30: Compliance & Documentation** - OWASP ASVS/ISO 27001/CyberSecurity Act audit checklist, GDPR export/deletion/consent completeness, consolidated REST/gRPC/AMQP + deployment + admin + PKI + SDK docs
@@ -1159,7 +1159,7 @@ Plans:
   4. A failed SurrealDB handshake / poisoned connection is dropped and never recycled into the healthy pool, and the reconnect loop uses full-jitter exponential backoff with a `max_backoff` ceiling and bounded retry (PERF-04)
   5. `claude_dev/performance-report.md` records baseline-vs-optimized numbers from the load-test harness (k6/criterion) for auth, authz-check, and certificate validation (PERF-05)
 
-**Plans**: 6/7 plans executed
+**Plans**: 7/7 plans complete
 
 Plans:
 **Wave 1**
@@ -1176,7 +1176,7 @@ Plans:
 **Wave 3** *(depends on 27-05 — shared main.rs)*
 
 - [x] 27-06-PLAN.md — PERF-04 SurrealDB reconnect resilience (full-jitter backoff + poisoned-handle eviction)
-- [ ] 27-07-PLAN.md — PERF-05 criterion benches (auth/authz/cert) + performance-report.md
+- [x] 27-07-PLAN.md — PERF-05 criterion benches (auth/authz/cert) + performance-report.md
 
 ---
 
@@ -1245,7 +1245,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete    | 2026-07-04 |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 10/10 | Complete    | 2026-07-04 |
 | 26. Correctness & Resilience | 8/8 | Complete   | 2026-07-05 |
-| 27. Performance & Load Hardening | 6/7 | In Progress|  |
+| 27. Performance & Load Hardening | 7/7 | Complete   | 2026-07-05 |
 | 28. Functional Completeness | 0/? | Not started | - |
 | 29. Structural Quality | 0/? | Not started | - |
 | 30. Compliance & Documentation | 0/? | Not started | - |

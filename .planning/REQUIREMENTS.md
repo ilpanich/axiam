@@ -910,9 +910,9 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** T18.3
 
 ### Acceptance Criteria
-- [ ] Load-test harness (k6 and/or criterion benches) for auth, authz check, and certificate validation
-- [ ] Critical paths profiled; measurable optimizations applied where warranted
-- [ ] Results documented in `claude_dev/performance-report.md` with baseline vs optimized numbers
+- [x] Load-test harness (k6 and/or criterion benches) for auth, authz check, and certificate validation
+- [x] Critical paths profiled; measurable optimizations applied where warranted
+- [x] Results documented in `claude_dev/performance-report.md` with baseline vs optimized numbers
 
 ---
 
@@ -1100,7 +1100,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Pending |
 | PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Complete (27-02: rust/python; 27-03: go/java/csharp; 27-04: typescript proven via jose's native pendingFetch guard + php Guzzle-promise guard) |
 | PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) | Complete (27-06: full-jitter backoff + Arc<RwLock<Surreal<Client>>> poisoned-handle eviction + exhaustion-stays-Unhealthy-forever reconnect loop) |
-| PERF-05 | Phase 27 | Load testing + profiling (T18.3) | Pending |
+| PERF-05 | Phase 27 | Load testing + profiling (T18.3) | Complete (27-07: criterion benches for auth/authz/cert-validation; performance-report.md with real baseline-vs-optimized numbers, ~8.4x authz batch speedup) |
 | FUNC-01 | Phase 28 | Unauthenticated federation login (T19.9) | Pending |
 | FUNC-02 | Phase 28 | Session invalidation on reset (T19.10) | Pending |
 | FUNC-03 | Phase 28 | Admin email-config API + templates (T19.20/21/22) | Pending |

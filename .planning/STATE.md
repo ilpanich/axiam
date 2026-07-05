@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: — MVP Release Hardening
-current_phase: 26
-current_phase_name: correctness-resilience
-status: verifying
-stopped_at: Phase 27 context gathered
-last_updated: "2026-07-05T11:59:06.180Z"
+current_phase: 27
+current_phase_name: performance-load-hardening
+status: executing
+stopped_at: Completed 27-01-PLAN.md
+last_updated: "2026-07-05T13:14:50.540Z"
 last_activity: 2026-07-05
-last_activity_desc: Phase 26 execution started
+last_activity_desc: Phase 27 execution started
 progress:
   total_phases: 8
   completed_phases: 4
-  total_plans: 33
-  completed_plans: 33
+  total_plans: 40
+  completed_plans: 34
   percent: 50
 ---
 
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 26 — correctness-resilience
+**Current focus:** Phase 27 — performance-load-hardening
 
 ## Current Position
 
-Phase: 26 (correctness-resilience) — EXECUTING
-Plan: 8 of 8
-Status: Phase complete — ready for verification
-Last activity: 2026-07-05 — Phase 26 execution started
+Phase: 27 (performance-load-hardening) — EXECUTING
+Plan: 2 of 7
+Status: Ready to execute
+Last activity: 2026-07-05 — Phase 27 execution started
 
 ## Performance Metrics
 
@@ -188,6 +188,7 @@ Last activity: 2026-07-05 — Phase 26 execution started
 | Phase 26 P06 | 15min | 3 tasks | 6 files |
 | Phase 26 P07 | 35min | 3 tasks | 5 files |
 | Phase 26 P08 | 12min | 3 tasks | 7 files |
+| Phase 27 P01 | 25min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -463,6 +464,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 26-08]: TotpSetupPanel accepts optional onCancel/cancelLabel props so MfaManagementPage's dialog chrome (Cancel+Confirm row) is preserved exactly while MfaSetupPage (no cancel action) omits it
 - [Phase ?]: [Phase 26-08]: MfaSetupPage strips setup_token from the URL via history.replaceState only around confirm resolution (success or 401/410 token-level failure), never immediately after enroll, so a mid-flow refresh during the ready state still has the token available (D-16 bookmark/refresh-safety)
 - [Phase ?]: [Phase 26-08]: A 401/410 from setupConfirmMfa is treated as a token-level failure (bounces to enroll-error/invalid-link state); any other confirm failure (wrong code) stays on the ready state with an inline error
+- [Phase ?]: [Phase 27-01]: std::sync::Mutex chosen over tokio::sync::Mutex for HibpBreaker state — no-await critical section, matches jwks_cache.rs lock-type convention
+- [Phase ?]: [Phase 27-01]: Half-open probe allows exactly one should_attempt()==true after cooldown while state stays Open until record_success() closes it
 
 ### Pending Todos
 
@@ -486,7 +489,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T11:59:06.157Z
-Stopped at: Phase 27 context gathered
-Resume file: .planning/phases/27-performance-load-hardening/27-CONTEXT.md
+Last session: 2026-07-05T13:14:50.526Z
+Stopped at: Completed 27-01-PLAN.md
+Resume file: None
 Next action: /gsd-execute-phase 23

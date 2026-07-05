@@ -874,8 +874,8 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** T19.26
 
 ### Acceptance Criteria
-- [ ] `check_hibp` wrapped in a circuit breaker that trips on repeated failure/timeout and fails open (`Ok(None)`) for a cooldown window
-- [ ] Hot-path violation/segment vectors pre-sized with `Vec::with_capacity(n)` (complexity checker, authz middleware, SDK serialization maps)
+- [x] `check_hibp` wrapped in a circuit breaker that trips on repeated failure/timeout and fails open (`Ok(None)`) for a cooldown window — 27-01: `HibpBreaker` (`crates/axiam-auth/src/hibp_breaker.rs`), short-circuits before the HTTP call, config-driven threshold/cooldown
+- [ ] Hot-path violation/segment vectors pre-sized with `Vec::with_capacity(n)` (complexity checker, authz middleware, SDK serialization maps) — 27-01: complexity checker done (`check_complexity` → `Vec::with_capacity(5)`); no authz-middleware path-segment Vec exists (27-RESEARCH.md Pitfall 1); SDK serialization maps not yet addressed
 - [ ] Load test: a credential-stuffing burst does not starve legitimate flows
 
 ## PERF-02: Concurrent Bounded BatchCheckAccess

@@ -55,6 +55,17 @@ public sealed class JwksVerifier
     private Dictionary<string, byte[]> _keysByKid = new();
     private DateTimeOffset _fetchedAt = DateTimeOffset.MinValue;
 
+    /// <summary>
+    /// Serializes the actual JWKS fetch/cache-mutation path so a concurrent burst of
+    /// unknown-<c>kid</c> verifications collapses to exactly one HTTP fetch (D-08/D-09).
+    /// Reuses the same <see cref="SemaphoreSlim"/>(1, 1) primitive already used by the
+    /// SDK's token-refresh single-flight guard (CS-01), for in-codebase consistency. This
+    /// also fixes the pre-existing data race on <see cref="_keysByKid"/>/<see cref="_fetchedAt"/>,
+    /// which previously had ZERO synchronization despite being mutated from concurrent
+    /// <see cref="VerifyAsync"/> callers.
+    /// </summary>
+    private readonly SemaphoreSlim _fetchLock = new(1, 1);
+
     /// <param name="httpClient">Used only to fetch the JWKS document; ownership stays with the caller.</param>
     /// <param name="baseUrl">The AXIAM server base URL; the JWKS path is resolved relative to it.</param>
     /// <param name="cacheTtl">How long a fetched JWKS document is trusted before a refetch is forced.</param>
@@ -158,27 +169,51 @@ public sealed class JwksVerifier
     /// loop). Leaves the existing cache untouched if the fetch itself fails; the caller
     /// fails closed on the still-unknown <c>kid</c>.
     /// </summary>
+    /// <remarks>
+    /// D-08/D-09: the fast path below (outside the lock) skips the fetch entirely when
+    /// the cache is already fresh — the common case. On a miss, <see cref="_fetchLock"/>
+    /// is acquired and freshness is re-checked ONE more time under the lock, since
+    /// another concurrent caller may have just performed the refetch while this one was
+    /// waiting; only if still stale/unknown does the actual HTTP fetch + cache mutation
+    /// happen. This collapses a concurrent invalid-<c>kid</c> burst to exactly one fetch.
+    /// </remarks>
     private async Task EnsureFreshAsync(string unknownKid, CancellationToken cancellationToken)
     {
-        bool expired = DateTimeOffset.UtcNow - _fetchedAt > _cacheTtl;
-        bool unknown = !_keysByKid.ContainsKey(unknownKid);
-        if (!expired && !unknown)
+        if (IsFresh(unknownKid))
             return;
 
-        JwksDocument? document = await _http.GetFromJsonAsync<JwksDocument>(_jwksUri, cancellationToken).ConfigureAwait(false);
-        if (document is null)
-            return;
-
-        var map = new Dictionary<string, byte[]>();
-        foreach (Jwk jwk in document.Keys)
+        await _fetchLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            if (jwk.Kty != "OKP" || jwk.Crv != "Ed25519")
-                continue; // ignore non-EdDSA entries defensively — alg is pinned by the caller too
-            map[jwk.Kid] = Base64UrlDecode(jwk.X); // raw 32-byte Ed25519 public key
-        }
+            if (IsFresh(unknownKid))
+                return; // another caller already refreshed while we waited for the lock
 
-        _keysByKid = map;
-        _fetchedAt = DateTimeOffset.UtcNow;
+            JwksDocument? document = await _http.GetFromJsonAsync<JwksDocument>(_jwksUri, cancellationToken).ConfigureAwait(false);
+            if (document is null)
+                return;
+
+            var map = new Dictionary<string, byte[]>();
+            foreach (Jwk jwk in document.Keys)
+            {
+                if (jwk.Kty != "OKP" || jwk.Crv != "Ed25519")
+                    continue; // ignore non-EdDSA entries defensively — alg is pinned by the caller too
+                map[jwk.Kid] = Base64UrlDecode(jwk.X); // raw 32-byte Ed25519 public key
+            }
+
+            _keysByKid = map;
+            _fetchedAt = DateTimeOffset.UtcNow;
+        }
+        finally
+        {
+            _fetchLock.Release();
+        }
+    }
+
+    private bool IsFresh(string kid)
+    {
+        bool expired = DateTimeOffset.UtcNow - _fetchedAt > _cacheTtl;
+        bool unknown = !_keysByKid.ContainsKey(kid);
+        return !expired && !unknown;
     }
 
     private static byte[] Base64UrlDecode(string s)

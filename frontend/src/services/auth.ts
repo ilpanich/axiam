@@ -147,4 +147,31 @@ export const authService = {
     api
       .post<void>("/api/v1/auth/mfa/confirm", { totp_code: code })
       .then(() => undefined),
+
+  /**
+   * Begin TOTP MFA enrollment during the MFA-mandated login flow
+   * (CORR-05b / D-16). Unlike `enrollMfa`, this variant carries a
+   * login-issued `setup_token` instead of relying on an authenticated
+   * session — it backs the public `/auth/mfa-setup` route.
+   * POST /api/v1/auth/mfa/setup/enroll  (body: { setup_token })
+   */
+  setupEnrollMfa: (setupToken: string): Promise<MfaEnrollResponse> =>
+    api
+      .post<MfaEnrollResponse>("/api/v1/auth/mfa/setup/enroll", {
+        setup_token: setupToken,
+      })
+      .then((r) => r.data),
+
+  /**
+   * Confirm TOTP MFA enrollment during the MFA-mandated login flow
+   * (CORR-05b / D-16).
+   * POST /api/v1/auth/mfa/setup/confirm  (body: { setup_token, totp_code })
+   */
+  setupConfirmMfa: (setupToken: string, totpCode: string): Promise<void> =>
+    api
+      .post<void>("/api/v1/auth/mfa/setup/confirm", {
+        setup_token: setupToken,
+        totp_code: totpCode,
+      })
+      .then(() => undefined),
 };

@@ -883,9 +883,9 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** T19.2, CQ-B20
 
 ### Acceptance Criteria
-- [ ] `BatchCheckAccess` evaluates requests concurrently with bounded concurrency (`buffer_unordered`/`FuturesUnordered`), result order preserved
-- [ ] Benchmark shows improvement over the sequential implementation
-- [ ] Correctness test: batch results match per-item `CheckAccess`
+- [x] `BatchCheckAccess` evaluates requests concurrently with bounded concurrency (`buffer_unordered`/`FuturesUnordered`), result order preserved — 27-05: `AuthzConfig.batch_max_concurrency` (default 16) wired through gRPC (`AuthorizationServiceImpl`) and REST (`handlers::authz_check::batch_check_access`); both use `stream::iter(enumerate).map(...).buffer_unordered(n).collect()` then `sort_by_key(index)`
+- [ ] Benchmark shows improvement over the sequential implementation — deferred to 27-07 (authz bench)
+- [x] Correctness test: batch results match per-item `CheckAccess` — 27-05: correctness tests for both transports assert batch == sequential per-item results, same order
 
 ## PERF-03: JWKS Single-Flight Across SDKs
 

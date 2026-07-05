@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 26
 current_phase_name: correctness-resilience
 status: executing
-stopped_at: Completed 26-04-PLAN.md
-last_updated: "2026-07-05T09:00:37.742Z"
+stopped_at: Completed 26-05-PLAN.md
+last_updated: "2026-07-05T09:23:57.029Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 26 execution started
 progress:
   total_phases: 8
   completed_phases: 3
   total_plans: 33
-  completed_plans: 29
+  completed_plans: 30
   percent: 38
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 26 (correctness-resilience) — EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 Status: Ready to execute
 Last activity: 2026-07-05 — Phase 26 execution started
 
@@ -184,6 +184,7 @@ Last activity: 2026-07-05 — Phase 26 execution started
 | Phase 26 P02 | 20min | 3 tasks | 3 files |
 | Phase 26 P03 | 25min | 2 tasks | 5 files |
 | Phase 26 P04 | 12min | 2 tasks | 2 files |
+| Phase 26 P05 | 22min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -448,6 +449,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 26-correctness-resilience] 26-03: Removed webhook.rs's deliver() entirely (zero call sites confirmed via grep) rather than keeping a deprecated stub
 - [Phase ?]: [Phase 26-correctness-resilience] 26-03: WEBHOOK primary queue also wired with its own default-exchange DLX to WEBHOOK_DLQ (not just WEBHOOK_RETRY->WEBHOOK) so a consumer's terminal nack is replayable, not silently dropped
 - [Phase ?]: [Phase 26-correctness-resilience] 26-04: CI e2e job now runs npm run test:e2e (Playwright) as a blocking step against the seeded backend, with vitest run kept as its own separate blocking step (D-11); auth-contract.spec.ts confirmed (no change needed) to already assert SECFIX-06 request bodies
+- [Phase ?]: [Phase 26-05]: tenant_slug/org_slug resolved strictly from the authenticated user's own tenant_id/organization_id (never request input), .ok()-guarded so lookup failure degrades to None without failing /me or login (D-14/D-15, T-26-05-01/02)
+- [Phase ?]: [Phase 26-05]: cookie_response_from_output threaded with tenant_repo/org_repo so login, verify_mfa, and setup_confirm_mfa share one slug-resolution implementation, keeping fresh-login and post-reload /me in agreement
 
 ### Pending Todos
 
@@ -471,7 +474,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T09:00:37.727Z
-Stopped at: Completed 26-04-PLAN.md
+Last session: 2026-07-05T09:23:57.014Z
+Stopped at: Completed 26-05-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

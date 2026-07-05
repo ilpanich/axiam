@@ -1125,7 +1125,7 @@ Plans:
   4. The CI e2e job runs `npx playwright test` against the seeded backend (vitest kept separate), the auth/login/contract specs gate the build, and the contract spec asserts request **bodies** — catching a SECFIX-06 regression (CORR-04)
   5. After a hard reload the Topbar restores the tenant from `/auth/me` slugs, an MFA-mandated user reaches the setup landing via `setup_token` (no dead end), and VerifyEmail/Dashboard/Org-settings no longer misfire under StrictMode/query-key-collision/refocus (CORR-05, CORR-06)
 
-**Plans**: 4/8 plans executed
+**Plans**: 5/8 plans executed
 
 Plans:
 **Wave 1**
@@ -1134,7 +1134,7 @@ Plans:
 - [x] 26-02-PLAN.md — CORR-02: SurrealDB proactive re-signin + reactive reconnect + auth-aware health_check [wave 1]
 - [x] 26-03-PLAN.md — CORR-03a: webhook emit/deliver_once split + Stripe-style signature + AMQP topology/publisher [wave 1]
 - [x] 26-04-PLAN.md — CORR-04: Playwright in CI (blocking) + spec triage + contract body assertions [wave 1]
-- [ ] 26-05-PLAN.md — CORR-05a: backend /auth/me tenant_slug/org_slug emission (graceful degrade) [wave 1]
+- [x] 26-05-PLAN.md — CORR-05a: backend /auth/me tenant_slug/org_slug emission (graceful degrade) [wave 1]
 - [ ] 26-06-PLAN.md — CORR-06: VerifyEmail useRef guard + Dashboard query key + org-settings dirty-tracking [wave 1]
 
 **Wave 2** *(blocked on Wave 1 completion)*
@@ -1227,7 +1227,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 23. Security Regressions & HIGH Findings | 6/6 | Complete   | 2026-07-03 |
 | 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete    | 2026-07-04 |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 10/10 | Complete    | 2026-07-04 |
-| 26. Correctness & Resilience | 4/8 | In Progress|  |
+| 26. Correctness & Resilience | 5/8 | In Progress|  |
 | 27. Performance & Load Hardening | 0/? | Not started | - |
 | 28. Functional Completeness | 0/? | Not started | - |
 | 29. Structural Quality | 0/? | Not started | - |

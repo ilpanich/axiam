@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 27
 current_phase_name: performance-load-hardening
 status: executing
-stopped_at: Completed 27-01-PLAN.md
-last_updated: "2026-07-05T13:14:50.540Z"
+stopped_at: Completed 27-02-PLAN.md
+last_updated: "2026-07-05T13:37:19.123Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 27 execution started
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 40
-  completed_plans: 34
+  completed_plans: 35
   percent: 50
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 27 (performance-load-hardening) — EXECUTING
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-07-05 — Phase 27 execution started
 
@@ -189,6 +189,7 @@ Last activity: 2026-07-05 — Phase 27 execution started
 | Phase 26 P07 | 35min | 3 tasks | 5 files |
 | Phase 26 P08 | 12min | 3 tasks | 7 files |
 | Phase 27 P01 | 25min | 2 tasks | 8 files |
+| Phase 27 P02 | 13min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -466,6 +467,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 26-08]: A 401/410 from setupConfirmMfa is treated as a token-level failure (bounces to enroll-error/invalid-link state); any other confirm failure (wrong code) stays on the ready state with an inline error
 - [Phase ?]: [Phase 27-01]: std::sync::Mutex chosen over tokio::sync::Mutex for HibpBreaker state — no-await critical section, matches jwks_cache.rs lock-type convention
 - [Phase ?]: [Phase 27-01]: Half-open probe allows exactly one should_attempt()==true after cooldown while state stays Open until record_success() closes it
+- [Phase ?]: [Phase 27-02] Rust: single fetch_lock shared by get_or_fetch and force_refetch_if_allowed so both entry points serialize on the same JWKS single-flight guard (D-08/D-09)
+- [Phase ?]: [Phase 27-02] Python: widened _refetch_lock to wrap the ENTIRE _get_signing_key lookup-and-fetch sequence (not just the invalidation decision) -- PyJWKClient exposes no cheap lock-free peek, so guaranteeing exactly-one-fetch under concurrency requires serializing the whole call
+- [Phase ?]: [Phase 27-02] Fixed a latent bug in the Python test double _FakeJwksEndpoint: its fetch mock never populated PyJWKClient's own jwk_set_cache, making single-flight coalescing unobservable regardless of production-code locking; corrected to mirror the real cache-populating side effect
 
 ### Pending Todos
 
@@ -489,7 +493,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T13:14:50.526Z
-Stopped at: Completed 27-01-PLAN.md
+Last session: 2026-07-05T13:37:11.178Z
+Stopped at: Completed 27-02-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

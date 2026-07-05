@@ -5,8 +5,8 @@ milestone_name: — MVP Release Hardening
 current_phase: 28
 current_phase_name: Functional Completeness
 status: planning
-stopped_at: Completed 27-07-PLAN.md
-last_updated: "2026-07-05T16:43:59.458Z"
+stopped_at: Phase 28 context gathered
+last_updated: "2026-07-05T17:02:47.412Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 27 complete, transitioned to Phase 28
 progress:
@@ -510,7 +510,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T15:50:53.558Z
-Stopped at: Completed 27-07-PLAN.md
-Resume file: None
+Last session: 2026-07-05T17:02:47.398Z
+Stopped at: Phase 28 context gathered
+Resume file: .planning/phases/28-functional-completeness/28-CONTEXT.md
 Next action: /gsd-execute-phase 23

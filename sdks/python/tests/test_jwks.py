@@ -66,18 +66,31 @@ class _FakeJwksEndpoint:
     """Tracks calls to a fake JWKS fetch, returning a fixed JWKS payload
     (mutable so a test can simulate rotation mid-test). Bound onto a
     ``PyJWKClient`` instance's ``fetch_data`` so no real network fetch ever
-    happens."""
+    happens.
+
+    Mirrors the cache-populating side effect of the real
+    ``PyJWKClient.fetch_data`` (writes the fetched payload into
+    ``jwk_set_cache`` on success) — without this, ``PyJWKClient``'s own
+    TTL cache never actually warms up under this mock, and every lookup
+    (even a same-kid repeat call) would appear to require a fresh fetch
+    regardless of any single-flight guarding in the code under test.
+    """
 
     def __init__(self, jwk_dicts: list[dict[str, Any]]) -> None:
         self.jwk_dicts = jwk_dicts
         self.call_count = 0
+        self._client: Any = None
 
     def bind(self, verifier: JwksVerifier) -> None:
+        self._client = verifier._client
         verifier._client.fetch_data = self._fetch_data  # type: ignore[method-assign]
 
     def _fetch_data(self) -> dict[str, Any]:
         self.call_count += 1
-        return {"keys": self.jwk_dicts}
+        data = {"keys": self.jwk_dicts}
+        if self._client is not None and self._client.jwk_set_cache is not None:
+            self._client.jwk_set_cache.put(data)
+        return data
 
 
 def _make_verifier(jwk_dicts: list[dict[str, Any]]) -> tuple[JwksVerifier, _FakeJwksEndpoint]:
@@ -239,9 +252,9 @@ def test_concurrent_cache_miss_burst_triggers_exactly_one_fetch(eddsa_keypair) -
         t.join()
 
     for result in results:
-        assert isinstance(
-            result, dict
-        ), f"every concurrent caller must verify successfully, got {result!r}"
+        assert isinstance(result, dict), (
+            f"every concurrent caller must verify successfully, got {result!r}"
+        )
         assert result["sub"] == "user-1"
 
     assert endpoint.call_count == 1, (

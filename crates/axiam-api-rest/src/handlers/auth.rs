@@ -74,6 +74,16 @@ pub struct LoginUserInfo {
     /// the validated JWT / AuthenticatedUser extractor — this only exposes
     /// it, it does not widen trust.
     pub tenant_id: Uuid,
+    /// 26-05 (D-14): lets the frontend restore the selected tenant after a
+    /// hard reload without a redundant lookup. Resolved strictly from the
+    /// authenticated user's own `tenant_id` (never request input — T-26-05-01)
+    /// and omitted (not an error) when the lookup fails (D-15).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_slug: Option<String>,
+    /// 26-05 (D-14): same contract as `tenant_slug`, resolved via the
+    /// tenant's `organization_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_slug: Option<String>,
 }
 
 /// Login success response body.
@@ -172,6 +182,8 @@ pub async fn cookie_response_from_output<C: Connection>(
     out: &LoginOutput,
     config: &AuthConfig,
     user_repo: &SurrealUserRepository<C>,
+    tenant_repo: &SurrealTenantRepository<C>,
+    org_repo: &SurrealOrganizationRepository<C>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // Decode the just-issued access token to get user_id.
     let claims = validate_access_token(&out.access_token, config).map_err(AxiamError::from)?;
@@ -188,6 +200,20 @@ pub async fn cookie_response_from_output<C: Connection>(
             reason: "user not found after login".into(),
         }
     })?;
+
+    // D-14/D-15: resolve tenant_slug/org_slug for the fresh-login response so
+    // it agrees with a post-reload `/me` call. `.ok()`-guarded — a lookup
+    // failure degrades to `None`, never to a failed login (T-26-05-02).
+    let tenant = tenant_repo.get_by_id(tenant_id).await.ok();
+    let tenant_slug = tenant.as_ref().map(|t| t.slug.clone());
+    let org_slug = match tenant.as_ref() {
+        Some(t) => org_repo
+            .get_by_id(t.organization_id)
+            .await
+            .ok()
+            .map(|o| o.slug),
+        None => None,
+    };
 
     let csrf_token = generate_csrf_token();
     Ok(HttpResponse::Ok()
@@ -212,6 +238,8 @@ pub async fn cookie_response_from_output<C: Connection>(
                 username: user.username,
                 email: user.email,
                 tenant_id,
+                tenant_slug,
+                org_slug,
             },
             session_id: out.session_id,
             expires_in: out.expires_in,
@@ -311,7 +339,8 @@ pub async fn login<C: Connection>(
 
     match result {
         axiam_auth::LoginResult::Success(out) => {
-            cookie_response_from_output(&out, &auth_config, &user_repo).await
+            cookie_response_from_output(&out, &auth_config, &user_repo, &tenant_repo, &org_repo)
+                .await
         }
         axiam_auth::LoginResult::MfaRequired(mut challenge) => {
             // Decode user/tenant from challenge to look up available methods.
@@ -478,10 +507,13 @@ pub async fn confirm_mfa<C: Connection>(
         (status = 401, description = "Invalid TOTP code"),
     )
 )]
+#[allow(clippy::too_many_arguments)] // Actix DI extractors
 pub async fn verify_mfa<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    tenant_repo: web::Data<SurrealTenantRepository<C>>,
+    org_repo: web::Data<SurrealOrganizationRepository<C>>,
     auth_config: web::Data<AuthConfig>,
     body: web::Json<MfaVerifyRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -494,7 +526,7 @@ pub async fn verify_mfa<C: Connection>(
     };
 
     let out = svc.verify_mfa(input).await?;
-    cookie_response_from_output(&out, &auth_config, &user_repo).await
+    cookie_response_from_output(&out, &auth_config, &user_repo, &tenant_repo, &org_repo).await
 }
 
 /// `POST /api/v1/auth/device`
@@ -582,10 +614,13 @@ pub async fn setup_enroll_mfa<C: Connection>(
         (status = 401, description = "Invalid or expired setup token / TOTP code"),
     )
 )]
+#[allow(clippy::too_many_arguments)] // Actix DI extractors
 pub async fn setup_confirm_mfa<C: Connection>(
     req: HttpRequest,
     svc: web::Data<AuthSvc<C>>,
     user_repo: web::Data<SurrealUserRepository<C>>,
+    tenant_repo: web::Data<SurrealTenantRepository<C>>,
+    org_repo: web::Data<SurrealOrganizationRepository<C>>,
     auth_config: web::Data<AuthConfig>,
     body: web::Json<MfaSetupConfirmRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -599,7 +634,7 @@ pub async fn setup_confirm_mfa<C: Connection>(
         )
         .await?;
 
-    cookie_response_from_output(&out, &auth_config, &user_repo).await
+    cookie_response_from_output(&out, &auth_config, &user_repo, &tenant_repo, &org_repo).await
 }
 
 /// `GET /api/v1/auth/me`
@@ -615,11 +650,14 @@ pub async fn setup_confirm_mfa<C: Connection>(
     ),
     security(("bearer" = []))
 )]
+#[allow(clippy::too_many_arguments)] // Actix DI extractors
 pub async fn me<C: Connection>(
     user: AuthenticatedUser,
     user_repo: web::Data<SurrealUserRepository<C>>,
     role_repo: web::Data<SurrealRoleRepository<C>>,
     permission_repo: web::Data<SurrealPermissionRepository<C>>,
+    tenant_repo: web::Data<SurrealTenantRepository<C>>,
+    org_repo: web::Data<SurrealOrganizationRepository<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let u = user_repo
         .get_by_id(user.tenant_id, user.user_id)
@@ -655,12 +693,29 @@ pub async fn me<C: Connection>(
         permissions.insert(0, "*".to_string());
     }
 
+    // D-14/D-15: resolve tenant_slug/org_slug strictly from the authenticated
+    // user's own tenant_id (never request input — T-26-05-01). `.ok()`-guarded
+    // so a lookup failure degrades to `None` instead of failing `/me`
+    // (T-26-05-02).
+    let tenant = tenant_repo.get_by_id(user.tenant_id).await.ok();
+    let tenant_slug = tenant.as_ref().map(|t| t.slug.clone());
+    let org_slug = match tenant.as_ref() {
+        Some(t) => org_repo
+            .get_by_id(t.organization_id)
+            .await
+            .ok()
+            .map(|o| o.slug),
+        None => None,
+    };
+
     Ok(HttpResponse::Ok().json(MeResponse {
         user: LoginUserInfo {
             id: user.user_id,
             username: u.username,
             email: u.email,
             tenant_id: user.tenant_id,
+            tenant_slug,
+            org_slug,
         },
         permissions,
     }))

@@ -73,3 +73,11 @@ axiam-email = { workspace = true }
 # 24-06: captures the structured tracing audit DLQ event as a plain writer in
 # gdpr_audit_dlq_test.rs, asserting the "audit syslog" sink fires (SECHRD-12).
 tracing-subscriber = { workspace = true }
+# 28-05: mock external OIDC IdP (discovery/JWKS/token endpoints) for the
+# first-time-SSO e2e (CQ-B40). Versions/rationale mirror axiam-server's
+# existing req5_oidc_e2e.rs dev-dependencies exactly.
+wiremock = "0.6"
+rsa = { version = "0.9", features = ["sha2"] }
+# rsa 0.9 requires a rand_core 0.6 CryptoRng; the workspace `rand` (0.9) ThreadRng
+# does not satisfy it. Use rand_core 0.6 OsRng for RSA test-key generation.
+rand_core = { version = "0.6", features = ["getrandom"] }

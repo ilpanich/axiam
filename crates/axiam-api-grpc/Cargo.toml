@@ -28,6 +28,7 @@ bytes = { workspace = true }
 secrecy = { workspace = true }
 axiam-db = { workspace = true }
 surrealdb = { workspace = true }
+futures = { version = "0.3.32", default-features = false, features = ["std"] }
 
 [features]
 client = []

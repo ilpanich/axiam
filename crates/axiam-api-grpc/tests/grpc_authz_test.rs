@@ -262,7 +262,7 @@ async fn start_test_server(
     // DO NOT attach build_grpc_governor_layer — SmartIpKeyExtractor panics
     // without a real peer IP on in-process connections.
     let authz_svc = AuthorizationServiceServer::with_interceptor(
-        AuthorizationServiceImpl::new(engine),
+        AuthorizationServiceImpl::new(engine, 16),
         AuthInterceptor::new(auth_config),
     );
 

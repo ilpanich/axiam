@@ -225,7 +225,7 @@ async fn start_test_server<U: UserRepository + Clone + 'static>(
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
     let authz_svc = AuthorizationServiceServer::with_interceptor(
-        AuthorizationServiceImpl::new(engine),
+        AuthorizationServiceImpl::new(engine, 16),
         AuthInterceptor::new(auth_config.clone()),
     );
     // SECFIX-01: UserService and TokenService are registered behind the same

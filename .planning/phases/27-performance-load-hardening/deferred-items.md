@@ -52,3 +52,37 @@ verification only, never committed).
 confirm the rest of the C# solution is green now that `dotnet` is actually runnable in this
 sandbox — previously the `Google.Protobuf` version bug documented in 27-03's SUMMARY.md blocked
 the build before any of this could even be reached).
+
+## 27-05 (BatchCheckAccess concurrency — gRPC/REST)
+
+While verifying Task 2's `AuthorizationServiceImpl::new` signature change against the
+`client`-feature-gated integration test suite (`cargo test -p axiam-api-grpc --features client
+--test grpc_authz_test --test grpc_auth_test`, not part of this plan's required `<verify>`
+commands but exercised as extra confidence), `crates/axiam-api-grpc/tests/grpc_auth_test.rs`
+failed to compile:
+
+```
+error[E0063]: missing fields `hibp_breaker_cooldown_secs` and `hibp_breaker_threshold` in
+initializer of `AuthConfig` --> tests/grpc_auth_test.rs:73:5
+```
+
+Confirmed via `git show HEAD:.../grpc_auth_test.rs` that this gap already exists at HEAD,
+predating this plan — 27-01 (`d9656ca feat(27-01): HibpBreaker state machine + AuthConfig
+knobs + unit tests`) added `hibp_breaker_threshold`/`hibp_breaker_cooldown_secs` to
+`AuthConfig` and updated the sibling `grpc_authz_test.rs::test_auth_config()` literal, but
+missed the near-identical `test_auth_config()` in `grpc_auth_test.rs`. 27-05 only changed one
+line in this file (`AuthorizationServiceImpl::new(engine)` → `(engine, 16)`, required by
+Task 1/2's constructor signature change) — the missing-fields gap is unrelated and pre-existing.
+Left unfixed per the scope-boundary rule.
+
+Separately, `grpc_authz_test.rs` (which DOES compile) hit a linker `Bus error` (`ld terminated
+with signal 7`) on first attempt — root-caused to the sandbox disk being at its ~38 GB quota
+ceiling (19 GB in `target/` plus accumulated prior-plan artifacts), not a code defect. Resolved
+by running `cargo clean` (CLAUDE.md-sanctioned recovery) before re-running; not re-verified
+under `--features client` afterward since it is outside this plan's required verification set
+(the plan's own `<verify>` commands — `cargo test -p axiam-api-grpc --lib batch_check_access`
+and `-p axiam-api-rest --lib batch_check_access` — both passed cleanly).
+
+**Follow-up recommended:** add the two missing `hibp_breaker_*` fields to
+`grpc_auth_test.rs::test_auth_config()` so `cargo test -p axiam-api-grpc --features client`
+compiles end-to-end again.

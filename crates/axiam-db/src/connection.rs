@@ -20,6 +20,16 @@
 //! valid when the request is sent (see [`DbManager::spawn_proactive_resignin`]
 //! doc comment for why this must NOT call `invalidate()` first).
 //!
+//! [`DbManager::reconnect`] is the reactive "missed window" safety net for
+//! when the proactive task didn't run in time. Per the SDK's HTTP transport,
+//! a request on an ALREADY-expired handle — including `Signin`/`Invalidate`
+//! themselves — is rejected before the RPC dispatcher ever runs, so recovery
+//! there means building a brand-new connection, not resuscitating the stale
+//! one in place. `health_check` classifies auth failures distinctly
+//! ([`DbError::Unhealthy`], D-05) so the readiness probe alarms rather than
+//! treating expired/invalid root credentials as an ordinary, possibly
+//! transient query error.
+//!
 //! **Known residual gap (documented, not fixed here):** every repository in
 //! `axiam-server` is constructed via `db.client().clone()`. Cloning a
 //! `Surreal<C>` mints a brand-new session id and copies the CURRENT auth
@@ -29,7 +39,10 @@
 //! already-cloned repository sessions each still expire independently on
 //! their own original schedule. This matches the phase's locked scope
 //! (`26-RESEARCH.md` Pitfall 2) and is the same shape of problem Phase 27's
-//! PERF-04 ("poisoned-connection eviction") is already slated to address.
+//! PERF-04 ("poisoned-connection eviction") is already slated to address —
+//! [`DbManager::reconnect`] is written as a forward-compatible extension
+//! seam for that future work (a full jittered-backoff reconnect loop and
+//! poisoned-connection eviction), not that full loop itself.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +51,7 @@ use serde::Deserialize;
 use surrealdb::Surreal;
 use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
+use surrealdb::types::NotAllowedError;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -246,6 +260,35 @@ impl DbManager {
         })
     }
 
+    /// Reactive reconnect seam (D-03) — the "missed window" safety net for
+    /// when the proactive re-signin task above did not run in time and the
+    /// cached token has ALREADY expired.
+    ///
+    /// Builds a BRAND-NEW `Surreal::new::<Http>` connection with its own
+    /// fresh session and signs in on it, rather than attempting
+    /// `invalidate()`+`signin()` on the stale handle: every request on an
+    /// already-401ing handle — including `Signin`/`Invalidate` themselves —
+    /// carries the stale cached auth header and is rejected by the HTTP
+    /// engine's transport-level status check before the RPC dispatcher ever
+    /// runs (see module docs).
+    ///
+    /// This is intentionally a single-attempt primitive — the extension seam
+    /// PERF-04 (Phase 27) will wrap a full jittered-backoff reconnect loop
+    /// and poisoned-connection eviction around this; that loop is NOT built
+    /// here.
+    pub async fn reconnect(config: &DbConfig) -> Result<Surreal<Client>, surrealdb::Error> {
+        let db = Surreal::new::<Http>(&config.url).await?;
+        db.signin(Root {
+            username: config.username.clone(),
+            password: config.password.clone(),
+        })
+        .await?;
+        db.use_ns(&config.namespace)
+            .use_db(&config.database)
+            .await?;
+        Ok(db)
+    }
+
     /// Returns a reference to the underlying SurrealDB client.
     ///
     /// Callers may `.clone()` the returned reference to obtain an additional
@@ -263,11 +306,34 @@ impl DbManager {
     /// configured target — there is no "wrong session" state to detect (the
     /// failure mode the previous WebSocket-based `session::ns()` check tried to
     /// catch no longer exists).
+    ///
+    /// An authentication failure (expired token, revoked/invalid root
+    /// credentials — D-05) classifies distinctly as [`DbError::Unhealthy`]
+    /// rather than a bare query error, so the readiness probe alarms.
     pub async fn health_check(&self) -> Result<(), DbError> {
-        let result = self.db.query("RETURN 1").await.map_err(DbError::Surreal)?;
+        let result = self
+            .db
+            .query("RETURN 1")
+            .await
+            .map_err(Self::classify_query_error)?;
         // Surface any statement-level error (HTTP returns 200 even on SQL error).
-        result.check().map_err(DbError::Surreal)?;
+        result.check().map_err(Self::classify_query_error)?;
         Ok(())
+    }
+
+    /// Classify a query/check failure into a [`DbError`], distinguishing an
+    /// authentication problem — expired token, invalidated session, or a
+    /// genuinely revoked/invalid root credential (ANY `NotAllowed(Auth(..))`
+    /// variant, not just token expiry, per T-26-02-02/D-05) — from an
+    /// ordinary query error.
+    ///
+    /// Side-effect-free and public so it can be unit-tested directly against
+    /// a synthetic `surrealdb::Error` without a live server.
+    pub fn classify_query_error(err: surrealdb::Error) -> DbError {
+        if matches!(err.not_allowed_details(), Some(NotAllowedError::Auth(_))) {
+            return DbError::Unhealthy(err.to_string());
+        }
+        DbError::Surreal(err)
     }
 
     /// Interval between proactive re-signin attempts against the fixed

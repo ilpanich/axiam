@@ -1125,7 +1125,7 @@ Plans:
   4. The CI e2e job runs `npx playwright test` against the seeded backend (vitest kept separate), the auth/login/contract specs gate the build, and the contract spec asserts request **bodies** — catching a SECFIX-06 regression (CORR-04)
   5. After a hard reload the Topbar restores the tenant from `/auth/me` slugs, an MFA-mandated user reaches the setup landing via `setup_token` (no dead end), and VerifyEmail/Dashboard/Org-settings no longer misfire under StrictMode/query-key-collision/refocus (CORR-05, CORR-06)
 
-**Plans**: 6/8 plans executed
+**Plans**: 7/8 plans executed
 
 Plans:
 **Wave 1**
@@ -1139,7 +1139,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 26-07-PLAN.md — CORR-03b: webhook consumer + retry/DLQ config + main.rs wiring + integration test [wave 2, depends 26-03]
+- [x] 26-07-PLAN.md — CORR-03b: webhook consumer + retry/DLQ config + main.rs wiring + integration test [wave 2, depends 26-03]
 - [ ] 26-08-PLAN.md — CORR-05b: MFA-setup landing route + TotpSetupPanel + tenant-restore e2e [wave 2, depends 26-05]
 
 **UI hint**: yes
@@ -1227,7 +1227,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 23. Security Regressions & HIGH Findings | 6/6 | Complete   | 2026-07-03 |
 | 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete    | 2026-07-04 |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 10/10 | Complete    | 2026-07-04 |
-| 26. Correctness & Resilience | 6/8 | In Progress|  |
+| 26. Correctness & Resilience | 7/8 | In Progress|  |
 | 27. Performance & Load Hardening | 0/? | Not started | - |
 | 28. Functional Completeness | 0/? | Not started | - |
 | 29. Structural Quality | 0/? | Not started | - |

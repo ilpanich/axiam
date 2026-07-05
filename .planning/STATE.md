@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 26
 current_phase_name: correctness-resilience
 status: executing
-stopped_at: Completed 26-06-PLAN.md
-last_updated: "2026-07-05T09:43:49.245Z"
+stopped_at: Completed 26-07-PLAN.md
+last_updated: "2026-07-05T10:21:28.324Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 26 execution started
 progress:
   total_phases: 8
   completed_phases: 3
   total_plans: 33
-  completed_plans: 31
+  completed_plans: 32
   percent: 38
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 26 (correctness-resilience) — EXECUTING
-Plan: 7 of 8
+Plan: 8 of 8
 Status: Ready to execute
 Last activity: 2026-07-05 — Phase 26 execution started
 
@@ -186,6 +186,7 @@ Last activity: 2026-07-05 — Phase 26 execution started
 | Phase 26 P04 | 12min | 2 tasks | 2 files |
 | Phase 26 P05 | 22min | 2 tasks | 1 files |
 | Phase 26 P06 | 15min | 3 tasks | 6 files |
+| Phase 26 P07 | 35min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -455,6 +456,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 26-06] Extracted DASHBOARD_USER_COUNT_QUERY_KEY into lib/queryClient.ts (not inline in DashboardPage.tsx) so it could be exported for a regression test without tripping the react-refresh/only-export-components ESLint rule (array literals aren't a constant export under that rule)
 - [Phase ?]: [Phase 26-06] Extracted shouldSeedForm/computeIsDirty into settingsForm.ts (plain .ts, not .tsx) for unit-testability — this project has no DOM-rendering test harness (no testing-library/jsdom)
 - [Phase ?]: [Phase 26-06] Org-settings navigate-away guard implemented with two complementary mechanisms: react-router v7 useBlocker for route-level navigation away from the page, plus a lifted dirty flag + pending-tab intercept in the parent for the Settings tab's own in-page tab switch (local state, not a router navigation)
+- [Phase ?]: [Phase 26-07]: Added lapin/futures-lite as direct axiam-api-rest dependencies (workspace-pinned, already resolved via axiam-amqp) so webhook_consumer.rs can drive lapin::Channel directly per the plan's architecture note
+- [Phase ?]: [Phase 26-07]: Live-broker integration test targets a loopback URL (not a local HTTP sink) since deliver_once's SSRF guard hardcodes allow_private=false in production — proves the guard survives AMQP-driven delivery and exercises retry->DLQ->audit via deterministic SsrfBlocked failure
+- [Phase ?]: [Phase 26-07]: webhook.delivery_* audit records use actor_id: Uuid::nil() / ActorType::System, matching mail_consumer.rs/axiam-federation::secrets.rs convention for AMQP-driven system actions
 
 ### Pending Todos
 
@@ -478,7 +482,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T09:39:25.645Z
-Stopped at: Completed 26-06-PLAN.md
+Last session: 2026-07-05T10:21:19.555Z
+Stopped at: Completed 26-07-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

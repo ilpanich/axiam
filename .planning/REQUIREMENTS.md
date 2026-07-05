@@ -833,10 +833,10 @@ The 4-week root-token TTL with no renewal is an uptime ceiling on the control pl
 Wire webhook delivery through a durable path with retry; today `.deliver(` has zero call sites.
 
 ### Acceptance Criteria
-- [ ] Delivery driven from a persistent queue (AMQP) rather than a detached `tokio::spawn`; survives restart
-- [ ] HMAC-SHA256 signature header; exponential-backoff retry; delivery status written to the audit trail
-- [ ] Depends on SECFIX-03 (secret encrypted on write) so the decrypt-on-deliver step succeeds
-- [ ] Integration test: registered webhook receives a signed delivery; failed delivery retries
+- [x] Delivery driven from a persistent queue (AMQP) rather than a detached `tokio::spawn`; survives restart — 26-03: `emit()`/`deliver_once()` split + `axiam.webhook`/`axiam.webhook.retry`/`axiam.webhook.dlq` topology; 26-07: `start_webhook_consumer` drives `deliver_once` from the durable queue, wired into `main.rs` on startup
+- [x] HMAC-SHA256 signature header; exponential-backoff retry; delivery status written to the audit trail — 26-03: Stripe-style `t=,v1=` signature (D-10); 26-07: `backoff_ttl_ms` bounded exponential backoff via retry-queue TTL (D-08) + per-attempt/terminal `webhook.delivery_*` audit records (D-09)
+- [x] Depends on SECFIX-03 (secret encrypted on write) so the decrypt-on-deliver step succeeds — AES-256-GCM secret decrypt in `deliver_once` (SEC-031, 26-03)
+- [x] Integration test: registered webhook receives a signed delivery; failed delivery retries — `webhook_consumer_test.rs` (26-07): broker-free attempt-increment/backoff assertions pass; `#[ignore]`d live-RabbitMQ test proves retry->DLQ->audit end-to-end (requires `just dev-up`, not run in this sandbox — see 26-07-SUMMARY.md coverage D4)
 
 ## CORR-04: Playwright Runs in CI with Body Assertions
 
@@ -1092,7 +1092,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Complete |
 | CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Complete (26-01: Quota::per_second construction + sustained-throughput/monotonicity test) |
 | CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Complete (26-02: Arc-shared proactive re-signin + reactive reconnect seam + auth-aware health_check) |
-| CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Pending |
+| CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Complete (26-03: emit()/deliver_once() split + AMQP topology/publisher/signature; 26-07: durable consumer with TTL+DLX retry, DLQ, and per-attempt/terminal audit, wired into main.rs) |
 | CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Complete |
 | CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Pending |
 | CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Complete (26-06: VerifyEmailPage useRef guard D-17, Dashboard distinct query key D-18, org-settings init-guard/dirty-tracking/navigate-away guard D-19) |

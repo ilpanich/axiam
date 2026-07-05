@@ -54,6 +54,7 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C>(
     auth_config: AuthConfig,
     grpc_config: &GrpcConfig,
     db: Surreal<C>,
+    batch_max_concurrency: usize,
 ) -> Result<(), tonic::transport::Error>
 where
     R: RoleRepository + 'static,
@@ -85,7 +86,7 @@ where
     let governor_layer = build_grpc_governor_layer(grpc_config.grpc_authz_per_sec);
 
     let authz_svc = AuthorizationServiceServer::with_interceptor(
-        AuthorizationServiceImpl::new(engine),
+        AuthorizationServiceImpl::new(engine, batch_max_concurrency),
         AuthInterceptor::new(auth_config.clone()),
     );
     // SECFIX-01: UserService and TokenService previously had zero auth —

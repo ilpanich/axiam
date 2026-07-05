@@ -22,3 +22,4 @@ uuid = { workspace = true }
 axiam-db = { path = "../axiam-db" }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = "0.4"
+serde_json = { workspace = true }

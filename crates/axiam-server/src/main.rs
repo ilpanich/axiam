@@ -81,6 +81,8 @@ struct AppConfig {
     #[serde(default)]
     grpc: GrpcConfig,
     #[serde(default)]
+    authz: axiam_authz::AuthzConfig,
+    #[serde(default)]
     amqp: AmqpConfig,
     #[serde(default)]
     rate_limit: RateLimitConfig,
@@ -669,6 +671,7 @@ async fn main() -> std::io::Result<()> {
     // (GrpcSharedRateLimitLayer), not just the per-replica in-memory
     // governor.
     let grpc_db = db_handle.clone();
+    let grpc_batch_max_concurrency = config.authz.batch_max_concurrency;
     tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
@@ -677,6 +680,7 @@ async fn main() -> std::io::Result<()> {
             grpc_auth_config,
             &grpc_config,
             grpc_db,
+            grpc_batch_max_concurrency,
         )
         .await
         {
@@ -738,6 +742,7 @@ async fn main() -> std::io::Result<()> {
             // register it as web::Data<dyn AuthzChecker>, causing "Requested application
             // data is not configured correctly" 500s on every admin endpoint.
             .app_data(web::Data::new(rest_authz.clone()))
+            .app_data(web::Data::new(config.authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(db_handle.clone()))
             .app_data(web::Data::new(health_checker.clone()))

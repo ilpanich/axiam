@@ -90,6 +90,18 @@ impl JwksCache {
         self.0.write().await.insert(key, entry);
     }
 
+    /// Returns the SEC-054 allow-private-networks policy this cache was
+    /// constructed with (`false` unless built via
+    /// [`JwksCache::new_allow_private_networks`]).
+    ///
+    /// `pub(crate)` so sibling modules in this crate (`oidc.rs`) can thread
+    /// the SAME already-injected test seam through their own SSRF-guarded
+    /// fetches (`discover`/`exchange_code`) instead of requiring a second,
+    /// independent bypass — see 28-05 SUMMARY for rationale.
+    pub(crate) fn allow_private_networks(&self) -> bool {
+        self.1
+    }
+
     /// Return JWKS for the given key, fetching if needed.
     ///
     /// 1. Cache hit within 1-h TTL → return cached keys (no HTTP).

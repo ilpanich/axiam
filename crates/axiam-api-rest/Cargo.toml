@@ -50,6 +50,7 @@ secrecy = { workspace = true }
 
 surrealdb = { workspace = true }
 webauthn-rs-proto = { workspace = true }
+futures = { version = "0.3.32", default-features = false, features = ["std"] }
 
 [features]
 # SAML SP endpoints + DTOs. Forwards to axiam-federation/saml (→ samael).

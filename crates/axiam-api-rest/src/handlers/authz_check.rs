@@ -15,15 +15,17 @@
 //! returning, regardless of the engine's decision (T-15-04, D-06).
 
 use actix_web::{HttpResponse, web};
+use axiam_authz::AuthzConfig;
 use axiam_authz::types::{AccessDecision, AccessRequest};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
 use axiam_db::SurrealAuditLogRepository;
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
-use crate::authz::{AuthzData, RequirePermission};
+use crate::authz::{AuthzChecker, AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 
@@ -208,11 +210,14 @@ pub async fn batch_check_access<C: Connection>(
     user: AuthenticatedUser,
     authz: AuthzData,
     audit_repo: web::Data<SurrealAuditLogRepository<C>>,
+    authz_config: web::Data<AuthzConfig>,
     body: web::Json<BatchCheckAccessBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let body = body.into_inner();
 
     // T-15-01: validate authz:check_as ONCE up front if any check uses subject_id override.
+    // This is the batch's "reject the whole thing on a single bad item" gate
+    // (T-27-12 analog) — it runs synchronously before any check_access fires.
     let has_override = body.checks.iter().any(|c| c.subject_id.is_some());
     if has_override {
         RequirePermission::new("authz:check_as", user.tenant_id)
@@ -220,33 +225,49 @@ pub async fn batch_check_access<C: Connection>(
             .await?;
     }
 
-    let mut results = Vec::with_capacity(body.checks.len());
+    // T-27-10/T-27-11: evaluate concurrently, bounded by
+    // AuthzConfig::batch_max_concurrency (D-07), preserving input order via
+    // sort_by_key after collection (D-06). The per-item append_check_as_audit
+    // fire-and-forget call is preserved inside the same mapped future.
+    let batch_max_concurrency = authz_config.batch_max_concurrency;
+    let checker: &dyn AuthzChecker = authz.get_ref().as_ref();
+    let audit_repo_ref: &SurrealAuditLogRepository<C> = audit_repo.get_ref();
+    let tenant_id = user.tenant_id;
+    let actor_id = user.user_id;
 
-    for check in body.checks {
-        let resource_id = check.resource_id;
-        let effective_subject = if let Some(sid) = check.subject_id {
-            // T-15-04: audit each cross-subject item individually.
-            append_check_as_audit(&audit_repo, user.tenant_id, user.user_id, sid, resource_id)
-                .await;
-            sid
-        } else {
-            user.user_id
-        };
+    let mut indexed: Vec<(usize, Result<AccessDecision, AxiamApiError>)> =
+        stream::iter(body.checks.into_iter().enumerate())
+            .map(|(i, check)| async move {
+                let resource_id = check.resource_id;
+                let effective_subject = if let Some(sid) = check.subject_id {
+                    // T-15-04: audit each cross-subject item individually.
+                    append_check_as_audit(audit_repo_ref, tenant_id, actor_id, sid, resource_id)
+                        .await;
+                    sid
+                } else {
+                    actor_id
+                };
 
-        let access_req = AccessRequest {
-            tenant_id: user.tenant_id,
-            subject_id: effective_subject,
-            action: check.action,
-            resource_id,
-            scope: check.scope,
-        };
+                let access_req = AccessRequest {
+                    tenant_id,
+                    subject_id: effective_subject,
+                    action: check.action,
+                    resource_id,
+                    scope: check.scope,
+                };
 
-        let decision = authz
-            .check_access(&access_req)
-            .await
-            .map_err(AxiamApiError::from)?;
+                let decision = checker.check_access(&access_req).await.map_err(AxiamApiError::from);
+                (i, decision)
+            })
+            .buffer_unordered(batch_max_concurrency)
+            .collect()
+            .await;
 
-        results.push(decision_to_response(decision));
+    indexed.sort_by_key(|&(i, _)| i);
+
+    let mut results = Vec::with_capacity(indexed.len());
+    for (_, decision) in indexed {
+        results.push(decision_to_response(decision?));
     }
 
     Ok(HttpResponse::Ok().json(BatchCheckAccessResponse { results }))

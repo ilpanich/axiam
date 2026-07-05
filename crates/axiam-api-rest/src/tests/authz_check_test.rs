@@ -6,11 +6,17 @@
 //! (c) Override allowed — subject_id present, caller holds authz:check_as → decision + audit row.
 //! (d) Batch — results have same length and order as input checks.
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use actix_web::web;
 use axiam_auth::token::AccessTokenClaims;
 use axiam_auth::token::ValidatedClaims;
+use axiam_authz::AuthzConfig;
+use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_core::error::AxiamResult;
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
 use axiam_db::SurrealAuditLogRepository;
 use surrealdb::Surreal;
@@ -23,6 +29,12 @@ use crate::extractors::auth::AuthenticatedUser;
 use crate::handlers::authz_check::{
     BatchCheckAccessBody, CheckAccessBody, batch_check_access, check_access,
 };
+
+/// Default `AuthzConfig` app-data for tests that don't care about the
+/// concurrency bound.
+fn make_authz_config() -> web::Data<AuthzConfig> {
+    web::Data::new(AuthzConfig::default())
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -243,7 +255,7 @@ async fn batch_check_returns_results_in_input_order() {
 
     let body = web::Json(BatchCheckAccessBody { checks });
 
-    let result = batch_check_access(user, authz, audit_repo, body).await;
+    let result = batch_check_access(user, authz, audit_repo, make_authz_config(), body).await;
     assert_eq!(status_code(&result), 200, "batch check should return 200");
 
     let json = read_body_json(result.unwrap()).await;
@@ -284,10 +296,128 @@ async fn batch_override_without_check_as_returns_403() {
         }],
     });
 
-    let result = batch_check_access(user, authz, audit_repo, body).await;
+    let result = batch_check_access(user, authz, audit_repo, make_authz_config(), body).await;
     assert_eq!(
         status_code(&result),
         403,
         "batch override without authz:check_as must return 403"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (f) D-06 correctness gate — batch == per-item check_access, same order
+// ---------------------------------------------------------------------------
+
+/// Test-only [`AuthzChecker`] whose decision depends on `resource_id`, so a
+/// batch of mixed allow/deny results can prove `sort_by_key` genuinely
+/// restores input order (not just a common allow-all/deny-all path).
+struct PerResourceAuthzChecker {
+    allowed: HashMap<Uuid, bool>,
+}
+
+impl AuthzChecker for PerResourceAuthzChecker {
+    fn check_access<'a>(
+        &'a self,
+        request: &'a AccessRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
+        let allow = self
+            .allowed
+            .get(&request.resource_id)
+            .copied()
+            .unwrap_or(false);
+        Box::pin(async move {
+            Ok(if allow {
+                AccessDecision::Allow
+            } else {
+                AccessDecision::Deny("denied by PerResourceAuthzChecker".into())
+            })
+        })
+    }
+}
+
+/// D-06/T-27-10 correctness gate: `batch_check_access` results must be
+/// identical, in the same order, to calling `check_access` once per item
+/// and collecting into a `Vec` — proves the concurrent
+/// `buffer_unordered` + `sort_by_key` refactor introduces no ordering or
+/// decision bug.
+#[tokio::test]
+async fn batch_check_access_matches_sequential_per_item_check_access() {
+    let tenant_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+
+    let resources: Vec<Uuid> = (0..6).map(|_| Uuid::new_v4()).collect();
+    // Alternate allow/deny per resource so ordering actually matters.
+    let allowed: HashMap<Uuid, bool> = resources
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, i % 2 == 0))
+        .collect();
+
+    let checks: Vec<CheckAccessBody> = resources
+        .iter()
+        .map(|resource_id| CheckAccessBody {
+            action: "read".into(),
+            resource_id: *resource_id,
+            scope: None,
+            subject_id: None,
+        })
+        .collect();
+
+    // Sequential per-item baseline via the single-check handler.
+    let db = setup_db().await;
+    let seq_audit_repo = web::Data::new(SurrealAuditLogRepository::new(db));
+    let mut sequential_allowed = Vec::with_capacity(checks.len());
+    for check in &checks {
+        let authz = make_authz(PerResourceAuthzChecker {
+            allowed: allowed.clone(),
+        });
+        let user = make_user(tenant_id, user_id);
+        let body = web::Json(CheckAccessBody {
+            action: check.action.clone(),
+            resource_id: check.resource_id,
+            scope: check.scope.clone(),
+            subject_id: None,
+        });
+        let result = check_access(user, authz, seq_audit_repo.clone(), body)
+            .await
+            .expect("sequential check_access must succeed");
+        let json = read_body_json(result).await;
+        sequential_allowed.push(json["allowed"].as_bool().expect("allowed bool"));
+    }
+
+    // Concurrent batch path via the real batch_check_access handler, with a
+    // small concurrency bound to force actual interleaving.
+    let batch_db = setup_db().await;
+    let batch_audit_repo = web::Data::new(SurrealAuditLogRepository::new(batch_db));
+    let batch_authz = make_authz(PerResourceAuthzChecker { allowed });
+    let batch_user = make_user(tenant_id, user_id);
+    let small_concurrency = web::Data::new(AuthzConfig {
+        batch_max_concurrency: 2,
+    });
+    let batch_body = web::Json(BatchCheckAccessBody { checks });
+
+    let batch_result = batch_check_access(
+        batch_user,
+        batch_authz,
+        batch_audit_repo,
+        small_concurrency,
+        batch_body,
+    )
+    .await
+    .expect("batch_check_access must succeed");
+    let batch_json = read_body_json(batch_result).await;
+    let batch_results = batch_json["results"].as_array().expect("results array");
+
+    assert_eq!(
+        batch_results.len(),
+        sequential_allowed.len(),
+        "batch and sequential result counts must match"
+    );
+    for (i, (batch_res, seq_allowed)) in batch_results.iter().zip(sequential_allowed.iter()).enumerate() {
+        assert_eq!(
+            batch_res["allowed"].as_bool().expect("allowed bool"),
+            *seq_allowed,
+            "result[{i}] mismatch between concurrent batch and sequential per-item check_access"
+        );
+    }
 }

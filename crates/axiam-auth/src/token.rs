@@ -20,6 +20,31 @@ pub const AUD_USER: &str = "axiam:user";
 /// OAuth2 Client Credentials grant — `sub` is a `client_id` string).
 pub const AUD_M2M: &str = "axiam:m2m";
 
+/// Self-describing subject kind carried by an access token (FUNC-04).
+///
+/// Informational only (D-10) — no validator or authz path branches on this
+/// claim; it exists so SDK modeling and audit attribution can distinguish
+/// which kind of subject minted the token. Tokens issued before this claim
+/// existed have no `sub_kind` key and deserialize to [`SubjectKind::User`]
+/// via `#[serde(default)]` on [`AccessTokenClaims::sub_kind`] (D-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectKind {
+    /// A human user authenticated via password/social login/MFA.
+    User,
+    /// A service account authenticated via mTLS client certificate
+    /// (device-auth cert-auth path).
+    ServiceAccount,
+    /// An OAuth2 client authenticated via the Client Credentials grant.
+    OAuth2Client,
+}
+
+impl Default for SubjectKind {
+    fn default() -> Self {
+        Self::User
+    }
+}
+
 /// JWT claims embedded in every access token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessTokenClaims {
@@ -54,6 +79,13 @@ pub struct AccessTokenClaims {
     /// Code flows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Self-describing subject kind (FUNC-04, D-09/D-10/D-11).
+    ///
+    /// Always serialized when a token is issued. Missing on decode (a
+    /// pre-phase token) defaults to [`SubjectKind::User`]. Informational
+    /// only — does not affect validation or authorization decisions.
+    #[serde(default)]
+    pub sub_kind: SubjectKind,
 }
 
 /// Issue a signed EdDSA (Ed25519) JWT access token.
@@ -92,6 +124,7 @@ pub fn issue_access_token(
         jti,
         aud: Some(aud.to_string()),
         scope,
+        sub_kind: SubjectKind::User,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -140,6 +173,54 @@ pub fn issue_client_credentials_token(
         jti: Uuid::new_v4().to_string(),
         aud: Some(AUD_M2M.to_string()),
         scope,
+        sub_kind: SubjectKind::OAuth2Client,
+    };
+
+    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
+
+    let header = Header::new(Algorithm::EdDSA);
+    jsonwebtoken::encode(&header, &claims, key)
+        .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+}
+
+/// Issue a JWT access token for a service account authenticated via mTLS
+/// client certificate (device-auth cert-auth path, resolving `TODO(T15)`).
+///
+/// The `sub` claim is the service account's `user_id` (mirrors the shape
+/// the device-auth handler previously passed to [`issue_access_token`]).
+/// `jti` is caller-supplied — service-account/device auth has no session
+/// row, so callers pass a random UUID. `aud` and `scope` mirror the values
+/// the device-auth call previously passed to `issue_access_token`
+/// ([`AUD_USER`], no scopes) — only `sub_kind` differs (D-09). This claim
+/// is informational only (D-10): validation and authz are unaffected.
+pub fn issue_service_account_token(
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    jti: String,
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    let now = Utc::now().timestamp();
+
+    let claims = AccessTokenClaims {
+        sub: user_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        org_id: org_id.to_string(),
+        iss: config.effective_issuer().to_owned(),
+        iat: now,
+        exp: now + config.access_token_lifetime_secs as i64,
+        jti,
+        aud: Some(AUD_USER.to_string()),
+        scope: None,
+        sub_kind: SubjectKind::ServiceAccount,
     };
 
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
@@ -733,5 +814,95 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         .unwrap();
         let c = decode_id_token(&token_without, &config);
         assert!(c.preferred_username.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // sub_kind tests (FUNC-04, D-09/D-10/D-11)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn missing_sub_kind_defaults_to_user() {
+        // D-11: a pre-phase token payload with no `sub_kind` key must still
+        // deserialize successfully, defaulting to `SubjectKind::User`.
+        let json = r#"{
+            "sub": "some-subject",
+            "tenant_id": "00000000-0000-0000-0000-000000000001",
+            "org_id": "00000000-0000-0000-0000-000000000002",
+            "iss": "axiam-test",
+            "iat": 0,
+            "exp": 9999999999,
+            "jti": "00000000-0000-0000-0000-000000000003"
+        }"#;
+        let claims: AccessTokenClaims = serde_json::from_str(json).unwrap();
+        assert_eq!(claims.sub_kind, SubjectKind::User);
+    }
+
+    #[test]
+    fn issue_access_token_stamps_user_sub_kind() {
+        let config = test_config();
+        let token = issue_access_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .unwrap();
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert_eq!(claims.sub_kind, SubjectKind::User);
+    }
+
+    #[test]
+    fn issue_client_credentials_token_stamps_oauth2_client_sub_kind() {
+        let config = test_config();
+        let token = issue_client_credentials_token(
+            "svc-client",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+        )
+        .unwrap();
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert_eq!(claims.sub_kind, SubjectKind::OAuth2Client);
+    }
+
+    #[test]
+    fn issue_service_account_token_stamps_service_account_sub_kind() {
+        let config = test_config();
+        let user_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let jti = Uuid::new_v4().to_string();
+
+        let token =
+            issue_service_account_token(user_id, tenant_id, org_id, jti.clone(), &config).unwrap();
+        let claims = decode_access_token(&token, &config).unwrap();
+
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.tenant_id, tenant_id.to_string());
+        assert_eq!(claims.org_id, org_id.to_string());
+        assert_eq!(claims.jti, jti);
+        assert_eq!(claims.sub_kind, SubjectKind::ServiceAccount);
+    }
+
+    #[test]
+    fn validate_access_token_accepts_service_account_token() {
+        // D-10: sub_kind is informational only — validation must not reject
+        // (or otherwise treat differently) a ServiceAccount-kinded token.
+        let config = test_config();
+        let token = issue_service_account_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4().to_string(),
+            &config,
+        )
+        .unwrap();
+
+        let validated = validate_access_token(&token, &config).unwrap();
+        assert_eq!(validated.0.sub_kind, SubjectKind::ServiceAccount);
     }
 }

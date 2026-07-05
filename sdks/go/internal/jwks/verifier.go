@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lestrrat-go/httprc/v3"
@@ -34,6 +35,13 @@ const (
 type Verifier struct {
 	cache   *jwk.Cache
 	jwksURL string
+
+	// refreshMu serializes the forced-refetch path so a concurrent burst of
+	// unknown-kid verifications collapses to exactly one network fetch
+	// (D-08/D-09). We do NOT rely on jwx/httprc's internal coalescing
+	// (Assumption A2) — the mutex wraps only the fetch/refresh decision,
+	// never the jws.Verify call itself.
+	refreshMu sync.Mutex
 }
 
 // NewVerifier constructs a Verifier bound to {baseURL}/oauth2/jwks (trailing
@@ -107,8 +115,21 @@ func (v *Verifier) Verify(ctx context.Context, token []byte) (Claims, error) {
 	payload, verifyErr := jws.Verify(token, jws.WithKeySet(keySet, jws.WithInferAlgorithmFromKey(false)))
 	if verifyErr != nil {
 		// Unknown kid (or stale cache after key rotation) → force exactly
-		// one refetch, then retry verification exactly once.
+		// one refetch, then retry verification exactly once. The mutex
+		// serializes this section so a concurrent burst of unknown-kid
+		// verifications triggers a single v.cache.Refresh call (D-08/D-09):
+		// each waiter re-checks CachedSet under the lock first, since
+		// another goroutine may have already performed the refetch while
+		// this one was waiting.
+		v.refreshMu.Lock()
+		if cachedSet, cachedErr := v.cache.CachedSet(v.jwksURL); cachedErr == nil {
+			if p, retryErr := jws.Verify(token, jws.WithKeySet(cachedSet, jws.WithInferAlgorithmFromKey(false))); retryErr == nil {
+				v.refreshMu.Unlock()
+				return parseClaims(p)
+			}
+		}
 		refreshed, refreshErr := v.cache.Refresh(ctx, v.jwksURL)
+		v.refreshMu.Unlock()
 		if refreshErr != nil {
 			return Claims{}, fmt.Errorf("jwks: token verification failed and JWKS refetch also failed: %w", verifyErr)
 		}

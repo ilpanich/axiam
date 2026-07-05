@@ -415,7 +415,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
         // we use the fact that decode_access_token does not require aud.
         // The simplest approach: issue with AUD_USER but override aud to None
         // by constructing claims manually.
-        use axiam_auth::token::AccessTokenClaims;
+        use axiam_auth::token::{AccessTokenClaims, SubjectKind};
         use chrono::Utc;
         use jsonwebtoken::{Algorithm, EncodingKey, Header};
 
@@ -430,6 +430,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             jti: Uuid::new_v4().to_string(),
             aud: None, // no audience
             scope: None,
+            sub_kind: SubjectKind::User,
         };
         let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes()).unwrap();
         let header = Header::new(Algorithm::EdDSA);

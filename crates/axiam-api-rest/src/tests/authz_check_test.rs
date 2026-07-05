@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use actix_web::web;
 use axiam_auth::token::AccessTokenClaims;
+use axiam_auth::token::SubjectKind;
 use axiam_auth::token::ValidatedClaims;
 use axiam_authz::AuthzConfig;
 use axiam_authz::types::{AccessDecision, AccessRequest};
@@ -59,6 +60,7 @@ fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedUser {
         jti: session_id.to_string(),
         aud: Some("axiam:user".into()),
         scope: None,
+        sub_kind: SubjectKind::User,
     });
     AuthenticatedUser {
         user_id,

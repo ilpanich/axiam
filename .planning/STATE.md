@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 28
 current_phase_name: functional-completeness
 status: executing
-stopped_at: Completed 28-01-PLAN.md
-last_updated: "2026-07-05T18:45:36.119Z"
+stopped_at: Completed 28-02-PLAN.md
+last_updated: "2026-07-05T19:02:24.091Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 28 execution started
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 45
-  completed_plans: 41
+  completed_plans: 42
   percent: 63
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 28 (functional-completeness) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-07-05 — Phase 28 execution started
 
@@ -197,6 +197,7 @@ Last activity: 2026-07-05 — Phase 28 execution started
 | Phase 27 P06 | 25min | 3 tasks | 3 files |
 | Phase 27 P07 | 40min | 3 tasks | 8 files |
 | Phase 28 P01 | 20min | 3 tasks | 3 files |
+| Phase 28 P02 | 20min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -490,6 +491,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 27-performance-load-hardening] 27-07: authz_bench injects a bench-only tokio::time::sleep(2ms) per check_access call (engine.rs untouched) to make the sequential-vs-concurrent batch comparison meaningful against near-zero-latency kv-mem
 - [Phase ?]: [Phase 28-01]: D-02 resolved via sentinel-empty write-path secret convention (not a separate optional-secret input type) — keeps ProviderConfig/SmtpConfig/ApiProviderConfig unified for write-input and resolved/stored use, avoiding a ripple into mail_consumer_test.rs and future 28-04 handler code
 - [Phase ?]: [Phase 28-01]: row_to_provider/try_into_domain changed to return AxiamError directly so D-08's NULL-ciphertext case surfaces as AxiamError::EmailConfig, matching the crate's existing email-config error family instead of the generic Database(String) variant
+- [Phase ?]: [28-02] issue_service_account_token mirrors device_auth's prior aud (AUD_USER)/scope (None) values verbatim — only sub_kind differs; validate_access_token unchanged (D-10)
+- [Phase ?]: [28-02] Task 3 RBAC-denial test uses a new real-AuthorizationEngine harness in user_test.rs (mirroring rbac_test.rs) since that file's existing AllowAllAuthzChecker harness cannot prove RBAC denial
 
 ### Pending Todos
 
@@ -513,7 +516,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T18:45:36.101Z
-Stopped at: Completed 28-01-PLAN.md
+Last session: 2026-07-05T19:02:24.073Z
+Stopped at: Completed 28-02-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

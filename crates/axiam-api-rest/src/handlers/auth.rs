@@ -818,3 +818,52 @@ pub async fn change_password<C: Connection>(
 
     Ok(HttpResponse::NoContent().finish())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_user_info(tenant_slug: Option<String>, org_slug: Option<String>) -> LoginUserInfo {
+        LoginUserInfo {
+            id: Uuid::nil(),
+            username: "alice".into(),
+            email: "alice@example.com".into(),
+            tenant_id: Uuid::nil(),
+            tenant_slug,
+            org_slug,
+        }
+    }
+
+    /// 26-05 (D-14): when slug resolution succeeds, both fields serialize
+    /// into the JSON body so the frontend can restore tenant context after
+    /// a hard reload.
+    #[test]
+    fn login_user_info_serializes_slugs_when_present() {
+        let info = sample_user_info(Some("acme-tenant".into()), Some("acme-org".into()));
+        let value = serde_json::to_value(&info).expect("serializable");
+
+        assert_eq!(value["tenant_slug"], "acme-tenant");
+        assert_eq!(value["org_slug"], "acme-org");
+    }
+
+    /// 26-05 (D-15): when slug resolution degrades to `None` (lookup
+    /// failure), the keys are omitted entirely rather than serialized as
+    /// `null` — this is what lets `/auth/me` and the fresh-login response
+    /// stay valid and be read defensively by the frontend without ever
+    /// failing the call.
+    #[test]
+    fn login_user_info_omits_slugs_when_absent() {
+        let info = sample_user_info(None, None);
+        let value = serde_json::to_value(&info).expect("serializable");
+        let obj = value.as_object().expect("object");
+
+        assert!(
+            !obj.contains_key("tenant_slug"),
+            "tenant_slug should be omitted, not null"
+        );
+        assert!(
+            !obj.contains_key("org_slug"),
+            "org_slug should be omitted, not null"
+        );
+    }
+}

@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 28
 current_phase_name: functional-completeness
 status: executing
-stopped_at: Completed 28-03-PLAN.md
-last_updated: "2026-07-05T19:24:36.900Z"
+stopped_at: Completed 28-05-PLAN.md (with a deferred Rule 4 item on federation metadata auth)
+last_updated: "2026-07-05T20:31:33.189Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 28 execution started
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 45
-  completed_plans: 43
+  completed_plans: 44
   percent: 63
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 28 (functional-completeness) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-07-05 — Phase 28 execution started
 
@@ -199,6 +199,7 @@ Last activity: 2026-07-05 — Phase 28 execution started
 | Phase 28 P01 | 20min | 3 tasks | 3 files |
 | Phase 28 P02 | 20min | 3 tasks | 4 files |
 | Phase 28 P03 | 25min | 3 tasks | 4 files |
+| Phase 28-functional-completeness P05 | 70min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -496,6 +497,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [28-02] Task 3 RBAC-denial test uses a new real-AuthorizationEngine harness in user_test.rs (mirroring rbac_test.rs) since that file's existing AllowAllAuthzChecker harness cannot prove RBAC denial
 - [Phase ?]: [Phase 28-03]: D-06 fail-safe implemented only around get_org_template/get_tenant_template fetches (per D-06-fetch-only-fallback) — resolve_template/render/render_html are infallible and untouched
 - [Phase ?]: [Phase 28-03]: Template-resolution tests capture the EmailService::send debug log (subject field) via tracing::subscriber::set_default + a BufWriter, mirroring gdpr_audit_dlq_test.rs, since send_with_retry_and_audit has no inspectable return value for the rendered EmailMessage
+- [Phase ?]: [Phase 28-05]: Reused JwksCache's existing allow_private_networks SEC-054 test seam inside OidcFederationService::discover()/exchange_code() (instead of a new bypass) to enable wiremock-based e2e testing of the public first-time-SSO handlers; zero production behavior change
+- [Phase ?]: [Phase 28-05]: Fixed a real production bug — the four public first-time-SSO endpoints (oidc/start, oidc/callback, saml/login, saml/acs) were missing from CSRF_EXEMPT_SUFFIXES and 403'd despite being listed in PUBLIC_PATHS
+- [Phase ?]: [Phase 28-05]: Deferred (Rule 4) fixing the federation metadata endpoint's auth model — saml_metadata requires a JWT despite PUBLIC_PATHS listing it as public; needs human decision on query-param-based tenant resolution vs. correcting the public-metadata framing
 
 ### Pending Todos
 
@@ -516,10 +520,11 @@ Raised 2026-06-02 (SAML feature-flag work):
 - [Phase 22-php-sdk] 22-01: PHPStan level-6 verification could not run in this sandbox -- api.github.com zipball for phpstan/phpstan returns 403 'GitHub access to this repository is not enabled for this session'; git-clone fallback requires an impractical 7GB+ full-history mirror. Deferred to sdk-ci-php.yml CI (unrestricted infra).
 - [Phase 24-07 gap-closure, RESOLVED] gRPC shared rate-limit store (GrpcSharedRateLimitLayer) is now wired into start_grpc_server/main.rs (Surreal<C> threaded through, `.layer()`'d before build_grpc_governor_layer, fail-open on DB error). Closed the 24-VERIFICATION.md NOT_WIRED gap; SECHRD-03 multi-replica mitigation is now production-live for both REST and gRPC.
 - 25-10 Task 3: awaiting human-verify checkpoint — operator must apply k8s manifests to a cluster to confirm SMTP-relay allow / non-allowlisted-egress deny / secret-key resolution / CI env prefix, per 25-10-PLAN.md how-to-verify steps
+- 28-05 deferred (Rule 4, needs human decision): federation metadata endpoint (GET /api/v1/federation/saml/metadata) is listed in PUBLIC_PATHS but its handler requires a valid JWT (AuthenticatedUser extractor), contradicting FUNC-01's 'reachable with no auth header' truth. See 28-05-SUMMARY.md Deviations item 5 for the finding and proposed remediation.
 
 ## Session Continuity
 
-Last session: 2026-07-05T19:24:30.163Z
-Stopped at: Completed 28-03-PLAN.md
+Last session: 2026-07-05T20:31:33.171Z
+Stopped at: Completed 28-05-PLAN.md (with a deferred Rule 4 item on federation metadata auth)
 Resume file: None
 Next action: /gsd-execute-phase 23

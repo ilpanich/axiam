@@ -86,3 +86,11 @@ and `-p axiam-api-rest --lib batch_check_access` — both passed cleanly).
 **Follow-up recommended:** add the two missing `hibp_breaker_*` fields to
 `grpc_auth_test.rs::test_auth_config()` so `cargo test -p axiam-api-grpc --features client`
 compiles end-to-end again.
+
+**RESOLVED (post-Wave-3 orchestrator integration fix):** Since this compile gap was *introduced*
+by Phase 27 (27-01), the orchestrator added the two missing fields
+(`hibp_breaker_threshold: 5`, `hibp_breaker_cooldown_secs: 30`) to
+`grpc_auth_test.rs::test_auth_config()`, matching the sibling `grpc_authz_test.rs`. Verified with
+`cargo test -p axiam-api-grpc --features client --test grpc_auth_test --no-run` → compiles clean
+(exit 0). The C# items above remain open (pre-existing, unrelated to Phase 27 — recommend a
+dedicated remediation task).

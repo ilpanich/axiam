@@ -23,3 +23,9 @@ axiam-db = { path = "../axiam-db" }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = "0.4"
 serde_json = { workspace = true }
+criterion = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
+futures = "0.3.32"
+
+[[bench]]
+name = "authz_bench"
+harness = false

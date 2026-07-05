@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from typing import Any
 
 import jwt
@@ -206,6 +207,46 @@ def test_empty_keyset_triggers_forced_refetch(eddsa_keypair) -> None:
     claims = verifier.verify(token)
     assert claims["sub"] == "user-1"
     assert endpoint.call_count == calls_after_first_attempt + 1
+
+
+def test_concurrent_cache_miss_burst_triggers_exactly_one_fetch(eddsa_keypair) -> None:
+    """PERF-03 / D-08-D-09 oracle: 8 concurrent verify() calls against a
+    cold cache collapse to exactly one JWKS fetch. The fetch guard makes
+    this deterministic regardless of thread-scheduling order — only the
+    total fetch count is asserted (never an ordering assumption)."""
+    private_key, jwk_dict = eddsa_keypair
+    verifier, endpoint = _make_verifier([jwk_dict])
+
+    token = _sign_eddsa_token(
+        private_key, "test-kid-1", {"sub": "user-1", "tenant_id": "tenant-1", "exp": 9999999999}
+    )
+
+    thread_count = 8
+    barrier = threading.Barrier(thread_count)
+    results: list[Any] = [None] * thread_count
+
+    def worker(index: int) -> None:
+        barrier.wait()
+        try:
+            results[index] = verifier.verify(token)
+        except BaseException as exc:  # noqa: BLE001 - captured for the main thread's assertions
+            results[index] = exc
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(thread_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    for result in results:
+        assert isinstance(
+            result, dict
+        ), f"every concurrent caller must verify successfully, got {result!r}"
+        assert result["sub"] == "user-1"
+
+    assert endpoint.call_count == 1, (
+        "exactly one JWKS fetch must occur across 8 concurrent cold-cache callers (D-08/D-09)"
+    )
 
 
 def test_jwks_path_is_org_wide_endpoint() -> None:

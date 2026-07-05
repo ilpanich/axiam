@@ -811,9 +811,9 @@ Close remaining auth-path timing/memory/durability side-channels.
 The governor currently throttles the mesh to ~1 token / 100 s (per_second semantics inverted).
 
 ### Acceptance Criteria
-- [ ] Use `per_millisecond(1000 / authz_per_sec)` (or `Quota::per_second`) with a separate burst — `rate_limit.rs:40-47`
-- [ ] Raising `grpc_authz_per_sec` increases throughput (not decreases it)
-- [ ] Test asserts sustained throughput ≈ configured rate
+- [x] Use `per_millisecond(1000 / authz_per_sec)` (or `Quota::per_second`) with a separate burst — `rate_limit.rs:40-47`
+- [x] Raising `grpc_authz_per_sec` increases throughput (not decreases it)
+- [x] Test asserts sustained throughput ≈ configured rate
 
 ## CORR-02: SurrealDB Token Renewal / Reconnect
 
@@ -1090,7 +1090,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Complete (code) — cluster NetworkPolicy/secret verification deferred (99-followups/25-10-networkpolicy-cluster-verification.md) |
 | SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Complete |
 | SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Complete |
-| CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Pending |
+| CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Complete (26-01: Quota::per_second construction + sustained-throughput/monotonicity test) |
 | CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Pending |
 | CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Pending |
 | CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Pending |

@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: — MVP Release Hardening
 current_phase: 26
-current_phase_name: Correctness & Resilience
+current_phase_name: correctness-resilience
 status: executing
-stopped_at: Phase 26 UI-SPEC approved
-last_updated: "2026-07-04T22:17:17.598Z"
-last_activity: 2026-07-04
-last_activity_desc: Phase 25 complete, transitioned to Phase 26
+stopped_at: Completed 26-01-PLAN.md
+last_updated: "2026-07-05T07:56:01.060Z"
+last_activity: 2026-07-05
+last_activity_desc: Phase 26 execution started
 progress:
   total_phases: 8
   completed_phases: 3
-  total_plans: 25
-  completed_plans: 25
+  total_plans: 33
+  completed_plans: 26
   percent: 38
 ---
 
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 25 — Security Hardening II — Federation, PKI, Data-Protection & Infra
+**Current focus:** Phase 26 — correctness-resilience
 
 ## Current Position
 
-Phase: 26 — Correctness & Resilience
-Plan: Not started
+Phase: 26 (correctness-resilience) — EXECUTING
+Plan: 2 of 8
 Status: Ready to execute
-Last activity: 2026-07-04 — Phase 25 complete, transitioned to Phase 26
+Last activity: 2026-07-05 — Phase 26 execution started
 
 ## Performance Metrics
 
@@ -180,6 +180,7 @@ Last activity: 2026-07-04 — Phase 25 complete, transitioned to Phase 26
 | Phase 25 P10 | 4min | 3 tasks | 3 files |
 | Phase 25 P02 | 35min | 2 tasks | 3 files |
 | Phase 25 P05 | 65min | 3 tasks | 8 files |
+| Phase 26 P01 | 15min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -435,6 +436,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25-02]: Removed WebhookDeliveryService's pooled reqwest::Client field entirely (guarded_fetch builds its own pinned client per attempt) rather than keeping it #[allow(dead_code)] as 25-01 did for SamlFederationService::http_client — no external call sites made the field genuinely dead
 - [Phase ?]: [Phase 25-05]: added anonymize_user to the UserRepository trait (was inherent-only) so run_erasure_pipeline's U: UserRepository bound compiles; NoopUserRepo test double updated
 - [Phase ?]: [Phase 25-05]: added axiam-server/src/lib.rs (bin+lib split) exposing pub mod cleanup so integration tests can call run_erasure_pipeline directly — Rust tests/ can only link a library target
+- [Phase ?]: [Phase 26-01]: Construct governor::Quota directly (Quota::per_second) and feed const_period()/const_burst_size() into GovernorConfigBuilder instead of trusting tower_governor's own .per_second()/.per_millisecond() builder methods, which set the replenish PERIOD not the rate (CORR-01/CQ-B44 re-fix)
+- [Phase ?]: [Phase 26-01]: Burst size = authz_per_sec (not *2), per D-01; FakeRelativeClock-driven sustained-load simulation is the required test shape for token-bucket rate math regression guards
 
 ### Pending Todos
 
@@ -458,7 +461,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-04T21:14:09.111Z
-Stopped at: Phase 26 UI-SPEC approved
-Resume file: .planning/phases/26-correctness-resilience/26-UI-SPEC.md
+Last session: 2026-07-05T07:56:01.045Z
+Stopped at: Completed 26-01-PLAN.md
+Resume file: None
 Next action: /gsd-execute-phase 23

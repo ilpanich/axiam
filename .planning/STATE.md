@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 26
 current_phase_name: correctness-resilience
 status: executing
-stopped_at: Completed 26-01-PLAN.md
-last_updated: "2026-07-05T07:56:01.060Z"
+stopped_at: Completed 26-02-PLAN.md
+last_updated: "2026-07-05T08:30:20.487Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 26 execution started
 progress:
   total_phases: 8
   completed_phases: 3
   total_plans: 33
-  completed_plans: 26
+  completed_plans: 27
   percent: 38
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 26 (correctness-resilience) — EXECUTING
-Plan: 2 of 8
+Plan: 3 of 8
 Status: Ready to execute
 Last activity: 2026-07-05 — Phase 26 execution started
 
@@ -181,6 +181,7 @@ Last activity: 2026-07-05 — Phase 26 execution started
 | Phase 25 P02 | 35min | 2 tasks | 3 files |
 | Phase 25 P05 | 65min | 3 tasks | 8 files |
 | Phase 26 P01 | 15min | 2 tasks | 1 files |
+| Phase 26 P02 | 20min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -438,6 +439,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25-05]: added axiam-server/src/lib.rs (bin+lib split) exposing pub mod cleanup so integration tests can call run_erasure_pipeline directly — Rust tests/ can only link a library target
 - [Phase ?]: [Phase 26-01]: Construct governor::Quota directly (Quota::per_second) and feed const_period()/const_burst_size() into GovernorConfigBuilder instead of trusting tower_governor's own .per_second()/.per_millisecond() builder methods, which set the replenish PERIOD not the rate (CORR-01/CQ-B44 re-fix)
 - [Phase ?]: [Phase 26-01]: Burst size = authz_per_sec (not *2), per D-01; FakeRelativeClock-driven sustained-load simulation is the required test shape for token-bucket rate math regression guards
+- [Phase ?]: [Phase 26-02]: DbManager.db changed from Surreal<Client> to Arc<Surreal<Client>> so the proactive re-signin task and DbManager's own client() field share the identical session id (a .clone() mints an independent session per the SDK's HTTP-engine model)
+- [Phase ?]: [Phase 26-02]: health_check classify_query_error maps ANY NotAllowed(Auth(..)) failure to DbError::Unhealthy, not just AuthError::TokenExpired -- a revoked/invalid root credential must also alarm rather than being treated as recoverable expiry (T-26-02-02)
+- [Phase ?]: [Phase 26-02]: DbManager::reconnect is a thin, single-attempt reactive seam (brand-new connection, never invalidate()+signin() on a stale handle) documented as the PERF-04 (Phase 27) extension point -- the full jittered-backoff/eviction loop is deferred there
 
 ### Pending Todos
 
@@ -461,7 +465,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T07:56:01.045Z
-Stopped at: Completed 26-01-PLAN.md
+Last session: 2026-07-05T08:30:20.472Z
+Stopped at: Completed 26-02-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

@@ -822,9 +822,9 @@ The governor currently throttles the mesh to ~1 token / 100 s (per_second semant
 The 4-week root-token TTL with no renewal is an uptime ceiling on the control plane.
 
 ### Acceptance Criteria
-- [ ] Periodic re-`signin`/handle-refresh well inside the token TTL, OR reconnect-on-auth-error path — `connection.rs`
-- [ ] `health_check` surfaces auth-expiry as unhealthy (readiness alarm)
-- [ ] Test/simulation proves the client recovers after token expiry without a process restart
+- [x] Periodic re-`signin`/handle-refresh well inside the token TTL, OR reconnect-on-auth-error path — `connection.rs` (26-02: proactive re-signin task D-03/D-04 + reactive `DbManager::reconnect` seam)
+- [x] `health_check` surfaces auth-expiry as unhealthy (readiness alarm) — `DbError::Unhealthy` via `classify_query_error` (D-05)
+- [x] Test/simulation proves the client recovers after token expiry without a process restart — `connection_resilience_test.rs` (pure-logic interval/classification tests pass; live-broker recovery proof is `#[ignore]`d, requires `just dev-up`)
 
 ## CORR-03: Webhook Delivery Wiring
 
@@ -1091,7 +1091,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Complete |
 | SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Complete |
 | CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Complete (26-01: Quota::per_second construction + sustained-throughput/monotonicity test) |
-| CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Pending |
+| CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Complete (26-02: Arc-shared proactive re-signin + reactive reconnect seam + auth-aware health_check) |
 | CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Pending |
 | CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Pending |
 | CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Pending |

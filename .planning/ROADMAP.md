@@ -1004,7 +1004,7 @@ NEGATIVE test passing.
 - [x] **Phase 25: Security Hardening II — Federation, PKI, Data-Protection & Infra** - Fail-closed trust boundaries: SSRF address pinning, mTLS CA status, GDPR erasure durability, federation nonce+secret handling, AMQP per-tenant signing, cluster egress/secret completeness (completed 2026-07-04)
 - [x] **Phase 26: Correctness & Resilience** - gRPC governor throughput, SurrealDB token renewal, durable webhook delivery, Playwright-in-CI with body assertions, frontend tenant/MFA/residual flows (completed 2026-07-05)
 - [x] **Phase 27: Performance & Load Hardening** - HIBP circuit breaker + hot-path pre-sizing, concurrent bounded BatchCheckAccess, JWKS single-flight across SDKs, SurrealDB reconnect backoff-with-jitter, load-test + profiling report (completed 2026-07-05)
-- [ ] **Phase 28: Functional Completeness** - Unauthenticated first-time federation login, session invalidation on reset, admin email-config API + templates, admin user/MFA endpoints + service-account token type, OpenAPI login schema
+- [x] **Phase 28: Functional Completeness** - Unauthenticated first-time federation login, session invalidation on reset, admin email-config API + templates, admin user/MFA endpoints + service-account token type, OpenAPI login schema (completed 2026-07-05)
 - [ ] **Phase 29: Structural Quality** - AppState extraction, generic paginate + shared repo helpers, error-taxonomy correctness, transactional multi-statement mutations, PKI/frontend dedup, dead-code cleanup — no behavior change
 - [ ] **Phase 30: Compliance & Documentation** - OWASP ASVS/ISO 27001/CyberSecurity Act audit checklist, GDPR export/deletion/consent completeness, consolidated REST/gRPC/AMQP + deployment + admin + PKI + SDK docs
 
@@ -1193,7 +1193,7 @@ Plans:
   4. An admin can list users and list/delete another user's MFA methods (RBAC-gated), and service-account tokens carry `sub_kind: "ServiceAccount"` (FUNC-04)
   5. `POST /auth/login` OpenAPI documents both the success and MFA-required responses (via `oneOf`/distinct status) so generated SDKs model them correctly (FUNC-05)
 
-**Plans**: 4/5 plans executed
+**Plans**: 5/5 plans complete
 
 Plans:
 **Wave 1**
@@ -1205,7 +1205,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 28-04-PLAN.md — FUNC-03 email-config admin API (6 scope-nested handlers, route↔OpenAPI↔permission triangle, D-13) + FUNC-01 public-SSO OpenAPI docs (D-12)
+- [x] 28-04-PLAN.md — FUNC-03 email-config admin API (6 scope-nested handlers, route↔OpenAPI↔permission triangle, D-13) + FUNC-01 public-SSO OpenAPI docs (D-12)
 
 ---
 
@@ -1258,7 +1258,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 10/10 | Complete    | 2026-07-04 |
 | 26. Correctness & Resilience | 8/8 | Complete   | 2026-07-05 |
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
-| 28. Functional Completeness | 4/5 | In Progress|  |
+| 28. Functional Completeness | 5/5 | Complete   | 2026-07-05 |
 | 29. Structural Quality | 0/? | Not started | - |
 | 30. Compliance & Documentation | 0/? | Not started | - |
 

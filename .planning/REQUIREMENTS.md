@@ -939,9 +939,9 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** T19.20, T19.21, T19.22
 
 ### Acceptance Criteria
-- [ ] Admin REST CRUD for `email_config` (org- and tenant-scoped), guarded by `email_config:write` RBAC permission (T19.20)
-- [ ] Mail consumer resolves per-org/per-tenant custom templates via `SurrealEmailTemplateRepository` (not the built-in default only) — T19.21
-- [ ] `backfill_plaintext_secrets` implements the UPDATE path (encrypt + update rows where ciphertext is NULL) — T19.22
+- [x] Admin REST CRUD for `email_config` (org- and tenant-scoped), guarded by `email_config:write` RBAC permission (T19.20) — Phase 28-04
+- [x] Mail consumer resolves per-org/per-tenant custom templates via `SurrealEmailTemplateRepository` (not the built-in default only) — T19.21 — Phase 28-03
+- [x] `backfill_plaintext_secrets` implements the UPDATE path (encrypt + update rows where ciphertext is NULL) — T19.22 — Phase 28-01 (documented as an honest no-op: `email_config` was created ciphertext-only in Schema v15, so there is no plaintext source to migrate; the anomaly-detector satisfies the "no plaintext secrets at rest" intent structurally instead)
 
 ## FUNC-04: Admin User & MFA Management Endpoints
 
@@ -1103,7 +1103,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | PERF-05 | Phase 27 | Load testing + profiling (T18.3) | Complete (27-07: criterion benches for auth/authz/cert-validation; performance-report.md with real baseline-vs-optimized numbers, ~8.4x authz batch speedup) |
 | FUNC-01 | Phase 28 | Unauthenticated federation login (T19.9) | Pending |
 | FUNC-02 | Phase 28 | Session invalidation on reset (T19.10) | Pending |
-| FUNC-03 | Phase 28 | Admin email-config API + templates (T19.20/21/22) | Pending |
+| FUNC-03 | Phase 28 | Admin email-config API + templates (T19.20/21/22) | Complete (28-01: T19.22 backfill honesty; 28-03: T19.21 custom-template resolution; 28-04: T19.20 admin REST CRUD, RBAC-gated, IDOR-safe, secret-omitting) |
 | FUNC-04 | Phase 28 | Admin user/MFA endpoints + SA token | Pending |
 | FUNC-05 | Phase 28 | OpenAPI login response schema (T19.4) | Pending |
 | QUAL-01 | Phase 29 | AppState extraction (CQ-B43) | Pending |

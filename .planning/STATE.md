@@ -4,17 +4,17 @@ milestone: v1.2
 milestone_name: — MVP Release Hardening
 current_phase: 28
 current_phase_name: functional-completeness
-status: executing
-stopped_at: Completed 28-05-PLAN.md (with a deferred Rule 4 item on federation metadata auth)
-last_updated: "2026-07-05T20:31:33.189Z"
+status: verifying
+stopped_at: Completed 28-04-PLAN.md (final plan of Phase 28-functional-completeness)
+last_updated: "2026-07-05T21:05:22.349Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 28 execution started
 progress:
   total_phases: 8
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 45
-  completed_plans: 44
-  percent: 63
+  completed_plans: 45
+  percent: 75
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 28 (functional-completeness) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-05 — Phase 28 execution started
 
 ## Performance Metrics
@@ -200,6 +200,7 @@ Last activity: 2026-07-05 — Phase 28 execution started
 | Phase 28 P02 | 20min | 3 tasks | 4 files |
 | Phase 28 P03 | 25min | 3 tasks | 4 files |
 | Phase 28-functional-completeness P05 | 70min | 3 tasks | 9 files |
+| Phase 28-functional-completeness P04 | 35min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -500,6 +501,10 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 28-05]: Reused JwksCache's existing allow_private_networks SEC-054 test seam inside OidcFederationService::discover()/exchange_code() (instead of a new bypass) to enable wiremock-based e2e testing of the public first-time-SSO handlers; zero production behavior change
 - [Phase ?]: [Phase 28-05]: Fixed a real production bug — the four public first-time-SSO endpoints (oidc/start, oidc/callback, saml/login, saml/acs) were missing from CSRF_EXEMPT_SUFFIXES and 403'd despite being listed in PUBLIC_PATHS
 - [Phase ?]: [Phase 28-05]: Deferred (Rule 4) fixing the federation metadata endpoint's auth model — saml_metadata requires a JWT despite PUBLIC_PATHS listing it as public; needs human decision on query-param-based tenant resolution vs. correcting the public-metadata framing
+- [Phase ?]: [Phase 28-functional-completeness]: 28-04: email_config:read/write is a single permission pair shared across org+tenant scopes and GET/PUT+DELETE verbs (D-03), not four separate permissions
+- [Phase ?]: [Phase 28-functional-completeness]: 28-04: GET email-config never calls get_effective_config — always the raw own-scope row (get_org_config/get_tenant_override), per D-14
+- [Phase ?]: [Phase 28-functional-completeness]: 28-04: email_config_repo registered as REST app_data in main.rs only when AXIAM__EMAIL_ENCRYPTION_KEY is present (fail-closed, no zero-key fallback), mirroring the mail consumer's conditional-spawn pattern
+- [Phase ?]: [Phase 28-functional-completeness]: 28-04: schema v23 (DEFINE FIELD OVERWRITE) extends email_config.provider_kind's ASSERT to accept the empty-string sentinel, fixing a latent set_tenant_override write/read asymmetry bug
 
 ### Pending Todos
 
@@ -524,7 +529,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T20:31:33.171Z
-Stopped at: Completed 28-05-PLAN.md (with a deferred Rule 4 item on federation metadata auth)
+Last session: 2026-07-05T21:05:22.331Z
+Stopped at: Completed 28-04-PLAN.md (final plan of Phase 28-functional-completeness)
 Resume file: None
 Next action: /gsd-execute-phase 23

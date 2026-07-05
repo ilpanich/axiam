@@ -884,7 +884,7 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 
 ### Acceptance Criteria
 - [x] `BatchCheckAccess` evaluates requests concurrently with bounded concurrency (`buffer_unordered`/`FuturesUnordered`), result order preserved — 27-05: `AuthzConfig.batch_max_concurrency` (default 16) wired through gRPC (`AuthorizationServiceImpl`) and REST (`handlers::authz_check::batch_check_access`); both use `stream::iter(enumerate).map(...).buffer_unordered(n).collect()` then `sort_by_key(index)`
-- [ ] Benchmark shows improvement over the sequential implementation — deferred to 27-07 (authz bench)
+- [x] Benchmark shows improvement over the sequential implementation — 27-07: `authz_bench` criterion run, sequential 95.9ms vs `buffer_unordered(16)` 11.4ms (~8.4x speedup), recorded in `claude_dev/performance-report.md`
 - [x] Correctness test: batch results match per-item `CheckAccess` — 27-05: correctness tests for both transports assert batch == sequential per-item results, same order
 
 ## PERF-03: JWKS Single-Flight Across SDKs
@@ -1097,7 +1097,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Complete (26-05: backend tenant_slug/org_slug; 26-08: public /auth/mfa-setup route D-16 + tenant-restore e2e) |
 | CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Complete (26-06: VerifyEmailPage useRef guard D-17, Dashboard distinct query key D-18, org-settings init-guard/dirty-tracking/navigate-away guard D-19) |
 | PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Pending |
-| PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Pending |
+| PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Complete (27-05: gRPC+REST `buffer_unordered`+`sort_by_key`, `AuthzConfig.batch_max_concurrency`=16, correctness tests batch==sequential; 27-07: `authz_bench` ~8.4x speedup) |
 | PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Complete (27-02: rust/python; 27-03: go/java/csharp; 27-04: typescript proven via jose's native pendingFetch guard + php Guzzle-promise guard) |
 | PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) | Complete (27-06: full-jitter backoff + Arc<RwLock<Surreal<Client>>> poisoned-handle eviction + exhaustion-stays-Unhealthy-forever reconnect loop) |
 | PERF-05 | Phase 27 | Load testing + profiling (T18.3) | Complete (27-07: criterion benches for auth/authz/cert-validation; performance-report.md with real baseline-vs-optimized numbers, ~8.4x authz batch speedup) |

@@ -14,7 +14,9 @@ use crate::connection::queues;
 use crate::messages::{MailType, OutboundMailMessage};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::email_template::TemplateKind;
-use axiam_core::repository::{AuditLogRepository, EmailConfigRepository, UserRepository};
+use axiam_core::repository::{
+    AuditLogRepository, EmailConfigRepository, EmailTemplateRepository, UserRepository,
+};
 use axiam_email::service::EmailService;
 use axiam_email::template::{TemplateContext, render_email, resolve_template};
 use futures_lite::StreamExt;
@@ -124,16 +126,18 @@ fn build_template_context(ctx: &serde_json::Value) -> TemplateContext {
 /// The actual recipient email is always resolved from `user_id` + `tenant_id`
 /// via the user repository, preventing recipient hijacking if a message is
 /// intercepted and tampered with in transit.
-pub async fn send_with_retry_and_audit<E, A, U>(
+pub async fn send_with_retry_and_audit<E, A, U, T>(
     msg: &OutboundMailMessage,
     email_config_repo: &E,
     audit_repo: &A,
     user_repo: &U,
+    template_repo: &T,
 ) -> Result<SendOutcome, SendError>
 where
     E: EmailConfigRepository,
     A: AuditLogRepository,
     U: UserRepository,
+    T: EmailTemplateRepository,
 {
     // 1. Resolve effective email config (tenant → org cascade).
     let email_config = email_config_repo
@@ -148,10 +152,40 @@ where
     // 2. Build EmailService from resolved config.
     let svc = EmailService::from_config(&config).map_err(|e| SendError(e.to_string()))?;
 
-    // 3. Resolve built-in template (no per-org/tenant custom templates fetched here;
-    //    template repository lookup is deferred to a future task — T19.21).
+    // 3. Resolve the effective template: tenant custom → org custom → built-in
+    //    (FUNC-03 / D-05). Each fetch is fail-safe (D-06): a DB error logs a
+    //    warning and falls back to `None` so a broken/unfetchable custom
+    //    template can never strand a security-critical email — mirroring the
+    //    SEC-055 recipient-resolution defensive shape below.
     let kind = template_kind_for(&msg.mail_type);
-    let template = resolve_template(kind, None, None);
+
+    let org_template = template_repo
+        .get_org_template(msg.org_id, kind)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(
+                org_id = %msg.org_id,
+                kind = ?kind,
+                error = %e,
+                "D-06: could not fetch org email template — falling back to built-in"
+            );
+            None
+        });
+
+    let tenant_template = template_repo
+        .get_tenant_template(msg.tenant_id, kind)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(
+                tenant_id = %msg.tenant_id,
+                kind = ?kind,
+                error = %e,
+                "D-06: could not fetch tenant email template — falling back to built-in"
+            );
+            None
+        });
+
+    let template = resolve_template(kind, org_template.as_ref(), tenant_template.as_ref());
 
     // 4. Build template context from message.
     let ctx = build_template_context(&msg.template_context);
@@ -293,15 +327,17 @@ fn error_class_for(error_msg: &str) -> &'static str {
 /// SEC-055: The `user_repo` is used to resolve the actual recipient email
 /// address from `user_id + tenant_id`, preventing recipient hijacking via
 /// a tampered `to_address` field in the AMQP message.
-pub async fn start_mail_consumer<E, A, U>(
+pub async fn start_mail_consumer<E, A, U, T>(
     channel: Channel,
     email_config_repo: E,
     audit_repo: A,
     user_repo: U,
+    template_repo: T,
 ) where
     E: EmailConfigRepository + 'static,
     A: AuditLogRepository + 'static,
     U: UserRepository + 'static,
+    T: EmailTemplateRepository + 'static,
 {
     info!("Starting mail AMQP consumer");
 
@@ -352,8 +388,14 @@ pub async fn start_mail_consumer<E, A, U>(
             }
         };
 
-        let outcome =
-            send_with_retry_and_audit(&msg, &email_config_repo, &audit_repo, &user_repo).await;
+        let outcome = send_with_retry_and_audit(
+            &msg,
+            &email_config_repo,
+            &audit_repo,
+            &user_repo,
+            &template_repo,
+        )
+        .await;
 
         match outcome {
             Ok(SendOutcome::Delivered) => {

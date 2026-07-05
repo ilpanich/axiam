@@ -392,6 +392,7 @@ mod tests {
         // buffer_unordered), not a re-implementation of its internals.
         let claims = ValidatedClaims(axiam_auth::token::AccessTokenClaims {
             sub: user_id.to_string(),
+            sub_kind: axiam_auth::token::SubjectKind::User,
             tenant_id: tenant_id.to_string(),
             org_id: Uuid::nil().to_string(),
             iss: "axiam-test".into(),

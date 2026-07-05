@@ -46,6 +46,8 @@ fn test_config() -> AuthConfig {
         jwt_issuer: "axiam-test".into(),
         pepper: None,
         min_password_length: 12,
+        hibp_breaker_threshold: 5,
+        hibp_breaker_cooldown_secs: 30,
         mfa_encryption_key: Some(TEST_MFA_KEY),
         federation_encryption_key: None,
         allow_missing_aud_as_user: true,

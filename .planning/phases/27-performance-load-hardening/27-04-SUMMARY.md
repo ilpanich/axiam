@@ -129,9 +129,15 @@ None - no external service configuration required.
 
 ## Next Phase Readiness
 
-- PERF-03 is now fully closed across all 7 code SDKs (rust: 27-02 or earlier per phase history, python/go/java/csharp: 27-03, typescript/php: this plan).
+- PERF-03 is now fully closed across all 7 code SDKs (rust/python: 27-02, go/java/csharp: 27-03, typescript/php: this plan).
 - This was the last plan of Phase 27 (performance-load-hardening) per the 7-plan structure implied by ROADMAP; verify remaining phase-level `<success_criteria>` (criterion benches, HIBP breaker, batch authz concurrency, DB reconnect resilience) were covered in earlier 27-0x plans before marking the phase itself complete.
 - No blockers for subsequent phases.
+
+---
+
+## Self-Check: PASSED
+
+All created/modified files found on disk; all 3 commit hashes (`08fbee9`, `16f0242`, `80f65d2`) found in git log.
 
 ---
 

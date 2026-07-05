@@ -892,9 +892,9 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** T19.28
 
 ### Acceptance Criteria
-- [ ] JWKS fetch wrapped in a single-flight promise/future so N concurrent cache-misses await one network request
-- [ ] Applied consistently across Python, Go, Rust, Java, C#, TypeScript SDKs
-- [ ] Test: burst of invalid-`kid` tokens triggers exactly one JWKS fetch
+- [x] JWKS fetch wrapped in a single-flight promise/future so N concurrent cache-misses await one network request
+- [x] Applied consistently across Python, Go, Rust, Java, C#, TypeScript, and PHP SDKs
+- [x] Test: burst of invalid-`kid` tokens triggers exactly one JWKS fetch
 
 ## PERF-04: SurrealDB Reconnect Resilience
 
@@ -1098,7 +1098,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Complete (26-06: VerifyEmailPage useRef guard D-17, Dashboard distinct query key D-18, org-settings init-guard/dirty-tracking/navigate-away guard D-19) |
 | PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Pending |
 | PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Pending |
-| PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Pending |
+| PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Complete (27-02: rust/python; 27-03: go/java/csharp; 27-04: typescript proven via jose's native pendingFetch guard + php Guzzle-promise guard) |
 | PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) | Pending |
 | PERF-05 | Phase 27 | Load testing + profiling (T18.3) | Pending |
 | FUNC-01 | Phase 28 | Unauthenticated federation login (T19.9) | Pending |

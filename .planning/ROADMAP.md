@@ -1193,7 +1193,14 @@ Plans:
   4. An admin can list users and list/delete another user's MFA methods (RBAC-gated), and service-account tokens carry `sub_kind: "ServiceAccount"` (FUNC-04)
   5. `POST /auth/login` OpenAPI documents both the success and MFA-required responses (via `oneOf`/distinct status) so generated SDKs model them correctly (FUNC-05)
 
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+- [ ] 28-01-PLAN.md — FUNC-03 foundation: email-provider secret hygiene (D-01/D-02), repository delete_org_config + NULL-ciphertext error (D-08) + honest backfill closure (D-07)
+- [ ] 28-02-PLAN.md — FUNC-04: SubjectKind + sub_kind claim + issue_service_account_token (D-09/D-10/D-11); verify admin user/MFA RBAC gating
+- [ ] 28-03-PLAN.md — FUNC-03 custom email-template delivery: thread EmailTemplateRepository into the mail consumer with fail-safe fallback (D-05/D-06)
+- [ ] 28-04-PLAN.md — FUNC-03 email-config admin API (6 scope-nested handlers, route↔OpenAPI↔permission triangle, D-13) + FUNC-01 public-SSO OpenAPI docs (D-12)
+- [ ] 28-05-PLAN.md — FUNC-01 first-time OIDC SSO e2e (closes CQ-B40) + FUNC-02 / FUNC-05 verification-and-close
 
 ---
 

@@ -31,11 +31,10 @@
 
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-
-use std::num::NonZeroU32;
 
 use axiam_db::repository::SurrealRateLimitBucketRepository;
 use chrono::{DateTime, Utc};
@@ -455,6 +454,106 @@ mod tests {
         assert_eq!(key1, peer.ip());
         assert_eq!(key2, peer.ip());
         assert_eq!(key1, key2, "rotating XFF must not yield a fresh key");
+    }
+
+    // -----------------------------------------------------------------
+    // CORR-01/D-02: sustained-throughput + monotonicity regression test
+    // -----------------------------------------------------------------
+    //
+    // Drives sustained load against the SAME `governor::Quota::per_second`
+    // construction `build_grpc_governor_layer` uses (see the production
+    // function above) via a `FakeRelativeClock`, and asserts the permitted
+    // count over a simulated window approximates the configured rate — the
+    // only reliable way to distinguish a correctly-throttling governor from
+    // one that is inverted (RESEARCH Pitfall 1: a naive "does the first
+    // burst get through" smoke test looks identical either way).
+    //
+    // This test would FAIL against the old, inverted construction: with
+    // `tower_governor`'s `.per_second(n)` treated as "n tokens/sec" (the
+    // CQ-B44 bug), the replenish period becomes `n` SECONDS, so over a
+    // 1-second simulated window virtually no additional tokens regenerate
+    // past the initial burst — the sustained (post-burst) count would be
+    // ~0, not approximately `n`.
+    fn permitted_over_window(rate: u32, window: std::time::Duration) -> u64 {
+        use governor::RateLimiter;
+        use governor::clock::FakeRelativeClock;
+
+        let burst = NonZeroU32::new(rate).expect("rate >= 1");
+        let quota = Quota::per_second(burst);
+        let clock = FakeRelativeClock::default();
+        let limiter = RateLimiter::direct_with_clock(quota, clock.clone());
+
+        // Drain the initial burst (the bucket starts full) — burst capacity
+        // is a separate, already-asserted property (D-01: burst ==
+        // authz_per_sec); it must NOT be counted as "sustained" throughput,
+        // or a fully-inverted governor with a large burst could still look
+        // like it's passing this test on the first drain alone.
+        while limiter.check().is_ok() {}
+
+        // Now simulate sustained load: advance the fake clock in small
+        // steps across the window, greedily draining whatever new tokens
+        // have accumulated at each step — this proves tokens keep
+        // replenishing throughout the window (sustained throughput), not
+        // just once at t=0.
+        let step = std::time::Duration::from_millis(5);
+        let mut elapsed = std::time::Duration::ZERO;
+        let mut permitted: u64 = 0;
+        while elapsed < window {
+            clock.advance(step);
+            elapsed += step;
+            while limiter.check().is_ok() {
+                permitted += 1;
+            }
+        }
+        permitted
+    }
+
+    #[test]
+    fn governor_sustained_throughput_matches_configured_rate() {
+        let window = std::time::Duration::from_secs(1);
+        let rate = 50u32;
+
+        let permitted = permitted_over_window(rate, window);
+
+        // Tolerance band accounts for the fake clock's discrete 5ms step
+        // granularity relative to the token replenish interval; well
+        // outside this band would mean the governor is not throttling at
+        // approximately the configured rate (CORR-01's ~1/100s inversion
+        // would put this number at ~0, nowhere close to 50).
+        let lower = (rate as f64 * 0.7) as u64;
+        let upper = (rate as f64 * 1.3) as u64;
+        assert!(
+            permitted >= lower && permitted <= upper,
+            "expected sustained throughput approximately {rate} req/s over a \
+             1s window (allowed range {lower}..={upper}), got {permitted} — \
+             the governor quota construction may be inverted again (CORR-01)"
+        );
+        assert!(
+            permitted > 1,
+            "sustained throughput of {permitted} over 1s is consistent with \
+             the ~1-token/100s inversion bug this test guards against"
+        );
+    }
+
+    #[test]
+    fn governor_higher_configured_rate_permits_strictly_more_requests() {
+        // Monotonicity guard: a higher `authz_per_sec` must yield strictly
+        // more permitted requests than a lower one over the SAME simulated
+        // window. An inverted construction (period, not rate) would make
+        // this relationship backwards (raising the configured rate makes
+        // the governor SLOWER) or flat (both effectively ~0).
+        let window = std::time::Duration::from_secs(1);
+
+        let low = permitted_over_window(10, window);
+        let high = permitted_over_window(100, window);
+
+        assert!(
+            high > low,
+            "expected a higher configured rate (100/s) to permit strictly \
+             more sustained requests than a lower rate (10/s) over the same \
+             1s window, got low={low} high={high} — the quota construction \
+             may be inverted (CORR-01)"
+        );
     }
 
     #[test]

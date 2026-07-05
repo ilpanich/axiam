@@ -1159,14 +1159,14 @@ Plans:
   4. A failed SurrealDB handshake / poisoned connection is dropped and never recycled into the healthy pool, and the reconnect loop uses full-jitter exponential backoff with a `max_backoff` ceiling and bounded retry (PERF-04)
   5. `claude_dev/performance-report.md` records baseline-vs-optimized numbers from the load-test harness (k6/criterion) for auth, authz-check, and certificate validation (PERF-05)
 
-**Plans**: 2/7 plans executed
+**Plans**: 3/7 plans executed
 
 Plans:
 **Wave 1**
 
 - [x] 27-01-PLAN.md — PERF-01 HIBP circuit breaker (fail-open + cooldown) + hot-path pre-sizing (axiam-auth)
 - [x] 27-02-PLAN.md — PERF-03 JWKS single-flight: Rust + Python SDKs
-- [ ] 27-03-PLAN.md — PERF-03 JWKS single-flight: Go + Java + C# SDKs
+- [x] 27-03-PLAN.md — PERF-03 JWKS single-flight: Go + Java + C# SDKs
 - [ ] 27-04-PLAN.md — PERF-03 JWKS single-flight: TypeScript + PHP SDKs
 
 **Wave 2** *(depends on 27-01 — shared main.rs)*
@@ -1245,7 +1245,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete    | 2026-07-04 |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 10/10 | Complete    | 2026-07-04 |
 | 26. Correctness & Resilience | 8/8 | Complete   | 2026-07-05 |
-| 27. Performance & Load Hardening | 2/7 | In Progress|  |
+| 27. Performance & Load Hardening | 3/7 | In Progress|  |
 | 28. Functional Completeness | 0/? | Not started | - |
 | 29. Structural Quality | 0/? | Not started | - |
 | 30. Compliance & Documentation | 0/? | Not started | - |

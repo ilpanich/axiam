@@ -1169,6 +1169,15 @@ pub trait EmailConfigRepository: Send + Sync {
         input: SetOrgEmailConfig,
     ) -> impl Future<Output = AxiamResult<EmailConfig>> + Send;
 
+    /// Delete the org-level email config (D-13).
+    ///
+    /// Note (D-13-org-delete-orphaning): this does NOT cascade-delete tenant
+    /// overrides that depend on this org baseline. After deletion,
+    /// `get_effective_config` returns `None` for tenants without a full
+    /// override of their own, which surfaces as a clear "no email config"
+    /// condition at send time rather than silently sending broken mail.
+    fn delete_org_config(&self, org_id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
     /// Get tenant-level overrides.
     fn get_tenant_override(
         &self,

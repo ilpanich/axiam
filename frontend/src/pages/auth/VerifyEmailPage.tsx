@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { CheckCircle2, AlertCircle, Loader2, MailOpen } from "lucide-react";
 import { authService } from "@/services/auth";
@@ -44,20 +44,35 @@ export function VerifyEmailPage() {
   );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!token || !tenantId) return;
+  // D-17: useRef once-guard prevents a second HTTP request under React 18
+  // StrictMode (which mounts effects twice in development). Mirrors
+  // useAuthInit.ts's guard idiom exactly.
+  const verifiedRef = useRef(false);
 
-    let cancelled = false;
+  useEffect(() => {
+    // D-17: the useRef guard is the SINGLE de-dup mechanism for the verify
+    // call. Refs persist across React 18 StrictMode's unmount/remount, so the
+    // second mount returns here and the single-use token is never consumed
+    // twice.
+    //
+    // Do NOT add a `cancelled`-on-cleanup flag back: under StrictMode the
+    // first doVerify() would be cancelled by its own cleanup before the
+    // network call resolves, so a genuinely successful verification would
+    // never reach setVerifyState("success") — surfacing a false "failed"
+    // even though the token was consumed (the regression this guard fixes,
+    // per useAuthInit.ts's own comment on the same pattern).
+    if (!token || !tenantId) return;
+    if (verifiedRef.current) return;
+    verifiedRef.current = true;
 
     async function doVerify() {
       setVerifyState("loading");
       try {
         await authService.verifyEmail(tenantId!, token!);
         window.history.replaceState({}, document.title, window.location.pathname);
-        if (!cancelled) setVerifyState("success");
+        setVerifyState("success");
       } catch (err) {
         window.history.replaceState({}, document.title, window.location.pathname);
-        if (cancelled) return;
         const axiosErr = err as AxiosError<ErrorResponse>;
         const msg =
           axiosErr.response?.data?.message ??
@@ -69,9 +84,6 @@ export function VerifyEmailPage() {
     }
 
     doVerify();
-    return () => {
-      cancelled = true;
-    };
   }, [token, tenantId]);
 
   return (

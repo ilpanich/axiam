@@ -8,11 +8,9 @@
 
 use axiam_amqp::mail_consumer::{MAX_RETRIES, SendOutcome, send_with_retry_and_audit};
 use axiam_amqp::messages::{MailType, OutboundMailMessage};
-use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::email::{ProviderConfig, SetOrgEmailConfig, SmtpConfig};
-use axiam_core::models::email_template::{EmailTemplate, SetEmailTemplate, TemplateKind};
 use axiam_core::repository::{
-    AuditLogFilter, AuditLogRepository, EmailConfigRepository, EmailTemplateRepository, Pagination,
+    AuditLogFilter, AuditLogRepository, EmailConfigRepository, Pagination,
 };
 use axiam_db::{
     SurrealAuditLogRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
@@ -26,6 +24,16 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
+//
+// FUNC-03 / D-05 / D-06 custom-template-resolution and fetch-error-fallback
+// tests live in their own file, `mail_consumer_template_test.rs` (a separate
+// cargo test binary/process), NOT here. They capture `tracing` debug/warn
+// output via a thread-local subscriber override; `tracing`'s per-callsite
+// `Interest` cache that override invalidates is process-global, so sharing a
+// process with other SurrealDB-touching tests risks a cross-test race that
+// silently drops captured log lines. Isolating them in their own test binary
+// (mirroring `axiam-api-rest/tests/gdpr_audit_dlq_test.rs`, which is the
+// sole test in its file for the same reason) avoids that race entirely.
 
 async fn setup_db() -> Surreal<Db> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
@@ -325,236 +333,5 @@ async fn successful_send_via_mock_config_returns_delivered() {
         result.is_ok(),
         "mock provider send must succeed: {:?}",
         result
-    );
-}
-
-// ---------------------------------------------------------------------------
-// FUNC-03 / D-05 / D-06: custom-template resolution + fetch-error fallback
-// ---------------------------------------------------------------------------
-//
-// `send_with_retry_and_audit` does not return the rendered `EmailMessage`
-// (it is delivered directly via the resolved `EmailService`/provider), so
-// these tests cannot assert on the message object itself. Instead they
-// capture the `tracing::debug!("email details", subject = ..)` line that
-// `EmailService::send` emits *before* attempting the (always-failing, in
-// this broker-free harness) network send — mirroring the tracing-capture
-// technique already used by `axiam-api-rest/tests/gdpr_audit_dlq_test.rs`.
-
-/// In-memory `tracing_subscriber::fmt::MakeWriter` so tests can assert on
-/// the structured `EmailService::send` debug log without a real log sink.
-#[derive(Clone)]
-struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for BufWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
-    type Writer = BufWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-/// `EmailTemplateRepository` test double whose org/tenant fetches always
-/// fail — proves D-06's fail-safe-to-built-in behavior on a genuine fetch
-/// `Err`, independent of `SurrealEmailTemplateRepository`'s real DB path.
-struct FailingTemplateRepo;
-
-impl EmailTemplateRepository for FailingTemplateRepo {
-    async fn get_org_template(
-        &self,
-        _org_id: Uuid,
-        _kind: TemplateKind,
-    ) -> AxiamResult<Option<EmailTemplate>> {
-        Err(AxiamError::Database(
-            "simulated org template fetch failure — test double".into(),
-        ))
-    }
-
-    async fn set_org_template(
-        &self,
-        _org_id: Uuid,
-        _input: SetEmailTemplate,
-    ) -> AxiamResult<EmailTemplate> {
-        unimplemented!("not exercised by the D-06 fallback test")
-    }
-
-    async fn delete_org_template(&self, _org_id: Uuid, _kind: TemplateKind) -> AxiamResult<()> {
-        unimplemented!("not exercised by the D-06 fallback test")
-    }
-
-    async fn list_org_templates(&self, _org_id: Uuid) -> AxiamResult<Vec<EmailTemplate>> {
-        unimplemented!("not exercised by the D-06 fallback test")
-    }
-
-    async fn get_tenant_template(
-        &self,
-        _tenant_id: Uuid,
-        _kind: TemplateKind,
-    ) -> AxiamResult<Option<EmailTemplate>> {
-        Err(AxiamError::Database(
-            "simulated tenant template fetch failure — test double".into(),
-        ))
-    }
-
-    async fn set_tenant_template(
-        &self,
-        _tenant_id: Uuid,
-        _input: SetEmailTemplate,
-    ) -> AxiamResult<EmailTemplate> {
-        unimplemented!("not exercised by the D-06 fallback test")
-    }
-
-    async fn delete_tenant_template(
-        &self,
-        _tenant_id: Uuid,
-        _kind: TemplateKind,
-    ) -> AxiamResult<()> {
-        unimplemented!("not exercised by the D-06 fallback test")
-    }
-
-    async fn list_tenant_templates(&self, _tenant_id: Uuid) -> AxiamResult<Vec<EmailTemplate>> {
-        unimplemented!("not exercised by the D-06 fallback test")
-    }
-}
-
-/// With a seeded tenant custom template, `send_with_retry_and_audit` renders
-/// and attempts to deliver an email carrying that custom template's subject
-/// (tenant precedence, D-05) — not the built-in default subject.
-#[tokio::test]
-async fn custom_tenant_template_is_used_when_present() {
-    let db = setup_db().await;
-    let org_id = Uuid::new_v4();
-    let tenant_id = Uuid::new_v4();
-    seed_failing_email_config(&db, org_id, tenant_id).await;
-
-    let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
-    let audit_repo = SurrealAuditLogRepository::new(db.clone());
-    let user_repo = SurrealUserRepository::new(db.clone());
-    let template_repo = SurrealEmailTemplateRepository::new(db.clone());
-
-    const CUSTOM_MARKER: &str = "CUSTOM-TENANT-SUBJECT-MARKER-9f3a";
-    template_repo
-        .set_tenant_template(
-            tenant_id,
-            SetEmailTemplate {
-                kind: TemplateKind::PasswordReset,
-                subject: CUSTOM_MARKER.into(),
-                html_body: "<p>custom html body</p>".into(),
-                text_body: "custom text body".into(),
-            },
-        )
-        .await
-        .expect("seed tenant custom template");
-
-    let log_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(BufWriter(log_buf.clone()))
-        .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
-    let outcome = send_with_retry_and_audit(
-        &msg,
-        &email_repo,
-        &audit_repo,
-        &user_repo,
-        &template_repo,
-    )
-    .await
-    .expect("delivery attempt must still proceed (built-in-vs-custom is orthogonal to transport)");
-
-    drop(_guard);
-
-    assert!(
-        matches!(outcome, SendOutcome::RetryNeeded { .. }),
-        "expected RetryNeeded against the fake SMTP sink, got {:?}",
-        outcome
-    );
-
-    let log_output = String::from_utf8(log_buf.lock().unwrap().clone()).expect("utf8 log output");
-    assert!(
-        log_output.contains(CUSTOM_MARKER),
-        "EmailService::send's debug log must carry the resolved tenant custom \
-         template's subject, proving D-05 tenant-precedence resolution reached \
-         the render/send path; log output: {log_output}"
-    );
-}
-
-/// When both `get_org_template` and `get_tenant_template` return `Err`, the
-/// consumer must NOT propagate that as a hard `SendError` — it logs a
-/// warning and falls back to the built-in template, still attempting
-/// delivery (D-06). SEC-055 recipient re-resolution is unaffected.
-#[tokio::test]
-async fn template_fetch_error_falls_back_to_builtin_and_still_attempts_delivery() {
-    let db = setup_db().await;
-    let org_id = Uuid::new_v4();
-    let tenant_id = Uuid::new_v4();
-    seed_failing_email_config(&db, org_id, tenant_id).await;
-
-    let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
-    let audit_repo = SurrealAuditLogRepository::new(db.clone());
-    let user_repo = SurrealUserRepository::new(db.clone());
-    let template_repo = FailingTemplateRepo;
-
-    let log_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(BufWriter(log_buf.clone()))
-        .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
-    let outcome =
-        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo).await;
-
-    drop(_guard);
-
-    // D-06: a template-fetch Err must never surface as a hard SendError —
-    // the mail pipeline still attempts delivery (RetryNeeded against the
-    // fake SMTP sink here), it just uses the built-in template instead.
-    assert!(
-        outcome.is_ok(),
-        "a template-fetch Err must fall back to the built-in template and still \
-         attempt delivery, not propagate as SendError; got {:?}",
-        outcome
-    );
-    assert!(
-        matches!(outcome, Ok(SendOutcome::RetryNeeded { .. })),
-        "expected RetryNeeded (delivery still attempted) despite template fetch \
-         failure, got {:?}",
-        outcome
-    );
-
-    let log_output = String::from_utf8(log_buf.lock().unwrap().clone()).expect("utf8 log output");
-    assert!(
-        log_output.contains("D-06") && log_output.contains("could not fetch"),
-        "expected a D-06 fallback warning for both the org and tenant fetch \
-         failures; log output: {log_output}"
-    );
-    let warn_count = log_output.matches("D-06").count();
-    assert_eq!(
-        warn_count, 2,
-        "expected exactly two D-06 fallback warnings (org fetch + tenant fetch), got {warn_count}; log: {log_output}"
-    );
-
-    // Built-in fallback content check: the built-in PasswordReset subject
-    // ("Reset your password for ...") must appear in the debug log, proving
-    // resolve_template fell through to builtin_template(kind), not some
-    // stale/garbage template.
-    assert!(
-        log_output.contains("Reset your password for"),
-        "expected the built-in PasswordReset subject in the debug log after \
-         fallback; log output: {log_output}"
     );
 }

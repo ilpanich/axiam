@@ -365,32 +365,39 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
         Self { db, key }
     }
 
-    /// Idempotent startup backfill: encrypt any legacy plaintext provider
-    /// secrets that pre-date the D-17 at-rest encryption requirement (D-17).
+    /// Intentional, tested no-op (D-07): `email_config` has no plaintext
+    /// secret to migrate, unlike `federation_config`.
     ///
-    /// Since the email_config table was introduced in Schema v15 (Phase 5)
-    /// with encrypted columns from the start, this method currently always
-    /// returns 0. It is retained so operators upgrading from pre-v15 snapshots
-    /// or external tooling that wrote plaintext rows before the schema was
-    /// finalized are automatically migrated.
+    /// `federation_config` predates split-column encryption: it was created
+    /// with a single plaintext `client_secret` column, so a real backfill
+    /// path exists there (`list_with_legacy_plaintext_secret` +
+    /// `set_encrypted_secret` in `federation_config.rs`) that reads the
+    /// plaintext column, encrypts it, and nulls the plaintext out.
     ///
-    /// The query selects SMTP rows where `smtp_password_ciphertext IS NULL`
-    /// and API-provider rows where `api_key_ciphertext IS NULL` — both of
-    /// which represent unencrypted legacy state. Already-encrypted rows are
-    /// skipped (idempotent). Returns the count of rows migrated.
+    /// `email_config` is different: it was introduced in Schema v15
+    /// (Phase 5) with ciphertext-only columns (`smtp_password_ciphertext`,
+    /// `api_key_ciphertext`) from the very first migration — there has
+    /// never been a plaintext `smtp_password`/`api_key` source column in
+    /// this schema to encrypt. There is therefore no UPDATE/encrypt path to
+    /// implement here, and inventing one would be dishonest about what this
+    /// function does. The "no unencrypted secrets at rest" intent is
+    /// instead satisfied structurally: `SurrealEmailConfigRepository`
+    /// only ever writes through `encrypt_provider` (see `set_org_config`),
+    /// so no plaintext-secret row can be produced by this repository.
+    ///
+    /// What this function *does* do: it detects (and warns on, but does not
+    /// mutate) any row with a configured provider but NULL/missing secret
+    /// ciphertext — an anomalous state that should never occur via this
+    /// repository's own write path, but could in principle arise from
+    /// external tooling writing directly to the table. On a normal v15+
+    /// database with no such anomalies, this always returns `Ok(0)`.
     pub async fn backfill_plaintext_secrets(&self) -> AxiamResult<u64> {
-        // Phase 5 added the email_config table with encrypted columns only —
-        // no plaintext password column exists in the schema. Therefore this
-        // SELECT will always return 0 rows on a v15+ database, making the
-        // backfill a true no-op unless a pre-v15 migration path introduces
-        // plaintext data in the future. The function compiles and runs, logs
-        // the count, and is retained for the federation-backfill analogy (D-17).
         let result = self
             .db
             .query(
                 "SELECT count() AS total FROM email_config \
                  WHERE (provider_kind IN ['smtp'] AND smtp_password_ciphertext = NONE) \
-                    OR (provider_kind IN ['sendgrid','postmark','resend','brevo'] \
+                    OR (provider_kind IN ['send_grid','postmark','resend','brevo'] \
                         AND api_key_ciphertext = NONE) \
                  GROUP ALL",
             )
@@ -407,22 +414,27 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
         }
 
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
-        let pending = rows.into_iter().next().map(|r| r.total).unwrap_or(0);
+        let anomalous = rows.into_iter().next().map(|r| r.total).unwrap_or(0);
 
-        // If there are no pending rows (expected on v15+), return immediately.
-        if pending == 0 {
+        // Expected steady state on a v15+ schema: nothing anomalous found,
+        // nothing to do.
+        if anomalous == 0 {
             return Ok(0);
         }
 
-        // TODO(T19.22): implement the UPDATE path when a pre-v15 plaintext
-        // migration becomes necessary. For now, log and return count so
-        // operators are aware of unencrypted rows requiring intervention.
+        // Anomalous rows exist (should not happen via this repository's own
+        // write path). There is no plaintext source column to migrate from
+        // (see doc comment above), so we can only detect and warn — an
+        // operator must investigate how these rows were written and either
+        // re-set the config (going through `set_org_config`/
+        // `set_tenant_override`, which always encrypts) or remove them.
         tracing::warn!(
-            pending_rows = pending,
-            "email_config rows with unencrypted secrets found; \
-             automatic migration not yet implemented (T19.22)"
+            anomalous_rows = anomalous,
+            "email_config rows with a configured provider but NULL/missing secret \
+             ciphertext found; email_config has no plaintext source column to \
+             backfill from (D-07) — these rows must be re-set or removed manually"
         );
-        Ok(pending)
+        Ok(anomalous)
     }
 
     /// Fetch the currently-stored secret ciphertext/nonce columns for an
@@ -1125,5 +1137,51 @@ mod tests {
             msg.contains("no usable credential"),
             "expected a clear no-usable-credential error, got: {msg}"
         );
+    }
+
+    // --- D-07: backfill_plaintext_secrets is a documented no-op ---
+
+    #[tokio::test]
+    async fn backfill_plaintext_secrets_is_a_noop_on_v15_schema_with_data_present() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+
+        // Seed a real org email_config row (encrypted, via the repository's
+        // own write path) so the table is non-empty when the backfill runs.
+        let input = SetOrgEmailConfig {
+            enabled: true,
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            reply_to: None,
+            provider: ProviderConfig::Smtp(SmtpConfig {
+                host: "smtp.example.com".into(),
+                port: 587,
+                username: "user".into(),
+                password: "supersecret".into(),
+                starttls: true,
+            }),
+        };
+        repo.set_org_config(org_id, input).await.unwrap();
+
+        let before = repo.get_org_config(org_id).await.unwrap().unwrap();
+
+        let result = repo.backfill_plaintext_secrets().await.unwrap();
+        assert_eq!(
+            result, 0,
+            "email_config has no plaintext source column (D-07); backfill must be a no-op"
+        );
+
+        // Mutates nothing: the seeded row's (decrypted) secret is unchanged.
+        let after = repo.get_org_config(org_id).await.unwrap().unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn backfill_plaintext_secrets_is_a_noop_on_empty_table() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let result = repo.backfill_plaintext_secrets().await.unwrap();
+        assert_eq!(result, 0);
     }
 }

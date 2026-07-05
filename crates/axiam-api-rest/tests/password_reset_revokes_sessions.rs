@@ -174,6 +174,13 @@ macro_rules! test_app {
                 .app_data(web::Data::new(SurrealFederationLinkRepository::new(
                     $db.clone(),
                 )))
+                // `confirm_reset`/`request_reset` gate their CPU-bound Argon2
+                // work behind a shared crypto semaphore (A3, mirrors
+                // axiam-server main.rs's production wiring) — missing this
+                // app_data makes the extractor 500 on every reset/confirm call.
+                .app_data(web::Data::new(std::sync::Arc::new(
+                    tokio::sync::Semaphore::new(4),
+                )))
                 .app_data(web::Data::new(reqwest::Client::new()))
                 .app_data(web::Data::new(MfaMethodService::new(
                     SurrealUserRepository::new($db.clone()),

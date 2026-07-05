@@ -164,3 +164,12 @@ None - no external service configuration required.
 ---
 *Phase: 27-performance-load-hardening*
 *Completed: 2026-07-05*
+
+## Self-Check: PASSED
+
+- FOUND: crates/axiam-authz/src/config.rs
+- FOUND: .planning/phases/27-performance-load-hardening/27-05-SUMMARY.md
+- FOUND commit: db98174 (Task 1)
+- FOUND commit: 96d9fae (Task 2)
+- FOUND commit: 99b289f (Task 3)
+- FOUND commit: f414825 (SUMMARY.md commit)

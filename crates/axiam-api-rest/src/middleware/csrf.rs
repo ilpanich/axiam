@@ -53,6 +53,18 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     // Bootstrap is a one-time endpoint called before any session exists.
     // It is protected by the AXIAM_BOOTSTRAP_ADMIN_EMAIL env gate instead (D-10).
     "/api/v1/admin/bootstrap",
+    // 28-05/CQ-B40: the four first-time-SSO public endpoints (D-22,
+    // handlers/federation.rs) are unauthenticated by design — same model as
+    // /login and /reset/confirm above: the caller has no prior session and
+    // therefore no `axiam_csrf` cookie to echo back. Without these entries a
+    // first-time OIDC/SAML SSO login is CSRF-blocked (403) before the
+    // handler ever runs, even though the route is correctly listed in
+    // PUBLIC_PATHS (AuthzMiddleware bypass is a separate registry from this
+    // one — both must cover a route for it to work unauthenticated).
+    "/api/v1/auth/federation/oidc/start",
+    "/api/v1/auth/federation/oidc/callback",
+    "/api/v1/auth/federation/saml/login",
+    "/api/v1/auth/federation/saml/acs",
 ];
 
 /// Path prefixes that are exempt from CSRF validation (OAuth2).

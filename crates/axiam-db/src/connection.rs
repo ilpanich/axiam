@@ -142,6 +142,18 @@ impl DbManager {
     /// Also spawns the proactive re-signin background task (D-03/D-04) that
     /// keeps this session authenticated well inside the root token's TTL.
     pub async fn connect(config: &DbConfig) -> Result<Self, surrealdb::Error> {
+        Self::connect_with_ttl(config, ROOT_TOKEN_DURATION).await
+    }
+
+    /// Test-only entry point: identical to [`connect`](Self::connect) but
+    /// with an explicit root-token TTL override, so an integration test can
+    /// prove recovery from a REAL, short-lived token expiry without waiting
+    /// four weeks. Production code should always use [`connect`](Self::connect),
+    /// which always passes the fixed [`ROOT_TOKEN_DURATION`].
+    pub async fn connect_with_ttl(
+        config: &DbConfig,
+        ttl: Duration,
+    ) -> Result<Self, surrealdb::Error> {
         info!(
             url = %config.url,
             namespace = %config.namespace,
@@ -159,7 +171,7 @@ impl DbManager {
         // then open the real connection whose FRESH signin mints a long-lived token.
         // The proactive re-signin task spawned below then keeps that token from
         // ever actually reaching this extended TTL.
-        Self::extend_root_token_duration(config).await;
+        Self::extend_root_token_duration(config, ttl).await;
 
         let db = Surreal::new::<Http>(&config.url).await?;
         db.signin(Root {
@@ -174,7 +186,7 @@ impl DbManager {
         info!("Successfully connected to SurrealDB");
 
         let db = Arc::new(db);
-        let refresh_handle = Self::spawn_proactive_resignin(Arc::clone(&db), config);
+        let refresh_handle = Self::spawn_proactive_resignin(Arc::clone(&db), config, ttl);
 
         Ok(Self { db, refresh_handle })
     }
@@ -183,7 +195,7 @@ impl DbManager {
     /// connection's cached JWT does not expire mid-process. Failures are logged
     /// and ignored (the server still starts; it just reverts to the ~1h window).
     /// Idempotent — safe to run on every startup.
-    async fn extend_root_token_duration(config: &DbConfig) {
+    async fn extend_root_token_duration(config: &DbConfig, ttl: Duration) {
         let setup = match Surreal::new::<Http>(&config.url).await {
             Ok(s) => s,
             Err(e) => {
@@ -208,11 +220,11 @@ impl DbManager {
              DURATION FOR TOKEN {}, FOR SESSION NONE",
             config.username,
             escaped_pass,
-            root_token_duration_surql_literal(ROOT_TOKEN_DURATION)
+            root_token_duration_surql_literal(ttl)
         );
         match setup.query(define_user).await.and_then(|r| r.check()) {
             Ok(_) => info!(
-                duration_secs = ROOT_TOKEN_DURATION.as_secs(),
+                duration_secs = ttl.as_secs(),
                 "Extended SurrealDB root token duration"
             ),
             Err(e) => warn!(error = %e, "token-duration setup: DEFINE USER failed (continuing)"),
@@ -231,9 +243,14 @@ impl DbManager {
     /// itself carry the (still valid) auth header, so it buys nothing on
     /// this path, and calling it on an ALREADY-expired handle would itself
     /// 401 before clearing anything — see `26-RESEARCH.md` Pitfall 3
-    /// (the reactive "missed window" safety net is a separate mechanism).
-    fn spawn_proactive_resignin(db: Arc<Surreal<Client>>, config: &DbConfig) -> JoinHandle<()> {
-        let interval = re_signin_interval_for(ROOT_TOKEN_DURATION, config.token_refresh_fraction);
+    /// (the reactive "missed window" safety net, [`DbManager::reconnect`],
+    /// is a separate mechanism).
+    fn spawn_proactive_resignin(
+        db: Arc<Surreal<Client>>,
+        config: &DbConfig,
+        ttl: Duration,
+    ) -> JoinHandle<()> {
+        let interval = re_signin_interval_for(ttl, config.token_refresh_fraction);
         let username = config.username.clone();
         let password = config.password.clone();
 

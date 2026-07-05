@@ -1258,7 +1258,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 10/10 | Complete    | 2026-07-04 |
 | 26. Correctness & Resilience | 8/8 | Complete   | 2026-07-05 |
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
-| 28. Functional Completeness | 5/5 | Complete   | 2026-07-05 |
+| 28. Functional Completeness | 5/5 | Complete    | 2026-07-05 |
 | 29. Structural Quality | 0/? | Not started | - |
 | 30. Compliance & Documentation | 0/? | Not started | - |
 

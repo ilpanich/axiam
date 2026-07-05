@@ -6,9 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::{App, HttpServer, web};
-use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher};
+use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher, WebhookPublisher};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
+use axiam_api_rest::webhook_consumer::{WebhookRetryConfig, start_webhook_consumer};
 use axiam_api_rest::{
     HealthChecker, RateLimitConfig, ServerConfig, build_cors, health_routes, openapi_routes,
     register_api_v1_routes,
@@ -345,6 +346,10 @@ async fn main() -> std::io::Result<()> {
     amqp.declare_queues()
         .await
         .expect("Failed to declare AMQP queues");
+    // CORR-03/D-06/D-07: primary/retry/DLQ webhook delivery topology (26-03).
+    amqp.declare_webhook_topology()
+        .await
+        .expect("Failed to declare webhook AMQP topology");
     tracing::info!("RabbitMQ connected and queues declared");
 
     // Raw SurrealDB handle — registered as app_data so handlers that need direct
@@ -572,6 +577,44 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(1);
     });
 
+    // Webhook delivery publisher (CORR-03/D-06/D-07) — used by emit() to
+    // publish onto the durable axiam.webhook queue, and by the webhook
+    // consumer below to publish TTL-delayed retries onto axiam.webhook.retry.
+    let webhook_pub_channel = amqp
+        .create_publisher_channel()
+        .await
+        .expect("Failed to create AMQP webhook publisher channel");
+    let webhook_publisher = WebhookPublisher::new(webhook_pub_channel);
+
+    // Spawn the webhook AMQP consumer on a background task (CORR-03/D-06).
+    // Drives WebhookDeliveryService::deliver_once for each queued delivery,
+    // schedules retries natively via the retry-queue TTL+DLX (D-07/D-08,
+    // bounded exponential backoff read from AXIAM__WEBHOOK__* — D-20), and
+    // writes per-attempt/terminal audit records (D-09).
+    {
+        let webhook_channel = amqp
+            .create_channel()
+            .await
+            .expect("Failed to create AMQP webhook consumer channel");
+        let webhook_delivery_for_consumer = webhook_delivery.clone();
+        let webhook_publisher_for_consumer = webhook_publisher.clone();
+        let webhook_audit_repo = audit_repo.clone();
+        let webhook_retry_cfg = WebhookRetryConfig::from_env();
+        tokio::spawn(async move {
+            start_webhook_consumer(
+                webhook_channel,
+                webhook_delivery_for_consumer,
+                webhook_publisher_for_consumer,
+                webhook_audit_repo,
+                webhook_retry_cfg,
+            )
+            .await;
+            tracing::error!("Webhook AMQP consumer exited — shutting down process");
+            std::process::exit(1);
+        });
+        tracing::info!("Webhook consumer spawned");
+    }
+
     // Spawn AMQP mail consumer on a background task (D-14).
     // Only spawned when AXIAM__EMAIL_ENCRYPTION_KEY is present; otherwise
     // mail delivery is disabled and a warning was logged at startup (T-5-key-absent).
@@ -724,6 +767,11 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(pgp_service.clone()))
             .app_data(web::Data::new(webhook_repo.clone()))
             .app_data(web::Data::new(webhook_delivery.clone()))
+            // CORR-03/D-06: registered so any future emit() call site (no
+            // REST handler invokes emit() on a real domain event yet —
+            // out of this plan's locked scope, see 26-07-PLAN.md residual
+            // scope notes) can extract web::Data<WebhookPublisher>.
+            .app_data(web::Data::new(webhook_publisher.clone()))
             .app_data(web::Data::new(notification_rule_repo.clone()))
             .app_data(web::Data::new(oauth2_client_repo.clone()))
             .app_data(web::Data::new(authorize_service.clone()))

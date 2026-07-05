@@ -457,6 +457,28 @@ async fn main() -> std::io::Result<()> {
     // registration every /api/v1/notification-rules request 500s with
     // "App data is not configured".
     let notification_rule_repo = SurrealNotificationRuleRepository::new(db.client_cloned().await);
+    // Email-config repository (28-04, FUNC-03) — required by the
+    // `handlers::email_config::*` handlers' `web::Data<SurrealEmailConfigRepository<C>>`
+    // extractor. Only constructed when AXIAM__EMAIL_ENCRYPTION_KEY is present (same
+    // fail-closed, no-zero-key-fallback posture as the mail consumer above): when the
+    // key is absent, `email_config_repo` stays `None` and is NOT registered as
+    // app_data below, so the six email-config routes fail closed with actix's
+    // "App data is not configured" 500 rather than silently encrypting with a
+    // constant/zero key.
+    let email_config_repo: Option<SurrealEmailConfigRepository<axiam_db::DbClient>> = match config
+        .email_encryption_key
+    {
+        Some(email_key) => Some(SurrealEmailConfigRepository::new(
+            db.client_cloned().await,
+            email_key,
+        )),
+        None => {
+            tracing::warn!(
+                "AXIAM__EMAIL_ENCRYPTION_KEY missing — email-config admin endpoints disabled"
+            );
+            None
+        }
+    };
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client_cloned().await);
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client_cloned().await);
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client_cloned().await);
@@ -737,7 +759,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         let rl = rate_limit_cfg.clone();
-        App::new()
+        let app = App::new()
             .wrap(SecurityHeadersMiddleware)
             .wrap(TracingLogger::default())
             .wrap(audit_middleware.clone())
@@ -807,8 +829,16 @@ async fn main() -> std::io::Result<()> {
             // but never separately registered as web::Data — the password-reset
             // handlers need direct access to gate their own Argon2 dummy-hash
             // and current-password-reuse checks.
-            .app_data(web::Data::new(Arc::clone(&crypto_semaphore)))
-            .configure(health_routes)
+            .app_data(web::Data::new(Arc::clone(&crypto_semaphore)));
+        // email_config_repo is only Some when AXIAM__EMAIL_ENCRYPTION_KEY is
+        // configured (fail-closed — see construction site above); app_data()
+        // returns Self (does not alter App's type parameter), so this
+        // conditional registration composes cleanly with the chain above.
+        let app = match &email_config_repo {
+            Some(repo) => app.app_data(web::Data::new(repo.clone())),
+            None => app,
+        };
+        app.configure(health_routes)
             .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
             .configure(openapi_routes)
     })

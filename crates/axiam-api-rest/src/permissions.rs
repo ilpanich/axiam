@@ -143,6 +143,15 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     // Settings
     ("settings:get", "Read tenant or organization settings"),
     ("settings:update", "Update tenant or organization settings"),
+    // Email Config (FUNC-03 / D-13)
+    (
+        "email_config:read",
+        "Read organization or tenant email configuration (secrets never returned)",
+    ),
+    (
+        "email_config:write",
+        "Create, update, or delete organization or tenant email configuration",
+    ),
     // Tenants
     ("tenants:list", "List tenants within an organization"),
     ("tenants:get", "Retrieve a single tenant"),
@@ -590,4 +599,36 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // Settings
     ("GET", "/api/v1/settings", "settings:get"),
     ("PUT", "/api/v1/settings", "settings:update"),
+    // Email Config (FUNC-03 / D-13) — single email_config:read/write permission
+    // shared across org and tenant scopes (D-03), NOT per-verb-per-scope.
+    (
+        "GET",
+        "/api/v1/organizations/{org_id}/email-config",
+        "email_config:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/organizations/{org_id}/email-config",
+        "email_config:write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/organizations/{org_id}/email-config",
+        "email_config:write",
+    ),
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/email-config",
+        "email_config:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/tenants/{tenant_id}/email-config",
+        "email_config:write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/tenants/{tenant_id}/email-config",
+        "email_config:write",
+    ),
 ];

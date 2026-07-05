@@ -291,6 +291,19 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                         handlers::settings::set_org_settings::<C>,
                     )),
             )
+            // --- Organization Email Config (FUNC-03 / D-13) ---
+            .service(
+                web::resource("/organizations/{org_id}/email-config")
+                    .route(web::get().to(
+                        handlers::email_config::get_org_email_config::<C>,
+                    ))
+                    .route(web::put().to(
+                        handlers::email_config::set_org_email_config::<C>,
+                    ))
+                    .route(web::delete().to(
+                        handlers::email_config::delete_org_email_config::<C>,
+                    )),
+            )
             .service(
                 web::resource("/organizations/{org_id}/tenants")
                     .route(web::post().to(handlers::tenants::create::<C>))
@@ -618,6 +631,19 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::put().to(
                         handlers::settings::set_tenant_settings::<C>,
+                    )),
+            )
+            // --- Tenant Email Config (explicit {tenant_id} path segment, D-13) ---
+            .service(
+                web::resource("/tenants/{tenant_id}/email-config")
+                    .route(web::get().to(
+                        handlers::email_config::get_tenant_email_config::<C>,
+                    ))
+                    .route(web::put().to(
+                        handlers::email_config::set_tenant_email_config::<C>,
+                    ))
+                    .route(web::delete().to(
+                        handlers::email_config::delete_tenant_email_config::<C>,
                     )),
             )
             // --- Federation Links ---

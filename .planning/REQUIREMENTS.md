@@ -845,10 +845,10 @@ Wire webhook delivery through a durable path with retry; today `.deliver(` has z
 The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 
 ### Acceptance Criteria
-- [ ] CI e2e step runs `npx playwright test` (vitest kept as its own step) — `.github/workflows/ci.yml`
-- [ ] The auth/login/contract specs execute against the seeded backend and gate the build
-- [ ] The contract spec asserts request **bodies**, catching SECFIX-06 regressions
-- [ ] `playwright-report` artifact reflects real runs
+- [x] CI e2e step runs `npx playwright test` (vitest kept as its own step) — `.github/workflows/ci.yml` (26-04: `npm run test:e2e` wired as a distinct blocking step; `npm test`/vitest added as its own separate blocking step)
+- [x] The auth/login/contract specs execute against the seeded backend and gate the build — all 13 present specs (105 tests) discoverable via `playwright test --list`, none skipped; true CI pass is the manual/CI-only verification per 26-04-PLAN.md
+- [x] The contract spec asserts request **bodies**, catching SECFIX-06 regressions — `auth-contract.spec.ts` confirmed (already authored in 23-06) asserting `tenant_id`/`email`/`token`/`new_password`/`org_slug`/`tenant_slug` via `postDataJSON()`
+- [x] `playwright-report` artifact reflects real runs — upload step retained unchanged; now fed by an actual Playwright run instead of vitest
 
 ## CORR-05: Frontend Tenant Context & MFA-Setup Landing
 
@@ -1093,7 +1093,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Complete (26-01: Quota::per_second construction + sustained-throughput/monotonicity test) |
 | CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Complete (26-02: Arc-shared proactive re-signin + reactive reconnect seam + auth-aware health_check) |
 | CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Pending |
-| CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Pending |
+| CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Complete |
 | CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Pending |
 | CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Pending |
 | PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Pending |

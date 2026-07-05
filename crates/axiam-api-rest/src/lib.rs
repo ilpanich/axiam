@@ -12,6 +12,7 @@ pub mod openapi;
 pub mod permissions;
 pub mod server;
 pub mod webhook;
+pub mod webhook_consumer;
 
 pub use authz::{AuthzChecker, AuthzData, RequirePermission};
 pub use config::{RateLimitConfig, ServerConfig};

@@ -15,6 +15,12 @@ axiam-db = { workspace = true }
 axiam-audit = { workspace = true }
 axiam-amqp = { workspace = true }
 axiam-oauth2 = { workspace = true }
+# webhook_consumer.rs (CORR-03/26-07) — the durable webhook AMQP consumer
+# drives lapin::Channel directly (mirrors axiam-amqp's mail_consumer.rs
+# shape), so this crate needs the same lapin/futures-lite pair axiam-amqp
+# already depends on. Workspace-pinned versions — no new external package.
+lapin = { workspace = true }
+futures-lite = { workspace = true }
 # default-features (=false) is inherited from [workspace.dependencies]; the
 # `saml` feature below re-enables it (on by default via this crate's `default`).
 axiam-federation = { workspace = true }

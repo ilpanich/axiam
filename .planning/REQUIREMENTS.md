@@ -855,8 +855,8 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** High | **Source:** CQ-F29, CQ-F31
 
 ### Acceptance Criteria
-- [ ] `/auth/me` (`MeResponse`/`LoginUserInfo`) emits `tenant_slug`/`org_slug`; Topbar restores tenant after hard reload (CQ-F29 — backend + frontend)
-- [ ] `mfa_setup_required` landing reads the `setup_token` and enrolls via the setup endpoint (no dead end for MFA-mandated users) — CQ-F31
+- [x] `/auth/me` (`MeResponse`/`LoginUserInfo`) emits `tenant_slug`/`org_slug`; Topbar restores tenant after hard reload (CQ-F29 — backend + frontend) — 26-05 (backend slugs) + 26-08 (frontend restore verified via fetchCurrentUser + e2e)
+- [x] `mfa_setup_required` landing reads the `setup_token` and enrolls via the setup endpoint (no dead end for MFA-mandated users) — CQ-F31 (26-08: public `/auth/mfa-setup?setup_token=...` route, D-16)
 
 ## CORR-06: Frontend Residual Correctness
 
@@ -1094,7 +1094,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Complete (26-02: Arc-shared proactive re-signin + reactive reconnect seam + auth-aware health_check) |
 | CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Complete (26-03: emit()/deliver_once() split + AMQP topology/publisher/signature; 26-07: durable consumer with TTL+DLX retry, DLQ, and per-attempt/terminal audit, wired into main.rs) |
 | CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Complete |
-| CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Pending |
+| CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Complete (26-05: backend tenant_slug/org_slug; 26-08: public /auth/mfa-setup route D-16 + tenant-restore e2e) |
 | CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Complete (26-06: VerifyEmailPage useRef guard D-17, Dashboard distinct query key D-18, org-settings init-guard/dirty-tracking/navigate-away guard D-19) |
 | PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Pending |
 | PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Pending |

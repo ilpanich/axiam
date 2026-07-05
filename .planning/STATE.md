@@ -4,17 +4,17 @@ milestone: v1.2
 milestone_name: — MVP Release Hardening
 current_phase: 26
 current_phase_name: correctness-resilience
-status: executing
-stopped_at: Completed 26-07-PLAN.md
-last_updated: "2026-07-05T10:21:28.324Z"
+status: verifying
+stopped_at: Completed 26-08-PLAN.md
+last_updated: "2026-07-05T10:34:51.530Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 26 execution started
 progress:
   total_phases: 8
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 33
-  completed_plans: 32
-  percent: 38
+  completed_plans: 33
+  percent: 50
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 
 Phase: 26 (correctness-resilience) — EXECUTING
 Plan: 8 of 8
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-05 — Phase 26 execution started
 
 ## Performance Metrics
@@ -187,6 +187,7 @@ Last activity: 2026-07-05 — Phase 26 execution started
 | Phase 26 P05 | 22min | 2 tasks | 1 files |
 | Phase 26 P06 | 15min | 3 tasks | 6 files |
 | Phase 26 P07 | 35min | 3 tasks | 5 files |
+| Phase 26 P08 | 12min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -459,6 +460,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 26-07]: Added lapin/futures-lite as direct axiam-api-rest dependencies (workspace-pinned, already resolved via axiam-amqp) so webhook_consumer.rs can drive lapin::Channel directly per the plan's architecture note
 - [Phase ?]: [Phase 26-07]: Live-broker integration test targets a loopback URL (not a local HTTP sink) since deliver_once's SSRF guard hardcodes allow_private=false in production — proves the guard survives AMQP-driven delivery and exercises retry->DLQ->audit via deterministic SsrfBlocked failure
 - [Phase ?]: [Phase 26-07]: webhook.delivery_* audit records use actor_id: Uuid::nil() / ActorType::System, matching mail_consumer.rs/axiam-federation::secrets.rs convention for AMQP-driven system actions
+- [Phase ?]: [Phase 26-08]: TotpSetupPanel accepts optional onCancel/cancelLabel props so MfaManagementPage's dialog chrome (Cancel+Confirm row) is preserved exactly while MfaSetupPage (no cancel action) omits it
+- [Phase ?]: [Phase 26-08]: MfaSetupPage strips setup_token from the URL via history.replaceState only around confirm resolution (success or 401/410 token-level failure), never immediately after enroll, so a mid-flow refresh during the ready state still has the token available (D-16 bookmark/refresh-safety)
+- [Phase ?]: [Phase 26-08]: A 401/410 from setupConfirmMfa is treated as a token-level failure (bounces to enroll-error/invalid-link state); any other confirm failure (wrong code) stays on the ready state with an inline error
 
 ### Pending Todos
 
@@ -482,7 +486,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T10:21:19.555Z
-Stopped at: Completed 26-07-PLAN.md
+Last session: 2026-07-05T10:34:51.515Z
+Stopped at: Completed 26-08-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

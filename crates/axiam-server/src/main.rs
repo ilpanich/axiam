@@ -21,9 +21,9 @@ use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepositor
 use axiam_db::{
     DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealErasureProofRepository,
-    SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
-    SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
+    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
+    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
     SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
@@ -641,12 +641,14 @@ async fn main() -> std::io::Result<()> {
             SurrealEmailConfigRepository::new(db_handle.clone(), email_key);
         let mail_audit_repo = audit_repo.clone();
         let mail_user_repo = user_repo.clone();
+        let mail_template_repo = SurrealEmailTemplateRepository::new(db_handle.clone());
         tokio::spawn(async move {
             axiam_amqp::start_mail_consumer(
                 mail_channel,
                 mail_email_config_repo,
                 mail_audit_repo,
                 mail_user_repo,
+                mail_template_repo,
             )
             .await;
             tracing::error!("AMQP mail consumer exited — shutting down process");

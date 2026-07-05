@@ -1,5 +1,11 @@
-import { useState, useCallback, useEffect } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useState, useCallback, useEffect, useRef } from "react";
+import {
+  useParams,
+  useNavigate,
+  Link,
+  useBlocker,
+  type BlockerFunction,
+} from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   tenantService,
@@ -13,6 +19,7 @@ import {
   type CreateTenantPayload,
   type GenerateCaCertPayload,
 } from "@/services/organizations";
+import { shouldSeedForm, computeIsDirty } from "./settingsForm";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -662,7 +669,13 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
 
 // ─── Settings tab ─────────────────────────────────────────────────────────────
 
-function SettingsTab({ orgId }: { orgId: string }) {
+function SettingsTab({
+  orgId,
+  onDirtyChange,
+}: {
+  orgId: string;
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const queryClient = useQueryClient();
   const [saveError, setSaveError] = useState("");
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -675,12 +688,61 @@ function SettingsTab({ orgId }: { orgId: string }) {
   // The form holds the FULL flat SetOrgSettings — PUT requires every field.
   // `null` until the nested settings load, then pre-filled from them.
   const [form, setForm] = useState<SetOrgSettings | null>(null);
+  // D-19: last-loaded server snapshot, frozen once seeded — the comparison
+  // baseline for isDirty. NOT updated by a background refetch while the
+  // form is dirty, so in-progress edits keep comparing against the value
+  // the user actually started editing from.
+  const snapshotRef = useRef<SetOrgSettings | null>(null);
+  // D-19: init-once guard — seeds `form` from `settings` only on the FIRST
+  // successful load per mount (SettingsTab remounts on orgId change, which
+  // is the intended re-seed case). A later background refetch/refocus with
+  // initializedRef.current already true must NOT overwrite in-progress
+  // edits — that was the reported bug.
+  const initializedRef = useRef(false);
+  const [isDirty, setIsDirty] = useState(false);
 
-  // Initialize form from loaded settings (runs when settings first load or org changes)
+  // Initialize form from loaded settings — once per mount/orgId only.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (settings) setForm(flattenOrgSettings(settings));
+    if (shouldSeedForm(initializedRef.current, settings)) {
+      const flattened = flattenOrgSettings(settings!);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setForm(flattened);
+      snapshotRef.current = flattened;
+      initializedRef.current = true;
+    }
   }, [settings]);
+
+  // Propagate dirty state to the parent so it can guard the in-page
+  // tab-switch (Settings -> Tenants/Certificates), which is local component
+  // state in OrganizationDetailPage, not a router navigation.
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+
+  // D-19: native browser-level guard (refresh/close tab) — copy is
+  // browser-controlled, only `event.returnValue` needs to be set.
+  useEffect(() => {
+    function handleBeforeUnload(e: BeforeUnloadEvent) {
+      if (isDirty) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isDirty]);
+
+  // D-19: in-app navigate-away guard for actual route changes (e.g. the
+  // "Back" link/breadcrumb, or a sidebar link to a different page) while
+  // dirty. react-router v7's useBlocker requires the data router this app
+  // already uses (createBrowserRouter in router.tsx).
+  const blocker = useBlocker(
+    useCallback<BlockerFunction>(
+      ({ currentLocation, nextLocation }) =>
+        isDirty && currentLocation.pathname !== nextLocation.pathname,
+      [isDirty]
+    )
+  );
 
   const updateMutation = useMutation({
     mutationFn: (payload: SetOrgSettings) =>
@@ -689,6 +751,11 @@ function SettingsTab({ orgId }: { orgId: string }) {
       void queryClient.invalidateQueries({ queryKey: ["org-settings", orgId] });
       setSaveError("");
       setSaveSuccess(true);
+      // Save resets the dirty baseline to the just-saved values and
+      // deactivates the navigate-away guard (UI-SPEC: "Dirty state resets
+      // to clean and the navigate-away guard deactivates").
+      if (form) snapshotRef.current = form;
+      setIsDirty(false);
       setTimeout(() => setSaveSuccess(false), 3000);
     },
     onError: (err: unknown) => {
@@ -704,6 +771,15 @@ function SettingsTab({ orgId }: { orgId: string }) {
   ) {
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
   }
+
+  // D-19: recompute dirtiness whenever the form changes, against the frozen
+  // snapshot (not the live `settings` query data — a background refetch
+  // must never flip a genuinely-edited field back to clean, or vice versa).
+  useEffect(() => {
+    if (form && snapshotRef.current) {
+      setIsDirty(computeIsDirty(form, snapshotRef.current));
+    }
+  }, [form]);
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -1031,17 +1107,40 @@ function SettingsTab({ orgId }: { orgId: string }) {
           <p className="text-sm text-cyan-400">Settings saved successfully.</p>
         )}
 
-        <Button type="submit" disabled={updateMutation.isPending}>
-          {updateMutation.isPending ? (
-            <>
-              <Loader2 size={14} className="animate-spin" />
-              Saving...
-            </>
-          ) : (
-            "Save Settings"
+        <div className="flex items-center gap-3">
+          <Button type="submit" disabled={updateMutation.isPending}>
+            {updateMutation.isPending ? (
+              <>
+                <Loader2 size={14} className="animate-spin" />
+                Saving...
+              </>
+            ) : (
+              "Save Settings"
+            )}
+          </Button>
+          {isDirty && (
+            <span
+              className="text-xs font-medium text-amber-400"
+              role="status"
+            >
+              Unsaved changes
+            </span>
           )}
-        </Button>
+        </div>
       </form>
+
+      {/* D-19: in-app navigate-away guard (route-level, e.g. the breadcrumb
+          "Organizations" link or a sidebar link to a different page) —
+          reuses the existing ConfirmDialog for visual consistency. */}
+      <ConfirmDialog
+        open={blocker.state === "blocked"}
+        onClose={() => blocker.reset?.()}
+        onConfirm={() => blocker.proceed?.()}
+        title="Discard unsaved changes?"
+        description="You have unsaved changes to these settings. Leaving now will discard them."
+        confirmLabel="Discard changes"
+        cancelLabel="Keep editing"
+      />
     </div>
   );
 }
@@ -1051,6 +1150,15 @@ function SettingsTab({ orgId }: { orgId: string }) {
 export function OrganizationDetailPage() {
   const { orgId } = useParams<{ orgId: string }>();
   const [activeTab, setActiveTab] = useState<Tab>("tenants");
+  // D-19: SettingsTab's dirty state, lifted up so switching AWAY from the
+  // Settings tab (a local component-state change, not a router navigation)
+  // can also be guarded. Route-level navigation away from this page
+  // entirely is separately guarded inside SettingsTab via useBlocker.
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [pendingTab, setPendingTab] = useState<Tab | null>(null);
+  // Bumped to force-remount SettingsTab (fresh init-once/dirty state) after
+  // the user explicitly discards in-progress edits to switch tabs.
+  const [settingsResetKey, setSettingsResetKey] = useState(0);
 
   const { data: org, isLoading: orgLoading } = useQuery({
     queryKey: ["organizations", orgId],
@@ -1058,9 +1166,25 @@ export function OrganizationDetailPage() {
     enabled: !!orgId,
   });
 
-  const handleTabChange = useCallback((tab: Tab) => {
-    setActiveTab(tab);
-  }, []);
+  const handleTabChange = useCallback(
+    (tab: Tab) => {
+      if (activeTab === "settings" && settingsDirty && tab !== "settings") {
+        setPendingTab(tab);
+        return;
+      }
+      setActiveTab(tab);
+    },
+    [activeTab, settingsDirty]
+  );
+
+  function discardAndSwitchTab() {
+    if (pendingTab) {
+      setActiveTab(pendingTab);
+      setSettingsDirty(false);
+      setSettingsResetKey((k) => k + 1);
+      setPendingTab(null);
+    }
+  }
 
   if (!orgId) return null;
 
@@ -1100,7 +1224,25 @@ export function OrganizationDetailPage() {
 
       {activeTab === "tenants" && <TenantsTab orgId={orgId} />}
       {activeTab === "certificates" && <CaCertificatesTab orgId={orgId} />}
-      {activeTab === "settings" && <SettingsTab orgId={orgId} />}
+      {activeTab === "settings" && (
+        <SettingsTab
+          key={settingsResetKey}
+          orgId={orgId}
+          onDirtyChange={setSettingsDirty}
+        />
+      )}
+
+      {/* D-19: in-app navigate-away guard for the Settings tab's own
+          in-page tab bar — reuses the existing ConfirmDialog. */}
+      <ConfirmDialog
+        open={pendingTab !== null}
+        onClose={() => setPendingTab(null)}
+        onConfirm={discardAndSwitchTab}
+        title="Discard unsaved changes?"
+        description="You have unsaved changes to these settings. Leaving now will discard them."
+        confirmLabel="Discard changes"
+        cancelLabel="Keep editing"
+      />
     </div>
   );
 }

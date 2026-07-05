@@ -9,6 +9,7 @@ interface ConfirmDialogProps {
   description: string;
   isLoading?: boolean;
   confirmLabel?: string;
+  cancelLabel?: string;
 }
 
 export function ConfirmDialog({
@@ -19,6 +20,7 @@ export function ConfirmDialog({
   description,
   isLoading = false,
   confirmLabel,
+  cancelLabel,
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -95,7 +97,7 @@ export function ConfirmDialog({
             disabled={isLoading}
             className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-md text-muted-foreground hover:bg-white/5 hover:text-foreground transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
           >
-            Cancel
+            {cancelLabel ?? "Cancel"}
           </button>
           <button
             onClick={onConfirm}

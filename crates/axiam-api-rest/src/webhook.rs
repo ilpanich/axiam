@@ -1,5 +1,16 @@
-//! Webhook delivery service — async HTTP delivery with HMAC-SHA256 signing
-//! and exponential backoff retry.
+//! Webhook delivery service — split into a publish-only `emit()` and a
+//! single-attempt `deliver_once()` (CORR-03/D-06/D-07).
+//!
+//! The old `deliver()` was a detached `tokio::spawn` running an in-process
+//! `tokio::time::sleep` exponential-backoff retry loop with ZERO call
+//! sites — it died on process restart and never actually ran (CORR-03).
+//! `emit()` now only publishes one `axiam_amqp::WebhookMessage` per matching
+//! webhook onto the durable `axiam.webhook` AMQP topology (declared via
+//! `axiam_amqp::connection::declare_webhook_topology`); `deliver_once()` is
+//! the single-attempt HTTP delivery the AMQP consumer (wired in 26-07)
+//! drives per (re)delivery. Retry scheduling is now owned by RabbitMQ's
+//! native per-message TTL + dead-letter-exchange pair on the retry queue,
+//! not by an in-process sleep (D-07).
 //!
 //! SEC-019/SECHRD-02: Delivery is routed through the shared
 //! `axiam_federation::ssrf::guarded_fetch` guard, which resolves the host
@@ -11,11 +22,23 @@
 //! `resolve_and_validate_host` + separate `client.post()` pair left open).
 //! SEC-031: The webhook secret is stored AES-256-GCM encrypted; it is decrypted
 //! in memory for HMAC computation and never serialised in API responses.
+//!
+//! D-10: signatures use the Stripe-style signed-timestamp scheme
+//! (`X-Axiam-Timestamp` + `X-Axiam-Signature: t=<unix>,v1=<hex>`) rather
+//! than a body-only HMAC, so a receiver can enforce a replay window and a
+//! forged signature can't be produced from the body alone (T-26-03-01). No
+//! SDK (Rust/TS/Go/Python/Java/C#/PHP) implements a webhook-signature
+//! verification helper today (confirmed via `grep -rn` across `sdks/` for
+//! `X-Axiam-Signature`/`WebhookSignature`/`verify_webhook` — only hits are
+//! the CRUD schema in `sdks/openapi.json`), so there is nothing downstream
+//! to update for this format change.
 
 use axiam_auth::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
 use axiam_core::repository::WebhookRepository;
 use axiam_federation::ssrf::{self, SsrfError};
+use chrono::Utc;
 use hmac::{Hmac, Mac};
+use reqwest::StatusCode;
 use sha2::Sha256;
 use uuid::Uuid;
 
@@ -36,6 +59,12 @@ pub enum WebhookError {
     SecretEncrypt(String),
     #[error("webhook encryption key is not configured (AXIAM__PKI__ENCRYPTION_KEY unset)")]
     EncryptionKeyMissing,
+    /// The webhook row could not be fetched (not found, or a repository
+    /// error) when `deliver_once` tried to resolve it by ID. Distinct from
+    /// the crypto-flavored variants above so a consumer (26-07) can tell a
+    /// missing/deleted webhook apart from a decrypt failure.
+    #[error("webhook lookup failed: {0}")]
+    WebhookLookupFailed(String),
 }
 
 impl From<WebhookError> for crate::error::AxiamApiError {
@@ -49,6 +78,9 @@ impl From<WebhookError> for crate::error::AxiamApiError {
                     "webhook subsystem unavailable: encryption key not configured".to_string(),
                 )
                 .into()
+            }
+            WebhookError::WebhookLookupFailed(msg) => {
+                axiam_core::error::AxiamError::WebhookDelivery(msg).into()
             }
             other => axiam_core::error::AxiamError::Crypto(other.to_string()).into(),
         }
@@ -75,10 +107,12 @@ impl From<SsrfError> for WebhookError {
     }
 }
 
-/// Async webhook delivery service.
+/// Webhook delivery service.
 ///
-/// Fetches matching webhooks from the repository and spawns background
-/// tasks to deliver the payload with HMAC-SHA256 signed headers.
+/// `emit()` publishes matching-webhook delivery messages onto the durable
+/// `axiam.webhook` AMQP topology; `deliver_once()` performs a single
+/// SSRF-guarded HTTP attempt for the AMQP consumer (26-07) to drive per
+/// (re)delivery.
 #[derive(Clone)]
 pub struct WebhookDeliveryService<W> {
     repo: W,
@@ -86,7 +120,7 @@ pub struct WebhookDeliveryService<W> {
     /// rest. Corresponds to `AXIAM__PKI__ENCRYPTION_KEY` (SEC-031/SEC-059).
     /// `None` when the env var is unset — the server still boots (this is
     /// an optional subsystem), but registration (`encrypt_secret`) and
-    /// delivery (`deliver`) both refuse to operate rather than falling
+    /// delivery (`deliver_once`) both refuse to operate rather than falling
     /// back to an all-zero/constant key.
     encryption_key: Option<[u8; 32]>,
 }
@@ -116,181 +150,164 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
             .map_err(|e| WebhookError::SecretEncrypt(e.to_string()))
     }
 
-    /// Fire webhook deliveries for the given event type and payload.
-    ///
-    /// Spawns a background task per matching webhook. Does not block.
-    pub fn deliver(&self, tenant_id: Uuid, event_type: String, payload: serde_json::Value) {
-        let repo = self.repo.clone();
-        let encryption_key = self.encryption_key;
-
-        tokio::spawn(async move {
-            // D-01/SEC-059: refuse delivery (log + return) when no encryption
-            // key is configured — never decrypt stored secrets with a
-            // placeholder/all-zero key.
-            let Some(encryption_key) = encryption_key else {
+    /// Publish-only replacement for the old `deliver()` (D-06): fetches the
+    /// webhooks matching `event_type` for `tenant_id` and publishes ONE
+    /// `axiam_amqp::WebhookMessage` per webhook via the injected
+    /// `WebhookPublisher`. Performs no HTTP call and does not spawn a
+    /// detached task — the AMQP consumer (wired in 26-07) drives
+    /// `deliver_once` per (re)delivery.
+    pub async fn emit(
+        &self,
+        publisher: &axiam_amqp::WebhookPublisher,
+        tenant_id: Uuid,
+        event_type: String,
+        payload: serde_json::Value,
+    ) {
+        let webhooks = match self.repo.get_by_event(tenant_id, &event_type).await {
+            Ok(w) => w,
+            Err(e) => {
                 tracing::error!(
                     %tenant_id, %event_type,
-                    "webhook delivery refused: encryption key not configured \
-                     (AXIAM__PKI__ENCRYPTION_KEY unset)"
+                    "failed to fetch webhooks for emit: {e}"
                 );
                 return;
-            };
-
-            let webhooks = match repo.get_by_event(tenant_id, &event_type).await {
-                Ok(w) => w,
-                Err(e) => {
-                    tracing::error!(
-                        %tenant_id, %event_type,
-                        "failed to fetch webhooks: {e}"
-                    );
-                    return;
-                }
-            };
-
-            for webhook in webhooks {
-                let event_type = event_type.clone();
-                let payload = payload.clone();
-
-                tokio::spawn(async move {
-                    let delivery_id = Uuid::new_v4();
-                    let body = serde_json::to_string(&payload).unwrap_or_default();
-
-                    // SEC-031: Decrypt the stored secret before HMAC computation.
-                    let plaintext_secret = match aes256gcm_decrypt(&encryption_key, &webhook.secret)
-                    {
-                        Ok(bytes) => match String::from_utf8(bytes) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                tracing::error!(
-                                    webhook_id = %webhook.id,
-                                    "webhook secret is not valid UTF-8 after decrypt: {e}"
-                                );
-                                return;
-                            }
-                        },
-                        Err(e) => {
-                            tracing::error!(
-                                webhook_id = %webhook.id,
-                                "failed to decrypt webhook secret: {e}"
-                            );
-                            return;
-                        }
-                    };
-
-                    let signature = compute_signature(&plaintext_secret, &body);
-
-                    let max_retries = webhook.retry_policy.max_retries;
-                    let initial_delay = webhook.retry_policy.initial_delay_secs;
-                    let multiplier = webhook.retry_policy.backoff_multiplier;
-
-                    for attempt in 0..=max_retries {
-                        if attempt > 0 {
-                            let delay_secs =
-                                (initial_delay as f64) * multiplier.powi((attempt - 1) as i32);
-                            // Clamp to avoid panic on negative/infinite/NaN values.
-                            let delay_secs = delay_secs.clamp(0.0, 3600.0);
-                            tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs))
-                                .await;
-                        }
-
-                        // SEC-019/SECHRD-02: `guarded_fetch` resolves the host
-                        // fresh on this attempt, rejects a private/loopback/
-                        // link-local resolved address, and pins the exact
-                        // validated IpAddr into a fresh single-use client for
-                        // the POST — no separate, independently-resolving
-                        // `client.post()` call remains, so `reqwest` cannot
-                        // re-resolve DNS between the check and the send
-                        // (D-01c). `allow_private=false`: this is the
-                        // production delivery path, never the test seam.
-                        let body_for_send = body.clone();
-                        let delivery_id_header = delivery_id.to_string();
-                        let signature_header = signature.clone();
-                        let event_type_header = event_type.clone();
-                        let result = ssrf::guarded_fetch(&webhook.url, false, move |c, u| {
-                            c.post(u)
-                                .header("Content-Type", "application/json")
-                                .header("X-Axiam-Signature", &signature_header)
-                                .header("X-Axiam-Event", &event_type_header)
-                                .header("X-Axiam-Delivery", &delivery_id_header)
-                                .body(body_for_send.clone())
-                        })
-                        .await;
-
-                        match result {
-                            Ok(resp) if resp.status().is_success() => {
-                                tracing::info!(
-                                    webhook_id = %webhook.id,
-                                    %delivery_id,
-                                    %event_type,
-                                    attempt,
-                                    status = %resp.status(),
-                                    "webhook delivered"
-                                );
-                                return;
-                            }
-                            Ok(resp) => {
-                                tracing::warn!(
-                                    webhook_id = %webhook.id,
-                                    %delivery_id,
-                                    %event_type,
-                                    attempt,
-                                    status = %resp.status(),
-                                    "webhook delivery failed"
-                                );
-                            }
-                            // SSRF block/invalid-url/resolve-failure is a
-                            // fail-closed verdict on the target itself —
-                            // retrying would just repeat the same rejection,
-                            // so abort all remaining attempts (preserves the
-                            // pre-existing "abort on SSRF block" behavior).
-                            Err(
-                                e @ (SsrfError::Blocked
-                                | SsrfError::InvalidUrl
-                                | SsrfError::ResolveFailed),
-                            ) => {
-                                let webhook_err: WebhookError = e.into();
-                                tracing::warn!(
-                                    webhook_id = %webhook.id,
-                                    %delivery_id,
-                                    error = %webhook_err,
-                                    "SSRF check failed — aborting all delivery retries"
-                                );
-                                return;
-                            }
-                            // A transport-level failure (connection refused,
-                            // timeout, TLS error, too-many-redirects) is not
-                            // an SSRF verdict — allow the existing
-                            // exponential-backoff retry loop to try again.
-                            Err(e) => {
-                                tracing::warn!(
-                                    webhook_id = %webhook.id,
-                                    %delivery_id,
-                                    %event_type,
-                                    attempt,
-                                    error = %e,
-                                    "webhook delivery error"
-                                );
-                            }
-                        }
-                    }
-
-                    tracing::error!(
-                        webhook_id = %webhook.id,
-                        %delivery_id,
-                        %event_type,
-                        "webhook delivery exhausted all retries"
-                    );
-                });
             }
-        });
+        };
+
+        for webhook in webhooks {
+            let msg = axiam_amqp::WebhookMessage {
+                webhook_id: webhook.id,
+                delivery_id: Uuid::new_v4(),
+                tenant_id,
+                event_type: event_type.clone(),
+                payload: payload.clone(),
+                attempt: 0,
+            };
+
+            if let Err(e) = publisher.publish(&msg).await {
+                tracing::error!(
+                    webhook_id = %webhook.id,
+                    %tenant_id, %event_type,
+                    "failed to publish webhook delivery message: {e}"
+                );
+            }
+        }
+    }
+
+    /// Single-attempt webhook delivery (D-06/D-07). Decrypts the stored
+    /// secret, computes the Stripe-style signed-timestamp signature (D-10),
+    /// and performs exactly one `ssrf::guarded_fetch` POST. Contains NO
+    /// retry loop and NO in-process delay — AMQP TTL+DLX (declared via
+    /// `axiam_amqp::connection::AmqpManager::declare_webhook_topology`) now
+    /// owns retry scheduling. Returns `Ok(StatusCode)` (which may be a
+    /// non-2xx status) or `Err(WebhookError)` and leaves the ack/nack/
+    /// republish-to-retry-queue decision to the caller (the AMQP consumer,
+    /// wired in 26-07).
+    ///
+    /// `tenant_id` scopes the webhook lookup — `WebhookRepository::get_by_id`
+    /// is tenant-scoped per AXIAM's multi-tenant data-isolation model. The
+    /// caller resolves it from the `WebhookMessage.tenant_id` field this
+    /// plan adds to the DTO (not present in the original plan sketch, which
+    /// omitted it — added here because tenant-scoping the lookup is a
+    /// correctness/data-isolation requirement, not optional).
+    pub async fn deliver_once(
+        &self,
+        tenant_id: Uuid,
+        webhook_id: Uuid,
+        delivery_id: Uuid,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<StatusCode, WebhookError> {
+        // D-01/SEC-059: refuse delivery (fail-closed) when no encryption key
+        // is configured — never decrypt stored secrets with a
+        // placeholder/all-zero key.
+        let encryption_key = self
+            .encryption_key
+            .ok_or(WebhookError::EncryptionKeyMissing)?;
+
+        let webhook = self
+            .repo
+            .get_by_id(tenant_id, webhook_id)
+            .await
+            .map_err(|e| WebhookError::WebhookLookupFailed(e.to_string()))?;
+
+        let body = serde_json::to_string(payload).unwrap_or_default();
+
+        // SEC-031: Decrypt the stored secret before HMAC computation.
+        let plaintext_secret = match aes256gcm_decrypt(&encryption_key, &webhook.secret) {
+            Ok(bytes) => String::from_utf8(bytes).map_err(|e| {
+                WebhookError::SecretDecrypt(format!("secret not valid UTF-8: {e}"))
+            })?,
+            Err(e) => return Err(WebhookError::SecretDecrypt(e.to_string())),
+        };
+
+        let timestamp = Utc::now().timestamp();
+        let signature = compute_signature_v2(&plaintext_secret, timestamp, &body);
+
+        // SEC-019/SECHRD-02: `guarded_fetch` resolves the host fresh on this
+        // attempt, rejects a private/loopback/link-local resolved address,
+        // and pins the exact validated IpAddr into a fresh single-use client
+        // for the POST — no separate, independently-resolving `client.post()`
+        // call remains, so `reqwest` cannot re-resolve DNS between the check
+        // and the send (D-01c). `allow_private=false`: this is the
+        // production delivery path, never the test seam.
+        let body_for_send = body.clone();
+        let timestamp_header = timestamp.to_string();
+        let signature_header = signature.clone();
+        let event_type_header = event_type.to_string();
+        let delivery_id_header = delivery_id.to_string();
+        let result = ssrf::guarded_fetch(&webhook.url, false, move |c, u| {
+            c.post(u)
+                .header("Content-Type", "application/json")
+                .header("X-Axiam-Timestamp", &timestamp_header)
+                .header("X-Axiam-Signature", &signature_header)
+                .header("X-Axiam-Event", &event_type_header)
+                .header("X-Axiam-Delivery", &delivery_id_header)
+                .body(body_for_send.clone())
+        })
+        .await;
+
+        match result {
+            Ok(resp) => {
+                let status = resp.status();
+                tracing::info!(
+                    webhook_id = %webhook_id,
+                    %delivery_id,
+                    %event_type,
+                    %status,
+                    "webhook delivery attempt completed"
+                );
+                Ok(status)
+            }
+            Err(e) => {
+                let webhook_err: WebhookError = e.into();
+                tracing::warn!(
+                    webhook_id = %webhook_id,
+                    %delivery_id,
+                    %event_type,
+                    error = %webhook_err,
+                    "webhook delivery attempt failed"
+                );
+                Err(webhook_err)
+            }
+        }
     }
 }
 
-/// Compute HMAC-SHA256 signature of the body using the shared secret.
-fn compute_signature(secret: &str, body: &str) -> String {
+/// Compute the Stripe-style signed-timestamp signature (D-10): HMAC-SHA256
+/// over the ASCII string `<timestamp>.<body>` using the per-webhook secret,
+/// returned as `t=<unix_seconds>,v1=<hex>`. Binding the timestamp into the
+/// signed payload (not just the body) lets a receiver enforce a replay
+/// window, and prevents a body-only forgery that doesn't need to also guess
+/// a valid timestamp (T-26-03-01).
+fn compute_signature_v2(secret: &str, timestamp: i64, body: &str) -> String {
+    let signed_payload = format!("{timestamp}.{body}");
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key");
-    mac.update(body.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    mac.update(signed_payload.as_bytes());
+    format!(
+        "t={timestamp},v1={}",
+        hex::encode(mac.finalize().into_bytes())
+    )
 }
 
 /// Encrypt a webhook secret with AES-256-GCM for storage (SEC-031).
@@ -307,18 +324,52 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
-    fn signature_is_deterministic() {
-        let sig1 = compute_signature("secret", "hello");
-        let sig2 = compute_signature("secret", "hello");
+    fn signature_v2_is_deterministic() {
+        let sig1 = compute_signature_v2("secret", 1_700_000_000, "hello");
+        let sig2 = compute_signature_v2("secret", 1_700_000_000, "hello");
         assert_eq!(sig1, sig2);
-        assert!(!sig1.is_empty());
     }
 
     #[test]
-    fn different_secrets_produce_different_signatures() {
-        let sig1 = compute_signature("secret1", "hello");
-        let sig2 = compute_signature("secret2", "hello");
+    fn signature_v2_different_secrets_produce_different_signatures() {
+        let sig1 = compute_signature_v2("secret1", 1_700_000_000, "hello");
+        let sig2 = compute_signature_v2("secret2", 1_700_000_000, "hello");
         assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn signature_v2_matches_stripe_style_format() {
+        let sig = compute_signature_v2("secret", 1_700_000_000, "hello");
+        let re = regex_lite_match_t_v1(&sig);
+        assert!(
+            re,
+            "signature must match ^t=\\d+,v1=[0-9a-f]{{64}}$, got: {sig}"
+        );
+    }
+
+    #[test]
+    fn signature_v2_different_timestamps_produce_different_signatures() {
+        let sig1 = compute_signature_v2("secret", 1_700_000_000, "hello");
+        let sig2 = compute_signature_v2("secret", 1_700_000_001, "hello");
+        assert_ne!(
+            sig1, sig2,
+            "binding the timestamp into the signed payload must change the signature"
+        );
+    }
+
+    /// Minimal hand-rolled matcher for `^t=\d+,v1=[0-9a-f]{64}$` — avoids
+    /// pulling in a `regex` dependency for a single test assertion.
+    fn regex_lite_match_t_v1(s: &str) -> bool {
+        let Some(rest) = s.strip_prefix("t=") else {
+            return false;
+        };
+        let Some((digits, rest)) = rest.split_once(",v1=") else {
+            return false;
+        };
+        !digits.is_empty()
+            && digits.chars().all(|c| c.is_ascii_digit())
+            && rest.len() == 64
+            && rest.chars().all(|c| c.is_ascii_hexdigit())
     }
 
     // ---- SSRF protection tests (SEC-019/SECHRD-02) ----

@@ -110,7 +110,7 @@ Each task was committed atomically:
 None — plan executed as written. One self-caught bug during test authoring (not a plan deviation, since it never reached a commit): the `FailingTemplateRepo` test double's error strings originally embedded the literal substring "D-06 test", which double-counted against the `warn!` log's own "D-06:" prefix in the fallback test's assertion. Fixed before any commit by rewording the test double's error messages to avoid the collision; verified via a clean 7/7 test pass afterward.
 
 ## Issues Encountered
-None beyond the self-caught test-string collision above.
+- `gsd-tools query requirements.mark-complete FUNC-03` returned `not_found`. Pre-existing structural mismatch between this project's `REQUIREMENTS.md` format (heading-per-requirement `## FUNC-03: ...`, plain unlabeled acceptance-criteria checkboxes, and a 4-column traceability table) and the tool's expected `- [ ] **REQ-ID**` bold-checkbox / 3-column-table conventions — not something introduced by this plan (28-01's SUMMARY also lists `requirements-completed: [FUNC-03]` yet the traceability row is still `Pending`, so this gap predates this plan). Not fixed here: rewriting REQUIREMENTS.md's format is out of this plan's scope. FUNC-03 has three ACs (T19.20/21/22); this plan closes only the T19.21 (custom-template resolution) AC, so the requirement row should stay `Pending` until the other two ACs are also verified regardless.
 
 ## User Setup Required
 None - no external service configuration required.
@@ -122,3 +122,7 @@ None - no external service configuration required.
 ---
 *Phase: 28-functional-completeness*
 *Completed: 2026-07-05*
+
+## Self-Check: PASSED
+
+All modified files confirmed present on disk and all task/summary commit hashes confirmed present in git log.

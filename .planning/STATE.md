@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 28
 current_phase_name: functional-completeness
 status: executing
-stopped_at: Completed 28-02-PLAN.md
-last_updated: "2026-07-05T19:02:24.091Z"
+stopped_at: Completed 28-03-PLAN.md
+last_updated: "2026-07-05T19:24:36.900Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 28 execution started
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 45
-  completed_plans: 42
+  completed_plans: 43
   percent: 63
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 28 (functional-completeness) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-07-05 — Phase 28 execution started
 
@@ -198,6 +198,7 @@ Last activity: 2026-07-05 — Phase 28 execution started
 | Phase 27 P07 | 40min | 3 tasks | 8 files |
 | Phase 28 P01 | 20min | 3 tasks | 3 files |
 | Phase 28 P02 | 20min | 3 tasks | 4 files |
+| Phase 28 P03 | 25min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -493,6 +494,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 28-01]: row_to_provider/try_into_domain changed to return AxiamError directly so D-08's NULL-ciphertext case surfaces as AxiamError::EmailConfig, matching the crate's existing email-config error family instead of the generic Database(String) variant
 - [Phase ?]: [28-02] issue_service_account_token mirrors device_auth's prior aud (AUD_USER)/scope (None) values verbatim — only sub_kind differs; validate_access_token unchanged (D-10)
 - [Phase ?]: [28-02] Task 3 RBAC-denial test uses a new real-AuthorizationEngine harness in user_test.rs (mirroring rbac_test.rs) since that file's existing AllowAllAuthzChecker harness cannot prove RBAC denial
+- [Phase ?]: [Phase 28-03]: D-06 fail-safe implemented only around get_org_template/get_tenant_template fetches (per D-06-fetch-only-fallback) — resolve_template/render/render_html are infallible and untouched
+- [Phase ?]: [Phase 28-03]: Template-resolution tests capture the EmailService::send debug log (subject field) via tracing::subscriber::set_default + a BufWriter, mirroring gdpr_audit_dlq_test.rs, since send_with_retry_and_audit has no inspectable return value for the rendered EmailMessage
 
 ### Pending Todos
 
@@ -516,7 +519,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T19:02:24.073Z
-Stopped at: Completed 28-02-PLAN.md
+Last session: 2026-07-05T19:24:30.163Z
+Stopped at: Completed 28-03-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

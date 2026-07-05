@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 26
 current_phase_name: correctness-resilience
 status: executing
-stopped_at: Completed 26-05-PLAN.md
-last_updated: "2026-07-05T09:23:57.029Z"
+stopped_at: Completed 26-06-PLAN.md
+last_updated: "2026-07-05T09:43:49.245Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 26 execution started
 progress:
   total_phases: 8
   completed_phases: 3
   total_plans: 33
-  completed_plans: 30
+  completed_plans: 31
   percent: 38
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 26 (correctness-resilience) — EXECUTING
-Plan: 6 of 8
+Plan: 7 of 8
 Status: Ready to execute
 Last activity: 2026-07-05 — Phase 26 execution started
 
@@ -185,6 +185,7 @@ Last activity: 2026-07-05 — Phase 26 execution started
 | Phase 26 P03 | 25min | 2 tasks | 5 files |
 | Phase 26 P04 | 12min | 2 tasks | 2 files |
 | Phase 26 P05 | 22min | 2 tasks | 1 files |
+| Phase 26 P06 | 15min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -451,6 +452,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 26-correctness-resilience] 26-04: CI e2e job now runs npm run test:e2e (Playwright) as a blocking step against the seeded backend, with vitest run kept as its own separate blocking step (D-11); auth-contract.spec.ts confirmed (no change needed) to already assert SECFIX-06 request bodies
 - [Phase ?]: [Phase 26-05]: tenant_slug/org_slug resolved strictly from the authenticated user's own tenant_id/organization_id (never request input), .ok()-guarded so lookup failure degrades to None without failing /me or login (D-14/D-15, T-26-05-01/02)
 - [Phase ?]: [Phase 26-05]: cookie_response_from_output threaded with tenant_repo/org_repo so login, verify_mfa, and setup_confirm_mfa share one slug-resolution implementation, keeping fresh-login and post-reload /me in agreement
+- [Phase ?]: [Phase 26-06] Extracted DASHBOARD_USER_COUNT_QUERY_KEY into lib/queryClient.ts (not inline in DashboardPage.tsx) so it could be exported for a regression test without tripping the react-refresh/only-export-components ESLint rule (array literals aren't a constant export under that rule)
+- [Phase ?]: [Phase 26-06] Extracted shouldSeedForm/computeIsDirty into settingsForm.ts (plain .ts, not .tsx) for unit-testability — this project has no DOM-rendering test harness (no testing-library/jsdom)
+- [Phase ?]: [Phase 26-06] Org-settings navigate-away guard implemented with two complementary mechanisms: react-router v7 useBlocker for route-level navigation away from the page, plus a lifted dirty flag + pending-tab intercept in the parent for the Settings tab's own in-page tab switch (local state, not a router navigation)
 
 ### Pending Todos
 
@@ -474,7 +478,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T09:23:57.014Z
-Stopped at: Completed 26-05-PLAN.md
+Last session: 2026-07-05T09:39:25.645Z
+Stopped at: Completed 26-06-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

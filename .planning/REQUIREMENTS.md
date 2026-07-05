@@ -863,9 +863,9 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** CQ-F19, CQ-F37, CQ-F38
 
 ### Acceptance Criteria
-- [ ] VerifyEmailPage uses a `useRef` once-guard (no StrictMode double-fire / false "failed") — CQ-F19
-- [ ] Dashboard gets a distinct query key so `["users",1,""]` no longer collides with UsersPage's different page size — CQ-F37
-- [ ] Org settings form guards init on first load / tracks dirtiness (no discard of in-progress edits on refocus) — CQ-F38
+- [x] VerifyEmailPage uses a `useRef` once-guard (no StrictMode double-fire / false "failed") — CQ-F19 (26-06: `verifiedRef` guard, `VerifyEmailPage.tsx`)
+- [x] Dashboard gets a distinct query key so `["users",1,""]` no longer collides with UsersPage's different page size — CQ-F37 (26-06: `DASHBOARD_USER_COUNT_QUERY_KEY` in `lib/queryClient.ts`, regression test in `DashboardPage.test.ts`)
+- [x] Org settings form guards init on first load / tracks dirtiness (no discard of in-progress edits on refocus) — CQ-F38 (26-06: `initializedRef`/`isDirty`/`beforeunload`/`useBlocker` in `OrganizationDetailPage.tsx`, pure logic tested in `OrganizationDetailPage.test.tsx`)
 
 ---
 
@@ -1095,7 +1095,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Pending |
 | CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Complete |
 | CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Pending |
-| CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Pending |
+| CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Complete (26-06: VerifyEmailPage useRef guard D-17, Dashboard distinct query key D-18, org-settings init-guard/dirty-tracking/navigate-away guard D-19) |
 | PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Pending |
 | PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Pending |
 | PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Pending |

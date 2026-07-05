@@ -331,7 +331,7 @@ jobs:
         working-directory: frontend
         run: npx playwright install chromium
 
-      - name: Serve frontend and run E2E tests
+      - name: Serve frontend and run Playwright E2E tests
         working-directory: frontend
         run: |
           # Serve the production build on port 5173 for Playwright
@@ -341,7 +341,12 @@ jobs:
           for i in $(seq 1 15); do
             curl -sf http://localhost:5173 > /dev/null 2>&1 && break || sleep 2
           done
-          npm test
+          # D-11: this must be `npm run test:e2e` (Playwright, test:e2e script)
+          # against the served build + seeded backend — NOT `npm test`
+          # (vitest), which was previously (and incorrectly) run here and let
+          # all 13 frontend/e2e/*.spec.ts specs (including the SECFIX-06
+          # body-asserting auth-contract.spec.ts) go unexecuted (CORR-04).
+          npm run test:e2e
           kill $SERVE_PID || true
         env:
           CI: "true"
@@ -350,6 +355,13 @@ jobs:
           E2E_TENANT_SLUG: "default"
           E2E_ADMIN_EMAIL: "admin@axiam.dev"
           E2E_ADMIN_PASSWORD: "Test@Admin123!"
+
+      - name: Run frontend unit tests
+        working-directory: frontend
+        # D-11: vitest run kept as its own separate blocking step (does not
+        # need the served frontend/seeded backend) so both suites
+        # independently gate the build.
+        run: npm test
 
       - name: Upload Playwright report
         if: always()

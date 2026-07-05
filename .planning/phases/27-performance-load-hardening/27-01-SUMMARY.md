@@ -174,3 +174,5 @@ PERF-01 is closed: `check_hibp` short-circuits the network call under sustained 
 ---
 *Phase: 27-performance-load-hardening*
 *Completed: 2026-07-05*
+
+## Self-Check: PASSED

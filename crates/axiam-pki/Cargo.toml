@@ -31,5 +31,10 @@ time = "0.3"
 
 [dev-dependencies]
 axiam-db = { workspace = true }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 uuid = { workspace = true }
+
+[[bench]]
+name = "cert_bench"
+harness = false

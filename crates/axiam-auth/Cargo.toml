@@ -35,5 +35,10 @@ webauthn-rs = { workspace = true }
 
 [dev-dependencies]
 axiam-db = { workspace = true }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }
+
+[[bench]]
+name = "auth_bench"
+harness = false

@@ -498,6 +498,14 @@ async fn main() -> std::io::Result<()> {
     let auth_config = config.auth.clone();
     let health_checker: Arc<dyn HealthChecker> = Arc::new(db);
 
+    // PERF-01: initialize the process-wide HIBP circuit breaker from
+    // AuthConfig (config-crate wired, not a manual env parse) before the
+    // HTTP server starts serving.
+    axiam_auth::hibp_breaker::init_global(
+        auth_config.hibp_breaker_threshold,
+        auth_config.hibp_breaker_cooldown_secs,
+    );
+
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
     // Build REST-facing authorization checker (D-01, D-02).

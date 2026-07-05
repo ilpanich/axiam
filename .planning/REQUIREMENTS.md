@@ -875,8 +875,8 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 
 ### Acceptance Criteria
 - [x] `check_hibp` wrapped in a circuit breaker that trips on repeated failure/timeout and fails open (`Ok(None)`) for a cooldown window — 27-01: `HibpBreaker` (`crates/axiam-auth/src/hibp_breaker.rs`), short-circuits before the HTTP call, config-driven threshold/cooldown
-- [ ] Hot-path violation/segment vectors pre-sized with `Vec::with_capacity(n)` (complexity checker, authz middleware, SDK serialization maps) — 27-01: complexity checker done (`check_complexity` → `Vec::with_capacity(5)`); no authz-middleware path-segment Vec exists (27-RESEARCH.md Pitfall 1); SDK serialization maps not yet addressed
-- [ ] Load test: a credential-stuffing burst does not starve legitimate flows
+- [x] Hot-path violation/segment vectors pre-sized with `Vec::with_capacity(n)` (complexity checker, authz middleware, SDK serialization maps) — 27-01: complexity checker done (`check_complexity` → `Vec::with_capacity(5)`); no authz-middleware path-segment Vec exists (27-RESEARCH.md Pitfall 1); SDK serialization maps DEFERRED to a future performance milestone (accepted human scope call 2026-07-05)
+- [~] Load test: a credential-stuffing burst does not starve legitimate flows — DEFERRED to a future performance milestone (accepted human scope call 2026-07-05): breaker mechanism unit-proven (9/9 tests, short-circuits before the HTTP call); k6/HTTP-level load testing deferred per CONTEXT.md D-14/D-15
 
 ## PERF-02: Concurrent Bounded BatchCheckAccess
 
@@ -1096,7 +1096,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Complete |
 | CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Complete (26-05: backend tenant_slug/org_slug; 26-08: public /auth/mfa-setup route D-16 + tenant-restore e2e) |
 | CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Complete (26-06: VerifyEmailPage useRef guard D-17, Dashboard distinct query key D-18, org-settings init-guard/dirty-tracking/navigate-away guard D-19) |
-| PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Pending |
+| PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Complete (27-01: `HibpBreaker` short-circuits before the HTTP call, 9/9 unit tests, complexity-checker pre-sizing done. Load-test starvation proof + SDK-serialization-map pre-sizing DEFERRED to a future performance milestone — accepted human scope call 2026-07-05, see 27-VERIFICATION) |
 | PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Complete (27-05: gRPC+REST `buffer_unordered`+`sort_by_key`, `AuthzConfig.batch_max_concurrency`=16, correctness tests batch==sequential; 27-07: `authz_bench` ~8.4x speedup) |
 | PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Complete (27-02: rust/python; 27-03: go/java/csharp; 27-04: typescript proven via jose's native pendingFetch guard + php Guzzle-promise guard) |
 | PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) | Complete (27-06: full-jitter backoff + Arc<RwLock<Surreal<Client>>> poisoned-handle eviction + exhaustion-stays-Unhealthy-forever reconnect loop) |

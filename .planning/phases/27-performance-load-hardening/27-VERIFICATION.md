@@ -1,10 +1,12 @@
 ---
 phase: 27-performance-load-hardening
 verified: 2026-07-05T16:20:00Z
-status: human_needed
-score: 4/5 must-haves verified
-behavior_unverified: 1
-overrides_applied: 0
+status: passed
+resolved: 2026-07-05T16:40:00Z
+human_resolution: "ACCEPTED as deliberate scope reduction (human scope call, 2026-07-05). The PERF-01 breaker mechanism is unit-proven (9/9, should_attempt() short-circuits before the HTTP call); k6/HTTP-level load testing (SC#1 'no starvation') and SDK-serialization-map pre-sizing are deferred to a future performance milestone per the locked D-14/D-15 decisions in 27-CONTEXT.md. Recorded in REQUIREMENTS.md PERF-01 (load-test criterion marked [~] DEFERRED, coverage row Complete-with-deferral)."
+score: 4/5 must-haves verified (5/5 accepted after human scope call)
+behavior_unverified: 0
+overrides_applied: 1
 human_verification:
   - test: "PERF-01's ROADMAP success criterion #1 bundles three claims: (a) breaker trips/fails-open/cooldown [VERIFIED — see below], (b) 'does not starve legitimate auth flows' under actual burst load, and (c) 'hot-path vectors are pre-sized'. REQUIREMENTS.md's own acceptance-criteria checklist (updated by 27-01's own commit) leaves (b) and part of (c) explicitly UNCHECKED: 'Load test: a credential-stuffing burst does not starve legitimate flows' has no checkbox ticked at all, and the pre-sizing line is annotated 'no authz-middleware path-segment Vec exists ... SDK serialization maps not yet addressed'."
     expected: "Either confirm this is an accepted, deliberate scope reduction (the phase's own CONTEXT.md/RESEARCH.md/DISCUSSION-LOG.md document a locked decision to defer k6/HTTP-level load testing to 'a future performance milestone' and to treat 'SDK serialization maps' pre-sizing as never-investigated/out-of-scope), or require a follow-up plan/phase to close the literal REQUIREMENTS.md checkboxes before shipping this phase as fully done."

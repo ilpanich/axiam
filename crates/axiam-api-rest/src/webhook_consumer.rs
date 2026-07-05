@@ -13,6 +13,19 @@
 //! `axiam_amqp::WebhookMessage`, and `axiam_amqp::WebhookPublisher` — all
 //! already present in `axiam-amqp` (a dependency of this crate).
 
+use axiam_amqp::{WebhookMessage, WebhookPublisher, connection::queues};
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+use axiam_core::repository::{AuditLogRepository, WebhookRepository};
+use futures_lite::StreamExt;
+use lapin::Acker;
+use lapin::Channel;
+use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions};
+use lapin::types::{DeliveryTag, FieldTable};
+use tracing::{error, info, warn};
+use uuid::Uuid;
+
+use crate::webhook::WebhookDeliveryService;
+
 // ---------------------------------------------------------------------------
 // Retry config (D-08/D-20)
 // ---------------------------------------------------------------------------
@@ -98,6 +111,263 @@ pub fn backoff_ttl_ms(attempt: u32, cfg: &WebhookRetryConfig) -> u64 {
     let delay_ms = cfg.backoff_base_ms as f64 * BACKOFF_MULTIPLIER.powi(exponent);
     let ceiling_ms = cfg.backoff_ceiling_ms as f64;
     delay_ms.clamp(0.0, ceiling_ms) as u64
+}
+
+// ---------------------------------------------------------------------------
+// AMQP consumer loop
+// ---------------------------------------------------------------------------
+
+/// Build the terminal/per-attempt audit entry for a webhook delivery outcome
+/// (D-09). `actor_id` uses the `Uuid::nil()` system-actor convention (no
+/// human/service-account initiated this delivery attempt — mirrors
+/// `mail_consumer`'s and `axiam-federation::secrets`'s existing
+/// `ActorType::System` + nil-actor-id pattern).
+fn build_audit_entry(
+    tenant_id: Uuid,
+    webhook_id: Uuid,
+    action: &str,
+    outcome: AuditOutcome,
+    metadata: serde_json::Value,
+) -> CreateAuditLogEntry {
+    CreateAuditLogEntry {
+        tenant_id,
+        actor_id: Uuid::nil(),
+        actor_type: ActorType::System,
+        action: action.into(),
+        resource_id: Some(webhook_id),
+        outcome,
+        ip_address: None,
+        metadata: Some(metadata),
+    }
+}
+
+/// Start consuming webhook deliveries from `queues::WEBHOOK` (D-06).
+///
+/// For each dequeued [`WebhookMessage`]:
+/// - Deserialize; a malformed payload is nacked `requeue:false` (bad
+///   payload, not retried forever — mirrors `mail_consumer`'s bad-payload
+///   handling).
+/// - Call `delivery_service.deliver_once` exactly once.
+/// - On a 2xx response: ack + write a terminal `webhook.delivery_succeeded`
+///   audit record.
+/// - On a non-2xx response or `WebhookError`, with `attempt+1 < max_attempts`:
+///   publish a copy (with incremented `attempt`) to `queues::WEBHOOK_RETRY`
+///   with `expiration = backoff_ttl_ms(attempt+1, cfg)`, write a per-attempt
+///   `webhook.delivery_attempt` audit record, then ack the ORIGINAL message
+///   (the retry copy re-enters `queues::WEBHOOK` via TTL+DLX once the delay
+///   expires — no in-process wait ties up this consumer's slot, D-07).
+/// - On exhaustion (`attempt+1 >= max_attempts`): nack `requeue:false` so the
+///   message dead-letters to `queues::WEBHOOK_DLQ` (replayable), and write a
+///   terminal `webhook.delivery_failed` audit record.
+///
+/// SEC-019/SECHRD-02: `deliver_once` is reused unchanged — the SSRF guard is
+/// preserved when delivery is driven from AMQP, not bypassed.
+pub async fn start_webhook_consumer<W, A>(
+    channel: Channel,
+    delivery_service: WebhookDeliveryService<W>,
+    publisher: WebhookPublisher,
+    audit_repo: A,
+    cfg: WebhookRetryConfig,
+) where
+    W: WebhookRepository + Clone + 'static,
+    A: AuditLogRepository + 'static,
+{
+    info!("Starting webhook AMQP consumer");
+
+    let mut consumer = match channel
+        .basic_consume(
+            queues::WEBHOOK.into(),
+            "axiam-webhook-consumer".into(),
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!(error = %e, "Failed to start webhook consumer");
+            return;
+        }
+    };
+
+    while let Some(delivery_result) = consumer.next().await {
+        let delivery = match delivery_result {
+            Ok(d) => d,
+            Err(e) => {
+                error!(error = %e, "Error receiving webhook delivery");
+                continue;
+            }
+        };
+
+        let tag = delivery.delivery_tag;
+
+        // Deserialize. Bad payload -> nack requeue:false (not re-deliverable).
+        let msg: WebhookMessage = match serde_json::from_slice(&delivery.data) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    delivery_tag = tag,
+                    "Invalid webhook message payload, nacking"
+                );
+                let _ = delivery
+                    .acker
+                    .nack(BasicNackOptions {
+                        requeue: false,
+                        ..BasicNackOptions::default()
+                    })
+                    .await;
+                continue;
+            }
+        };
+
+        let result = delivery_service
+            .deliver_once(
+                msg.tenant_id,
+                msg.webhook_id,
+                msg.delivery_id,
+                &msg.event_type,
+                &msg.payload,
+            )
+            .await;
+
+        match result {
+            Ok(status) if status.is_success() => {
+                let entry = build_audit_entry(
+                    msg.tenant_id,
+                    msg.webhook_id,
+                    "webhook.delivery_succeeded",
+                    AuditOutcome::Success,
+                    serde_json::json!({
+                        "delivery_id": msg.delivery_id,
+                        "attempt": msg.attempt + 1,
+                        "status": status.as_u16(),
+                    }),
+                );
+                if let Err(e) = audit_repo.append(entry).await {
+                    error!(error = %e, "Failed to write webhook.delivery_succeeded audit event");
+                }
+                if let Err(e) = delivery.acker.ack(BasicAckOptions::default()).await {
+                    error!(error = %e, delivery_tag = tag, "Failed to ack webhook delivery");
+                }
+            }
+            Ok(status) => {
+                handle_delivery_failure(
+                    &msg,
+                    &publisher,
+                    &audit_repo,
+                    &cfg,
+                    format!("non-2xx status: {}", status.as_u16()),
+                    tag,
+                    &delivery.acker,
+                )
+                .await;
+            }
+            Err(e) => {
+                handle_delivery_failure(
+                    &msg,
+                    &publisher,
+                    &audit_repo,
+                    &cfg,
+                    e.to_string(),
+                    tag,
+                    &delivery.acker,
+                )
+                .await;
+            }
+        }
+    }
+
+    warn!("Webhook AMQP consumer stream ended");
+}
+
+/// Shared failure-path handling for both a non-2xx delivery response and a
+/// `WebhookError` (SSRF-blocked, secret-decrypt failure, lookup failure,
+/// etc.) — both are "this attempt did not succeed" and follow the same
+/// retry-or-exhaust decision (D-07/D-09).
+async fn handle_delivery_failure<A>(
+    msg: &WebhookMessage,
+    publisher: &WebhookPublisher,
+    audit_repo: &A,
+    cfg: &WebhookRetryConfig,
+    error_detail: String,
+    delivery_tag: DeliveryTag,
+    acker: &Acker,
+) where
+    A: AuditLogRepository + 'static,
+{
+    let next_attempt = msg.attempt + 1;
+
+    if next_attempt < cfg.max_attempts {
+        let ttl_ms = backoff_ttl_ms(next_attempt, cfg);
+        let mut retry_msg = msg.clone();
+        retry_msg.attempt = next_attempt;
+
+        if let Err(e) = publisher.publish_retry(&retry_msg, ttl_ms).await {
+            error!(
+                error = %e,
+                webhook_id = %msg.webhook_id,
+                delivery_id = %msg.delivery_id,
+                "Failed to publish webhook retry"
+            );
+        }
+
+        let entry = build_audit_entry(
+            msg.tenant_id,
+            msg.webhook_id,
+            "webhook.delivery_attempt",
+            AuditOutcome::Failure,
+            serde_json::json!({
+                "delivery_id": msg.delivery_id,
+                "attempt": next_attempt,
+                "error": error_detail,
+                "next_retry_in_ms": ttl_ms,
+            }),
+        );
+        if let Err(e) = audit_repo.append(entry).await {
+            error!(error = %e, "Failed to write webhook.delivery_attempt audit event");
+        }
+
+        // Ack the ORIGINAL message — the retry copy has been queued onto
+        // WEBHOOK_RETRY and will re-enter WEBHOOK via TTL+DLX (D-07).
+        if let Err(e) = acker.ack(BasicAckOptions::default()).await {
+            error!(error = %e, delivery_tag, "Failed to ack original webhook delivery");
+        }
+    } else {
+        warn!(
+            webhook_id = %msg.webhook_id,
+            delivery_id = %msg.delivery_id,
+            attempt = next_attempt,
+            max_attempts = cfg.max_attempts,
+            error = %error_detail,
+            "Webhook delivery exhausted retries — dead-lettering"
+        );
+
+        let entry = build_audit_entry(
+            msg.tenant_id,
+            msg.webhook_id,
+            "webhook.delivery_failed",
+            AuditOutcome::Failure,
+            serde_json::json!({
+                "delivery_id": msg.delivery_id,
+                "attempt": next_attempt,
+                "error": error_detail,
+                "next_retry_in_ms": null,
+            }),
+        );
+        if let Err(e) = audit_repo.append(entry).await {
+            error!(error = %e, "Failed to write webhook.delivery_failed audit event");
+        }
+
+        // Terminal exhaustion -> nack requeue:false -> WEBHOOK's own DLX ->
+        // WEBHOOK_DLQ (replayable, per 26-03's topology).
+        let _ = acker
+            .nack(BasicNackOptions {
+                requeue: false,
+                ..BasicNackOptions::default()
+            })
+            .await;
+    }
 }
 
 // ---------------------------------------------------------------------------

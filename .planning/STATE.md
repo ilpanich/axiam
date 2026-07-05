@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 27
 current_phase_name: performance-load-hardening
 status: executing
-stopped_at: Completed 27-05-PLAN.md
-last_updated: "2026-07-05T14:58:40.553Z"
+stopped_at: Completed 27-06-PLAN.md
+last_updated: "2026-07-05T15:22:11.920Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 27 execution started
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 40
-  completed_plans: 38
+  completed_plans: 39
   percent: 50
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 27 (performance-load-hardening) — EXECUTING
-Plan: 6 of 7
+Plan: 7 of 7
 Status: Ready to execute
 Last activity: 2026-07-05 — Phase 27 execution started
 
@@ -193,6 +193,7 @@ Last activity: 2026-07-05 — Phase 27 execution started
 | Phase 27 P03 | 20min | 3 tasks | 7 files |
 | Phase 27 P04 | 20min | 2 tasks | 4 files |
 | Phase 27 P05 | 44min | 3 tasks | 11 files |
+| Phase 27 P06 | 25min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -479,6 +480,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 27-performance-load-hardening] 27-04: TypeScript SDK needs no inFlightFetch guard — jose's RemoteJWKSet.reload() already has an internal pendingFetch lazy-promise-singleton, proven by a concurrent-burst test rather than assumed
 - [Phase ?]: [Phase 27-performance-load-hardening] 27-04: PHP SDK JwksVerifier converted entirely to Guzzle async (requestAsync) for both OIDC discovery and JWKS fetch so a single shared $inFlightFetch promise coalesces concurrent verify()-triggered refetches; test drives the private ensureFreshAsync via Reflection since a sequential verify() loop cannot exercise concurrency under classic PHP-FPM (RESEARCH Pitfall 6)
 - [Phase ?]: [Phase 27-05]: futures added as std-only direct dep to axiam-api-grpc/axiam-api-rest (already-resolved 0.3.32 transitive) for bounded stream::buffer_unordered batch concurrency; AuthzConfig.batch_max_concurrency (default 16) config-driven per D-06/D-07
+- [Phase ?]: [Phase 27-06]: DbManager.db swapped to Arc<tokio::sync::RwLock<Surreal<Client>>> for atomic poisoned-handle eviction (D-12); client() removed in favor of async client_cloned()
+- [Phase ?]: [Phase 27-06]: Poisoned-handle unit test uses the kv-mem embedded engine (not a live HTTP connection) since Surreal::new::<Http>() performs a real network health-check at construction time
 
 ### Pending Todos
 
@@ -502,7 +505,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T14:58:40.537Z
-Stopped at: Completed 27-05-PLAN.md
+Last session: 2026-07-05T15:22:11.904Z
+Stopped at: Completed 27-06-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

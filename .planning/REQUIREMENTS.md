@@ -901,9 +901,9 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** T19.33, T19.34
 
 ### Acceptance Criteria
-- [ ] Reconnect loop uses exponential backoff with **full jitter**, a `max_backoff` ceiling, and a bounded retry count that surfaces a critical error (no flat-interval hammering)
-- [ ] Poisoned connections (topology anomaly / handshake timeout) are dropped and regenerated, never recycled into the healthy pool
-- [ ] Test/simulation: competing workers desynchronize; a failed handshake does not leak a broken handle
+- [x] Reconnect loop uses exponential backoff with **full jitter**, a `max_backoff` ceiling, and a bounded retry count that surfaces a critical error (no flat-interval hammering)
+- [x] Poisoned connections (topology anomaly / handshake timeout) are dropped and regenerated, never recycled into the healthy pool
+- [x] Test/simulation: competing workers desynchronize; a failed handshake does not leak a broken handle
 
 ## PERF-05: Load Testing & Critical-Path Profiling
 
@@ -1099,7 +1099,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Pending |
 | PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Pending |
 | PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Complete (27-02: rust/python; 27-03: go/java/csharp; 27-04: typescript proven via jose's native pendingFetch guard + php Guzzle-promise guard) |
-| PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) | Pending |
+| PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) | Complete (27-06: full-jitter backoff + Arc<RwLock<Surreal<Client>>> poisoned-handle eviction + exhaustion-stays-Unhealthy-forever reconnect loop) |
 | PERF-05 | Phase 27 | Load testing + profiling (T18.3) | Pending |
 | FUNC-01 | Phase 28 | Unauthenticated federation login (T19.9) | Pending |
 | FUNC-02 | Phase 28 | Session invalidation on reset (T19.10) | Pending |

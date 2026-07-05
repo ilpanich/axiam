@@ -1159,7 +1159,7 @@ Plans:
   4. A failed SurrealDB handshake / poisoned connection is dropped and never recycled into the healthy pool, and the reconnect loop uses full-jitter exponential backoff with a `max_backoff` ceiling and bounded retry (PERF-04)
   5. `claude_dev/performance-report.md` records baseline-vs-optimized numbers from the load-test harness (k6/criterion) for auth, authz-check, and certificate validation (PERF-05)
 
-**Plans**: 5/7 plans executed
+**Plans**: 6/7 plans executed
 
 Plans:
 **Wave 1**
@@ -1175,7 +1175,7 @@ Plans:
 
 **Wave 3** *(depends on 27-05 — shared main.rs)*
 
-- [ ] 27-06-PLAN.md — PERF-04 SurrealDB reconnect resilience (full-jitter backoff + poisoned-handle eviction)
+- [x] 27-06-PLAN.md — PERF-04 SurrealDB reconnect resilience (full-jitter backoff + poisoned-handle eviction)
 - [ ] 27-07-PLAN.md — PERF-05 criterion benches (auth/authz/cert) + performance-report.md
 
 ---
@@ -1245,7 +1245,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 24. Security Hardening I — Auth & Access-Control | 9/9 | Complete    | 2026-07-04 |
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 10/10 | Complete    | 2026-07-04 |
 | 26. Correctness & Resilience | 8/8 | Complete   | 2026-07-05 |
-| 27. Performance & Load Hardening | 5/7 | In Progress|  |
+| 27. Performance & Load Hardening | 6/7 | In Progress|  |
 | 28. Functional Completeness | 0/? | Not started | - |
 | 29. Structural Quality | 0/? | Not started | - |
 | 30. Compliance & Documentation | 0/? | Not started | - |

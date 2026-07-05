@@ -8,19 +8,49 @@
 //! which caused a running server to return "not found" on records that exist
 //! after the connection idled. AXIAM uses no live queries, so the WebSocket
 //! engine bought us nothing but that failure mode.
+//!
+//! ## Root-token renewal (CORR-02)
+//!
+//! SurrealDB mints root signin JWTs with a fixed `DURATION FOR TOKEN`. Left
+//! at the SDK default (`1h`), the HTTP engine's cached token expires mid-process
+//! and every subsequent request 401s until the process restarts.
+//! [`DbManager::connect`] spawns a background task that re-`signin`s the SAME
+//! still-authenticated session at a fraction of the TTL (D-04,
+//! [`re_signin_interval`]) — this succeeds because the cached token is still
+//! valid when the request is sent (see [`DbManager::spawn_proactive_resignin`]
+//! doc comment for why this must NOT call `invalidate()` first).
+//!
+//! **Known residual gap (documented, not fixed here):** every repository in
+//! `axiam-server` is constructed via `db.client().clone()`. Cloning a
+//! `Surreal<C>` mints a brand-new session id and copies the CURRENT auth
+//! state as a value snapshot — it does not share future re-signins with the
+//! original handle. This module's proactive re-signin therefore only keeps
+//! `DbManager`'s OWN session (used by `health_check`) alive; the ~30
+//! already-cloned repository sessions each still expire independently on
+//! their own original schedule. This matches the phase's locked scope
+//! (`26-RESEARCH.md` Pitfall 2) and is the same shape of problem Phase 27's
+//! PERF-04 ("poisoned-connection eviction") is already slated to address.
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use surrealdb::Surreal;
 use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::error::DbError;
 
-/// Token lifetime applied to the SurrealDB root user at startup (SurrealQL
-/// duration literal). The default is `1h`, which expires mid-process and 401s
-/// every request until restart; `4w` comfortably outlives any normal uptime.
-const ROOT_TOKEN_DURATION: &str = "4w";
+/// Token lifetime applied to the SurrealDB root user at startup. Represented
+/// as a real `Duration` (not just a SurrealQL string literal) so the
+/// `DEFINE USER ... DURATION FOR TOKEN` statement AND the proactive
+/// re-signin cadence ([`re_signin_interval`]) derive from ONE source of
+/// truth and can never drift apart. Four weeks comfortably outlives any
+/// normal uptime even without renewal; the renewal mechanism above exists so
+/// that ceiling is never actually load-bearing.
+const ROOT_TOKEN_DURATION: Duration = Duration::from_secs(4 * 7 * 24 * 3600);
 
 /// Configuration for connecting to SurrealDB.
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +66,13 @@ pub struct DbConfig {
     pub username: String,
     /// Root password for authentication.
     pub password: String,
+    /// Fraction of [`ROOT_TOKEN_DURATION`] at which the proactive re-signin
+    /// task fires (D-04). Clamped to `0.05..=0.95` at use (see
+    /// [`re_signin_interval`]) — never trusted un-clamped from config.
+    /// Overridable via `AXIAM__DB__TOKEN_REFRESH_FRACTION` (D-20); default
+    /// ~0.6 leaves a wide safety margin before the token actually expires
+    /// while avoiding excessive re-signin traffic.
+    pub token_refresh_fraction: f64,
 }
 
 impl Default for DbConfig {
@@ -46,14 +83,39 @@ impl Default for DbConfig {
             database: "main".into(),
             username: "root".into(),
             password: "root".into(),
+            token_refresh_fraction: 0.6,
         }
     }
 }
 
+/// Returns the SurrealQL `DURATION FOR TOKEN` literal for the given TTL
+/// (e.g. `Duration::from_secs(60)` -> `"60s"`). SurrealQL accepts a bare
+/// `<n>s` duration literal, so no duration-string parser is needed — the
+/// literal is derived FROM the `Duration`, never the reverse.
+fn root_token_duration_surql_literal(ttl: Duration) -> String {
+    format!("{}s", ttl.as_secs())
+}
+
+/// Interval between proactive re-signin attempts, computed against the
+/// given TTL: `ttl * fraction`, with `fraction` clamped to a safe
+/// `0.05..=0.95` band (D-04) regardless of what a misconfigured env var
+/// supplies.
+fn re_signin_interval_for(ttl: Duration, fraction: f64) -> Duration {
+    Duration::from_secs_f64(ttl.as_secs_f64() * fraction.clamp(0.05, 0.95))
+}
+
 /// Manages a connection to SurrealDB over the stateless HTTP engine.
 pub struct DbManager {
-    /// SurrealDB client handle (HTTP engine).
-    db: Surreal<Client>,
+    /// SurrealDB client handle (HTTP engine). `Arc`-shared (not cloned) with
+    /// the proactive re-signin task so both sides observe/refresh the SAME
+    /// session id — a `.clone()`d `Surreal<C>` would mint an independent
+    /// session that re-signin traffic on one side would not reach (see
+    /// module docs, Pitfall 2).
+    db: Arc<Surreal<Client>>,
+    /// Handle to the background proactive re-signin task (D-03/D-04),
+    /// owned so it is explicitly droppable/abortable rather than a
+    /// fire-and-forget detached task.
+    refresh_handle: JoinHandle<()>,
 }
 
 impl DbManager {
@@ -62,6 +124,9 @@ impl DbManager {
     /// Authenticates as root and selects the configured namespace and database.
     /// With the HTTP engine these are stored on the client and re-sent on every
     /// request, so the selection cannot be silently lost on reconnect.
+    ///
+    /// Also spawns the proactive re-signin background task (D-03/D-04) that
+    /// keeps this session authenticated well inside the root token's TTL.
     pub async fn connect(config: &DbConfig) -> Result<Self, surrealdb::Error> {
         info!(
             url = %config.url,
@@ -78,8 +143,8 @@ impl DbManager {
         //
         // Fix: on a short-lived setup handle, extend the root user's token duration,
         // then open the real connection whose FRESH signin mints a long-lived token.
-        // The token is therefore long-lived for the whole process lifetime and is
-        // shared by every repository clone taken from this handle.
+        // The proactive re-signin task spawned below then keeps that token from
+        // ever actually reaching this extended TTL.
         Self::extend_root_token_duration(config).await;
 
         let db = Surreal::new::<Http>(&config.url).await?;
@@ -94,7 +159,10 @@ impl DbManager {
 
         info!("Successfully connected to SurrealDB");
 
-        Ok(Self { db })
+        let db = Arc::new(db);
+        let refresh_handle = Self::spawn_proactive_resignin(Arc::clone(&db), config);
+
+        Ok(Self { db, refresh_handle })
     }
 
     /// Best-effort: redefine the root user with a long token duration so the
@@ -124,23 +192,66 @@ impl DbManager {
         let define_user = format!(
             "DEFINE USER OVERWRITE {} ON ROOT PASSWORD '{}' ROLES OWNER \
              DURATION FOR TOKEN {}, FOR SESSION NONE",
-            config.username, escaped_pass, ROOT_TOKEN_DURATION
+            config.username,
+            escaped_pass,
+            root_token_duration_surql_literal(ROOT_TOKEN_DURATION)
         );
         match setup.query(define_user).await.and_then(|r| r.check()) {
             Ok(_) => info!(
-                duration = ROOT_TOKEN_DURATION,
+                duration_secs = ROOT_TOKEN_DURATION.as_secs(),
                 "Extended SurrealDB root token duration"
             ),
             Err(e) => warn!(error = %e, "token-duration setup: DEFINE USER failed (continuing)"),
         }
     }
 
+    /// Spawn the proactive periodic re-signin task (D-03/D-04) that keeps
+    /// this `DbManager`'s own SurrealDB session authenticated well inside
+    /// the root token's TTL, so the cached JWT never actually reaches its
+    /// expiry under normal operation.
+    ///
+    /// Re-signs the SAME `Arc`-shared session `db` refers to (not a
+    /// `.clone()`d one) at each interval — this succeeds because the
+    /// currently-cached token is still valid when the request is sent.
+    /// Deliberately does NOT call `invalidate()` first: that request would
+    /// itself carry the (still valid) auth header, so it buys nothing on
+    /// this path, and calling it on an ALREADY-expired handle would itself
+    /// 401 before clearing anything — see `26-RESEARCH.md` Pitfall 3
+    /// (the reactive "missed window" safety net is a separate mechanism).
+    fn spawn_proactive_resignin(db: Arc<Surreal<Client>>, config: &DbConfig) -> JoinHandle<()> {
+        let interval = re_signin_interval_for(ROOT_TOKEN_DURATION, config.token_refresh_fraction);
+        let username = config.username.clone();
+        let password = config.password.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                match db
+                    .signin(Root {
+                        username: username.clone(),
+                        password: password.clone(),
+                    })
+                    .await
+                {
+                    // T-26-02-01: never log the token/JWT/password — only the
+                    // outcome (ok/err) and non-secret context.
+                    Ok(_) => info!("Proactive SurrealDB root re-signin succeeded"),
+                    Err(e) => warn!(
+                        error = %e,
+                        "Proactive SurrealDB root re-signin failed (a reactive \
+                         reconnect path is the safety net for a fully-missed window)"
+                    ),
+                }
+            }
+        })
+    }
+
     /// Returns a reference to the underlying SurrealDB client.
     ///
     /// Callers may `.clone()` the returned reference to obtain an additional
-    /// handle. With the HTTP engine, clones share the stored namespace/database
-    /// and auth, and every request carries them — there is no per-connection
-    /// session to diverge.
+    /// handle. With the HTTP engine clones share the stored namespace/database
+    /// selection, but NOT future re-signin traffic on the original handle —
+    /// see module docs' "Known residual gap".
     pub fn client(&self) -> &Surreal<Client> {
         &self.db
     }
@@ -157,5 +268,24 @@ impl DbManager {
         // Surface any statement-level error (HTTP returns 200 even on SQL error).
         result.check().map_err(DbError::Surreal)?;
         Ok(())
+    }
+
+    /// Interval between proactive re-signin attempts against the fixed
+    /// [`ROOT_TOKEN_DURATION`]: `ROOT_TOKEN_DURATION * fraction`, with
+    /// `fraction` clamped to `0.05..=0.95` (D-04). Public so the derivation
+    /// can be asserted directly in `connection_resilience_test.rs` without a
+    /// live server.
+    pub fn re_signin_interval(fraction: f64) -> Duration {
+        re_signin_interval_for(ROOT_TOKEN_DURATION, fraction)
+    }
+}
+
+impl Drop for DbManager {
+    fn drop(&mut self) {
+        // Explicitly stop the proactive re-signin task rather than leaving it
+        // detached — in production `DbManager` lives for the process
+        // lifetime so this rarely runs, but it keeps tests (which may
+        // construct several `DbManager`s) from leaking background tasks.
+        self.refresh_handle.abort();
     }
 }

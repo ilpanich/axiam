@@ -28,6 +28,22 @@ pub mod queues {
     pub const MAIL_OUTBOUND: &str = "axiam.mail.outbound";
     /// Dead-letter queue for [`MAIL_OUTBOUND`] exhausted-retry messages (D-14).
     pub const MAIL_OUTBOUND_DLQ: &str = "axiam.mail.outbound.dlq";
+    /// Primary webhook delivery queue (CORR-03/D-07).
+    ///
+    /// A terminal nack (requeue=false, attempts exhausted) dead-letters to
+    /// [`WEBHOOK_DLQ`]. Declared and consumed via [`AmqpManager::declare_webhook_topology`].
+    pub const WEBHOOK: &str = "axiam.webhook";
+    /// Webhook retry-delay queue (CORR-03/D-07). No consumer is ever
+    /// attached to this queue — a message published here with a per-message
+    /// TTL (`x-message-ttl`/`BasicProperties::with_expiration`) dead-letters
+    /// back to [`WEBHOOK`] via the default exchange once the TTL expires,
+    /// giving RabbitMQ-native delayed retry without an in-process sleep
+    /// tying up a consumer slot (D-07/Pitfall 5).
+    pub const WEBHOOK_RETRY: &str = "axiam.webhook.retry";
+    /// Terminal dead-letter queue for exhausted webhook deliveries
+    /// (CORR-03/D-07). Messages here are real and replayable — not silently
+    /// dropped (see the DLX-wiring note on [`WEBHOOK`]/[`WEBHOOK_RETRY`]).
+    pub const WEBHOOK_DLQ: &str = "axiam.webhook.dlq";
 }
 
 /// Queues declared via the plain durable loop (no special arguments).
@@ -182,6 +198,87 @@ impl AmqpManager {
         info!(
             queue = queues::MAIL_OUTBOUND,
             "Declared queue (with dead-letter routing)"
+        );
+
+        Ok(())
+    }
+
+    /// Declare the durable webhook AMQP topology (primary + retry + DLQ,
+    /// CORR-03/D-07).
+    ///
+    /// **Correct DLX form (Pitfall 4):** unlike [`Self::declare_queues`]'s
+    /// existing `AUDIT_EVENTS`/`AUTHZ_REQUEST`/`MAIL_OUTBOUND` wiring above
+    /// (which sets `x-dead-letter-exchange` to a queue NAME with no matching
+    /// `exchange_declare` anywhere in this crate — RabbitMQ silently drops
+    /// dead-lettered messages in that case), this topology uses the default
+    /// (nameless, `""`) exchange plus an explicit `x-dead-letter-routing-key`
+    /// for both dead-letter hops. The default exchange's implicit
+    /// per-queue-name routing makes this the well-known-correct,
+    /// minimal-surface form — never a bare undeclared exchange name.
+    ///
+    /// Declaration order (DLQ target first, same discipline as
+    /// [`Self::declare_queues`]'s `ALL_QUEUES` convention):
+    /// 1. [`queues::WEBHOOK_DLQ`] — terminal, plain durable, no DLX of its own.
+    /// 2. [`queues::WEBHOOK`] — primary; a terminal nack (requeue=false,
+    ///    attempts exhausted per `AXIAM__WEBHOOK__MAX_ATTEMPTS`) dead-letters
+    ///    to [`queues::WEBHOOK_DLQ`].
+    /// 3. [`queues::WEBHOOK_RETRY`] — no consumer ever attached; a message
+    ///    published here with a per-message TTL dead-letters back to
+    ///    [`queues::WEBHOOK`] once the TTL expires, so RabbitMQ (not an
+    ///    in-process `tokio::time::sleep`) schedules the delay
+    ///    (D-07/Pitfall 5).
+    pub async fn declare_webhook_topology(&self) -> Result<(), AmqpError> {
+        let options = QueueDeclareOptions {
+            durable: true,
+            ..QueueDeclareOptions::default()
+        };
+
+        // 1. Terminal DLQ — plain durable, no DLX args of its own.
+        self.channel
+            .queue_declare(queues::WEBHOOK_DLQ.into(), options, FieldTable::default())
+            .await
+            .map_err(AmqpError::Declaration)?;
+        info!(queue = queues::WEBHOOK_DLQ, "Declared queue");
+
+        // 2. Primary webhook queue: terminal-exhaustion nacks dead-letter to
+        // WEBHOOK_DLQ via the default exchange + explicit routing key.
+        let mut webhook_args = FieldTable::default();
+        webhook_args.insert(
+            "x-dead-letter-exchange".into(),
+            lapin::types::AMQPValue::LongString("".into()),
+        );
+        webhook_args.insert(
+            "x-dead-letter-routing-key".into(),
+            lapin::types::AMQPValue::LongString(queues::WEBHOOK_DLQ.into()),
+        );
+        self.channel
+            .queue_declare(queues::WEBHOOK.into(), options, webhook_args)
+            .await
+            .map_err(AmqpError::Declaration)?;
+        info!(
+            queue = queues::WEBHOOK,
+            "Declared queue (with dead-letter routing to WEBHOOK_DLQ)"
+        );
+
+        // 3. Retry queue: per-message TTL (set at publish time) dead-letters
+        // back to the primary WEBHOOK queue via the default exchange — no
+        // consumer attached here, no in-process sleep holding a slot.
+        let mut retry_args = FieldTable::default();
+        retry_args.insert(
+            "x-dead-letter-exchange".into(),
+            lapin::types::AMQPValue::LongString("".into()),
+        );
+        retry_args.insert(
+            "x-dead-letter-routing-key".into(),
+            lapin::types::AMQPValue::LongString(queues::WEBHOOK.into()),
+        );
+        self.channel
+            .queue_declare(queues::WEBHOOK_RETRY.into(), options, retry_args)
+            .await
+            .map_err(AmqpError::Declaration)?;
+        info!(
+            queue = queues::WEBHOOK_RETRY,
+            "Declared queue (with dead-letter routing back to WEBHOOK)"
         );
 
         Ok(())

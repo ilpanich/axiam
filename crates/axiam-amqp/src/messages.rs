@@ -195,6 +195,31 @@ pub struct NotificationEvent {
     pub data: Option<serde_json::Value>,
 }
 
+/// Webhook delivery message carried on the `axiam.webhook` /
+/// `axiam.webhook.retry` queues (CORR-03/D-07).
+///
+/// Produced by `WebhookDeliveryService::emit` (`axiam-api-rest`), consumed
+/// by the webhook AMQP consumer (wired in 26-07) which drives
+/// `WebhookDeliveryService::deliver_once` per (re)delivery. `attempt` is
+/// incremented by the consumer on each republish to the retry queue and
+/// checked against `AXIAM__WEBHOOK__MAX_ATTEMPTS` before a terminal nack
+/// routes the message to `WEBHOOK_DLQ` (D-07).
+///
+/// `tenant_id` is not in the plan's original DTO sketch, but is required
+/// for `deliver_once` to resolve the webhook via the tenant-scoped
+/// `WebhookRepository::get_by_id` without a cross-tenant lookup — AXIAM's
+/// multi-tenant data-isolation model requires every domain-entity lookup to
+/// be tenant-scoped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookMessage {
+    pub webhook_id: Uuid,
+    pub delivery_id: Uuid,
+    pub tenant_id: Uuid,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub attempt: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

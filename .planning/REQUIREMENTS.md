@@ -921,18 +921,18 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** High | **Source:** T19.9
 
 ### Acceptance Criteria
-- [ ] `POST /auth/federation/oidc/login` and `POST /auth/federation/saml/login` complete the external flow and return AXIAM access/refresh tokens for first-time users (no pre-existing local account)
-- [ ] Existing authenticated endpoints remain for account-linking
-- [ ] Federation metadata endpoint is public (no auth) — `handlers/federation.rs:377`
-- [ ] E2e: create federation config via API, then complete a first-time login (closes CQ-B40 gap)
+- [x] `POST /auth/federation/oidc/login` (OIDC) completes the external flow and returns AXIAM access/refresh tokens for first-time users (no pre-existing local account) — proven e2e (28-05). SAML first-time-login path is implemented + integration-covered; a full SAML end-to-end test is an accepted documented deferral (ROADMAP SC1 is met via the OIDC path — "oidc/login OR saml/login" — and the shared downstream provisioning is exercised by the OIDC e2e)
+- [x] Existing authenticated endpoints remain for account-linking (the `/api/v1/federation/*` link-account routes are unchanged and still require auth)
+- [x] Federation metadata endpoint auth model made consistent — RESOLVED (FUNC-01 human scope decision, D-15): SAML SP metadata is admin-authenticated (JWT via `AuthenticatedUser`), NOT public. The original "is public" wording was incorrect for this admin endpoint; the stale `PUBLIC_PATHS` entry was removed so the middleware allowlist matches the handler. Authenticated behavior covered by `federation_test::saml_metadata_returns_xml`
+- [x] E2e: create federation config via API, then complete a first-time login (closes CQ-B40 gap) — 28-05 `federation_first_time_sso_test::first_time_oidc_sso_sets_cookies_and_me_succeeds` (verifier-confirmed pass)
 
 ## FUNC-02: Session Invalidation on Password Reset
 
 **Priority:** High | **Source:** T19.10, REQ-7 (v1.0 carryover), OWASP ASVS 3.3.1
 
 ### Acceptance Criteria
-- [ ] `confirm_reset` invalidates all active sessions/refresh tokens for the user (threads `SessionRepository` into `PasswordResetService`)
-- [ ] Test: after reset, prior sessions are rejected
+- [x] `confirm_reset` invalidates all active sessions/refresh tokens for the user (threads `SessionRepository` into `PasswordResetService`) — verifier-confirmed
+- [x] Test: after reset, prior sessions are rejected — `password_reset_confirm_revokes_existing_sessions` (1/1, verifier re-ran)
 
 ## FUNC-03: Admin Email-Config API & Template Delivery
 
@@ -948,16 +948,16 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** codebase CONCERNS.md T19 TODOs, REQ-7
 
 ### Acceptance Criteria
-- [ ] Admin user-listing endpoint enabled (RBAC-gated) — `handlers/auth.rs:470`
-- [ ] Admin list/delete MFA methods for other users (RBAC-gated) — `mfa_methods.rs:72,116`
-- [ ] Service-account dedicated token type with `sub_kind: "ServiceAccount"` — `handlers/auth.rs:364`
+- [x] Admin user-listing endpoint enabled (RBAC-gated) — 28-02: `list_users_non_privileged_caller_returns_403` proves the `users:list` gate (9/9)
+- [x] Admin list/delete MFA methods for other users (RBAC-gated) — 28-02: verified by code read (`users:admin` gate + `is_own_resource` self-service bypass), per the plan's verify-only scope
+- [x] Service-account dedicated token type with `sub_kind: "ServiceAccount"` — 28-02: `issue_service_account_token` stamps `SubjectKind::ServiceAccount`, wired at the SA cert-auth call-site (24/24 token tests, 6/6 device_auth)
 
 ## FUNC-05: OpenAPI Login Response Schema
 
 **Priority:** Low | **Source:** T19.4
 
 ### Acceptance Criteria
-- [ ] `POST /auth/login` OpenAPI documents both `LoginSuccessResponse` and `MfaRequiredResponse` (via `oneOf` or distinct status codes) so generated SDKs model it correctly
+- [x] `POST /auth/login` OpenAPI documents both `LoginSuccessResponse` and `MfaRequiredResponse` (via `oneOf` or distinct status codes) so generated SDKs model it correctly — 28-04: `route_openapi_parity` (2/2, 200/202/403/401 distinct)
 
 ---
 
@@ -1101,11 +1101,11 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Complete (27-02: rust/python; 27-03: go/java/csharp; 27-04: typescript proven via jose's native pendingFetch guard + php Guzzle-promise guard) |
 | PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) | Complete (27-06: full-jitter backoff + Arc<RwLock<Surreal<Client>>> poisoned-handle eviction + exhaustion-stays-Unhealthy-forever reconnect loop) |
 | PERF-05 | Phase 27 | Load testing + profiling (T18.3) | Complete (27-07: criterion benches for auth/authz/cert-validation; performance-report.md with real baseline-vs-optimized numbers, ~8.4x authz batch speedup) |
-| FUNC-01 | Phase 28 | Unauthenticated federation login (T19.9) | Pending |
-| FUNC-02 | Phase 28 | Session invalidation on reset (T19.10) | Pending |
+| FUNC-01 | Phase 28 | Unauthenticated federation login (T19.9) | Complete (28-05 + FUNC-01 human scope decision D-15): OIDC first-time SSO proven e2e (closes CQ-B40); SAML SP metadata correctly admin-authenticated — stale PUBLIC_PATHS entry removed so middleware matches the JWT-gated handler, AC reworded; full SAML first-time-login e2e test is an accepted documented deferral (ROADMAP SC1 met via OIDC). See 28-VERIFICATION.md. |
+| FUNC-02 | Phase 28 | Session invalidation on reset (T19.10) | Complete (28-05 verified: confirm_reset threads SessionRepository into PasswordResetService; password_reset_confirm_revokes_existing_sessions passes) |
 | FUNC-03 | Phase 28 | Admin email-config API + templates (T19.20/21/22) | Complete (28-01: T19.22 backfill honesty; 28-03: T19.21 custom-template resolution; 28-04: T19.20 admin REST CRUD, RBAC-gated, IDOR-safe, secret-omitting) |
-| FUNC-04 | Phase 28 | Admin user/MFA endpoints + SA token | Pending |
-| FUNC-05 | Phase 28 | OpenAPI login response schema (T19.4) | Pending |
+| FUNC-04 | Phase 28 | Admin user/MFA endpoints + SA token | Complete (28-02 verified: SubjectKind::ServiceAccount mint path + issue_service_account_token; admin user-listing RBAC-403 test; MFA admin-gating confirmed by code read per verify-only scope) |
+| FUNC-05 | Phase 28 | OpenAPI login response schema (T19.4) | Complete (28-04 verified: route_openapi_parity — POST /auth/login documents 200/202/403/401 distinctly for SDK accuracy) |
 | QUAL-01 | Phase 29 | AppState extraction (CQ-B43) | Pending |
 | QUAL-02 | Phase 29 | Generic paginate + shared helpers (CQ-B10) | Pending |
 | QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) | Pending |

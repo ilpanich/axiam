@@ -1,11 +1,13 @@
 ---
 phase: 28-functional-completeness
 verified: 2026-07-05T21:42:53Z
-status: gaps_found
-score: 9/11 must-haves verified
+status: passed
+resolved: 2026-07-05T22:10:00Z
+score: 11/11 must-haves verified (after human scope decision D-15)
 behavior_unverified: 0
-overrides_applied: 0
-gaps:
+overrides_applied: 1
+human_resolution: "Both gaps resolved via human scope decision D-15 (2026-07-05). GAP 1 (metadata 'public'): decided to keep the SAML SP metadata endpoint intentionally admin-authenticated (JWT via AuthenticatedUser), NOT public — removed the stale /api/v1/federation/saml/metadata entry from permissions.rs::PUBLIC_PATHS so the middleware allowlist matches the handler, and reworded FUNC-01's AC. Authenticated behavior is covered by federation_test::saml_metadata_returns_xml (20/20 pass, re-run after the fix). GAP 2 (SAML first-time-login e2e): accepted documented deferral — ROADMAP SC1 is satisfied by the proven OIDC path ('oidc/login OR saml/login') and the shared downstream provisioning (provision_new_user) is exercised by the OIDC e2e; a dedicated SAML e2e test is deferred to a future phase. Recorded in REQUIREMENTS.md FUNC-01."
+gaps_resolved:
   - truth: "The federation metadata endpoint is reachable with no auth header (ROADMAP SC1 / FUNC-01)"
     status: failed
     reason: >

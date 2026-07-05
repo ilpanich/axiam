@@ -35,8 +35,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use std::num::NonZeroU32;
+
 use axiam_db::repository::SurrealRateLimitBucketRepository;
 use chrono::{DateTime, Utc};
+use governor::Quota;
 use governor::clock::QuantaInstant;
 use governor::middleware::NoOpMiddleware;
 use http::{Request, Response};
@@ -148,10 +151,11 @@ pub type GrpcGovernorLayer =
 
 /// Build a [`GovernorLayer`] for gRPC server-wide rate limiting.
 ///
-/// The layer uses token-bucket semantics (via the `governor` crate) with one
-/// token replenished per second and a burst allowance of `authz_per_sec` tokens.
-/// For service-mesh patterns where the authz endpoint is called on every request,
-/// the default of 100 tokens/sec is intentionally generous.
+/// The layer uses token-bucket semantics (via the `governor` crate) with
+/// `authz_per_sec` tokens replenished per second and a burst allowance equal
+/// to `authz_per_sec` (one second's worth of tokens). For service-mesh
+/// patterns where the authz endpoint is called on every request, the default
+/// of 100 tokens/sec is intentionally generous.
 ///
 /// # Panics
 ///
@@ -160,16 +164,30 @@ pub type GrpcGovernorLayer =
 pub fn build_grpc_governor_layer(authz_per_sec: u32) -> GrpcGovernorLayer {
     assert!(authz_per_sec >= 1, "grpc_authz_per_sec must be >= 1");
 
-    // CQ-B44: was `.per_second(1).burst_size(authz_per_sec)` — the hardcoded
-    // `per_second(1)` meant the rate was 1 req/s regardless of `authz_per_sec`.
-    // Fixed: replenish `authz_per_sec` tokens per second with 2× burst.
-    // SECHRD-03/D-01c: key extractor swapped to GrpcTrustedHopsKeyExtractor
-    // for IP-spoofing resistance parity with REST — this throughput/quota
-    // math is otherwise untouched (CORR-01/Phase 26 owns it).
+    // CORR-01 (D-01): the PREVIOUS "fix" here (CQ-B44) called
+    // `tower_governor`'s OWN `GovernorConfigBuilder::per_second(n)` /
+    // `.burst_size(authz_per_sec * 2)` as if `.per_second(n)` meant "n tokens
+    // per second." It does NOT — `tower_governor`'s builder methods set the
+    // replenish PERIOD (i.e. "one token every n seconds"), so with the
+    // default `grpc_authz_per_sec=100` the governor replenished 1 token every
+    // 100 seconds, and raising the configured rate made throughput WORSE, not
+    // better. Fixed by bypassing `tower_governor`'s confusing
+    // `.per_second()`/`.per_millisecond()` convenience methods entirely and
+    // constructing the underlying `governor::Quota` directly via
+    // `Quota::per_second`, whose `replenish_interval()` is `1s /
+    // authz_per_sec` and whose `burst_size()` is `authz_per_sec` — then
+    // feeding that quota into the builder via `.const_period()`/
+    // `.const_burst_size()`. Burst is `authz_per_sec` (not `* 2`), per D-01.
+    //
+    // SECHRD-03/D-01c: key extractor is GrpcTrustedHopsKeyExtractor for
+    // IP-spoofing resistance parity with REST — unrelated to this quota math.
+    let burst = NonZeroU32::new(authz_per_sec).expect("authz_per_sec >= 1 asserted above");
+    let quota = Quota::per_second(burst);
+
     let config = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(authz_per_sec as u64)
-            .burst_size(authz_per_sec * 2)
+            .const_period(quota.replenish_interval())
+            .const_burst_size(quota.burst_size().get())
             .key_extractor(GrpcTrustedHopsKeyExtractor::new(trusted_hops_from_env()))
             .finish()
             .expect("valid GovernorConfig for gRPC rate limiter"),

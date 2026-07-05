@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: — MVP Release Hardening
 current_phase: 28
-current_phase_name: Functional Completeness
+current_phase_name: functional-completeness
 status: executing
-stopped_at: Phase 28 context gathered
-last_updated: "2026-07-05T18:02:53.870Z"
+stopped_at: Completed 28-01-PLAN.md
+last_updated: "2026-07-05T18:45:36.119Z"
 last_activity: 2026-07-05
-last_activity_desc: Phase 27 complete, transitioned to Phase 28
+last_activity_desc: Phase 28 execution started
 progress:
   total_phases: 8
   completed_phases: 5
-  total_plans: 40
-  completed_plans: 40
+  total_plans: 45
+  completed_plans: 41
   percent: 63
 ---
 
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 27 — performance-load-hardening
+**Current focus:** Phase 28 — functional-completeness
 
 ## Current Position
 
-Phase: 28 — Functional Completeness
-Plan: Not started
+Phase: 28 (functional-completeness) — EXECUTING
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-07-05 — Phase 27 complete, transitioned to Phase 28
+Last activity: 2026-07-05 — Phase 28 execution started
 
 ## Performance Metrics
 
@@ -196,6 +196,7 @@ Last activity: 2026-07-05 — Phase 27 complete, transitioned to Phase 28
 | Phase 27 P05 | 44min | 3 tasks | 11 files |
 | Phase 27 P06 | 25min | 3 tasks | 3 files |
 | Phase 27 P07 | 40min | 3 tasks | 8 files |
+| Phase 28 P01 | 20min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -487,6 +488,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 27-performance-load-hardening] 27-07: criterion resolved to 0.8.2 (not RESEARCH-assumed 0.5.x) — confirmed via cargo add --dry-run at execution time
 - [Phase ?]: [Phase 27-performance-load-hardening] 27-07: switched all three benches to std::hint::black_box since criterion 0.8.2 deprecates its own black_box re-export — keeps cargo clippy -D warnings clean
 - [Phase ?]: [Phase 27-performance-load-hardening] 27-07: authz_bench injects a bench-only tokio::time::sleep(2ms) per check_access call (engine.rs untouched) to make the sequential-vs-concurrent batch comparison meaningful against near-zero-latency kv-mem
+- [Phase ?]: [Phase 28-01]: D-02 resolved via sentinel-empty write-path secret convention (not a separate optional-secret input type) — keeps ProviderConfig/SmtpConfig/ApiProviderConfig unified for write-input and resolved/stored use, avoiding a ripple into mail_consumer_test.rs and future 28-04 handler code
+- [Phase ?]: [Phase 28-01]: row_to_provider/try_into_domain changed to return AxiamError directly so D-08's NULL-ciphertext case surfaces as AxiamError::EmailConfig, matching the crate's existing email-config error family instead of the generic Database(String) variant
 
 ### Pending Todos
 
@@ -510,7 +513,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T17:02:47.398Z
-Stopped at: Phase 28 context gathered
-Resume file: .planning/phases/28-functional-completeness/28-CONTEXT.md
+Last session: 2026-07-05T18:45:36.101Z
+Stopped at: Completed 28-01-PLAN.md
+Resume file: None
 Next action: /gsd-execute-phase 23

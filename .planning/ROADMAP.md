@@ -1193,12 +1193,12 @@ Plans:
   4. An admin can list users and list/delete another user's MFA methods (RBAC-gated), and service-account tokens carry `sub_kind: "ServiceAccount"` (FUNC-04)
   5. `POST /auth/login` OpenAPI documents both the success and MFA-required responses (via `oneOf`/distinct status) so generated SDKs model them correctly (FUNC-05)
 
-**Plans**: 5 plans
+**Plans**: 1/5 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 28-01-PLAN.md — FUNC-03 foundation: email-provider secret hygiene (D-01/D-02), repository delete_org_config + NULL-ciphertext error (D-08) + honest backfill closure (D-07)
+- [x] 28-01-PLAN.md — FUNC-03 foundation: email-provider secret hygiene (D-01/D-02), repository delete_org_config + NULL-ciphertext error (D-08) + honest backfill closure (D-07)
 - [ ] 28-02-PLAN.md — FUNC-04: SubjectKind + sub_kind claim + issue_service_account_token (D-09/D-10/D-11); verify admin user/MFA RBAC gating
 - [ ] 28-03-PLAN.md — FUNC-03 custom email-template delivery: thread EmailTemplateRepository into the mail consumer with fail-safe fallback (D-05/D-06)
 - [ ] 28-05-PLAN.md — FUNC-01 first-time OIDC SSO e2e (closes CQ-B40) + FUNC-02 / FUNC-05 verification-and-close
@@ -1258,7 +1258,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 25. Security Hardening II — Federation/PKI/Data/Infra | 10/10 | Complete    | 2026-07-04 |
 | 26. Correctness & Resilience | 8/8 | Complete   | 2026-07-05 |
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
-| 28. Functional Completeness | 0/? | Not started | - |
+| 28. Functional Completeness | 1/5 | In Progress|  |
 | 29. Structural Quality | 0/? | Not started | - |
 | 30. Compliance & Documentation | 0/? | Not started | - |
 

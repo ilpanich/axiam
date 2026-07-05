@@ -247,7 +247,8 @@ async fn main() -> std::io::Result<()> {
     // Idempotent — rows that are already encrypted are skipped. Runs before HTTP bind
     // to avoid serving plaintext-secret rows after this deploy.
     {
-        let boot_fed_repo = axiam_db::SurrealFederationConfigRepository::new(db.client_cloned().await);
+        let boot_fed_repo =
+            axiam_db::SurrealFederationConfigRepository::new(db.client_cloned().await);
         let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(db.client_cloned().await);
         if let Some(fed_key) = config.auth.federation_encryption_key {
             match axiam_federation::secrets::migrate_plaintext_federation_secrets(
@@ -273,7 +274,8 @@ async fn main() -> std::io::Result<()> {
     // to avoid serving plaintext-secret rows after this deploy.
     {
         if let Some(email_key) = config.email_encryption_key {
-            let boot_email_repo = SurrealEmailConfigRepository::new(db.client_cloned().await, email_key);
+            let boot_email_repo =
+                SurrealEmailConfigRepository::new(db.client_cloned().await, email_key);
             match boot_email_repo.backfill_plaintext_secrets().await {
                 Ok(n) => tracing::info!(migrated = n, "email config secrets backfill complete"),
                 Err(e) => tracing::warn!(error = %e, "email config secrets backfill failed"),
@@ -383,7 +385,8 @@ async fn main() -> std::io::Result<()> {
         std::sync::Arc::new(session_repo.clone());
     let audit_repo = SurrealAuditLogRepository::new(db.client_cloned().await);
     let ca_cert_repo = SurrealCaCertificateRepository::new(db.client_cloned().await);
-    let federation_link_repo_for_auth = SurrealFederationLinkRepository::new(db.client_cloned().await);
+    let federation_link_repo_for_auth =
+        SurrealFederationLinkRepository::new(db.client_cloned().await);
     // A separate refresh-token repo instance for AuthService (used by
     // revoke_all_sessions / revoke_all_sessions_except on password change and reset).
     let auth_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client_cloned().await);

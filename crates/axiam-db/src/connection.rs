@@ -507,7 +507,10 @@ impl DbManager {
     /// without a process restart.
     pub async fn health_check(&self) -> Result<(), DbError> {
         let guard = self.db.read().await;
-        let result = guard.query("RETURN 1").await.map_err(Self::classify_query_error)?;
+        let result = guard
+            .query("RETURN 1")
+            .await
+            .map_err(Self::classify_query_error)?;
         // Surface any statement-level error (HTTP returns 200 even on SQL error).
         result.check().map_err(Self::classify_query_error)?;
         Ok(())
@@ -561,8 +564,7 @@ mod tests {
         let base_ms = 250u64;
         let ceiling_ms = 30_000u64;
         for attempt in 1..=12u32 {
-            let capped =
-                (base_ms as f64 * 2f64.powi((attempt - 1) as i32)).min(ceiling_ms as f64);
+            let capped = (base_ms as f64 * 2f64.powi((attempt - 1) as i32)).min(ceiling_ms as f64);
             for _ in 0..50 {
                 let delay = reconnect_backoff_delay(attempt, base_ms, ceiling_ms);
                 assert!(
@@ -606,6 +608,71 @@ mod tests {
             max > min,
             "expected the 200 sampled delays to span a range, but all were {min}ms \
              (full jitter must not collapse to a fixed value)"
+        );
+    }
+
+    /// D-12 proof: after a `RwLock` write-swap replaces the handle, a reader
+    /// observes ONLY the new handle — the old (poisoned) handle is never
+    /// recycled or returned again.
+    ///
+    /// Constructing a real `Surreal<Client>` (HTTP engine) always performs a
+    /// live network health-check at connect time (see
+    /// `engine::remote::http::native::create_client`), so this test proves
+    /// the swap/eviction MECHANISM — the exact `Arc<RwLock<Surreal<C>>>`
+    /// read/write-guard pattern [`DbManager`] and [`spawn_reconnect_loop`]
+    /// use — against the embedded `kv-mem` engine instead, per
+    /// 27-RESEARCH.md Open Question 3 ("treat poisoned-connection testing
+    /// primarily as a unit-level proof of the swap/eviction, not a real
+    /// network-fault simulation"). Two independent in-memory instances stand
+    /// in for an "old" (poisoned) and a "new" (freshly reconnected) handle;
+    /// each carries a distinguishing marker row so cross-contamination would
+    /// be observable.
+    #[tokio::test]
+    async fn poisoned_handle_is_evicted_and_never_returned_after_swap() {
+        use surrealdb::engine::local::{Db, Mem};
+
+        async fn new_marked_db(marker: &str) -> Surreal<Db> {
+            let db = Surreal::new::<Mem>(()).await.expect("in-memory connect");
+            db.use_ns("test").use_db("test").await.expect("use ns/db");
+            db.query(format!("CREATE marker SET value = '{marker}'"))
+                .await
+                .and_then(|r| r.check())
+                .expect("seed marker row");
+            db
+        }
+
+        async fn read_marker_values(db: &Surreal<Db>) -> Vec<String> {
+            let mut result = db
+                .query("SELECT VALUE value FROM marker")
+                .await
+                .and_then(|r| r.check())
+                .expect("read marker rows");
+            result.take(0).expect("deserialize marker values")
+        }
+
+        let old_db = new_marked_db("old-poisoned").await;
+        let handle = Arc::new(RwLock::new(old_db));
+
+        // Pre-swap: the current handle is observably the "old" one.
+        {
+            let pre_swap = handle.read().await.clone();
+            let values = read_marker_values(&pre_swap).await;
+            assert_eq!(values, vec!["old-poisoned".to_string()]);
+        }
+
+        // Simulate a successful reconnect: build a fresh handle and swap it
+        // in under the write guard, exactly as spawn_reconnect_loop does
+        // (`*db.write().await = fresh`) — the old handle is dropped here.
+        let new_db = new_marked_db("new-fresh").await;
+        *handle.write().await = new_db;
+
+        // Post-swap: every subsequent reader observes ONLY the new handle.
+        let post_swap = handle.read().await.clone();
+        let values = read_marker_values(&post_swap).await;
+        assert_eq!(
+            values,
+            vec!["new-fresh".to_string()],
+            "the old (poisoned) handle must never be observed after the swap (D-12)"
         );
     }
 }

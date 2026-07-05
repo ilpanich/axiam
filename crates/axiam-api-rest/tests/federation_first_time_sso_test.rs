@@ -27,21 +27,20 @@
 //! its loopback `/token` endpoint. Production always constructs
 //! `JwksCache::new()` (SECHRD-02 stays fully enforced there).
 //!
-//! ## Known gap NOT covered by this file (see 28-05-SUMMARY.md)
+//! ## Metadata endpoint: RESOLVED as intentionally authenticated (Phase 28 FUNC-01)
 //!
-//! The plan also asked for an assertion that the federation metadata
+//! The plan originally asked for an assertion that the federation metadata
 //! endpoint (`GET /api/v1/federation/saml/metadata`) is reachable with NO
-//! auth header. Ground-truthing during this plan's execution found that,
-//! despite being listed in `PUBLIC_PATHS`, the handler (`saml_metadata`)
-//! unconditionally requires a valid JWT via the `AuthenticatedUser`
-//! extractor (empirically confirmed: a bare `GET` with zero credentials
-//! returns 401, not the 200/403 the plan expected). Closing that gap means
-//! changing the endpoint's auth model (resolving tenant identity from
-//! query params instead of a JWT, mirroring `oidc_start_public`'s
-//! org_id/org_slug + tenant_id/tenant_slug pattern) — a "changing auth
-//! approach" architectural change (deviation Rule 4) requiring human
-//! sign-off, out of this test file's zero-production-code-risk scope. See
-//! the SUMMARY for the full finding and proposed fix.
+//! auth header. Ground-truthing during 28-05 found that, despite being
+//! listed in `PUBLIC_PATHS`, the handler (`saml_metadata`) unconditionally
+//! requires a valid JWT via the `AuthenticatedUser` extractor (a bare `GET`
+//! with zero credentials returns 401). This was routed to a human decision
+//! at phase verification. Resolution (D-15): keep the endpoint JWT-gated —
+//! the stale `PUBLIC_PATHS` entry was removed (see `permissions.rs`) so the
+//! middleware allowlist now matches the handler, and FUNC-01's acceptance
+//! criterion was reworded to reflect that metadata is admin-authenticated,
+//! not public. Authenticated metadata behavior is covered by
+//! `federation_test.rs::saml_metadata_returns_xml`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

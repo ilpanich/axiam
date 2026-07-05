@@ -236,7 +236,11 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // Federation callback endpoints (unauthenticated — IdP redirects here)
     "/api/v1/federation/oidc/callback",
     "/api/v1/federation/saml/acs",
-    "/api/v1/federation/saml/metadata",
+    // NOTE: /api/v1/federation/saml/metadata is intentionally NOT public — its
+    // handler requires an authenticated admin (AuthenticatedUser/JWT). It was
+    // previously listed here, which contradicted the handler and returned 401
+    // to unauthenticated callers (Phase 28 FUNC-01 verification, D-15 scope
+    // decision: keep metadata JWT-gated rather than making it public).
     // First-time SSO (Phase 4 D-22) — unauthenticated, distinct from
     // /api/v1/federation/* link-account endpoints (which require auth).
     "/api/v1/auth/federation/oidc/start",

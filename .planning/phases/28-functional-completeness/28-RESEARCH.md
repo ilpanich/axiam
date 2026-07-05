@@ -650,9 +650,12 @@ completion within the existing, already-current stack.
 **If this table is empty:** N/A — see above; all three assumptions are low-risk implementation
 choices flagged for planner awareness, not load-bearing claims about external facts.
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> Both questions resolved during planning; the plans follow the stated recommendations.
 
 1. **Does the SA-token-type AC require anything beyond the `sub_kind` claim?**
+   - **RESOLVED:** No. Plan 28-02 stamps `sub_kind` alone (no extra SA claims, no authz gating), per the recommendation and D-10.
    - What we know: CONTEXT.md's "Claude's Discretion" section defaults to "sub_kind alone
      satisfies the AC."
    - What's unclear: whether a future consumer (e.g., audit log enrichment) expects additional
@@ -661,6 +664,7 @@ choices flagged for planner awareness, not load-bearing claims about external fa
      restrictions or additional claims (D-10 explicitly rules out authz-gating changes).
 
 2. **Should the org/tenant email-config DELETE endpoints exist, or only GET/PUT?**
+   - **RESOLVED:** Implement DELETE per D-13; Plan 28-01 adds the missing `delete_org_config` repository method and 28-04 wires the endpoints. Org-level DELETE does not cascade — orphaned tenant overrides surface D-08's clear error at send time (recorded as an explicit `<plan_decision>` in 28-01/28-04).
    - What we know: D-13 explicitly lists `GET/PUT/DELETE` for both scopes.
    - What's unclear: whether DELETE on the org-level singleton should be permitted at all (an org
      without an email config would break the tenant `effective_email_config` merge for every

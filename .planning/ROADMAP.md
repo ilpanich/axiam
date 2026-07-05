@@ -1189,18 +1189,23 @@ Plans:
 
   1. A first-time SSO user with no pre-existing local account completes `POST /auth/federation/oidc/login` (or `/saml/login`) and receives AXIAM access/refresh tokens; the federation metadata endpoint is public (FUNC-01)
   2. After a password reset, all prior sessions/refresh tokens for that user are rejected (`SessionRepository` threaded into `PasswordResetService`) (FUNC-02)
-  3. An admin can CRUD org/tenant `email_config` (gated by `email_config:write`), the mail consumer renders a per-tenant custom template, and `backfill_plaintext_secrets` encrypts NULL-ciphertext rows (FUNC-03)
+  3. An admin can CRUD org/tenant `email_config` (gated by `email_config:write`), the mail consumer renders a per-tenant custom template, and `backfill_plaintext_secrets` is honestly closed as a documented, tested no-op — `email_config` is ciphertext-only by schema so there is no plaintext to encrypt (see CONTEXT.md D-07); a NULL-ciphertext row surfaces a clear misconfiguration error at send time (D-08) (FUNC-03)
   4. An admin can list users and list/delete another user's MFA methods (RBAC-gated), and service-account tokens carry `sub_kind: "ServiceAccount"` (FUNC-04)
   5. `POST /auth/login` OpenAPI documents both the success and MFA-required responses (via `oneOf`/distinct status) so generated SDKs model them correctly (FUNC-05)
 
 **Plans**: 5 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 28-01-PLAN.md — FUNC-03 foundation: email-provider secret hygiene (D-01/D-02), repository delete_org_config + NULL-ciphertext error (D-08) + honest backfill closure (D-07)
 - [ ] 28-02-PLAN.md — FUNC-04: SubjectKind + sub_kind claim + issue_service_account_token (D-09/D-10/D-11); verify admin user/MFA RBAC gating
 - [ ] 28-03-PLAN.md — FUNC-03 custom email-template delivery: thread EmailTemplateRepository into the mail consumer with fail-safe fallback (D-05/D-06)
-- [ ] 28-04-PLAN.md — FUNC-03 email-config admin API (6 scope-nested handlers, route↔OpenAPI↔permission triangle, D-13) + FUNC-01 public-SSO OpenAPI docs (D-12)
 - [ ] 28-05-PLAN.md — FUNC-01 first-time OIDC SSO e2e (closes CQ-B40) + FUNC-02 / FUNC-05 verification-and-close
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 28-04-PLAN.md — FUNC-03 email-config admin API (6 scope-nested handlers, route↔OpenAPI↔permission triangle, D-13) + FUNC-01 public-SSO OpenAPI docs (D-12)
 
 ---
 

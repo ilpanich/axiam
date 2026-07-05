@@ -5,8 +5,8 @@ milestone_name: — MVP Release Hardening
 current_phase: 26
 current_phase_name: correctness-resilience
 status: verifying
-stopped_at: Completed 26-08-PLAN.md
-last_updated: "2026-07-05T10:34:51.530Z"
+stopped_at: Phase 27 context gathered
+last_updated: "2026-07-05T11:59:06.180Z"
 last_activity: 2026-07-05
 last_activity_desc: Phase 26 execution started
 progress:
@@ -486,7 +486,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T10:34:51.515Z
-Stopped at: Completed 26-08-PLAN.md
-Resume file: None
+Last session: 2026-07-05T11:59:06.157Z
+Stopped at: Phase 27 context gathered
+Resume file: .planning/phases/27-performance-load-hardening/27-CONTEXT.md
 Next action: /gsd-execute-phase 23

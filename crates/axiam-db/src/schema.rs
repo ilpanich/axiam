@@ -152,6 +152,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "bootstrap_atomicity_gate",
         sql: SCHEMA_V22,
     },
+    Migration {
+        version: 23,
+        name: "email_config_provider_kind_optional",
+        sql: SCHEMA_V23,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1165,6 +1170,28 @@ DEFINE FIELD IF NOT EXISTS created_at ON TABLE bootstrap_setup_token TYPE dateti
 DEFINE TABLE IF NOT EXISTS bootstrap_setup_token_consumed SCHEMAFULL TYPE NORMAL;
 DEFINE FIELD IF NOT EXISTS consumed_at ON TABLE bootstrap_setup_token_consumed TYPE datetime
     DEFAULT time::now();
+";
+
+// -----------------------------------------------------------------------
+// Schema v23 — email_config.provider_kind becomes optional (28-04/FUNC-03)
+// -----------------------------------------------------------------------
+//
+// `SurrealEmailConfigRepository::set_tenant_override` has always written
+// `provider_kind = ''` when the caller's override does not touch the
+// provider (a tenant may override only `from_name`/`enabled`, leaving the
+// provider inherited from the org baseline — `get_tenant_override` already
+// treats an empty `provider_kind` as "no provider override" on the read
+// side). The original v15 ASSERT only allowed the five real provider-kind
+// values, so this legitimate partial-override write path always violated
+// the schema constraint. `OVERWRITE` extends the ASSERT to also accept the
+// empty-string sentinel, matching the read-side contract, without touching
+// scope='org' rows (org config always sets a real provider_kind).
+
+const SCHEMA_V23: &str = "\
+-- Allow empty provider_kind (sentinel: tenant override does not touch the
+-- provider) alongside the five real provider kinds (28-04).
+DEFINE FIELD OVERWRITE provider_kind ON TABLE email_config TYPE string
+    ASSERT $value IN ['', 'smtp', 'send_grid', 'postmark', 'resend', 'brevo'];
 ";
 
 // -----------------------------------------------------------------------

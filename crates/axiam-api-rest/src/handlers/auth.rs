@@ -3,7 +3,7 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::service::{LoginInput, LoginOutput, RefreshInput, VerifyMfaInput};
-use axiam_auth::token::{issue_access_token, validate_access_token};
+use axiam_auth::token::{issue_service_account_token, validate_access_token};
 use axiam_auth::{AuthService, MfaMethodService};
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceAuthResponse;
@@ -553,18 +553,17 @@ pub async fn device_auth<C: Connection>(
     // Resolve org_id from the tenant
     let tenant = tenant_repo.get_by_id(cert_auth.tenant_id).await?;
 
-    // TODO(T15): Introduce a dedicated service-account token with `sub_kind: "ServiceAccount"`
-    // so downstream handlers/audit can distinguish SA tokens from user tokens.
-    // For now, reuse the user token shape; `sub` contains the service_account_id.
-    // Service-account/device auth has no session row — use random jti.
-    let access_token = issue_access_token(
+    // FUNC-04 (D-09): mint a dedicated service-account token carrying
+    // `sub_kind: "service_account"` so downstream handlers/audit can
+    // distinguish SA tokens from user tokens. `sub` contains the
+    // service_account_id. Service-account/device auth has no session
+    // row — use random jti.
+    let access_token = issue_service_account_token(
         cert_auth.service_account_id,
         cert_auth.tenant_id,
         tenant.organization_id,
-        &[],
-        &auth_config,
         uuid::Uuid::new_v4().to_string(),
-        axiam_auth::token::AUD_USER,
+        &auth_config,
     )
     .map_err(axiam_core::error::AxiamError::from)?;
 

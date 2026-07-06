@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 29
 current_phase_name: structural-quality
 status: executing
-stopped_at: Completed 29-04-PLAN.md
-last_updated: "2026-07-06T13:12:03.596Z"
+stopped_at: Completed 29-05-PLAN.md
+last_updated: "2026-07-06T13:48:42.745Z"
 last_activity: 2026-07-06
 last_activity_desc: Phase 29 execution started
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 52
-  completed_plans: 49
+  completed_plans: 50
   percent: 75
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 29 (structural-quality) — EXECUTING
-Plan: 4 of 7
+Plan: 5 of 7
 Status: Ready to execute
 Last activity: 2026-07-06 — Phase 29 execution started
 
@@ -205,6 +205,7 @@ Last activity: 2026-07-06 — Phase 29 execution started
 | Phase 29 P01 | 30min | 3 tasks | 8 files |
 | Phase 29 P02 | 55min | 3 tasks | 7 files |
 | Phase 29 P04 | 21min | 2 tasks | 14 files |
+| Phase 29-structural-quality P05 | 35min | 2 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -515,6 +516,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 29-structural-quality]: 29-02: added an in-transaction duplicate-pending-request guard to create_with_pending_flag (Rule 2) — prevents two live cancel tokens per user and gives the atomicity test a reproducible rollback trigger
 - [Phase ?]: [Phase 29-04]: scope.rs gets take_first_or_not_found only (no CountRow/paginate) — it has no local CountRow struct or paginated list method
 - [Phase ?]: [Phase 29-04]: session.rs/group.rs/audit.rs raw count reads (existence checks, non-paginated totals) left untouched — helpers::paginate only applies where a PaginatedResult<T> is actually constructed
+- [Phase ?]: [Phase 29-structural-quality]: 29-05 - saml_replay.rs and federation_login_state.rs CountRow-only collapse; their marker-string classification and BEGIN/COMMIT transaction logic left untouched per plan prohibition (reused by QUAL-03)
+- [Phase ?]: [Phase 29-structural-quality]: 29-05 - Option<T>-returning single-record reads (ca_certificate.rs, certificate.rs create/get_by_id/revoke, pgp_key.rs revoke) left as-is; not the literal take_first_or_not_found target pattern, no group-A precedent to convert Option<T> to Vec<T> deserialization
+- [Phase ?]: [Phase 29-structural-quality]: 29-05 - federation_link.rs malformed-UUID reads now surface DbError::Serialization (naming the field) instead of the old local parse_uuid's DbError::Migration, matching helpers::parse_uuid's canonical QUAL-03/D-10 classification used by every other migrated repo
 
 ### Pending Todos
 
@@ -539,7 +543,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-06T13:11:54.849Z
-Stopped at: Completed 29-04-PLAN.md
+Last session: 2026-07-06T13:48:42.731Z
+Stopped at: Completed 29-05-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

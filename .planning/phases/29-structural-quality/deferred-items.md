@@ -31,3 +31,11 @@ scope-boundary rule (only fix issues directly caused by the current task's chang
   anywhere in `axiam-db/src/`. Left in `Cargo.toml` since `Cargo.toml` is not in this
   plan's `files_modified` list and no `unused_crate_dependencies` lint is enabled in
   this workspace (so it does not fail any gate). Candidate for a future cleanup pass.
+
+## 29-05
+
+- Both pre-existing issues above (the `resource_delete_with_children_rejected` test
+  failure and the `axiam-auth/src/token.rs` clippy warning) were re-confirmed present
+  and unrelated to 29-05's changes: `resource.rs` and `axiam-auth/src/token.rs` are not
+  in 29-05's `files_modified` list and were not touched. No new out-of-scope findings
+  discovered during 29-05's file-group-B dedup + `federation_link.rs` parse_uuid removal.

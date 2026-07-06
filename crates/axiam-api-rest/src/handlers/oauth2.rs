@@ -3,24 +3,20 @@
 use actix_web::{HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_core::repository::UserRepository;
-use axiam_db::{
-    SurrealAuthorizationCodeRepository, SurrealOAuth2ClientRepository,
-    SurrealRefreshTokenRepository, SurrealTenantRepository, SurrealUserRepository,
-};
-use axiam_oauth2::authorize::{AuthorizeRequest, AuthorizeService};
+use axiam_oauth2::authorize::AuthorizeRequest;
 use axiam_oauth2::error::OAuth2Error;
 use axiam_oauth2::oidc::{
     JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document, build_jwks,
 };
 use axiam_oauth2::token::{
     IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,
-    TokenService,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -53,18 +49,6 @@ pub struct OAuth2ErrorResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Type alias for the concrete TokenService used in handlers
-// ---------------------------------------------------------------------------
-
-type ConcreteTokenService<C> = TokenService<
-    SurrealOAuth2ClientRepository<C>,
-    SurrealAuthorizationCodeRepository<C>,
-    SurrealTenantRepository<C>,
-    SurrealRefreshTokenRepository<C>,
-    SurrealUserRepository<C>,
->;
-
-// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -83,12 +67,10 @@ type ConcreteTokenService<C> = TokenService<
     ),
     security(("bearer" = []))
 )]
-pub async fn authorize<C: Connection>(
+pub async fn authorize<C: Connection + Clone>(
     user: AuthenticatedUser,
     query: web::Query<AuthorizeQuery>,
-    authz_service: web::Data<
-        AuthorizeService<SurrealOAuth2ClientRepository<C>, SurrealAuthorizationCodeRepository<C>>,
-    >,
+    state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let q = query.into_inner();
 
@@ -105,7 +87,7 @@ pub async fn authorize<C: Connection>(
         nonce: q.nonce,
     };
 
-    match authz_service.authorize(req).await {
+    match state.authorize_service.authorize(req).await {
         Ok(resp) => {
             match url::Url::parse(&resp.redirect_uri) {
                 Ok(mut url) => {
@@ -169,14 +151,18 @@ pub async fn authorize<C: Connection>(
          body = OAuth2ErrorResponse),
     ),
 )]
-pub async fn token<C: Connection>(
+pub async fn token<C: Connection + Clone>(
     tenant_query: web::Query<TenantQuery>,
     form: web::Form<TokenRequest>,
-    token_service: web::Data<ConcreteTokenService<C>>,
+    state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
-    match token_service.exchange(tenant_id, form.into_inner()).await {
+    match state
+        .token_service
+        .exchange(tenant_id, form.into_inner())
+        .await
+    {
         Ok(resp) => HttpResponse::Ok()
             .append_header(("Cache-Control", "no-store"))
             .append_header(("Pragma", "no-cache"))
@@ -204,14 +190,15 @@ pub async fn token<C: Connection>(
          body = OAuth2ErrorResponse),
     ),
 )]
-pub async fn revoke<C: Connection>(
+pub async fn revoke<C: Connection + Clone>(
     tenant_query: web::Query<TenantQuery>,
     form: web::Form<RevokeRequest>,
-    token_service: web::Data<ConcreteTokenService<C>>,
+    state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
-    match token_service
+    match state
+        .token_service
         .revoke_token(tenant_id, form.into_inner())
         .await
     {
@@ -240,14 +227,15 @@ pub async fn revoke<C: Connection>(
          body = OAuth2ErrorResponse),
     ),
 )]
-pub async fn introspect<C: Connection>(
+pub async fn introspect<C: Connection + Clone>(
     tenant_query: web::Query<TenantQuery>,
     form: web::Form<IntrospectRequest>,
-    token_service: web::Data<ConcreteTokenService<C>>,
+    state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
-    match token_service
+    match state
+        .token_service
         .introspect_token(tenant_id, form.into_inner())
         .await
     {
@@ -333,9 +321,9 @@ pub async fn jwks(auth_config: web::Data<AuthConfig>) -> HttpResponse {
     ),
     security(("bearer" = []))
 )]
-pub async fn userinfo<C: Connection>(
+pub async fn userinfo<C: Connection + Clone>(
     user: AuthenticatedUser,
-    user_repo: web::Data<SurrealUserRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let scopes: Vec<String> = user
         .claims
@@ -352,7 +340,11 @@ pub async fn userinfo<C: Connection>(
     // Fetch user details for email/username when the relevant
     // scopes are present.
     let (email, preferred_username) = if has_scope("email") || has_scope("profile") {
-        match user_repo.get_by_id(user.tenant_id, user.user_id).await {
+        match state
+            .user_repo
+            .get_by_id(user.tenant_id, user.user_id)
+            .await
+        {
             Ok(u) => (
                 if has_scope("email") {
                     Some(u.email)

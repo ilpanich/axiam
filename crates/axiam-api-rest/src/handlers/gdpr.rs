@@ -11,39 +11,26 @@ use std::future::Future;
 use std::io::Write as _;
 
 use actix_web::{HttpResponse, web};
-use axiam_amqp::MailOutboundPublisher;
-use axiam_auth::AuthService;
 use axiam_auth::crypto::decrypt_separate;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::gdpr::{AccountDeletionStatus, CreateExportJob};
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::repository::{
-    AccountDeletionRepository, AuditLogRepository, ExportJobRepository, MailPublisher,
-    TenantRepository, UserRepository,
+    AccountDeletionRepository, AuditLogRepository, ExportJobRepository, TenantRepository,
+    UserRepository,
 };
-use axiam_db::{
-    SurrealAccountDeletionRepository, SurrealAuditLogRepository, SurrealExportJobRepository,
-    SurrealFederationLinkRepository, SurrealRefreshTokenRepository, SurrealSessionRepository,
-    SurrealTenantRepository, SurrealUserRepository,
-};
+use axiam_db::SurrealAuditLogRepository;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use surrealdb::Connection;
 use uuid::Uuid;
 
-/// Concrete `AuthService` type used by GDPR handlers (mirrors auth.rs pattern).
-type AuthSvc<C> = AuthService<
-    SurrealUserRepository<C>,
-    SurrealSessionRepository<C>,
-    SurrealFederationLinkRepository<C>,
-    SurrealRefreshTokenRepository<C>,
->;
-
 use crate::authz::{AuthzData, RequirePermission, is_own_resource};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -119,7 +106,7 @@ fn generate_cancel_token() -> String {
 /// pattern is intentional: an audit failure must not block the user response,
 /// but failures are logged at `error!` level since GDPR audit trails are legally
 /// significant (CQ-B31 / T-12-01).
-async fn append_gdpr_audit<C: Connection>(
+async fn append_gdpr_audit<C: Connection + Clone>(
     audit_repo: &SurrealAuditLogRepository<C>,
     tenant_id: Uuid,
     actor_id: Uuid,
@@ -283,11 +270,10 @@ fn dead_letter_erasure_audit(entry: &CreateAuditLogEntry, db_error: &AxiamError)
     security(("bearer" = []))
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn request_account_export<C: Connection>(
+pub async fn request_account_export<C: Connection + Clone>(
     auth_user: AuthenticatedUser,
     authz: AuthzData,
-    export_job_repo: web::Data<SurrealExportJobRepository<C>>,
-    audit_repo: web::Data<SurrealAuditLogRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<ExportRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -302,7 +288,8 @@ pub async fn request_account_export<C: Connection>(
 
     // CQ-B39: Deduplicate concurrent export requests — reject if a queued
     // export already exists for this user to avoid duplicate processing.
-    if export_job_repo
+    if state
+        .export_job_repo
         .has_pending_for_user(auth_user.tenant_id, target_id)
         .await?
     {
@@ -313,7 +300,8 @@ pub async fn request_account_export<C: Connection>(
     }
 
     // Create a queued export job.
-    export_job_repo
+    state
+        .export_job_repo
         .create(CreateExportJob {
             tenant_id: auth_user.tenant_id,
             user_id: target_id,
@@ -322,7 +310,7 @@ pub async fn request_account_export<C: Connection>(
 
     // Audit: gdpr.data_export_requested.
     append_gdpr_audit(
-        &audit_repo,
+        &state.audit_repo,
         auth_user.tenant_id,
         auth_user.user_id,
         "gdpr.data_export_requested",
@@ -353,17 +341,17 @@ pub async fn request_account_export<C: Connection>(
     security(("bearer" = []))
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn download_account_export<C: Connection>(
+pub async fn download_account_export<C: Connection + Clone>(
     auth_user: AuthenticatedUser,
     authz: AuthzData,
-    export_job_repo: web::Data<SurrealExportJobRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<DownloadPath>,
-    export_encryption_key: web::Data<Option<[u8; 32]>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let token = path.into_inner().token;
     let token_hash = sha256_hex(&token);
 
-    let job = export_job_repo
+    let job = state
+        .export_job_repo
         .find_by_download_token_hash(auth_user.tenant_id, &token_hash)
         .await?
         .ok_or_else(|| AxiamError::NotFound {
@@ -402,8 +390,8 @@ pub async fn download_account_export<C: Connection>(
             return Err(AxiamError::Internal("export blob missing on ready job".into()).into());
         }
     };
-    let key = export_encryption_key
-        .get_ref()
+    let key = state
+        .email_encryption_key
         .as_ref()
         .ok_or_else(|| AxiamError::Internal("export encryption key not configured".into()))?;
 
@@ -413,7 +401,10 @@ pub async fn download_account_export<C: Connection>(
     // Atomic single-use consume: UPDATE WHERE status = 'ready' + DELETE.
     // If 0 rows were updated the token was already consumed (TOCTTOU-safe,
     // D-13 / CQ-B38 / REQ-14 AC-5).
-    let consumed = export_job_repo.consume_ready_and_delete(job.id).await?;
+    let consumed = state
+        .export_job_repo
+        .consume_ready_and_delete(job.id)
+        .await?;
     if !consumed {
         return Err(AxiamError::AuthorizationDenied {
             reason: "export token already consumed".into(),
@@ -448,15 +439,10 @@ pub async fn download_account_export<C: Connection>(
     security(("bearer" = []))
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn request_account_delete<C: Connection>(
+pub async fn request_account_delete<C: Connection + Clone>(
     auth_user: AuthenticatedUser,
     authz: AuthzData,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    account_deletion_repo: web::Data<SurrealAccountDeletionRepository<C>>,
-    audit_repo: web::Data<SurrealAuditLogRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    auth_service: web::Data<AuthSvc<C>>,
-    mail_publisher: web::Data<MailOutboundPublisher>,
+    state: web::Data<AppState<C>>,
     body: web::Json<DeleteRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -470,7 +456,10 @@ pub async fn request_account_delete<C: Connection>(
     }
 
     // Load target user to get email for the cancel mail.
-    let target_user = user_repo.get_by_id(auth_user.tenant_id, target_id).await?;
+    let target_user = state
+        .user_repo
+        .get_by_id(auth_user.tenant_id, target_id)
+        .await?;
 
     // Schedule purge at +30 days (D-08).
     let scheduled_purge_at = Utc::now() + chrono::Duration::days(30);
@@ -485,7 +474,8 @@ pub async fn request_account_delete<C: Connection>(
     // failure (e.g. a duplicate pending-deletion conflict) must never
     // strand the user in deletion_pending=true with no account_deletion row
     // to hold a cancellable token (CQ-B39 residual / uncancellable purge).
-    account_deletion_repo
+    state
+        .account_deletion_repo
         .create_with_pending_flag(
             auth_user.tenant_id,
             target_id,
@@ -498,12 +488,13 @@ pub async fn request_account_delete<C: Connection>(
     // separate, subsequent call — not part of the D-14 strand-risk
     // transaction: a failure here leaves an unrevoked session, a lesser and
     // pre-existing concern, not an uncancellable purge.
-    auth_service
+    state
+        .auth_service
         .revoke_all_sessions(auth_user.tenant_id, target_id)
         .await?;
 
     // Resolve org_id for the mail message.
-    let org_id = match tenant_repo.get_by_id(auth_user.tenant_id).await {
+    let org_id = match state.tenant_repo.get_by_id(auth_user.tenant_id).await {
         Ok(tenant) => tenant.organization_id,
         Err(e) => {
             tracing::warn!(error = %e, "failed to resolve org_id for delete-cancel mail");
@@ -529,13 +520,13 @@ pub async fn request_account_delete<C: Connection>(
         attempt_count: 0,
         enqueued_at: Utc::now(),
     };
-    if let Err(e) = mail_publisher.publish(msg).await {
+    if let Err(e) = state.mail_outbound_publisher.publish(msg).await {
         tracing::warn!(error = %e, "failed to enqueue delete-cancel email; continuing");
     }
 
     // Audit: gdpr.erasure_requested.
     append_gdpr_audit(
-        &audit_repo,
+        &state.audit_repo,
         auth_user.tenant_id,
         auth_user.user_id,
         "gdpr.erasure_requested",
@@ -567,15 +558,15 @@ pub async fn request_account_delete<C: Connection>(
         (status = 400, description = "Token invalid or expired"),
     )
 )]
-pub async fn cancel_account_delete<C: Connection>(
-    account_deletion_repo: web::Data<SurrealAccountDeletionRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
+pub async fn cancel_account_delete<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     query: web::Query<CancelQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let token_hash = sha256_hex(&query.token);
 
     // Global lookup by token hash (no auth context — public endpoint, D-09).
-    let deletion = account_deletion_repo
+    let deletion = state
+        .account_deletion_repo
         .find_by_token_hash_global(&token_hash)
         .await?
         .ok_or_else(|| AxiamError::NotFound {
@@ -598,11 +589,13 @@ pub async fn cancel_account_delete<C: Connection>(
     }
 
     // Abort deletion: mark cancelled (single-use) + re-enable account.
-    account_deletion_repo
+    state
+        .account_deletion_repo
         .mark_cancelled(deletion.tenant_id, deletion.id)
         .await?;
 
-    user_repo
+    state
+        .user_repo
         .clear_deletion_pending(deletion.tenant_id, deletion.user_id)
         .await?;
 

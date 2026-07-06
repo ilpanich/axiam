@@ -1,13 +1,13 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::models::audit::AuditLogEntry;
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
-use axiam_db::SurrealAuditLogRepository;
 use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
+use crate::state::AppState;
 
 /// `GET /api/v1/audit-logs`
 #[utoipa::path(
@@ -21,10 +21,10 @@ use crate::error::AxiamApiError;
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealAuditLogRepository<C>>,
+    state: web::Data<AppState<C>>,
     pagination: web::Query<Pagination>,
     filter: web::Query<AuditLogFilter>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -38,7 +38,8 @@ pub async fn list<C: Connection>(
         // Not an admin — restrict to the caller's own entries via actor_id.
         f.actor_id = Some(user.user_id);
     }
-    let result = repo
+    let result = state
+        .audit_repo
         .list(user.tenant_id, f, pagination.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(result))
@@ -59,17 +60,18 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list_system<C: Connection>(
+pub async fn list_system<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealAuditLogRepository<C>>,
+    state: web::Data<AppState<C>>,
     pagination: web::Query<Pagination>,
     filter: web::Query<AuditLogFilter>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("audit_logs:list_system", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let result = repo
+    let result = state
+        .audit_repo
         .list_system(filter.into_inner(), pagination.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(result))

@@ -35,6 +35,11 @@ const MAX_RESETS_PER_DAY: u64 = 3;
 ///
 /// `T` is the OAuth2 refresh-token repository — used by `confirm_reset` to
 /// also revoke OAuth2-flow refresh tokens (RESEARCH §4 "two chokepoints").
+///
+/// `Clone` (QUAL-07): this service is now a hoisted `AppState<C>` singleton
+/// constructed once at startup and cloned per Actix worker, rather than
+/// rebuilt per-request.
+#[derive(Clone)]
 pub struct PasswordResetService<U, R, F, H, S, T>
 where
     U: UserRepository,

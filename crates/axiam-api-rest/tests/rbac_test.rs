@@ -20,23 +20,18 @@ use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::AuthzChecker;
 use axiam_api_rest::permissions::{PERMISSION_REGISTRY, ROUTE_PERMISSION_MAP};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
-use axiam_auth::{AuthService, MfaMethodService};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
-    SurrealAuditLogRepository, SurrealCaCertificateRepository, SurrealCertificateRepository,
-    SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealGroupRepository,
-    SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use axiam_db::{seed_default_roles, seed_permissions};
 use surrealdb::Surreal;
@@ -104,25 +99,6 @@ fn make_authz(db: &Surreal<TestDb>) -> Arc<dyn AuthzChecker> {
         SurrealScopeRepository::new(db.clone()),
         SurrealGroupRepository::new(db.clone()),
     ))
-}
-
-fn make_auth_service(
-    db: &Surreal<TestDb>,
-    auth: &AuthConfig,
-) -> AuthService<
-    SurrealUserRepository<TestDb>,
-    SurrealSessionRepository<TestDb>,
-    SurrealFederationLinkRepository<TestDb>,
-    SurrealRefreshTokenRepository<TestDb>,
-> {
-    AuthService::new(
-        SurrealUserRepository::new(db.clone()),
-        SurrealSessionRepository::new(db.clone()),
-        SurrealFederationLinkRepository::new(db.clone()),
-        SurrealRefreshTokenRepository::new(db.clone()),
-        auth.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-    )
 }
 
 /// Fresh in-memory DB with an org + tenant + the default permission registry
@@ -239,57 +215,9 @@ macro_rules! test_app {
             App::new()
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new($authz.clone()))
-                .app_data(web::Data::new(make_auth_service(&$db, &$auth)))
-                .app_data(web::Data::new(MfaMethodService::new(
-                    SurrealUserRepository::new($db.clone()),
-                    SurrealWebauthnCredentialRepository::new($db.clone()),
-                )))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
+                .app_data(web::Data::new(AppState::for_test(
                     $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealSettingsRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRoleRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealPermissionRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealGroupRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealResourceRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealScopeRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealAuditLogRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealCertificateRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealCaCertificateRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealServiceAccountRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealPgpKeyRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealWebhookRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealOAuth2ClientRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationConfigRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationLinkRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealNotificationRuleRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealPasswordHistoryRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealWebauthnCredentialRepository::new(
-                    $db.clone(),
+                    $auth.clone(),
                 )))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
@@ -466,7 +394,8 @@ async fn public_routes_no_auth_required() {
 
     // /health route is registered separately — not via register_api_v1_routes
     // — so build a minimal app for it.
-    let health_app = test::init_service(App::new().configure(axiam_api_rest::health_routes)).await;
+    let health_app =
+        test::init_service(App::new().configure(axiam_api_rest::health_routes::<TestDb>)).await;
     let req = test::TestRequest::get().uri("/health").to_request();
     let resp = test::call_service(&health_app, req).await;
     assert_eq!(resp.status().as_u16(), 200);

@@ -28,6 +28,22 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
+
+/// D-02 fail-closed guard: `email_config_repo` is `None` when
+/// `AXIAM__EMAIL_ENCRYPTION_KEY` is unset. Every email-config handler must
+/// go through this instead of unwrapping directly, preserving the
+/// pre-AppState "App data is not configured" 500 behavior with a clearer
+/// error path.
+fn require_email_config_repo<C: Connection + Clone>(
+    state: &AppState<C>,
+) -> Result<&SurrealEmailConfigRepository<C>, AxiamApiError> {
+    state.email_config_repo.as_ref().ok_or_else(|| {
+        AxiamApiError(AxiamError::Internal(
+            "email configuration is disabled (AXIAM__EMAIL_ENCRYPTION_KEY not set)".into(),
+        ))
+    })
+}
 
 /// Structural-only validation for a tenant email-config override (D-15).
 ///
@@ -98,10 +114,10 @@ fn validate_email_config_override(input: &EmailConfigOverride) -> AxiamResult<()
     ),
     security(("bearer" = []))
 )]
-pub async fn get_org_email_config<C: Connection>(
+pub async fn get_org_email_config<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealEmailConfigRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("email_config:read", Uuid::nil())
@@ -115,6 +131,7 @@ pub async fn get_org_email_config<C: Connection>(
         }));
     }
 
+    let repo = require_email_config_repo(&state)?;
     match repo.get_org_config(org_id).await? {
         Some(config) => Ok(HttpResponse::Ok().json(config)),
         None => Err(AxiamApiError(AxiamError::NotFound {
@@ -139,10 +156,10 @@ pub async fn get_org_email_config<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn set_org_email_config<C: Connection>(
+pub async fn set_org_email_config<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealEmailConfigRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<SetOrgEmailConfig>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -159,6 +176,7 @@ pub async fn set_org_email_config<C: Connection>(
 
     let input = body.into_inner();
     validate_email_config(&input)?;
+    let repo = require_email_config_repo(&state)?;
     let config = repo.set_org_config(org_id, input).await?;
     Ok(HttpResponse::Ok().json(config))
 }
@@ -176,10 +194,10 @@ pub async fn set_org_email_config<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete_org_email_config<C: Connection>(
+pub async fn delete_org_email_config<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealEmailConfigRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("email_config:write", Uuid::nil())
@@ -193,6 +211,7 @@ pub async fn delete_org_email_config<C: Connection>(
         }));
     }
 
+    let repo = require_email_config_repo(&state)?;
     repo.delete_org_config(org_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -216,10 +235,10 @@ pub async fn delete_org_email_config<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get_tenant_email_config<C: Connection>(
+pub async fn get_tenant_email_config<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealEmailConfigRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("email_config:read", Uuid::nil())
@@ -233,6 +252,7 @@ pub async fn get_tenant_email_config<C: Connection>(
         }));
     }
 
+    let repo = require_email_config_repo(&state)?;
     match repo.get_tenant_override(tenant_id).await? {
         Some(config) => Ok(HttpResponse::Ok().json(config)),
         None => Err(AxiamApiError(AxiamError::NotFound {
@@ -258,10 +278,10 @@ pub async fn get_tenant_email_config<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn set_tenant_email_config<C: Connection>(
+pub async fn set_tenant_email_config<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealEmailConfigRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<SetTenantEmailOverride>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -278,6 +298,7 @@ pub async fn set_tenant_email_config<C: Connection>(
 
     let input = body.into_inner();
     validate_email_config_override(&input)?;
+    let repo = require_email_config_repo(&state)?;
     let overrides = repo.set_tenant_override(tenant_id, input).await?;
     Ok(HttpResponse::Ok().json(overrides))
 }
@@ -295,10 +316,10 @@ pub async fn set_tenant_email_config<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete_tenant_email_config<C: Connection>(
+pub async fn delete_tenant_email_config<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealEmailConfigRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("email_config:write", Uuid::nil())
@@ -312,6 +333,7 @@ pub async fn delete_tenant_email_config<C: Connection>(
         }));
     }
 
+    let repo = require_email_config_repo(&state)?;
     repo.delete_tenant_override(tenant_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

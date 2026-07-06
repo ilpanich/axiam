@@ -235,9 +235,8 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
 
         // SEC-031: Decrypt the stored secret before HMAC computation.
         let plaintext_secret = match aes256gcm_decrypt(&encryption_key, &webhook.secret) {
-            Ok(bytes) => String::from_utf8(bytes).map_err(|e| {
-                WebhookError::SecretDecrypt(format!("secret not valid UTF-8: {e}"))
-            })?,
+            Ok(bytes) => String::from_utf8(bytes)
+                .map_err(|e| WebhookError::SecretDecrypt(format!("secret not valid UTF-8: {e}")))?,
             Err(e) => return Err(WebhookError::SecretDecrypt(e.to_string())),
         };
 

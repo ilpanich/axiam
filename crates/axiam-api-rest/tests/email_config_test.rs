@@ -20,9 +20,9 @@ use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::AuthzChecker;
 use axiam_api_rest::permissions::PERMISSION_REGISTRY;
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
-use axiam_auth::{AuthService, MfaMethodService};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
@@ -31,15 +31,9 @@ use axiam_core::repository::{
     EmailConfigRepository, OrganizationRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealAuditLogRepository, SurrealCaCertificateRepository, SurrealCertificateRepository,
-    SurrealEmailConfigRepository, SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealGroupRepository, SurrealNotificationRuleRepository,
-    SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
-    SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealRefreshTokenRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealServiceAccountRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
-    SurrealWebhookRepository,
+    SurrealEmailConfigRepository, SurrealGroupRepository, SurrealOrganizationRepository,
+    SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use axiam_db::{seed_default_roles, seed_permissions};
 use surrealdb::Surreal;
@@ -105,25 +99,6 @@ fn make_authz(db: &Surreal<TestDb>) -> Arc<dyn AuthzChecker> {
         SurrealScopeRepository::new(db.clone()),
         SurrealGroupRepository::new(db.clone()),
     ))
-}
-
-fn make_auth_service(
-    db: &Surreal<TestDb>,
-    auth: &AuthConfig,
-) -> AuthService<
-    SurrealUserRepository<TestDb>,
-    SurrealSessionRepository<TestDb>,
-    SurrealFederationLinkRepository<TestDb>,
-    SurrealRefreshTokenRepository<TestDb>,
-> {
-    AuthService::new(
-        SurrealUserRepository::new(db.clone()),
-        SurrealSessionRepository::new(db.clone()),
-        SurrealFederationLinkRepository::new(db.clone()),
-        SurrealRefreshTokenRepository::new(db.clone()),
-        auth.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-    )
 }
 
 /// Fresh in-memory DB with an org + tenant + the default permission registry
@@ -226,62 +201,14 @@ macro_rules! test_app {
             App::new()
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new($authz.clone()))
-                .app_data(web::Data::new(make_auth_service(&$db, &$auth)))
-                .app_data(web::Data::new(MfaMethodService::new(
-                    SurrealUserRepository::new($db.clone()),
-                    SurrealWebauthnCredentialRepository::new($db.clone()),
-                )))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealSettingsRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRoleRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealPermissionRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealGroupRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealResourceRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealScopeRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealAuditLogRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealCertificateRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealCaCertificateRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealServiceAccountRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealPgpKeyRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealWebhookRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealOAuth2ClientRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationConfigRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationLinkRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealNotificationRuleRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealPasswordHistoryRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealWebauthnCredentialRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealEmailConfigRepository::new(
-                    $db.clone(),
-                    TEST_EMAIL_KEY,
-                )))
+                .app_data(web::Data::new({
+                    let mut state = AppState::for_test($db.clone(), $auth.clone());
+                    state.email_config_repo = Some(SurrealEmailConfigRepository::new(
+                        $db.clone(),
+                        TEST_EMAIL_KEY,
+                    ));
+                    state
+                }))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
@@ -290,11 +217,7 @@ macro_rules! test_app {
     };
 }
 
-fn bearer_req(
-    method: fn() -> test::TestRequest,
-    uri: &str,
-    token: &str,
-) -> test::TestRequest {
+fn bearer_req(method: fn() -> test::TestRequest, uri: &str, token: &str) -> test::TestRequest {
     method()
         .uri(uri)
         .peer_addr("127.0.0.1:12345".parse().unwrap())
@@ -588,10 +511,7 @@ async fn tenant_email_config_put_get_delete_round_trip() {
     )
     .to_request();
     assert_eq!(
-        test::call_service(&app, delete_req)
-            .await
-            .status()
-            .as_u16(),
+        test::call_service(&app, delete_req).await.status().as_u16(),
         204,
         "tenant DELETE must succeed"
     );

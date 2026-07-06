@@ -86,6 +86,10 @@ pub struct SamlAssertionClaims {
 /// SAML Federation Service that handles external SAML IdP integration.
 ///
 /// Generic over repository implementations for testability.
+///
+/// `Clone` (QUAL-07, axiam-api-rest): hoisted `AppState<C>` singleton,
+/// constructed once at startup and cloned per Actix worker.
+#[derive(Clone)]
 pub struct SamlFederationService<FC, FL, UR, AR> {
     federation_config_repo: FC,
     federation_link_repo: FL,

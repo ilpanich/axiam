@@ -35,9 +35,10 @@ use actix_web::http::header::{ContentType, RETRY_AFTER};
 use actix_web::{Error, HttpResponse, web};
 use axiam_db::repository::SurrealRateLimitBucketRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 
 use crate::extractors::rate_limit::XForwardedForKeyExtractor;
+use crate::state::AppState;
 
 /// Fixed-window duration (seconds) for the shared bucket. A simple
 /// fixed-window counter is acceptable here (unlike the in-memory GCRA
@@ -98,13 +99,13 @@ fn too_many_requests_response() -> HttpResponse {
 ///     .wrap(RateLimitShared::<C>::new("login", rate_limit_cfg.login_per_min))
 ///     .route(web::post().to(handlers::auth::login::<C>))
 /// ```
-pub struct RateLimitShared<C: Connection> {
+pub struct RateLimitShared<C: Connection + Clone> {
     endpoint: &'static str,
     limit: u32,
     _marker: PhantomData<C>,
 }
 
-impl<C: Connection> RateLimitShared<C> {
+impl<C: Connection + Clone> RateLimitShared<C> {
     pub fn new(endpoint: &'static str, limit: u32) -> Self {
         Self {
             endpoint,
@@ -114,7 +115,7 @@ impl<C: Connection> RateLimitShared<C> {
     }
 }
 
-impl<C: Connection> Clone for RateLimitShared<C> {
+impl<C: Connection + Clone> Clone for RateLimitShared<C> {
     fn clone(&self) -> Self {
         Self {
             endpoint: self.endpoint,
@@ -128,7 +129,7 @@ impl<S, B, C> Transform<S, ServiceRequest> for RateLimitShared<C>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     B: 'static,
-    C: Connection + 'static,
+    C: Connection + Clone + 'static,
 {
     type Response = ServiceResponse<EitherBody<B>>;
     type Error = Error;
@@ -150,7 +151,7 @@ where
 // Inner service
 // ---------------------------------------------------------------------------
 
-pub struct RateLimitSharedService<S, C: Connection> {
+pub struct RateLimitSharedService<S, C: Connection + Clone> {
     inner: Rc<S>,
     endpoint: &'static str,
     limit: u32,
@@ -161,7 +162,7 @@ impl<S, B, C> Service<ServiceRequest> for RateLimitSharedService<S, C>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     B: 'static,
-    C: Connection + 'static,
+    C: Connection + Clone + 'static,
 {
     type Response = ServiceResponse<EitherBody<B>>;
     type Error = Error;
@@ -184,13 +185,13 @@ where
         let extractor = XForwardedForKeyExtractor::with_trusted_hops(trusted_hops());
         let ip = extractor.extract(&req).ok();
 
-        // The SurrealDB handle is registered as `web::Data<Surreal<C>>`
-        // app_data (same mechanism every other repository-backed handler
-        // uses). Its absence is treated exactly like a DB error below —
-        // fail open to the in-memory governor.
+        // The SurrealDB handle is read from `web::Data<AppState<C>>` (QUAL-01
+        // — was a standalone `web::Data<Surreal<C>>` registration). Its
+        // absence is treated exactly like a DB error below — fail open to
+        // the in-memory governor.
         let db = req
-            .app_data::<web::Data<Surreal<C>>>()
-            .map(|d| d.get_ref().clone());
+            .app_data::<web::Data<AppState<C>>>()
+            .map(|d| d.db.clone());
 
         Box::pin(async move {
             let allow = match (ip, db) {

@@ -587,6 +587,7 @@ async fn oidc_linking_ignores_client_supplied_nonce() {
     use axiam_api_rest::RateLimitConfig;
     use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
     use axiam_api_rest::register_api_v1_routes;
+    use axiam_api_rest::state::AppState;
     use axiam_auth::config::AuthConfig;
     use axiam_core::models::organization::CreateOrganization;
     use axiam_core::models::tenant::CreateTenant;
@@ -673,28 +674,27 @@ async fn oidc_linking_ignores_client_supplied_nonce() {
     let app = actix_test::init_service(
         App::new()
             .app_data(web::Data::new(auth_config.clone()))
-            .app_data(web::Data::new(
-                axiam_db::SurrealFederationConfigRepository::new(http_db.clone()),
-            ))
-            .app_data(web::Data::new(
-                axiam_db::SurrealFederationLinkRepository::new(http_db.clone()),
-            ))
-            .app_data(web::Data::new(axiam_db::SurrealUserRepository::new(
-                http_db.clone(),
-            )))
-            .app_data(web::Data::new(
-                axiam_db::SurrealFederationLoginStateRepository::new(http_db.clone()),
-            ))
-            .app_data(web::Data::new(
-                reqwest::Client::builder()
+            .app_data(web::Data::new({
+                let mut state = AppState::for_test(http_db.clone(), auth_config.clone());
+                state.http_client = reqwest::Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .timeout(std::time::Duration::from_secs(10))
                     .build()
-                    .unwrap(),
-            ))
-            .app_data(web::Data::new(Arc::new(
-                JwksCache::new_allow_private_networks(),
-            )))
+                    .unwrap();
+                state.jwks_cache = Arc::new(JwksCache::new_allow_private_networks());
+                // QUAL-07: OidcFederationService is a hoisted AppState
+                // singleton; build it with the same test-only encryption
+                // key, http_client, and jwks_cache used elsewhere here.
+                state.oidc_federation_service = Some(OidcFederationService::new(
+                    state.federation_config_repo.clone(),
+                    state.federation_link_repo.clone(),
+                    state.user_repo.clone(),
+                    state.http_client.clone(),
+                    Arc::clone(&state.jwks_cache),
+                    TEST_FED_ENC_KEY,
+                ));
+                state
+            }))
             .app_data(web::Data::new(
                 Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
             ))

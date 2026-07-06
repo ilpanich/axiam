@@ -5,6 +5,7 @@ use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::permissions::PERMISSION_REGISTRY;
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_authz::AuthorizationEngine;
@@ -141,7 +142,12 @@ fn make_real_authz(db: &Surreal<TestDb>) -> Arc<dyn AuthzChecker> {
 
 /// Create a user with NO role assigned — lacks every permission, including
 /// `users:list` (FUNC-04 non-privileged-caller fixture).
-async fn create_user_no_role(db: &Surreal<TestDb>, tenant_id: Uuid, username: &str, email: &str) -> Uuid {
+async fn create_user_no_role(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    username: &str,
+    email: &str,
+) -> Uuid {
     let user_repo = SurrealUserRepository::new(db.clone());
     let user = user_repo
         .create(CreateUser {
@@ -161,11 +167,10 @@ macro_rules! test_app_real_authz {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
+                .app_data(web::Data::new(AppState::for_test(
                     $db.clone(),
+                    $auth.clone(),
                 )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
                 .app_data(web::Data::new($authz.clone()))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
@@ -180,11 +185,10 @@ macro_rules! test_app {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
+                .app_data(web::Data::new(AppState::for_test(
                     $db.clone(),
+                    $auth.clone(),
                 )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))

@@ -6,6 +6,7 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_api_rest::webhook::WebhookDeliveryService;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::crypto::aes256gcm_decrypt;
@@ -123,13 +124,15 @@ macro_rules! test_app {
     };
     ($db:expr, $auth:expr, $enc_key:expr) => {{
         let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
-        let webhook_repo = SurrealWebhookRepository::new($db.clone());
-        let webhook_delivery = WebhookDeliveryService::new(webhook_repo.clone(), $enc_key);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(webhook_repo))
-                .app_data(web::Data::new(webhook_delivery))
+                .app_data(web::Data::new({
+                    let mut state = AppState::for_test($db.clone(), $auth.clone());
+                    state.webhook_delivery =
+                        WebhookDeliveryService::new(state.webhook_repo.clone(), $enc_key);
+                    state
+                }))
                 .app_data(web::Data::new(authz))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())

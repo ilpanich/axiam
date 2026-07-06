@@ -6,7 +6,6 @@ use axiam_core::models::role::{CreateRole, Role, UpdateRole};
 use axiam_core::repository::{
     GroupRepository, PaginatedResult, Pagination, RoleRepository, UserRepository,
 };
-use axiam_db::{SurrealGroupRepository, SurrealRoleRepository, SurrealUserRepository};
 
 use super::users::UserResponse;
 use serde::Deserialize;
@@ -16,6 +15,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
 
 // -----------------------------------------------------------------------
 // Request types
@@ -79,10 +79,10 @@ pub struct UnassignQuery {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<CreateRoleRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:create", Uuid::nil())
@@ -95,7 +95,7 @@ pub async fn create<C: Connection>(
         description: req.description,
         is_global: req.is_global,
     };
-    let role = repo.create(input).await?;
+    let role = state.role_repo.create(input).await?;
     Ok(HttpResponse::Created().json(role))
 }
 
@@ -110,16 +110,19 @@ pub async fn create<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let result = repo.list(user.tenant_id, query.into_inner()).await?;
+    let result = state
+        .role_repo
+        .list(user.tenant_id, query.into_inner())
+        .await?;
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -135,16 +138,19 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let role = repo.get_by_id(user.tenant_id, path.into_inner()).await?;
+    let role = state
+        .role_repo
+        .get_by_id(user.tenant_id, path.into_inner())
+        .await?;
     Ok(HttpResponse::Ok().json(role))
 }
 
@@ -161,17 +167,18 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateRole>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let role = repo
+    let role = state
+        .role_repo
         .update(user.tenant_id, path.into_inner(), body.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(role))
@@ -189,16 +196,19 @@ pub async fn update<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete<C: Connection>(
+pub async fn delete<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    repo.delete(user.tenant_id, path.into_inner()).await?;
+    state
+        .role_repo
+        .delete(user.tenant_id, path.into_inner())
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -218,10 +228,10 @@ pub async fn delete<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn assign_to_user<C: Connection>(
+pub async fn assign_to_user<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AssignRoleToUserRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -229,13 +239,15 @@ pub async fn assign_to_user<C: Connection>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
-    repo.assign_to_user(
-        user.tenant_id,
-        req.user_id,
-        path.into_inner(),
-        req.resource_id,
-    )
-    .await?;
+    state
+        .role_repo
+        .assign_to_user(
+            user.tenant_id,
+            req.user_id,
+            path.into_inner(),
+            req.resource_id,
+        )
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -254,10 +266,10 @@ pub async fn assign_to_user<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn unassign_from_user<C: Connection>(
+pub async fn unassign_from_user<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<RoleUserPath>,
     query: web::Query<UnassignQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -265,7 +277,9 @@ pub async fn unassign_from_user<C: Connection>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
-    repo.unassign_from_user(user.tenant_id, p.user_id, p.role_id, query.resource_id)
+    state
+        .role_repo
+        .unassign_from_user(user.tenant_id, p.user_id, p.role_id, query.resource_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -286,10 +300,10 @@ pub async fn unassign_from_user<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn assign_to_group<C: Connection>(
+pub async fn assign_to_group<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AssignRoleToGroupRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -297,13 +311,15 @@ pub async fn assign_to_group<C: Connection>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
-    repo.assign_to_group(
-        user.tenant_id,
-        req.group_id,
-        path.into_inner(),
-        req.resource_id,
-    )
-    .await?;
+    state
+        .role_repo
+        .assign_to_group(
+            user.tenant_id,
+            req.group_id,
+            path.into_inner(),
+            req.resource_id,
+        )
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -322,10 +338,10 @@ pub async fn assign_to_group<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn unassign_from_group<C: Connection>(
+pub async fn unassign_from_group<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<RoleGroupPath>,
     query: web::Query<UnassignQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -333,7 +349,9 @@ pub async fn unassign_from_group<C: Connection>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
-    repo.unassign_from_group(user.tenant_id, p.group_id, p.role_id, query.resource_id)
+    state
+        .role_repo
+        .unassign_from_group(user.tenant_id, p.group_id, p.role_id, query.resource_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -352,22 +370,24 @@ pub async fn unassign_from_group<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list_users<C: Connection>(
+pub async fn list_users<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let role_id = path.into_inner();
-    let ids = repo.get_role_user_ids(user.tenant_id, role_id).await?;
+    let ids = state
+        .role_repo
+        .get_role_user_ids(user.tenant_id, role_id)
+        .await?;
     let mut users = Vec::with_capacity(ids.len());
     for id in ids {
         users.push(UserResponse::from(
-            user_repo.get_by_id(user.tenant_id, id).await?,
+            state.user_repo.get_by_id(user.tenant_id, id).await?,
         ));
     }
     Ok(HttpResponse::Ok().json(users))
@@ -386,21 +406,23 @@ pub async fn list_users<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list_groups<C: Connection>(
+pub async fn list_groups<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealRoleRepository<C>>,
-    group_repo: web::Data<SurrealGroupRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let role_id = path.into_inner();
-    let ids = repo.get_role_group_ids(user.tenant_id, role_id).await?;
+    let ids = state
+        .role_repo
+        .get_role_group_ids(user.tenant_id, role_id)
+        .await?;
     let mut groups: Vec<Group> = Vec::with_capacity(ids.len());
     for id in ids {
-        groups.push(group_repo.get_by_id(user.tenant_id, id).await?);
+        groups.push(state.group_repo.get_by_id(user.tenant_id, id).await?);
     }
     Ok(HttpResponse::Ok().json(groups))
 }

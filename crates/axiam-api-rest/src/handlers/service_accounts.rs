@@ -6,7 +6,6 @@ use axiam_core::models::service_account::{
 };
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{PaginatedResult, Pagination, ServiceAccountRepository};
-use axiam_db::SurrealServiceAccountRepository;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -15,6 +14,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
 
 // -----------------------------------------------------------------------
 // Request types
@@ -89,10 +89,10 @@ pub struct RotateSecretResponse {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealServiceAccountRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<CreateServiceAccountRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:create", Uuid::nil())
@@ -102,7 +102,7 @@ pub async fn create<C: Connection>(
         tenant_id: user.tenant_id,
         name: body.into_inner().name,
     };
-    let (sa, raw_secret) = repo.create(input).await?;
+    let (sa, raw_secret) = state.service_account_repo.create(input).await?;
     Ok(HttpResponse::Created().json(ServiceAccountCreatedResponse {
         id: sa.id,
         tenant_id: sa.tenant_id,
@@ -126,16 +126,19 @@ pub async fn create<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealServiceAccountRepository<C>>,
+    state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let result = repo.list(user.tenant_id, query.into_inner()).await?;
+    let result = state
+        .service_account_repo
+        .list(user.tenant_id, query.into_inner())
+        .await?;
     let items: Vec<ServiceAccountResponse> = result
         .items
         .into_iter()
@@ -161,16 +164,19 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealServiceAccountRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let sa = repo.get_by_id(user.tenant_id, path.into_inner()).await?;
+    let sa = state
+        .service_account_repo
+        .get_by_id(user.tenant_id, path.into_inner())
+        .await?;
     Ok(HttpResponse::Ok().json(ServiceAccountResponse::from(sa)))
 }
 
@@ -187,17 +193,18 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealServiceAccountRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateServiceAccount>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let sa = repo
+    let sa = state
+        .service_account_repo
         .update(user.tenant_id, path.into_inner(), body.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(ServiceAccountResponse::from(sa)))
@@ -215,16 +222,19 @@ pub async fn update<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete<C: Connection>(
+pub async fn delete<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealServiceAccountRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    repo.delete(user.tenant_id, path.into_inner()).await?;
+    state
+        .service_account_repo
+        .delete(user.tenant_id, path.into_inner())
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -240,16 +250,17 @@ pub async fn delete<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn rotate_secret<C: Connection>(
+pub async fn rotate_secret<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealServiceAccountRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:rotate_secret", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let raw_secret = repo
+    let raw_secret = state
+        .service_account_repo
         .rotate_secret(user.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(RotateSecretResponse {

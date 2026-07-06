@@ -19,9 +19,7 @@ use actix_web::{HttpResponse, web};
 use axiam_auth::password;
 use axiam_core::error::AxiamError;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
-use axiam_db::{
-    SurrealOrganizationRepository, SurrealTenantRepository, seed_default_roles, seed_permissions,
-};
+use axiam_db::{seed_default_roles, seed_permissions};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -31,6 +29,7 @@ use uuid::Uuid;
 
 use crate::error::AxiamApiError;
 use crate::permissions::PERMISSION_REGISTRY;
+use crate::state::AppState;
 
 // -----------------------------------------------------------------------
 // Request / response types
@@ -78,7 +77,7 @@ fn hash_setup_token(token: &str) -> String {
 /// CREATE inside the same atomic transaction that creates the admin user
 /// (Task 3): a replayed token still loses to a UNIQUE-index violation even
 /// if two requests race past this pre-check simultaneously.
-async fn setup_token_is_valid<C: Connection>(
+async fn setup_token_is_valid<C: Connection + Clone>(
     db: &Surreal<C>,
     token_hash: &str,
 ) -> Result<bool, AxiamApiError> {
@@ -139,10 +138,8 @@ pub struct BootstrapResponse {
         (status = 400, description = "Organization or tenant not found"),
     )
 )]
-pub async fn bootstrap<C: Connection>(
-    org_repo: web::Data<SurrealOrganizationRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    db: web::Data<Surreal<C>>,
+pub async fn bootstrap<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<BootstrapRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -177,7 +174,7 @@ pub async fn bootstrap<C: Connection>(
                     }));
                 }
             };
-            if !setup_token_is_valid(db.get_ref(), &token_hash).await? {
+            if !setup_token_is_valid(&state.db, &token_hash).await? {
                 return Err(AxiamApiError(AxiamError::AuthorizationDenied {
                     reason: "setup token is invalid, unknown, or already consumed".into(),
                 }));
@@ -187,24 +184,28 @@ pub async fn bootstrap<C: Connection>(
     }
 
     // 2. Verify org and tenant exist.
-    org_repo.get_by_id(req.org_id).await.map_err(|_| {
+    state.org_repo.get_by_id(req.org_id).await.map_err(|_| {
         AxiamApiError(AxiamError::Validation {
             message: "organization not found".into(),
         })
     })?;
-    tenant_repo.get_by_id(req.tenant_id).await.map_err(|_| {
-        AxiamApiError(AxiamError::Validation {
-            message: "tenant not found".into(),
-        })
-    })?;
+    state
+        .tenant_repo
+        .get_by_id(req.tenant_id)
+        .await
+        .map_err(|_| {
+            AxiamApiError(AxiamError::Validation {
+                message: "tenant not found".into(),
+            })
+        })?;
 
     // 3. Seed permissions (idempotent).
-    seed_permissions(db.get_ref(), req.tenant_id, PERMISSION_REGISTRY)
+    seed_permissions(&state.db, req.tenant_id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
     // 4. Seed default roles and get their IDs.
-    let seed_result = seed_default_roles(db.get_ref(), req.tenant_id, PERMISSION_REGISTRY)
+    let seed_result = seed_default_roles(&state.db, req.tenant_id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
@@ -271,7 +272,8 @@ pub async fn bootstrap<C: Connection>(
     txn_stmts.push("COMMIT TRANSACTION".to_string());
     let txn_query = txn_stmts.join("; ");
 
-    let mut query = db
+    let mut query = state
+        .db
         .query(txn_query)
         .bind(("tenant_id", tenant_id_str))
         .bind(("user_id", user_id_str.clone()))

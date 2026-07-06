@@ -39,9 +39,12 @@ fn build_governor(requests_per_min: u32) -> Governor<XForwardedForKeyExtractor, 
 }
 
 /// Register health and readiness routes.
-pub fn health_routes(cfg: &mut web::ServiceConfig) {
+///
+/// Generic over `C` (QUAL-01) since `/ready` now extracts
+/// `web::Data<AppState<C>>` for its `HealthChecker`.
+pub fn health_routes<C: surrealdb::Connection + Clone>(cfg: &mut web::ServiceConfig) {
     cfg.route("/health", web::get().to(crate::health::health))
-        .route("/ready", web::get().to(crate::health::ready));
+        .route("/ready", web::get().to(crate::health::ready::<C>));
 }
 
 /// Register Swagger UI and OpenAPI JSON spec routes.

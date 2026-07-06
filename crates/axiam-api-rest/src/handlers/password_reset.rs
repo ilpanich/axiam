@@ -4,26 +4,17 @@
 //! and confirm the reset with a new password.
 
 use actix_web::{HttpResponse, web};
-use axiam_amqp::MailOutboundPublisher;
-use axiam_auth::PasswordResetService;
 use axiam_core::error::AxiamError;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
-use axiam_core::repository::{MailPublisher, OrganizationRepository, TenantRepository};
-use axiam_db::{
-    SurrealFederationLinkRepository, SurrealOrganizationRepository,
-    SurrealPasswordHistoryRepository, SurrealPasswordResetTokenRepository,
-    SurrealRefreshTokenRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository,
-};
+use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use chrono::Utc;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
-use std::sync::Arc;
 use surrealdb::Connection;
-use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -117,19 +108,8 @@ where
         (status = 200, description = "Password reset email enqueued"),
     )
 )]
-#[allow(clippy::too_many_arguments)] // Actix DI extractors
-pub async fn request_reset<C: Connection>(
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    token_repo: web::Data<SurrealPasswordResetTokenRepository<C>>,
-    federation_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    history_repo: web::Data<SurrealPasswordHistoryRepository<C>>,
-    session_repo: web::Data<SurrealSessionRepository<C>>,
-    refresh_token_repo: web::Data<SurrealRefreshTokenRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    org_repo: web::Data<SurrealOrganizationRepository<C>>,
-    mail_publisher: web::Data<MailOutboundPublisher>,
-    auth_config: web::Data<axiam_auth::AuthConfig>,
-    crypto_semaphore: web::Data<Arc<Semaphore>>,
+pub async fn request_reset<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<RequestResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -140,8 +120,8 @@ pub async fn request_reset<C: Connection>(
     // uniform enumeration-safe `{"sent": true}` response as an unknown
     // account (D-05 / Pitfall 4 / T-23-06-A).
     let tenant_id = resolve_reset_tenant_id(
-        org_repo.as_ref(),
-        tenant_repo.as_ref(),
+        &state.org_repo,
+        &state.tenant_repo,
         req.tenant_id,
         req.org_slug.as_deref(),
         req.tenant_slug.as_deref(),
@@ -159,27 +139,20 @@ pub async fn request_reset<C: Connection>(
         return Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })));
     };
 
-    let svc = PasswordResetService::new(
-        user_repo.as_ref().clone(),
-        token_repo.as_ref().clone(),
-        federation_repo.as_ref().clone(),
-        history_repo.as_ref().clone(),
-        session_repo.as_ref().clone(),
-        refresh_token_repo.as_ref().clone(),
-        Arc::clone(crypto_semaphore.as_ref()),
-    );
+    // QUAL-07: PasswordResetService is now a hoisted AppState singleton
+    // (was constructed per-request here).
+    let expiry_hours = state.auth_config.password_reset_token_expiry_hours;
+    let pepper = state.auth_config.pepper.as_ref().map(|p| p.expose_secret());
 
-    let expiry_hours = auth_config.password_reset_token_expiry_hours;
-    let pepper = auth_config.pepper.as_ref().map(|p| p.expose_secret());
-
-    match svc
+    match state
+        .password_reset_service
         .initiate_reset(tenant_id, &req.email, expiry_hours, pepper)
         .await
     {
         Ok(Some((raw_token, user_id, expires_at))) => {
             // Resolve org_id from tenant for the mail message.
             // On failure, log and continue — D-15: never propagate to client.
-            let org_id = match tenant_repo.get_by_id(tenant_id).await {
+            let org_id = match state.tenant_repo.get_by_id(tenant_id).await {
                 Ok(tenant) => tenant.organization_id,
                 Err(e) => {
                     tracing::warn!(
@@ -213,7 +186,7 @@ pub async fn request_reset<C: Connection>(
                 enqueued_at: Utc::now(),
             };
 
-            if let Err(e) = mail_publisher.publish(msg).await {
+            if let Err(e) = state.mail_outbound_publisher.publish(msg).await {
                 // D-15: log warn but do NOT propagate — uniform 200 regardless
                 tracing::warn!(
                     error = %e,
@@ -262,19 +235,8 @@ pub async fn request_reset<C: Connection>(
         (status = 400, description = "Invalid token or password policy violation"),
     )
 )]
-#[allow(clippy::too_many_arguments)] // Actix DI extractors
-pub async fn confirm_reset<C: Connection>(
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    token_repo: web::Data<SurrealPasswordResetTokenRepository<C>>,
-    federation_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    history_repo: web::Data<SurrealPasswordHistoryRepository<C>>,
-    session_repo: web::Data<SurrealSessionRepository<C>>,
-    refresh_token_repo: web::Data<SurrealRefreshTokenRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    settings_repo: web::Data<SurrealSettingsRepository<C>>,
-    auth_config: web::Data<axiam_auth::AuthConfig>,
-    http_client: web::Data<reqwest::Client>,
-    crypto_semaphore: web::Data<Arc<Semaphore>>,
+pub async fn confirm_reset<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<ConfirmResetBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use axiam_core::repository::{SettingsRepository, TenantRepository};
@@ -282,32 +244,26 @@ pub async fn confirm_reset<C: Connection>(
     let req = body.into_inner();
 
     // Resolve the tenant to get its org_id for settings.
-    let tenant = tenant_repo.get_by_id(req.tenant_id).await?;
+    let tenant = state.tenant_repo.get_by_id(req.tenant_id).await?;
 
     // Resolve effective password policy.
-    let settings = settings_repo
+    let settings = state
+        .settings_repo
         .get_effective_settings(tenant.organization_id, req.tenant_id)
         .await?;
 
-    let svc = PasswordResetService::new(
-        user_repo.as_ref().clone(),
-        token_repo.as_ref().clone(),
-        federation_repo.as_ref().clone(),
-        history_repo.as_ref().clone(),
-        session_repo.as_ref().clone(),
-        refresh_token_repo.as_ref().clone(),
-        Arc::clone(crypto_semaphore.as_ref()),
-    );
-
-    svc.confirm_reset(
-        req.tenant_id,
-        &req.token,
-        &req.new_password,
-        &settings.password,
-        auth_config.pepper.as_ref().map(|p| p.expose_secret()),
-        Some(http_client.as_ref()),
-    )
-    .await?;
+    // QUAL-07: PasswordResetService is now a hoisted AppState singleton.
+    state
+        .password_reset_service
+        .confirm_reset(
+            req.tenant_id,
+            &req.token,
+            &req.new_password,
+            &settings.password,
+            state.auth_config.pepper.as_ref().map(|p| p.expose_secret()),
+            Some(&state.http_client),
+        )
+        .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({ "reset": true })))
 }

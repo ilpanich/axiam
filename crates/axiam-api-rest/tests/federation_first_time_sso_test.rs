@@ -49,6 +49,7 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -56,12 +57,10 @@ use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
-    SurrealFederationConfigRepository, SurrealFederationLinkRepository,
-    SurrealFederationLoginStateRepository, SurrealOrganizationRepository,
-    SurrealPermissionRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
-    SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
+use axiam_federation::oidc::OidcFederationService;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -226,69 +225,40 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
     .unwrap()
 }
 
-fn make_auth_service(
-    db: &Surreal<TestDb>,
-    auth: &AuthConfig,
-) -> axiam_auth::AuthService<
-    SurrealUserRepository<TestDb>,
-    SurrealSessionRepository<TestDb>,
-    SurrealFederationLinkRepository<TestDb>,
-    SurrealRefreshTokenRepository<TestDb>,
-> {
-    axiam_auth::AuthService::new(
-        SurrealUserRepository::new(db.clone()),
-        SurrealSessionRepository::new(db.clone()),
-        SurrealFederationLinkRepository::new(db.clone()),
-        SurrealRefreshTokenRepository::new(db.clone()),
-        auth.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-    )
-}
-
 macro_rules! test_app {
     ($db:expr, $auth:expr, $jwks_cache:expr) => {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(make_auth_service(&$db, &$auth)))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealFederationConfigRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationLinkRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationLoginStateRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRoleRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealPermissionRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
+                .app_data(web::Data::new({
+                    let mut state = AppState::for_test($db.clone(), $auth.clone());
+                    state.http_client = reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()
+                        .unwrap();
+                    // 28-05: enables discover()/exchange_code() to reach the
+                    // loopback wiremock IdP started by this test (see file
+                    // header for the full rationale).
+                    state.jwks_cache = $jwks_cache;
+                    // QUAL-07: OidcFederationService is a hoisted AppState
+                    // singleton; build it with the same test-only encryption
+                    // key, http_client, and jwks_cache used elsewhere here.
+                    state.oidc_federation_service = Some(OidcFederationService::new(
+                        state.federation_config_repo.clone(),
+                        state.federation_link_repo.clone(),
+                        state.user_repo.clone(),
+                        state.http_client.clone(),
+                        std::sync::Arc::clone(&state.jwks_cache),
+                        TEST_FED_ENC_KEY,
+                    ));
+                    state
+                }))
                 // Note: no `Arc<dyn SessionValidator>` app_data registered
                 // (mirrors federation_test.rs) — the admin bearer token is
                 // minted directly via `issue_access_token`, not through a
                 // real login, so it has no matching `Session` row; the
                 // optional SessionValidator check would otherwise 401 it.
-                .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(
-                    reqwest::Client::builder()
-                        .redirect(reqwest::redirect::Policy::none())
-                        .timeout(std::time::Duration::from_secs(10))
-                        .build()
-                        .unwrap(),
-                ))
-                // 28-05: enables discover()/exchange_code() to reach the
-                // loopback wiremock IdP started by this test (see file
-                // header for the full rationale).
-                .app_data(web::Data::new($jwks_cache))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
@@ -375,11 +345,7 @@ async fn first_time_oidc_sso_sets_cookies_and_me_succeeds() {
         }))
         .to_request();
     let start_resp = test::call_service(&app, start_req).await;
-    assert_eq!(
-        start_resp.status().as_u16(),
-        200,
-        "oidc/start must succeed"
-    );
+    assert_eq!(start_resp.status().as_u16(), 200, "oidc/start must succeed");
     let start_body: serde_json::Value = test::read_body_json(start_resp).await;
     let state = start_body["state"].as_str().unwrap().to_string();
     let authorize_url = start_body["authorize_url"].as_str().unwrap();

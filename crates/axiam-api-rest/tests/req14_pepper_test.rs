@@ -13,18 +13,15 @@ use std::net::SocketAddr;
 
 use actix_web::{App, test, web};
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::state::AppState;
 use axiam_api_rest::{RateLimitConfig, register_api_v1_routes};
 use axiam_auth::config::AuthConfig;
-use axiam_auth::{AuthService, MfaMethodService};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
-    SurrealFederationLinkRepository, SurrealOrganizationRepository,
-    SurrealPasswordHistoryRepository, SurrealPermissionRepository, SurrealRefreshTokenRepository,
-    SurrealRoleRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use std::sync::Arc;
 use surrealdb::Surreal;
@@ -133,34 +130,9 @@ macro_rules! test_app_with_auth {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(AuthService::new(
-                    SurrealUserRepository::new($db.clone()),
-                    SurrealSessionRepository::new($db.clone()),
-                    SurrealFederationLinkRepository::new($db.clone()),
-                    SurrealRefreshTokenRepository::new($db.clone()),
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
                     $auth.clone(),
-                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-                )))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealSettingsRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRoleRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealPermissionRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealPasswordHistoryRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(MfaMethodService::new(
-                    SurrealUserRepository::new($db.clone()),
-                    SurrealWebauthnCredentialRepository::new($db.clone()),
                 )))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>

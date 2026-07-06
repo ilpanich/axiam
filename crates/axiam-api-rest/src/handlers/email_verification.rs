@@ -5,21 +5,16 @@
 //! verification email if the original expired or was lost.
 
 use actix_web::{HttpResponse, web};
-use axiam_amqp::MailOutboundPublisher;
-use axiam_auth::EmailVerificationService;
 use axiam_core::error::AxiamError;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
-use axiam_core::repository::{MailPublisher, TenantRepository};
-use axiam_db::{
-    SurrealEmailVerificationTokenRepository, SurrealFederationLinkRepository,
-    SurrealTenantRepository, SurrealUserRepository,
-};
+use axiam_core::repository::TenantRepository;
 use chrono::Utc;
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -57,20 +52,17 @@ pub struct ResendVerificationRequest {
         (status = 400, description = "Invalid or expired token"),
     )
 )]
-pub async fn verify_email<C: Connection>(
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    token_repo: web::Data<SurrealEmailVerificationTokenRepository<C>>,
-    federation_repo: web::Data<SurrealFederationLinkRepository<C>>,
+pub async fn verify_email<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<VerifyEmailRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
-    let svc = EmailVerificationService::new(
-        user_repo.as_ref().clone(),
-        token_repo.as_ref().clone(),
-        federation_repo.as_ref().clone(),
-    );
 
-    svc.verify_email(req.tenant_id, &req.token).await?;
+    // QUAL-07: EmailVerificationService is now a hoisted AppState singleton.
+    state
+        .email_verification_service
+        .verify_email(req.tenant_id, &req.token)
+        .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({ "verified": true })))
 }
@@ -90,26 +82,22 @@ pub async fn verify_email<C: Connection>(
         (status = 200, description = "Verification email enqueued"),
     )
 )]
-pub async fn resend_verification<C: Connection>(
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    token_repo: web::Data<SurrealEmailVerificationTokenRepository<C>>,
-    federation_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    mail_publisher: web::Data<MailOutboundPublisher>,
+pub async fn resend_verification<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<ResendVerificationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
-    let svc = EmailVerificationService::new(
-        user_repo.as_ref().clone(),
-        token_repo.as_ref().clone(),
-        federation_repo.as_ref().clone(),
-    );
 
-    match svc.resend_verification(req.tenant_id, &req.email).await {
+    // QUAL-07: EmailVerificationService is now a hoisted AppState singleton.
+    match state
+        .email_verification_service
+        .resend_verification(req.tenant_id, &req.email)
+        .await
+    {
         Ok(Some((raw_token, user_id, expires_at))) => {
             // Resolve org_id from tenant for the mail message.
             // On failure, log and continue — D-15: never propagate to client.
-            let org_id = match tenant_repo.get_by_id(req.tenant_id).await {
+            let org_id = match state.tenant_repo.get_by_id(req.tenant_id).await {
                 Ok(tenant) => tenant.organization_id,
                 Err(e) => {
                     tracing::warn!(
@@ -146,7 +134,7 @@ pub async fn resend_verification<C: Connection>(
                 enqueued_at: Utc::now(),
             };
 
-            if let Err(e) = mail_publisher.publish(msg).await {
+            if let Err(e) = state.mail_outbound_publisher.publish(msg).await {
                 // D-15: log warn but do NOT propagate — uniform 200 regardless
                 tracing::warn!(
                     error = %e,

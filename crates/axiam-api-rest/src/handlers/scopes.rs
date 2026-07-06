@@ -4,7 +4,6 @@ use actix_web::{HttpResponse, web};
 use axiam_core::error::AxiamError;
 use axiam_core::models::scope::{CreateScope, Scope, UpdateScope};
 use axiam_core::repository::ScopeRepository;
-use axiam_db::SurrealScopeRepository;
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -12,6 +11,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
 
 // -----------------------------------------------------------------------
 // Path extractors
@@ -60,10 +60,10 @@ pub struct UpdateScopeRequest {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealScopeRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<ResourcePath>,
     body: web::Json<CreateScopeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -77,7 +77,7 @@ pub async fn create<C: Connection>(
         name: req.name,
         description: req.description,
     };
-    let scope = repo.create(input).await?;
+    let scope = state.scope_repo.create(input).await?;
     Ok(HttpResponse::Created().json(scope))
 }
 
@@ -92,16 +92,17 @@ pub async fn create<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealScopeRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<ResourcePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let scopes = repo
+    let scopes = state
+        .scope_repo
         .list_by_resource(user.tenant_id, path.resource_id)
         .await?;
     Ok(HttpResponse::Ok().json(scopes))
@@ -122,16 +123,19 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealScopeRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<ScopePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let scope = repo.get_by_id(user.tenant_id, path.scope_id).await?;
+    let scope = state
+        .scope_repo
+        .get_by_id(user.tenant_id, path.scope_id)
+        .await?;
     if scope.resource_id != path.resource_id {
         return Err(AxiamError::NotFound {
             entity: "Scope".into(),
@@ -158,17 +162,20 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealScopeRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<ScopePath>,
     body: web::Json<UpdateScopeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let existing = repo.get_by_id(user.tenant_id, path.scope_id).await?;
+    let existing = state
+        .scope_repo
+        .get_by_id(user.tenant_id, path.scope_id)
+        .await?;
     if existing.resource_id != path.resource_id {
         return Err(AxiamError::NotFound {
             entity: "Scope".into(),
@@ -181,7 +188,10 @@ pub async fn update<C: Connection>(
         name: req.name,
         description: req.description,
     };
-    let scope = repo.update(user.tenant_id, path.scope_id, input).await?;
+    let scope = state
+        .scope_repo
+        .update(user.tenant_id, path.scope_id, input)
+        .await?;
     Ok(HttpResponse::Ok().json(scope))
 }
 
@@ -200,16 +210,19 @@ pub async fn update<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete<C: Connection>(
+pub async fn delete<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealScopeRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<ScopePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let existing = repo.get_by_id(user.tenant_id, path.scope_id).await?;
+    let existing = state
+        .scope_repo
+        .get_by_id(user.tenant_id, path.scope_id)
+        .await?;
     if existing.resource_id != path.resource_id {
         return Err(AxiamError::NotFound {
             entity: "Scope".into(),
@@ -217,6 +230,9 @@ pub async fn delete<C: Connection>(
         }
         .into());
     }
-    repo.delete(user.tenant_id, path.scope_id).await?;
+    state
+        .scope_repo
+        .delete(user.tenant_id, path.scope_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }

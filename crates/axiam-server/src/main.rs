@@ -9,6 +9,7 @@ use actix_web::{App, HttpServer, web};
 use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher, WebhookPublisher};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
+use axiam_api_rest::state::AppState;
 use axiam_api_rest::webhook_consumer::{WebhookRetryConfig, start_webhook_consumer};
 use axiam_api_rest::{
     HealthChecker, RateLimitConfig, ServerConfig, build_cors, health_routes, openapi_routes,
@@ -16,22 +17,29 @@ use axiam_api_rest::{
 };
 use axiam_audit::AuditMiddleware;
 use axiam_auth::config::AuthConfig;
-use axiam_auth::{AuthService, MfaMethodService, WebauthnService};
+use axiam_auth::{
+    AuthService, EmailVerificationService, MfaMethodService, PasswordResetService, WebauthnService,
+};
 use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
 use axiam_db::{
     DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
-    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealEmailVerificationTokenRepository, SurrealErasureProofRepository,
+    SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
+    SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
+    SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
+    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
+use axiam_federation::oidc::OidcFederationService;
+#[cfg(feature = "saml")]
+use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
@@ -465,20 +473,19 @@ async fn main() -> std::io::Result<()> {
     // app_data below, so the six email-config routes fail closed with actix's
     // "App data is not configured" 500 rather than silently encrypting with a
     // constant/zero key.
-    let email_config_repo: Option<SurrealEmailConfigRepository<axiam_db::DbClient>> = match config
-        .email_encryption_key
-    {
-        Some(email_key) => Some(SurrealEmailConfigRepository::new(
-            db.client_cloned().await,
-            email_key,
-        )),
-        None => {
-            tracing::warn!(
-                "AXIAM__EMAIL_ENCRYPTION_KEY missing — email-config admin endpoints disabled"
-            );
-            None
-        }
-    };
+    let email_config_repo: Option<SurrealEmailConfigRepository<axiam_db::DbClient>> =
+        match config.email_encryption_key {
+            Some(email_key) => Some(SurrealEmailConfigRepository::new(
+                db.client_cloned().await,
+                email_key,
+            )),
+            None => {
+                tracing::warn!(
+                    "AXIAM__EMAIL_ENCRYPTION_KEY missing — email-config admin endpoints disabled"
+                );
+                None
+            }
+        };
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client_cloned().await);
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client_cloned().await);
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client_cloned().await);
@@ -516,6 +523,61 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         i64::try_from(config.auth.refresh_token_lifetime_secs)
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
+    );
+
+    // QUAL-07: hoist the 13 per-request service constructions
+    // (password_reset.rs/email_verification.rs/federation.rs) into
+    // once-at-startup singletons.
+    //
+    // These two repos were NEVER registered in main.rs before this plan (a
+    // pre-existing bug — see 29-03-SUMMARY.md): `SurrealPasswordResetTokenRepository`
+    // and `SurrealEmailVerificationTokenRepository` are constructed here
+    // purely to build the two hoisted services below; no handler touches
+    // them directly, so they are not their own AppState field.
+    let password_reset_token_repo =
+        SurrealPasswordResetTokenRepository::new(db.client_cloned().await);
+    let email_verification_token_repo =
+        SurrealEmailVerificationTokenRepository::new(db.client_cloned().await);
+
+    let password_reset_service = PasswordResetService::new(
+        user_repo.clone(),
+        password_reset_token_repo,
+        federation_link_repo.clone(),
+        password_history_repo.clone(),
+        session_repo.clone(),
+        handler_refresh_token_repo.clone(),
+        Arc::clone(&crypto_semaphore),
+    );
+    let email_verification_service = EmailVerificationService::new(
+        user_repo.clone(),
+        email_verification_token_repo,
+        federation_link_repo.clone(),
+    );
+    // OidcFederationService bakes in the federation encryption key at
+    // construction (unlike SamlFederationService, which needs none) — so
+    // absence of AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY is resolved ONCE
+    // here (`None`) rather than per-request; the 4 OIDC handler call sites
+    // return the identical fail-closed error as before.
+    let oidc_federation_service = config.auth.federation_encryption_key.map(|enc_key| {
+        OidcFederationService::new(
+            federation_config_repo.clone(),
+            federation_link_repo.clone(),
+            user_repo.clone(),
+            http_client.clone(),
+            Arc::clone(&jwks_cache),
+            enc_key,
+        )
+    });
+    // SamlFederationService::new needs no encryption key — constructed
+    // unconditionally regardless of the saml Cargo feature's own gating
+    // (only the SAML REST handlers/routes stay #[cfg(feature = "saml")]).
+    #[cfg(feature = "saml")]
+    let saml_federation_service = SamlFederationService::new(
+        federation_config_repo.clone(),
+        federation_link_repo.clone(),
+        user_repo.clone(),
+        assertion_replay_repo.clone(),
+        http_client.clone(),
     );
 
     config.rate_limit.validate();
@@ -757,9 +819,68 @@ async fn main() -> std::io::Result<()> {
     );
     let cleanup_handle = tokio::spawn(cleanup.run());
 
+    // QUAL-01: single composition root — one AppState<C> built here and
+    // registered once per worker below, replacing the ~49 individual
+    // `.app_data(web::Data::new(...))` calls this closure used to make.
+    let app_state = AppState {
+        authz_config: config.authz.clone(),
+        auth_config: auth_config.clone(),
+        db: db_handle.clone(),
+        health_checker: health_checker.clone(),
+        audit_repo: audit_repo.clone(),
+        org_repo: org_repo.clone(),
+        tenant_repo: tenant_repo.clone(),
+        user_repo: user_repo.clone(),
+        group_repo: group_repo.clone(),
+        role_repo: role_repo.clone(),
+        permission_repo: permission_repo.clone(),
+        resource_repo: resource_repo.clone(),
+        scope_repo: scope_repo.clone(),
+        service_account_repo: service_account_repo.clone(),
+        auth_service: auth_service.clone(),
+        webauthn_service: webauthn_service.clone(),
+        mfa_method_service: mfa_method_service.clone(),
+        mail_outbound_publisher: Arc::new(mail_outbound_publisher.clone())
+            as Arc<dyn axiam_api_rest::state::DynMailPublisher>,
+        session_repo: session_repo.clone(),
+        session_validator: session_validator.clone(),
+        refresh_token_repo: handler_refresh_token_repo.clone(),
+        password_history_repo: password_history_repo.clone(),
+        consent_repo: consent_repo.clone(),
+        account_deletion_repo: account_deletion_repo.clone(),
+        export_job_repo: export_job_repo.clone(),
+        erasure_proof_repo: erasure_proof_repo.clone(),
+        email_encryption_key: config.email_encryption_key,
+        ca_service: ca_service.clone(),
+        cert_service: cert_service.clone(),
+        cert_repo: cert_repo.clone(),
+        device_auth_service: device_auth_service.clone(),
+        pgp_service: pgp_service.clone(),
+        webhook_repo: webhook_repo.clone(),
+        webhook_delivery: webhook_delivery.clone(),
+        notification_rule_repo: notification_rule_repo.clone(),
+        oauth2_client_repo: oauth2_client_repo.clone(),
+        authorize_service: authorize_service.clone(),
+        token_service: token_service.clone(),
+        settings_repo: settings_repo.clone(),
+        federation_config_repo: federation_config_repo.clone(),
+        federation_link_repo: federation_link_repo.clone(),
+        assertion_replay_repo: assertion_replay_repo.clone(),
+        federation_login_state_repo: federation_login_state_repo.clone(),
+        http_client: http_client.clone(),
+        jwks_cache: jwks_cache.clone(),
+        crypto_semaphore: Arc::clone(&crypto_semaphore),
+        email_config_repo: email_config_repo.clone(),
+        password_reset_service: password_reset_service.clone(),
+        email_verification_service: email_verification_service.clone(),
+        oidc_federation_service: oidc_federation_service.clone(),
+        #[cfg(feature = "saml")]
+        saml_federation_service: saml_federation_service.clone(),
+    };
+
     HttpServer::new(move || {
         let rl = rate_limit_cfg.clone();
-        let app = App::new()
+        App::new()
             .wrap(SecurityHeadersMiddleware)
             .wrap(TracingLogger::default())
             .wrap(audit_middleware.clone())
@@ -769,76 +890,23 @@ async fn main() -> std::io::Result<()> {
             // by every RBAC-protected handler. web::Data::from would unwrap the Arc and
             // register it as web::Data<dyn AuthzChecker>, causing "Requested application
             // data is not configured correctly" 500s on every admin endpoint.
+            //
+            // QUAL-01: this is 1 of 3 dependencies that stay registered OUTSIDE
+            // AppState<C> alongside the single AppState registration below — see
+            // `axiam_api_rest::state` module docs for the full rationale (Rust
+            // generics/dyn-safety: 118 handler call sites use `AuthzData` directly,
+            // `AuthenticatedUser`'s non-generic `FromRequest` impl needs
+            // `AuthConfig`/`SessionValidator` without knowing `C`, and
+            // `axiam-audit::AuditMiddleware` — a different crate wrapping the whole
+            // App — independently looks up `web::Data<AuthConfig>`).
             .app_data(web::Data::new(rest_authz.clone()))
-            .app_data(web::Data::new(config.authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
-            .app_data(web::Data::new(db_handle.clone()))
-            .app_data(web::Data::new(health_checker.clone()))
-            .app_data(web::Data::new(audit_repo.clone()))
-            .app_data(web::Data::new(org_repo.clone()))
-            .app_data(web::Data::new(tenant_repo.clone()))
-            .app_data(web::Data::new(user_repo.clone()))
-            .app_data(web::Data::new(group_repo.clone()))
-            .app_data(web::Data::new(role_repo.clone()))
-            .app_data(web::Data::new(permission_repo.clone()))
-            .app_data(web::Data::new(resource_repo.clone()))
-            .app_data(web::Data::new(scope_repo.clone()))
-            .app_data(web::Data::new(service_account_repo.clone()))
-            .app_data(web::Data::new(auth_service.clone()))
-            .app_data(web::Data::new(webauthn_service.clone()))
-            .app_data(web::Data::new(mfa_method_service.clone()))
-            // CQ-B29: NotificationPublisher removed from app_data — no handler extracts it;
-            // wiring NotificationDispatcher requires rule_repo + mail_publisher in the
-            // audit worker (deferred to Phase 19).
-            // .app_data(web::Data::new(notification_publisher.clone()))
-            .app_data(web::Data::new(mail_outbound_publisher.clone()))
-            .app_data(web::Data::new(session_repo.clone()))
             .app_data(web::Data::new(session_validator.clone()))
-            .app_data(web::Data::new(handler_refresh_token_repo.clone()))
-            .app_data(web::Data::new(password_history_repo.clone()))
-            .app_data(web::Data::new(consent_repo.clone()))
-            .app_data(web::Data::new(account_deletion_repo.clone()))
-            .app_data(web::Data::new(export_job_repo.clone()))
-            .app_data(web::Data::new(erasure_proof_repo.clone()))
-            .app_data(web::Data::new(config.email_encryption_key))
-            .app_data(web::Data::new(ca_service.clone()))
-            .app_data(web::Data::new(cert_service.clone()))
-            .app_data(web::Data::new(cert_repo.clone()))
-            .app_data(web::Data::new(device_auth_service.clone()))
-            .app_data(web::Data::new(pgp_service.clone()))
-            .app_data(web::Data::new(webhook_repo.clone()))
-            .app_data(web::Data::new(webhook_delivery.clone()))
-            // CORR-03/D-06: registered so any future emit() call site (no
-            // REST handler invokes emit() on a real domain event yet —
-            // out of this plan's locked scope, see 26-07-PLAN.md residual
-            // scope notes) can extract web::Data<WebhookPublisher>.
-            .app_data(web::Data::new(webhook_publisher.clone()))
-            .app_data(web::Data::new(notification_rule_repo.clone()))
-            .app_data(web::Data::new(oauth2_client_repo.clone()))
-            .app_data(web::Data::new(authorize_service.clone()))
-            .app_data(web::Data::new(token_service.clone()))
-            .app_data(web::Data::new(settings_repo.clone()))
-            .app_data(web::Data::new(federation_config_repo.clone()))
-            .app_data(web::Data::new(federation_link_repo.clone()))
-            .app_data(web::Data::new(assertion_replay_repo.clone()))
-            .app_data(web::Data::new(federation_login_state_repo.clone()))
-            .app_data(web::Data::new(http_client.clone()))
-            .app_data(web::Data::new(jwks_cache.clone()))
-            // SECHRD-12/T-24-91: crypto_semaphore was already constructed and
-            // cloned into AuthService/CaService/PgpService/CertService above,
-            // but never separately registered as web::Data — the password-reset
-            // handlers need direct access to gate their own Argon2 dummy-hash
-            // and current-password-reuse checks.
-            .app_data(web::Data::new(Arc::clone(&crypto_semaphore)));
-        // email_config_repo is only Some when AXIAM__EMAIL_ENCRYPTION_KEY is
-        // configured (fail-closed — see construction site above); app_data()
-        // returns Self (does not alter App's type parameter), so this
-        // conditional registration composes cleanly with the chain above.
-        let app = match &email_config_repo {
-            Some(repo) => app.app_data(web::Data::new(repo.clone())),
-            None => app,
-        };
-        app.configure(health_routes)
+            // QUAL-01: single composition root — every other REST handler
+            // dependency (repos, services, the 4 hoisted QUAL-07 singletons)
+            // lives on this one AppState<C> value (see above).
+            .app_data(web::Data::new(app_state.clone()))
+            .configure(health_routes::<axiam_db::DbClient>)
             .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
             .configure(openapi_routes)
     })

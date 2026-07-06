@@ -84,6 +84,10 @@ pub struct FederationCallbackResult {
 /// OIDC Federation Service that handles external IdP integration.
 ///
 /// Generic over repository implementations for testability.
+///
+/// `Clone` (QUAL-07, axiam-api-rest): hoisted `AppState<C>` singleton,
+/// constructed once at startup and cloned per Actix worker.
+#[derive(Clone)]
 pub struct OidcFederationService<FC, FL, UR> {
     federation_config_repo: FC,
     federation_link_repo: FL,

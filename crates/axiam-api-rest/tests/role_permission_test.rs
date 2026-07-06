@@ -4,6 +4,7 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::group::CreateGroup;
@@ -14,8 +15,8 @@ use axiam_core::repository::{
     GroupRepository, OrganizationRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealRoleRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealGroupRepository, SurrealOrganizationRepository, SurrealTenantRepository,
+    SurrealUserRepository,
 };
 use std::sync::Arc;
 use surrealdb::Surreal;
@@ -115,15 +116,9 @@ macro_rules! test_app {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
+                .app_data(web::Data::new(AppState::for_test(
                     $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealGroupRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRoleRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealPermissionRepository::new(
-                    $db.clone(),
+                    $auth.clone(),
                 )))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>

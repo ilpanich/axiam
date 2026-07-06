@@ -6,13 +6,13 @@ use axiam_core::models::settings::{
     validate_org_settings, validate_tenant_override,
 };
 use axiam_core::repository::SettingsRepository;
-use axiam_db::SurrealSettingsRepository;
 use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
 
 /// `GET /api/v1/organizations/{org_id}/settings`
 #[utoipa::path(
@@ -28,10 +28,10 @@ use crate::extractors::auth::AuthenticatedUser;
     ),
     security(("bearer" = []))
 )]
-pub async fn get_org_settings<C: Connection>(
+pub async fn get_org_settings<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealSettingsRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("settings:get", Uuid::nil())
@@ -48,7 +48,7 @@ pub async fn get_org_settings<C: Connection>(
         ));
     }
 
-    let settings = repo.get_org_settings(org_id).await?;
+    let settings = state.settings_repo.get_org_settings(org_id).await?;
     Ok(HttpResponse::Ok().json(settings))
 }
 
@@ -67,10 +67,10 @@ pub async fn get_org_settings<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn set_org_settings<C: Connection>(
+pub async fn set_org_settings<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealSettingsRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<SetOrgSettings>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -90,7 +90,7 @@ pub async fn set_org_settings<C: Connection>(
 
     let input = body.into_inner();
     validate_org_settings(&input)?;
-    let settings = repo.set_org_settings(org_id, input).await?;
+    let settings = state.settings_repo.set_org_settings(org_id, input).await?;
     Ok(HttpResponse::Ok().json(settings))
 }
 
@@ -108,15 +108,16 @@ pub async fn set_org_settings<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get_tenant_settings<C: Connection>(
+pub async fn get_tenant_settings<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealSettingsRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("settings:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let settings = repo
+    let settings = state
+        .settings_repo
         .get_effective_settings(user.org_id, user.tenant_id)
         .await?;
     Ok(HttpResponse::Ok().json(settings))
@@ -139,16 +140,16 @@ pub async fn get_tenant_settings<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn set_tenant_settings<C: Connection>(
+pub async fn set_tenant_settings<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealSettingsRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<TenantSettingsOverride>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("settings:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let org = repo.get_org_settings(user.org_id).await?;
+    let org = state.settings_repo.get_org_settings(user.org_id).await?;
     let overrides = body.into_inner();
 
     // Validate: tenant can only be more restrictive than org
@@ -160,7 +161,8 @@ pub async fn set_tenant_settings<C: Connection>(
     // from (scope, scope_id) and uses that as the canonical ID.
     let merged = effective_settings(&org, &overrides, user.tenant_id, Uuid::nil());
 
-    let result = repo
+    let result = state
+        .settings_repo
         .store_effective_tenant_settings(user.tenant_id, merged)
         .await?;
     Ok(HttpResponse::Ok().json(result))

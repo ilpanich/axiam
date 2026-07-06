@@ -12,14 +12,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use actix_web::web;
+use axiam_auth::config::AuthConfig;
 use axiam_auth::token::AccessTokenClaims;
 use axiam_auth::token::SubjectKind;
 use axiam_auth::token::ValidatedClaims;
-use axiam_authz::AuthzConfig;
 use axiam_authz::types::{AccessDecision, AccessRequest};
 use axiam_core::error::AxiamResult;
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
-use axiam_db::SurrealAuditLogRepository;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -30,11 +29,13 @@ use crate::extractors::auth::AuthenticatedUser;
 use crate::handlers::authz_check::{
     BatchCheckAccessBody, CheckAccessBody, batch_check_access, check_access,
 };
+use crate::state::AppState;
 
-/// Default `AuthzConfig` app-data for tests that don't care about the
-/// concurrency bound.
-fn make_authz_config() -> web::Data<AuthzConfig> {
-    web::Data::new(AuthzConfig::default())
+type TestDb = surrealdb::engine::local::Db;
+
+/// Build a full `AppState<TestDb>` (QUAL-01) from a test `db` handle.
+fn make_state(db: Surreal<TestDb>) -> web::Data<AppState<TestDb>> {
+    web::Data::new(AppState::for_test(db, AuthConfig::default()))
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +106,7 @@ async fn self_check_returns_allow() {
     let resource_id = Uuid::new_v4();
 
     let db = setup_db().await;
-    let audit_repo = web::Data::new(SurrealAuditLogRepository::new(db));
+    let state = make_state(db);
     let authz = make_authz(AllowAllAuthzChecker);
     let user = make_user(tenant_id, user_id);
 
@@ -116,7 +117,7 @@ async fn self_check_returns_allow() {
         subject_id: None, // self-check
     });
 
-    let result = check_access(user, authz, audit_repo, body).await;
+    let result = check_access(user, authz, state, body).await;
     assert_eq!(status_code(&result), 200, "self-check should return 200");
 
     let json = read_body_json(result.unwrap()).await;
@@ -139,7 +140,7 @@ async fn override_without_check_as_permission_returns_403() {
     let resource_id = Uuid::new_v4();
 
     let db = setup_db().await;
-    let audit_repo = web::Data::new(SurrealAuditLogRepository::new(db));
+    let state = make_state(db);
     // DenyAll will deny the authz:check_as permission check → 403
     let authz = make_authz(DenyAllAuthzChecker);
     let user = make_user(tenant_id, user_id);
@@ -151,7 +152,7 @@ async fn override_without_check_as_permission_returns_403() {
         subject_id: Some(other_subject), // override attempt
     });
 
-    let result = check_access(user, authz, audit_repo, body).await;
+    let result = check_access(user, authz, state, body).await;
     assert_eq!(
         status_code(&result),
         403,
@@ -171,7 +172,7 @@ async fn override_with_check_as_permission_returns_decision_and_audits() {
     let resource_id = Uuid::new_v4();
 
     let db = setup_db().await;
-    let audit_repo = web::Data::new(SurrealAuditLogRepository::new(db));
+    let state = make_state(db);
     // AllowAll grants both authz:check_as AND the engine's access decision
     let authz = make_authz(AllowAllAuthzChecker);
     let user = make_user(tenant_id, admin_id);
@@ -183,7 +184,7 @@ async fn override_with_check_as_permission_returns_decision_and_audits() {
         subject_id: Some(queried_subject),
     });
 
-    let result = check_access(user, authz, audit_repo.clone(), body).await;
+    let result = check_access(user, authz, state.clone(), body).await;
     assert_eq!(
         status_code(&result),
         200,
@@ -205,7 +206,8 @@ async fn override_with_check_as_permission_returns_decision_and_audits() {
         ..Default::default()
     };
     let page = Pagination::default();
-    let audit_result = audit_repo
+    let audit_result = state
+        .audit_repo
         .list(tenant_id, filter, page)
         .await
         .expect("audit list");
@@ -228,7 +230,7 @@ async fn batch_check_returns_results_in_input_order() {
     let user_id = Uuid::new_v4();
 
     let db = setup_db().await;
-    let audit_repo = web::Data::new(SurrealAuditLogRepository::new(db));
+    let state = make_state(db);
     // AllowAll engine — all checks return allowed
     let authz = make_authz(AllowAllAuthzChecker);
     let user = make_user(tenant_id, user_id);
@@ -257,7 +259,7 @@ async fn batch_check_returns_results_in_input_order() {
 
     let body = web::Json(BatchCheckAccessBody { checks });
 
-    let result = batch_check_access(user, authz, audit_repo, make_authz_config(), body).await;
+    let result = batch_check_access(user, authz, state, body).await;
     assert_eq!(status_code(&result), 200, "batch check should return 200");
 
     let json = read_body_json(result.unwrap()).await;
@@ -284,7 +286,7 @@ async fn batch_override_without_check_as_returns_403() {
     let other_subject = Uuid::new_v4();
 
     let db = setup_db().await;
-    let audit_repo = web::Data::new(SurrealAuditLogRepository::new(db));
+    let state = make_state(db);
     // DenyAll will deny the authz:check_as permission → 403
     let authz = make_authz(DenyAllAuthzChecker);
     let user = make_user(tenant_id, user_id);
@@ -298,7 +300,7 @@ async fn batch_override_without_check_as_returns_403() {
         }],
     });
 
-    let result = batch_check_access(user, authz, audit_repo, make_authz_config(), body).await;
+    let result = batch_check_access(user, authz, state, body).await;
     assert_eq!(
         status_code(&result),
         403,
@@ -367,7 +369,7 @@ async fn batch_check_access_matches_sequential_per_item_check_access() {
 
     // Sequential per-item baseline via the single-check handler.
     let db = setup_db().await;
-    let seq_audit_repo = web::Data::new(SurrealAuditLogRepository::new(db));
+    let seq_state = make_state(db);
     let mut sequential_allowed = Vec::with_capacity(checks.len());
     for check in &checks {
         let authz = make_authz(PerResourceAuthzChecker {
@@ -380,7 +382,7 @@ async fn batch_check_access_matches_sequential_per_item_check_access() {
             scope: check.scope.clone(),
             subject_id: None,
         });
-        let result = check_access(user, authz, seq_audit_repo.clone(), body)
+        let result = check_access(user, authz, seq_state.clone(), body)
             .await
             .expect("sequential check_access must succeed");
         let json = read_body_json(result).await;
@@ -390,23 +392,18 @@ async fn batch_check_access_matches_sequential_per_item_check_access() {
     // Concurrent batch path via the real batch_check_access handler, with a
     // small concurrency bound to force actual interleaving.
     let batch_db = setup_db().await;
-    let batch_audit_repo = web::Data::new(SurrealAuditLogRepository::new(batch_db));
+    let mut batch_state_inner = AppState::for_test(batch_db, AuthConfig::default());
+    batch_state_inner.authz_config = axiam_authz::AuthzConfig {
+        batch_max_concurrency: 2,
+    };
+    let batch_state = web::Data::new(batch_state_inner);
     let batch_authz = make_authz(PerResourceAuthzChecker { allowed });
     let batch_user = make_user(tenant_id, user_id);
-    let small_concurrency = web::Data::new(AuthzConfig {
-        batch_max_concurrency: 2,
-    });
     let batch_body = web::Json(BatchCheckAccessBody { checks });
 
-    let batch_result = batch_check_access(
-        batch_user,
-        batch_authz,
-        batch_audit_repo,
-        small_concurrency,
-        batch_body,
-    )
-    .await
-    .expect("batch_check_access must succeed");
+    let batch_result = batch_check_access(batch_user, batch_authz, batch_state, batch_body)
+        .await
+        .expect("batch_check_access must succeed");
     let batch_json = read_body_json(batch_result).await;
     let batch_results = batch_json["results"].as_array().expect("results array");
 
@@ -415,7 +412,11 @@ async fn batch_check_access_matches_sequential_per_item_check_access() {
         sequential_allowed.len(),
         "batch and sequential result counts must match"
     );
-    for (i, (batch_res, seq_allowed)) in batch_results.iter().zip(sequential_allowed.iter()).enumerate() {
+    for (i, (batch_res, seq_allowed)) in batch_results
+        .iter()
+        .zip(sequential_allowed.iter())
+        .enumerate()
+    {
         assert_eq!(
             batch_res["allowed"].as_bool().expect("allowed bool"),
             *seq_allowed,

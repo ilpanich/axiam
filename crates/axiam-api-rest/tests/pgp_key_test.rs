@@ -4,6 +4,7 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -11,9 +12,8 @@ use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::{
-    SurrealAuditLogRepository, SurrealCaCertificateRepository, SurrealCertificateRepository,
-    SurrealOrganizationRepository, SurrealPgpKeyRepository, SurrealServiceAccountRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealOrganizationRepository,
+    SurrealPgpKeyRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use std::sync::Arc;
@@ -126,33 +126,27 @@ macro_rules! test_app {
         let pki_config = test_pki_config();
         let ca_repo = SurrealCaCertificateRepository::new($db.clone());
         let cert_repo = SurrealCertificateRepository::new($db.clone());
-        let tenant_repo = SurrealTenantRepository::new($db.clone());
-        let sa_repo = SurrealServiceAccountRepository::new($db.clone());
-        let audit_repo = SurrealAuditLogRepository::new($db.clone());
         let pgp_repo = SurrealPgpKeyRepository::new($db.clone());
-        let device_auth_service = DeviceAuthService::new(cert_repo.clone(), ca_repo.clone());
         let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
-        let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), sem.clone());
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(CaService::new(
-                    ca_repo.clone(),
-                    pki_config.clone(),
-                    sem.clone(),
-                )))
-                .app_data(web::Data::new(CertService::new(
-                    ca_repo,
-                    cert_repo.clone(),
-                    pki_config,
-                    sem,
-                )))
-                .app_data(web::Data::new(cert_repo))
-                .app_data(web::Data::new(tenant_repo))
-                .app_data(web::Data::new(sa_repo))
-                .app_data(web::Data::new(device_auth_service))
-                .app_data(web::Data::new(audit_repo))
-                .app_data(web::Data::new(pgp_service))
+                .app_data(web::Data::new({
+                    let mut state = AppState::for_test($db.clone(), $auth.clone());
+                    state.device_auth_service =
+                        DeviceAuthService::new(cert_repo.clone(), ca_repo.clone());
+                    state.ca_service =
+                        CaService::new(ca_repo.clone(), pki_config.clone(), sem.clone());
+                    state.cert_service = CertService::new(
+                        ca_repo,
+                        cert_repo.clone(),
+                        pki_config.clone(),
+                        sem.clone(),
+                    );
+                    state.cert_repo = cert_repo;
+                    state.pgp_service = PgpService::new(pgp_repo, pki_config, sem);
+                    state
+                }))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))

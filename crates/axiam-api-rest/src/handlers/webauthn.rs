@@ -1,12 +1,7 @@
 //! WebAuthn passkey registration and authentication endpoints.
 
 use actix_web::{HttpRequest, HttpResponse, web};
-use axiam_auth::{AuthService, WebauthnService};
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
-use axiam_db::{
-    SurrealFederationLinkRepository, SurrealRefreshTokenRepository, SurrealSessionRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository,
-};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -18,15 +13,7 @@ use webauthn_rs_proto::{
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::client_info::{client_ip, user_agent};
-
-type AuthSvc<C> = AuthService<
-    SurrealUserRepository<C>,
-    SurrealSessionRepository<C>,
-    SurrealFederationLinkRepository<C>,
-    SurrealRefreshTokenRepository<C>,
->;
-
-type WebauthnSvc<C> = WebauthnService<SurrealWebauthnCredentialRepository<C>>;
+use crate::state::AppState;
 
 // -------------------------------------------------------------------
 // Request / response types
@@ -148,12 +135,13 @@ fn peek_tenant_id(state_token: &str) -> Result<Uuid, AxiamApiError> {
     ),
     security(("bearer" = []))
 )]
-pub async fn start_registration<C: Connection>(
+pub async fn start_registration<C: Connection + Clone>(
     user: AuthenticatedUser,
-    svc: web::Data<WebauthnSvc<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_name = user.user_id.to_string();
-    let (challenge, state_token) = svc
+    let (challenge, state_token) = state
+        .webauthn_service
         .start_registration(user.tenant_id, user.org_id, user.user_id, &user_name)
         .await?;
 
@@ -178,13 +166,14 @@ pub async fn start_registration<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn finish_registration<C: Connection>(
+pub async fn finish_registration<C: Connection + Clone>(
     user: AuthenticatedUser,
-    svc: web::Data<WebauthnSvc<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<FinishRegistrationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
-    let cred = svc
+    let cred = state
+        .webauthn_service
         .finish_registration(
             user.tenant_id,
             user.user_id,
@@ -219,16 +208,19 @@ pub async fn finish_registration<C: Connection>(
         (status = 401, description = "Invalid challenge token"),
     )
 )]
-pub async fn start_authentication<C: Connection>(
-    auth_svc: web::Data<AuthSvc<C>>,
-    svc: web::Data<WebauthnSvc<C>>,
+pub async fn start_authentication<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<StartAuthenticationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let (user_id, tenant_id, org_id) = auth_svc
+    let (user_id, tenant_id, org_id) = state
+        .auth_service
         .decode_mfa_challenge_ids(&body.challenge_token)
         .map_err(|e| AxiamApiError(e.into()))?;
 
-    let (challenge, state_token) = svc.start_authentication(tenant_id, org_id, user_id).await?;
+    let (challenge, state_token) = state
+        .webauthn_service
+        .start_authentication(tenant_id, org_id, user_id)
+        .await?;
 
     Ok(HttpResponse::Ok().json(StartAuthenticationResponse {
         challenge,
@@ -251,20 +243,21 @@ pub async fn start_authentication<C: Connection>(
         (status = 401, description = "Authentication failed"),
     )
 )]
-pub async fn finish_authentication<C: Connection>(
+pub async fn finish_authentication<C: Connection + Clone>(
     req: HttpRequest,
-    auth_svc: web::Data<AuthSvc<C>>,
-    svc: web::Data<WebauthnSvc<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<FinishAuthenticationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
     let tenant_id = peek_tenant_id(&b.state_token)?;
 
-    let (user_id, org_id) = svc
+    let (user_id, org_id) = state
+        .webauthn_service
         .finish_authentication(tenant_id, &b.state_token, &b.response)
         .await?;
 
-    let out = auth_svc
+    let out = state
+        .auth_service
         .create_session_and_tokens(
             user_id,
             tenant_id,

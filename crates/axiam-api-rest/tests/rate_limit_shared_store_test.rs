@@ -10,6 +10,8 @@
 
 use actix_web::{App, HttpResponse, test, web};
 use axiam_api_rest::middleware::rate_limit_shared::RateLimitShared;
+use axiam_api_rest::state::AppState;
+use axiam_auth::config::AuthConfig;
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
 
@@ -38,11 +40,16 @@ fn build_app(
         InitError = (),
     >,
 > {
-    App::new().app_data(web::Data::new(db)).service(
-        web::resource("/t")
-            .wrap(RateLimitShared::<TestDb>::new("shared_test", LIMIT))
-            .route(web::get().to(ok_handler)),
-    )
+    App::new()
+        .app_data(web::Data::new(AppState::for_test(
+            db,
+            AuthConfig::default(),
+        )))
+        .service(
+            web::resource("/t")
+                .wrap(RateLimitShared::<TestDb>::new("shared_test", LIMIT))
+                .route(web::get().to(ok_handler)),
+        )
 }
 
 #[actix_rt::test]

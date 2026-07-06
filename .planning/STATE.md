@@ -5,16 +5,16 @@ milestone_name: — MVP Release Hardening
 current_phase: 29
 current_phase_name: structural-quality
 status: executing
-stopped_at: Completed 29-06-PLAN.md
-last_updated: "2026-07-06T14:16:52.856Z"
+stopped_at: Completed 29-07-PLAN.md (Task 3 checkpoint pending human verification)
+last_updated: "2026-07-06T14:36:42.286Z"
 last_activity: 2026-07-06
 last_activity_desc: Phase 29 execution started
 progress:
   total_phases: 8
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 52
-  completed_plans: 51
-  percent: 75
+  completed_plans: 52
+  percent: 88
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 29 (structural-quality) — EXECUTING
-Plan: 6 of 7
+Plan: 7 of 7
 Status: Ready to execute
 Last activity: 2026-07-06 — Phase 29 execution started
 
@@ -207,6 +207,7 @@ Last activity: 2026-07-06 — Phase 29 execution started
 | Phase 29 P04 | 21min | 2 tasks | 14 files |
 | Phase 29-structural-quality P05 | 35min | 2 tasks | 17 files |
 | Phase 29 P06 | 25min | 2 tasks | 6 files |
+| Phase 29 P07 | 55min | 2 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -522,6 +523,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 29-structural-quality]: 29-05 - federation_link.rs malformed-UUID reads now surface DbError::Serialization (naming the field) instead of the old local parse_uuid's DbError::Migration, matching helpers::parse_uuid's canonical QUAL-03/D-10 classification used by every other migrated repo
 - [Phase ?]: [Phase 29-06]: crypto.rs functions are pub(crate) — internal consolidation only, no new public API surface
 - [Phase ?]: [Phase 29-06]: CertService reconstructs signing CA via rcgen CertificateParams::from_ca_cert_pem (real stored CA PEM) instead of build_ca_params(&subject) — closes D-08/T-29-11 issuer-DN drift vector; build_ca_params deleted
+- [Phase ?]: [Phase 29-structural-quality] 29-07: Reconciled shared.tsx ActionBadge wrapper className (not just lookup/fallback) to match RoleDetailPage/PermissionsPage's real usage before adoption
+- [Phase ?]: [Phase 29-structural-quality] 29-07: UserDetailPage's InfoRow and SettingsPage's ToggleField left unmigrated — both genuinely diverge from shared.tsx (not byte-identical as the plan assumed), preserving D-03 behavior
+- [Phase ?]: [Phase 29-structural-quality] 29-07: ProfilePage clear-display-name now uses the same display_name||undefined convention as UserDetailPage/UsersPage via userService.update
 
 ### Pending Todos
 
@@ -543,10 +547,11 @@ Raised 2026-06-02 (SAML feature-flag work):
 - [Phase 24-07 gap-closure, RESOLVED] gRPC shared rate-limit store (GrpcSharedRateLimitLayer) is now wired into start_grpc_server/main.rs (Surreal<C> threaded through, `.layer()`'d before build_grpc_governor_layer, fail-open on DB error). Closed the 24-VERIFICATION.md NOT_WIRED gap; SECHRD-03 multi-replica mitigation is now production-live for both REST and gRPC.
 - 25-10 Task 3: awaiting human-verify checkpoint — operator must apply k8s manifests to a cluster to confirm SMTP-relay allow / non-allowlisted-egress deny / secret-key resolution / CI env prefix, per 25-10-PLAN.md how-to-verify steps
 - 28-05 deferred (Rule 4, needs human decision): federation metadata endpoint (GET /api/v1/federation/saml/metadata) is listed in PUBLIC_PATHS but its handler requires a valid JWT (AuthenticatedUser extractor), contradicting FUNC-01's 'reachable with no auth header' truth. See 28-05-SUMMARY.md Deviations item 5 for the finding and proposed remediation.
+- 29-07: Playwright e2e suite could not execute in this sandbox (browser-binary version mismatch: pinned @playwright/test@1.58.2 expects revision 1208, pre-installed cache only has 1194); Task 3 manual smoke checkpoint also pending human verification
 
 ## Session Continuity
 
-Last session: 2026-07-06T14:16:47.262Z
-Stopped at: Completed 29-06-PLAN.md
+Last session: 2026-07-06T14:36:42.269Z
+Stopped at: Completed 29-07-PLAN.md (Task 3 checkpoint pending human verification)
 Resume file: None
 Next action: /gsd-execute-phase 23

@@ -1008,8 +1008,8 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** CQ-F15, CQ-F39, CQ-F17
 
 ### Acceptance Criteria
-- [ ] Pages import the extracted `ToggleField`/`SectionCard`/`InfoRow`/`ActionBadge`/`slugify`/`useCrudMutations` (local duplicates removed) — or the dead modules are deleted
-- [ ] Profile/MFA pages call a typed users service instead of inline `api.*` calls
+- [x] Pages import the extracted `ToggleField`/`SectionCard`/`InfoRow`/`ActionBadge`/`slugify`/`useCrudMutations` (local duplicates removed) — or the dead modules are deleted — **29-07: shared.tsx ActionBadge case/fallback/className fixed then adopted by 9 pages + RoleDetailPage's dead export removed; OrganizationsPage/OrganizationDetailPage on shared slugify; RolesPage on useCrudMutations. UserDetailPage's InfoRow and SettingsPage's ToggleField intentionally kept local (genuinely diverge from shared.tsx, not byte-identical as assumed — see 29-07-SUMMARY Deviations). Playwright suite + Task 3 manual smoke pending (sandbox could not run e2e — browser-binary version mismatch)**
+- [x] Profile/MFA pages call a typed users service instead of inline `api.*` calls — **29-07: ProfilePage/MfaManagementPage route through userService.get/update/listMfaMethods/deleteMfaMethod; raw @/lib/api import removed from both**
 
 ## QUAL-07: Dead-Code & Per-Request-Construction Cleanup
 
@@ -1111,7 +1111,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) | Complete (29-01: helpers::classify_write_error centralizes marker-string detection for duplicate user/role-assignment/group-membership → 409; DbError::Serialization fixes parse_uuid mislabeling; OAuth2 client-lookup DB outage → ServerError distinct from invalid_client) |
 | QUAL-04 | Phase 29 | Transactional mutations (CQ-B07/46) | Complete (29-02: role/resource edge deletes are single tenant-predicated transactions via node-tenant subquery guards; resource child-guard folded into its transaction via LET-capture, closing the TOCTOU; GDPR deletion setup via create_with_pending_flag is one transaction with a duplicate-pending rollback guard) |
 | QUAL-05 | Phase 29 | PKI helper dedup (CQ-B15) | Complete (29-06: crypto.rs consolidation of generate_keypair/compute_fingerprint/encrypt_secret/decrypt_secret across ca/cert/pgp; CertService::generate reconstructs the CA via from_ca_cert_pem, closing the D-08/T-29-11 issuer-DN drift vector, locked by an identical-issuer-DN regression test) |
-| QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Pending |
+| QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Complete (29-07: shared.tsx ActionBadge fixed and adopted across 9 pages + RoleDetailPage dead export removed; slugify/userService/useCrudMutations adopted; Playwright + Task 3 manual smoke pending — see 29-07-SUMMARY.md) |
 | QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Complete (29-03: federation/reset/verification services hoisted to shared AppState singletons, closing the per-request-construction half; 29-04: pepper-less axiam_db::verify_password duplicate deleted with re-exports removed, sole caller repointed to canonical axiam_auth::password::verify_password, closing the pepper-less-caller trap) |
 | CMPL-01 | Phase 30 | Security audit checklist (T18.1) | Pending |
 | CMPL-02 | Phase 30 | GDPR completeness (T18.2) | Pending |

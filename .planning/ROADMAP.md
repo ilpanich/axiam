@@ -1005,7 +1005,7 @@ NEGATIVE test passing.
 - [x] **Phase 26: Correctness & Resilience** - gRPC governor throughput, SurrealDB token renewal, durable webhook delivery, Playwright-in-CI with body assertions, frontend tenant/MFA/residual flows (completed 2026-07-05)
 - [x] **Phase 27: Performance & Load Hardening** - HIBP circuit breaker + hot-path pre-sizing, concurrent bounded BatchCheckAccess, JWKS single-flight across SDKs, SurrealDB reconnect backoff-with-jitter, load-test + profiling report (completed 2026-07-05)
 - [x] **Phase 28: Functional Completeness** - Unauthenticated first-time federation login, session invalidation on reset, admin email-config API + templates, admin user/MFA endpoints + service-account token type, OpenAPI login schema (completed 2026-07-05)
-- [ ] **Phase 29: Structural Quality** - AppState extraction, generic paginate + shared repo helpers, error-taxonomy correctness, transactional multi-statement mutations, PKI/frontend dedup, dead-code cleanup — no behavior change
+- [x] **Phase 29: Structural Quality** - AppState extraction, generic paginate + shared repo helpers, error-taxonomy correctness, transactional multi-statement mutations, PKI/frontend dedup, dead-code cleanup — no behavior change (completed 2026-07-06)
 - [ ] **Phase 30: Compliance & Documentation** - OWASP ASVS/ISO 27001/CyberSecurity Act audit checklist, GDPR export/deletion/consent completeness, consolidated REST/gRPC/AMQP + deployment + admin + PKI + SDK docs
 
 > v1.2 roadmap created 2026-07-03. Phase numbering continues from Phase 22 (v1.1). Sequential execution with
@@ -1222,7 +1222,7 @@ Plans:
   4. The 24 duplicated `CountRow` definitions collapse to `helpers::CountRow`, repos adopt a generic `paginate<T>` + `helpers::parse_uuid`/`take_first_or_not_found`, and `CertService` reconstructs the CA via `from_ca_cert_pem` with shared keypair/fingerprint/encrypt helpers (QUAL-02, QUAL-05)
   5. Frontend pages import the extracted shared components/hooks (`ToggleField`/`SectionCard`/`useCrudMutations`/…) or the dead modules are deleted and profile/MFA pages call a typed users service; the pepper-less second `verify_password` impl and per-request federation/reset/verification service construction are removed (QUAL-06, QUAL-07)
 
-**Plans**: 6/7 plans executed
+**Plans**: 7/7 plans complete
 
 Plans:
 **Wave 1**
@@ -1251,7 +1251,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 29-07-PLAN.md — QUAL-06 frontend shared components/services adoption + manual smoke checkpoint (Wave 7)
+- [x] 29-07-PLAN.md — QUAL-06 frontend shared components/services adoption + manual smoke checkpoint (Wave 7)
 
 **UI hint**: yes
 
@@ -1288,7 +1288,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 26. Correctness & Resilience | 8/8 | Complete   | 2026-07-05 |
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
 | 28. Functional Completeness | 5/5 | Complete    | 2026-07-05 |
-| 29. Structural Quality | 6/7 | In Progress|  |
+| 29. Structural Quality | 7/7 | Complete   | 2026-07-06 |
 | 30. Compliance & Documentation | 0/? | Not started | - |
 
 ---

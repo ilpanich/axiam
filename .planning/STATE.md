@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 29
 current_phase_name: structural-quality
 status: executing
-stopped_at: Completed 29-05-PLAN.md
-last_updated: "2026-07-06T13:48:42.745Z"
+stopped_at: Completed 29-06-PLAN.md
+last_updated: "2026-07-06T14:16:52.856Z"
 last_activity: 2026-07-06
 last_activity_desc: Phase 29 execution started
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 52
-  completed_plans: 50
+  completed_plans: 51
   percent: 75
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 29 (structural-quality) — EXECUTING
-Plan: 5 of 7
+Plan: 6 of 7
 Status: Ready to execute
 Last activity: 2026-07-06 — Phase 29 execution started
 
@@ -206,6 +206,7 @@ Last activity: 2026-07-06 — Phase 29 execution started
 | Phase 29 P02 | 55min | 3 tasks | 7 files |
 | Phase 29 P04 | 21min | 2 tasks | 14 files |
 | Phase 29-structural-quality P05 | 35min | 2 tasks | 17 files |
+| Phase 29 P06 | 25min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -519,6 +520,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 29-structural-quality]: 29-05 - saml_replay.rs and federation_login_state.rs CountRow-only collapse; their marker-string classification and BEGIN/COMMIT transaction logic left untouched per plan prohibition (reused by QUAL-03)
 - [Phase ?]: [Phase 29-structural-quality]: 29-05 - Option<T>-returning single-record reads (ca_certificate.rs, certificate.rs create/get_by_id/revoke, pgp_key.rs revoke) left as-is; not the literal take_first_or_not_found target pattern, no group-A precedent to convert Option<T> to Vec<T> deserialization
 - [Phase ?]: [Phase 29-structural-quality]: 29-05 - federation_link.rs malformed-UUID reads now surface DbError::Serialization (naming the field) instead of the old local parse_uuid's DbError::Migration, matching helpers::parse_uuid's canonical QUAL-03/D-10 classification used by every other migrated repo
+- [Phase ?]: [Phase 29-06]: crypto.rs functions are pub(crate) — internal consolidation only, no new public API surface
+- [Phase ?]: [Phase 29-06]: CertService reconstructs signing CA via rcgen CertificateParams::from_ca_cert_pem (real stored CA PEM) instead of build_ca_params(&subject) — closes D-08/T-29-11 issuer-DN drift vector; build_ca_params deleted
 
 ### Pending Todos
 
@@ -543,7 +546,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-06T13:48:42.731Z
-Stopped at: Completed 29-05-PLAN.md
+Last session: 2026-07-06T14:16:47.262Z
+Stopped at: Completed 29-06-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

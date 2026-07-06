@@ -1000,8 +1000,8 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Low | **Source:** CQ-B15
 
 ### Acceptance Criteria
-- [ ] `CertService` reconstructs the CA via `from_ca_cert_pem` (not from the subject CN)
-- [ ] Keypair/fingerprint/encrypt helpers are shared, not triplicated across ca/cert/pgp
+- [x] `CertService` reconstructs the CA via `from_ca_cert_pem` (not from the subject CN) — **29-06: replaced `build_ca_params(&ca_cert.subject)` with `CertificateParams::from_ca_cert_pem(&ca_cert.public_cert_pem)`, locked by an identical-issuer-DN regression test (T-29-11/D-08)**
+- [x] Keypair/fingerprint/encrypt helpers are shared, not triplicated across ca/cert/pgp — **29-06: consolidated into `crates/axiam-pki/src/crypto.rs` (generate_keypair, compute_fingerprint, encrypt_secret, decrypt_secret); ca/cert import all four, pgp imports encrypt_secret/decrypt_secret only**
 
 ## QUAL-06: Frontend Shared Components & Services Adoption
 
@@ -1110,7 +1110,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | QUAL-02 | Phase 29 | Generic paginate + shared helpers (CQ-B10) | Complete (29-04: helpers::paginate<T> added with unit tests; adopted across file-group A — organization, tenant, permission, resource, service_account, session, audit, group + scope.rs's take_first_or_not_found-only migration. 29-05: file-group B — ca_certificate, certificate, email_config, email_verification_token, export_job, federation_config, federation_login_state, notification_rule, oauth2_auth_code, oauth2_client, oauth2_refresh_token, password_reset_token, pgp_key, saml_replay, webauthn_credential, webhook — deduped; federation_link.rs's duplicate parse_uuid removed and its 7 call sites routed through helpers::parse_uuid. All 24 CountRow duplicates collapsed) |
 | QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) | Complete (29-01: helpers::classify_write_error centralizes marker-string detection for duplicate user/role-assignment/group-membership → 409; DbError::Serialization fixes parse_uuid mislabeling; OAuth2 client-lookup DB outage → ServerError distinct from invalid_client) |
 | QUAL-04 | Phase 29 | Transactional mutations (CQ-B07/46) | Complete (29-02: role/resource edge deletes are single tenant-predicated transactions via node-tenant subquery guards; resource child-guard folded into its transaction via LET-capture, closing the TOCTOU; GDPR deletion setup via create_with_pending_flag is one transaction with a duplicate-pending rollback guard) |
-| QUAL-05 | Phase 29 | PKI helper dedup (CQ-B15) | Pending |
+| QUAL-05 | Phase 29 | PKI helper dedup (CQ-B15) | Complete (29-06: crypto.rs consolidation of generate_keypair/compute_fingerprint/encrypt_secret/decrypt_secret across ca/cert/pgp; CertService::generate reconstructs the CA via from_ca_cert_pem, closing the D-08/T-29-11 issuer-DN drift vector, locked by an identical-issuer-DN regression test) |
 | QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Pending |
 | QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Complete (29-03: federation/reset/verification services hoisted to shared AppState singletons, closing the per-request-construction half; 29-04: pepper-less axiam_db::verify_password duplicate deleted with re-exports removed, sole caller repointed to canonical axiam_auth::password::verify_password, closing the pepper-less-caller trap) |
 | CMPL-01 | Phase 30 | Security audit checklist (T18.1) | Pending |

@@ -10,6 +10,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::classify_write_error;
 
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
@@ -388,10 +389,20 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .into());
         }
 
-        // Create the membership edge (IF NOT EXISTS avoids duplicates).
+        // Create the membership edge.
         let query = format!("RELATE user:`{user_id_str}` -> member_of -> group:`{group_id_str}`;");
 
-        self.db.query(query).await.map_err(DbError::from)?;
+        let result = self.db.query(query).await.map_err(DbError::from)?;
+
+        // QUAL-03/D-09: a RELATE's per-statement failure (e.g. a duplicate
+        // membership violating idx_member_of_unique) only surfaces via
+        // `.check()` — without it, a duplicate add_member call silently
+        // "succeeded" while the edge was never (re-)created. classify_write_error
+        // routes a genuine duplicate to 409; anything else (e.g. a DB outage)
+        // still falls through to Migration (5xx).
+        result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "group_membership"))?;
 
         Ok(())
     }

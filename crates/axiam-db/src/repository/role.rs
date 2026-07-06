@@ -9,7 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::{CountRow, parse_uuid};
+use crate::helpers::{CountRow, classify_write_error, parse_uuid};
 
 #[derive(Debug, SurrealValue)]
 struct RoleRow {
@@ -366,7 +366,11 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                     reason: "cross-tenant role assignment denied".into(),
                 });
             }
-            return Err(DbError::Migration(msg).into());
+            // QUAL-03/D-09: a duplicate has_role edge violates the
+            // idx_has_role_unique UNIQUE(in,out) index — classify_write_error
+            // routes that (and only that) to 409, not this generic Migration
+            // fallback.
+            return Err(classify_write_error(msg, "role_assignment").into());
         }
 
         Ok(())
@@ -566,7 +570,11 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                     reason: "cross-tenant group role assignment denied".into(),
                 });
             }
-            return Err(DbError::Migration(msg).into());
+            // QUAL-03/D-09: a duplicate has_role edge violates the
+            // idx_has_role_unique UNIQUE(in,out) index — classify_write_error
+            // routes that (and only that) to 409, not this generic Migration
+            // fallback.
+            return Err(classify_write_error(msg, "role_assignment").into());
         }
 
         Ok(())

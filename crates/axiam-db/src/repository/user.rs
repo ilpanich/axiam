@@ -14,7 +14,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::{CountRow, parse_uuid};
+use crate::helpers::{CountRow, classify_write_error, parse_uuid};
 
 /// DB-side row struct for queries where the UUID is already known.
 ///
@@ -249,7 +249,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let tenant_id_str = input.tenant_id.to_string();
 
         let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e, "user"))?;
 
         let metadata = input
             .metadata
@@ -282,7 +282,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
@@ -460,7 +460,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let result = builder.await.map_err(DbError::from)?;
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
@@ -515,7 +515,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
         Ok(!rows.is_empty())
@@ -628,7 +628,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
         Ok(())
     }
 
@@ -679,7 +679,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
         Ok(())
     }
 }
@@ -722,7 +722,7 @@ impl<C: Connection> SurrealUserRepository<C> {
         let ph_id_str = Uuid::new_v4().to_string();
 
         let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e, "user"))?;
 
         let metadata = input
             .metadata
@@ -777,7 +777,7 @@ impl<C: Connection> SurrealUserRepository<C> {
 
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         // The user CREATE result is at index 1 (BEGIN occupies slot 0).
         let rows: Vec<UserRow> = result.take(1).map_err(DbError::from)?;
@@ -814,7 +814,7 @@ impl<C: Connection> SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
         Ok(())
     }
 
@@ -838,7 +838,7 @@ impl<C: Connection> SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
         Ok(())
     }
 
@@ -857,7 +857,7 @@ impl<C: Connection> SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         let rows: Vec<UserRowWithId> = result.take(0).map_err(DbError::from)?;
         rows.into_iter()

@@ -1026,9 +1026,9 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** High | **Source:** T18.1
 
 ### Acceptance Criteria
-- [ ] Checklist mapped to OWASP ASVS (Level 2 for IAM controls), ISO 27001, and CyberSecurity Act
-- [ ] Every authentication, session, access-control, cryptography, and PKI requirement verified with a pass/fail + evidence pointer
-- [ ] Findings and remediations documented in `claude_dev/security-audit.md`; open items cross-referenced to this milestone's REQ-IDs
+- [x] Checklist mapped to OWASP ASVS (Level 2 for IAM controls), ISO 27001, and CyberSecurity Act — 30-01 (`claude_dev/security-audit.md` §2 ASVS L2, §3 ISO 27001 Annex A family level, §4 CyberSecurity Act/CRA theme level)
+- [x] Every authentication, session, access-control, cryptography, and PKI requirement verified with a pass/fail + evidence pointer — 30-01 (citation index over `docs/compliance/` + `.planning/REQUIREMENTS.md`, D-01/D-03)
+- [x] Findings and remediations documented in `claude_dev/security-audit.md`; open items cross-referenced to this milestone's REQ-IDs — 30-01 (§7 open-items register with v1.2 REQ-ID column; F-03/F-05 corrections + SBOM-01)
 
 ## CMPL-02: GDPR Completeness
 
@@ -1113,7 +1113,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | QUAL-05 | Phase 29 | PKI helper dedup (CQ-B15) | Complete (29-06: crypto.rs consolidation of generate_keypair/compute_fingerprint/encrypt_secret/decrypt_secret across ca/cert/pgp; CertService::generate reconstructs the CA via from_ca_cert_pem, closing the D-08/T-29-11 issuer-DN drift vector, locked by an identical-issuer-DN regression test) |
 | QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Complete (29-07: shared.tsx ActionBadge fixed and adopted across 9 pages + RoleDetailPage dead export removed; slugify/userService/useCrudMutations adopted; Playwright + Task 3 manual smoke pending — see 29-07-SUMMARY.md) |
 | QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Complete (29-03: federation/reset/verification services hoisted to shared AppState singletons, closing the per-request-construction half; 29-04: pepper-less axiam_db::verify_password duplicate deleted with re-exports removed, sole caller repointed to canonical axiam_auth::password::verify_password, closing the pepper-less-caller trap) |
-| CMPL-01 | Phase 30 | Security audit checklist (T18.1) | Pending |
+| CMPL-01 | Phase 30 | Security audit checklist (T18.1) | Complete (30-01: `claude_dev/security-audit.md` — master citation index mapping ASVS L2 + ISO 27001 Annex A (family) + CyberSecurity Act/CRA (theme) to pass/fail + evidence pointers, open items cross-referenced to v1.2 REQ-IDs; D-03 spot-verify corrected F-03→Fixed, F-05→Partially Mitigated, raised SBOM-01; CRA interpretation + [ASSUMED] rows remain for human PR-time confirmation) |
 | CMPL-02 | Phase 30 | GDPR completeness (T18.2) | Pending |
 | DOCS-01 | Phase 30 | Comprehensive documentation (T18.4) | Pending |
 

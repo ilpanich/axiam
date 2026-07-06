@@ -5,16 +5,16 @@ milestone_name: — MVP Release Hardening
 current_phase: 30
 current_phase_name: Compliance & Documentation
 status: executing
-stopped_at: Phase 30 context gathered
-last_updated: "2026-07-06T16:50:28.780Z"
+stopped_at: Completed 30-01-PLAN.md (CMPL-01 security-audit.md)
+last_updated: "2026-07-06T17:12:12.894Z"
 last_activity: 2026-07-06
-last_activity_desc: Phase 29 complete, transitioned to Phase 30
+last_activity_desc: Completed 30-01 (CMPL-01 security-audit.md)
 progress:
   total_phases: 8
   completed_phases: 7
-  total_plans: 52
-  completed_plans: 52
-  percent: 88
+  total_plans: 58
+  completed_plans: 53
+  percent: 91
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** AXIAM must be secure enough for production use as an IAM system — no beta user should be at risk.
-**Current focus:** Phase 29 — structural-quality
+**Current focus:** Phase 30 — Compliance & Documentation
 
 ## Current Position
 
 Phase: 30 — Compliance & Documentation
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-07-06 — Phase 29 complete, transitioned to Phase 30
+Plan: 30-01 complete (CMPL-01 security-audit.md); next: 30-02 (CMPL-02 GDPR)
+Status: Executing
+Last activity: 2026-07-06 — Completed 30-01 (CMPL-01 security-audit.md)
 
 ## Performance Metrics
 
@@ -209,6 +209,7 @@ Last activity: 2026-07-06 — Phase 29 complete, transitioned to Phase 30
 | Phase 29-structural-quality P05 | 35min | 2 tasks | 17 files |
 | Phase 29 P06 | 25min | 2 tasks | 6 files |
 | Phase 29 P07 | 55min | 2 tasks | 15 files |
+| Phase 30 P01 | 55min | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -527,6 +528,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 29-structural-quality] 29-07: Reconciled shared.tsx ActionBadge wrapper className (not just lookup/fallback) to match RoleDetailPage/PermissionsPage's real usage before adoption
 - [Phase ?]: [Phase 29-structural-quality] 29-07: UserDetailPage's InfoRow and SettingsPage's ToggleField left unmigrated — both genuinely diverge from shared.tsx (not byte-identical as the plan assumed), preserving D-03 behavior
 - [Phase ?]: [Phase 29-structural-quality] 29-07: ProfilePage clear-display-name now uses the same display_name||undefined convention as UserDetailPage/UsersPage via userService.update
+- [Phase ?]: [Phase 30-01]: CyberSecurity Act interpreted as EU Cyber Resilience Act (CRA) not Reg 2019/881 (30-RESEARCH A2); [ASSUMED] flag kept for human PR-time confirmation in claude_dev/security-audit.md §4
+- [Phase ?]: [Phase 30-01]: security-audit.md D-03 spot-verify corrected stale Phase-7 findings — F-03 HIBP now Fixed (check_hibp + PERF-01 HibpBreaker), F-05 CSP Partially Mitigated (nginx edge), SBOM-01 raised; docs/compliance/* left untouched (out of scope)
 
 ### Pending Todos
 
@@ -552,7 +555,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-06T16:11:37.258Z
-Stopped at: Phase 30 context gathered
-Resume file: .planning/phases/30-compliance-documentation/30-CONTEXT.md
+Last session: 2026-07-06T17:12:12.873Z
+Stopped at: Completed 30-01-PLAN.md (CMPL-01 security-audit.md)
+Resume file: None
 Next action: /gsd-execute-phase 23

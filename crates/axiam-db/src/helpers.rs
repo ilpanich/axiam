@@ -1,6 +1,7 @@
 //! Shared repository utilities: common row types and helper functions
 //! that were previously duplicated across every repo module.
 
+use axiam_core::repository::{PaginatedResult, Pagination};
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
@@ -89,6 +90,31 @@ pub fn take_first_or_not_found<T>(items: Vec<T>, entity: &str, id: &str) -> Resu
 }
 
 // ---------------------------------------------------------------------------
+// paginate — shared PaginatedResult<T> construction (QUAL-02/CQ-B10)
+// ---------------------------------------------------------------------------
+
+/// Assemble a [`PaginatedResult<T>`] from already-fetched `items`, the
+/// `count_rows` from a `SELECT count() AS total ... GROUP ALL` query, and the
+/// `pagination` window that was applied to the data query.
+///
+/// Replaces the `let total = count_rows.first().map(|r| r.total).unwrap_or(0);
+/// Ok(PaginatedResult { items, total, offset, limit })` tail duplicated across
+/// every repo's list method (CQ-B10).
+pub fn paginate<T>(
+    items: Vec<T>,
+    count_rows: Vec<CountRow>,
+    pagination: &Pagination,
+) -> PaginatedResult<T> {
+    let total = count_rows.first().map(|r| r.total).unwrap_or(0);
+    PaginatedResult {
+        items,
+        total,
+        offset: pagination.offset,
+        limit: pagination.limit,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -151,6 +177,34 @@ mod tests {
     fn take_first_or_not_found_non_empty_returns_first() {
         let result: Result<i32, DbError> = take_first_or_not_found(vec![1, 2, 3], "x", "y");
         assert_eq!(result.unwrap(), 1);
+    }
+
+    // --- paginate ---
+
+    #[test]
+    fn paginate_empty_count_rows_defaults_to_zero() {
+        let pagination = Pagination {
+            offset: 5,
+            limit: 10,
+        };
+        let result = paginate(vec![1, 2, 3], vec![], &pagination);
+        assert_eq!(result.total, 0);
+        assert_eq!(result.offset, 5);
+        assert_eq!(result.limit, 10);
+        assert_eq!(result.items, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn paginate_preserves_pagination_offset_and_limit() {
+        let pagination = Pagination {
+            offset: 20,
+            limit: 50,
+        };
+        let count_rows = vec![CountRow { total: 42 }];
+        let result: PaginatedResult<i32> = paginate(vec![], count_rows, &pagination);
+        assert_eq!(result.total, 42);
+        assert_eq!(result.offset, 20);
+        assert_eq!(result.limit, 50);
     }
 
     // --- DbError::AlreadyExists propagation (compile-time check via From) ---

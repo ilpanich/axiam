@@ -866,32 +866,6 @@ impl<C: Connection> SurrealUserRepository<C> {
     }
 }
 
-/// Verify a password against an Argon2id hash.
-///
-/// Public for use by the auth layer.
-pub fn verify_password(password: &str, hash: &str, pepper: Option<&str>) -> Result<bool, DbError> {
-    use argon2::{Argon2, PasswordVerifier};
-
-    let peppered: String;
-    let input = match pepper {
-        Some(p) => {
-            peppered = format!("{p}{password}");
-            peppered.as_bytes()
-        }
-        None => password.as_bytes(),
-    };
-
-    let parsed_hash = argon2::PasswordHash::new(hash)
-        .map_err(|e| DbError::Migration(format!("invalid hash format: {e}")))?;
-
-    let argon2 = Argon2::default();
-    match argon2.verify_password(input, &parsed_hash) {
-        Ok(()) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => Ok(false),
-        Err(e) => Err(DbError::Migration(format!("verify error: {e}"))),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

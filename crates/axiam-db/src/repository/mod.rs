@@ -68,6 +68,6 @@ pub use service_account::{SurrealServiceAccountRepository, hash_client_secret};
 pub use session::SurrealSessionRepository;
 pub use settings::SurrealSettingsRepository;
 pub use tenant::SurrealTenantRepository;
-pub use user::{SurrealUserRepository, verify_password};
+pub use user::SurrealUserRepository;
 pub use webauthn_credential::SurrealWebauthnCredentialRepository;
 pub use webhook::SurrealWebhookRepository;

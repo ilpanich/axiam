@@ -9,7 +9,7 @@ use axiam_core::repository::{
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
-use axiam_db::verify_password;
+use axiam_auth::password::verify_password;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 

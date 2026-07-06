@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 29
 current_phase_name: structural-quality
 status: executing
-stopped_at: Completed 29-02-PLAN.md
-last_updated: "2026-07-06T08:42:59.162Z"
+stopped_at: Completed 29-03-PLAN.md (recovered from stalled executor + full-suite verified)
+last_updated: "2026-07-06T12:50:00.000Z"
 last_activity: 2026-07-06
-last_activity_desc: Phase 29 execution started
+last_activity_desc: 29-03 AppState migration recovered, verified (~400 tests), committed
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 52
-  completed_plans: 47
+  completed_plans: 48
   percent: 75
 ---
 

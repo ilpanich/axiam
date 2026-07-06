@@ -52,8 +52,7 @@ an AsyncAPI spec for AMQP, the deployment/admin/PKI guides, and the docs index.
   pointers that **link into** the existing `docs/compliance/` files (and
   code/tests) rather than duplicating them. The `docs/compliance/` set remains
   the detailed backing evidence.
-- **D-02 — ISO 27001 / CyberSecurity Act depth = control-family + evidence
-  pointer.** Map ISO 27001 Annex A control **families** (e.g. A.5, A.8, A.9) and
+- **D-02 — ISO 27001 / CyberSecurity Act depth = control-family + evidence pointer.** Map ISO 27001 Annex A control **families** (e.g. A.5, A.8, A.9) and
   CyberSecurity Act essential-requirement **themes** to pass/fail with a pointer
   to code/tests/ASVS rows. Right altitude for an IAM MVP beta — auditable
   without a full ISMS certification effort. (ASVS L2 is already control-by-control
@@ -105,8 +104,7 @@ an AsyncAPI spec for AMQP, the deployment/admin/PKI guides, and the docs index.
   rather than copying — no duplication/drift.
 
 ### Cross-cutting docs decisions
-- **D-10 — OpenAPI publishing = spec file + static reference (no new live
-  Swagger UI).** Commit the OpenAPI JSON under `docs/api/` and document viewing
+- **D-10 — OpenAPI publishing = spec file + static reference (no new live Swagger UI).** Commit the OpenAPI JSON under `docs/api/` and document viewing
   it with any Swagger/Redoc viewer. Do **not** newly wire in-app Swagger UI in
   this phase — avoids the known `utoipa-swagger-ui` GitHub-egress build
   fragility (see `SWAGGER_UI_DOWNLOAD_URL` workaround in CLAUDE.md). If a

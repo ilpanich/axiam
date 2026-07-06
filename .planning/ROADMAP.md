@@ -1271,11 +1271,19 @@ Plans:
 **Plans**: 6 plans (3 waves)
 
 Plans:
+**Wave 1**
+
 - [ ] 30-01-PLAN.md — CMPL-01 security-audit.md master doc (ASVS L2 + ISO 27001 family + CyberSecurity Act theme mapping, cite existing evidence) [wave 1]
 - [ ] 30-02-PLAN.md — CMPL-02 GDPR verify (re-run gdpr_test.rs) + docs/compliance/gdpr-compliance.md (D-05 async reconciliation, D-06 consent scope) [wave 1]
 - [ ] 30-03-PLAN.md — DOCS-01 API contracts: net-new docs/api/asyncapi.yml + openapi.json symlink + grpc.md + api/README.md [wave 1]
 - [ ] 30-04-PLAN.md — DOCS-01 operator guides: docs/{deployment,admin,pki}/README.md [wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 30-05-PLAN.md — DOCS-01 docs/README.md index + scripts/check-doc-links.sh (zero-dependency link-check) [wave 2]
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 30-06-PLAN.md — DOCS-01 .github/workflows/docs-ci.yml (spec-validate + link-check; @asyncapi/cli legitimacy checkpoint) [wave 3]
 
 ---

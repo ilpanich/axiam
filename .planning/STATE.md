@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 29
 current_phase_name: structural-quality
 status: executing
-stopped_at: Phase 29 context gathered
-last_updated: "2026-07-06T07:03:21.245Z"
+stopped_at: Completed 29-01-PLAN.md
+last_updated: "2026-07-06T07:32:14.550Z"
 last_activity: 2026-07-06
 last_activity_desc: Phase 29 execution started
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 52
-  completed_plans: 45
+  completed_plans: 46
   percent: 75
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 29 (structural-quality) — EXECUTING
-Plan: 1 of 7
-Status: Executing Phase 29
+Plan: 2 of 7
+Status: Ready to execute
 Last activity: 2026-07-06 — Phase 29 execution started
 
 ## Performance Metrics
@@ -202,6 +202,7 @@ Last activity: 2026-07-06 — Phase 29 execution started
 | Phase 28 P03 | 25min | 3 tasks | 4 files |
 | Phase 28-functional-completeness P05 | 70min | 3 tasks | 9 files |
 | Phase 28-functional-completeness P04 | 35min | 3 tasks | 9 files |
+| Phase 29 P01 | 30min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -506,6 +507,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 28-functional-completeness]: 28-04: GET email-config never calls get_effective_config — always the raw own-scope row (get_org_config/get_tenant_override), per D-14
 - [Phase ?]: [Phase 28-functional-completeness]: 28-04: email_config_repo registered as REST app_data in main.rs only when AXIAM__EMAIL_ENCRYPTION_KEY is present (fail-closed, no zero-key fallback), mirroring the mail consumer's conditional-spawn pattern
 - [Phase ?]: [Phase 28-functional-completeness]: 28-04: schema v23 (DEFINE FIELD OVERWRITE) extends email_config.provider_kind's ASSERT to accept the empty-string sentinel, fixing a latent set_tenant_override write/read asymmetry bug
+- [Phase ?]: [Phase 29-structural-quality]: 29-01 classify_write_error is generic over Display (not concrete surrealdb::Error) so it covers both .check() sites and password::hash_password (AuthError) sites uniformly
+- [Phase ?]: [Phase 29-structural-quality]: 29-01 discovered group.rs::add_member never called .check() on its RELATE query — a duplicate group-membership RELATE silently 'succeeded' with no edge created; fixed as part of the QUAL-03 member_of routing target
 
 ### Pending Todos
 
@@ -530,7 +533,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-05T22:18:33.286Z
-Stopped at: Phase 29 context gathered
-Resume file: .planning/phases/29-structural-quality/29-CONTEXT.md
+Last session: 2026-07-06T07:32:14.535Z
+Stopped at: Completed 29-01-PLAN.md
+Resume file: None
 Next action: /gsd-execute-phase 23

@@ -982,9 +982,9 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** CQ-B11, CQ-B17, CQ-B18
 
 ### Acceptance Criteria
-- [ ] Index/unique violations on mainstream create paths map to `DbError::AlreadyExists` → HTTP 409 (not `Migration` → 500) — incl. user create, edge-uniqueness (CQ-B17)
-- [ ] `helpers::parse_uuid` does not label a corrupt-data read as "Migration failed"
-- [ ] OAuth2 handlers distinguish DB outage from `invalid_client` (CQ-B18)
+- [x] Index/unique violations on mainstream create paths map to `DbError::AlreadyExists` → HTTP 409 (not `Migration` → 500) — incl. user create, edge-uniqueness (CQ-B17)
+- [x] `helpers::parse_uuid` does not label a corrupt-data read as "Migration failed"
+- [x] OAuth2 handlers distinguish DB outage from `invalid_client` (CQ-B18)
 
 ## QUAL-04: Transactional Multi-Statement Mutations
 
@@ -1108,7 +1108,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | FUNC-05 | Phase 28 | OpenAPI login response schema (T19.4) | Complete (28-04 verified: route_openapi_parity — POST /auth/login documents 200/202/403/401 distinctly for SDK accuracy) |
 | QUAL-01 | Phase 29 | AppState extraction (CQ-B43) | Pending |
 | QUAL-02 | Phase 29 | Generic paginate + shared helpers (CQ-B10) | Pending |
-| QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) | Pending |
+| QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) | Complete (29-01: helpers::classify_write_error centralizes marker-string detection for duplicate user/role-assignment/group-membership → 409; DbError::Serialization fixes parse_uuid mislabeling; OAuth2 client-lookup DB outage → ServerError distinct from invalid_client) |
 | QUAL-04 | Phase 29 | Transactional mutations (CQ-B07/46) | Pending |
 | QUAL-05 | Phase 29 | PKI helper dedup (CQ-B15) | Pending |
 | QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Pending |

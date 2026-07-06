@@ -1268,7 +1268,15 @@ Plans:
   2. `GET /api/v1/users/:id/export` covers every table incl. real sessions (optional PGP encryption), account deletion durably pseudonymizes audit PII (ties to SECHRD-06), and consent is recorded and exportable (CMPL-02)
   3. `docs/` consolidates REST (OpenAPI) / gRPC (proto) / AMQP (AsyncAPI) API docs, a Docker/K8s deployment guide (env/secrets/NetworkPolicies), admin + PKI/certificate guides, and links to the 7 SDK getting-started READMEs (DOCS-01)
 
-**Plans**: TBD
+**Plans**: 6 plans (3 waves)
+
+Plans:
+- [ ] 30-01-PLAN.md — CMPL-01 security-audit.md master doc (ASVS L2 + ISO 27001 family + CyberSecurity Act theme mapping, cite existing evidence) [wave 1]
+- [ ] 30-02-PLAN.md — CMPL-02 GDPR verify (re-run gdpr_test.rs) + docs/compliance/gdpr-compliance.md (D-05 async reconciliation, D-06 consent scope) [wave 1]
+- [ ] 30-03-PLAN.md — DOCS-01 API contracts: net-new docs/api/asyncapi.yml + openapi.json symlink + grpc.md + api/README.md [wave 1]
+- [ ] 30-04-PLAN.md — DOCS-01 operator guides: docs/{deployment,admin,pki}/README.md [wave 1]
+- [ ] 30-05-PLAN.md — DOCS-01 docs/README.md index + scripts/check-doc-links.sh (zero-dependency link-check) [wave 2]
+- [ ] 30-06-PLAN.md — DOCS-01 .github/workflows/docs-ci.yml (spec-validate + link-check; @asyncapi/cli legitimacy checkpoint) [wave 3]
 
 ---
 

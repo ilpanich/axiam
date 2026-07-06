@@ -122,11 +122,63 @@ full v1.2 suite (D-03).
 
 ## 3. ISO 27001 Annex A — Control-Family Mapping
 
-_Placeholder — filled in Task 2 of `.planning/phases/30-compliance-documentation/30-01-PLAN.md`._
+**[ASSUMED]** No canonical OWASP ASVS ↔ ISO 27001 crosswalk document exists;
+the family groupings below are this project's own interpretive mapping at
+control-family altitude (D-02), built from the ISO 27001:2022 Annex A structure
+(4 themes, 93 controls: A.5 Organizational (37), A.6 People (8), A.7 Physical
+(14), A.8 Technological (34)) cross-referenced against AXIAM's actual control
+surface. **A human reviewer must confirm this mapping before it is treated as
+final** (see the Task 3 checkpoint).
+
+| Annex A Family | Theme | Applies to AXIAM | Status | Evidence Pointer |
+|-----------------|-------|-------------------|--------|-------------------|
+| A.5.15–5.18 (access control, identity mgmt, authn info, access rights) | Organizational | Yes | Pass | `crates/axiam-authz` RBAC engine; ASVS V4 rows (§2); `.planning/REQUIREMENTS.md#req-4-rbac-enforcement` |
+| A.5 (remaining: supplier/asset mgmt, incident mgmt process) | Organizational | Partial | Partial | No formal supplier-risk or incident-response *process* documentation exists yet beyond `FINDINGS.md`'s ad-hoc tracking-issue workflow; code-level controls (A.5.15–5.18) are covered above |
+| A.6 (screening, responsibilities, training, disciplinary process) | People | N/A `[ASSUMED]` | N/A | Organizational/HR controls outside the codebase's verifiable scope for a self-assessment — not code-verifiable; human reviewer should confirm this is an acceptable N/A for a beta-stage self-assessment |
+| A.7 (physical/environmental security) | Physical | N/A `[ASSUMED]` | N/A | AXIAM is a containerized/Kubernetes-deployed application; physical facility security is the cloud/infrastructure provider's responsibility, not AXIAM's codebase |
+| A.8.2–8.3 (privileged access rights, information access restriction) | Technological | Yes | Pass | RBAC default-deny (`axiam-authz`); admin bootstrap gate (SECHRD-04); ASVS V4.1.1/V4.3.1 (§2) |
+| A.8.5 (secure authentication) | Technological | Yes | Pass | Argon2id (V2.4.1), MFA/TOTP (V2.8.1), mTLS device auth (V2.9.1/V2.9.2) — see §2 V2 rows |
+| A.8.9–8.11 (configuration management, information deletion, data masking) | Technological | Yes | Pass | GDPR erasure/pseudonymization (SECHRD-06, §7); K8s `ConfigMap`/`Secret` separation (`k8s/server/secret.yml`) |
+| A.8.12 (data leakage prevention) | Technological | Yes | Pass | Encrypted-at-rest secrets (MFA/federation/PKI/webhook keys — SECFIX-03, SECHRD-08/09); no secrets in `Debug`/serialized output (SECHRD-09) |
+| A.8.15–8.16 (logging, monitoring) | Technological | Yes | Pass | `crates/axiam-audit` append-only audit log; ASVS V7 rows (§2) |
+| A.8.20–8.23 (network security, segregation, secure coding) | Technological | Yes | Pass | K8s default-deny NetworkPolicies (`k8s/network-policy/`, SECHRD-10); TLS at ingress; ASVS V9/V14 rows (§2) |
+| A.8.24 (cryptography) | Technological | Yes | Pass | Argon2id, AES-256-GCM, Ed25519/EdDSA JWT, X.509 PKI — ASVS V6/V8 rows (§2) |
+| A.8.25–8.29 (secure development lifecycle, security testing) | Technological | Yes | Pass | CI security-scan job — `cargo audit`, `cargo deny`, Trivy fs/config scan, `npm audit` (`.github/workflows/ci.yml`); ASVS V10 rows (§2) |
+| A.8.32–8.34 (change management, capacity management, audit testing) | Technological | Partial | Partial | CI/CD pipeline (`ci.yml`, `release.yml`, SHA-pinned actions) covers change control; capacity management is out of scope for MVP beta; audit testing = this document + `docs/compliance/` |
+| A.5 SBOM / asset inventory | Organizational/Technological | Deferred `[ASSUMED]` | Deferred | No SBOM is currently generated. Tracked as an open item in §7 (cross-referenced to a v1.2 REQ-ID) |
+
+**A human reviewer must confirm:** the A.6/A.7 N/A dispositions, the A.8.5 vs
+A.8.24 sub-control groupings, and the SBOM deferral, before this table is
+treated as a final self-assessment (RESEARCH.md Assumption A1).
+
+---
 
 ## 4. CyberSecurity Act — Essential-Requirement Theme Mapping
 
-_Placeholder — filled in Task 2 of `.planning/phases/30-compliance-documentation/30-01-PLAN.md`._
+**[ASSUMED — requires human confirmation]** "CyberSecurity Act" is interpreted
+here as the **EU Cyber Resilience Act (CRA)** — the current EU framework
+setting essential cybersecurity requirements for products with digital elements
+(Annex I) — rather than EU Regulation 2019/881 (the ENISA Cybersecurity Act,
+which establishes the EU cybersecurity certification framework/agency mandate
+but does not itself impose product-level essential requirements). AXIAM, as a
+product with digital elements, is more directly addressed by the CRA's Annex I
+essential requirements. **If this interpretation is incorrect for AXIAM's
+intended regulatory context, the theme table below must be re-anchored against
+Regulation 2019/881 instead** (RESEARCH.md Assumption A2).
+
+| CRA/CSA Theme | Applies to AXIAM | Status | Evidence Pointer |
+|---------------|-------------------|--------|--------------------|
+| Secure-by-design & default configuration | Yes | Pass | Default-deny RBAC (`axiam-authz`); fail-closed encryption-key handling (SECFIX-03, no `unwrap_or([0u8;32])` fallback); cookie-based auth secure defaults (§2 V3) |
+| No known exploitable vulnerabilities | Yes | Pass | `cargo audit` + `cargo deny` + Trivy (fs/config, HIGH/CRITICAL gate) + `npm audit` — `.github/workflows/ci.yml`; ASVS V10.3 rows (§2) |
+| Confidentiality of stored/transmitted data | Yes | Pass | AES-256-GCM at rest (MFA/CA/webhook secrets); TLS at ingress; GDPR export encryption (§7 CMPL-02) |
+| Data minimization | Yes | Pass | GDPR export excludes `password_hash`/`mfa_secret`/token hashes/`passkey_json` — `crates/axiam-server/src/cleanup.rs::aggregate_export_data` |
+| Access control / authentication | Yes | Pass | Same evidence as ASVS V2/V4 (§2) and A.5.15–5.18 (§3) |
+| Vulnerability handling process | Yes | Pass | `docs/compliance/FINDINGS.md` inline-fix-vs-defer register with GitHub tracking issues (#98–#101); each Deferred finding has a rationale and an issue link |
+| Security updates | Yes | Pass | `.github/dependabot.yml` — weekly automated dependency updates across 3 ecosystems (cargo, npm, github-actions), grouped minor/patch. This resolves the "Partial" status carried in earlier research; dependabot is confirmed present and configured. |
+| SBOM | Deferred `[ASSUMED]` | Deferred | No SBOM currently generated for AXIAM's dependency tree. Cross-referenced as an open item in §7 |
+
+**A human reviewer must confirm** the CRA-vs-2019/881 framework interpretation
+above before this table is treated as final.
 
 ---
 

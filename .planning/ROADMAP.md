@@ -1222,7 +1222,16 @@ Plans:
   4. The 24 duplicated `CountRow` definitions collapse to `helpers::CountRow`, repos adopt a generic `paginate<T>` + `helpers::parse_uuid`/`take_first_or_not_found`, and `CertService` reconstructs the CA via `from_ca_cert_pem` with shared keypair/fingerprint/encrypt helpers (QUAL-02, QUAL-05)
   5. Frontend pages import the extracted shared components/hooks (`ToggleField`/`SectionCard`/`useCrudMutations`/…) or the dead modules are deleted and profile/MFA pages call a typed users service; the pepper-less second `verify_password` impl and per-request federation/reset/verification service construction are removed (QUAL-06, QUAL-07)
 
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+- [ ] 29-01-PLAN.md — QUAL-03 error taxonomy: classify_write_error + DbError::Serialization, 409 create/edge paths, OAuth2 DB-outage vs invalid_client (Wave 1)
+- [ ] 29-02-PLAN.md — QUAL-04 transactional mutations: tenant-predicated role/resource deletes + child-guard TOCTOU + GDPR deletion-setup atomicity (Wave 2)
+- [ ] 29-03-PLAN.md — QUAL-01 AppState<C> full migration + QUAL-07 per-request service hoisting (Wave 3)
+- [ ] 29-04-PLAN.md — QUAL-02 paginate<T> + shared-helper dedup (group A) + QUAL-07 pepper-less verify_password deletion (Wave 4)
+- [ ] 29-05-PLAN.md — QUAL-02 CountRow/take_first dedup (group B) + federation_link parse_uuid removal (Wave 5)
+- [ ] 29-06-PLAN.md — QUAL-05 PKI dedup: from_ca_cert_pem CA reconstruction + shared crypto module + phase-end workspace regression gate (Wave 6)
+- [ ] 29-07-PLAN.md — QUAL-06 frontend shared components/services adoption + manual smoke checkpoint (Wave 7)
 
 **UI hint**: yes
 
@@ -1259,7 +1268,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 26. Correctness & Resilience | 8/8 | Complete   | 2026-07-05 |
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
 | 28. Functional Completeness | 5/5 | Complete    | 2026-07-05 |
-| 29. Structural Quality | 0/? | Not started | - |
+| 29. Structural Quality | 0/7 | Not started | - |
 | 30. Compliance & Documentation | 0/? | Not started | - |
 
 ---

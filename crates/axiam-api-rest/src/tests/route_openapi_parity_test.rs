@@ -45,6 +45,12 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     // compiled; listing it unconditionally is harmless (no reverse openapi
     // membership check) and mirrors the SAML entries in PUBLIC_PATHS.
     "/api/v1/federation/saml/authn-request",
+    // Federation SAML SP metadata (authenticated user, no role permission).
+    // Kept JWT-gated by the D-15 scope decision (Phase 28 FUNC-01): it was
+    // removed from PUBLIC_PATHS because its handler requires AuthenticatedUser,
+    // so it belongs here (JWT-authenticated, no named permission), same
+    // saml-feature-conditional OpenAPI presence as authn-request above.
+    "/api/v1/federation/saml/metadata",
     // Authz check — JWT-authenticated; authz:check_as check is conditional
     // inside the handler (not a route-level gate), so these paths are not
     // in ROUTE_PERMISSION_MAP (see PATTERNS.md Pitfall 4).

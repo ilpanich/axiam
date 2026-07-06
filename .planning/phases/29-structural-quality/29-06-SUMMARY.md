@@ -137,3 +137,10 @@ None. `cargo build -p axiam-pki` succeeded on the first attempt after enabling t
 ---
 *Phase: 29-structural-quality*
 *Completed: 2026-07-06*
+
+## Self-Check: PASSED
+
+- FOUND: crates/axiam-pki/src/crypto.rs
+- FOUND: crates/axiam-pki/tests/cert_test.rs
+- FOUND: commits e2da843, 1588edf, c5ba45a, 81eb712
+- Confirmed via grep: no `fn build_ca_params`/`fn generate_keypair`/`fn compute_fingerprint`/`fn encrypt_private_key`/`fn decrypt_private_key` remain in `ca.rs`/`cert.rs`

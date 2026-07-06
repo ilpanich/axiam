@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 29
 current_phase_name: structural-quality
 status: executing
-stopped_at: Completed 29-03-PLAN.md (recovered from stalled executor + full-suite verified)
-last_updated: "2026-07-06T12:50:00.000Z"
+stopped_at: Completed 29-04-PLAN.md
+last_updated: "2026-07-06T13:12:03.596Z"
 last_activity: 2026-07-06
-last_activity_desc: 29-03 AppState migration recovered, verified (~400 tests), committed
+last_activity_desc: Phase 29 execution started
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 52
-  completed_plans: 48
+  completed_plans: 49
   percent: 75
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 29 (structural-quality) — EXECUTING
-Plan: 3 of 7
+Plan: 4 of 7
 Status: Ready to execute
 Last activity: 2026-07-06 — Phase 29 execution started
 
@@ -204,6 +204,7 @@ Last activity: 2026-07-06 — Phase 29 execution started
 | Phase 28-functional-completeness P04 | 35min | 3 tasks | 9 files |
 | Phase 29 P01 | 30min | 3 tasks | 8 files |
 | Phase 29 P02 | 55min | 3 tasks | 7 files |
+| Phase 29 P04 | 21min | 2 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -512,6 +513,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 29-structural-quality]: 29-01 discovered group.rs::add_member never called .check() on its RELATE query — a duplicate group-membership RELATE silently 'succeeded' with no edge created; fixed as part of the QUAL-03 member_of routing target
 - [Phase ?]: [Phase 29-structural-quality]: 29-02: has_role/grants/child_of/on_resource edge tables carry no tenant_id field of their own — tenant predicates on their DELETEs are node-tenant subquery guards (out.tenant_id/in.tenant_id) not flat WHERE clauses
 - [Phase ?]: [Phase 29-structural-quality]: 29-02: added an in-transaction duplicate-pending-request guard to create_with_pending_flag (Rule 2) — prevents two live cancel tokens per user and gives the atomicity test a reproducible rollback trigger
+- [Phase ?]: [Phase 29-04]: scope.rs gets take_first_or_not_found only (no CountRow/paginate) — it has no local CountRow struct or paginated list method
+- [Phase ?]: [Phase 29-04]: session.rs/group.rs/audit.rs raw count reads (existence checks, non-paginated totals) left untouched — helpers::paginate only applies where a PaginatedResult<T> is actually constructed
 
 ### Pending Todos
 
@@ -536,7 +539,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-06T08:42:59.147Z
-Stopped at: Completed 29-02-PLAN.md
+Last session: 2026-07-06T13:11:54.849Z
+Stopped at: Completed 29-04-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

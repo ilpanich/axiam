@@ -974,8 +974,8 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** CQ-B10
 
 ### Acceptance Criteria
-- [ ] A generic `paginate<T>` helper exists and is adopted; the 24 duplicated `CountRow` definitions collapse to the shared `helpers::CountRow`
-- [ ] Repos use `helpers::parse_uuid`/`take_first_or_not_found` instead of inline duplicates
+- [ ] A generic `paginate<T>` helper exists and is adopted; the 24 duplicated `CountRow` definitions collapse to the shared `helpers::CountRow` — **29-04: helper added + adopted in file-group A (8 of the ~23 duplicates collapsed); file-group B remains for 29-05**
+- [ ] Repos use `helpers::parse_uuid`/`take_first_or_not_found` instead of inline duplicates — **29-04: file-group A + scope.rs migrated to `take_first_or_not_found`; file-group B remains for 29-05**
 
 ## QUAL-03: Error Taxonomy Correctness
 
@@ -1016,8 +1016,8 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Low | **Source:** CQ-B47, CQ-B27
 
 ### Acceptance Criteria
-- [ ] The second `verify_password` Argon2 impl (`user.rs:829-852`, re-exported) is deleted (pepper-less-caller trap)
-- [ ] Federation/reset/verification services are constructed once (not per request across 9+ sites)
+- [x] The second `verify_password` Argon2 impl (`user.rs:829-852`, re-exported) is deleted (pepper-less-caller trap) — 29-04
+- [x] Federation/reset/verification services are constructed once (not per request across 9+ sites) — 29-03
 
 ---
 
@@ -1107,12 +1107,12 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | FUNC-04 | Phase 28 | Admin user/MFA endpoints + SA token | Complete (28-02 verified: SubjectKind::ServiceAccount mint path + issue_service_account_token; admin user-listing RBAC-403 test; MFA admin-gating confirmed by code read per verify-only scope) |
 | FUNC-05 | Phase 28 | OpenAPI login response schema (T19.4) | Complete (28-04 verified: route_openapi_parity — POST /auth/login documents 200/202/403/401 distinctly for SDK accuracy) |
 | QUAL-01 | Phase 29 | AppState extraction (CQ-B43) | Pending |
-| QUAL-02 | Phase 29 | Generic paginate + shared helpers (CQ-B10) | Pending |
+| QUAL-02 | Phase 29 | Generic paginate + shared helpers (CQ-B10) | In Progress (29-04: helpers::paginate<T> added with unit tests; adopted across file-group A — organization, tenant, permission, resource, service_account, session, audit, group + scope.rs's take_first_or_not_found-only migration. File-group B — the remaining ~15 repos + federation_link.rs parse_uuid removal — is 29-05) |
 | QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) | Complete (29-01: helpers::classify_write_error centralizes marker-string detection for duplicate user/role-assignment/group-membership → 409; DbError::Serialization fixes parse_uuid mislabeling; OAuth2 client-lookup DB outage → ServerError distinct from invalid_client) |
 | QUAL-04 | Phase 29 | Transactional mutations (CQ-B07/46) | Complete (29-02: role/resource edge deletes are single tenant-predicated transactions via node-tenant subquery guards; resource child-guard folded into its transaction via LET-capture, closing the TOCTOU; GDPR deletion setup via create_with_pending_flag is one transaction with a duplicate-pending rollback guard) |
 | QUAL-05 | Phase 29 | PKI helper dedup (CQ-B15) | Pending |
 | QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Pending |
-| QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Pending |
+| QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Complete (29-03: federation/reset/verification services hoisted to shared AppState singletons, closing the per-request-construction half; 29-04: pepper-less axiam_db::verify_password duplicate deleted with re-exports removed, sole caller repointed to canonical axiam_auth::password::verify_password, closing the pepper-less-caller trap) |
 | CMPL-01 | Phase 30 | Security audit checklist (T18.1) | Pending |
 | CMPL-02 | Phase 30 | GDPR completeness (T18.2) | Pending |
 | DOCS-01 | Phase 30 | Comprehensive documentation (T18.4) | Pending |

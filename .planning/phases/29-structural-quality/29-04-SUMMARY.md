@@ -159,3 +159,8 @@ None - no external service configuration required.
 ---
 *Phase: 29-structural-quality*
 *Completed: 2026-07-06*
+
+## Self-Check: PASSED
+
+All modified/created files verified present on disk; all task/docs commit hashes
+(`daf5044`, `00c69bf`, `1f7538c`) verified present in `git log --oneline --all`.

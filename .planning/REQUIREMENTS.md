@@ -966,8 +966,8 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** CQ-B43
 
 ### Acceptance Criteria
-- [ ] `main.rs` composes a single `AppState` instead of ~45 inline `app_data` registrations
-- [ ] Handlers extract dependencies from `AppState`; no behavior change (tests green)
+- [x] `main.rs` composes a single `AppState` instead of ~45 inline `app_data` registrations — 29-03: `AppState<C>` in `state.rs`, one `.app_data()` registration in `main.rs` (verifier-confirmed)
+- [x] Handlers extract dependencies from `AppState`; no behavior change (tests green) — 29-03: 28/29 handler files on `web::Data<AppState<C>>`, 0 taking individual repo `web::Data`; phase-end workspace regression gate green (886 tests, 0 failures)
 
 ## QUAL-02: Generic Pagination & Shared Repo Helpers
 

@@ -1047,7 +1047,7 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** T18.4
 
 ### Acceptance Criteria
-- [ ] REST (OpenAPI), gRPC (proto), and AMQP (AsyncAPI) API docs
+- [x] REST (OpenAPI), gRPC (proto), and AMQP (AsyncAPI) API docs — 30-03 (`docs/api/asyncapi.yml` hand-authored AsyncAPI 2.6 spec covering all 11 AMQP queues/6 message types; `docs/api/openapi.json` symlinked to the drift-gated `sdks/openapi.json` (refreshed — was stale); `docs/api/grpc.md` + `docs/api/README.md`)
 - [ ] Deployment guide (Docker/K8s, required env/secrets, NetworkPolicies)
 - [ ] Admin guide + PKI/certificate guide
 - [ ] SDK getting-started guides (link to the 7 SDK READMEs)
@@ -1115,7 +1115,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Complete (29-03: federation/reset/verification services hoisted to shared AppState singletons, closing the per-request-construction half; 29-04: pepper-less axiam_db::verify_password duplicate deleted with re-exports removed, sole caller repointed to canonical axiam_auth::password::verify_password, closing the pepper-less-caller trap) |
 | CMPL-01 | Phase 30 | Security audit checklist (T18.1) | Complete (30-01: `claude_dev/security-audit.md` — master citation index mapping ASVS L2 + ISO 27001 Annex A (family) + CyberSecurity Act/CRA (theme) to pass/fail + evidence pointers, open items cross-referenced to v1.2 REQ-IDs; D-03 spot-verify corrected F-03→Fixed, F-05→Partially Mitigated, raised SBOM-01; CRA interpretation + [ASSUMED] rows remain for human PR-time confirmation) |
 | CMPL-02 | Phase 30 | GDPR completeness (T18.2) | Complete (30-02: `docs/compliance/gdpr-compliance.md` — re-ran `gdpr_test.rs` export_completeness/export_includes_real_session_metadata/deletion_pseudonymization/consent_on_registration as evidence; D-05 async-export reconciliation; D-06 consent scope; SECHRD-06 erasure durability cited; no production code change needed) |
-| DOCS-01 | Phase 30 | Comprehensive documentation (T18.4) | Pending |
+| DOCS-01 | Phase 30 | Comprehensive documentation (T18.4) | In Progress (30-03: REST/gRPC/AMQP API docs complete under `docs/api/`; deployment/admin/PKI guides + top-level `docs/README.md` index + docs-CI pending in 30-04..30-06) |
 
 **Coverage: 44/44 v1.2 requirement IDs mapped to Phases 23–30 (100%).** NOTE: the enumerated set totals **44** (SECFIX 6 + SECHRD 12 + CORR 6 + PERF 5 + FUNC 5 + QUAL 7 + CMPL 2 + DOCS 1); the earlier "42" summary undercounted by 2. Roadmap: Phase 23 SECFIX · 24–25 SECHRD · 26 CORR · 27 PERF · 28 FUNC · 29 QUAL · 30 CMPL+DOCS.
 

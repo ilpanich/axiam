@@ -142,3 +142,7 @@ None - no external service configuration required.
 ---
 *Phase: 30-compliance-documentation*
 *Completed: 2026-07-06*
+
+## Self-Check: PASSED
+
+All created files verified present on disk (`docs/api/asyncapi.yml`, `docs/api/openapi.json`, `docs/api/grpc.md`, `docs/api/README.md`, this SUMMARY). All task commits (`d2d96ec`, `297c258`, `6ccb7d5`, `000b857`) verified present in `git log`.

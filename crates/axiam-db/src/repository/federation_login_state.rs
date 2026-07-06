@@ -13,6 +13,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::CountRow;
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -29,11 +30,6 @@ struct FederationLoginStateRow {
     /// SAML AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).
     /// Empty string for OIDC flows where no request ID is tracked.
     request_id: Option<String>,
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 // ---------------------------------------------------------------------------

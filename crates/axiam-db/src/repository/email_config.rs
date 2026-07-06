@@ -24,6 +24,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Crypto helpers (mirror of axiam-auth split-output variant — no circular dep)
@@ -408,11 +409,6 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        #[derive(Debug, surrealdb_types::SurrealValue)]
-        struct CountRow {
-            total: u64,
-        }
-
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         let anomalous = rows.into_iter().next().map(|r| r.total).unwrap_or(0);
 
@@ -597,10 +593,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<EmailConfigRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "email_config".into(),
-            id: org_id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "email_config", &org_id.to_string())?;
 
         // Re-construct domain with original plaintext provider.
         // Use a placeholder UUID for the record id since UPSERT does not

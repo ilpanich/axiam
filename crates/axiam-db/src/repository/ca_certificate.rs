@@ -11,6 +11,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -43,11 +44,6 @@ struct CaCertificateRowWithId {
     status: String,
     encrypted_private_key: Option<surrealdb_types::Bytes>,
     created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +269,6 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         // Data query.
         let data_sql = "SELECT meta::id(id) AS record_id, * FROM ca_certificate \
@@ -298,12 +293,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
             .map(|r| r.try_into_entry())
             .collect::<Result<_, _>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn get_by_issuer_id(&self, id: Uuid) -> AxiamResult<CaCertificate> {

@@ -9,7 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::parse_uuid;
+use crate::helpers::{CountRow, parse_uuid, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -118,11 +118,6 @@ impl<C: Connection> SurrealExportJobRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        #[derive(Debug, surrealdb_types::SurrealValue)]
-        struct CountRow {
-            total: u64,
-        }
-
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         let count = rows.into_iter().next().map(|r| r.total).unwrap_or(0);
         Ok(count > 0)
@@ -156,10 +151,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<ExportJobRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "export_job".into(),
-            id: id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "export_job", &id.to_string())?;
 
         Ok(ExportJob {
             id,

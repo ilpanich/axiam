@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
 struct AuthCodeRow {
@@ -69,11 +70,6 @@ impl AuthCodeRowWithId {
     }
 }
 
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
 /// SurrealDB implementation of the AuthorizationCode repository.
 #[derive(Clone)]
 pub struct SurrealAuthorizationCodeRepository<C: Connection> {
@@ -126,10 +122,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<AuthCodeRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "oauth2_auth_code".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "oauth2_auth_code", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -187,10 +180,11 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<AuthCodeRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "oauth2_auth_code".into(),
-            id: format!("code_hash={code_hash_owned}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "oauth2_auth_code",
+            &format!("code_hash={code_hash_owned}"),
+        )?;
 
         row.try_into_auth_code().map_err(Into::into)
     }
@@ -234,10 +228,11 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<AuthCodeRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "oauth2_auth_code".into(),
-            id: format!("code_hash={code_hash_owned}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "oauth2_auth_code",
+            &format!("code_hash={code_hash_owned}"),
+        )?;
 
         row.try_into_auth_code().map_err(Into::into)
     }

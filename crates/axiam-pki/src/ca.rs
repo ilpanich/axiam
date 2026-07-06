@@ -1,18 +1,17 @@
 //! CA certificate generation and management service.
 
-use aes_gcm::aead::{Aead, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{
-    CaCertificate, CreateCaCertificate, GeneratedCaCertificate, KeyAlgorithm, StoreCaCertificate,
+    CaCertificate, CreateCaCertificate, GeneratedCaCertificate, StoreCaCertificate,
 };
 use axiam_core::repository::{CaCertificateRepository, PaginatedResult, Pagination};
 use chrono::{Duration, Utc};
-use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
-use sha2::{Digest, Sha256};
+use rcgen::{CertificateParams, DnType, IsCa};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+
+use crate::crypto::{compute_fingerprint, encrypt_secret, generate_keypair};
 
 pub use crate::config::PkiConfig;
 
@@ -107,7 +106,7 @@ impl<R: CaCertificateRepository> CaService<R> {
                 "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable".into(),
             )
         })?;
-        let encrypted_private_key = encrypt_private_key(private_key_pem.as_bytes(), &enc_key)?;
+        let encrypted_private_key = encrypt_secret(private_key_pem.as_bytes(), &enc_key)?;
 
         let store = StoreCaCertificate {
             organization_id: input.organization_id,
@@ -145,36 +144,4 @@ impl<R: CaCertificateRepository> CaService<R> {
             .list_by_organization(organization_id, pagination)
             .await
     }
-}
-
-/// Generate a key pair for the given algorithm.
-fn generate_keypair(algorithm: &KeyAlgorithm) -> AxiamResult<KeyPair> {
-    match algorithm {
-        KeyAlgorithm::Ed25519 => KeyPair::generate_for(&rcgen::PKCS_ED25519)
-            .map_err(|e| AxiamError::Certificate(format!("Ed25519 keygen failed: {e}"))),
-        KeyAlgorithm::Rsa4096 => KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256)
-            .map_err(|e| AxiamError::Certificate(format!("RSA-4096 keygen failed: {e}"))),
-    }
-}
-
-/// Compute SHA-256 fingerprint from DER-encoded certificate bytes.
-fn compute_fingerprint(der: &[u8]) -> String {
-    let hash = Sha256::digest(der);
-    hex::encode(hash)
-}
-
-/// Encrypt data with AES-256-GCM. The 12-byte nonce is prepended to the
-/// ciphertext so the caller doesn't need to store it separately.
-fn encrypt_private_key(plaintext: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<Vec<u8>> {
-    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
-        .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM encryption failed: {e}")))?;
-
-    let mut result = Vec::with_capacity(nonce.len() + ciphertext.len());
-    result.extend_from_slice(&nonce);
-    result.extend_from_slice(&ciphertext);
-    Ok(result)
 }

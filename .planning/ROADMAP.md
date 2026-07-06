@@ -1006,7 +1006,7 @@ NEGATIVE test passing.
 - [x] **Phase 27: Performance & Load Hardening** - HIBP circuit breaker + hot-path pre-sizing, concurrent bounded BatchCheckAccess, JWKS single-flight across SDKs, SurrealDB reconnect backoff-with-jitter, load-test + profiling report (completed 2026-07-05)
 - [x] **Phase 28: Functional Completeness** - Unauthenticated first-time federation login, session invalidation on reset, admin email-config API + templates, admin user/MFA endpoints + service-account token type, OpenAPI login schema (completed 2026-07-05)
 - [x] **Phase 29: Structural Quality** - AppState extraction, generic paginate + shared repo helpers, error-taxonomy correctness, transactional multi-statement mutations, PKI/frontend dedup, dead-code cleanup — no behavior change (completed 2026-07-06)
-- [ ] **Phase 30: Compliance & Documentation** - OWASP ASVS/ISO 27001/CyberSecurity Act audit checklist, GDPR export/deletion/consent completeness, consolidated REST/gRPC/AMQP + deployment + admin + PKI + SDK docs
+- [x] **Phase 30: Compliance & Documentation** - OWASP ASVS/ISO 27001/CyberSecurity Act audit checklist, GDPR export/deletion/consent completeness, consolidated REST/gRPC/AMQP + deployment + admin + PKI + SDK docs (completed 2026-07-06)
 
 > v1.2 roadmap created 2026-07-03. Phase numbering continues from Phase 22 (v1.1). Sequential execution with
 > a green-build gate between phases; Phases 24 and 25 are parallel-capable once Phase 23 lands. `gsd-sdk
@@ -1268,7 +1268,7 @@ Plans:
   2. `GET /api/v1/users/:id/export` covers every table incl. real sessions (optional PGP encryption), account deletion durably pseudonymizes audit PII (ties to SECHRD-06), and consent is recorded and exportable (CMPL-02)
   3. `docs/` consolidates REST (OpenAPI) / gRPC (proto) / AMQP (AsyncAPI) API docs, a Docker/K8s deployment guide (env/secrets/NetworkPolicies), admin + PKI/certificate guides, and links to the 7 SDK getting-started READMEs (DOCS-01)
 
-**Plans**: 5/6 plans executed
+**Plans**: 6/6 plans complete
 
 Plans:
 **Wave 1**
@@ -1284,7 +1284,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 30-06-PLAN.md — DOCS-01 .github/workflows/docs-ci.yml (spec-validate + link-check; @asyncapi/cli legitimacy checkpoint) [wave 3]
+- [x] 30-06-PLAN.md — DOCS-01 .github/workflows/docs-ci.yml (spec-validate + link-check; @asyncapi/cli legitimacy checkpoint) [wave 3]
 
 ---
 
@@ -1305,7 +1305,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
 | 28. Functional Completeness | 5/5 | Complete    | 2026-07-05 |
 | 29. Structural Quality | 7/7 | Complete    | 2026-07-06 |
-| 30. Compliance & Documentation | 5/6 | In Progress|  |
+| 30. Compliance & Documentation | 6/6 | Complete   | 2026-07-06 |
 
 ---
 

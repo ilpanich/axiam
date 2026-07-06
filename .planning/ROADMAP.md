@@ -1305,7 +1305,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
 | 28. Functional Completeness | 5/5 | Complete    | 2026-07-05 |
 | 29. Structural Quality | 7/7 | Complete    | 2026-07-06 |
-| 30. Compliance & Documentation | 6/6 | Complete   | 2026-07-06 |
+| 30. Compliance & Documentation | 6/6 | Complete    | 2026-07-06 |
 
 ---
 

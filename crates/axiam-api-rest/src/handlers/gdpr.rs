@@ -16,7 +16,7 @@ use axiam_auth::AuthService;
 use axiam_auth::crypto::decrypt_separate;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
-use axiam_core::models::gdpr::{AccountDeletionStatus, CreateAccountDeletion, CreateExportJob};
+use axiam_core::models::gdpr::{AccountDeletionStatus, CreateExportJob};
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::repository::{
     AccountDeletionRepository, AuditLogRepository, ExportJobRepository, MailPublisher,
@@ -474,28 +474,32 @@ pub async fn request_account_delete<C: Connection>(
 
     // Schedule purge at +30 days (D-08).
     let scheduled_purge_at = Utc::now() + chrono::Duration::days(30);
-    user_repo
-        .mark_deletion_pending(auth_user.tenant_id, target_id, scheduled_purge_at)
-        .await?;
-
-    // Revoke all sessions immediately (D-08: account disabled).
-    auth_service
-        .revoke_all_sessions(auth_user.tenant_id, target_id)
-        .await?;
 
     // Generate cancel token: 256-bit random token, hex-encoded (CQ-B39).
     // Only the SHA-256 hash is stored in the DB; the raw token is emailed.
     let raw_cancel_token = generate_cancel_token();
     let cancel_token_hash = sha256_hex(&raw_cancel_token);
 
-    // Create the account_deletion row.
+    // D-14: mark the user deletion-pending AND create the account_deletion
+    // row (holding the cancel_token_hash) in ONE transaction — a create
+    // failure (e.g. a duplicate pending-deletion conflict) must never
+    // strand the user in deletion_pending=true with no account_deletion row
+    // to hold a cancellable token (CQ-B39 residual / uncancellable purge).
     account_deletion_repo
-        .create(CreateAccountDeletion {
-            tenant_id: auth_user.tenant_id,
-            user_id: target_id,
-            cancel_token_hash,
+        .create_with_pending_flag(
+            auth_user.tenant_id,
+            target_id,
             scheduled_purge_at,
-        })
+            cancel_token_hash,
+        )
+        .await?;
+
+    // Revoke all sessions immediately (D-08: account disabled). Kept as a
+    // separate, subsequent call — not part of the D-14 strand-risk
+    // transaction: a failure here leaves an unrevoked session, a lesser and
+    // pre-existing concern, not an uncancellable purge.
+    auth_service
+        .revoke_all_sessions(auth_user.tenant_id, target_id)
         .await?;
 
     // Resolve org_id for the mail message.

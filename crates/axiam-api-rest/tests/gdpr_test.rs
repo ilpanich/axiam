@@ -467,6 +467,143 @@ async fn export_includes_real_session_metadata() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1c/1d: create_with_pending_flag atomicity (D-14 / QUAL-04)
+// ---------------------------------------------------------------------------
+/// Happy path: `create_with_pending_flag` atomically marks the user
+/// deletion-pending AND creates the `account_deletion` row holding the
+/// cancel token — both effects land together.
+#[tokio::test]
+async fn create_with_pending_flag_succeeds_atomically() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let account_deletion_repo = SurrealAccountDeletionRepository::new(db.clone());
+
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "atomic_happy_user".into(),
+            email: "atomic_happy@example.com".into(),
+            password: "AtomicHappy1234!".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let scheduled_purge_at = Utc::now() + chrono::Duration::days(30);
+    let cancel_token_hash = sha256_hex("happy-path-token");
+
+    let deletion = account_deletion_repo
+        .create_with_pending_flag(
+            tenant_id,
+            user.id,
+            scheduled_purge_at,
+            cancel_token_hash.clone(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(deletion.tenant_id, tenant_id);
+    assert_eq!(deletion.user_id, user.id);
+    assert_eq!(deletion.cancel_token_hash, cancel_token_hash);
+    assert_eq!(deletion.status, AccountDeletionStatus::Pending);
+
+    // Both effects of the transaction landed: user is deletion-pending...
+    let updated_user = user_repo.get_by_id(tenant_id, user.id).await.unwrap();
+    assert!(
+        updated_user.deletion_pending,
+        "deletion_pending must be set by create_with_pending_flag"
+    );
+
+    // ...and the account_deletion row is independently findable by the
+    // cancel token hash it was created with.
+    let found = account_deletion_repo
+        .find_by_token_hash(tenant_id, &cancel_token_hash)
+        .await
+        .unwrap()
+        .expect("account_deletion row must exist after create_with_pending_flag");
+    assert_eq!(found.id, deletion.id);
+    assert_eq!(found.status, AccountDeletionStatus::Pending);
+}
+
+/// D-14 lock-in: if a pending `account_deletion` row already exists for the
+/// user, `create_with_pending_flag`'s in-transaction duplicate-pending guard
+/// rejects the call and the WHOLE transaction — including the `UPDATE` that
+/// would have flipped `deletion_pending` — rolls back. Before this fix,
+/// `mark_deletion_pending` and `account_deletion_repo.create` were two
+/// independent DB round-trips: a failure on the second left the user
+/// permanently `deletion_pending = true` with no matching cancellable row
+/// (CQ-B39 residual, an uncancellable purge).
+#[tokio::test]
+async fn create_with_pending_flag_rolls_back_on_duplicate_pending_conflict() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let account_deletion_repo = SurrealAccountDeletionRepository::new(db.clone());
+
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "atomicity_test_user".into(),
+            email: "atomicity@example.com".into(),
+            password: "Atomic1234!".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    // Force the post-UPDATE CREATE to fail: a pre-existing pending
+    // account_deletion row for this user already satisfies the
+    // duplicate-pending guard inside create_with_pending_flag's
+    // transaction.
+    account_deletion_repo
+        .create(CreateAccountDeletion {
+            tenant_id,
+            user_id: user.id,
+            cancel_token_hash: sha256_hex("pre-existing-token"),
+            scheduled_purge_at: Utc::now() + chrono::Duration::days(30),
+        })
+        .await
+        .unwrap();
+
+    // Precondition: the user's own deletion_pending flag is still false —
+    // the pre-existing row above was inserted directly, not through the
+    // normal request-delete flow, so this reproduces a genuine "CREATE
+    // fails after the UPDATE would have run" scenario without corrupting
+    // the starting state.
+    let before = user_repo.get_by_id(tenant_id, user.id).await.unwrap();
+    assert!(
+        !before.deletion_pending,
+        "precondition: deletion_pending must start false"
+    );
+
+    let result = account_deletion_repo
+        .create_with_pending_flag(
+            tenant_id,
+            user.id,
+            Utc::now() + chrono::Duration::days(30),
+            sha256_hex("second-attempt-token"),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "create_with_pending_flag must fail when a pending account_deletion row already exists"
+    );
+
+    // The whole transaction rolled back — deletion_pending must remain
+    // false, never stranded at true with no matching cancellable row.
+    let after = user_repo.get_by_id(tenant_id, user.id).await.unwrap();
+    assert!(
+        !after.deletion_pending,
+        "deletion_pending must remain false after a rolled-back create_with_pending_flag"
+    );
+    assert!(
+        after.scheduled_purge_at.is_none(),
+        "scheduled_purge_at must not be set by a rolled-back transaction"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: deletion_pseudonymization
 // ---------------------------------------------------------------------------
 /// Full purge pipeline: user row anonymized, auth artifacts cleared, audit

@@ -469,6 +469,79 @@
         }
       }
     },
+    "/api/v1/auth/federation/oidc/callback": {
+      "post": {
+        "tags": [
+          "federation-sso"
+        ],
+        "summary": "`POST /api/v1/auth/federation/oidc/callback`",
+        "description": "Consumes the state row (single-use), runs the verified OIDC flow from\nplan 04-02 (nonce from DB — not caller-supplied), provisions or links the\nuser, and returns Set-Cookie response (no token in body).",
+        "operationId": "oidc_callback_public",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcPublicCallbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OIDC callback: cookies set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoLoginSuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "State not found or expired"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/federation/oidc/start": {
+      "post": {
+        "tags": [
+          "federation-sso"
+        ],
+        "summary": "`POST /api/v1/auth/federation/oidc/start`",
+        "description": "Generates a server-side state+nonce pair, persists it in\n`federation_login_state` (10-min TTL), and returns the IdP authorization\nURL.  No JWT required — this is the first step of first-time SSO (D-22).",
+        "operationId": "oidc_start_public",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OIDC start: authorize URL returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcStartResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "401": {
+            "description": "Unknown org/tenant slug"
+          }
+        }
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "tags": [
@@ -530,16 +603,6 @@
         ],
         "summary": "`POST /api/v1/auth/logout`",
         "operationId": "logout",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LogoutRequest"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "204": {
             "description": "Logged out"
@@ -3392,6 +3455,122 @@
         ]
       }
     },
+    "/api/v1/organizations/{org_id}/email-config": {
+      "get": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`GET /api/v1/organizations/{org_id}/email-config`",
+        "operationId": "get_org_email_config",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization email configuration (secrets omitted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailConfig"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No email configuration set for this organization"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`PUT /api/v1/organizations/{org_id}/email-config`",
+        "operationId": "set_org_email_config",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetOrgEmailConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Organization email configuration updated (secrets omitted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailConfig"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`DELETE /api/v1/organizations/{org_id}/email-config`",
+        "operationId": "delete_org_email_config",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Organization email configuration deleted"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/organizations/{org_id}/settings": {
       "get": {
         "tags": [
@@ -6057,6 +6236,125 @@
         ]
       }
     },
+    "/api/v1/tenants/{tenant_id}/email-config": {
+      "get": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/email-config`",
+        "operationId": "get_tenant_email_config",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tenant email configuration override (secrets omitted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailConfigOverride"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No email configuration override set for this tenant"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`PUT /api/v1/tenants/{tenant_id}/email-config`",
+        "operationId": "set_tenant_email_config",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailConfigOverride"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Tenant email configuration override updated (secrets omitted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailConfigOverride"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "email-config"
+        ],
+        "summary": "`DELETE /api/v1/tenants/{tenant_id}/email-config`",
+        "operationId": "delete_tenant_email_config",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Tenant email configuration override deleted"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/users": {
       "get": {
         "tags": [
@@ -7196,6 +7494,19 @@
           "user_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "ApiProviderConfig": {
+        "type": "object",
+        "description": "API-based provider configuration (SendGrid, Postmark, Resend, Brevo).\n\n`api_key` follows the same write-only + omit-preserving contract as\n[`SmtpConfig::password`] (D-01/D-02).",
+        "properties": {
+          "api_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Override base URL (useful for testing / self-hosted instances)."
           }
         }
       },
@@ -8349,6 +8660,114 @@
           }
         }
       },
+      "EmailConfig": {
+        "type": "object",
+        "description": "Fully resolved email configuration (all fields present).",
+        "required": [
+          "id",
+          "scope",
+          "scope_id",
+          "enabled",
+          "from_name",
+          "from_email",
+          "provider",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "from_email": {
+            "type": "string"
+          },
+          "from_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/ProviderConfig"
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/SettingsScope"
+          },
+          "scope_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The org_id or tenant_id this config belongs to."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EmailConfigOverride": {
+        "type": "object",
+        "description": "Partial tenant overrides for email configuration.\n`None` = inherit from org baseline.",
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "from_email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProviderConfig",
+                "description": "Full provider replacement (no partial merge within a provider)."
+              }
+            ]
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Some(None)` explicitly clears reply-to; `None` inherits."
+          }
+        }
+      },
+      "EmailProviderKind": {
+        "type": "string",
+        "description": "Which email backend to use.",
+        "enum": [
+          "smtp",
+          "send_grid",
+          "postmark",
+          "resend",
+          "brevo"
+        ]
+      },
       "EmailVerificationPolicy": {
         "type": "object",
         "description": "Email verification requirements.",
@@ -8898,7 +9317,8 @@
         "required": [
           "id",
           "username",
-          "email"
+          "email",
+          "tenant_id"
         ],
         "properties": {
           "email": {
@@ -8908,20 +9328,27 @@
             "type": "string",
             "format": "uuid"
           },
+          "org_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "26-05 (D-14): same contract as `tenant_slug`, resolved via the\ntenant's `organization_id`."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "23-06: exposes the caller's raw tenant_id UUID so the frontend can\ncarry it into tenant-scoped unauthenticated calls that require it\n(e.g. `resendVerification`'s `ResendVerificationRequest.tenant_id`)\nwithout re-deriving it from a slug. Already known server-side from\nthe validated JWT / AuthenticatedUser extractor — this only exposes\nit, it does not widen trust."
+          },
+          "tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "26-05 (D-14): lets the frontend restore the selected tenant after a\nhard reload without a redundant lookup. Resolved strictly from the\nauthenticated user's own `tenant_id` (never request input — T-26-05-01)\nand omitted (not an error) when the lookup fails (D-15)."
+          },
           "username": {
             "type": "string"
-          }
-        }
-      },
-      "LogoutRequest": {
-        "type": "object",
-        "required": [
-          "session_id"
-        ],
-        "properties": {
-          "session_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
@@ -9419,6 +9846,7 @@
           "config_id",
           "code",
           "redirect_uri",
+          "state",
           "nonce"
         ],
         "properties": {
@@ -9433,11 +9861,15 @@
           },
           "nonce": {
             "type": "string",
-            "description": "The nonce originally sent in the authorization request."
+            "description": "Client-supplied nonce (SECHRD-07/D-04: retained for backward\ncompatibility with older callers, but IGNORED for verification —\n`expected_nonce` always comes from the server-side `FederationLoginState`\nrow looked up via `state`, never from this field)."
           },
           "redirect_uri": {
             "type": "string",
             "description": "Redirect URI that was used in the authorization request."
+          },
+          "state": {
+            "type": "string",
+            "description": "CSRF state value from the authorization request. Used to look up the\nserver-side `FederationLoginState` row that holds the real nonce\n(SECHRD-07/D-04) — required so the callback can find its login state."
           }
         }
       },
@@ -9544,6 +9976,90 @@
           },
           "userinfo_endpoint": {
             "type": "string"
+          }
+        }
+      },
+      "OidcPublicCallbackRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/auth/federation/oidc/callback`.",
+        "required": [
+          "state",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "OidcStartRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/auth/federation/oidc/start`.",
+        "required": [
+          "federation_config_id",
+          "redirect_uri"
+        ],
+        "properties": {
+          "federation_config_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "org_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "redirect_uri": {
+            "type": "string",
+            "description": "SPA post-login destination (stored server-side; returned in callback\nresponse body so the SPA can route after receiving cookies)."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "OidcStartResponse": {
+        "type": "object",
+        "description": "Response body for `POST /api/v1/auth/federation/oidc/start`.\nThe nonce is intentionally omitted — it stays server-side (T-04-31).",
+        "required": [
+          "authorize_url",
+          "state",
+          "expires_in_secs"
+        ],
+        "properties": {
+          "authorize_url": {
+            "type": "string",
+            "description": "The IdP authorization URL to redirect the user to."
+          },
+          "expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Remaining TTL in seconds (10 min = 600)."
+          },
+          "state": {
+            "type": "string",
+            "description": "CSRF state value (must be round-tripped through the IdP)."
           }
         }
       },
@@ -9770,6 +10286,116 @@
           "Revoked"
         ]
       },
+      "ProviderConfig": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SmtpConfig"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "smtp"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ApiProviderConfig"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "send_grid"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ApiProviderConfig"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "postmark"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ApiProviderConfig"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "resend"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ApiProviderConfig"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "brevo"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "description": "Provider-specific connection details."
+      },
       "ReadyResponse": {
         "type": "object",
         "required": [
@@ -9818,18 +10444,32 @@
       },
       "RequestResetBody": {
         "type": "object",
-        "description": "Body for the request-reset endpoint.",
+        "description": "Body for the request-reset endpoint.\n\n`tenant_id` is optional (Open Question 1 / Assumption A4): the public\nforgot-password page has no prior tenant context, so it may instead\nsupply `org_slug`/`tenant_slug` (mirroring `handlers/auth.rs`'s\n`(Option<Uuid>, Option<&str>)` login pattern). Slug-resolution failure\nis enumeration-safe (D-05) — it funnels into the SAME uniform\n`{\"sent\": true}` response as an unknown account, never a distinct\nerror status.",
         "required": [
-          "tenant_id",
           "email"
         ],
         "properties": {
           "email": {
             "type": "string"
           },
+          "org_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "tenant_id": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid"
+          },
+          "tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -10251,6 +10891,36 @@
           }
         }
       },
+      "SetOrgEmailConfig": {
+        "type": "object",
+        "description": "Input for setting organization-level email config.",
+        "required": [
+          "enabled",
+          "from_name",
+          "from_email",
+          "provider"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "from_email": {
+            "type": "string"
+          },
+          "from_name": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/ProviderConfig"
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "SetOrgSettings": {
         "type": "object",
         "description": "Input for setting organization-level security settings.",
@@ -10422,6 +11092,62 @@
             "format": "uuid"
           },
           "tenant_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "SmtpConfig": {
+        "type": "object",
+        "description": "SMTP-specific configuration.\n\n`password` is write-only (D-01): `#[serde(skip_serializing)]` means it is\nnever emitted in a GET/serialized response. On the write path (D-02),\n`#[serde(default)]` lets a caller omit the field entirely (deserializing\nto `\"\"`); an empty string is the sentinel for \"no new secret supplied —\npreserve whatever is already stored\" (see `SurrealEmailConfigRepository::\nset_org_config`). A non-empty value is a real secret to encrypt+replace.",
+        "required": [
+          "host",
+          "port",
+          "username",
+          "starttls"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "starttls": {
+            "type": "boolean",
+            "description": "Use STARTTLS (true) or implicit TLS (false)."
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "SsoLoginSuccessResponse": {
+        "type": "object",
+        "description": "Returned by both OIDC callback and SAML ACS on success (alongside\nSet-Cookie headers). The `redirect_uri` field allows the SPA to route\nthe user to the originally requested destination.",
+        "required": [
+          "user_id",
+          "session_id",
+          "expires_in",
+          "redirect_uri"
+        ],
+        "properties": {
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "redirect_uri": {
+            "type": "string",
+            "description": "SPA destination URL stored during start/login."
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_id": {
             "type": "string",
             "format": "uuid"
           }
@@ -11280,6 +12006,13 @@
               }
             ]
           },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New HMAC-SHA256 shared secret (D-02 secret rotation). Encrypted\nserver-side with AES-256-GCM before storage; omit to leave the\nexisting secret untouched."
+          },
           "url": {
             "type": [
               "string",
@@ -11699,8 +12432,16 @@
       "description": "Organization and tenant security settings"
     },
     {
+      "name": "email-config",
+      "description": "Organization and tenant email provider configuration"
+    },
+    {
       "name": "federation",
       "description": "OIDC and SAML federation with external IdPs"
+    },
+    {
+      "name": "federation-sso",
+      "description": "First-time SSO — public OIDC/SAML start and callback endpoints"
     },
     {
       "name": "notification_rules",

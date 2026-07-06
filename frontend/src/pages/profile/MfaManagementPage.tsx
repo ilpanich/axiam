@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Shield, Trash2, Loader2, AlertCircle, KeyRound, Fingerprint } from "lucide-react";
-import api from "@/lib/api";
 import { authService } from "@/services/auth";
 import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
@@ -16,8 +15,9 @@ import type { AxiosError } from "axios";
 // Types & API helpers
 // ---------------------------------------------------------------------------
 
-// CQ-F17: use canonical MfaMethod type from services/users.ts
-import type { MfaMethod } from "@/services/users";
+// CQ-F17/QUAL-06: use canonical MfaMethod type + userService methods from
+// services/users.ts instead of inline api.get/api.delete (D-16).
+import { userService, type MfaMethod } from "@/services/users";
 export type { MfaMethod };
 
 interface TotpSetupResponse {
@@ -29,20 +29,6 @@ interface ErrorResponse {
   message?: string;
   error?: string;
 }
-
-// The backend has no `/users/me` alias — MFA methods are addressed by the
-// authenticated user's real id (resolved from the auth store at call sites).
-async function getMfaMethods(userId: string): Promise<MfaMethod[]> {
-  const res = await api.get<MfaMethod[] | { items: MfaMethod[] }>(
-    `/api/v1/users/${userId}/mfa-methods`,
-  );
-  return Array.isArray(res.data) ? res.data : res.data.items;
-}
-
-async function deleteMfaMethod(userId: string, id: string): Promise<void> {
-  await api.delete(`/api/v1/users/${userId}/mfa-methods/${id}`);
-}
-
 
 // ---------------------------------------------------------------------------
 // Method type badge
@@ -158,12 +144,12 @@ export function MfaManagementPage() {
 
   const { data: methods = [], isLoading } = useQuery({
     queryKey: ["mfaMethods", userId],
-    queryFn: () => getMfaMethods(userId!),
+    queryFn: () => userService.listMfaMethods(userId!),
     enabled: !!userId,
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteMfaMethod(userId!, id),
+    mutationFn: (id: string) => userService.deleteMfaMethod(userId!, id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mfaMethods"] });
       setDeleteTarget(null);

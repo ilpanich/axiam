@@ -84,6 +84,10 @@ pub struct FederationCallbackResult {
 /// OIDC Federation Service that handles external IdP integration.
 ///
 /// Generic over repository implementations for testability.
+///
+/// `Clone` (QUAL-07, axiam-api-rest): hoisted `AppState<C>` singleton,
+/// constructed once at startup and cloned per Actix worker.
+#[derive(Clone)]
 pub struct OidcFederationService<FC, FL, UR> {
     federation_config_repo: FC,
     federation_link_repo: FL,
@@ -128,15 +132,27 @@ where
         &self,
         metadata_url: &str,
     ) -> Result<OidcDiscoveryDocument, FederationError> {
-        validate_metadata_url(metadata_url)?;
+        // Test-only seam (mirrors `JwksCache::new_allow_private_networks`,
+        // SEC-054): `self.cache`'s allow-private bit is threaded through here
+        // so integration tests can point `metadata_url` at a loopback
+        // wiremock IdP. `false` (the JwksCache default, and the ONLY value
+        // ever produced by `JwksCache::new()` in production) preserves the
+        // exact pre-existing behavior below. MUST NOT be set to `true`
+        // outside of test code — production always constructs `JwksCache`
+        // via `new()`.
+        let allow_private = self.cache.allow_private_networks();
 
-        let response = self
-            .http_client
-            .get(metadata_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
+        if !allow_private {
+            validate_metadata_url(metadata_url)?;
+        }
+
+        // SECHRD-02: route the discovery-document GET through the shared,
+        // IP-pinning SSRF guard (D-01a/b/c). Production always fails closed
+        // against private/loopback/link-local addresses and internal
+        // redirect targets — `allow_private=false`.
+        let response = crate::ssrf::guarded_fetch(metadata_url, allow_private, |c, u| c.get(u))
             .await
-            .map_err(|e| FederationError::DiscoveryFailed(format!("HTTP request failed: {e}")))?;
+            .map_err(|e| FederationError::DiscoveryFailed(e.to_string()))?;
 
         if !response.status().is_success() {
             return Err(FederationError::DiscoveryFailed(format!(
@@ -166,6 +182,8 @@ where
         // Validate that critical endpoints in the discovery document use
         // HTTPS. A compromised/malicious discovery endpoint could return
         // http:// URLs, leaking client_secret during token exchange.
+        // Skipped under the same test-only `allow_private` seam as above —
+        // a loopback wiremock IdP serves plain HTTP.
         for (name, url) in [
             ("authorization_endpoint", &doc.authorization_endpoint),
             ("token_endpoint", &doc.token_endpoint),
@@ -174,7 +192,7 @@ where
             let parsed = url::Url::parse(url).map_err(|e| {
                 FederationError::DiscoveryFailed(format!("{name} is not a valid URL: {e}"))
             })?;
-            if parsed.scheme() != "https" {
+            if !allow_private && parsed.scheme() != "https" {
                 return Err(FederationError::DiscoveryFailed(format!(
                     "{name} must use HTTPS, got: {url}"
                 )));
@@ -439,22 +457,25 @@ where
         client_id: &str,
         client_secret: &str,
     ) -> Result<TokenResponse, FederationError> {
-        let response = self
-            .http_client
-            .post(token_endpoint)
-            .timeout(std::time::Duration::from_secs(10))
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", redirect_uri),
-                ("client_id", client_id),
-                ("client_secret", client_secret),
-            ])
-            .send()
-            .await
-            .map_err(|e| {
-                FederationError::TokenExchangeFailed(format!("HTTP request failed: {e}"))
-            })?;
+        // SECHRD-02: route the token-endpoint POST through the shared,
+        // IP-pinning SSRF guard (D-01a/b/c) — the token endpoint comes from
+        // the (already HTTPS-validated) discovery document, not just the
+        // configured issuer, so it must be guarded here too.
+        let form_params = [
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ];
+        // Test-only seam — see `discover()`'s matching comment. `false` in
+        // every production code path (`JwksCache::new()`'s default).
+        let allow_private = self.cache.allow_private_networks();
+        let response = crate::ssrf::guarded_fetch(token_endpoint, allow_private, |c, u| {
+            c.post(u).form(&form_params)
+        })
+        .await
+        .map_err(|e| FederationError::TokenExchangeFailed(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();

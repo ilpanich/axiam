@@ -12,9 +12,9 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{generate_refresh_token, hash_refresh_token};
-use axiam_auth::{AuthService, MfaMethodService};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::password_reset::CreatePasswordResetToken;
 use axiam_core::models::settings::system_defaults;
@@ -25,11 +25,8 @@ use axiam_core::repository::{
     UserRepository,
 };
 use axiam_db::repository::{
-    SurrealFederationLinkRepository, SurrealOrganizationRepository,
-    SurrealPasswordHistoryRepository, SurrealPasswordResetTokenRepository,
-    SurrealPermissionRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository,
+    SurrealOrganizationRepository, SurrealPasswordResetTokenRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use chrono::{Duration, Utc};
 use surrealdb::Surreal;
@@ -122,62 +119,18 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     (db, org.id, tenant.id, user.id)
 }
 
-fn make_auth_service(
-    db: &Surreal<TestDb>,
-    auth: &AuthConfig,
-) -> AuthService<
-    SurrealUserRepository<TestDb>,
-    SurrealSessionRepository<TestDb>,
-    SurrealFederationLinkRepository<TestDb>,
-    SurrealRefreshTokenRepository<TestDb>,
-> {
-    AuthService::new(
-        SurrealUserRepository::new(db.clone()),
-        SurrealSessionRepository::new(db.clone()),
-        SurrealFederationLinkRepository::new(db.clone()),
-        SurrealRefreshTokenRepository::new(db.clone()),
-        auth.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-    )
-}
-
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(make_auth_service(&$db, &$auth)))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealSettingsRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRoleRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealPermissionRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
                 .app_data(web::Data::new(
                     Arc::new(SurrealSessionRepository::new($db.clone()))
                         as Arc<dyn axiam_api_rest::SessionValidator>,
                 ))
-                .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
+                .app_data(web::Data::new(AppState::for_test(
                     $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealPasswordHistoryRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealPasswordResetTokenRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationLinkRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(reqwest::Client::new()))
-                .app_data(web::Data::new(MfaMethodService::new(
-                    SurrealUserRepository::new($db.clone()),
-                    SurrealWebauthnCredentialRepository::new($db.clone()),
+                    $auth.clone(),
                 )))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>

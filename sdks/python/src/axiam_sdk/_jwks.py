@@ -75,19 +75,7 @@ class JwksVerifier:
         if header.get("alg") != "EdDSA":
             raise ValueError(f"unexpected alg {header.get('alg')!r}: only EdDSA is accepted")
 
-        try:
-            signing_key = self._client.get_signing_key_from_jwt(token)
-        except PyJWTError:
-            # Unknown kid, a stale in-TTL cache after key rotation, or an
-            # empty/malformed keyset response (e.g. a rotation window where
-            # the new key has not yet propagated) → force exactly one
-            # rate-limited refetch, then retry once. A second failure
-            # propagates. PyJWTError is the common base of both
-            # PyJWKClientError (unknown kid) and PyJWKSetError (empty/invalid
-            # keyset) — both failure modes warrant the same forced-refetch
-            # response.
-            self._force_refetch_if_allowed()
-            signing_key = self._client.get_signing_key_from_jwt(token)
+        signing_key = self._get_signing_key(token)
 
         return jwt.decode(
             token,
@@ -96,16 +84,44 @@ class JwksVerifier:
             options={"require": ["sub"]},
         )
 
-    def _force_refetch_if_allowed(self) -> None:
-        """Invalidate the JWKS-set cache to force the next
-        ``get_signing_key_from_jwt`` call to refetch, rate-limited to once
-        per ``_FORCED_REFETCH_MIN_INTERVAL_SECONDS``."""
+    def _get_signing_key(self, token: str) -> Any:
+        """Resolve the signing key for *token*, single-flighted through
+        ``_refetch_lock`` so a burst of concurrent callers against a cold
+        or stale cache — forced-refetch or not — collapses to exactly one
+        network fetch (D-08/D-09, PERF-03).
+
+        The lock spans the ENTIRE lookup-and-fetch sequence, not merely the
+        "should-I-invalidate" decision (the pre-existing TOCTOU gap this
+        closes): every waiter, once it acquires the lock, first retries
+        against whatever a prior lock-holder may have already
+        fetched/repaired before ever triggering another fetch itself.
+        """
         with self._refetch_lock:
+            try:
+                return self._client.get_signing_key_from_jwt(token)
+            except PyJWTError:
+                # Unknown kid, a stale in-TTL cache after key rotation, or
+                # an empty/malformed keyset response (e.g. a rotation
+                # window where the new key has not yet propagated).
+                # PyJWTError is the common base of both PyJWKClientError
+                # (unknown kid) and PyJWKSetError (empty/invalid keyset) —
+                # both failure modes warrant the same forced-refetch
+                # response below.
+                pass
+
             now = time.monotonic()
             if (
                 self._last_forced_refetch is not None
                 and now - self._last_forced_refetch < _FORCED_REFETCH_MIN_INTERVAL_SECONDS
             ):
-                return
+                # Rate-limited: another caller already forced a refetch
+                # recently (while we waited for the lock, or just before
+                # us) — surface whatever the current cache yields rather
+                # than hammering the endpoint again.
+                return self._client.get_signing_key_from_jwt(token)
+
+            # Force exactly one rate-limited refetch, then retry once. A
+            # second failure propagates to the caller.
             self._client.jwk_set_cache = None
             self._last_forced_refetch = now
+            return self._client.get_signing_key_from_jwt(token)

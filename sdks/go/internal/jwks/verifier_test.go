@@ -245,3 +245,71 @@ func TestJWKS_UnknownKidRefetchesOnce(t *testing.T) {
 		t.Fatal("expected verification to fail for a kid unknown even after refetch")
 	}
 }
+
+// TestJWKS_ConcurrentUnknownKidSingleFlight proves D-08/D-09: a burst of
+// concurrent Verify calls against an unknown kid (cold cache) collapses to
+// exactly one forced JWKS refetch, not one per goroutine.
+func TestJWKS_ConcurrentUnknownKidSingleFlight(t *testing.T) {
+	priv1, pubJWK1 := generateKey(t, "kid-1")
+	priv2, pubJWK2 := generateKey(t, "kid-2")
+
+	// Server starts out only knowing kid-1.
+	srv := newMutableJWKSServer(t, marshalSet(t, pubJWK1))
+
+	ctx := context.Background()
+	v, err := NewVerifier(ctx, srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	// Prime the cache with kid-1 via an initial verify.
+	primeClaims := Claims{Subject: "priming", TenantID: "t", OrgID: "o", Exp: time.Now().Add(time.Hour).Unix()}
+	primeToken := signEdDSA(t, priv1, "kid-1", primeClaims)
+	if _, err := v.Verify(ctx, primeToken); err != nil {
+		t.Fatalf("priming Verify: %v", err)
+	}
+
+	hitsBeforeRotation := srv.Hits()
+
+	// Rotate: server now serves both keys; sign a token with kid-2, which
+	// the verifier's cache does not yet know about (cold-cache miss for
+	// every goroutine in the burst below).
+	srv.setBody(marshalSet(t, pubJWK1, pubJWK2))
+	unknownClaims := Claims{Subject: "user-456", TenantID: "t2", OrgID: "o2", Exp: time.Now().Add(time.Hour).Unix()}
+	tokenKid2 := signEdDSA(t, priv2, "kid-2", unknownClaims)
+
+	const goroutines = 8
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, verifyErr := v.Verify(ctx, tokenKid2)
+			errs[idx] = verifyErr
+		}(i)
+	}
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("goroutine %d: Verify failed: %v", i, e)
+		}
+	}
+
+	hitsAfterBurst := srv.Hits()
+	if hitsAfterBurst != hitsBeforeRotation+1 {
+		t.Fatalf("expected exactly ONE JWKS fetch for the concurrent unknown-kid burst, got %d additional hits (before=%d after=%d)",
+			hitsAfterBurst-hitsBeforeRotation, hitsBeforeRotation, hitsAfterBurst)
+	}
+
+	// Subsequent verification after the refresh must reuse the cache (no
+	// extra fetch).
+	hitsBeforeReuse := srv.Hits()
+	if _, err := v.Verify(ctx, tokenKid2); err != nil {
+		t.Fatalf("post-refresh Verify: %v", err)
+	}
+	if srv.Hits() != hitsBeforeReuse {
+		t.Fatalf("expected cache reuse after refresh, got an extra fetch (before=%d after=%d)", hitsBeforeReuse, srv.Hits())
+	}
+}

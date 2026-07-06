@@ -7,6 +7,12 @@ use std::sync::Arc;
 use actix_web::{App, test, web};
 use axiam_api_rest::health::HealthChecker;
 use axiam_api_rest::server::health_routes;
+use axiam_api_rest::state::AppState;
+use axiam_auth::config::AuthConfig;
+use surrealdb::Surreal;
+use surrealdb::engine::local::Mem;
+
+type TestDb = surrealdb::engine::local::Db;
 
 struct MockHealthy;
 
@@ -24,13 +30,25 @@ impl HealthChecker for MockUnhealthy {
     }
 }
 
+/// Build an `AppState<TestDb>` (QUAL-01) with `health_checker` overridden to
+/// the given test double — `/ready` now extracts `web::Data<AppState<C>>`
+/// instead of a standalone `web::Data<Arc<dyn HealthChecker>>`.
+async fn state_with_checker(checker: Arc<dyn HealthChecker>) -> AppState<TestDb> {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let mut state = AppState::for_test(db, AuthConfig::default());
+    state.health_checker = checker;
+    state
+}
+
 #[actix_rt::test]
 async fn health_returns_200_ok() {
-    let checker: Arc<dyn HealthChecker> = Arc::new(MockHealthy);
+    let state = state_with_checker(Arc::new(MockHealthy)).await;
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(checker))
-            .configure(health_routes),
+            .app_data(web::Data::new(state))
+            .configure(health_routes::<TestDb>),
     )
     .await;
 
@@ -45,11 +63,11 @@ async fn health_returns_200_ok() {
 
 #[actix_rt::test]
 async fn ready_returns_200_when_db_healthy() {
-    let checker: Arc<dyn HealthChecker> = Arc::new(MockHealthy);
+    let state = state_with_checker(Arc::new(MockHealthy)).await;
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(checker))
-            .configure(health_routes),
+            .app_data(web::Data::new(state))
+            .configure(health_routes::<TestDb>),
     )
     .await;
 
@@ -65,11 +83,11 @@ async fn ready_returns_200_when_db_healthy() {
 
 #[actix_rt::test]
 async fn ready_returns_503_when_db_unhealthy() {
-    let checker: Arc<dyn HealthChecker> = Arc::new(MockUnhealthy);
+    let state = state_with_checker(Arc::new(MockUnhealthy)).await;
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(checker))
-            .configure(health_routes),
+            .app_data(web::Data::new(state))
+            .configure(health_routes::<TestDb>),
     )
     .await;
 

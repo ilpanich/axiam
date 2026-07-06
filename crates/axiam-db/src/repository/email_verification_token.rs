@@ -11,6 +11,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
 struct TokenRow {
@@ -31,11 +32,6 @@ struct TokenRowWithId {
     expires_at: DateTime<Utc>,
     consumed_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 impl TokenRow {
@@ -128,10 +124,7 @@ impl<C: Connection> EmailVerificationTokenRepository
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "email_verification_token".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "email_verification_token", &id_str)?;
 
         Ok(row.into_token(id)?)
     }
@@ -161,10 +154,11 @@ impl<C: Connection> EmailVerificationTokenRepository
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<TokenRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "email_verification_token".into(),
-            id: format!("token_hash={token_hash}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "email_verification_token",
+            &format!("token_hash={token_hash}"),
+        )?;
 
         Ok(row.try_into_token()?)
     }
@@ -213,10 +207,11 @@ impl<C: Connection> EmailVerificationTokenRepository
 
         // Statement 1 is the SELECT with full record_id.
         let rows: Vec<TokenRowWithId> = result.take(1).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "email_verification_token".into(),
-            id: format!("token_hash={token_hash}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "email_verification_token",
+            &format!("token_hash={token_hash}"),
+        )?;
 
         Ok(row.try_into_token()?)
     }

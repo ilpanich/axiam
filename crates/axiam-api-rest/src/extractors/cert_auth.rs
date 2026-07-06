@@ -8,12 +8,11 @@ use actix_web::HttpRequest;
 use actix_web::web;
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceIdentity;
-use axiam_db::{SurrealCaCertificateRepository, SurrealCertificateRepository};
-use axiam_pki::DeviceAuthService;
 use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
+use crate::state::AppState;
 
 /// Authenticated device context extracted from a client certificate.
 ///
@@ -31,15 +30,11 @@ impl CertificateAuthenticated {
     /// This is called manually from the handler rather than via
     /// `FromRequest`, because the concrete `DeviceAuthService` type
     /// depends on the DB connection generic `C`.
-    pub async fn extract<C: Connection>(req: &HttpRequest) -> Result<Self, AxiamApiError> {
-        let service = req
-            .app_data::<web::Data<
-                DeviceAuthService<
-                    SurrealCertificateRepository<C>,
-                    SurrealCaCertificateRepository<C>,
-                >,
-            >>()
-            .ok_or(AxiamError::Internal("missing DeviceAuthService".into()))?;
+    pub async fn extract<C: Connection + Clone>(req: &HttpRequest) -> Result<Self, AxiamApiError> {
+        let state = req
+            .app_data::<web::Data<AppState<C>>>()
+            .ok_or(AxiamError::Internal("missing AppState".into()))?;
+        let service = &state.device_auth_service;
 
         let header = req
             .headers()

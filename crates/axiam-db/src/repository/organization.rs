@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
@@ -44,12 +45,6 @@ impl OrganizationRowWithId {
             updated_at: self.updated_at,
         })
     }
-}
-
-/// Row struct for count queries.
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 /// SurrealDB implementation of the Organization repository.
@@ -91,10 +86,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<OrganizationRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "organization".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "organization", &id_str)?;
 
         Ok(Organization {
             id,
@@ -117,10 +109,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
             .map_err(DbError::from)?;
 
         let rows: Vec<OrganizationRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "organization".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "organization", &id_str)?;
 
         Ok(Organization {
             id,
@@ -146,10 +135,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
             .map_err(DbError::from)?;
 
         let rows: Vec<OrganizationRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "organization".into(),
-            id: format!("slug={slug}"),
-        })?;
+        let row = take_first_or_not_found(rows, "organization", &format!("slug={slug}"))?;
 
         Ok(row.try_into_organization()?)
     }
@@ -192,10 +178,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<OrganizationRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "organization".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "organization", &id_str)?;
 
         Ok(Organization {
             id,
@@ -224,7 +207,6 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let mut result = self
             .db
@@ -246,11 +228,6 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
             .map(|row| row.try_into_organization())
             .collect::<Result<Vec<_>, DbError>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 }

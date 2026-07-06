@@ -79,3 +79,8 @@ __pycache__/
 .ruff_cache/
 sdks/python/dist/
 sdks/python/build/
+
+# `uv run --with-editable ".[dev]"` local ephemeral test env (Phase 27) — this
+# SDK has no committed venv/lockfile convention; regenerate on demand.
+sdks/python/.venv/
+sdks/python/uv.lock

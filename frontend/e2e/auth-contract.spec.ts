@@ -29,10 +29,17 @@ async function mockAuthMe(page: Page): Promise<void> {
     route.fulfill({
       status: 200,
       contentType: "application/json",
+      // Matches the real backend MeResponse shape (crates/axiam-api-rest/src/
+      // handlers/auth.rs) — the user is nested under `user`, and `tenant_id`
+      // (23-06) is required for fetchCurrentUser() to populate the store and
+      // for resendVerification's body (Pitfall 4) to be well-formed.
       body: JSON.stringify({
-        id: "contract-test-user",
-        username: "contract",
-        email: "contract@test.example",
+        user: {
+          id: "contract-test-user",
+          username: "contract",
+          email: "contract@test.example",
+          tenant_id: "11111111-1111-1111-1111-111111111111",
+        },
         permissions: [],
       }),
     });
@@ -40,10 +47,16 @@ async function mockAuthMe(page: Page): Promise<void> {
 }
 
 /**
- * Mock GET /api/v1/users/me (ProfilePage profile data).
+ * Mock GET /api/v1/users/{userId} (ProfilePage profile data).
+ *
+ * ProfilePage.getCurrentUser() addresses the user by their real id (there is
+ * no `/users/me` alias) — the id comes from the auth store, which
+ * `mockAuthMe` populates as "contract-test-user". A single-segment glob (`*`)
+ * matches that dynamic id without crossing into `/users/me/mfa-methods`
+ * (mocked separately by `mockMfaMethods`).
  */
 async function mockUserProfile(page: Page): Promise<void> {
-  await page.route("**/api/v1/users/me", (route) => {
+  await page.route("**/api/v1/users/*", (route) => {
     if (route.request().method() === "GET") {
       route.fulfill({
         status: 200,
@@ -85,10 +98,12 @@ test.describe("Auth endpoint contract", () => {
   test.describe("ForgotPasswordPage", () => {
     test("POST /api/v1/auth/reset — not /auth/forgot-password", async ({ page }) => {
       let capturedUrl: string | undefined;
+      let capturedBody: Record<string, unknown> | null = null;
 
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
           capturedUrl = route.request().url();
+          capturedBody = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
           route.continue();
@@ -105,24 +120,64 @@ test.describe("Auth endpoint contract", () => {
       expect(capturedUrl).toBeDefined();
       expect(capturedUrl).toContain("/api/v1/auth/reset");
       expect(capturedUrl).not.toContain("/auth/forgot-password");
-    });
-  });
 
-  test.describe("ResetPasswordPage", () => {
-    test("POST /api/v1/auth/reset/confirm — not /auth/reset-password", async ({ page }) => {
-      let capturedUrl: string | undefined;
+      // 23-06: RequestResetBody requires `email`; the SECFIX-06 defining
+      // signal is that the body actually carries it (not just the path).
+      expect(capturedBody).not.toBeNull();
+      expect(capturedBody?.email).toBe("test@example.com");
+    });
+
+    test("POST /api/v1/auth/reset carries org_slug/tenant_slug from the page URL (D-04 / Open Question 1)", async ({
+      page,
+    }) => {
+      let capturedBody: Record<string, unknown> | null = null;
 
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
-          capturedUrl = route.request().url();
+          capturedBody = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
           route.continue();
         }
       });
 
-      // Provide a token in the query string so the form renders (not the "no token" state)
-      await page.goto("/auth/reset-password?token=contract-test-token");
+      // The slug is carried in the forgot-password page's OWN URL — never
+      // user-typed, never inferred from the email domain (D-04).
+      await page.goto("/auth/forgot-password?org=acme-corp&tenant=production");
+      await page.getByLabel("Email address").fill("test@example.com");
+      await page.getByRole("button", { name: /Send Reset Link/i }).click();
+
+      await expect(page.getByText(/If an account with that email exists/i)).toBeVisible();
+
+      expect(capturedBody).not.toBeNull();
+      expect(capturedBody?.email).toBe("test@example.com");
+      expect(capturedBody?.org_slug).toBe("acme-corp");
+      expect(capturedBody?.tenant_slug).toBe("production");
+    });
+  });
+
+  test.describe("ResetPasswordPage", () => {
+    test("POST /api/v1/auth/reset/confirm — not /auth/reset-password", async ({ page }) => {
+      let capturedUrl: string | undefined;
+      let capturedBody: Record<string, unknown> | null = null;
+      const tenantId = "22222222-2222-2222-2222-222222222222";
+
+      await page.route("**/auth/**", (route) => {
+        if (route.request().method() === "POST") {
+          capturedUrl = route.request().url();
+          capturedBody = route.request().postDataJSON();
+          route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+        } else {
+          route.continue();
+        }
+      });
+
+      // Provide token + tenant_id in the query string so the form renders
+      // (not the "invalid reset link" state) — mirrors VerifyEmailPage's
+      // already-shipped `?token=…&tenant_id=…` pattern (Open Question 2).
+      await page.goto(
+        `/auth/reset-password?token=contract-test-token&tenant_id=${tenantId}`
+      );
 
       // Fill a password that satisfies the policy checker (12+ chars, upper, lower, digit, special)
       const newPassword = "Contract@Test123!";
@@ -140,32 +195,53 @@ test.describe("Auth endpoint contract", () => {
       expect(capturedUrl).toBeDefined();
       expect(capturedUrl).toContain("/api/v1/auth/reset/confirm");
       expect(capturedUrl).not.toContain("/auth/reset-password");
+
+      // 23-06: ConfirmResetBody requires tenant_id/token/new_password — the
+      // SECFIX-06 defining signal is that the body actually carries them.
+      expect(capturedBody).not.toBeNull();
+      expect(capturedBody?.tenant_id).toBe(tenantId);
+      expect(capturedBody?.token).toBe("contract-test-token");
+      expect(capturedBody?.new_password).toBe(newPassword);
     });
   });
 
   test.describe("VerifyEmailPage", () => {
-    test("GET /api/v1/auth/verify-email — not /auth/verify-email", async ({ page }) => {
+    test("POST /api/v1/auth/verify-email — not /auth/verify-email", async ({ page }) => {
       let capturedUrl: string | undefined;
+      let capturedBody: Record<string, unknown> | null = null;
+      const tenantId = "33333333-3333-3333-3333-333333333333";
 
+      // `verifyEmail` is a POST (VerifyEmailRequest {tenant_id, token} in the
+      // body) — the page's on-mount verification call, not a GET.
       await page.route("**/auth/**", (route) => {
-        if (route.request().method() === "GET") {
+        if (route.request().method() === "POST") {
           capturedUrl = route.request().url();
+          capturedBody = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
           route.continue();
         }
       });
 
-      // Token in query string triggers the on-mount verification call
-      await page.goto("/auth/verify-email?token=contract-verify-token");
+      // Both `token` AND `tenant_id` are required for the page to trigger
+      // verification (VerifyEmailPage's hasRequiredParams gate) — Open
+      // Question 2.
+      await page.goto(
+        `/auth/verify-email?token=contract-verify-token&tenant_id=${tenantId}`
+      );
 
       // Wait for success state (email verified)
       await expect(page.getByText(/Email verified/i)).toBeVisible({ timeout: 5_000 });
 
       expect(capturedUrl).toBeDefined();
       expect(capturedUrl).toContain("/api/v1/auth/verify-email");
-      expect(capturedUrl).toContain("token=contract-verify-token");
       expect(capturedUrl).not.toContain("/auth/verify-email?");
+
+      // 23-06: VerifyEmailRequest requires BOTH tenant_id and token in the
+      // body — the SECFIX-06 defining signal.
+      expect(capturedBody).not.toBeNull();
+      expect(capturedBody?.tenant_id).toBe(tenantId);
+      expect(capturedBody?.token).toBe("contract-verify-token");
     });
   });
 
@@ -174,6 +250,7 @@ test.describe("Auth endpoint contract", () => {
   test.describe("ProfilePage", () => {
     test("resend-verification POST /api/v1/auth/resend-verification — not /auth/resend-verification", async ({ page }) => {
       let capturedUrl: string | undefined;
+      let capturedBody: Record<string, unknown> | null = null;
 
       // Mock auth init so the app treats us as authenticated
       await mockAuthMe(page);
@@ -183,6 +260,7 @@ test.describe("Auth endpoint contract", () => {
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
           capturedUrl = route.request().url();
+          capturedBody = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
           route.continue();
@@ -202,6 +280,14 @@ test.describe("Auth endpoint contract", () => {
       expect(capturedUrl).toBeDefined();
       expect(capturedUrl).toContain("/api/v1/auth/resend-verification");
       expect(capturedUrl).not.toContain("/auth/resend-verification");
+
+      // 23-06 / Pitfall 4: ResendVerificationRequest requires BOTH tenant_id
+      // AND email — previously the frontend sent NO body at all (guaranteed
+      // 400). tenant_id/email come from the authenticated auth store
+      // (populated here via mockAuthMe).
+      expect(capturedBody).not.toBeNull();
+      expect(capturedBody?.tenant_id).toBe("11111111-1111-1111-1111-111111111111");
+      expect(capturedBody?.email).toBe("contract@test.example");
     });
   });
 

@@ -2,7 +2,6 @@ import { useState, useActionState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { User, Lock, Shield, CheckCircle2, AlertCircle, Pencil, X, Loader2 } from "lucide-react";
-import api from "@/lib/api";
 import { authService } from "@/services/auth";
 import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
@@ -12,81 +11,19 @@ import { Label } from "@/components/ui/label";
 import type { AxiosError } from "axios";
 
 // ---------------------------------------------------------------------------
-// API helpers (inline, per spec)
+// QUAL-06/D-16: data calls route through the canonical userService (get,
+// update, listMfaMethods) instead of inline api.get/api.put — see
+// services/users.ts. `User.metadata` already carries the free-form metadata
+// object (backend has no `display_name` column; it lives in `metadata`), and
+// `mapUserFromApi` already projects `display_name` onto the top-level field.
 // ---------------------------------------------------------------------------
 
-// Backend UserResponse: there is NO `display_name` column — it lives inside
-// the free-form `metadata` object (key `display_name`, shared with the users
-// admin UI). `email_verified` is serialized directly on UserResponse.
-// Source: crates/axiam-api-rest/src/handlers/users.rs (UserResponse,
-// UpdateUserRequest).
-interface UserMetadata {
-  display_name?: string;
-  [key: string]: unknown;
-}
-
-interface UserResponse {
-  id: string;
-  username: string;
-  email: string;
-  email_verified: boolean;
-  metadata: UserMetadata;
-}
-
-/** View-model with `display_name` projected out of `metadata` for the UI. */
-interface UserProfile {
-  id: string;
-  username: string;
-  email: string;
-  email_verified: boolean;
-  display_name: string | null;
-  /** Raw metadata, preserved so updates don't clobber other keys. */
-  metadata: UserMetadata;
-}
-
-// CQ-F17: use canonical MfaMethod type from services/users.ts
-import type { MfaMethod } from "@/services/users";
-
-interface UpdateProfilePayload {
-  email?: string;
-  metadata?: UserMetadata;
-}
+// CQ-F17: use canonical User type from services/users.ts
+import { userService, type User as UserProfile } from "@/services/users";
 
 interface ErrorResponse {
   message?: string;
   error?: string;
-}
-
-// The backend addresses users by their real id — there is no `/users/me`
-// alias — so the authenticated user's id is threaded in from the auth store.
-async function getCurrentUser(userId: string): Promise<UserProfile> {
-  const res = await api.get<UserResponse>(`/api/v1/users/${userId}`);
-  const u = res.data;
-  const metadata = u.metadata ?? {};
-  return {
-    id: u.id,
-    username: u.username,
-    email: u.email,
-    email_verified: u.email_verified,
-    display_name:
-      typeof metadata.display_name === "string" ? metadata.display_name : null,
-    metadata,
-  };
-}
-
-async function updateProfile(
-  userId: string,
-  data: UpdateProfilePayload,
-): Promise<UserResponse> {
-  const res = await api.put<UserResponse>(`/api/v1/users/${userId}`, data);
-  return res.data;
-}
-
-async function getMfaMethods(userId: string): Promise<MfaMethod[]> {
-  const res = await api.get<MfaMethod[] | { items: MfaMethod[] }>(
-    `/api/v1/users/${userId}/mfa-methods`,
-  );
-  return Array.isArray(res.data) ? res.data : res.data.items;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,21 +65,30 @@ export function ProfilePage() {
   const [verificationMessage, setVerificationMessage] = useState<string | null>(null);
 
   const userId = useAuthStore((s) => s.user?.id);
+  const currentUser = useAuthStore((s) => s.user);
 
-  const { data: profile, isLoading, error: loadError } = useQuery({
+  const { data: profile, isLoading, error: loadError } = useQuery<UserProfile>({
     queryKey: ["currentUser", userId],
-    queryFn: () => getCurrentUser(userId!),
+    queryFn: () => userService.get(userId!),
     enabled: !!userId,
   });
 
   const { data: mfaMethods } = useQuery({
     queryKey: ["mfaMethods", userId],
-    queryFn: () => getMfaMethods(userId!),
+    queryFn: () => userService.listMfaMethods(userId!),
     enabled: !!userId,
   });
 
+  // 23-RESEARCH Pitfall 4: `resendVerification` is a PUBLIC/unauthenticated
+  // backend route that requires BOTH `tenant_id` AND `email` in the body —
+  // both are already available from the authenticated auth store.
   const resendMutation = useMutation({
-    mutationFn: authService.resendVerification,
+    mutationFn: () => {
+      if (!currentUser?.tenant_id || !currentUser?.email) {
+        return Promise.reject(new Error("missing tenant context or email"));
+      }
+      return authService.resendVerification(currentUser.tenant_id, currentUser.email);
+    },
     onSuccess: () => {
       setVerificationMessage("Verification email sent. Please check your inbox.");
     },
@@ -157,17 +103,13 @@ export function ProfilePage() {
       const display_name = (formData.get("display_name") as string).trim();
       const email = (formData.get("email") as string).trim();
       try {
-        // display_name has no backend column — persist it inside `metadata`,
-        // merging with existing keys so we don't drop other metadata.
-        const metadata: UserMetadata = { ...(profile?.metadata ?? {}) };
-        if (display_name) {
-          metadata.display_name = display_name;
-        } else {
-          delete metadata.display_name;
-        }
-        await updateProfile(userId!, {
+        // display_name has no backend column — userService.update routes it
+        // into `metadata.display_name` on the wire (same convention as
+        // UserDetailPage/UsersPage's edit forms: `|| undefined` to omit it
+        // when cleared).
+        await userService.update(userId!, {
           email: email || undefined,
-          metadata,
+          display_name: display_name || undefined,
         });
         await queryClient.invalidateQueries({ queryKey: ["currentUser"] });
         setEditing(false);

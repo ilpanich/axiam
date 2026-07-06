@@ -3,7 +3,6 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::models::organization::{CreateOrganization, Organization, UpdateOrganization};
 use axiam_core::repository::{OrganizationRepository, PaginatedResult, Pagination, RoleRepository};
-use axiam_db::{SurrealOrganizationRepository, SurrealRoleRepository};
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -11,6 +10,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
 
 // -----------------------------------------------------------------------
 // Request types (CQ-B25)
@@ -42,11 +42,10 @@ pub struct UpdateOrganizationRequest {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealOrganizationRepository<C>>,
-    role_repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<CreateOrganizationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("organizations:create", Uuid::nil())
@@ -54,7 +53,8 @@ pub async fn create<C: Connection>(
         .await?;
 
     // Restrict organization creation to system-wide super-admin only.
-    let roles = role_repo
+    let roles = state
+        .role_repo
         .get_user_roles(user.tenant_id, user.user_id)
         .await?;
     let is_super_admin = roles.iter().any(|r| r.name == "super-admin");
@@ -72,7 +72,7 @@ pub async fn create<C: Connection>(
         slug: req.slug,
         metadata: req.metadata,
     };
-    let org = repo.create(input).await?;
+    let org = state.org_repo.create(input).await?;
     Ok(HttpResponse::Created().json(org))
 }
 
@@ -87,11 +87,10 @@ pub async fn create<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealOrganizationRepository<C>>,
-    role_repo: web::Data<SurrealRoleRepository<C>>,
+    state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("organizations:list", Uuid::nil())
@@ -99,7 +98,8 @@ pub async fn list<C: Connection>(
         .await?;
 
     // Restrict organization listing to system-wide super-admin only.
-    let roles = role_repo
+    let roles = state
+        .role_repo
         .get_user_roles(user.tenant_id, user.user_id)
         .await?;
     let is_super_admin = roles.iter().any(|r| r.name == "super-admin");
@@ -111,7 +111,7 @@ pub async fn list<C: Connection>(
         ));
     }
 
-    let result = repo.list(query.into_inner()).await?;
+    let result = state.org_repo.list(query.into_inner()).await?;
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -127,10 +127,10 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealOrganizationRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("organizations:get", Uuid::nil())
@@ -147,7 +147,7 @@ pub async fn get<C: Connection>(
         ));
     }
 
-    let org = repo.get_by_id(org_id).await?;
+    let org = state.org_repo.get_by_id(org_id).await?;
     Ok(HttpResponse::Ok().json(org))
 }
 
@@ -164,10 +164,10 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealOrganizationRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateOrganizationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -191,7 +191,7 @@ pub async fn update<C: Connection>(
         slug: req.slug,
         metadata: req.metadata,
     };
-    let org = repo.update(org_id, input).await?;
+    let org = state.org_repo.update(org_id, input).await?;
     Ok(HttpResponse::Ok().json(org))
 }
 
@@ -207,10 +207,10 @@ pub async fn update<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete<C: Connection>(
+pub async fn delete<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealOrganizationRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("organizations:delete", Uuid::nil())
@@ -227,6 +227,6 @@ pub async fn delete<C: Connection>(
         ));
     }
 
-    repo.delete(org_id).await?;
+    state.org_repo.delete(org_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

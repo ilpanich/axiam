@@ -3,20 +3,14 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::service::{LoginInput, LoginOutput, RefreshInput, VerifyMfaInput};
-use axiam_auth::token::{issue_access_token, validate_access_token};
-use axiam_auth::{AuthService, MfaMethodService};
+use axiam_auth::token::{issue_service_account_token, validate_access_token};
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceAuthResponse;
 use axiam_core::repository::{
     OrganizationRepository, PermissionRepository, RoleRepository, SettingsRepository,
     TenantRepository, UserRepository,
 };
-use axiam_db::{
-    SurrealFederationLinkRepository, SurrealOrganizationRepository,
-    SurrealPasswordHistoryRepository, SurrealPermissionRepository, SurrealRefreshTokenRepository,
-    SurrealRoleRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
-};
+use axiam_db::{SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use surrealdb::Connection;
@@ -31,16 +25,7 @@ use crate::middleware::csrf::{
     access_cookie, clear_access_cookie, clear_csrf_cookie, clear_refresh_cookie, csrf_cookie,
     generate_csrf_token, refresh_cookie,
 };
-
-type AuthSvc<C> = AuthService<
-    SurrealUserRepository<C>,
-    SurrealSessionRepository<C>,
-    SurrealFederationLinkRepository<C>,
-    SurrealRefreshTokenRepository<C>,
->;
-
-type MfaMethodSvc<C> =
-    MfaMethodService<SurrealUserRepository<C>, SurrealWebauthnCredentialRepository<C>>;
+use crate::state::AppState;
 
 // -----------------------------------------------------------------------
 // Request / response types
@@ -67,6 +52,23 @@ pub struct LoginUserInfo {
     pub id: Uuid,
     pub username: String,
     pub email: String,
+    /// 23-06: exposes the caller's raw tenant_id UUID so the frontend can
+    /// carry it into tenant-scoped unauthenticated calls that require it
+    /// (e.g. `resendVerification`'s `ResendVerificationRequest.tenant_id`)
+    /// without re-deriving it from a slug. Already known server-side from
+    /// the validated JWT / AuthenticatedUser extractor — this only exposes
+    /// it, it does not widen trust.
+    pub tenant_id: Uuid,
+    /// 26-05 (D-14): lets the frontend restore the selected tenant after a
+    /// hard reload without a redundant lookup. Resolved strictly from the
+    /// authenticated user's own `tenant_id` (never request input — T-26-05-01)
+    /// and omitted (not an error) when the lookup fails (D-15).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_slug: Option<String>,
+    /// 26-05 (D-14): same contract as `tenant_slug`, resolved via the
+    /// tenant's `organization_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_slug: Option<String>,
 }
 
 /// Login success response body.
@@ -98,11 +100,6 @@ pub struct RefreshSuccessResponse {
 pub struct RefreshRequest {
     pub tenant_id: Uuid,
     pub org_id: Uuid,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct LogoutRequest {
-    pub session_id: Uuid,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -166,10 +163,12 @@ pub struct ChangePasswordRequest {
 /// Build an `HttpResponse` that sets all three auth cookies and returns
 /// the `LoginSuccessResponse` body. A fresh CSRF token is generated on
 /// every call (D-02 — new CSRF token on login and refresh rotation).
-pub async fn cookie_response_from_output<C: Connection>(
+pub async fn cookie_response_from_output<C: Connection + Clone>(
     out: &LoginOutput,
     config: &AuthConfig,
     user_repo: &SurrealUserRepository<C>,
+    tenant_repo: &SurrealTenantRepository<C>,
+    org_repo: &SurrealOrganizationRepository<C>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // Decode the just-issued access token to get user_id.
     let claims = validate_access_token(&out.access_token, config).map_err(AxiamError::from)?;
@@ -186,6 +185,20 @@ pub async fn cookie_response_from_output<C: Connection>(
             reason: "user not found after login".into(),
         }
     })?;
+
+    // D-14/D-15: resolve tenant_slug/org_slug for the fresh-login response so
+    // it agrees with a post-reload `/me` call. `.ok()`-guarded — a lookup
+    // failure degrades to `None`, never to a failed login (T-26-05-02).
+    let tenant = tenant_repo.get_by_id(tenant_id).await.ok();
+    let tenant_slug = tenant.as_ref().map(|t| t.slug.clone());
+    let org_slug = match tenant.as_ref() {
+        Some(t) => org_repo
+            .get_by_id(t.organization_id)
+            .await
+            .ok()
+            .map(|o| o.slug),
+        None => None,
+    };
 
     let csrf_token = generate_csrf_token();
     Ok(HttpResponse::Ok()
@@ -209,6 +222,9 @@ pub async fn cookie_response_from_output<C: Connection>(
                 id: user.id,
                 username: user.username,
                 email: user.email,
+                tenant_id,
+                tenant_slug,
+                org_slug,
             },
             session_id: out.session_id,
             expires_in: out.expires_in,
@@ -233,15 +249,9 @@ pub async fn cookie_response_from_output<C: Connection>(
     )
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn login<C: Connection>(
+pub async fn login<C: Connection + Clone>(
     req: HttpRequest,
-    svc: web::Data<AuthSvc<C>>,
-    mfa_svc: web::Data<MfaMethodSvc<C>>,
-    settings_repo: web::Data<SurrealSettingsRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    org_repo: web::Data<SurrealOrganizationRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    auth_config: web::Data<AuthConfig>,
+    state: web::Data<AppState<C>>,
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -252,7 +262,8 @@ pub async fn login<C: Connection>(
     let org_id = match (b.org_id, b.org_slug.as_deref()) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
-            org_repo
+            state
+                .org_repo
                 .get_by_slug(slug)
                 .await
                 .map_err(|_| AxiamError::AuthenticationFailed {
@@ -269,7 +280,8 @@ pub async fn login<C: Connection>(
     let tenant_id = match (b.tenant_id, b.tenant_slug.as_deref()) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
-            tenant_repo
+            state
+                .tenant_repo
                 .get_by_slug(org_id, slug)
                 .await
                 .map_err(|_| AxiamError::AuthenticationFailed {
@@ -288,7 +300,8 @@ pub async fn login<C: Connection>(
     // Propagate errors instead of silently falling back to no-enforcement,
     // which could bypass MFA during DB outages.
     let mfa_policy = Some(
-        settings_repo
+        state
+            .settings_repo
             .get_effective_settings(org_id, tenant_id)
             .await
             .map(|s| s.mfa)?,
@@ -304,17 +317,28 @@ pub async fn login<C: Connection>(
         mfa_policy,
     };
 
-    let result = svc.login(input).await?;
+    let result = state.auth_service.login(input).await?;
 
     match result {
         axiam_auth::LoginResult::Success(out) => {
-            cookie_response_from_output(&out, &auth_config, &user_repo).await
+            cookie_response_from_output(
+                &out,
+                &state.auth_config,
+                &state.user_repo,
+                &state.tenant_repo,
+                &state.org_repo,
+            )
+            .await
         }
         axiam_auth::LoginResult::MfaRequired(mut challenge) => {
             // Decode user/tenant from challenge to look up available methods.
-            if let Ok((user_id, tenant_id, _org_id)) =
-                svc.decode_mfa_challenge_ids(&challenge.challenge_token)
-                && let Ok(types) = mfa_svc.available_method_types(tenant_id, user_id).await
+            if let Ok((user_id, tenant_id, _org_id)) = state
+                .auth_service
+                .decode_mfa_challenge_ids(&challenge.challenge_token)
+                && let Ok(types) = state
+                    .mfa_method_service
+                    .available_method_types(tenant_id, user_id)
+                    .await
             {
                 challenge.available_methods = types;
             }
@@ -338,27 +362,24 @@ pub async fn login<C: Connection>(
     post,
     path = "/api/v1/auth/logout",
     tag = "auth",
-    request_body = LogoutRequest,
     responses(
         (status = 204, description = "Logged out"),
         (status = 401, description = "Unauthorized"),
     ),
     security(("bearer" = []))
 )]
-pub async fn logout<C: Connection>(
+pub async fn logout<C: Connection + Clone>(
     user: AuthenticatedUser,
-    svc: web::Data<AuthSvc<C>>,
-    body: web::Json<LogoutRequest>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    // SEC-051: a caller may only revoke their own session (JWT jti must match).
-    // Rejecting cross-session revocation prevents session fixation attacks where
-    // an authenticated user deletes another user's active session.
-    if body.session_id != user.session_id {
-        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
-            reason: "cannot revoke another user's session".into(),
-        }));
-    }
-    svc.logout(user.tenant_id, body.session_id).await?;
+    // D-03 (SECFIX-05): the session to revoke is derived solely from the
+    // caller's verified JWT `jti` (`AuthenticatedUser.session_id`, D-15).
+    // No client-supplied session_id — there is no IDOR surface to guard,
+    // so the prior cross-session comparison is gone along with the body.
+    state
+        .auth_service
+        .logout(user.tenant_id, user.session_id)
+        .await?;
     Ok(HttpResponse::NoContent()
         .cookie(clear_access_cookie())
         .cookie(clear_refresh_cookie())
@@ -377,10 +398,9 @@ pub async fn logout<C: Connection>(
         (status = 401, description = "Invalid refresh token"),
     )
 )]
-pub async fn refresh<C: Connection>(
+pub async fn refresh<C: Connection + Clone>(
     req: HttpRequest,
-    svc: web::Data<AuthSvc<C>>,
-    auth_config: web::Data<AuthConfig>,
+    state: web::Data<AppState<C>>,
     body: web::Json<RefreshRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -401,25 +421,25 @@ pub async fn refresh<C: Connection>(
         user_agent: user_agent(&req),
     };
 
-    let out = svc.refresh(input).await?;
+    let out = state.auth_service.refresh(input).await?;
 
     // Issue a new CSRF token on every refresh rotation (D-02).
     let csrf_token = generate_csrf_token();
     Ok(HttpResponse::Ok()
         .cookie(access_cookie(
             &out.access_token,
-            auth_config.access_token_lifetime_secs,
-            auth_config.cookie_secure,
+            state.auth_config.access_token_lifetime_secs,
+            state.auth_config.cookie_secure,
         ))
         .cookie(refresh_cookie(
             &out.refresh_token,
-            auth_config.refresh_token_lifetime_secs,
-            auth_config.cookie_secure,
+            state.auth_config.refresh_token_lifetime_secs,
+            state.auth_config.cookie_secure,
         ))
         .cookie(csrf_cookie(
             &csrf_token,
-            auth_config.access_token_lifetime_secs,
-            auth_config.cookie_secure,
+            state.auth_config.access_token_lifetime_secs,
+            state.auth_config.cookie_secure,
         ))
         .json(RefreshSuccessResponse {
             expires_in: out.expires_in,
@@ -437,11 +457,14 @@ pub async fn refresh<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn enroll_mfa<C: Connection>(
+pub async fn enroll_mfa<C: Connection + Clone>(
     user: AuthenticatedUser,
-    svc: web::Data<AuthSvc<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let out = svc.enroll_mfa(user.tenant_id, user.user_id).await?;
+    let out = state
+        .auth_service
+        .enroll_mfa(user.tenant_id, user.user_id)
+        .await?;
     Ok(HttpResponse::Ok().json(MfaEnrollResponse {
         secret_base32: out.secret_base32,
         totp_uri: out.totp_uri,
@@ -460,12 +483,14 @@ pub async fn enroll_mfa<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn confirm_mfa<C: Connection>(
+pub async fn confirm_mfa<C: Connection + Clone>(
     user: AuthenticatedUser,
-    svc: web::Data<AuthSvc<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<MfaConfirmRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    svc.confirm_mfa(user.tenant_id, user.user_id, &body.totp_code)
+    state
+        .auth_service
+        .confirm_mfa(user.tenant_id, user.user_id, &body.totp_code)
         .await?;
     Ok(HttpResponse::Ok().json(MfaConfirmResponse { mfa_enabled: true }))
 }
@@ -481,11 +506,10 @@ pub async fn confirm_mfa<C: Connection>(
         (status = 401, description = "Invalid TOTP code"),
     )
 )]
-pub async fn verify_mfa<C: Connection>(
+#[allow(clippy::too_many_arguments)] // Actix DI extractors
+pub async fn verify_mfa<C: Connection + Clone>(
     req: HttpRequest,
-    svc: web::Data<AuthSvc<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    auth_config: web::Data<AuthConfig>,
+    state: web::Data<AppState<C>>,
     body: web::Json<MfaVerifyRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -496,8 +520,15 @@ pub async fn verify_mfa<C: Connection>(
         user_agent: user_agent(&req),
     };
 
-    let out = svc.verify_mfa(input).await?;
-    cookie_response_from_output(&out, &auth_config, &user_repo).await
+    let out = state.auth_service.verify_mfa(input).await?;
+    cookie_response_from_output(
+        &out,
+        &state.auth_config,
+        &state.user_repo,
+        &state.tenant_repo,
+        &state.org_repo,
+    )
+    .await
 }
 
 /// `POST /api/v1/auth/device`
@@ -514,35 +545,33 @@ pub async fn verify_mfa<C: Connection>(
         (status = 403, description = "Certificate not bound to a service account"),
     )
 )]
-pub async fn device_auth<C: Connection>(
+pub async fn device_auth<C: Connection + Clone>(
     req: HttpRequest,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    auth_config: web::Data<AuthConfig>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let cert_auth = CertificateAuthenticated::extract::<C>(&req).await?;
 
     // Resolve org_id from the tenant
-    let tenant = tenant_repo.get_by_id(cert_auth.tenant_id).await?;
+    let tenant = state.tenant_repo.get_by_id(cert_auth.tenant_id).await?;
 
-    // TODO(T15): Introduce a dedicated service-account token with `sub_kind: "ServiceAccount"`
-    // so downstream handlers/audit can distinguish SA tokens from user tokens.
-    // For now, reuse the user token shape; `sub` contains the service_account_id.
-    // Service-account/device auth has no session row — use random jti.
-    let access_token = issue_access_token(
+    // FUNC-04 (D-09): mint a dedicated service-account token carrying
+    // `sub_kind: "service_account"` so downstream handlers/audit can
+    // distinguish SA tokens from user tokens. `sub` contains the
+    // service_account_id. Service-account/device auth has no session
+    // row — use random jti.
+    let access_token = issue_service_account_token(
         cert_auth.service_account_id,
         cert_auth.tenant_id,
         tenant.organization_id,
-        &[],
-        &auth_config,
         uuid::Uuid::new_v4().to_string(),
-        axiam_auth::token::AUD_USER,
+        &state.auth_config,
     )
     .map_err(axiam_core::error::AxiamError::from)?;
 
     Ok(HttpResponse::Ok().json(DeviceAuthResponse {
         access_token,
         token_type: "Bearer".into(),
-        expires_in: auth_config.access_token_lifetime_secs,
+        expires_in: state.auth_config.access_token_lifetime_secs,
     }))
 }
 
@@ -560,11 +589,14 @@ pub async fn device_auth<C: Connection>(
         (status = 401, description = "Invalid or expired setup token"),
     )
 )]
-pub async fn setup_enroll_mfa<C: Connection>(
-    svc: web::Data<AuthSvc<C>>,
+pub async fn setup_enroll_mfa<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<MfaSetupEnrollRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let out = svc.enroll_mfa_with_setup_token(&body.setup_token).await?;
+    let out = state
+        .auth_service
+        .enroll_mfa_with_setup_token(&body.setup_token)
+        .await?;
     Ok(HttpResponse::Ok().json(MfaEnrollResponse {
         secret_base32: out.secret_base32,
         totp_uri: out.totp_uri,
@@ -585,15 +617,15 @@ pub async fn setup_enroll_mfa<C: Connection>(
         (status = 401, description = "Invalid or expired setup token / TOTP code"),
     )
 )]
-pub async fn setup_confirm_mfa<C: Connection>(
+#[allow(clippy::too_many_arguments)] // Actix DI extractors
+pub async fn setup_confirm_mfa<C: Connection + Clone>(
     req: HttpRequest,
-    svc: web::Data<AuthSvc<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    auth_config: web::Data<AuthConfig>,
+    state: web::Data<AppState<C>>,
     body: web::Json<MfaSetupConfirmRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
-    let out = svc
+    let out = state
+        .auth_service
         .confirm_mfa_with_setup_token(
             &b.setup_token,
             &b.totp_code,
@@ -602,7 +634,14 @@ pub async fn setup_confirm_mfa<C: Connection>(
         )
         .await?;
 
-    cookie_response_from_output(&out, &auth_config, &user_repo).await
+    cookie_response_from_output(
+        &out,
+        &state.auth_config,
+        &state.user_repo,
+        &state.tenant_repo,
+        &state.org_repo,
+    )
+    .await
 }
 
 /// `GET /api/v1/auth/me`
@@ -618,13 +657,13 @@ pub async fn setup_confirm_mfa<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn me<C: Connection>(
+#[allow(clippy::too_many_arguments)] // Actix DI extractors
+pub async fn me<C: Connection + Clone>(
     user: AuthenticatedUser,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    role_repo: web::Data<SurrealRoleRepository<C>>,
-    permission_repo: web::Data<SurrealPermissionRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let u = user_repo
+    let u = state
+        .user_repo
         .get_by_id(user.tenant_id, user.user_id)
         .await
         .map_err(|_| AxiamError::AuthenticationFailed {
@@ -634,7 +673,8 @@ pub async fn me<C: Connection>(
     // Effective permissions = union of action strings across every role
     // assigned to the user (direct + via group membership). `get_user_roles`
     // handles both sources, so we don't need a separate group lookup here.
-    let roles = role_repo
+    let roles = state
+        .role_repo
         .get_user_roles(user.tenant_id, user.user_id)
         .await?;
 
@@ -644,7 +684,8 @@ pub async fn me<C: Connection>(
         if role.name == "super-admin" {
             is_super_admin = true;
         }
-        let perms = permission_repo
+        let perms = state
+            .permission_repo
             .get_role_permissions(user.tenant_id, role.id)
             .await?;
         for p in perms {
@@ -658,11 +699,30 @@ pub async fn me<C: Connection>(
         permissions.insert(0, "*".to_string());
     }
 
+    // D-14/D-15: resolve tenant_slug/org_slug strictly from the authenticated
+    // user's own tenant_id (never request input — T-26-05-01). `.ok()`-guarded
+    // so a lookup failure degrades to `None` instead of failing `/me`
+    // (T-26-05-02).
+    let tenant = state.tenant_repo.get_by_id(user.tenant_id).await.ok();
+    let tenant_slug = tenant.as_ref().map(|t| t.slug.clone());
+    let org_slug = match tenant.as_ref() {
+        Some(t) => state
+            .org_repo
+            .get_by_id(t.organization_id)
+            .await
+            .ok()
+            .map(|o| o.slug),
+        None => None,
+    };
+
     Ok(HttpResponse::Ok().json(MeResponse {
         user: LoginUserInfo {
             id: user.user_id,
             username: u.username,
             email: u.email,
+            tenant_id: user.tenant_id,
+            tenant_slug,
+            org_slug,
         },
         permissions,
     }))
@@ -688,10 +748,10 @@ pub async fn me<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn reset_mfa<C: Connection>(
+pub async fn reset_mfa<C: Connection + Clone>(
     caller: AuthenticatedUser,
     authz: AuthzData,
-    svc: web::Data<AuthSvc<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let target_user_id = path.into_inner();
@@ -700,7 +760,10 @@ pub async fn reset_mfa<C: Connection>(
             .check(&caller, authz.get_ref().as_ref())
             .await?;
     }
-    svc.reset_mfa(caller.tenant_id, target_user_id).await?;
+    state
+        .auth_service
+        .reset_mfa(caller.tenant_id, target_user_id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -726,13 +789,9 @@ pub async fn reset_mfa<C: Connection>(
     security(("bearer" = []))
 )]
 #[allow(clippy::too_many_arguments)] // Actix DI extractors
-pub async fn change_password<C: Connection>(
+pub async fn change_password<C: Connection + Clone>(
     user: AuthenticatedUser,
-    svc: web::Data<AuthSvc<C>>,
-    settings_repo: web::Data<SurrealSettingsRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    history_repo: web::Data<SurrealPasswordHistoryRepository<C>>,
-    http_client: web::Data<reqwest::Client>, // CQ-B35: for HIBP breach check
+    state: web::Data<AppState<C>>,
     body: web::Json<ChangePasswordRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use axiam_core::repository::{SettingsRepository, TenantRepository};
@@ -746,22 +805,74 @@ pub async fn change_password<C: Connection>(
     }
 
     // Resolve tenant to look up org_id for effective settings.
-    let tenant = tenant_repo.get_by_id(user.tenant_id).await?;
-    let settings = settings_repo
+    let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
+    let settings = state
+        .settings_repo
         .get_effective_settings(tenant.organization_id, user.tenant_id)
         .await?;
 
-    svc.change_password(
-        user.tenant_id,
-        user.user_id,
-        user.session_id,
-        &body.current_password,
-        &body.new_password,
-        &settings.password,
-        history_repo.as_ref(),
-        Some(http_client.as_ref()),
-    )
-    .await?;
+    state
+        .auth_service
+        .change_password(
+            user.tenant_id,
+            user.user_id,
+            user.session_id,
+            &body.current_password,
+            &body.new_password,
+            &settings.password,
+            &state.password_history_repo,
+            Some(&state.http_client),
+        )
+        .await?;
 
     Ok(HttpResponse::NoContent().finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_user_info(tenant_slug: Option<String>, org_slug: Option<String>) -> LoginUserInfo {
+        LoginUserInfo {
+            id: Uuid::nil(),
+            username: "alice".into(),
+            email: "alice@example.com".into(),
+            tenant_id: Uuid::nil(),
+            tenant_slug,
+            org_slug,
+        }
+    }
+
+    /// 26-05 (D-14): when slug resolution succeeds, both fields serialize
+    /// into the JSON body so the frontend can restore tenant context after
+    /// a hard reload.
+    #[test]
+    fn login_user_info_serializes_slugs_when_present() {
+        let info = sample_user_info(Some("acme-tenant".into()), Some("acme-org".into()));
+        let value = serde_json::to_value(&info).expect("serializable");
+
+        assert_eq!(value["tenant_slug"], "acme-tenant");
+        assert_eq!(value["org_slug"], "acme-org");
+    }
+
+    /// 26-05 (D-15): when slug resolution degrades to `None` (lookup
+    /// failure), the keys are omitted entirely rather than serialized as
+    /// `null` — this is what lets `/auth/me` and the fresh-login response
+    /// stay valid and be read defensively by the frontend without ever
+    /// failing the call.
+    #[test]
+    fn login_user_info_omits_slugs_when_absent() {
+        let info = sample_user_info(None, None);
+        let value = serde_json::to_value(&info).expect("serializable");
+        let obj = value.as_object().expect("object");
+
+        assert!(
+            !obj.contains_key("tenant_slug"),
+            "tenant_slug should be omitted, not null"
+        );
+        assert!(
+            !obj.contains_key("org_slug"),
+            "org_slug should be omitted, not null"
+        );
+    }
 }

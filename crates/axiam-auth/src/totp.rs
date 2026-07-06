@@ -71,17 +71,35 @@ pub fn verify_code(
         .map_err(|e| AuthError::Crypto(format!("TOTP check: {e}")))
 }
 
+/// TOTP step size in seconds (RFC 6238 default), shared by every `TOTP::new`
+/// call in this module.
+const TOTP_STEP_SECS: u64 = 30;
+
+/// TOTP skew tolerance (±1 step), shared by every `TOTP::new` call in this
+/// module.
+const TOTP_SKEW: u8 = 1;
+
 /// Verify a TOTP code with replay protection.
 ///
-/// Computes the current time-step (`unix_timestamp / 30`) and, if the code
-/// is valid, checks that the step is strictly greater than
-/// `last_used_step.unwrap_or(0)`.  If the step is equal (same window) or
-/// less, the code is rejected even though the HMAC is correct.
+/// Computes the current time-step (`unix_timestamp / 30`) and, if the HMAC is
+/// valid within the tolerated ±1-step skew window, determines WHICH step
+/// actually matched (`current_step - 1`, `current_step`, or
+/// `current_step + 1`) rather than assuming it was always `current_step`.
+/// This matters because `totp-rs`'s `check()`/`check_current()` only report
+/// pass/fail for the whole skew window, not the matched step — recording
+/// `current_step` unconditionally would let a code accepted via the -1-skew
+/// step be replayed again once the wall clock advances past it (T-24-02).
 ///
-/// Returns `Ok((valid, current_step))` on success.  The caller MUST persist
-/// `current_step` via `user_repo.update_totp_step` when `valid` is `true`.
+/// The code is rejected (even though the HMAC is correct) unless the matched
+/// step is strictly greater than `last_used_step.unwrap_or(0)`.
 ///
-/// Per SEC-008 (REQ-14 AC-5).
+/// Returns `Ok((valid, matched_step))` on success. The caller MUST persist
+/// `matched_step` via the atomic `user_repo.update_totp_step` CAS when
+/// `valid` is `true`, and MUST treat a lost CAS (`Ok(false)`) as an invalid
+/// code (SECHRD-01) — this function cannot see concurrent submissions by
+/// itself, so the persisted-step compare-and-set is the actual replay guard.
+///
+/// Per SEC-008 / SECHRD-01 (REQ-14 AC-5).
 pub fn verify_code_with_replay_check(
     secret_bytes: &[u8],
     code: &str,
@@ -92,8 +110,8 @@ pub fn verify_code_with_replay_check(
     let totp = TOTP::new(
         Algorithm::SHA1,
         6,
-        1,
-        30,
+        TOTP_SKEW,
+        TOTP_STEP_SECS,
         secret_bytes.to_vec(),
         Some(issuer.to_string()),
         account.to_string(),
@@ -105,9 +123,9 @@ pub fn verify_code_with_replay_check(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| AuthError::Crypto(format!("system time error: {e}")))?
         .as_secs()
-        / 30;
+        / TOTP_STEP_SECS;
 
-    // Check the HMAC.
+    // Check the HMAC across the tolerated ±1-step skew window.
     let hmac_valid = totp
         .check_current(code)
         .map_err(|e| AuthError::Crypto(format!("TOTP check: {e}")))?;
@@ -116,13 +134,31 @@ pub fn verify_code_with_replay_check(
         return Ok((false, current_step));
     }
 
-    // Replay check: reject codes from the same or an earlier step.
+    // Determine which candidate step actually matched, probing in the same
+    // order totp-rs's own `check()` does for skew=1: current_step - 1,
+    // current_step, current_step + 1. The code has already passed the
+    // constant-time HMAC check above, so re-deriving `generate()` here to
+    // identify the matched candidate does not introduce a new secret-timing
+    // side channel — it only distinguishes between three already-known-valid
+    // outcomes.
+    let matched_step = [
+        current_step.checked_sub(1),
+        Some(current_step),
+        current_step.checked_add(1),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|&candidate_step| totp.generate(candidate_step * TOTP_STEP_SECS) == code)
+    .unwrap_or(current_step);
+
+    // Replay check: reject unless the ACTUAL matched step (incl. -1 skew) is
+    // strictly greater than the last-used step.
     let last = last_used_step.unwrap_or(0);
-    if current_step <= last {
-        return Ok((false, current_step));
+    if matched_step <= last {
+        return Ok((false, matched_step));
     }
 
-    Ok((true, current_step))
+    Ok((true, matched_step))
 }
 
 #[cfg(test)]
@@ -202,5 +238,71 @@ mod tests {
         .unwrap();
         let code = totp.generate_current().unwrap();
         assert!(verify_code(&secret_bytes, &code, "AXIAM", "admin@axiam.dev").unwrap());
+    }
+
+    /// T-24-02: a code that only validates against the -1 skew step must have
+    /// `current_step - 1` (not `current_step`) recorded as the matched step,
+    /// and once persisted, the SAME code must not be replayable — even though
+    /// it still falls inside the ±1 skew window relative to a later call.
+    #[test]
+    fn totp_skew_step_recorded() {
+        let secret = Secret::generate_secret();
+        let secret_bytes = secret.to_bytes().unwrap();
+
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes.clone(),
+            Some("AXIAM".into()),
+            "skew@test.com".into(),
+        )
+        .unwrap();
+
+        let current_step = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            / 30;
+        let prev_step = current_step - 1;
+
+        // Hand-generate a code for the PREVIOUS step (simulates a client
+        // that entered a code right at a step boundary) — this is the -1
+        // skew case `TOTP::check` tolerates.
+        let prev_code = totp.generate(prev_step * 30);
+
+        let (valid, matched_step) = verify_code_with_replay_check(
+            &secret_bytes,
+            &prev_code,
+            "AXIAM",
+            "skew@test.com",
+            None,
+        )
+        .unwrap();
+        assert!(valid, "code from the -1 skew step should be accepted");
+        assert_eq!(
+            matched_step, prev_step,
+            "matched step must be current_step - 1 (the step that actually \
+             matched), not always current_step"
+        );
+
+        // Persist `matched_step` (as the real caller does via
+        // `update_totp_step`) and resubmit the SAME code. It is still inside
+        // the ±1 skew window relative to `check()`, but must now be rejected
+        // because its matched step is not strictly greater than the
+        // persisted last-used step.
+        let (replay_valid, _) = verify_code_with_replay_check(
+            &secret_bytes,
+            &prev_code,
+            "AXIAM",
+            "skew@test.com",
+            Some(matched_step),
+        )
+        .unwrap();
+        assert!(
+            !replay_valid,
+            "a skew-accepted code must not be replayable at a later step"
+        );
     }
 }

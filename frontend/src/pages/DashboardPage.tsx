@@ -21,6 +21,7 @@ import { userService, groupService } from "@/services/users";
 import { roleService } from "@/services/roles";
 import { certificateService, type Certificate } from "@/services/certificates";
 import { auditService, type AuditLog } from "@/services/audit";
+import { DASHBOARD_USER_COUNT_QUERY_KEY } from "@/lib/queryClient";
 
 // ─── Stat card ────────────────────────────────────────────────────────────────
 
@@ -180,10 +181,18 @@ export function DashboardPage() {
 
   // CQ-F10: query keys align with CRUD page invalidations so dashboard counts
   // refresh after create/update/delete on the respective list pages.
+  //
+  // D-18: the user-count probe uses DASHBOARD_USER_COUNT_QUERY_KEY — a key
+  // shape that structurally can never collide with UsersPage's
+  // ["users", page, search] key (page is always a number there, never the
+  // string "dashboard-count"). A prior ["users", 1, ""] key was
+  // byte-for-byte identical to UsersPage's page-1/no-filter key, so
+  // navigating Dashboard -> Users (or back) cross-contaminated the shared
+  // react-query cache.
   const results = useQueries({
     queries: [
       {
-        queryKey: ["users", 1, ""],
+        queryKey: DASHBOARD_USER_COUNT_QUERY_KEY,
         queryFn: () => userService.list(1, 1, ""),
       },
       {

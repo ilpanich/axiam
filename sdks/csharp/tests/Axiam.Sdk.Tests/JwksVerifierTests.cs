@@ -31,14 +31,17 @@ public class JwksVerifierTests
     private sealed class FakeJwksHandler : HttpMessageHandler
     {
         private readonly string _jwksJson;
+        private int _requestCount;
 
         public FakeJwksHandler(string jwksJson) => _jwksJson = jwksJson;
 
-        public int RequestCount { get; private set; }
+        // Interlocked so the concurrent single-flight burst test below counts hits
+        // accurately even if the (deliberately buggy) SUT ever raced multiple fetches.
+        public int RequestCount => _requestCount;
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            RequestCount++;
+            Interlocked.Increment(ref _requestCount);
             Assert.Equal("/oauth2/jwks", request.RequestUri!.AbsolutePath);
             var response = new HttpResponseMessage(HttpStatusCode.OK)
             {
@@ -112,6 +115,42 @@ public class JwksVerifierTests
         JsonElement? claims = await verifier.VerifyAsync(jwt, Tenant);
 
         Assert.Null(claims);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    /// <summary>
+    /// Proves D-08/D-09: a burst of concurrent <see cref="JwksVerifier.VerifyAsync"/> calls
+    /// against a cold cache (every kid is "unknown" until the first fetch) collapses to
+    /// exactly one HTTP fetch, not one per <see cref="Task"/>. Also proves the cache
+    /// mutation is race-free (every task gets valid, non-null claims back) — the
+    /// pre-existing plain <c>Dictionary</c>/<c>DateTimeOffset</c> fields had ZERO
+    /// synchronization before this guard was added.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentUnknownKidBurst_TriggersExactlyOneFetch()
+    {
+        (JwksVerifier verifier, JwksFixture fixture, FakeJwksHandler handler) = CreateVerifier();
+        string jwt = fixture.SignJwt("user-1", Tenant, Roles, DateTimeOffset.UtcNow.AddMinutes(15));
+
+        const int concurrency = 8;
+        var tasks = new Task<JsonElement?>[concurrency];
+        for (int i = 0; i < concurrency; i++)
+        {
+            tasks[i] = verifier.VerifyAsync(jwt, Tenant);
+        }
+
+        JsonElement?[] results = await Task.WhenAll(tasks);
+
+        foreach (JsonElement? claims in results)
+        {
+            Assert.NotNull(claims);
+            Assert.Equal(Tenant, claims!.Value.GetProperty("tenant_id").GetString());
+        }
+        Assert.Equal(1, handler.RequestCount);
+
+        // Subsequent verification after the burst must reuse the cache (no extra fetch).
+        JsonElement? again = await verifier.VerifyAsync(jwt, Tenant);
+        Assert.NotNull(again);
         Assert.Equal(1, handler.RequestCount);
     }
 

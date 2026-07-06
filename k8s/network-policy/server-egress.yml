@@ -30,7 +30,7 @@ spec:
 
     # Allow server → external HTTPS (OIDC JWKS, SAML IdP, email APIs) (D-12)
     # Excludes private ranges to deny lateral movement on 443.
-    # RFC1918 + CGN are excluded; cluster-specific CIDRs must also be excluded by the operator.
+    # RFC1918 + CGN are excluded; cluster-specific CIDRs are also excluded below (D-07c).
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -39,8 +39,35 @@ spec:
               - 172.16.0.0/12       # RFC1918 class B
               - 192.168.0.0/16      # RFC1918 class C
               - 100.64.0.0/10       # Carrier-grade NAT (CGN)
-              # TODO: operator must add cluster pod CIDR here, e.g. 10.244.0.0/16 (flannel/calico default)
-              # TODO: operator must add cluster service CIDR here, e.g. 10.96.0.0/12 (kubeadm default)
+              # Cluster pod/service CIDRs (D-07c) — these example values match
+              # the flannel/calico + kubeadm defaults referenced above. The
+              # operator MUST replace them with the real pod/service CIDRs for
+              # their cluster (e.g. via a kustomize overlay patch) so that
+              # in-cluster pods/services are never reachable through this wide
+              # 443 egress allowance.
+              - 10.244.0.0/16       # cluster pod CIDR (flannel/calico default) — override for your cluster
+              - 10.96.0.0/12        # cluster service CIDR (kubeadm default) — override for your cluster
       ports:
         - protocol: TCP
           port: 443
+
+    # Allow server → SMTP relay (mail delivery, GDPR export notifications) (D-07a/b)
+    # Ports 25 (SMTP), 465 (SMTPS), 587 (submission).
+    #
+    # SECURITY (SECHRD-10 / D-07b): this rule is FAIL-CLOSED by default. The
+    # CIDR below is RFC 5737 TEST-NET-1 (192.0.2.0/24) — a documentation-only
+    # range that is never assigned to real hosts, so NO SMTP egress is allowed
+    # until the operator replaces it with their actual SMTP relay's CIDR (e.g.
+    # via a kustomize overlay patch or Helm value). Mail will not send until
+    # this is configured. NEVER widen this to 0.0.0.0/0 — SMTP egress must stay
+    # scoped to a specific, operator-configured relay.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/24   # PLACEHOLDER (RFC 5737 TEST-NET-1) — replace with your SMTP relay CIDR
+      ports:
+        - protocol: TCP
+          port: 25
+        - protocol: TCP
+          port: 465
+        - protocol: TCP
+          port: 587

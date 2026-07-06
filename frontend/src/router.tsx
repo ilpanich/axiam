@@ -31,6 +31,7 @@ import { MfaManagementPage } from "@/pages/profile/MfaManagementPage";
 import { ForgotPasswordPage } from "@/pages/auth/ForgotPasswordPage";
 import { ResetPasswordPage } from "@/pages/auth/ResetPasswordPage";
 import { VerifyEmailPage } from "@/pages/auth/VerifyEmailPage";
+import { MfaSetupPage } from "@/pages/auth/MfaSetupPage";
 
 export const router = createBrowserRouter([
   // Public routes (no AppLayout, no auth required)
@@ -53,6 +54,10 @@ export const router = createBrowserRouter([
   {
     path: "/auth/verify-email",
     element: <VerifyEmailPage />,
+  },
+  {
+    path: "/auth/mfa-setup",
+    element: <MfaSetupPage />,
   },
 
   // Protected routes under AppLayout

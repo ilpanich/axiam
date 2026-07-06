@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -41,11 +42,6 @@ struct WebhookRowWithId {
     backoff_multiplier: f64,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -144,10 +140,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<WebhookRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "webhook".into(),
-            id: id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "webhook", &id.to_string())?;
         row.try_into_entry(id).map_err(Into::into)
     }
 
@@ -167,10 +160,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<WebhookRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "webhook".into(),
-            id: id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "webhook", &id.to_string())?;
         row.try_into_entry().map_err(Into::into)
     }
 
@@ -209,6 +199,13 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
                 serde_json::json!(retry.backoff_multiplier),
             ));
         }
+        // D-02: secret rotation — only SET when the caller supplied a new
+        // (already-encrypted) secret; otherwise the stored secret is left
+        // untouched.
+        if let Some(ref secret) = input.secret {
+            set_clauses.push("secret = $secret".into());
+            binds.push(("secret".into(), serde_json::json!(secret)));
+        }
 
         let sql = format!(
             "UPDATE type::record('webhook', $id) SET {} \
@@ -230,10 +227,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<WebhookRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "webhook".into(),
-            id: id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "webhook", &id.to_string())?;
         row.try_into_entry(id).map_err(Into::into)
     }
 
@@ -283,7 +277,6 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let data_result = self
             .db
@@ -308,12 +301,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
             .map(|r| r.try_into_entry())
             .collect::<Result<_, _>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn get_by_event(&self, tenant_id: Uuid, event_type: &str) -> AxiamResult<Vec<Webhook>> {

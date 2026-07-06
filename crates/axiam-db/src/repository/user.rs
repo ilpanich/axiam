@@ -14,7 +14,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::{CountRow, parse_uuid};
+use crate::helpers::{CountRow, classify_write_error, parse_uuid};
 
 /// DB-side row struct for queries where the UUID is already known.
 ///
@@ -126,6 +126,15 @@ impl std::fmt::Debug for UserRowWithId {
             .field("updated_at", &self.updated_at)
             .finish_non_exhaustive()
     }
+}
+
+/// Minimal row shape for the `update_totp_step` CAS query — only the record
+/// ID is projected since the caller only needs to know whether the guarded
+/// UPDATE affected a row (CAS won) or not (CAS lost).
+#[derive(Debug, SurrealValue)]
+struct TotpStepCasRow {
+    #[allow(dead_code)]
+    record_id: String,
 }
 
 fn parse_status(s: &str) -> Result<UserStatus, DbError> {
@@ -240,7 +249,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let tenant_id_str = input.tenant_id.to_string();
 
         let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e, "user"))?;
 
         let metadata = input
             .metadata
@@ -273,7 +282,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
@@ -451,7 +460,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let result = builder.await.map_err(DbError::from)?;
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
@@ -481,19 +490,35 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         Ok(())
     }
 
-    async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<()> {
-        self.db
+    async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<bool> {
+        // Atomic compare-and-set (SEC-008/SECHRD-01): the UPDATE only matches
+        // when the stored step is unset (NONE, first-ever verification —
+        // mirrors `increment_failed_logins`'s NONE-handling) or strictly less
+        // than the incoming step. Wrapping the UPDATE in a SELECT FROM (...)
+        // subquery (same shape as `oauth2_auth_code.rs::consume`) makes the
+        // read-of-affected-rows atomic with the write: exactly one concurrent
+        // caller observes a non-empty row set for a given step.
+        let result = self
+            .db
             .query(
-                "UPDATE type::record('user', $id) SET \
-                 totp_last_used_step = $step, updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id",
+                "SELECT meta::id(id) AS record_id FROM \
+                 (UPDATE type::record('user', $id) SET \
+                  totp_last_used_step = $step, updated_at = time::now() \
+                  WHERE tenant_id = $tenant_id \
+                    AND (totp_last_used_step = NONE OR totp_last_used_step < $step))",
             )
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("step", step))
             .await
             .map_err(DbError::from)?;
-        Ok(())
+
+        let mut result = result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+
+        let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
+        Ok(!rows.is_empty())
     }
 
     async fn list(
@@ -603,7 +628,58 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        Ok(())
+    }
+
+    /// Anonymize a user row in-place (D-05).
+    ///
+    /// Scrubs every PII column:
+    /// - email → `email_hash` (SHA-256 hex of original email, passed by caller)
+    /// - username → `pseudonym` (DELETED_USER_<hmac>)
+    /// - password_hash → NULL (login permanently blocked)
+    /// - mfa_secret → NULL
+    /// - metadata → `{}`
+    /// - locked_until / last_failed_login_at → NULL
+    /// - status → `Anonymized`
+    ///
+    /// The row and its `id` are kept to preserve referential integrity for
+    /// `created_by`/owner foreign-key references.
+    async fn anonymize_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+    ) -> AxiamResult<()> {
+        // password_hash is TYPE string (not nullable) — use empty string as
+        // tombstone value. Argon2 output is never empty, so login is permanently
+        // blocked without needing to make the column nullable.
+        self.db
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 email = $email_hash, \
+                 username = $pseudonym, \
+                 password_hash = '', \
+                 mfa_secret = NONE, \
+                 mfa_enabled = false, \
+                 metadata = {}, \
+                 locked_until = NONE, \
+                 last_failed_login_at = NONE, \
+                 deletion_pending = false, \
+                 scheduled_purge_at = NONE, \
+                 status = 'Anonymized', \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("email_hash", email_hash.to_string()))
+            .bind(("pseudonym", pseudonym.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
         Ok(())
     }
 }
@@ -635,15 +711,25 @@ impl<C: Connection> SurrealUserRepository<C> {
         let id_str = id.to_string();
         let consent_id = Uuid::new_v4().to_string();
         let tenant_id_str = input.tenant_id.to_string();
+        // SECHRD-12/T-24-93 (RESEARCH Pitfall 5): admin-created users go
+        // through this write path, so their initial password must be seeded
+        // into `password_history` in the SAME transaction — otherwise the
+        // unauthenticated reset path's current-password-reuse check
+        // (`PasswordResetService::confirm_reset`) has zero history rows to
+        // work against for these users. Federated-user creation paths
+        // (oidc.rs/saml.rs) have no local password and are intentionally
+        // left untouched.
+        let ph_id_str = Uuid::new_v4().to_string();
 
         let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e, "user"))?;
 
         let metadata = input
             .metadata
             .unwrap_or(serde_json::Value::Object(Default::default()));
 
-        // Result slots: BEGIN=0, CREATE user=1, CREATE consent=2, COMMIT=3.
+        // Result slots: BEGIN=0, CREATE user=1, CREATE consent=2,
+        // CREATE password_history=3, COMMIT=4.
         let result = self
             .db
             .query(
@@ -667,10 +753,15 @@ impl<C: Connection> SurrealUserRepository<C> {
                  accepted_at = time::now(), \
                  ip_address = $ip_address, \
                  user_agent = $user_agent; \
+                 CREATE type::record('password_history', $ph_id) SET \
+                 tenant_id = $tenant_id, \
+                 user_id = $id, \
+                 password_hash = $password_hash; \
                  COMMIT TRANSACTION",
             )
             .bind(("id", id_str.clone()))
             .bind(("consent_id", consent_id))
+            .bind(("ph_id", ph_id_str))
             .bind(("tenant_id", tenant_id_str))
             .bind(("username", input.username))
             .bind(("email", input.email))
@@ -686,7 +777,7 @@ impl<C: Connection> SurrealUserRepository<C> {
 
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         // The user CREATE result is at index 1 (BEGIN occupies slot 0).
         let rows: Vec<UserRow> = result.take(1).map_err(DbError::from)?;
@@ -723,58 +814,7 @@ impl<C: Connection> SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Anonymize a user row in-place (D-05).
-    ///
-    /// Scrubs every PII column:
-    /// - email → `email_hash` (SHA-256 hex of original email, passed by caller)
-    /// - username → `pseudonym` (DELETED_USER_<hmac>)
-    /// - password_hash → NULL (login permanently blocked)
-    /// - mfa_secret → NULL
-    /// - metadata → `{}`
-    /// - locked_until / last_failed_login_at → NULL
-    /// - status → `Anonymized`
-    ///
-    /// The row and its `id` are kept to preserve referential integrity for
-    /// `created_by`/owner foreign-key references.
-    pub async fn anonymize_user(
-        &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-        email_hash: &str,
-        pseudonym: &str,
-    ) -> AxiamResult<()> {
-        // password_hash is TYPE string (not nullable) — use empty string as
-        // tombstone value. Argon2 output is never empty, so login is permanently
-        // blocked without needing to make the column nullable.
-        self.db
-            .query(
-                "UPDATE type::record('user', $id) SET \
-                 email = $email_hash, \
-                 username = $pseudonym, \
-                 password_hash = '', \
-                 mfa_secret = NONE, \
-                 mfa_enabled = false, \
-                 metadata = {}, \
-                 locked_until = NONE, \
-                 last_failed_login_at = NONE, \
-                 deletion_pending = false, \
-                 scheduled_purge_at = NONE, \
-                 status = 'Anonymized', \
-                 updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id",
-            )
-            .bind(("id", user_id.to_string()))
-            .bind(("email_hash", email_hash.to_string()))
-            .bind(("pseudonym", pseudonym.to_string()))
-            .bind(("tenant_id", tenant_id.to_string()))
-            .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
         Ok(())
     }
 
@@ -798,7 +838,7 @@ impl<C: Connection> SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
         Ok(())
     }
 
@@ -817,38 +857,12 @@ impl<C: Connection> SurrealUserRepository<C> {
             .await
             .map_err(DbError::from)?
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         let rows: Vec<UserRowWithId> = result.take(0).map_err(DbError::from)?;
         rows.into_iter()
             .map(|r| r.try_into_user().map_err(Into::into))
             .collect()
-    }
-}
-
-/// Verify a password against an Argon2id hash.
-///
-/// Public for use by the auth layer.
-pub fn verify_password(password: &str, hash: &str, pepper: Option<&str>) -> Result<bool, DbError> {
-    use argon2::{Argon2, PasswordVerifier};
-
-    let peppered: String;
-    let input = match pepper {
-        Some(p) => {
-            peppered = format!("{p}{password}");
-            peppered.as_bytes()
-        }
-        None => password.as_bytes(),
-    };
-
-    let parsed_hash = argon2::PasswordHash::new(hash)
-        .map_err(|e| DbError::Migration(format!("invalid hash format: {e}")))?;
-
-    let argon2 = Argon2::default();
-    match argon2.verify_password(input, &parsed_hash) {
-        Ok(()) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => Ok(false),
-        Err(e) => Err(DbError::Migration(format!("verify error: {e}"))),
     }
 }
 
@@ -932,6 +946,55 @@ mod tests {
         assert!(
             !anon.deletion_pending,
             "deletion_pending cleared after anonymization"
+        );
+    }
+
+    /// SECHRD-12/T-24-93 (RESEARCH Pitfall 5): `create_with_consent` must
+    /// seed exactly one `password_history` row from the user's initial
+    /// password hash, in the SAME transaction as the user/consent creation,
+    /// so the unauthenticated reset path's current-password-reuse check has
+    /// data for admin-created users.
+    #[tokio::test]
+    async fn create_with_consent_seeds_history() {
+        use crate::SurrealPasswordHistoryRepository;
+        use axiam_core::repository::PasswordHistoryRepository;
+
+        let db = setup_db().await;
+        let repo = SurrealUserRepository::new(db.clone());
+        let history_repo = SurrealPasswordHistoryRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+
+        let user = repo
+            .create_with_consent(
+                CreateUser {
+                    tenant_id,
+                    username: "admin-created".into(),
+                    email: "admin-created@example.com".into(),
+                    password: "InitialStr0ngPassword!".into(),
+                    metadata: None,
+                },
+                "terms_of_service",
+                "v1",
+                Some("127.0.0.1".into()),
+                Some("test-agent".into()),
+            )
+            .await
+            .unwrap();
+
+        let history = history_repo
+            .get_recent(tenant_id, user.id, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            history.len(),
+            1,
+            "expected exactly one seeded password_history row, got: {history:?}"
+        );
+        assert_eq!(history[0].tenant_id, tenant_id);
+        assert_eq!(history[0].user_id, user.id);
+        assert_eq!(
+            history[0].password_hash, user.password_hash,
+            "seeded history hash must match the user's initial password_hash"
         );
     }
 }

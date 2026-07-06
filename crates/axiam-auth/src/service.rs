@@ -10,6 +10,7 @@ use axiam_core::repository::{
     UserRepository,
 };
 use chrono::{Duration, Utc};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -20,12 +21,6 @@ use crate::config::AuthConfig;
 use crate::error::AuthError;
 use crate::token::AUD_USER;
 use crate::{password, token, totp};
-
-/// Constant Argon2id hash of "dummy" used for timing equalization on
-/// user-not-found (SEC-026). Must be a valid Argon2 PHC string so that
-/// `verify_password` executes the full Argon2 computation.
-const DUMMY_HASH: &str =
-    "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaasfNiu6f6WSz0n28";
 
 // -----------------------------------------------------------------------
 // Input / output types
@@ -220,7 +215,11 @@ impl<
                         let _permit = self.crypto_semaphore.acquire().await.ok();
                         let pepper_owned = self.config.pepper.clone();
                         let _ = tokio::task::spawn_blocking(move || {
-                            password::verify_password("dummy", DUMMY_HASH, pepper_owned.as_deref())
+                            password::verify_password(
+                                "dummy",
+                                password::DUMMY_HASH,
+                                pepper_owned.as_ref().map(|p| p.expose_secret()),
+                            )
                         })
                         .await;
                         return Err(AuthError::InvalidCredentials.into());
@@ -249,7 +248,11 @@ impl<
         let hash_owned = user.password_hash.clone();
         let pepper_owned = self.config.pepper.clone();
         let valid = tokio::task::spawn_blocking(move || {
-            password::verify_password(&pw_owned, &hash_owned, pepper_owned.as_deref())
+            password::verify_password(
+                &pw_owned,
+                &hash_owned,
+                pepper_owned.as_ref().map(|p| p.expose_secret()),
+            )
         })
         .await
         .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
@@ -364,10 +367,20 @@ impl<
             return Err(AuthError::MfaInvalidCode.into());
         }
 
-        // Persist the used step to prevent replay within this window (SEC-008).
-        self.user_repo
+        // Persist the used step to prevent replay within this window
+        // (SEC-008/SECHRD-01). `update_totp_step` is an atomic
+        // compare-and-set: `Ok(false)` means the CAS was lost — either this
+        // exact step was already consumed (replay) or a concurrent
+        // submission of the same code already won. Either way, surface the
+        // SAME rejection as an invalid code so a replay/CAS-miss is
+        // indistinguishable from a wrong code.
+        let advanced = self
+            .user_repo
             .update_totp_step(tenant_id, user_id, used_step)
             .await?;
+        if !advanced {
+            return Err(AuthError::MfaInvalidCode.into());
+        }
 
         // 3. Create session and issue tokens.
         self.create_session_and_tokens(
@@ -467,23 +480,38 @@ impl<
             .ok_or(AuthError::MfaNotEnrolled)?;
 
         let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
-        // confirm_mfa is enrollment confirmation only — use plain verify_code (no
-        // replay tracking).  Replay protection (SEC-008) applies to login via
-        // verify_mfa, not to enrollment confirmation.
-        let valid = totp::verify_code(
+        // SECHRD-01/T-24-03: reuse the same matched-step verification and
+        // atomic CAS as `verify_mfa` so replay tracking begins at
+        // enrollment-confirm time rather than at first login. A
+        // freshly-enrolled user always has `totp_last_used_step = NONE`, so
+        // this always succeeds on first use — it only closes the gap where
+        // the enrollment code itself could otherwise be replayed before the
+        // user's first full login.
+        let (valid, used_step) = totp::verify_code_with_replay_check(
             &secret_bytes,
             totp_code,
             &self.config.totp_issuer,
             &user.email,
+            user.totp_last_used_step,
         )?;
 
         if !valid {
             return Err(AuthError::MfaInvalidCode.into());
         }
 
-        // Activate MFA.  totp_last_used_step is intentionally NOT set here:
-        // the user must complete a full login (verify_mfa) for replay tracking
-        // to begin.
+        // Seed totp_last_used_step atomically. A lost CAS here means the
+        // enrollment code was already consumed (e.g. a concurrent duplicate
+        // submission) — reject with the same enrollment-failure error rather
+        // than introduce a new response shape.
+        let advanced = self
+            .user_repo
+            .update_totp_step(tenant_id, user_id, used_step)
+            .await?;
+        if !advanced {
+            return Err(AuthError::MfaInvalidCode.into());
+        }
+
+        // Activate MFA.
         self.user_repo
             .update(
                 tenant_id,
@@ -681,7 +709,11 @@ impl<
         let hash_owned = user.password_hash.clone();
         let pepper_owned = self.config.pepper.clone();
         let valid = tokio::task::spawn_blocking(move || {
-            password::verify_password(&pw_owned, &hash_owned, pepper_owned.as_deref())
+            password::verify_password(
+                &pw_owned,
+                &hash_owned,
+                pepper_owned.as_ref().map(|p| p.expose_secret()),
+            )
         })
         .await
         .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
@@ -697,7 +729,11 @@ impl<
         let current_hash_owned = user.password_hash.clone();
         let pepper_owned2 = self.config.pepper.clone();
         let is_same = tokio::task::spawn_blocking(move || {
-            password::verify_password(&new_pw_owned, &current_hash_owned, pepper_owned2.as_deref())
+            password::verify_password(
+                &new_pw_owned,
+                &current_hash_owned,
+                pepper_owned2.as_ref().map(|p| p.expose_secret()),
+            )
         })
         .await
         .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))?
@@ -709,7 +745,7 @@ impl<
         // 2. Evaluate new password against policy.
         let check = crate::policy::evaluate_password(
             new_password,
-            self.config.pepper.as_deref(),
+            self.config.pepper.as_ref().map(|p| p.expose_secret()),
             policy,
             tenant_id,
             user_id,
@@ -725,7 +761,10 @@ impl<
         }
 
         // 3. Hash new password.
-        let new_hash = password::hash_password(new_password, self.config.pepper.as_deref())?;
+        let new_hash = password::hash_password(
+            new_password,
+            self.config.pepper.as_ref().map(|p| p.expose_secret()),
+        )?;
 
         // 4. Store old password in history before overwriting.
         history_repo
@@ -1037,19 +1076,10 @@ impl<
         tenant_id: Uuid,
         user: &axiam_core::models::user::User,
     ) -> AxiamResult<()> {
-        // SEC-032: atomic increment — single SurrealQL UPDATE avoids TOCTOU race.
-        // Lockout duration escalates exponentially per repeated lockout, capped
-        // at max_lockout_duration_secs (brute-force protection).
-        self.user_repo
-            .increment_failed_logins(
-                tenant_id,
-                user.id,
-                self.config.max_failed_login_attempts,
-                self.config.lockout_duration_secs as i64,
-                self.config.lockout_backoff_multiplier,
-                self.config.max_lockout_duration_secs as i64,
-            )
-            .await
+        // D-06: delegate to the shared lockout helper — the single source of
+        // truth for failed-attempt accrual, also called by gRPC
+        // `UserService::validate_credentials` (SEC-026b).
+        crate::lockout::record_failed_login(&self.user_repo, &self.config, tenant_id, user).await
     }
 
     async fn reset_failed_logins(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {

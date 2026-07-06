@@ -10,15 +10,16 @@ use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::{CreateResource, UpdateResource};
 use axiam_core::models::role::CreateRole;
+use axiam_core::models::scope::CreateScope;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     OrganizationRepository, PermissionRepository, ResourceRepository, RoleRepository,
-    TenantRepository, UserRepository,
+    ScopeRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealPermissionRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -158,7 +159,11 @@ async fn role_assign_same_tenant_ok() {
 }
 
 /// permission_grant_cross_tenant_rejected: role in tenant A, permission in tenant B
-/// → grant_to_role(tenant_a, role_a, perm_b) returns AuthorizationDenied.
+/// → grant_to_role_with_scopes(tenant_a, role_a, perm_b, []) returns AuthorizationDenied.
+///
+/// SECFIX-02: this targets `grant_to_role_with_scopes` — the REST-reachable path
+/// (`POST /api/v1/roles/{id}/permissions` → handlers/permissions.rs → this repo
+/// method) — not the already-guarded sibling `grant_to_role`.
 #[tokio::test]
 async fn permission_grant_cross_tenant_rejected() {
     let db = setup_db().await;
@@ -187,11 +192,85 @@ async fn permission_grant_cross_tenant_rejected() {
         .unwrap();
 
     // Cross-tenant grant: role in A, permission in B — must be rejected.
+    // Empty scope_ids exercises the wildcard branch of grant_to_role_with_scopes.
     let result = perm_repo
-        .grant_to_role(tenant_a, role_a.id, perm_b.id)
+        .grant_to_role_with_scopes(tenant_a, role_a.id, perm_b.id, vec![])
         .await;
 
     assert!(result.is_err(), "cross-tenant permission grant must fail");
+    match result.unwrap_err() {
+        AxiamError::AuthorizationDenied { .. } => {}
+        other => panic!("expected AuthorizationDenied, got {other:?}"),
+    }
+}
+
+/// permission_grant_cross_tenant_scope_rejected: role + permission both in tenant A,
+/// but the supplied scope_id belongs to tenant B → grant_to_role_with_scopes must
+/// reject the attach even though the role/permission pair is same-tenant.
+///
+/// SECFIX-02: proves the scoped branch's per-scope tenant-ownership check
+/// (`array::len($sc) == array::len($scope_ids)`), not just the role/permission guard.
+#[tokio::test]
+async fn permission_grant_cross_tenant_scope_rejected() {
+    let db = setup_db().await;
+    let (_org_id, tenant_a, tenant_b) = setup_two_tenants(&db).await;
+
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let res_repo = SurrealResourceRepository::new(db.clone());
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+
+    let role_a = role_repo
+        .create(CreateRole {
+            tenant_id: tenant_a,
+            name: "role-a-scope-cross".into(),
+            description: "Role A".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+
+    let perm_a = perm_repo
+        .create(CreatePermission {
+            tenant_id: tenant_a,
+            action: "resource:read-scope-cross".into(),
+            description: "Perm in tenant A".into(),
+        })
+        .await
+        .unwrap();
+
+    // Seed a scope owned by tenant B (scopes require a parent resource).
+    let resource_b = res_repo
+        .create(CreateResource {
+            tenant_id: tenant_b,
+            name: "tenant-b-resource".into(),
+            resource_type: "service".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let scope_b = scope_repo
+        .create(CreateScope {
+            tenant_id: tenant_b,
+            resource_id: resource_b.id,
+            name: "read-cross".into(),
+            description: "Scope in tenant B".into(),
+        })
+        .await
+        .unwrap();
+
+    // Role + permission are same-tenant (A), but the scope belongs to tenant B —
+    // must still be rejected atomically, with no partial edge written.
+    let result = perm_repo
+        .grant_to_role_with_scopes(tenant_a, role_a.id, perm_a.id, vec![scope_b.id])
+        .await;
+
+    assert!(
+        result.is_err(),
+        "cross-tenant scope attachment must fail even when role/permission are same-tenant"
+    );
     match result.unwrap_err() {
         AxiamError::AuthorizationDenied { .. } => {}
         other => panic!("expected AuthorizationDenied, got {other:?}"),

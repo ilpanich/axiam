@@ -9,7 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::parse_uuid;
+use crate::helpers::{classify_write_error, parse_uuid};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -141,6 +141,93 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
             .next()
             .map(|r| r.try_into_domain().map_err(Into::into))
             .transpose()
+    }
+
+    /// D-14: atomically mark a user deletion-pending AND create the
+    /// `account_deletion` row (holding the `cancel_token_hash`) in ONE
+    /// transaction.
+    ///
+    /// Before this method existed, `gdpr.rs::request_account_delete` issued
+    /// two fully independent DB round-trips — `user_repo.mark_deletion_pending`
+    /// then `account_deletion_repo.create` — so a failure on the second call
+    /// (after the first already committed) left the user permanently
+    /// `deletion_pending = true` with no `account_deletion` row to hold a
+    /// cancel token: an uncancellable purge (CQ-B39 residual). Wrapping both
+    /// statements in `BEGIN`/`COMMIT` guarantees they succeed or fail
+    /// together.
+    ///
+    /// Also adds a duplicate-pending-request guard (Rule 2: without it, a
+    /// double-submit race could mint two live `account_deletion` rows — two
+    /// outstanding cancel tokens — for the same user). The guard is
+    /// evaluated *inside* the same transaction: if a pending deletion
+    /// already exists for this user, the whole transaction — including the
+    /// just-issued `UPDATE` on the user row — rolls back, so
+    /// `deletion_pending` is never left `true` without a matching
+    /// cancellable row.
+    ///
+    /// Result slots: BEGIN=0, UPDATE user=1, LET $existing=2, IF/THROW=3,
+    /// CREATE account_deletion=4, COMMIT=5. Every field of the returned
+    /// `AccountDeletion` is already known client-side (the id is generated
+    /// here, everything else is an input or a literal), so we don't
+    /// `.take()` any statement result — `.check()` alone proves the whole
+    /// transaction committed.
+    pub async fn create_with_pending_flag(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        scheduled_purge_at: DateTime<Utc>,
+        cancel_token_hash: String,
+    ) -> AxiamResult<AccountDeletion> {
+        let id = Uuid::new_v4();
+        let created_at = Utc::now();
+
+        let query = "BEGIN TRANSACTION; \
+            UPDATE type::record('user', $user_id) SET \
+                deletion_pending = true, \
+                scheduled_purge_at = $purge_at, \
+                status = 'Inactive', \
+                updated_at = time::now() \
+                WHERE tenant_id = $tenant_id; \
+            LET $existing = (SELECT id FROM account_deletion \
+                WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                AND status = 'pending'); \
+            IF array::len($existing) > 0 { \
+                THROW 'pending deletion request already exists'; \
+            }; \
+            CREATE type::record('account_deletion', $ad_id) SET \
+                tenant_id = $tenant_id, \
+                user_id = $user_id, \
+                cancel_token_hash = $hash, \
+                scheduled_purge_at = $purge_at, \
+                status = 'pending', \
+                created_at = $created_at; \
+            COMMIT TRANSACTION";
+
+        let result = self
+            .db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("purge_at", scheduled_purge_at))
+            .bind(("ad_id", id.to_string()))
+            .bind(("hash", cancel_token_hash.clone()))
+            .bind(("created_at", created_at))
+            .await
+            .map_err(DbError::from)?;
+
+        result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "account_deletion"))?;
+
+        Ok(AccountDeletion {
+            id,
+            tenant_id,
+            user_id,
+            cancel_token_hash,
+            scheduled_purge_at,
+            status: AccountDeletionStatus::Pending,
+            created_at,
+        })
     }
 }
 

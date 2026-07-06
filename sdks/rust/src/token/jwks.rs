@@ -92,6 +92,11 @@ pub struct JwksVerifier {
     http_client: reqwest::Client,
     jwks_url: url::Url,
     cache: RwLock<Option<CachedJwks>>,
+    /// Serializes concurrent fetchers so a burst of cache-miss callers (e.g.
+    /// an invalid-`kid` storm) collapses to exactly one network fetch
+    /// (D-08/D-09). Guards ONLY the fetch — a coalescing wrapper, never the
+    /// cryptographic verify path.
+    fetch_lock: tokio::sync::Mutex<()>,
 }
 
 #[cfg(any(feature = "rest", feature = "actix"))]
@@ -107,6 +112,7 @@ impl JwksVerifier {
             http_client,
             jwks_url,
             cache: RwLock::new(None),
+            fetch_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -168,6 +174,13 @@ impl JwksVerifier {
         if let Some(jwks) = self.cached_if_fresh() {
             return Ok(jwks);
         }
+        // Serialize concurrent fetchers on a cold/stale cache (D-08/D-09):
+        // acquire the fetch guard, then double-check under it — a
+        // concurrent caller may have already refreshed while we waited.
+        let _guard = self.fetch_lock.lock().await;
+        if let Some(jwks) = self.cached_if_fresh() {
+            return Ok(jwks);
+        }
         self.fetch_and_cache(false).await
     }
 
@@ -185,6 +198,13 @@ impl JwksVerifier {
     /// `FORCED_REFETCH_MIN_INTERVAL` to avoid a rotating/hostile `kid`
     /// stream hammering the JWKS endpoint.
     async fn force_refetch_if_allowed(&self) -> Result<JwkSet, AxiamError> {
+        // Same fetch_lock as get_or_fetch — a rotating/hostile-kid burst
+        // that reaches this forced-refetch path must ALSO serialize on the
+        // single fetch guard so concurrent callers collapse to one fetch
+        // (D-08/D-09), rather than each racing the cooldown check
+        // independently (the pre-existing TOCTOU this plan closes).
+        let _guard = self.fetch_lock.lock().await;
+
         let allowed = {
             let cache = self.cache.read().ok();
             match cache.as_ref().and_then(|c| c.as_ref()) {

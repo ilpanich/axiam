@@ -9,7 +9,7 @@ use lapin::types::FieldTable;
 use tracing::{error, info, warn};
 
 use crate::connection::queues;
-use crate::messages::{AuditEventMessage, verify_payload};
+use crate::messages::{AuditEventMessage, verify_tenant_signature};
 
 fn parse_actor_type(s: &str) -> Option<ActorType> {
     match s {
@@ -31,11 +31,12 @@ fn parse_outcome(s: &str) -> Option<AuditOutcome> {
 
 /// Start consuming audit events from `axiam.audit.events` and persisting them.
 ///
-/// SEC-022/055: When `signing_key` is `Some`, the `hmac_signature` in each
-/// `AuditEventMessage` is verified before processing. Messages with an invalid
-/// or missing signature are nacked. When `None`, signatures are not required
-/// (migration / development mode) but a warning is logged.
-pub async fn start_audit_consumer<A>(channel: Channel, audit_repo: A, signing_key: Option<Vec<u8>>)
+/// SEC-022/055/SECHRD-08: Every `AuditEventMessage` is verified before
+/// processing — the per-tenant subkey is derived from `master_signing_key` +
+/// the message's `tenant_id` + `key_version`, then the `hmac_signature` is
+/// checked against it. Messages with an invalid or missing signature are
+/// nacked and never processed; there is no fail-open path (D-05c).
+pub async fn start_audit_consumer<A>(channel: Channel, audit_repo: A, master_signing_key: Vec<u8>)
 where
     A: AuditLogRepository + 'static,
 {
@@ -87,32 +88,34 @@ where
             }
         };
 
-        // SEC-022/055: Verify HMAC signature when a signing key is configured.
-        if let Some(ref key) = signing_key {
-            let received_sig = msg.hmac_signature.take();
-            let canonical_bytes =
-                serde_json::to_vec(&msg).unwrap_or_else(|_| delivery.data.clone());
-            let valid = received_sig
-                .as_deref()
-                .is_some_and(|sig| verify_payload(key, &canonical_bytes, sig));
-            if !valid {
-                warn!(
-                    delivery_tag = tag,
-                    "AuditEventMessage HMAC verification failed — nacking (SEC-022/055)"
-                );
-                let _ = delivery
-                    .acker
-                    .nack(BasicNackOptions {
-                        requeue: false,
-                        ..BasicNackOptions::default()
-                    })
-                    .await;
-                continue;
-            }
-        } else {
+        // SEC-022/055/SECHRD-08: Verify the per-tenant derived HMAC
+        // signature. Unsigned or invalid-signature messages are always
+        // rejected — there is no fail-open path (D-05c, T-25-20).
+        let received_sig = msg.hmac_signature.take();
+        let tenant_id = msg.tenant_id;
+        let key_version = msg.key_version;
+        let canonical_bytes = serde_json::to_vec(&msg).unwrap_or_else(|_| delivery.data.clone());
+        let valid = verify_tenant_signature(
+            &master_signing_key,
+            tenant_id,
+            key_version,
+            &canonical_bytes,
+            received_sig.as_deref(),
+        );
+        if !valid {
             warn!(
-                "AMQP signing key not configured — AuditEventMessage signatures not verified (SEC-022/055)"
+                delivery_tag = tag,
+                tenant_id = %tenant_id,
+                "AuditEventMessage unsigned or HMAC verification failed — rejecting (SEC-022/055/SECHRD-08)"
             );
+            let _ = delivery
+                .acker
+                .nack(BasicNackOptions {
+                    requeue: false,
+                    ..BasicNackOptions::default()
+                })
+                .await;
+            continue;
         }
 
         let actor_type = match parse_actor_type(&msg.actor_type) {

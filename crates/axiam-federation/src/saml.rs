@@ -86,11 +86,22 @@ pub struct SamlAssertionClaims {
 /// SAML Federation Service that handles external SAML IdP integration.
 ///
 /// Generic over repository implementations for testability.
+///
+/// `Clone` (QUAL-07, axiam-api-rest): hoisted `AppState<C>` singleton,
+/// constructed once at startup and cloned per Actix worker.
+#[derive(Clone)]
 pub struct SamlFederationService<FC, FL, UR, AR> {
     federation_config_repo: FC,
     federation_link_repo: FL,
     user_repo: UR,
     replay_repo: AR,
+    /// Retained for constructor API stability across the ~9 call sites in
+    /// `axiam-api-rest::handlers::federation` and the `axiam-server`
+    /// integration tests (out of this plan's scope). No longer read
+    /// directly: `fetch_idp_metadata` now routes through
+    /// `ssrf::guarded_fetch`, which builds its own fresh, IP-pinned client
+    /// per request rather than reusing an injected pooled client (D-01c).
+    #[allow(dead_code)]
     http_client: reqwest::Client,
 }
 
@@ -127,15 +138,13 @@ where
     ) -> Result<IdpMetadata, FederationError> {
         validate_metadata_url(metadata_url)?;
 
-        let response = self
-            .http_client
-            .get(metadata_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
+        // SECHRD-02: route the metadata GET through the shared, IP-pinning
+        // SSRF guard (D-01a/b/c). Production always fails closed against
+        // private/loopback/link-local addresses and internal redirect
+        // targets — `allow_private=false`.
+        let response = crate::ssrf::guarded_fetch(metadata_url, false, |c, u| c.get(u))
             .await
-            .map_err(|e| {
-                FederationError::SamlMetadataFailed(format!("HTTP request failed: {e}"))
-            })?;
+            .map_err(|e| FederationError::SamlMetadataFailed(e.to_string()))?;
 
         if !response.status().is_success() {
             return Err(FederationError::SamlMetadataFailed(format!(
@@ -329,6 +338,13 @@ where
     ///
     /// `expected_destination` — if `Some` and non-empty, checked against
     /// `Response.Destination` (SEC-005/REQ-14 AC-5).
+    ///
+    /// `require_in_response_to` — if `true` and `expected_request_id` is `None`,
+    /// reject a response with no `InResponseTo` at all (unsolicited-response
+    /// defense for callers, such as the authenticated ACS path, that have no
+    /// stored request ID to compare against but still must not accept an
+    /// out-of-band response). Has no effect when `expected_request_id` is
+    /// `Some` — that already enforces presence-and-equality (SECFIX-04/SEC-005).
     pub async fn handle_saml_response(
         &self,
         tenant_id: Uuid,
@@ -337,6 +353,7 @@ where
         _relay_state: Option<&str>,
         expected_request_id: Option<&str>,
         expected_destination: Option<&str>,
+        require_in_response_to: bool,
     ) -> Result<FederationCallbackResult, FederationError> {
         let config = self
             .federation_config_repo
@@ -398,6 +415,13 @@ where
                 }
                 _ => {}
             }
+        } else if require_in_response_to && response.in_response_to.is_none() {
+            // No stored expected_request_id is available (e.g. the authenticated
+            // ACS path has no FederationLoginState row), but the caller still
+            // requires presence to reject unsolicited responses (SECFIX-04/SEC-005).
+            return Err(FederationError::SamlResponseFailed(
+                "SAML Response missing InResponseTo (unsolicited response rejected)".into(),
+            ));
         }
 
         // Destination: reject responses not addressed to this ACS URL.
@@ -436,6 +460,18 @@ where
         let assertion = response.assertion.as_ref().ok_or_else(|| {
             FederationError::SamlResponseFailed("SAML Response missing Assertion".into())
         })?;
+
+        // Step 2 — XSW (XML Signature Wrapping) binding check (SECFIX-04/SEC-005).
+        // `verify_signature` above only proves SOME valid <ds:Signature> exists
+        // somewhere in the document; it never surfaces which element ID it
+        // verified. `response.assertion` is a scalar field, so a wrapped/duplicated
+        // second <Assertion> sibling would otherwise be trusted unchallenged. Bind
+        // the cryptographically verified signature to THIS consumed assertion by
+        // raw-XML introspection: exactly one <Assertion> must exist document-wide,
+        // and at least one <Signature>'s <Reference URI> must resolve to this
+        // assertion's ID. Must run AFTER verify_signature (378) and AFTER the
+        // assertion is read (above), BEFORE any of its claims are trusted.
+        bind_signature_to_assertion(xml.as_bytes(), &assertion.id)?;
 
         // Validate conditions — REQUIRED (SEC-005/REQ-14 AC-5).
         // An assertion without a Conditions block has no validity window and no
@@ -724,6 +760,96 @@ where
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// Bind the cryptographically verified XML signature to the assertion actually
+/// consumed by `handle_saml_response` (SECFIX-04/SEC-005 — XML Signature
+/// Wrapping defense).
+///
+/// `samael::crypto::verify_signed_xml` (called by `verify_signature` above)
+/// only proves that SOME valid `<ds:Signature>` exists somewhere in the
+/// document — it never surfaces which element ID the verified signature's
+/// `<Reference URI="#...">` pointed to. Meanwhile `samael::schema::Response`
+/// exposes `assertion` as a *scalar* `Option<Assertion>`, so an attacker can
+/// keep the original signed assertion intact somewhere in the tree (so the
+/// lone-signature check still passes) and inject a second, forged, unsigned
+/// `<Assertion>` sibling that the deserializer happens to bind to
+/// `response.assertion`.
+///
+/// This performs an independent raw-XML introspection pass (via `libxml`,
+/// already resolved transitively through samael 0.0.19's `xmlsec` feature)
+/// to close that gap:
+///
+/// 1. Exactly one `<Assertion>` element (namespace-agnostic local name) must
+///    exist anywhere in the document — rejects the wrapped/duplicated payload
+///    shape outright, regardless of signature status.
+/// 2. At least one `<Signature>`'s `<Reference URI="#...">` must resolve to
+///    `claimed_assertion_id` — binds "the element that was cryptographically
+///    verified" to "the element whose claims are about to be trusted".
+///    Rejects on an empty, absent, or non-matching reference.
+///
+/// Never uses regex/string search on the XML (a real, namespace-aware XPath
+/// parser is required — see 23-RESEARCH.md Anti-Patterns).
+fn bind_signature_to_assertion(
+    xml_bytes: &[u8],
+    claimed_assertion_id: &str,
+) -> Result<(), FederationError> {
+    let parser = libxml::parser::Parser::default();
+    let doc = parser.parse_string(xml_bytes).map_err(|e| {
+        FederationError::SamlResponseFailed(format!(
+            "XSW binding check: failed to re-parse SAML response XML: {e}"
+        ))
+    })?;
+
+    let mut context = libxml::xpath::Context::new(&doc).map_err(|()| {
+        FederationError::SamlResponseFailed(
+            "XSW binding check: failed to create XPath context".into(),
+        )
+    })?;
+
+    // 1. Exactly one Assertion element must exist anywhere in the document.
+    let assertions = context
+        .findnodes("//*[local-name()='Assertion']", None)
+        .map_err(|()| {
+            FederationError::SamlResponseFailed(
+                "XSW binding check: XPath evaluation failed (Assertion)".into(),
+            )
+        })?;
+    if assertions.len() != 1 {
+        return Err(FederationError::SamlResponseFailed(format!(
+            "expected exactly 1 Assertion element in SAML Response, found {} \
+             (possible XML Signature Wrapping attack)",
+            assertions.len()
+        )));
+    }
+
+    // 2. Every <Signature>'s Reference URI must resolve to the consumed
+    //    assertion's ID. Reject on empty/absent/non-matching references.
+    let references = context
+        .findnodes(
+            "//*[local-name()='Signature']//*[local-name()='Reference']/@URI",
+            None,
+        )
+        .map_err(|()| {
+            FederationError::SamlResponseFailed(
+                "XSW binding check: XPath evaluation failed (Signature/Reference)".into(),
+            )
+        })?;
+
+    let expected_reference = format!("#{claimed_assertion_id}");
+    let bound = references.iter().any(|node| {
+        let uri = node.get_content();
+        !uri.is_empty() && uri == expected_reference
+    });
+    if !bound {
+        return Err(FederationError::SamlResponseFailed(
+            "no verified Signature references the consumed Assertion \
+             (XML Signature Wrapping rejected)"
+                .into(),
+        ));
+    }
+
+    Ok(())
+}
 
 /// Extract NameID, session index, and attributes from a SAML assertion.
 fn extract_assertion_claims(
@@ -1020,7 +1146,7 @@ mod tests {
             _: Uuid,
             _: Uuid,
             _: u64,
-        ) -> axiam_core::error::AxiamResult<()> {
+        ) -> axiam_core::error::AxiamResult<bool> {
             unimplemented!()
         }
         async fn list(
@@ -1038,6 +1164,15 @@ mod tests {
             _: i64,
             _: f64,
             _: i64,
+        ) -> axiam_core::error::AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn anonymize_user(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: &str,
+            _: &str,
         ) -> axiam_core::error::AxiamResult<()> {
             unimplemented!()
         }

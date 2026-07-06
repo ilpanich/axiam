@@ -10,6 +10,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 /// Generate a random client ID with the `oa_` prefix (32 hex chars).
 fn generate_client_id() -> String {
@@ -73,11 +74,6 @@ impl OAuth2ClientRowWithId {
     }
 }
 
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
 /// SurrealDB implementation of the OAuth2Client repository.
 #[derive(Clone)]
 pub struct SurrealOAuth2ClientRepository<C: Connection> {
@@ -128,10 +124,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "oauth2_client".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -167,10 +160,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .map_err(DbError::from)?;
 
         let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "oauth2_client".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -208,10 +198,11 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .map_err(DbError::from)?;
 
         let rows: Vec<OAuth2ClientRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "oauth2_client".into(),
-            id: format!("client_id={client_id_owned}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "oauth2_client",
+            &format!("client_id={client_id_owned}"),
+        )?;
 
         row.try_into_client().map_err(Into::into)
     }
@@ -271,10 +262,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "oauth2_client".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -326,7 +314,6 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let mut result = self
             .db
@@ -349,11 +336,6 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .map(|row| row.try_into_client())
             .collect::<Result<Vec<_>, DbError>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 }

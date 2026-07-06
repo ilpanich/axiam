@@ -172,7 +172,16 @@ where
             .client_repo
             .get_by_client_id(tenant_id, client_id)
             .await
-            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
+            .map_err(|e| match e {
+                // QUAL-03/D-11: only a genuinely-unknown client maps to
+                // invalid_client. Any other error (e.g. a DB outage) must
+                // surface as a distinct server error, never masquerade as
+                // bad client credentials (error-oracle).
+                AxiamError::NotFound { .. } => {
+                    OAuth2Error::InvalidClient("client not found".into())
+                }
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
 
         // Verify client is authorized for authorization_code grant
         if !client.grant_types.iter().any(|s| s == "authorization_code") {
@@ -343,7 +352,16 @@ where
             .client_repo
             .get_by_client_id(tenant_id, client_id)
             .await
-            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
+            .map_err(|e| match e {
+                // QUAL-03/D-11: only a genuinely-unknown client maps to
+                // invalid_client. Any other error (e.g. a DB outage) must
+                // surface as a distinct server error, never masquerade as
+                // bad client credentials (error-oracle).
+                AxiamError::NotFound { .. } => {
+                    OAuth2Error::InvalidClient("client not found".into())
+                }
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
 
         let provided_hash = hash_client_secret(client_secret);
         if !bool::from(
@@ -451,7 +469,16 @@ where
             .client_repo
             .get_by_client_id(tenant_id, client_id)
             .await
-            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
+            .map_err(|e| match e {
+                // QUAL-03/D-11: only a genuinely-unknown client maps to
+                // invalid_client. Any other error (e.g. a DB outage) must
+                // surface as a distinct server error, never masquerade as
+                // bad client credentials (error-oracle).
+                AxiamError::NotFound { .. } => {
+                    OAuth2Error::InvalidClient("client not found".into())
+                }
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
 
         let provided_hash = hash_client_secret(client_secret_val);
         if !bool::from(
@@ -742,7 +769,16 @@ where
             .client_repo
             .get_by_client_id(tenant_id, client_id)
             .await
-            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
+            .map_err(|e| match e {
+                // QUAL-03/D-11: only a genuinely-unknown client maps to
+                // invalid_client. Any other error (e.g. a DB outage) must
+                // surface as a distinct server error, never masquerade as
+                // bad client credentials (error-oracle).
+                AxiamError::NotFound { .. } => {
+                    OAuth2Error::InvalidClient("client not found".into())
+                }
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
 
         let provided_hash = hash_client_secret(client_secret);
         if !bool::from(

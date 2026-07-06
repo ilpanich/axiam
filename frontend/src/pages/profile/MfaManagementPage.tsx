@@ -1,15 +1,13 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Shield, Trash2, Loader2, AlertCircle, Copy, Check, KeyRound, Fingerprint } from "lucide-react";
-import { QRCodeSVG } from "qrcode.react";
-import api from "@/lib/api";
+import { Shield, Trash2, Loader2, AlertCircle, KeyRound, Fingerprint } from "lucide-react";
 import { authService } from "@/services/auth";
 import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import { DataTable } from "@/components/DataTable";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { TotpSetupPanel } from "@/components/auth/TotpSetupPanel";
 import type { Column } from "@/components/DataTable";
 import type { AxiosError } from "axios";
 
@@ -17,8 +15,9 @@ import type { AxiosError } from "axios";
 // Types & API helpers
 // ---------------------------------------------------------------------------
 
-// CQ-F17: use canonical MfaMethod type from services/users.ts
-import type { MfaMethod } from "@/services/users";
+// CQ-F17/QUAL-06: use canonical MfaMethod type + userService methods from
+// services/users.ts instead of inline api.get/api.delete (D-16).
+import { userService, type MfaMethod } from "@/services/users";
 export type { MfaMethod };
 
 interface TotpSetupResponse {
@@ -30,20 +29,6 @@ interface ErrorResponse {
   message?: string;
   error?: string;
 }
-
-// The backend has no `/users/me` alias — MFA methods are addressed by the
-// authenticated user's real id (resolved from the auth store at call sites).
-async function getMfaMethods(userId: string): Promise<MfaMethod[]> {
-  const res = await api.get<MfaMethod[] | { items: MfaMethod[] }>(
-    `/api/v1/users/${userId}/mfa-methods`,
-  );
-  return Array.isArray(res.data) ? res.data : res.data.items;
-}
-
-async function deleteMfaMethod(userId: string, id: string): Promise<void> {
-  await api.delete(`/api/v1/users/${userId}/mfa-methods/${id}`);
-}
-
 
 // ---------------------------------------------------------------------------
 // Method type badge
@@ -87,15 +72,11 @@ function TotpSetupDialog({
   confirmError,
 }: TotpSetupDialogProps) {
   const [code, setCode] = useState("");
-  const [copied, setCopied] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setCode("");
-      setCopied(false);
-      setTimeout(() => inputRef.current?.focus(), 100);
     }
   }, [open]);
 
@@ -109,21 +90,6 @@ function TotpSetupDialog({
   }, [open, onClose]);
 
   if (!open || !setupData) return null;
-
-  const isDataUrl = setupData.totp_uri.startsWith("data:");
-
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(setupData.secret_base32);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (code.length === 6) {
-      await onConfirm(code);
-    }
-  };
 
   return (
     <div
@@ -150,97 +116,15 @@ function TotpSetupDialog({
           </p>
         </div>
 
-        {/* QR code area — backend returns an otpauth:// URI; render it as a
-            scannable QR client-side (it is not a data: image). */}
-        <div className="flex flex-col items-center gap-3">
-          {isDataUrl ? (
-            <img
-              src={setupData.totp_uri}
-              alt="TOTP QR code — scan with your authenticator app"
-              className="h-40 w-40 rounded-lg border border-white/10 bg-white p-1"
-            />
-          ) : (
-            <QRCodeSVG
-              value={setupData.totp_uri}
-              size={160}
-              level="M"
-              marginSize={2}
-              bgColor="#ffffff"
-              fgColor="#0a0a0a"
-              title="TOTP QR code — scan with your authenticator app"
-              className="h-44 w-44 rounded-lg border border-white/10 bg-white p-2"
-            />
-          )}
-        </div>
-
-        {/* Manual entry */}
-        <div className="space-y-2">
-          <p className="text-xs text-muted-foreground">Or enter this key manually:</p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 text-xs font-mono bg-white/5 border border-white/10 rounded px-3 py-2 text-primary break-all">
-              {setupData.secret_base32}
-            </code>
-            <button
-              type="button"
-              onClick={handleCopy}
-              className="p-2 rounded hover:bg-white/10 transition-colors text-muted-foreground hover:text-foreground shrink-0"
-              aria-label="Copy secret key"
-            >
-              {copied ? (
-                <Check size={14} className="text-emerald-400" />
-              ) : (
-                <Copy size={14} />
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Verification input */}
-        <form onSubmit={handleSubmit} noValidate>
-          {confirmError && (
-            <div
-              role="alert"
-              className="flex items-start gap-2 mb-3 p-3 rounded-md bg-destructive/10 border border-destructive/30 text-destructive text-sm"
-            >
-              <AlertCircle size={14} className="shrink-0 mt-0.5" />
-              <span>{confirmError}</span>
-            </div>
-          )}
-
-          <div className="space-y-2">
-            <Label htmlFor="totp-verify-code">Verification Code</Label>
-            <input
-              ref={inputRef}
-              id="totp-verify-code"
-              type="text"
-              inputMode="numeric"
-              pattern="[0-9]{6}"
-              maxLength={6}
-              placeholder="000000"
-              value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              autoComplete="one-time-code"
-              className="flex h-10 w-full rounded-md px-3 py-2 text-sm bg-white/5 border border-primary/20 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 transition-colors duration-200 text-center text-xl tracking-[0.4em] font-mono"
-              required
-            />
-          </div>
-
-          <div className="flex justify-end gap-3 mt-4">
-            <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={isConfirming}>
-              Cancel
-            </Button>
-            <Button type="submit" size="sm" disabled={isConfirming || code.length !== 6}>
-              {isConfirming ? (
-                <>
-                  <Loader2 size={14} className="animate-spin" aria-hidden="true" />
-                  Confirming…
-                </>
-              ) : (
-                "Confirm"
-              )}
-            </Button>
-          </div>
-        </form>
+        <TotpSetupPanel
+          setupData={setupData}
+          code={code}
+          onCodeChange={setCode}
+          onConfirm={onConfirm}
+          error={confirmError}
+          isPending={isConfirming}
+          onCancel={onClose}
+        />
       </div>
     </div>
   );
@@ -260,12 +144,12 @@ export function MfaManagementPage() {
 
   const { data: methods = [], isLoading } = useQuery({
     queryKey: ["mfaMethods", userId],
-    queryFn: () => getMfaMethods(userId!),
+    queryFn: () => userService.listMfaMethods(userId!),
     enabled: !!userId,
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteMfaMethod(userId!, id),
+    mutationFn: (id: string) => userService.deleteMfaMethod(userId!, id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mfaMethods"] });
       setDeleteTarget(null);

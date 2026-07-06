@@ -15,6 +15,7 @@ axiam-email = { workspace = true }
 chrono = { workspace = true }
 futures-lite = { workspace = true }
 hmac = { workspace = true }
+hkdf = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 lapin = { workspace = true }
@@ -29,3 +30,4 @@ uuid = { workspace = true }
 axiam-db = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }
+tracing-subscriber = { workspace = true }

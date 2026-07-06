@@ -21,6 +21,7 @@ use crate::error::DbError;
 struct ErasureProofRow {
     pseudonym: String,
     tenant_id: String,
+    user_id: String,
     erased_at: DateTime<Utc>,
 }
 
@@ -55,11 +56,13 @@ impl<C: Connection> ErasureProofRepository for SurrealErasureProofRepository<C> 
                 "CREATE type::record('erasure_proof', $id) SET \
                  pseudonym = $pseudonym, \
                  tenant_id = $tenant_id, \
+                 user_id = $user_id, \
                  erased_at = $erased_at",
             )
             .bind(("id", id.to_string()))
             .bind(("pseudonym", input.pseudonym.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
+            .bind(("user_id", input.user_id.to_string()))
             .bind(("erased_at", input.erased_at))
             .await
             .map_err(DbError::from)?;
@@ -75,11 +78,14 @@ impl<C: Connection> ErasureProofRepository for SurrealErasureProofRepository<C> 
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let user_id = Uuid::parse_str(&row.user_id)
+            .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
 
         Ok(ErasureProof {
             id,
             pseudonym: row.pseudonym,
             tenant_id,
+            user_id,
             erased_at: row.erased_at,
         })
     }
@@ -107,11 +113,13 @@ mod tests {
         let db = setup_db().await;
         let repo = SurrealErasureProofRepository::new(db);
         let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
 
         let proof = repo
             .create(CreateErasureProof {
                 pseudonym: "DELETED_USER_deadbeef01234567".into(),
                 tenant_id,
+                user_id,
                 erased_at: Utc::now(),
             })
             .await
@@ -119,6 +127,41 @@ mod tests {
 
         assert_eq!(proof.pseudonym, "DELETED_USER_deadbeef01234567");
         assert_eq!(proof.tenant_id, tenant_id);
+        assert_eq!(proof.user_id, user_id);
         assert!(!proof.id.is_nil());
+    }
+
+    /// A duplicate erasure proof CREATE for the same (tenant_id, user_id)
+    /// must fail idempotently at the schema level (D-03b/SECHRD-06) — the DB
+    /// UNIQUE index is the enforcement mechanism a retried erasure relies on.
+    #[tokio::test]
+    async fn erasure_proof_duplicate_user_rejected_by_unique_index() {
+        let db = setup_db().await;
+        let repo = SurrealErasureProofRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        repo.create(CreateErasureProof {
+            pseudonym: "DELETED_USER_first0123456789ab".into(),
+            tenant_id,
+            user_id,
+            erased_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+        let duplicate = repo
+            .create(CreateErasureProof {
+                pseudonym: "DELETED_USER_second123456789a".into(),
+                tenant_id,
+                user_id,
+                erased_at: Utc::now(),
+            })
+            .await;
+
+        assert!(
+            duplicate.is_err(),
+            "a second erasure proof for the same (tenant_id, user_id) must be rejected by the UNIQUE index"
+        );
     }
 }

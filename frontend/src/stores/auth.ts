@@ -5,6 +5,12 @@ export interface AuthUser {
   username: string;
   email: string;
   permissions: string[];
+  /**
+   * Raw tenant_id UUID from the backend (LoginUserInfo.tenant_id, 23-06).
+   * Required by unauthenticated-but-tenant-scoped calls like
+   * `resendVerification` (ResendVerificationRequest.tenant_id: Uuid).
+   */
+  tenant_id: string;
   /** Restored from /auth/me for slug-based tenant context (CQ-F29). */
   tenantSlug?: string;
   orgSlug?: string;

@@ -14,16 +14,25 @@ import com.nimbusds.jwt.SignedJWT;
 
 import io.axiam.sdk.errors.AuthError;
 
+import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
 
 import org.junit.jupiter.api.Test;
 
 import java.util.Date;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Proves D-19/T-20-06/T-20-07: a valid EdDSA token verifies against the
@@ -106,6 +115,60 @@ class JwksVerifierTest {
             String token = signEdDsa(keyPair, claims("tenant-a"));
 
             assertDoesNotThrow(() -> verifier.verify(token));
+        }
+    }
+
+    /**
+     * Proves D-08/D-09: a burst of concurrent {@link JwksVerifier#verify}
+     * calls against a cold cache collapses to exactly one JWKS fetch, not
+     * one fetch per thread.
+     */
+    @Test
+    void concurrentVerifyBurstTriggersExactlyOneJwksFetch() throws Exception {
+        OctetKeyPair keyPair = generateEd25519KeyPair("kid-burst");
+        AtomicInteger fetchCount = new AtomicInteger(0);
+
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                @Override
+                public MockResponse dispatch(RecordedRequest request) {
+                    fetchCount.incrementAndGet();
+                    return jwksResponse(keyPair.toPublicJWK());
+                }
+            });
+            server.start();
+
+            JwksVerifier verifier = new JwksVerifier(server.url("/").toString());
+            String token = signEdDsa(keyPair, claims("tenant-a"));
+
+            int threadCount = 8;
+            ExecutorService pool = Executors.newFixedThreadPool(threadCount);
+            CountDownLatch ready = new CountDownLatch(threadCount);
+            CountDownLatch start = new CountDownLatch(1);
+            CountDownLatch done = new CountDownLatch(threadCount);
+            List<Throwable> errors = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+            for (int i = 0; i < threadCount; i++) {
+                pool.submit(() -> {
+                    ready.countDown();
+                    try {
+                        start.await();
+                        verifier.verify(token);
+                    } catch (Throwable t) {
+                        errors.add(t);
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+
+            ready.await();
+            start.countDown();
+            assertTrue(done.await(10, TimeUnit.SECONDS), "verify burst did not complete in time");
+            pool.shutdown();
+
+            assertTrue(errors.isEmpty(), "unexpected verify failures: " + errors);
+            assertEquals(1, fetchCount.get(), "expected exactly one JWKS fetch for the concurrent unknown-kid burst");
         }
     }
 

@@ -9,7 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::parse_uuid;
+use crate::helpers::{CountRow, parse_uuid, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -96,16 +96,19 @@ impl<C: Connection> SurrealExportJobRepository<C> {
         Self { db }
     }
 
-    /// Return true if the user already has a queued or in-flight export job
-    /// (status = 'queued').  Used by the GDPR handler to prevent duplicate
-    /// concurrent export requests (CQ-B39).
+    /// Return true if the user already has a queued, ready-but-undownloaded,
+    /// or failed export job.  Used by the GDPR handler to prevent duplicate
+    /// concurrent export requests (CQ-B39/SECHRD-06/D-03d).
+    ///
+    /// `downloaded` is intentionally excluded: a user who already downloaded
+    /// their export may request a new one.
     pub async fn has_pending_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<bool> {
         let mut result = self
             .db
             .query(
                 "SELECT count() AS total FROM export_job \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
-                 AND status IN ['queued'] \
+                 AND status IN ['queued', 'ready', 'failed'] \
                  GROUP ALL",
             )
             .bind(("tenant_id", tenant_id.to_string()))
@@ -114,11 +117,6 @@ impl<C: Connection> SurrealExportJobRepository<C> {
             .map_err(DbError::from)?
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-
-        #[derive(Debug, surrealdb_types::SurrealValue)]
-        struct CountRow {
-            total: u64,
-        }
 
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         let count = rows.into_iter().next().map(|r| r.total).unwrap_or(0);
@@ -153,10 +151,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<ExportJobRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "export_job".into(),
-            id: id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "export_job", &id.to_string())?;
 
         Ok(ExportJob {
             id,
@@ -375,5 +370,98 @@ mod tests {
         );
 
         repo.mark_downloaded(found.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_job_dedup_blocks_ready_and_failed() {
+        let db = setup_db().await;
+        let repo = SurrealExportJobRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+
+        // queued
+        let user_queued = Uuid::new_v4();
+        repo.create(CreateExportJob {
+            tenant_id,
+            user_id: user_queued,
+        })
+        .await
+        .unwrap();
+        assert!(
+            repo.has_pending_for_user(tenant_id, user_queued)
+                .await
+                .unwrap(),
+            "queued job must block a duplicate request"
+        );
+
+        // ready (undownloaded)
+        let user_ready = Uuid::new_v4();
+        let job_ready = repo
+            .create(CreateExportJob {
+                tenant_id,
+                user_id: user_ready,
+            })
+            .await
+            .unwrap();
+        repo.set_ready(
+            job_ready.id,
+            "ready-token-hash".into(),
+            Some("blob".into()),
+            None,
+            Some("nonce".into()),
+            Utc::now() + Duration::hours(24),
+        )
+        .await
+        .unwrap();
+        assert!(
+            repo.has_pending_for_user(tenant_id, user_ready)
+                .await
+                .unwrap(),
+            "ready-but-undownloaded job must block a duplicate request"
+        );
+
+        // failed
+        let user_failed = Uuid::new_v4();
+        let job_failed = repo
+            .create(CreateExportJob {
+                tenant_id,
+                user_id: user_failed,
+            })
+            .await
+            .unwrap();
+        repo.mark_failed(job_failed.id).await.unwrap();
+        assert!(
+            repo.has_pending_for_user(tenant_id, user_failed)
+                .await
+                .unwrap(),
+            "failed job must block a duplicate request"
+        );
+
+        // downloaded — must NOT block
+        let user_downloaded = Uuid::new_v4();
+        let job_downloaded = repo
+            .create(CreateExportJob {
+                tenant_id,
+                user_id: user_downloaded,
+            })
+            .await
+            .unwrap();
+        repo.set_ready(
+            job_downloaded.id,
+            "downloaded-token-hash".into(),
+            Some("blob".into()),
+            None,
+            Some("nonce".into()),
+            Utc::now() + Duration::hours(24),
+        )
+        .await
+        .unwrap();
+        repo.mark_downloaded(job_downloaded.id).await.unwrap();
+        assert!(
+            !repo
+                .has_pending_for_user(tenant_id, user_downloaded)
+                .await
+                .unwrap(),
+            "downloaded job must NOT block a new request"
+        );
     }
 }

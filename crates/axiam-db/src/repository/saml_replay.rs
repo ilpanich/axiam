@@ -9,19 +9,10 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::repository::AssertionReplayRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::{Connection, Surreal};
-use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-
-// ---------------------------------------------------------------------------
-// Row structs
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
+use crate::helpers::CountRow;
 
 // ---------------------------------------------------------------------------
 // Repository

@@ -48,7 +48,14 @@
   -->
   <ItemGroup>
     <PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
-    <PackageReference Include="Google.Protobuf" Version="2.80.0" />
+    <!-- D-08/27-03 fix: 2.80.0 does not exist for Google.Protobuf (that numbering
+         belongs to Grpc.Net.Client/gRPC-C# releases, not the protobuf runtime, which
+         is on the 3.x line) — NuGet was silently floor-resolving it to 3.0.0, an old
+         release missing IBufferMessage/WriteContext/ParseContext/UnknownFieldSet used
+         by the already-generated axiam.v1 stubs, breaking the build entirely. Pinned to
+         3.25.8 to match the exact protobuf-java runtime version this repo already uses
+         (sdks/java/pom.xml's protobuf.version property) for cross-SDK consistency. -->
+    <PackageReference Include="Google.Protobuf" Version="3.25.8" />
     <PackageReference Include="RabbitMQ.Client" Version="7.2.1" />
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />

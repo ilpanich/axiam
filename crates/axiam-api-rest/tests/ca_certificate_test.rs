@@ -4,6 +4,7 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -128,11 +129,15 @@ macro_rules! test_app {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(CaService::new(
-                    SurrealCaCertificateRepository::new($db.clone()),
-                    test_pki_config(),
-                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-                )))
+                .app_data(web::Data::new({
+                    let mut state = AppState::for_test($db.clone(), $auth.clone());
+                    state.ca_service = CaService::new(
+                        SurrealCaCertificateRepository::new($db.clone()),
+                        test_pki_config(),
+                        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+                    );
+                    state
+                }))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))

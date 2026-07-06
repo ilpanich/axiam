@@ -2,11 +2,21 @@ import api from "@/lib/api";
 
 // ─── Request payloads ─────────────────────────────────────────────────────────
 
+/**
+ * Backend `RequestResetBody` (crates/axiam-api-rest/src/handlers/password_reset.rs)
+ * accepts an OPTIONAL org/tenant slug pair (the forgot-password page has no
+ * tenant_id yet — Open Question 1 / D-04). No user-typed tenant field, no
+ * email-domain inference: the slug must come from the URL the page was
+ * loaded with.
+ */
 export interface RequestPasswordResetPayload {
   email: string;
+  org_slug?: string;
+  tenant_slug?: string;
 }
 
 export interface ConfirmPasswordResetPayload {
+  tenant_id: string;
   token: string;
   new_password: string;
 }
@@ -35,19 +45,46 @@ export const authService = {
   /**
    * Request a password-reset email.
    * POST /api/v1/auth/reset
+   *
+   * Backend `RequestResetBody` accepts an optional `org_slug`/`tenant_slug`
+   * pair (D-04 / Open Question 1) — the forgot-password page carries the
+   * tenant slug in its own URL (no user-typed tenant field, no
+   * email-domain inference). Enumeration-safety (D-05) is preserved even
+   * when the slug is unresolvable or omitted.
    */
-  requestPasswordReset: (email: string): Promise<void> =>
+  requestPasswordReset: (
+    email: string,
+    orgSlug?: string,
+    tenantSlug?: string
+  ): Promise<void> =>
     api
-      .post<void>("/api/v1/auth/reset", { email })
+      .post<void>("/api/v1/auth/reset", {
+        email,
+        org_slug: orgSlug,
+        tenant_slug: tenantSlug,
+      })
       .then(() => undefined),
 
   /**
    * Confirm a password reset using the token from the email link.
    * POST /api/v1/auth/reset/confirm
+   *
+   * Backend `ConfirmResetBody` requires `tenant_id` (a UUID) — the emailed
+   * reset link carries it directly (Open Question 2, mirroring the
+   * already-shipped VerifyEmailPage `?token=…&tenant_id=…` pattern) — see
+   * ResetPasswordPage.
    */
-  confirmPasswordReset: (token: string, new_password: string): Promise<void> =>
+  confirmPasswordReset: (
+    tenantId: string,
+    token: string,
+    new_password: string
+  ): Promise<void> =>
     api
-      .post<void>("/api/v1/auth/reset/confirm", { token, new_password })
+      .post<void>("/api/v1/auth/reset/confirm", {
+        tenant_id: tenantId,
+        token,
+        new_password,
+      })
       .then(() => undefined),
 
   /**
@@ -65,12 +102,20 @@ export const authService = {
       .then(() => undefined),
 
   /**
-   * Resend the email verification message (authenticated endpoint).
+   * Resend the email verification message.
    * POST /api/v1/auth/resend-verification
+   *
+   * Despite living behind an authenticated page (ProfilePage), this is a
+   * PUBLIC/unauthenticated backend route — `ResendVerificationRequest`
+   * requires BOTH `tenant_id` (a UUID) AND `email` in the body (23-RESEARCH
+   * Pitfall 4). The caller must supply both from the current auth context.
    */
-  resendVerification: (): Promise<void> =>
+  resendVerification: (tenantId: string, email: string): Promise<void> =>
     api
-      .post<void>("/api/v1/auth/resend-verification")
+      .post<void>("/api/v1/auth/resend-verification", {
+        tenant_id: tenantId,
+        email,
+      })
       .then(() => undefined),
 
   /**
@@ -101,5 +146,32 @@ export const authService = {
   confirmMfa: (code: string): Promise<void> =>
     api
       .post<void>("/api/v1/auth/mfa/confirm", { totp_code: code })
+      .then(() => undefined),
+
+  /**
+   * Begin TOTP MFA enrollment during the MFA-mandated login flow
+   * (CORR-05b / D-16). Unlike `enrollMfa`, this variant carries a
+   * login-issued `setup_token` instead of relying on an authenticated
+   * session — it backs the public `/auth/mfa-setup` route.
+   * POST /api/v1/auth/mfa/setup/enroll  (body: { setup_token })
+   */
+  setupEnrollMfa: (setupToken: string): Promise<MfaEnrollResponse> =>
+    api
+      .post<MfaEnrollResponse>("/api/v1/auth/mfa/setup/enroll", {
+        setup_token: setupToken,
+      })
+      .then((r) => r.data),
+
+  /**
+   * Confirm TOTP MFA enrollment during the MFA-mandated login flow
+   * (CORR-05b / D-16).
+   * POST /api/v1/auth/mfa/setup/confirm  (body: { setup_token, totp_code })
+   */
+  setupConfirmMfa: (setupToken: string, totpCode: string): Promise<void> =>
+    api
+      .post<void>("/api/v1/auth/mfa/setup/confirm", {
+        setup_token: setupToken,
+        totp_code: totpCode,
+      })
       .then(() => undefined),
 };

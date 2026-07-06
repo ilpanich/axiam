@@ -1,0 +1,96 @@
+# Deferred Items — Phase 27 (Performance & Load Hardening)
+
+Out-of-scope discoveries logged during execution, per the executor's scope-boundary rule
+(only auto-fix issues directly caused by the current task's changes).
+
+## 27-03 (JWKS single-flight — Go/Java/C# SDKs)
+
+While verifying Task 3 (C# JWKS single-flight guard) with a real `dotnet test` run (the
+sandbox previously had no .NET SDK installed at all, so these appear to have never been
+build-verified against a real toolchain), the C# test project (`sdks/csharp/tests/Axiam.Sdk.Tests`)
+was found to have THREE pre-existing compile failures, all unrelated to JWKS/PERF-03:
+
+1. **`GrpcAuthzClientTests.cs`** — `FakeAuthorizationService : AuthorizationService.AuthorizationServiceBase`
+   does not compile. `Axiam.Sdk.csproj`'s `<Protobuf>` item generates `GrpcServices="Client"`
+   only (D-05, intentional — the SDK never hosts a gRPC server), and no `<Protobuf>` item
+   exists anywhere in the test project to generate server-side stubs for the in-process fake
+   server the test relies on. Needs either a test-project-local Protobuf codegen item
+   (`GrpcServices="Server"` or `"Both"`, scoped to tests only) or a different fake-server
+   strategy.
+2. **`AmqpConsumerTests.cs`** — `RabbitMQ.Client` API mismatch: `BasicDeliverEventArgs` now
+   requires an additional `consumerTag` constructor argument, and several previously-mutable
+   properties are now read-only (`CS0191`). The installed `RabbitMQ.Client` 7.2.1 (pinned in
+   `Axiam.Sdk.csproj`) has evidently diverged from the API shape this test file was written
+   against.
+3. **`SensitiveRedactionTests.cs`** — `Grpc.Core.StatusCode` fails to resolve
+   (`CS0234: 'Core' does not exist in the namespace 'Axiam.Sdk.Grpc'`). This is a C# namespace
+   shadowing issue: the file's enclosing `Axiam.Sdk` scope also contains a real
+   `Axiam.Sdk.Grpc` namespace, so unqualified `Grpc.Core...` resolves against that sibling
+   namespace instead of the global `Grpc.Core` (needs `global::Grpc.Core.StatusCode` or an
+   explicit `using Grpc.Core;` + unqualified `StatusCode`).
+
+None of these three files were touched by 27-03 (scoped to `JwksVerifier.cs` /
+`JwksVerifierTests.cs` only). They were excluded from compilation ONLY transiently, in-memory,
+during 27-03's own verification run (via a temporary `<Compile Remove>` in
+`Axiam.Sdk.Tests.csproj` that was reverted before committing) so the JWKS burst test could be
+proven in isolation. The working tree carries none of that transient exclusion.
+
+Additionally, `Axiam.Sdk.AspNetCore/ServiceCollectionExtensions.cs` (a separate project, not
+part of `Axiam.Sdk.Tests`, referenced only by the `.sln`) fails with
+`CS0234: 'IAuthorizationMiddlewareResultHandler' does not exist in the namespace
+'Microsoft.AspNetCore.Authorization.Policy'`. The real ASP.NET Core type lives in
+`Microsoft.AspNetCore.Authorization` (no `.Policy` segment) — a namespace typo, pre-existing,
+unrelated to JWKS. This means the literal plan verification command run at the solution root
+(`cd sdks/csharp && dotnet test --filter JwksVerifier`) cannot succeed as written until this
+and the three test-file issues above are fixed, since `dotnet test` without an explicit project
+path builds every project the `.sln` references. 27-03's SUMMARY.md documents the narrower
+verification actually performed (`dotnet test tests/Axiam.Sdk.Tests/Axiam.Sdk.Tests.csproj
+--filter JwksVerifier`, with the three broken sibling test files transiently excluded during
+verification only, never committed).
+
+**Follow-up recommended:** a dedicated remediation plan/task to fix all four issues above (and
+confirm the rest of the C# solution is green now that `dotnet` is actually runnable in this
+sandbox — previously the `Google.Protobuf` version bug documented in 27-03's SUMMARY.md blocked
+the build before any of this could even be reached).
+
+## 27-05 (BatchCheckAccess concurrency — gRPC/REST)
+
+While verifying Task 2's `AuthorizationServiceImpl::new` signature change against the
+`client`-feature-gated integration test suite (`cargo test -p axiam-api-grpc --features client
+--test grpc_authz_test --test grpc_auth_test`, not part of this plan's required `<verify>`
+commands but exercised as extra confidence), `crates/axiam-api-grpc/tests/grpc_auth_test.rs`
+failed to compile:
+
+```
+error[E0063]: missing fields `hibp_breaker_cooldown_secs` and `hibp_breaker_threshold` in
+initializer of `AuthConfig` --> tests/grpc_auth_test.rs:73:5
+```
+
+Confirmed via `git show HEAD:.../grpc_auth_test.rs` that this gap already exists at HEAD,
+predating this plan — 27-01 (`d9656ca feat(27-01): HibpBreaker state machine + AuthConfig
+knobs + unit tests`) added `hibp_breaker_threshold`/`hibp_breaker_cooldown_secs` to
+`AuthConfig` and updated the sibling `grpc_authz_test.rs::test_auth_config()` literal, but
+missed the near-identical `test_auth_config()` in `grpc_auth_test.rs`. 27-05 only changed one
+line in this file (`AuthorizationServiceImpl::new(engine)` → `(engine, 16)`, required by
+Task 1/2's constructor signature change) — the missing-fields gap is unrelated and pre-existing.
+Left unfixed per the scope-boundary rule.
+
+Separately, `grpc_authz_test.rs` (which DOES compile) hit a linker `Bus error` (`ld terminated
+with signal 7`) on first attempt — root-caused to the sandbox disk being at its ~38 GB quota
+ceiling (19 GB in `target/` plus accumulated prior-plan artifacts), not a code defect. Resolved
+by running `cargo clean` (CLAUDE.md-sanctioned recovery) before re-running; not re-verified
+under `--features client` afterward since it is outside this plan's required verification set
+(the plan's own `<verify>` commands — `cargo test -p axiam-api-grpc --lib batch_check_access`
+and `-p axiam-api-rest --lib batch_check_access` — both passed cleanly).
+
+**Follow-up recommended:** add the two missing `hibp_breaker_*` fields to
+`grpc_auth_test.rs::test_auth_config()` so `cargo test -p axiam-api-grpc --features client`
+compiles end-to-end again.
+
+**RESOLVED (post-Wave-3 orchestrator integration fix):** Since this compile gap was *introduced*
+by Phase 27 (27-01), the orchestrator added the two missing fields
+(`hibp_breaker_threshold: 5`, `hibp_breaker_cooldown_secs: 30`) to
+`grpc_auth_test.rs::test_auth_config()`, matching the sibling `grpc_authz_test.rs`. Verified with
+`cargo test -p axiam-api-grpc --features client --test grpc_auth_test --no-run` → compiles clean
+(exit 0). The C# items above remain open (pre-existing, unrelated to Phase 27 — recommend a
+dedicated remediation task).

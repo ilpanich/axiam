@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{parse_uuid, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -41,17 +42,13 @@ struct FederationLinkRowWithId {
 // Row -> Domain conversions
 // ---------------------------------------------------------------------------
 
-fn parse_uuid(s: &str) -> Result<Uuid, DbError> {
-    Uuid::parse_str(s).map_err(|e| DbError::Migration(e.to_string()))
-}
-
 impl FederationLinkRow {
     fn try_into_entry(self, id: Uuid) -> Result<FederationLink, DbError> {
         Ok(FederationLink {
             id,
-            tenant_id: parse_uuid(&self.tenant_id)?,
-            user_id: parse_uuid(&self.user_id)?,
-            federation_config_id: parse_uuid(&self.federation_config_id)?,
+            tenant_id: parse_uuid(&self.tenant_id, "tenant_id")?,
+            user_id: parse_uuid(&self.user_id, "user_id")?,
+            federation_config_id: parse_uuid(&self.federation_config_id, "federation_config_id")?,
             external_subject: self.external_subject,
             external_email: self.external_email,
             created_at: self.created_at,
@@ -62,12 +59,12 @@ impl FederationLinkRow {
 
 impl FederationLinkRowWithId {
     fn try_into_entry(self) -> Result<FederationLink, DbError> {
-        let id = parse_uuid(&self.record_id)?;
+        let id = parse_uuid(&self.record_id, "record_id")?;
         Ok(FederationLink {
             id,
-            tenant_id: parse_uuid(&self.tenant_id)?,
-            user_id: parse_uuid(&self.user_id)?,
-            federation_config_id: parse_uuid(&self.federation_config_id)?,
+            tenant_id: parse_uuid(&self.tenant_id, "tenant_id")?,
+            user_id: parse_uuid(&self.user_id, "user_id")?,
+            federation_config_id: parse_uuid(&self.federation_config_id, "federation_config_id")?,
             external_subject: self.external_subject,
             external_email: self.external_email,
             created_at: self.created_at,
@@ -130,10 +127,7 @@ impl<C: Connection> FederationLinkRepository for SurrealFederationLinkRepository
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<FederationLinkRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "federation_link".into(),
-            id: id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "federation_link", &id.to_string())?;
         row.try_into_entry(id).map_err(Into::into)
     }
 
@@ -162,13 +156,14 @@ impl<C: Connection> FederationLinkRepository for SurrealFederationLinkRepository
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<FederationLinkRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "federation_link".into(),
-            id: format!(
+        let row = take_first_or_not_found(
+            rows,
+            "federation_link",
+            &format!(
                 "subject={external_subject} \
                          config={federation_config_id}"
             ),
-        })?;
+        )?;
         row.try_into_entry().map_err(Into::into)
     }
 

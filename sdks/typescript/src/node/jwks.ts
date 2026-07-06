@@ -51,6 +51,21 @@ export interface Verifier {
 export function createVerifier(baseUrl: string): Verifier {
   // Lazily-resolved singleton so repeated verifyAccessToken() calls reuse
   // the same createRemoteJWKSet cache instead of rebuilding it per call.
+  //
+  // D-08/D-09 (single-flight, PERF-03): a concurrent invalid-`kid` burst
+  // against a cold cache must collapse to exactly ONE network fetch. Proven
+  // (not just assumed) by `test/node/jwks.test.ts`'s "collapses N concurrent
+  // verifyAccessToken calls ... to exactly one JWKS fetch" test, which mocks
+  // global `fetch` with a call counter and fires 8 concurrent calls: jose's
+  // `createRemoteJWKSet` (see jose's `RemoteJWKSet.reload()`,
+  // `this.#pendingFetch ||= fetchJwks(...).then(...)`) ALREADY holds its own
+  // internal lazy-promise-singleton around the underlying fetch, so
+  // concurrent callers reaching a cold/unknown-kid getter share the same
+  // in-flight fetch promise natively — no additional `inFlightFetch` guard
+  // is added here (it would be redundant). If a future `jose` upgrade
+  // removes that internal guarantee, the burst test above will start
+  // failing and an explicit guard (mirroring `jwksPromise`'s shape) must be
+  // added at that point.
   let jwksPromise: Promise<ReturnType<typeof import('jose').createRemoteJWKSet>> | null = null;
 
   async function getJwks() {

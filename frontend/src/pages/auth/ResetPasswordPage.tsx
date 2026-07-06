@@ -34,6 +34,10 @@ interface ResetPasswordState {
 export function ResetPasswordPage() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token");
+  // Backend requires the tenant id alongside the token (Open Question 2);
+  // the emailed reset link carries it directly, mirroring the
+  // already-shipped VerifyEmailPage `?token=…&tenant_id=…` pattern.
+  const tenantId = searchParams.get("tenant_id") ?? searchParams.get("tenant");
 
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -42,15 +46,20 @@ export function ResetPasswordPage() {
   const policyMet = checkPasswordPolicy(newPassword);
   const passwordsMatch = newPassword === confirmPassword;
   const confirmError = confirmTouched && confirmPassword.length > 0 && !passwordsMatch;
-  const canSubmit = policyMet && passwordsMatch && confirmPassword.length > 0 && Boolean(token);
+  const canSubmit =
+    policyMet &&
+    passwordsMatch &&
+    confirmPassword.length > 0 &&
+    Boolean(token) &&
+    Boolean(tenantId);
 
   const [state, formAction, isPending] = useActionState<ResetPasswordState, FormData>(
     async (_prev, formData) => {
       const newPw = formData.get("new_password") as string;
       const confirmPw = formData.get("confirm_password") as string;
 
-      if (!token) {
-        return { error: "Invalid or missing reset token.", success: false };
+      if (!token || !tenantId) {
+        return { error: "Invalid or missing reset link.", success: false };
       }
       if (!checkPasswordPolicy(newPw)) {
         return { error: "Password does not meet the requirements.", success: false };
@@ -60,7 +69,7 @@ export function ResetPasswordPage() {
       }
 
       try {
-        await authService.confirmPasswordReset(token, newPw);
+        await authService.confirmPasswordReset(tenantId, token, newPw);
         window.history.replaceState({}, document.title, window.location.pathname);
         return { error: null, success: true };
       } catch (err) {
@@ -100,8 +109,8 @@ export function ResetPasswordPage() {
     );
   }
 
-  // No token in URL
-  if (!token) {
+  // No token or tenant_id in URL
+  if (!token || !tenantId) {
     return (
       <PublicLayout>
         <div className="text-center space-y-4">

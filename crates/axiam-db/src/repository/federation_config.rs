@@ -11,6 +11,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -57,9 +58,25 @@ struct FederationConfigRowWithId {
     updated_at: DateTime<Utc>,
 }
 
+/// Row shape for `list()` — deliberately narrower than
+/// [`FederationConfigRowWithId`]: omits `client_secret`,
+/// `client_secret_ciphertext`, `client_secret_nonce`, and
+/// `client_secret_key_version` so list views never hydrate the encrypted
+/// secret columns (SECHRD-09 / D-06).
 #[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
+struct FederationConfigListRow {
+    record_id: String,
+    tenant_id: String,
+    provider: String,
+    protocol: String,
+    metadata_url: Option<String>,
+    client_id: String,
+    attribute_map: serde_json::Value,
+    enabled: bool,
+    allowed_algorithms: Vec<String>,
+    idp_signing_cert_pem: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +118,35 @@ impl FederationConfigRow {
             client_secret_ciphertext: self.client_secret_ciphertext,
             client_secret_nonce: self.client_secret_nonce,
             client_secret_key_version: self.client_secret_key_version,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+impl FederationConfigListRow {
+    /// Converts a narrowed list-view row into a `FederationConfig`, filling
+    /// the never-selected secret columns with empty/`None` placeholders
+    /// (list views never need the encrypted material; `get_by_id` is the
+    /// legitimate decrypt-at-use path).
+    fn try_into_entry(self) -> Result<FederationConfig, DbError> {
+        let id = Uuid::parse_str(&self.record_id).map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(FederationConfig {
+            id,
+            tenant_id: Uuid::parse_str(&self.tenant_id)
+                .map_err(|e| DbError::Migration(e.to_string()))?,
+            provider: self.provider,
+            protocol: parse_protocol(&self.protocol)?,
+            metadata_url: self.metadata_url,
+            client_id: self.client_id,
+            client_secret: String::new(),
+            attribute_map: self.attribute_map,
+            enabled: self.enabled,
+            allowed_algorithms: self.allowed_algorithms,
+            idp_signing_cert_pem: self.idp_signing_cert_pem,
+            client_secret_ciphertext: None,
+            client_secret_nonce: None,
+            client_secret_key_version: None,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -200,10 +246,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<FederationConfigRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "federation_config".into(),
-            id: id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "federation_config", &id.to_string())?;
         row.try_into_entry(id).map_err(Into::into)
     }
 
@@ -225,10 +268,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<FederationConfigRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "federation_config".into(),
-            id: id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "federation_config", &id.to_string())?;
         row.try_into_entry().map_err(Into::into)
     }
 
@@ -301,10 +341,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<FederationConfigRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "federation_config".into(),
-            id: id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "federation_config", &id.to_string())?;
         row.try_into_entry(id).map_err(Into::into)
     }
 
@@ -354,12 +391,17 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
+        // Narrowed projection (SECHRD-09 / D-06): explicitly excludes
+        // client_secret / client_secret_ciphertext / client_secret_nonce /
+        // client_secret_key_version — list views never need the encrypted
+        // material, so `list()` no longer hydrates those columns per row.
         let data_result = self
             .db
             .query(
-                "SELECT meta::id(id) AS record_id, * \
+                "SELECT meta::id(id) AS record_id, tenant_id, provider, protocol, \
+                 metadata_url, client_id, attribute_map, enabled, allowed_algorithms, \
+                 idp_signing_cert_pem, created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  ORDER BY created_at DESC \
@@ -373,19 +415,14 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         let mut data_result = data_result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let rows: Vec<FederationConfigRowWithId> = data_result.take(0).map_err(DbError::from)?;
+        let rows: Vec<FederationConfigListRow> = data_result.take(0).map_err(DbError::from)?;
 
         let items: Vec<FederationConfig> = rows
             .into_iter()
             .map(|r| r.try_into_entry())
             .collect::<Result<_, _>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {

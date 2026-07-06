@@ -6,8 +6,6 @@ use axiam_core::models::pgp_key::{
     PgpKeyPurpose, SignAuditBatchRequest, SignedAuditBatch,
 };
 use axiam_core::repository::{AuditLogRepository, PaginatedResult, Pagination};
-use axiam_db::{SurrealAuditLogRepository, SurrealPgpKeyRepository};
-use axiam_pki::PgpService;
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -15,6 +13,7 @@ use uuid::Uuid;
 use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
+use crate::state::AppState;
 
 // -----------------------------------------------------------------------
 // Request types (CQ-B25)
@@ -41,10 +40,10 @@ pub struct CreatePgpKeyRequest {
     ),
     security(("bearer" = []))
 )]
-pub async fn generate<C: Connection>(
+pub async fn generate<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<CreatePgpKeyRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("pgp_keys:generate", Uuid::nil())
@@ -58,7 +57,7 @@ pub async fn generate<C: Connection>(
         algorithm: req.algorithm,
         email: req.email,
     };
-    let result = service.generate(input).await?;
+    let result = state.pgp_service.generate(input).await?;
     Ok(HttpResponse::Created().json(result))
 }
 
@@ -74,16 +73,17 @@ pub async fn generate<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
+    state: web::Data<AppState<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("pgp_keys:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let result = service
+    let result = state
+        .pgp_service
         .list(user.tenant_id, pagination.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(result))
@@ -100,17 +100,17 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("pgp_keys:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    let result = service.get(user.tenant_id, id).await?;
+    let result = state.pgp_service.get(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -125,17 +125,17 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn revoke<C: Connection>(
+pub async fn revoke<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("pgp_keys:revoke", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    service.revoke(user.tenant_id, id).await?;
+    state.pgp_service.revoke(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
 }
 
@@ -151,11 +151,10 @@ pub async fn revoke<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn sign_audit_batch<C: Connection>(
+pub async fn sign_audit_batch<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    pgp_service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
-    audit_repo: web::Data<SurrealAuditLogRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<SignAuditBatchRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("pgp_keys:sign_audit_batch", Uuid::nil())
@@ -178,7 +177,8 @@ pub async fn sign_audit_batch<C: Connection>(
         .into());
     }
 
-    let entries = audit_repo
+    let entries = state
+        .audit_repo
         .get_by_ids(user.tenant_id, &request.entry_ids)
         .await?;
 
@@ -195,7 +195,8 @@ pub async fn sign_audit_batch<C: Connection>(
         .into());
     }
 
-    let result = pgp_service
+    let result = state
+        .pgp_service
         .sign_audit_batch(user.tenant_id, entries)
         .await?;
     Ok(HttpResponse::Ok().json(result))
@@ -214,11 +215,11 @@ pub async fn sign_audit_batch<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn encrypt<C: Connection>(
+pub async fn encrypt<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    service: web::Data<PgpService<SurrealPgpKeyRepository<C>>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<EncryptRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("pgp_keys:encrypt", Uuid::nil())
@@ -233,7 +234,8 @@ pub async fn encrypt<C: Connection>(
         message: format!("invalid base64: {e}"),
     })?;
 
-    let result = service
+    let result = state
+        .pgp_service
         .encrypt_for_export(user.tenant_id, key_id, &plaintext)
         .await?;
     Ok(HttpResponse::Ok().json(result))

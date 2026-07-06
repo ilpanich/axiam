@@ -8,6 +8,9 @@ use Axiam\Sdk\Core\AxiamException;
 use Firebase\JWT\JWK;
 use Firebase\JWT\JWT;
 use GuzzleHttp\ClientInterface;
+use GuzzleHttp\Promise\Create;
+use GuzzleHttp\Promise\PromiseInterface;
+use Psr\Http\Message\ResponseInterface;
 
 /**
  * Local EdDSA/Ed25519 JWKS verification (CONTRACT.md D-08).
@@ -41,6 +44,27 @@ final class JwksVerifier
     private ?array $keysByKid = null;
 
     private int $fetchedAt = 0;
+
+    /**
+     * Guzzle-promise-based single-flight guard (D-08/D-09, RESEARCH Pitfall 6):
+     * concurrent `verify()`-triggered refetches within ONE process/coroutine
+     * await this SAME in-flight promise instead of each independently issuing
+     * their own discovery+JWKS request. Reset to `null` once the shared fetch
+     * settles (success or failure), so the next cache-miss burst starts exactly
+     * one new fetch.
+     *
+     * Classic-FPM vacuity (RESEARCH Pitfall 6): this guard is only observable
+     * via Guzzle's async interface (`sendAsync`/`requestAsync` +
+     * `Promise\Utils::settle`) or a long-running coroutine runtime
+     * (Swoole/RoadRunner) — see {@see JwksSingleFlightTest}. Under classic
+     * synchronous PHP-FPM, each HTTP request is served by its own worker
+     * PROCESS with no shared memory or event loop between processes, so there
+     * is only ever one in-flight fetch per process by construction and no
+     * possible race to coalesce. That is not a defect and is not "fixable"
+     * without a cross-process shared cache — explicitly out of this phase's
+     * scope (single-flight WITHIN one process, not cross-process caching).
+     */
+    private ?PromiseInterface $inFlightFetch = null;
 
     public function __construct(
         private readonly ClientInterface $http,
@@ -121,41 +145,88 @@ final class JwksVerifier
         return is_array($header) ? $header : null;
     }
 
+    /**
+     * Synchronous entry point used by {@see verify()} — waits on the same
+     * in-flight guard {@see ensureFreshAsync()} builds, so a burst of
+     * synchronous `verify()` calls sharing one event loop (e.g. Guzzle's
+     * curl-multi-driven `wait()`) still only ever resolves ONE underlying
+     * fetch (D-09).
+     */
     private function ensureFresh(string $unknownKid): void
+    {
+        $this->ensureFreshAsync($unknownKid)->wait();
+    }
+
+    /**
+     * Async in-flight guard (D-08): if the cache is already fresh, returns an
+     * already-resolved promise with no HTTP call at all. If a fetch triggered
+     * by a concurrent caller is already underway, returns that SAME promise
+     * instead of issuing a second discovery+JWKS request. Otherwise starts
+     * exactly one new fetch and stores it as the shared in-flight promise
+     * until it settles.
+     *
+     * Exercised directly (bypassing `verify()`/`wait()`) by
+     * {@see JwksSingleFlightTest} via `sendAsync`-style concurrency to prove
+     * the guard is meaningful under Guzzle's async interface (RESEARCH
+     * Pitfall 6) — never touches `firebase/php-jwt`'s verification call.
+     */
+    private function ensureFreshAsync(string $unknownKid): PromiseInterface
     {
         $expired = (time() - $this->fetchedAt) > $this->cacheTtlSeconds;
         $unknown = !isset($this->keysByKid[$unknownKid]);
         if ($this->keysByKid !== null && !$expired && !$unknown) {
-            return;
+            return Create::promiseFor(null);
         }
 
-        // Resolve jwks_uri fresh via OIDC discovery on every refetch (cheap, avoids a
-        // second hardcoded path constant drifting from the server's actual
-        // configuration).
-        $jwksUri = $this->baseUrl . '/oauth2/jwks';
-        try {
-            $discoveryBody = (string) $this->http
-                ->request('GET', '/.well-known/openid-configuration')
-                ->getBody();
-            $discovery = json_decode($discoveryBody, true);
-            if (is_array($discovery) && is_string($discovery['jwks_uri'] ?? null) && $discovery['jwks_uri'] !== '') {
-                $jwksUri = $discovery['jwks_uri'];
-            }
-        } catch (\Throwable) {
-            // Discovery unavailable — fall back to the conventional /oauth2/jwks path.
+        if ($this->inFlightFetch !== null) {
+            // A fetch triggered by a concurrent caller is already underway —
+            // join it instead of issuing a new discovery+JWKS request.
+            return $this->inFlightFetch;
         }
 
-        try {
-            $jwksBody = (string) $this->http->request('GET', $jwksUri)->getBody();
-            $jwksJson = json_decode($jwksBody, true);
-            if (!is_array($jwksJson)) {
-                return; // leave the existing (possibly null) cache untouched on failure
-            }
-            $this->keysByKid = JWK::parseKeySet($jwksJson);
-            $this->fetchedAt = time();
-        } catch (\Throwable) {
-            // Fetch/parse failure — leave the existing cache (if any) untouched;
-            // verify() will fail closed on an unknown/missing kid.
-        }
+        $fetch = $this->resolveJwksUriAsync()
+            ->then(fn (string $jwksUri): PromiseInterface => $this->http->requestAsync('GET', $jwksUri))
+            ->then(function (ResponseInterface $response): void {
+                $jwksJson = json_decode((string) $response->getBody(), true);
+                if (is_array($jwksJson)) {
+                    $this->keysByKid = JWK::parseKeySet($jwksJson);
+                    $this->fetchedAt = time();
+                }
+            })
+            ->otherwise(function (\Throwable $e): void {
+                // Fetch/parse failure (network, JSON, or key-parse) — leave
+                // the existing cache (if any) untouched; verify() will fail
+                // closed on a still-unknown kid.
+            });
+
+        // Reset the guard once settled so the NEXT cache-miss burst starts a
+        // fresh single-flight fetch rather than replaying this one forever.
+        $this->inFlightFetch = $fetch->then(function ($value) {
+            $this->inFlightFetch = null;
+
+            return $value;
+        });
+
+        return $this->inFlightFetch;
+    }
+
+    /**
+     * Resolve `jwks_uri` fresh via OIDC discovery (cheap, avoids a second
+     * hardcoded path constant drifting from the server's actual
+     * configuration), falling back to the conventional `/oauth2/jwks` path on
+     * any discovery failure.
+     */
+    private function resolveJwksUriAsync(): PromiseInterface
+    {
+        return $this->http->requestAsync('GET', '/.well-known/openid-configuration')
+            ->then(function (ResponseInterface $response): string {
+                $discovery = json_decode((string) $response->getBody(), true);
+                if (is_array($discovery) && is_string($discovery['jwks_uri'] ?? null) && $discovery['jwks_uri'] !== '') {
+                    return $discovery['jwks_uri'];
+                }
+
+                return $this->baseUrl . '/oauth2/jwks';
+            })
+            ->otherwise(fn (): string => $this->baseUrl . '/oauth2/jwks');
     }
 }

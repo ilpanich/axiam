@@ -2,8 +2,17 @@
 
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
+use zeroize::Zeroizing;
 
 use crate::error::AuthError;
+
+/// Constant Argon2id hash of "dummy" used for timing equalization on
+/// user-not-found / unknown-account branches (SEC-026). Must be a valid
+/// Argon2 PHC string so that `verify_password` executes the full Argon2
+/// computation. Shared by `AuthService` and `PasswordResetService` so both
+/// timing-equalization call sites use the identical constant (no drift).
+pub(crate) const DUMMY_HASH: &str =
+    "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaasfNiu6f6WSz0n28";
 
 /// Hash a password with Argon2id using OWASP-recommended parameters.
 ///
@@ -15,15 +24,17 @@ pub fn hash_password(password: &str, pepper: Option<&str>) -> Result<String, Aut
         .map_err(|e| AuthError::Crypto(format!("argon2 params: {e}")))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
 
-    let peppered: String;
-    let input = match pepper {
+    let peppered: Zeroizing<String>;
+    let input: &[u8] = match pepper {
         Some(p) => {
-            peppered = format!("{p}{password}");
+            peppered = Zeroizing::new(format!("{p}{password}"));
             peppered.as_bytes()
         }
         None => password.as_bytes(),
     };
 
+    // `peppered` is zeroized on drop at end of scope — including on the
+    // `?`-propagated error path below (Drop runs during unwind/early-return).
     let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
     let hash = argon2
         .hash_password(input, &salt)
@@ -44,15 +55,17 @@ pub fn verify_password(
     hash: &str,
     pepper: Option<&str>,
 ) -> Result<bool, AuthError> {
-    let peppered: String;
-    let input = match pepper {
+    let peppered: Zeroizing<String>;
+    let input: &[u8] = match pepper {
         Some(p) => {
-            peppered = format!("{p}{password}");
+            peppered = Zeroizing::new(format!("{p}{password}"));
             peppered.as_bytes()
         }
         None => password.as_bytes(),
     };
 
+    // `peppered` is zeroized on drop at end of scope — including on every
+    // `?`-propagated error path below (Drop runs during unwind/early-return).
     let parsed_hash = argon2::PasswordHash::new(hash)
         .map_err(|e| AuthError::Crypto(format!("invalid hash format: {e}")))?;
 

@@ -14,14 +14,16 @@ use axiam_core::models::gdpr::{
     AccountDeletionStatus, CreateAccountDeletion, CreateConsent, CreateErasureProof,
     CreateExportJob,
 };
+use axiam_core::models::session::CreateSession;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     AccountDeletionRepository, AuditLogFilter, AuditLogRepository, ConsentRepository,
-    ErasureProofRepository, ExportJobRepository, Pagination, UserRepository,
+    ErasureProofRepository, ExportJobRepository, Pagination, SessionRepository, UserRepository,
 };
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAuditLogRepository, SurrealConsentRepository,
-    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealUserRepository,
+    SurrealErasureProofRepository, SurrealExportJobRepository, SurrealSessionRepository,
+    SurrealUserRepository,
 };
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -309,6 +311,299 @@ async fn export_completeness() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1b: export_includes_real_session_metadata
+// ---------------------------------------------------------------------------
+/// The GDPR export's `sessions` section must carry real, non-empty session
+/// metadata (`id`, `created_at`, `expires_at`, `ip_address`, `user_agent`)
+/// sourced from `SessionRepository::list_by_user` — NOT a hardcoded `[]` —
+/// and must NEVER include the session's `token_hash` (live credential
+/// material, D-03c / SECHRD-06).
+#[tokio::test]
+async fn export_includes_real_session_metadata() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let session_repo = SurrealSessionRepository::new(db.clone());
+    let export_job_repo = SurrealExportJobRepository::new(db.clone());
+
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "session_export_user".into(),
+            email: "session_export@example.com".into(),
+            password: "SessionExport1234!".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    // Create a real session for this user — the exact field this test
+    // proves is no longer hardcoded to `[]` in the export assembly.
+    let live_token_hash = "super-secret-live-session-token-hash".to_string();
+    let session = session_repo
+        .create(CreateSession {
+            tenant_id,
+            user_id: user.id,
+            token_hash: live_token_hash.clone(),
+            ip_address: Some("10.0.0.42".into()),
+            user_agent: Some("test-agent/1.0".into()),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        })
+        .await
+        .unwrap();
+
+    // --- Simulate the export session-projection (mirrors cleanup.rs
+    //     aggregate_export_data's sessions block) ---
+    let sessions = session_repo.list_by_user(tenant_id, user.id).await.unwrap();
+    let sessions_json: Vec<_> = sessions
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "created_at": s.created_at,
+                "expires_at": s.expires_at,
+                "ip_address": s.ip_address,
+                "user_agent": s.user_agent,
+            })
+        })
+        .collect();
+
+    let export = serde_json::json!({
+        "export_metadata": {
+            "generated_at": Utc::now(),
+            "tenant_id": tenant_id,
+            "subject_id": user.id,
+            "schema_version": "1.0",
+        },
+        "sessions": sessions_json,
+    });
+
+    // Encrypt/decrypt round-trip through a real export_job row, exactly like
+    // the production path, so this test exercises the same storage seam.
+    let key: [u8; 32] = [0xCD; 32];
+    let export_bytes = export.to_string().into_bytes();
+    let (nonce_b64, ct_b64) = encrypt_separate(&key, &export_bytes).unwrap();
+    let job = export_job_repo
+        .create(CreateExportJob {
+            tenant_id,
+            user_id: user.id,
+        })
+        .await
+        .unwrap();
+    let raw_token = Uuid::new_v4().to_string();
+    let token_hash = sha256_hex(&raw_token);
+    export_job_repo
+        .set_ready(
+            job.id,
+            token_hash.clone(),
+            Some(ct_b64),
+            None,
+            Some(nonce_b64),
+            Utc::now() + chrono::Duration::hours(24),
+        )
+        .await
+        .unwrap();
+    let ready_job = export_job_repo
+        .find_by_download_token_hash(tenant_id, &token_hash)
+        .await
+        .unwrap()
+        .expect("export job not found by token hash");
+    let plaintext_bytes = decrypt_separate(
+        &key,
+        ready_job.blob_nonce.as_deref().unwrap(),
+        ready_job.encrypted_blob.as_deref().unwrap(),
+    )
+    .unwrap();
+    let plaintext = String::from_utf8(plaintext_bytes).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&plaintext).unwrap();
+
+    // --- Assertions ---
+    let sessions_arr = parsed["sessions"]
+        .as_array()
+        .expect("sessions section must be an array");
+    assert!(
+        !sessions_arr.is_empty(),
+        "sessions section must be non-empty — the seeded session must appear (no hardcoded [])"
+    );
+    let session_entry = &sessions_arr[0];
+    assert_eq!(
+        session_entry["id"].as_str().unwrap(),
+        session.id.to_string(),
+        "session id must match the created session"
+    );
+    assert_eq!(
+        session_entry["ip_address"].as_str().unwrap(),
+        "10.0.0.42",
+        "ip_address must be present in the projection"
+    );
+    assert_eq!(
+        session_entry["user_agent"].as_str().unwrap(),
+        "test-agent/1.0",
+        "user_agent must be present in the projection"
+    );
+    assert!(
+        session_entry.get("created_at").is_some(),
+        "created_at must be present in the projection"
+    );
+    assert!(
+        session_entry.get("expires_at").is_some(),
+        "expires_at must be present in the projection"
+    );
+
+    // No token_hash / live credential material anywhere in the export.
+    assert!(
+        !plaintext.contains("token_hash"),
+        "export must not contain the token_hash field name"
+    );
+    assert!(
+        !plaintext.contains(&live_token_hash),
+        "export must not contain the session's live token_hash value"
+    );
+    // No invented `last_seen` field either (Session model has none).
+    assert!(
+        !plaintext.contains("last_seen"),
+        "export must not contain a last_seen field (Session model has none)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 1c/1d: create_with_pending_flag atomicity (D-14 / QUAL-04)
+// ---------------------------------------------------------------------------
+/// Happy path: `create_with_pending_flag` atomically marks the user
+/// deletion-pending AND creates the `account_deletion` row holding the
+/// cancel token — both effects land together.
+#[tokio::test]
+async fn create_with_pending_flag_succeeds_atomically() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let account_deletion_repo = SurrealAccountDeletionRepository::new(db.clone());
+
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "atomic_happy_user".into(),
+            email: "atomic_happy@example.com".into(),
+            password: "AtomicHappy1234!".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let scheduled_purge_at = Utc::now() + chrono::Duration::days(30);
+    let cancel_token_hash = sha256_hex("happy-path-token");
+
+    let deletion = account_deletion_repo
+        .create_with_pending_flag(
+            tenant_id,
+            user.id,
+            scheduled_purge_at,
+            cancel_token_hash.clone(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(deletion.tenant_id, tenant_id);
+    assert_eq!(deletion.user_id, user.id);
+    assert_eq!(deletion.cancel_token_hash, cancel_token_hash);
+    assert_eq!(deletion.status, AccountDeletionStatus::Pending);
+
+    // Both effects of the transaction landed: user is deletion-pending...
+    let updated_user = user_repo.get_by_id(tenant_id, user.id).await.unwrap();
+    assert!(
+        updated_user.deletion_pending,
+        "deletion_pending must be set by create_with_pending_flag"
+    );
+
+    // ...and the account_deletion row is independently findable by the
+    // cancel token hash it was created with.
+    let found = account_deletion_repo
+        .find_by_token_hash(tenant_id, &cancel_token_hash)
+        .await
+        .unwrap()
+        .expect("account_deletion row must exist after create_with_pending_flag");
+    assert_eq!(found.id, deletion.id);
+    assert_eq!(found.status, AccountDeletionStatus::Pending);
+}
+
+/// D-14 lock-in: if a pending `account_deletion` row already exists for the
+/// user, `create_with_pending_flag`'s in-transaction duplicate-pending guard
+/// rejects the call and the WHOLE transaction — including the `UPDATE` that
+/// would have flipped `deletion_pending` — rolls back. Before this fix,
+/// `mark_deletion_pending` and `account_deletion_repo.create` were two
+/// independent DB round-trips: a failure on the second left the user
+/// permanently `deletion_pending = true` with no matching cancellable row
+/// (CQ-B39 residual, an uncancellable purge).
+#[tokio::test]
+async fn create_with_pending_flag_rolls_back_on_duplicate_pending_conflict() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let account_deletion_repo = SurrealAccountDeletionRepository::new(db.clone());
+
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "atomicity_test_user".into(),
+            email: "atomicity@example.com".into(),
+            password: "Atomic1234!".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    // Force the post-UPDATE CREATE to fail: a pre-existing pending
+    // account_deletion row for this user already satisfies the
+    // duplicate-pending guard inside create_with_pending_flag's
+    // transaction.
+    account_deletion_repo
+        .create(CreateAccountDeletion {
+            tenant_id,
+            user_id: user.id,
+            cancel_token_hash: sha256_hex("pre-existing-token"),
+            scheduled_purge_at: Utc::now() + chrono::Duration::days(30),
+        })
+        .await
+        .unwrap();
+
+    // Precondition: the user's own deletion_pending flag is still false —
+    // the pre-existing row above was inserted directly, not through the
+    // normal request-delete flow, so this reproduces a genuine "CREATE
+    // fails after the UPDATE would have run" scenario without corrupting
+    // the starting state.
+    let before = user_repo.get_by_id(tenant_id, user.id).await.unwrap();
+    assert!(
+        !before.deletion_pending,
+        "precondition: deletion_pending must start false"
+    );
+
+    let result = account_deletion_repo
+        .create_with_pending_flag(
+            tenant_id,
+            user.id,
+            Utc::now() + chrono::Duration::days(30),
+            sha256_hex("second-attempt-token"),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "create_with_pending_flag must fail when a pending account_deletion row already exists"
+    );
+
+    // The whole transaction rolled back — deletion_pending must remain
+    // false, never stranded at true with no matching cancellable row.
+    let after = user_repo.get_by_id(tenant_id, user.id).await.unwrap();
+    assert!(
+        !after.deletion_pending,
+        "deletion_pending must remain false after a rolled-back create_with_pending_flag"
+    );
+    assert!(
+        after.scheduled_purge_at.is_none(),
+        "scheduled_purge_at must not be set by a rolled-back transaction"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: deletion_pseudonymization
 // ---------------------------------------------------------------------------
 /// Full purge pipeline: user row anonymized, auth artifacts cleared, audit
@@ -411,12 +706,14 @@ async fn deletion_pseudonymization() {
         .create(CreateErasureProof {
             pseudonym: pseudonym.clone(),
             tenant_id,
+            user_id,
             erased_at: Utc::now(),
         })
         .await
         .unwrap();
     assert_eq!(proof.pseudonym, pseudonym);
     assert_eq!(proof.tenant_id, tenant_id);
+    assert_eq!(proof.user_id, user_id);
 
     // --- Verify: user row is anonymized ---
     let anon_user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();

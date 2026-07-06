@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::take_first_or_not_found;
 
 #[derive(Debug, SurrealValue)]
 struct ScopeRow {
@@ -91,10 +92,7 @@ impl<C: Connection> ScopeRepository for SurrealScopeRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<ScopeRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "scope".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "scope", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -127,10 +125,7 @@ impl<C: Connection> ScopeRepository for SurrealScopeRepository<C> {
             .map_err(DbError::from)?;
 
         let rows: Vec<ScopeRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "scope".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "scope", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -186,10 +181,7 @@ impl<C: Connection> ScopeRepository for SurrealScopeRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<ScopeRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "scope".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "scope", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;

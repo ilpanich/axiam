@@ -11,6 +11,7 @@ pub mod oidc;
 #[cfg(feature = "saml")]
 pub mod saml;
 pub mod secrets;
+pub mod ssrf;
 
 use error::FederationError;
 

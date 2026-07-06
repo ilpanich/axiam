@@ -1,7 +1,5 @@
 //! Tenant certificate generation service — signs certificates with a CA key.
 
-use aes_gcm::aead::Aead;
-use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{
     Certificate, CertificateStatus, CreateCertificate, GeneratedCertificate, StoreCertificate,
@@ -11,12 +9,12 @@ use axiam_core::repository::{
 };
 use chrono::{Duration, Utc};
 use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::PkiConfig;
+use crate::crypto::{compute_fingerprint, decrypt_secret, generate_keypair};
 
 /// Hard cap for leaf certificate validity: 825 days (~27 months).
 ///
@@ -109,7 +107,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable".into(),
             )
         })?;
-        let ca_private_key_pem = decrypt_private_key(&encrypted_key, &enc_key)?;
+        let ca_private_key_pem = decrypt_ca_key_pem(&encrypted_key, &enc_key)?;
 
         let not_before = now;
         let requested_not_after = now
@@ -127,7 +125,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             .await
             .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
 
-        let ca_subject = ca_cert.subject.clone();
+        let ca_cert_pem = ca_cert.public_cert_pem.clone();
         let ee_subject = input.subject.clone();
         let key_algorithm = input.key_algorithm.clone();
         let not_before_ts = not_before.timestamp();
@@ -138,8 +136,12 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 let ca_key_pair = KeyPair::from_pem(&ca_private_key_pem)
                     .map_err(|e| AxiamError::Certificate(format!("invalid CA private key: {e}")))?;
 
-                // Build the CA signing parameters (needed by rcgen to issue a signed cert).
-                let ca_params = build_ca_params(&ca_subject)?;
+                // Reconstruct the signing CA from its real, stored certificate PEM —
+                // NOT from the (mutable) `subject` field — so the issuer DN embedded
+                // in every leaf cert can never drift from the CA's actual Subject DN
+                // (QUAL-05/D-08, T-29-11).
+                let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)
+                    .map_err(|e| AxiamError::Certificate(format!("invalid CA certificate PEM: {e}")))?;
                 let ca_certificate = ca_params
                     .self_signed(&ca_key_pair)
                     .map_err(|e| AxiamError::Certificate(format!("CA self-sign failed: {e}")))?;
@@ -221,48 +223,12 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     }
 }
 
-/// Build minimal CA params for rcgen (used to reconstruct CA certificate for signing).
-fn build_ca_params(subject: &str) -> AxiamResult<CertificateParams> {
-    let mut params = CertificateParams::new(Vec::<String>::new())
-        .map_err(|e| AxiamError::Certificate(e.to_string()))?;
-    params.distinguished_name.push(DnType::CommonName, subject);
-    params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    Ok(params)
-}
-
-/// Generate a key pair for the given algorithm.
-fn generate_keypair(
-    algorithm: &axiam_core::models::certificate::KeyAlgorithm,
-) -> AxiamResult<KeyPair> {
-    use axiam_core::models::certificate::KeyAlgorithm;
-    match algorithm {
-        KeyAlgorithm::Ed25519 => KeyPair::generate_for(&rcgen::PKCS_ED25519)
-            .map_err(|e| AxiamError::Certificate(format!("Ed25519 keygen failed: {e}"))),
-        KeyAlgorithm::Rsa4096 => KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256)
-            .map_err(|e| AxiamError::Certificate(format!("RSA-4096 keygen failed: {e}"))),
-    }
-}
-
-/// Compute SHA-256 fingerprint from DER-encoded certificate bytes.
-fn compute_fingerprint(der: &[u8]) -> String {
-    let hash = Sha256::digest(der);
-    hex::encode(hash)
-}
-
-/// Decrypt AES-256-GCM encrypted data (12-byte nonce prepended to ciphertext).
-fn decrypt_private_key(data: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<String> {
-    if data.len() < 12 {
-        return Err(AxiamError::Crypto(
-            "encrypted data too short (missing nonce)".into(),
-        ));
-    }
-    let (nonce_bytes, ciphertext) = data.split_at(12);
-    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM decryption failed: {e}")))?;
+/// Decrypt an AES-256-GCM encrypted private key PEM and validate it is UTF-8.
+///
+/// X.509-specific wrapper around the shared [`decrypt_secret`] — the CA/leaf
+/// private key material is always stored as UTF-8 PEM text.
+fn decrypt_ca_key_pem(data: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<String> {
+    let plaintext = decrypt_secret(data, key_bytes)?;
     String::from_utf8(plaintext)
         .map_err(|e| AxiamError::Crypto(format!("decrypted key is not valid UTF-8: {e}")))
 }

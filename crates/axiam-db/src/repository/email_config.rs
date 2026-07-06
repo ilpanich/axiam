@@ -24,6 +24,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Crypto helpers (mirror of axiam-auth split-output variant — no circular dep)
@@ -174,13 +175,27 @@ struct ProviderRowFields {
 }
 
 /// Decrypt and reconstruct `ProviderConfig` from row data.
-fn row_to_provider(fields: ProviderRowFields, key: &[u8; 32]) -> Result<ProviderConfig, DbError> {
+///
+/// Returns a clear [`AxiamError::EmailConfig`] (D-08) when a row has a
+/// configured provider but NULL/missing secret ciphertext or nonce, instead
+/// of silently reconstructing an empty-string secret. An empty in-memory
+/// secret would otherwise be indistinguishable from a deliberately-empty
+/// credential and only fail later, at send time, with a confusing
+/// provider-level error rather than a clear misconfiguration error here.
+fn row_to_provider(
+    fields: ProviderRowFields,
+    key: &[u8; 32],
+) -> Result<ProviderConfig, AxiamError> {
     match parse_provider_kind(&fields.kind)? {
         EmailProviderKind::Smtp => {
             let password = match (fields.smtp_password_ciphertext, fields.smtp_password_nonce) {
-                (Some(ct), Some(nonce)) => decrypt_field(key, &nonce, &ct)
-                    .map_err(|e| DbError::Migration(e.to_string()))?,
-                _ => String::new(),
+                (Some(ct), Some(nonce)) => decrypt_field(key, &nonce, &ct)?,
+                _ => {
+                    return Err(AxiamError::EmailConfig(
+                        "email config has no usable credential: SMTP password ciphertext/nonce is missing"
+                            .to_string(),
+                    ));
+                }
             };
             Ok(ProviderConfig::Smtp(SmtpConfig {
                 host: fields.smtp_host.unwrap_or_default(),
@@ -192,9 +207,13 @@ fn row_to_provider(fields: ProviderRowFields, key: &[u8; 32]) -> Result<Provider
         }
         kind => {
             let api_key = match (fields.api_key_ciphertext, fields.api_key_nonce) {
-                (Some(ct), Some(nonce)) => decrypt_field(key, &nonce, &ct)
-                    .map_err(|e| DbError::Migration(e.to_string()))?,
-                _ => String::new(),
+                (Some(ct), Some(nonce)) => decrypt_field(key, &nonce, &ct)?,
+                _ => {
+                    return Err(AxiamError::EmailConfig(
+                        "email config has no usable credential: API key ciphertext/nonce is missing"
+                            .to_string(),
+                    ));
+                }
             };
             let config = ApiProviderConfig {
                 api_key,
@@ -212,7 +231,7 @@ fn row_to_provider(fields: ProviderRowFields, key: &[u8; 32]) -> Result<Provider
 }
 
 impl EmailConfigRowWithId {
-    fn try_into_domain(self, key: &[u8; 32]) -> Result<EmailConfig, DbError> {
+    fn try_into_domain(self, key: &[u8; 32]) -> Result<EmailConfig, AxiamError> {
         let id = Uuid::parse_str(&self.record_id)
             .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
         let scope_id = Uuid::parse_str(&self.scope_id)
@@ -250,6 +269,16 @@ impl EmailConfigRowWithId {
 // ---------------------------------------------------------------------------
 // Bind helpers — encrypt provider secrets for DB write
 // ---------------------------------------------------------------------------
+
+/// Existing secret ciphertext/nonce columns for an org's email_config row,
+/// used by `set_org_config`'s D-02 preserve-on-omit merge.
+#[derive(Debug, SurrealValue)]
+struct ExistingSecretColumns {
+    smtp_password_ciphertext: Option<String>,
+    smtp_password_nonce: Option<String>,
+    api_key_ciphertext: Option<String>,
+    api_key_nonce: Option<String>,
+}
 
 struct EncryptedProviderBinds {
     provider_kind: String,
@@ -337,32 +366,39 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
         Self { db, key }
     }
 
-    /// Idempotent startup backfill: encrypt any legacy plaintext provider
-    /// secrets that pre-date the D-17 at-rest encryption requirement (D-17).
+    /// Intentional, tested no-op (D-07): `email_config` has no plaintext
+    /// secret to migrate, unlike `federation_config`.
     ///
-    /// Since the email_config table was introduced in Schema v15 (Phase 5)
-    /// with encrypted columns from the start, this method currently always
-    /// returns 0. It is retained so operators upgrading from pre-v15 snapshots
-    /// or external tooling that wrote plaintext rows before the schema was
-    /// finalized are automatically migrated.
+    /// `federation_config` predates split-column encryption: it was created
+    /// with a single plaintext `client_secret` column, so a real backfill
+    /// path exists there (`list_with_legacy_plaintext_secret` +
+    /// `set_encrypted_secret` in `federation_config.rs`) that reads the
+    /// plaintext column, encrypts it, and nulls the plaintext out.
     ///
-    /// The query selects SMTP rows where `smtp_password_ciphertext IS NULL`
-    /// and API-provider rows where `api_key_ciphertext IS NULL` — both of
-    /// which represent unencrypted legacy state. Already-encrypted rows are
-    /// skipped (idempotent). Returns the count of rows migrated.
+    /// `email_config` is different: it was introduced in Schema v15
+    /// (Phase 5) with ciphertext-only columns (`smtp_password_ciphertext`,
+    /// `api_key_ciphertext`) from the very first migration — there has
+    /// never been a plaintext `smtp_password`/`api_key` source column in
+    /// this schema to encrypt. There is therefore no UPDATE/encrypt path to
+    /// implement here, and inventing one would be dishonest about what this
+    /// function does. The "no unencrypted secrets at rest" intent is
+    /// instead satisfied structurally: `SurrealEmailConfigRepository`
+    /// only ever writes through `encrypt_provider` (see `set_org_config`),
+    /// so no plaintext-secret row can be produced by this repository.
+    ///
+    /// What this function *does* do: it detects (and warns on, but does not
+    /// mutate) any row with a configured provider but NULL/missing secret
+    /// ciphertext — an anomalous state that should never occur via this
+    /// repository's own write path, but could in principle arise from
+    /// external tooling writing directly to the table. On a normal v15+
+    /// database with no such anomalies, this always returns `Ok(0)`.
     pub async fn backfill_plaintext_secrets(&self) -> AxiamResult<u64> {
-        // Phase 5 added the email_config table with encrypted columns only —
-        // no plaintext password column exists in the schema. Therefore this
-        // SELECT will always return 0 rows on a v15+ database, making the
-        // backfill a true no-op unless a pre-v15 migration path introduces
-        // plaintext data in the future. The function compiles and runs, logs
-        // the count, and is retained for the federation-backfill analogy (D-17).
         let result = self
             .db
             .query(
                 "SELECT count() AS total FROM email_config \
                  WHERE (provider_kind IN ['smtp'] AND smtp_password_ciphertext = NONE) \
-                    OR (provider_kind IN ['sendgrid','postmark','resend','brevo'] \
+                    OR (provider_kind IN ['send_grid','postmark','resend','brevo'] \
                         AND api_key_ciphertext = NONE) \
                  GROUP ALL",
             )
@@ -373,28 +409,56 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        #[derive(Debug, surrealdb_types::SurrealValue)]
-        struct CountRow {
-            total: u64,
-        }
-
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
-        let pending = rows.into_iter().next().map(|r| r.total).unwrap_or(0);
+        let anomalous = rows.into_iter().next().map(|r| r.total).unwrap_or(0);
 
-        // If there are no pending rows (expected on v15+), return immediately.
-        if pending == 0 {
+        // Expected steady state on a v15+ schema: nothing anomalous found,
+        // nothing to do.
+        if anomalous == 0 {
             return Ok(0);
         }
 
-        // TODO(T19.22): implement the UPDATE path when a pre-v15 plaintext
-        // migration becomes necessary. For now, log and return count so
-        // operators are aware of unencrypted rows requiring intervention.
+        // Anomalous rows exist (should not happen via this repository's own
+        // write path). There is no plaintext source column to migrate from
+        // (see doc comment above), so we can only detect and warn — an
+        // operator must investigate how these rows were written and either
+        // re-set the config (going through `set_org_config`/
+        // `set_tenant_override`, which always encrypts) or remove them.
         tracing::warn!(
-            pending_rows = pending,
-            "email_config rows with unencrypted secrets found; \
-             automatic migration not yet implemented (T19.22)"
+            anomalous_rows = anomalous,
+            "email_config rows with a configured provider but NULL/missing secret \
+             ciphertext found; email_config has no plaintext source column to \
+             backfill from (D-07) — these rows must be re-set or removed manually"
         );
-        Ok(pending)
+        Ok(anomalous)
+    }
+
+    /// Fetch the currently-stored secret ciphertext/nonce columns for an
+    /// org's email_config row, if one exists. Used by `set_org_config`'s
+    /// D-02 preserve-on-omit merge to keep the stored secret unchanged when
+    /// a write omits it, instead of overwriting it with ciphertext of an
+    /// empty value.
+    async fn fetch_org_secret_columns(
+        &self,
+        org_id: Uuid,
+    ) -> AxiamResult<Option<ExistingSecretColumns>> {
+        let result = self
+            .db
+            .query(
+                "SELECT smtp_password_ciphertext, smtp_password_nonce, \
+                        api_key_ciphertext, api_key_nonce \
+                 FROM email_config \
+                 WHERE scope = 'org' AND scope_id = $scope_id",
+            )
+            .bind(("scope_id", org_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<ExistingSecretColumns> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.into_iter().next())
     }
 }
 
@@ -417,7 +481,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         let rows: Vec<EmailConfigRowWithId> = result.take(0).map_err(DbError::from)?;
         rows.into_iter()
             .next()
-            .map(|r| r.try_into_domain(&self.key).map_err(Into::into))
+            .map(|r| r.try_into_domain(&self.key))
             .transpose()
     }
 
@@ -426,7 +490,41 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         org_id: Uuid,
         input: SetOrgEmailConfig,
     ) -> AxiamResult<EmailConfig> {
-        let encrypted = encrypt_provider(&input.provider, &self.key)?;
+        // D-02: an empty secret on the write path means "no new secret
+        // supplied" — preserve whatever ciphertext is already stored rather
+        // than persisting ciphertext of an empty value.
+        let secret_omitted = match &input.provider {
+            ProviderConfig::Smtp(smtp) => smtp.password.is_empty(),
+            ProviderConfig::SendGrid(api)
+            | ProviderConfig::Postmark(api)
+            | ProviderConfig::Resend(api)
+            | ProviderConfig::Brevo(api) => api.api_key.is_empty(),
+        };
+
+        let mut encrypted = encrypt_provider(&input.provider, &self.key)?;
+
+        if secret_omitted
+            && let Some(existing) = self.fetch_org_secret_columns(org_id).await?
+        {
+            match &input.provider {
+                ProviderConfig::Smtp(_) => {
+                    if existing.smtp_password_ciphertext.is_some() {
+                        encrypted.smtp_password_ciphertext = existing.smtp_password_ciphertext;
+                        encrypted.smtp_password_nonce = existing.smtp_password_nonce;
+                    }
+                }
+                ProviderConfig::SendGrid(_)
+                | ProviderConfig::Postmark(_)
+                | ProviderConfig::Resend(_)
+                | ProviderConfig::Brevo(_) => {
+                    if existing.api_key_ciphertext.is_some() {
+                        encrypted.api_key_ciphertext = existing.api_key_ciphertext;
+                        encrypted.api_key_nonce = existing.api_key_nonce;
+                    }
+                }
+            }
+        }
+
         // Clone fields we need post-move for the domain object reconstruction.
         let enabled = input.enabled;
         let from_name = input.from_name.clone();
@@ -495,10 +593,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<EmailConfigRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "email_config".into(),
-            id: org_id.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "email_config", &org_id.to_string())?;
 
         // Re-construct domain with original plaintext provider.
         // Use a placeholder UUID for the record id since UPSERT does not
@@ -510,6 +605,20 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
             updated_at: row.updated_at,
             ..config
         })
+    }
+
+    async fn delete_org_config(&self, org_id: Uuid) -> AxiamResult<()> {
+        self.db
+            .query(
+                "DELETE FROM email_config \
+                 WHERE scope = 'org' AND scope_id = $scope_id",
+            )
+            .bind(("scope_id", org_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
     }
 
     async fn get_tenant_override(
@@ -543,24 +652,21 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         let provider = if row.provider_kind.is_empty() {
             None
         } else {
-            Some(
-                row_to_provider(
-                    ProviderRowFields {
-                        kind: row.provider_kind,
-                        smtp_host: row.smtp_host,
-                        smtp_port: row.smtp_port,
-                        smtp_username: row.smtp_username,
-                        smtp_starttls: row.smtp_starttls,
-                        smtp_password_ciphertext: row.smtp_password_ciphertext,
-                        smtp_password_nonce: row.smtp_password_nonce,
-                        api_url: row.api_url,
-                        api_key_ciphertext: row.api_key_ciphertext,
-                        api_key_nonce: row.api_key_nonce,
-                    },
-                    &self.key,
-                )
-                .map_err(AxiamError::from)?,
-            )
+            Some(row_to_provider(
+                ProviderRowFields {
+                    kind: row.provider_kind,
+                    smtp_host: row.smtp_host,
+                    smtp_port: row.smtp_port,
+                    smtp_username: row.smtp_username,
+                    smtp_starttls: row.smtp_starttls,
+                    smtp_password_ciphertext: row.smtp_password_ciphertext,
+                    smtp_password_nonce: row.smtp_password_nonce,
+                    api_url: row.api_url,
+                    api_key_ciphertext: row.api_key_ciphertext,
+                    api_key_nonce: row.api_key_nonce,
+                },
+                &self.key,
+            )?)
         };
 
         Ok(Some(EmailConfigOverride {
@@ -857,5 +963,218 @@ mod tests {
         let repo = SurrealEmailConfigRepository::new(db, test_key());
         let result = repo.get_org_config(Uuid::new_v4()).await.unwrap();
         assert!(result.is_none());
+    }
+
+    // --- D-13: delete_org_config ---
+
+    #[tokio::test]
+    async fn delete_org_config_removes_row() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+        let input = SetOrgEmailConfig {
+            enabled: true,
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            reply_to: None,
+            provider: ProviderConfig::Smtp(SmtpConfig {
+                host: "smtp.example.com".into(),
+                port: 587,
+                username: "user".into(),
+                password: "supersecret".into(),
+                starttls: true,
+            }),
+        };
+        repo.set_org_config(org_id, input).await.unwrap();
+        assert!(repo.get_org_config(org_id).await.unwrap().is_some());
+
+        repo.delete_org_config(org_id).await.unwrap();
+
+        assert!(repo.get_org_config(org_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_org_config_is_ok_when_nothing_to_delete() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        // No config was ever set for this org — must not error.
+        repo.delete_org_config(Uuid::new_v4()).await.unwrap();
+    }
+
+    // --- D-02: preserve-on-omit / replace-on-supply ---
+
+    #[tokio::test]
+    async fn set_org_config_omitted_secret_preserves_stored_smtp_password() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+
+        let with_secret = SetOrgEmailConfig {
+            enabled: true,
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            reply_to: None,
+            provider: ProviderConfig::Smtp(SmtpConfig {
+                host: "smtp.example.com".into(),
+                port: 587,
+                username: "user".into(),
+                password: "original-secret".into(),
+                starttls: true,
+            }),
+        };
+        repo.set_org_config(org_id, with_secret).await.unwrap();
+
+        // A second write that omits the password (empty string sentinel,
+        // D-02) but changes an unrelated field (from_name).
+        let omit_secret = SetOrgEmailConfig {
+            enabled: true,
+            from_name: "Renamed".into(),
+            from_email: "test@example.com".into(),
+            reply_to: None,
+            provider: ProviderConfig::Smtp(SmtpConfig {
+                host: "smtp.example.com".into(),
+                port: 587,
+                username: "user".into(),
+                password: String::new(),
+                starttls: true,
+            }),
+        };
+        repo.set_org_config(org_id, omit_secret).await.unwrap();
+
+        let fetched = repo.get_org_config(org_id).await.unwrap().unwrap();
+        assert_eq!(fetched.from_name, "Renamed");
+        if let ProviderConfig::Smtp(smtp) = &fetched.provider {
+            assert_eq!(
+                smtp.password, "original-secret",
+                "omitting the secret on update must preserve the previously stored ciphertext"
+            );
+        } else {
+            panic!("expected Smtp provider");
+        }
+    }
+
+    #[tokio::test]
+    async fn set_org_config_supplied_secret_replaces_stored_value() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+
+        let first = SetOrgEmailConfig {
+            enabled: true,
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            reply_to: None,
+            provider: ProviderConfig::SendGrid(ApiProviderConfig {
+                api_key: "original_key".into(),
+                api_url: None,
+            }),
+        };
+        repo.set_org_config(org_id, first).await.unwrap();
+
+        let second = SetOrgEmailConfig {
+            enabled: true,
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            reply_to: None,
+            provider: ProviderConfig::SendGrid(ApiProviderConfig {
+                api_key: "replaced_key".into(),
+                api_url: None,
+            }),
+        };
+        repo.set_org_config(org_id, second).await.unwrap();
+
+        let fetched = repo.get_org_config(org_id).await.unwrap().unwrap();
+        if let ProviderConfig::SendGrid(api) = &fetched.provider {
+            assert_eq!(
+                api.api_key, "replaced_key",
+                "supplying a non-empty secret on update must replace the stored value"
+            );
+        } else {
+            panic!("expected SendGrid provider");
+        }
+    }
+
+    // --- D-08: NULL-ciphertext row surfaces a clear error, not an empty secret ---
+
+    #[tokio::test]
+    async fn read_path_errors_on_null_ciphertext_row() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db.clone(), test_key());
+        let org_id = Uuid::new_v4();
+
+        // Insert a row directly (bypassing the repository's own encrypt-on-write
+        // path) with a configured SMTP provider but NULL secret ciphertext/nonce —
+        // simulating an anomalous/corrupted row that should never occur via the
+        // repository's own write path, but must not silently decrypt to "".
+        let record_id = Uuid::new_v4().to_string();
+        db.query(
+            "CREATE type::record('email_config', $record_id) SET \
+             scope = 'org', scope_id = $scope_id, enabled = true, \
+             from_name = 'Test', from_email = 'test@example.com', reply_to = NONE, \
+             provider_kind = 'smtp', smtp_host = 'smtp.example.com', smtp_port = 587, \
+             smtp_username = 'user', smtp_starttls = true, \
+             smtp_password_ciphertext = NONE, smtp_password_nonce = NONE, \
+             api_url = NONE, api_key_ciphertext = NONE, api_key_nonce = NONE, \
+             secret_key_version = NONE, created_at = time::now(), updated_at = time::now()",
+        )
+        .bind(("record_id", record_id))
+        .bind(("scope_id", org_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let err = repo.get_org_config(org_id).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no usable credential"),
+            "expected a clear no-usable-credential error, got: {msg}"
+        );
+    }
+
+    // --- D-07: backfill_plaintext_secrets is a documented no-op ---
+
+    #[tokio::test]
+    async fn backfill_plaintext_secrets_is_a_noop_on_v15_schema_with_data_present() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+
+        // Seed a real org email_config row (encrypted, via the repository's
+        // own write path) so the table is non-empty when the backfill runs.
+        let input = SetOrgEmailConfig {
+            enabled: true,
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            reply_to: None,
+            provider: ProviderConfig::Smtp(SmtpConfig {
+                host: "smtp.example.com".into(),
+                port: 587,
+                username: "user".into(),
+                password: "supersecret".into(),
+                starttls: true,
+            }),
+        };
+        repo.set_org_config(org_id, input).await.unwrap();
+
+        let before = repo.get_org_config(org_id).await.unwrap().unwrap();
+
+        let result = repo.backfill_plaintext_secrets().await.unwrap();
+        assert_eq!(
+            result, 0,
+            "email_config has no plaintext source column (D-07); backfill must be a no-op"
+        );
+
+        // Mutates nothing: the seeded row's (decrypted) secret is unchanged.
+        let after = repo.get_org_config(org_id).await.unwrap().unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn backfill_plaintext_secrets_is_a_noop_on_empty_table() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let result = repo.backfill_plaintext_secrets().await.unwrap();
+        assert_eq!(result, 0);
     }
 }

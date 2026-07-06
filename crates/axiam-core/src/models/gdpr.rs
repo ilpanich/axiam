@@ -120,12 +120,18 @@ pub struct CreateExportJob {
 // -----------------------------------------------------------------------
 
 /// PII-free record proving that an erasure happened (GDPR accountability).
-/// Contains only the pseudonym and timestamp — no identifying data.
+/// Contains only the pseudonym, the (already-anonymized) user record id, and
+/// timestamp — no identifying data.
+///
+/// `user_id` is retained (not PII by itself once the `user` row has been
+/// anonymized) solely so a DB `UNIQUE` index can make a retried erasure's
+/// duplicate proof CREATE idempotent (D-03b/SECHRD-06).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ErasureProof {
     pub id: Uuid,
     pub pseudonym: String,
     pub tenant_id: Uuid,
+    pub user_id: Uuid,
     pub erased_at: DateTime<Utc>,
 }
 
@@ -134,5 +140,6 @@ pub struct ErasureProof {
 pub struct CreateErasureProof {
     pub pseudonym: String,
     pub tenant_id: Uuid,
+    pub user_id: Uuid,
     pub erased_at: DateTime<Utc>,
 }

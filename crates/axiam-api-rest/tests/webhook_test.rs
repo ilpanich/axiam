@@ -6,12 +6,17 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
+use axiam_api_rest::webhook::WebhookDeliveryService;
 use axiam_auth::config::AuthConfig;
+use axiam_auth::crypto::aes256gcm_decrypt;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
-use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+use axiam_core::repository::{
+    OrganizationRepository, TenantRepository, UserRepository, WebhookRepository,
+};
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
     SurrealWebhookRepository,
@@ -19,6 +24,11 @@ use axiam_db::repository::{
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
+
+/// Fixed AES-256-GCM key used by tests that need a *present* webhook
+/// encryption key (D-02 ciphertext-at-rest proof). Distinct from any
+/// production key; never used outside this test module.
+const TEST_WEBHOOK_ENC_KEY: [u8; 32] = [0x42u8; 32];
 
 type TestDb = surrealdb::engine::local::Db;
 
@@ -109,12 +119,20 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
 }
 
 macro_rules! test_app {
-    ($db:expr, $auth:expr) => {{
+    ($db:expr, $auth:expr) => {
+        test_app!($db, $auth, Some(TEST_WEBHOOK_ENC_KEY))
+    };
+    ($db:expr, $auth:expr, $enc_key:expr) => {{
         let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(SurrealWebhookRepository::new($db.clone())))
+                .app_data(web::Data::new({
+                    let mut state = AppState::for_test($db.clone(), $auth.clone());
+                    state.webhook_delivery =
+                        WebhookDeliveryService::new(state.webhook_repo.clone(), $enc_key);
+                    state
+                }))
                 .app_data(web::Data::new(authz))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
@@ -706,4 +724,209 @@ async fn create_webhook_rejects_invalid_retry_policy() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 400);
+}
+
+// ---------------------------------------------------------------------------
+// SECFIX-03 (SEC-059/SEC-031) negative tests — D-01 fail-closed key handling
+// and D-02 encrypt-on-write.
+// ---------------------------------------------------------------------------
+
+/// D-01: webhook registration must be refused (explicit error, never a
+/// silent 201) when no encryption key is configured — proves the
+/// fail-closed posture that replaced the old `unwrap_or([0u8; 32])`
+/// all-zero fallback.
+#[actix_rt::test]
+async fn create_webhook_fails_closed_without_encryption_key() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    // No encryption key configured — mirrors AXIAM__PKI__ENCRYPTION_KEY unset.
+    let app = test_app!(db, auth, None::<[u8; 32]>);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/webhooks")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["user.created"],
+            "secret": "my-webhook-secret"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        503,
+        "registration must be refused (not a silent 201) when the encryption key is absent"
+    );
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "service_unavailable");
+}
+
+/// D-02: the secret persisted to the DB must be ciphertext, never the
+/// submitted plaintext, and must decrypt back to the original plaintext —
+/// proving encrypt-on-write plus the delivery-side decrypt round trip.
+#[actix_rt::test]
+async fn create_webhook_stores_ciphertext_not_plaintext() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let plaintext_secret = "my-webhook-secret";
+    let req = test::TestRequest::post()
+        .uri("/api/v1/webhooks")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["user.created"],
+            "secret": plaintext_secret
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    let id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+
+    // Read the persisted row directly from the repository (bypasses the
+    // API response, which never serializes the secret at all).
+    let webhook_repo = SurrealWebhookRepository::new(db.clone());
+    let stored = webhook_repo.get_by_id(tenant_id, id).await.unwrap();
+
+    assert_ne!(
+        stored.secret, plaintext_secret,
+        "stored secret must be ciphertext, not the submitted plaintext"
+    );
+
+    let decrypted_bytes = aes256gcm_decrypt(&TEST_WEBHOOK_ENC_KEY, &stored.secret)
+        .expect("stored secret must decrypt with the configured key");
+    let decrypted = String::from_utf8(decrypted_bytes).expect("utf8");
+    assert_eq!(
+        decrypted, plaintext_secret,
+        "decrypting the stored ciphertext must round-trip to the original plaintext"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 25-02 (SECHRD-02 / D-01c) negative test — webhook delivery pins the
+// resolved IP; no second DNS resolution occurs at send time.
+// ---------------------------------------------------------------------------
+
+/// Proves the exact property `webhook.rs`'s delivery loop now depends on:
+/// once `axiam_federation::ssrf` resolves and validates a delivery target,
+/// the actual POST is pinned to that validated `IpAddr` — a second,
+/// independent DNS resolution at send time (the DNS-rebind TOCTOU
+/// RESEARCH Pitfall 1 describes: "re-resolves per retry but does NOT pin
+/// per send") cannot silently redirect the connection elsewhere.
+///
+/// Hermetic (loopback only, no live external egress): Linux routes the
+/// entire `127.0.0.0/8` range to `lo`, so `127.0.0.2` is a valid, bindable
+/// loopback address without any extra host configuration.
+///
+/// - `"localhost"` genuinely, deterministically resolves to `127.0.0.1` —
+///   that's where the REAL mock server listens.
+/// - `ssrf::pinned_client` is the exact mechanism `guarded_fetch` (and
+///   therefore `webhook.rs`'s delivery loop) uses to build the per-attempt
+///   client. Pinning it to `127.0.0.2` (deliberately NOT where "localhost"
+///   truly resolves, and where nothing listens) simulates a stale/rebind-
+///   immune pin: if the client independently re-resolved "localhost" at
+///   send time instead of honoring the pin, the request would succeed
+///   against the real listener at `127.0.0.1`. Because the override is
+///   authoritative, the request instead fails against `127.0.0.2` —
+///   proving no second resolution occurs.
+/// - A companion positive case pins to the correct `127.0.0.1` and proves
+///   delivery reaches the real listener, ruling out "the test just always
+///   fails" as an explanation.
+/// - Finally, the full production code path — `ssrf::guarded_fetch` used
+///   exactly as `webhook.rs` uses it (resolve + validate + pin + send in
+///   one call) — is exercised end-to-end and proven to reach the real
+///   listener, confirming the wiring `webhook.rs` now relies on works.
+#[tokio::test]
+async fn webhook_pins_resolved_ip() {
+    use axiam_federation::ssrf;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    // The REAL destination: what "localhost" genuinely, deterministically
+    // resolves to. A legitimate, correctly-pinned send lands here.
+    let real_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind real listener");
+    let real_port = real_listener.local_addr().expect("local_addr").port();
+
+    let real_hit = Arc::new(AtomicBool::new(false));
+    let real_hit_writer = real_hit.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = real_listener.accept().await else {
+                break;
+            };
+            real_hit_writer.store(true, Ordering::SeqCst);
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(response).await;
+        }
+    });
+
+    let url = format!("http://localhost:{real_port}/webhook");
+
+    // --- Negative case: pin to the WRONG loopback address -----------------
+    // Nothing listens on 127.0.0.2:{real_port}. If the client were to
+    // independently re-resolve "localhost" at send time instead of honoring
+    // the pin, this would still succeed (reaching the real listener at
+    // 127.0.0.1). It must instead fail, proving the pin — not a fresh DNS
+    // lookup — determines where the connection lands.
+    let wrong_pin = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+    let wrong_client =
+        ssrf::pinned_client("localhost", wrong_pin, real_port).expect("build wrong-pin client");
+    let wrong_result = wrong_client.post(&url).body("{}").send().await;
+    assert!(
+        wrong_result.is_err(),
+        "request pinned to 127.0.0.2 (nothing listening) must fail — if it \
+         succeeded, the client re-resolved \"localhost\" independently \
+         instead of honoring the pin, got: {wrong_result:?}"
+    );
+    assert!(
+        !real_hit.load(Ordering::SeqCst),
+        "the real listener at 127.0.0.1 must NOT have been reached by the \
+         127.0.0.2-pinned request"
+    );
+
+    // --- Positive control: pin to the CORRECT loopback address ------------
+    // Proves the mechanism genuinely works (rules out "always fails").
+    let correct_pin = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let correct_client = ssrf::pinned_client("localhost", correct_pin, real_port)
+        .expect("build correctly-pinned client");
+    let correct_result = correct_client.post(&url).body("{}").send().await;
+    assert!(
+        correct_result.is_ok(),
+        "request pinned to 127.0.0.1 (real listener) must succeed, got: {correct_result:?}"
+    );
+    assert!(
+        real_hit.load(Ordering::SeqCst),
+        "the real listener at 127.0.0.1 must have been reached by the correctly-pinned request"
+    );
+
+    // --- End-to-end: the exact call shape webhook.rs's delivery loop uses --
+    // `allow_private=true` is the documented first-hop test seam (mirrors
+    // production `deliver()`'s use of `guarded_fetch`, which passes `false`
+    // against real, non-loopback targets).
+    let e2e_result = ssrf::guarded_fetch(&url, true, |c, u| c.post(u).body("{}")).await;
+    assert!(
+        e2e_result.is_ok(),
+        "guarded_fetch (the exact function webhook.rs's delivery loop calls) \
+         must resolve \"localhost\" to 127.0.0.1, pin it, and reach the real \
+         listener, got: {e2e_result:?}"
+    );
 }

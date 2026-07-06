@@ -1222,7 +1222,7 @@ Plans:
   4. The 24 duplicated `CountRow` definitions collapse to `helpers::CountRow`, repos adopt a generic `paginate<T>` + `helpers::parse_uuid`/`take_first_or_not_found`, and `CertService` reconstructs the CA via `from_ca_cert_pem` with shared keypair/fingerprint/encrypt helpers (QUAL-02, QUAL-05)
   5. Frontend pages import the extracted shared components/hooks (`ToggleField`/`SectionCard`/`useCrudMutations`/…) or the dead modules are deleted and profile/MFA pages call a typed users service; the pepper-less second `verify_password` impl and per-request federation/reset/verification service construction are removed (QUAL-06, QUAL-07)
 
-**Plans**: 1/7 plans executed
+**Plans**: 2/7 plans executed
 
 Plans:
 **Wave 1**
@@ -1231,7 +1231,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 29-02-PLAN.md — QUAL-04 transactional mutations: tenant-predicated role/resource deletes + child-guard TOCTOU + GDPR deletion-setup atomicity (Wave 2)
+- [x] 29-02-PLAN.md — QUAL-04 transactional mutations: tenant-predicated role/resource deletes + child-guard TOCTOU + GDPR deletion-setup atomicity (Wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -1288,7 +1288,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 26. Correctness & Resilience | 8/8 | Complete   | 2026-07-05 |
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
 | 28. Functional Completeness | 5/5 | Complete    | 2026-07-05 |
-| 29. Structural Quality | 1/7 | In Progress|  |
+| 29. Structural Quality | 2/7 | In Progress|  |
 | 30. Compliance & Documentation | 0/? | Not started | - |
 
 ---

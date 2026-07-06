@@ -991,9 +991,9 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** Medium | **Source:** CQ-B07, CQ-B46, CQ-B38 setup
 
 ### Acceptance Criteria
-- [ ] Role/permission edge deletes are transactional AND tenant-predicated (closes the cross-tenant edge-strip in CQ-B07/SEC-058 family)
-- [ ] `resource::delete` child-guard + delete wrapped in one transaction (no TOCTOU — CQ-B46)
-- [ ] GDPR deletion setup is transactional (a `create` failure after `mark_deletion_pending` cannot strand an uncancellable purge — CQ-B39 residual)
+- [x] Role/permission edge deletes are transactional AND tenant-predicated (closes the cross-tenant edge-strip in CQ-B07/SEC-058 family)
+- [x] `resource::delete` child-guard + delete wrapped in one transaction (no TOCTOU — CQ-B46)
+- [x] GDPR deletion setup is transactional (a `create` failure after `mark_deletion_pending` cannot strand an uncancellable purge — CQ-B39 residual)
 
 ## QUAL-05: PKI Helper Deduplication
 
@@ -1109,7 +1109,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | QUAL-01 | Phase 29 | AppState extraction (CQ-B43) | Pending |
 | QUAL-02 | Phase 29 | Generic paginate + shared helpers (CQ-B10) | Pending |
 | QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) | Complete (29-01: helpers::classify_write_error centralizes marker-string detection for duplicate user/role-assignment/group-membership → 409; DbError::Serialization fixes parse_uuid mislabeling; OAuth2 client-lookup DB outage → ServerError distinct from invalid_client) |
-| QUAL-04 | Phase 29 | Transactional mutations (CQ-B07/46) | Pending |
+| QUAL-04 | Phase 29 | Transactional mutations (CQ-B07/46) | Complete (29-02: role/resource edge deletes are single tenant-predicated transactions via node-tenant subquery guards; resource child-guard folded into its transaction via LET-capture, closing the TOCTOU; GDPR deletion setup via create_with_pending_flag is one transaction with a duplicate-pending rollback guard) |
 | QUAL-05 | Phase 29 | PKI helper dedup (CQ-B15) | Pending |
 | QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Pending |
 | QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Pending |

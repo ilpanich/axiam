@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 29
 current_phase_name: structural-quality
 status: executing
-stopped_at: Completed 29-01-PLAN.md
-last_updated: "2026-07-06T07:32:14.550Z"
+stopped_at: Completed 29-02-PLAN.md
+last_updated: "2026-07-06T08:42:59.162Z"
 last_activity: 2026-07-06
 last_activity_desc: Phase 29 execution started
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 52
-  completed_plans: 46
+  completed_plans: 47
   percent: 75
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 29 (structural-quality) — EXECUTING
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-07-06 — Phase 29 execution started
 
@@ -203,6 +203,7 @@ Last activity: 2026-07-06 — Phase 29 execution started
 | Phase 28-functional-completeness P05 | 70min | 3 tasks | 9 files |
 | Phase 28-functional-completeness P04 | 35min | 3 tasks | 9 files |
 | Phase 29 P01 | 30min | 3 tasks | 8 files |
+| Phase 29 P02 | 55min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -509,6 +510,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 28-functional-completeness]: 28-04: schema v23 (DEFINE FIELD OVERWRITE) extends email_config.provider_kind's ASSERT to accept the empty-string sentinel, fixing a latent set_tenant_override write/read asymmetry bug
 - [Phase ?]: [Phase 29-structural-quality]: 29-01 classify_write_error is generic over Display (not concrete surrealdb::Error) so it covers both .check() sites and password::hash_password (AuthError) sites uniformly
 - [Phase ?]: [Phase 29-structural-quality]: 29-01 discovered group.rs::add_member never called .check() on its RELATE query — a duplicate group-membership RELATE silently 'succeeded' with no edge created; fixed as part of the QUAL-03 member_of routing target
+- [Phase ?]: [Phase 29-structural-quality]: 29-02: has_role/grants/child_of/on_resource edge tables carry no tenant_id field of their own — tenant predicates on their DELETEs are node-tenant subquery guards (out.tenant_id/in.tenant_id) not flat WHERE clauses
+- [Phase ?]: [Phase 29-structural-quality]: 29-02: added an in-transaction duplicate-pending-request guard to create_with_pending_flag (Rule 2) — prevents two live cancel tokens per user and gives the atomicity test a reproducible rollback trigger
 
 ### Pending Todos
 
@@ -533,7 +536,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-06T07:32:14.535Z
-Stopped at: Completed 29-01-PLAN.md
+Last session: 2026-07-06T08:42:59.147Z
+Stopped at: Completed 29-02-PLAN.md
 Resume file: None
 Next action: /gsd-execute-phase 23

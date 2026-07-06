@@ -1,0 +1,542 @@
+asyncapi: 2.6.0
+info:
+  title: AXIAM AMQP API
+  version: "0.1.0"
+  description: |
+    AMQP message contracts for AXIAM's async authorization, audit ingestion,
+    mail delivery, webhook delivery, and notification queues.
+
+    **Hand-authored, not generated.** Derived by field-for-field transcription
+    from `crates/axiam-amqp/src/messages.rs` and
+    `crates/axiam-amqp/src/connection.rs` (`pub mod queues`) as of v1.2 beta.
+    Unlike the REST OpenAPI spec (generated from `utoipa` annotations and
+    drift-gated in CI), this document has no codegen link to the Rust source
+    — it is a point-in-time snapshot that must be manually re-verified
+    whenever `messages.rs` or `connection.rs` changes. See
+    `docs/api/README.md` for the full caveat.
+
+    All AMQP payloads flowing through `axiam.authz.request`, `axiam.audit.events`,
+    and `axiam.webhook.*` participate in AXIAM's fail-closed security model:
+    `AuthzRequest` and `AuditEventMessage` carry a mandatory HMAC-SHA256
+    `hmac_signature` (see the `AuthzRequest` message description for the
+    exact convention); webhook delivery uses a nack-no-requeue dead-letter
+    chain with no silent message loss.
+  license:
+    name: Apache-2.0
+  x-milestone: v1.2 Beta
+  x-last-verified: "2026-07-06"
+servers:
+  rabbitmq:
+    url: "{host}:{port}"
+    protocol: amqp
+    description: >-
+      RabbitMQ broker (AMQP 0-9-1). Host/port are deployment-specific
+      (see docs/deployment/README.md); the queue topology below is fixed
+      by `crates/axiam-amqp/src/connection.rs`.
+    variables:
+      host:
+        default: localhost
+        description: RabbitMQ hostname (e.g. the `AXIAM__AMQP__HOST` config value).
+      port:
+        default: "5672"
+        description: RabbitMQ AMQP port.
+
+defaultContentType: application/json
+
+channels:
+  axiam.authz.request:
+    description: >-
+      Inbound async authorization check requests (queue: `axiam.authz.request`,
+      durable, autoDelete=false). Consumed by AXIAM; poison messages route to
+      `axiam.authz.request.dlq` (CQ-B05).
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.authz.request
+          durable: true
+          autoDelete: false
+    subscribe:
+      summary: AXIAM consumes an authorization check request.
+      message:
+        $ref: '#/components/messages/AuthzRequest'
+
+  axiam.authz.request.dlq:
+    description: >-
+      Dead-letter queue for `axiam.authz.request` poison messages (CQ-B05).
+      Not consumed by the running application in normal operation; retained
+      for operator inspection/replay.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.authz.request.dlq
+          durable: true
+          autoDelete: false
+    publish:
+      summary: A poison `AuthzRequest` is dead-lettered here (nack, no requeue).
+      message:
+        $ref: '#/components/messages/AuthzRequest'
+
+  axiam.authz.response:
+    description: >-
+      Outbound authorization decision responses (queue: `axiam.authz.response`,
+      durable). No DLQ — this is a response queue, not subject to poison-message
+      dead-lettering.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.authz.response
+          durable: true
+          autoDelete: false
+    publish:
+      summary: AXIAM publishes an authorization decision.
+      message:
+        $ref: '#/components/messages/AuthzResponse'
+
+  axiam.audit.events:
+    description: >-
+      Inbound audit events from external services (queue: `axiam.audit.events`,
+      durable). Consumed by AXIAM; poison messages route to
+      `axiam.audit.events.dlq` (CQ-B05).
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.audit.events
+          durable: true
+          autoDelete: false
+    subscribe:
+      summary: AXIAM consumes an externally-produced audit event.
+      message:
+        $ref: '#/components/messages/AuditEventMessage'
+
+  axiam.audit.events.dlq:
+    description: >-
+      Dead-letter queue for `axiam.audit.events` poison messages (CQ-B05).
+      Not consumed by the running application in normal operation; retained
+      for operator inspection/replay.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.audit.events.dlq
+          durable: true
+          autoDelete: false
+    publish:
+      summary: A poison `AuditEventMessage` is dead-lettered here (nack, no requeue).
+      message:
+        $ref: '#/components/messages/AuditEventMessage'
+
+  axiam.notifications:
+    description: >-
+      Outbound real-time event notifications (queue: `axiam.notifications`,
+      durable). No DLQ.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.notifications
+          durable: true
+          autoDelete: false
+    publish:
+      summary: AXIAM publishes a real-time notification event.
+      message:
+        $ref: '#/components/messages/NotificationEvent'
+
+  axiam.mail.outbound:
+    description: >-
+      Outbound async mail delivery queue (D-14) (queue: `axiam.mail.outbound`,
+      durable). Consumed by AXIAM's mail-delivery worker; messages exhausted
+      after retry route to `axiam.mail.outbound.dlq`.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.mail.outbound
+          durable: true
+          autoDelete: false
+    subscribe:
+      summary: AXIAM's mail worker consumes an outbound mail job.
+      message:
+        $ref: '#/components/messages/OutboundMailMessage'
+
+  axiam.mail.outbound.dlq:
+    description: >-
+      Dead-letter queue for `axiam.mail.outbound` exhausted-retry messages
+      (D-14). Not consumed by the running application in normal operation;
+      retained for operator inspection/replay.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.mail.outbound.dlq
+          durable: true
+          autoDelete: false
+    publish:
+      summary: A mail job exhausted its retries and is dead-lettered here.
+      message:
+        $ref: '#/components/messages/OutboundMailMessage'
+
+  axiam.webhook:
+    description: >-
+      Primary webhook delivery queue (CORR-03/D-07) (queue: `axiam.webhook`,
+      durable). Consumed by the webhook AMQP consumer, which drives
+      `WebhookDeliveryService::deliver_once` per (re)delivery attempt. A
+      terminal nack (requeue=false, `attempt` exhausted against
+      `AXIAM__WEBHOOK__MAX_ATTEMPTS`) dead-letters to `axiam.webhook.dlq`.
+      Non-terminal failures republish to `axiam.webhook.retry` with an
+      incremented `attempt`.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.webhook
+          durable: true
+          autoDelete: false
+    subscribe:
+      summary: AXIAM's webhook consumer processes a delivery attempt.
+      message:
+        $ref: '#/components/messages/WebhookMessage'
+
+  axiam.webhook.retry:
+    description: >-
+      Webhook retry-delay queue (CORR-03/D-07) (queue: `axiam.webhook.retry`,
+      durable). No consumer is ever attached to this queue — AXIAM publishes
+      a `WebhookMessage` here with a per-message TTL
+      (`x-message-ttl` / `BasicProperties::with_expiration`), and once the
+      TTL expires RabbitMQ dead-letters it back to `axiam.webhook` via the
+      default exchange, giving RabbitMQ-native delayed retry without an
+      in-process sleep tying up a consumer slot. `attempt` is incremented by
+      the `axiam.webhook` consumer before republishing here.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.webhook.retry
+          durable: true
+          autoDelete: false
+    publish:
+      summary: >-
+        AXIAM publishes a `WebhookMessage` here (with TTL) to delay the next
+        delivery attempt; no application ever subscribes to this queue.
+      message:
+        $ref: '#/components/messages/WebhookMessage'
+
+  axiam.webhook.dlq:
+    description: >-
+      Terminal dead-letter queue for exhausted webhook deliveries
+      (CORR-03/D-07). Messages here are real and replayable — not silently
+      dropped. Reached via a terminal nack (requeue=false) from
+      `axiam.webhook` once `attempt` exceeds `AXIAM__WEBHOOK__MAX_ATTEMPTS`.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.webhook.dlq
+          durable: true
+          autoDelete: false
+    publish:
+      summary: A webhook delivery exhausted all attempts and is dead-lettered here.
+      message:
+        $ref: '#/components/messages/WebhookMessage'
+
+components:
+  messages:
+    AuthzRequest:
+      name: AuthzRequest
+      title: Authorization check request
+      summary: >-
+        Authorization check request received from `axiam.authz.request`
+        (source: crates/axiam-amqp/src/messages.rs L125-146).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/AuthzRequest'
+
+    AuthzResponse:
+      name: AuthzResponse
+      title: Authorization decision response
+      summary: >-
+        Authorization decision published to `axiam.authz.response`
+        (source: crates/axiam-amqp/src/messages.rs L148-153).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/AuthzResponse'
+
+    AuditEventMessage:
+      name: AuditEventMessage
+      title: Audit event
+      summary: >-
+        Audit event received from external services via `axiam.audit.events`;
+        maps directly to `CreateAuditLogEntry` in `axiam-core`
+        (source: crates/axiam-amqp/src/messages.rs L159-174).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/AuditEventMessage'
+
+    NotificationEvent:
+      name: NotificationEvent
+      title: Notification event
+      summary: >-
+        Notification event published to `axiam.notifications`
+        (source: crates/axiam-amqp/src/messages.rs L187-196).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/NotificationEvent'
+
+    OutboundMailMessage:
+      name: OutboundMailMessage
+      title: Outbound mail job
+      summary: >-
+        Outbound mail message published to `axiam.mail.outbound` (D-14).
+        Defined in `axiam_core::models::mail` and re-exported by
+        `crates/axiam-amqp/src/messages.rs` (module doc, L1-13) so crates
+        that cannot depend on `axiam-amqp` (e.g. `axiam-audit`) can still
+        build outbound mail messages.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/OutboundMailMessage'
+
+    WebhookMessage:
+      name: WebhookMessage
+      title: Webhook delivery attempt
+      summary: >-
+        Webhook delivery message carried on `axiam.webhook` /
+        `axiam.webhook.retry` / `axiam.webhook.dlq` (CORR-03/D-07)
+        (source: crates/axiam-amqp/src/messages.rs L214-221).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/WebhookMessage'
+
+  schemas:
+    AuthzRequest:
+      type: object
+      description: >-
+        HMAC-SHA256-signed (SEC-022/055). `hmac_signature` is computed over
+        the JSON-serialized payload with `hmac_signature` itself set to
+        null, using a per-tenant subkey derived via HKDF-SHA256
+        (`derive_tenant_key`, SECHRD-08/D-05a/b) from a shared master key,
+        domain-separated and versioned by `key_version`. Consumers reject
+        (nack, no requeue) whenever the signature is absent or invalid —
+        there is no fail-open path (D-05c).
+      required:
+        - correlation_id
+        - tenant_id
+        - subject_id
+        - action
+        - resource_id
+        - key_version
+      properties:
+        correlation_id:
+          type: string
+          format: uuid
+          description: Caller-provided ID to correlate request with response.
+        tenant_id:
+          type: string
+          format: uuid
+        subject_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+        scope:
+          type: string
+          nullable: true
+        key_version:
+          type: integer
+          minimum: 0
+          maximum: 255
+          description: >-
+            HKDF master-key rotation version (SECHRD-08/D-05b). Selects
+            which per-tenant subkey derivation the signature was produced
+            with. Defaults to `CURRENT_KEY_VERSION` (1) when absent.
+        hmac_signature:
+          type: string
+          nullable: true
+          description: >-
+            HMAC-SHA256 hex digest of the JSON-serialized body (this field
+            set to null/absent during signing). Mandatory on the wire — the
+            consumer rejects both unsigned and invalid-signature messages
+            (no fail-open path).
+
+    AuthzResponse:
+      type: object
+      required:
+        - correlation_id
+        - allowed
+      properties:
+        correlation_id:
+          type: string
+          format: uuid
+        allowed:
+          type: boolean
+        reason:
+          type: string
+          nullable: true
+
+    AuditEventMessage:
+      type: object
+      description: >-
+        HMAC-SHA256-signed (SEC-022/055), same convention as `AuthzRequest`
+        (per-tenant HKDF-derived subkey, `key_version` on the wire,
+        fail-closed — no accept-when-absent path, SECHRD-08/D-05a/b/c).
+      required:
+        - tenant_id
+        - actor_id
+        - actor_type
+        - action
+        - outcome
+        - key_version
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        actor_id:
+          type: string
+          format: uuid
+        actor_type:
+          type: string
+        action:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+          nullable: true
+        outcome:
+          type: string
+        ip_address:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        key_version:
+          type: integer
+          minimum: 0
+          maximum: 255
+        hmac_signature:
+          type: string
+          nullable: true
+          description: >-
+            HMAC-SHA256 hex digest, same mandatory fail-closed convention as
+            `AuthzRequest.hmac_signature`.
+
+    NotificationEvent:
+      type: object
+      required:
+        - event_type
+        - tenant_id
+        - actor_id
+        - timestamp
+      properties:
+        event_type:
+          type: string
+        tenant_id:
+          type: string
+          format: uuid
+        actor_id:
+          type: string
+          format: uuid
+        resource_id:
+          type: string
+          format: uuid
+          nullable: true
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: object
+          nullable: true
+          additionalProperties: true
+
+    OutboundMailMessage:
+      type: object
+      description: >-
+        All fields except `to_address` are safe to include in audit
+        metadata. `to_address` is present for delivery only — MUST NOT be
+        logged in audit events (D-16); consumers MUST exclude it from any
+        audit records they produce. `to_address` is advisory only — the
+        actual recipient is always resolved server-side from
+        `user_id`+`tenant_id` to prevent recipient hijacking (SEC-055).
+      required:
+        - mail_type
+        - tenant_id
+        - org_id
+        - user_id
+        - to_address
+        - template_context
+        - attempt_count
+        - enqueued_at
+      properties:
+        mail_type:
+          type: string
+          enum:
+            - PasswordReset
+            - EmailVerification
+            - Notification
+            - DeletionCancel
+            - ExportReady
+        tenant_id:
+          type: string
+          format: uuid
+        org_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        to_address:
+          type: string
+          description: >-
+            Delivery address, advisory only. MUST NOT appear in audit log
+            metadata (D-16).
+        template_context:
+          type: object
+          additionalProperties: true
+        attempt_count:
+          type: integer
+          minimum: 0
+        enqueued_at:
+          type: string
+          format: date-time
+
+    WebhookMessage:
+      type: object
+      description: >-
+        `tenant_id` is required so `deliver_once` can resolve the webhook via
+        the tenant-scoped `WebhookRepository::get_by_id` without a
+        cross-tenant lookup, consistent with AXIAM's multi-tenant
+        data-isolation model. `attempt` is incremented by the consumer on
+        each republish to `axiam.webhook.retry` and checked against
+        `AXIAM__WEBHOOK__MAX_ATTEMPTS` before a terminal nack routes the
+        message to `axiam.webhook.dlq`.
+      required:
+        - webhook_id
+        - delivery_id
+        - tenant_id
+        - event_type
+        - payload
+        - attempt
+      properties:
+        webhook_id:
+          type: string
+          format: uuid
+        delivery_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        attempt:
+          type: integer
+          minimum: 0

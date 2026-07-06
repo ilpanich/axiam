@@ -305,7 +305,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
              COMMIT TRANSACTION"
         );
 
-        let result = self
+        let mut result = self
             .db
             .query(query)
             .bind(("id", id_str.clone()))
@@ -314,14 +314,28 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .await
             .map_err(DbError::from)?;
 
-        if let Err(e) = result.check() {
-            let msg = e.to_string();
-            if msg.contains("cannot delete resource with children") {
+        // The child-guard THROW fires on its own statement slot, but the
+        // trailing DELETE/COMMIT slots report the generic "not executed due
+        // to a failed transaction" error, and Response::check() can surface
+        // one of those instead of the THROW text — which silently downgraded
+        // the child-guard rejection to an opaque Migration error
+        // (req14_tenant_isolation_test::resource_delete_with_children_rejected
+        // regressed when 29-02 moved the guard from a Rust pre-check into the
+        // transaction). Scan every statement error so the THROW message is
+        // reliably detected regardless of which slot check() would return.
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let combined = errors
+                .into_values()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if combined.contains("cannot delete resource with children") {
                 return Err(AxiamError::Validation {
                     message: "cannot delete resource with children".into(),
                 });
             }
-            return Err(DbError::Migration(msg).into());
+            return Err(DbError::Migration(combined).into());
         }
 
         Ok(())

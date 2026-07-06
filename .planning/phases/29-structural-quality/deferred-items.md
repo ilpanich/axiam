@@ -39,3 +39,20 @@ scope-boundary rule (only fix issues directly caused by the current task's chang
   and unrelated to 29-05's changes: `resource.rs` and `axiam-auth/src/token.rs` are not
   in 29-05's `files_modified` list and were not touched. No new out-of-scope findings
   discovered during 29-05's file-group-B dedup + `federation_link.rs` parse_uuid removal.
+
+## RESOLVED — `resource_delete_with_children_rejected` was a 29-02 regression, not pre-existing
+
+Orchestrator follow-up (post-29-05): the "pre-existing" label above was **incorrect**.
+Investigation traced the failure to 29-02 (`3e8394a`), which moved `resource::delete`'s
+child guard from a Rust pre-check (returning `AxiamError::Validation { "cannot delete
+resource with children" }`) into an in-transaction `THROW`. The THROW message fires on
+its own statement slot, but the trailing `DELETE`/`COMMIT` slots report the generic
+"not executed due to a failed transaction" error, and `Response::check()` surfaced one
+of those instead of the THROW text — so the guard rejection was silently downgraded to
+an opaque `DbError::Migration`, failing the test's `contains("children")` assertion.
+(The sibling cycle/depth guards pass because they are pure-Rust checks, not SQL THROWs;
+`account_deletion`'s THROW test only asserts `is_err()`, so it never caught this class.)
+Fixed by scanning **all** statement errors via `Response::take_errors()` instead of
+relying on `check()`'s single surfaced message, preserving 29-02's in-transaction
+TOCTOU fix. `req14_tenant_isolation_test` now 7/7. The `axiam-auth` clippy warning and
+unused `argon2` dep remain genuinely deferred (out of this phase's file scope).

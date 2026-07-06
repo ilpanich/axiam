@@ -125,7 +125,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             .await
             .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
 
-        let ca_subject = ca_cert.subject.clone();
+        let ca_cert_pem = ca_cert.public_cert_pem.clone();
         let ee_subject = input.subject.clone();
         let key_algorithm = input.key_algorithm.clone();
         let not_before_ts = not_before.timestamp();
@@ -136,8 +136,12 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 let ca_key_pair = KeyPair::from_pem(&ca_private_key_pem)
                     .map_err(|e| AxiamError::Certificate(format!("invalid CA private key: {e}")))?;
 
-                // Build the CA signing parameters (needed by rcgen to issue a signed cert).
-                let ca_params = build_ca_params(&ca_subject)?;
+                // Reconstruct the signing CA from its real, stored certificate PEM —
+                // NOT from the (mutable) `subject` field — so the issuer DN embedded
+                // in every leaf cert can never drift from the CA's actual Subject DN
+                // (QUAL-05/D-08, T-29-11).
+                let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)
+                    .map_err(|e| AxiamError::Certificate(format!("invalid CA certificate PEM: {e}")))?;
                 let ca_certificate = ca_params
                     .self_signed(&ca_key_pair)
                     .map_err(|e| AxiamError::Certificate(format!("CA self-sign failed: {e}")))?;
@@ -217,15 +221,6 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     ) -> AxiamResult<PaginatedResult<Certificate>> {
         self.cert_repo.list(tenant_id, pagination).await
     }
-}
-
-/// Build minimal CA params for rcgen (used to reconstruct CA certificate for signing).
-fn build_ca_params(subject: &str) -> AxiamResult<CertificateParams> {
-    let mut params = CertificateParams::new(Vec::<String>::new())
-        .map_err(|e| AxiamError::Certificate(e.to_string()))?;
-    params.distinguished_name.push(DnType::CommonName, subject);
-    params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    Ok(params)
 }
 
 /// Decrypt an AES-256-GCM encrypted private key PEM and validate it is UTF-8.

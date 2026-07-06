@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
 struct ResourceRow {
@@ -77,11 +78,6 @@ fn row_to_resource(row: ResourceRow, id: Uuid) -> Result<Resource, DbError> {
     })
 }
 
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
 /// Maximum depth for ancestor traversal to prevent infinite loops.
 const MAX_ANCESTOR_DEPTH: usize = 50;
 
@@ -138,10 +134,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<ResourceRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "resource".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "resource", &id_str)?;
 
         row_to_resource(row, id).map_err(Into::into)
     }
@@ -161,10 +154,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .map_err(DbError::from)?;
 
         let rows: Vec<ResourceRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "resource".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "resource", &id_str)?;
 
         row_to_resource(row, id).map_err(Into::into)
     }
@@ -264,10 +254,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
         // The UPDATE statement index depends on whether we prepended a DELETE.
         let stmt_idx = if parent_id_changed { 1 } else { 0 };
         let rows: Vec<ResourceRow> = result.take(stmt_idx).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "resource".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "resource", &id_str)?;
 
         row_to_resource(row, id).map_err(Into::into)
     }
@@ -357,7 +344,6 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let mut result = self
             .db
@@ -380,12 +366,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .map(|row| row.try_into_resource())
             .collect::<Result<Vec<_>, DbError>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn get_children(&self, tenant_id: Uuid, parent_id: Uuid) -> AxiamResult<Vec<Resource>> {

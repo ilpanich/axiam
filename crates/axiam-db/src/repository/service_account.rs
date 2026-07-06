@@ -14,6 +14,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 /// Generate a random client ID with the `sa_` prefix (32 hex chars).
 fn generate_client_id() -> String {
@@ -98,11 +99,6 @@ impl ServiceAccountRowWithId {
     }
 }
 
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
 /// SurrealDB implementation of the ServiceAccount repository.
 #[derive(Clone)]
 pub struct SurrealServiceAccountRepository<C: Connection> {
@@ -148,10 +144,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<ServiceAccountRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "service_account".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "service_account", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -185,10 +178,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map_err(DbError::from)?;
 
         let rows: Vec<ServiceAccountRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "service_account".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "service_account", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -224,10 +214,11 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map_err(DbError::from)?;
 
         let rows: Vec<ServiceAccountRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "service_account".into(),
-            id: format!("client_id={client_id_owned}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "service_account",
+            &format!("client_id={client_id_owned}"),
+        )?;
 
         row.try_into_service_account().map_err(Into::into)
     }
@@ -275,10 +266,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<ServiceAccountRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "service_account".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "service_account", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -331,7 +319,6 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let mut result = self
             .db
@@ -354,12 +341,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map(|row| row.try_into_service_account())
             .collect::<Result<Vec<_>, DbError>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn rotate_secret(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<String> {

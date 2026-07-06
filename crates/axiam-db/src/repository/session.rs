@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
 struct SessionRow {
@@ -71,11 +72,6 @@ impl SessionRowWithId {
     }
 }
 
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
 /// SurrealDB implementation of the Session repository.
 pub struct SurrealSessionRepository<C: Connection> {
     db: Surreal<C>,
@@ -129,10 +125,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "session".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "session", &id_str)?;
 
         row_to_session(row, id).map_err(Into::into)
     }
@@ -152,10 +145,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(DbError::from)?;
 
         let rows: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "session".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "session", &id_str)?;
 
         row_to_session(row, id).map_err(Into::into)
     }
@@ -175,10 +165,11 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(DbError::from)?;
 
         let rows: Vec<SessionRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "session".into(),
-            id: format!("token_hash={token_hash_owned}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "session",
+            &format!("token_hash={token_hash_owned}"),
+        )?;
 
         row.try_into_session().map_err(Into::into)
     }

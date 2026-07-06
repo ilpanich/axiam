@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
@@ -67,12 +68,6 @@ impl TenantRowWithId {
     }
 }
 
-/// Row struct for count queries.
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
 /// SurrealDB implementation of the Tenant repository.
 #[derive(Clone)]
 pub struct SurrealTenantRepository<C: Connection> {
@@ -123,10 +118,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
 
         // Statement 0 is the CREATE, statement 1 is the RELATE.
         let rows: Vec<TenantRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "tenant".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "tenant", &id_str)?;
 
         Ok(row.into_tenant(id)?)
     }
@@ -142,10 +134,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .map_err(DbError::from)?;
 
         let rows: Vec<TenantRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "tenant".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "tenant", &id_str)?;
 
         Ok(row.into_tenant(id)?)
     }
@@ -167,10 +156,11 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .map_err(DbError::from)?;
 
         let rows: Vec<TenantRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "tenant".into(),
-            id: format!("org={organization_id},slug={slug}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "tenant",
+            &format!("org={organization_id},slug={slug}"),
+        )?;
 
         Ok(row.try_into_tenant()?)
     }
@@ -210,10 +200,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<TenantRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "tenant".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "tenant", &id_str)?;
 
         Ok(row.into_tenant(id)?)
     }
@@ -245,7 +232,6 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let mut result = self
             .db
@@ -269,11 +255,6 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .map(|row| row.try_into_tenant())
             .collect::<Result<Vec<_>, DbError>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 }

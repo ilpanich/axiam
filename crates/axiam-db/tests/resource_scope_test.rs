@@ -157,6 +157,136 @@ async fn delete_resource() {
     assert!(result.is_err(), "deleted resource should not be found");
 }
 
+/// Regression: the child-count guard must still block a delete when a child
+/// exists (the transactional/LET-capture rewrite must preserve this
+/// pre-existing behavior).
+#[tokio::test]
+async fn delete_resource_blocked_by_existing_child() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealResourceRepository::new(db);
+
+    let parent = repo
+        .create(CreateResource {
+            tenant_id,
+            name: "parent-with-child".into(),
+            resource_type: "project".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    repo.create(CreateResource {
+        tenant_id,
+        name: "child".into(),
+        resource_type: "service".into(),
+        parent_id: Some(parent.id),
+        metadata: None,
+    })
+    .await
+    .unwrap();
+
+    let result = repo.delete(tenant_id, parent.id).await;
+    assert!(result.is_err(), "delete must fail when children exist");
+
+    // No partial mutation: the parent must still exist.
+    let still_there = repo.get_by_id(tenant_id, parent.id).await;
+    assert!(
+        still_there.is_ok(),
+        "parent must survive a delete blocked by the child guard"
+    );
+}
+
+/// D-13/CQ-B46 lock-in: a concurrent child-create racing a parent delete
+/// must never produce BOTH a successful parent delete AND a surviving
+/// `child_of` edge pointing at the now-deleted parent (an orphan). Before
+/// this fix, the child-count guard ran as a separate `.query()` round-trip
+/// before the delete's own query — a classic TOCTOU window. The fix folds
+/// the guard into the SAME transaction as the deletes via a LET-capture, so
+/// the read-then-decide-then-delete is atomic.
+///
+/// Run several trials with real concurrent tasks (mirrors
+/// `totp_step_cas_test.rs`'s proven `tokio::spawn` + race pattern) to
+/// exercise both possible interleavings against the in-memory engine's
+/// actual transaction isolation.
+#[tokio::test]
+async fn concurrent_child_create_never_orphans_after_parent_delete() {
+    const TRIALS: usize = 15;
+
+    for trial in 0..TRIALS {
+        let (db, tenant_id) = setup().await;
+        let repo = std::sync::Arc::new(SurrealResourceRepository::new(db.clone()));
+
+        let parent = repo
+            .create(CreateResource {
+                tenant_id,
+                name: format!("race-parent-{trial}"),
+                resource_type: "project".into(),
+                parent_id: None,
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let parent_id = parent.id;
+
+        let repo_create = repo.clone();
+        let create_handle = tokio::spawn(async move {
+            repo_create
+                .create(CreateResource {
+                    tenant_id,
+                    name: format!("race-child-{trial}"),
+                    resource_type: "service".into(),
+                    parent_id: Some(parent_id),
+                    metadata: None,
+                })
+                .await
+        });
+
+        let repo_delete = repo.clone();
+        let delete_handle =
+            tokio::spawn(async move { repo_delete.delete(tenant_id, parent_id).await });
+
+        let (create_result, delete_result) = tokio::join!(create_handle, delete_handle);
+        let create_result = create_result.expect("create task panicked");
+        let delete_result = delete_result.expect("delete task panicked");
+
+        // Query the child_of table directly (bypassing the repository,
+        // which only ever projects the resource.parent_id column) to
+        // observe the exact invariant this transaction guards: a live
+        // `child_of` edge pointing at a resource the delete call reports
+        // as removed.
+        let mut edge_check = db
+            .query(format!(
+                "SELECT * FROM child_of WHERE out = resource:`{parent_id}`"
+            ))
+            .await
+            .unwrap();
+        let remaining_edges: Vec<surrealdb_types::Value> = edge_check.take(0).unwrap();
+
+        if delete_result.is_ok() {
+            assert!(
+                remaining_edges.is_empty(),
+                "trial {trial}: delete succeeded but a child_of edge to the \
+                 deleted parent still exists — orphan"
+            );
+        } else {
+            // The guard tripped (it saw the child before the delete could
+            // proceed) — the parent must still be present, i.e. no partial
+            // mutation ran.
+            assert!(
+                repo.get_by_id(tenant_id, parent_id).await.is_ok(),
+                "trial {trial}: a blocked delete must never partially remove the parent"
+            );
+        }
+
+        // The create's own success/failure is incidental to this
+        // invariant — it either won the race (child exists, delete must
+        // have seen it and aborted) or lost it (delete already committed).
+        // Both are covered by the branch above; just avoid an unused-var
+        // warning.
+        let _ = &create_result;
+    }
+}
+
 #[tokio::test]
 async fn list_resources_with_pagination() {
     let (db, tenant_id) = setup().await;

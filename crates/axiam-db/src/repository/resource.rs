@@ -274,40 +274,68 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let id_str = id.to_string();
+        let tenant_id_str = tenant_id.to_string();
 
-        // CQ-B08: block delete if this resource has children (prevents orphaning).
-        let child_count_sql = format!(
-            "SELECT count() AS total FROM child_of \
-             WHERE out = resource:`{id_str}` GROUP ALL"
-        );
-        let mut count_result = self
-            .db
-            .query(&child_count_sql)
-            .await
-            .map_err(DbError::from)?;
-        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let child_count = count_rows.first().map(|r| r.total).unwrap_or(0);
-        if child_count > 0 {
-            return Err(AxiamError::Validation {
-                message: "cannot delete resource with children".into(),
-            });
-        }
-
-        // Clean up edges, scopes, then delete the resource.
+        // D-13/CQ-B46: fold the child-count guard into the SAME
+        // transaction as the deletes via a LET-capture (mirroring
+        // federation_login_state.rs's `LET $row = (...)` idiom). Before
+        // this fix, the guard ran as a separate `.query()` round-trip
+        // BEFORE the deletes — a classic TOCTOU: a concurrent child-create
+        // could commit in the gap between the count-check and the delete,
+        // leaving both a successful parent delete AND an orphaned child.
+        // Now the read-then-decide-then-delete happens atomically: either
+        // the transaction observes children and aborts before any DELETE
+        // runs, or it observes none and every DELETE below commits
+        // together.
+        //
+        // D-13/CQ-B07/SEC-058: child_of/on_resource edge tables carry no
+        // tenant_id field of their own (schema v19 defines
+        // idx_child_of_unique / idx_on_resource_unique on (in, out) only),
+        // so tenant scoping on those two DELETEs is expressed as a
+        // node-tenant subquery guard on the edge's in/out endpoint
+        // (in.tenant_id / out.tenant_id via graph-traversal dereference),
+        // not a flat WHERE clause. `scope` and the resource record itself
+        // DO carry their own tenant_id field, so those two keep their
+        // pre-existing flat predicates.
+        //
+        // Result slots: BEGIN=0, LET children=1, IF/THROW=2,
+        // DELETE child_of=3, DELETE on_resource=4, DELETE scope=5,
+        // DELETE resource=6, COMMIT=7. delete() returns Ok(()) — no row
+        // data to extract, .check() alone proves the transaction
+        // committed (or surfaces the child-guard THROW).
         let query = format!(
-            "DELETE child_of WHERE in = resource:`{id_str}` OR out = resource:`{id_str}`; \
-             DELETE on_resource WHERE out = resource:`{id_str}`; \
+            "BEGIN TRANSACTION; \
+             LET $children = (SELECT VALUE id FROM child_of WHERE out = resource:`{id_str}`); \
+             IF array::len($children) > 0 {{ \
+                 THROW 'cannot delete resource with children'; \
+             }}; \
+             DELETE child_of WHERE \
+                 (in = resource:`{id_str}` AND in.tenant_id = $tenant_id) OR \
+                 (out = resource:`{id_str}` AND out.tenant_id = $tenant_id); \
+             DELETE on_resource WHERE out = resource:`{id_str}` AND out.tenant_id = $tenant_id; \
              DELETE scope WHERE resource_id = $resource_id AND tenant_id = $tenant_id; \
-             DELETE type::record('resource', $id) WHERE tenant_id = $tenant_id;"
+             DELETE type::record('resource', $id) WHERE tenant_id = $tenant_id; \
+             COMMIT TRANSACTION"
         );
 
-        self.db
+        let result = self
+            .db
             .query(query)
             .bind(("id", id_str.clone()))
             .bind(("resource_id", id_str))
-            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("tenant_id", tenant_id_str))
             .await
             .map_err(DbError::from)?;
+
+        if let Err(e) = result.check() {
+            let msg = e.to_string();
+            if msg.contains("cannot delete resource with children") {
+                return Err(AxiamError::Validation {
+                    message: "cannot delete resource with children".into(),
+                });
+            }
+            return Err(DbError::Migration(msg).into());
+        }
 
         Ok(())
     }

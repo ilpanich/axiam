@@ -1225,12 +1225,32 @@ Plans:
 **Plans**: 7 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 29-01-PLAN.md — QUAL-03 error taxonomy: classify_write_error + DbError::Serialization, 409 create/edge paths, OAuth2 DB-outage vs invalid_client (Wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 29-02-PLAN.md — QUAL-04 transactional mutations: tenant-predicated role/resource deletes + child-guard TOCTOU + GDPR deletion-setup atomicity (Wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 29-03-PLAN.md — QUAL-01 AppState<C> full migration + QUAL-07 per-request service hoisting (Wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 29-04-PLAN.md — QUAL-02 paginate<T> + shared-helper dedup (group A) + QUAL-07 pepper-less verify_password deletion (Wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 29-05-PLAN.md — QUAL-02 CountRow/take_first dedup (group B) + federation_link parse_uuid removal (Wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 29-06-PLAN.md — QUAL-05 PKI dedup: from_ca_cert_pem CA reconstruction + shared crypto module + phase-end workspace regression gate (Wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
 - [ ] 29-07-PLAN.md — QUAL-06 frontend shared components/services adoption + manual smoke checkpoint (Wave 7)
 
 **UI hint**: yes

@@ -76,8 +76,7 @@ researcher MUST verify current adoption state before planning.
   behavior, and **add** tests that lock the fix. This is the honest reading of
   the roadmap ("refactors never churn unreviewed security code" but the taxonomy
   and transaction ACs explicitly change responses).
-- **D-06 — Green gate = per-crate during dev + full-workspace regression at
-  phase end.** During each plan, run narrowly-scoped tests (`-p <crate>
+- **D-06 — Green gate = per-crate during dev + full-workspace regression at phase end.** During each plan, run narrowly-scoped tests (`-p <crate>
   --lib`/`--test <name>`) to respect the sandbox disk quota (per CLAUDE.md build
   hygiene: `cargo clean` between plans, `SWAGGER_UI_DOWNLOAD_URL` workaround for
   `axiam-api-rest`). Run the **full workspace test suite once as the end-of-phase

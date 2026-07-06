@@ -1035,10 +1035,10 @@ The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
 **Priority:** High | **Source:** T18.2, REQ-8 (v1.0 carryover)
 
 ### Acceptance Criteria
-- [ ] User data export (`GET /api/v1/users/:id/export`) covers every table incl. real sessions; optional PGP encryption
-- [ ] Account deletion (right to be forgotten) pseudonymizes audit PII durably (ties to SECHRD-06)
-- [ ] Consent tracking recorded and exportable
-- [ ] Compliance measures documented
+- [x] User data export (`GET /api/v1/users/:id/export`) covers every table incl. real sessions; optional PGP encryption — 30-02 (async `POST /account/export` → `GET /account/export/{token}` flow documented as canonical per D-05; `export_completeness` + `export_includes_real_session_metadata` re-run and passing; optional PGP via `POST /api/v1/pgp-keys/{id}/encrypt`)
+- [x] Account deletion (right to be forgotten) pseudonymizes audit PII durably (ties to SECHRD-06) — 30-02 (`deletion_pseudonymization` re-run and passing; cites SECHRD-06 `pseudonymize_actor` + `erasure_proof` UNIQUE index)
+- [x] Consent tracking recorded and exportable — 30-02 (`consent_on_registration` re-run and passing; D-06 scope: record+export present, UI/withdrawal deferred)
+- [x] Compliance measures documented — 30-02 (`docs/compliance/gdpr-compliance.md`)
 
 ---
 
@@ -1114,7 +1114,7 @@ Security regressions (SECFIX-01..06) are the highest priority and should land fi
 | QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Complete (29-07: shared.tsx ActionBadge fixed and adopted across 9 pages + RoleDetailPage dead export removed; slugify/userService/useCrudMutations adopted; Playwright + Task 3 manual smoke pending — see 29-07-SUMMARY.md) |
 | QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Complete (29-03: federation/reset/verification services hoisted to shared AppState singletons, closing the per-request-construction half; 29-04: pepper-less axiam_db::verify_password duplicate deleted with re-exports removed, sole caller repointed to canonical axiam_auth::password::verify_password, closing the pepper-less-caller trap) |
 | CMPL-01 | Phase 30 | Security audit checklist (T18.1) | Complete (30-01: `claude_dev/security-audit.md` — master citation index mapping ASVS L2 + ISO 27001 Annex A (family) + CyberSecurity Act/CRA (theme) to pass/fail + evidence pointers, open items cross-referenced to v1.2 REQ-IDs; D-03 spot-verify corrected F-03→Fixed, F-05→Partially Mitigated, raised SBOM-01; CRA interpretation + [ASSUMED] rows remain for human PR-time confirmation) |
-| CMPL-02 | Phase 30 | GDPR completeness (T18.2) | Pending |
+| CMPL-02 | Phase 30 | GDPR completeness (T18.2) | Complete (30-02: `docs/compliance/gdpr-compliance.md` — re-ran `gdpr_test.rs` export_completeness/export_includes_real_session_metadata/deletion_pseudonymization/consent_on_registration as evidence; D-05 async-export reconciliation; D-06 consent scope; SECHRD-06 erasure durability cited; no production code change needed) |
 | DOCS-01 | Phase 30 | Comprehensive documentation (T18.4) | Pending |
 
 **Coverage: 44/44 v1.2 requirement IDs mapped to Phases 23–30 (100%).** NOTE: the enumerated set totals **44** (SECFIX 6 + SECHRD 12 + CORR 6 + PERF 5 + FUNC 5 + QUAL 7 + CMPL 2 + DOCS 1); the earlier "42" summary undercounted by 2. Roadmap: Phase 23 SECFIX · 24–25 SECHRD · 26 CORR · 27 PERF · 28 FUNC · 29 QUAL · 30 CMPL+DOCS.

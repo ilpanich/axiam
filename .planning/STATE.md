@@ -5,16 +5,16 @@ milestone_name: — MVP Release Hardening
 current_phase: 30
 current_phase_name: Compliance & Documentation
 status: executing
-stopped_at: Completed 30-01-PLAN.md (CMPL-01 security-audit.md)
-last_updated: "2026-07-06T17:12:12.894Z"
+stopped_at: Completed 30-02-PLAN.md (CMPL-02 GDPR compliance doc)
+last_updated: "2026-07-06T17:24:01.116Z"
 last_activity: 2026-07-06
-last_activity_desc: Completed 30-01 (CMPL-01 security-audit.md)
+last_activity_desc: Completed 30-02 (CMPL-02 GDPR compliance doc)
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 58
-  completed_plans: 53
-  percent: 91
+  completed_plans: 54
+  percent: 88
 ---
 
 # Project State
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 30 — Compliance & Documentation
-Plan: 30-01 complete (CMPL-01 security-audit.md); next: 30-02 (CMPL-02 GDPR)
+Plan: 30-02 complete (CMPL-02 GDPR compliance doc); next: 30-03
 Status: Executing
-Last activity: 2026-07-06 — Completed 30-01 (CMPL-01 security-audit.md)
+Last activity: 2026-07-06 — Completed 30-02 (CMPL-02 GDPR compliance doc)
 
 ## Performance Metrics
 
@@ -210,6 +210,7 @@ Last activity: 2026-07-06 — Completed 30-01 (CMPL-01 security-audit.md)
 | Phase 29 P06 | 25min | 2 tasks | 6 files |
 | Phase 29 P07 | 55min | 2 tasks | 15 files |
 | Phase 30 P01 | 55min | 3 tasks | 1 files |
+| Phase 30 P02 | 35min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -530,6 +531,7 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 29-structural-quality] 29-07: ProfilePage clear-display-name now uses the same display_name||undefined convention as UserDetailPage/UsersPage via userService.update
 - [Phase ?]: [Phase 30-01]: CyberSecurity Act interpreted as EU Cyber Resilience Act (CRA) not Reg 2019/881 (30-RESEARCH A2); [ASSUMED] flag kept for human PR-time confirmation in claude_dev/security-audit.md §4
 - [Phase ?]: [Phase 30-01]: security-audit.md D-03 spot-verify corrected stale Phase-7 findings — F-03 HIBP now Fixed (check_hibp + PERF-01 HibpBreaker), F-05 CSP Partially Mitigated (nginx edge), SBOM-01 raised; docs/compliance/* left untouched (out of scope)
+- [Phase ?]: [Phase 30-02]: GDPR export's 'optional PGP' capability is the decoupled POST /api/v1/pgp-keys/{id}/encrypt utility (Export-purpose key), not auto-chained into sweep_pending_exports/download_account_export — documented precisely rather than implied as automatic
 
 ### Pending Todos
 
@@ -555,7 +557,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-06T17:12:12.873Z
-Stopped at: Completed 30-01-PLAN.md (CMPL-01 security-audit.md)
+Last session: 2026-07-06T17:24:01.098Z
+Stopped at: Completed 30-02-PLAN.md (CMPL-02 GDPR compliance doc)
 Resume file: None
 Next action: /gsd-execute-phase 23

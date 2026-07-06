@@ -1268,13 +1268,13 @@ Plans:
   2. `GET /api/v1/users/:id/export` covers every table incl. real sessions (optional PGP encryption), account deletion durably pseudonymizes audit PII (ties to SECHRD-06), and consent is recorded and exportable (CMPL-02)
   3. `docs/` consolidates REST (OpenAPI) / gRPC (proto) / AMQP (AsyncAPI) API docs, a Docker/K8s deployment guide (env/secrets/NetworkPolicies), admin + PKI/certificate guides, and links to the 7 SDK getting-started READMEs (DOCS-01)
 
-**Plans**: 1/6 plans executed
+**Plans**: 2/6 plans executed
 
 Plans:
 **Wave 1**
 
 - [x] 30-01-PLAN.md — CMPL-01 security-audit.md master doc (ASVS L2 + ISO 27001 family + CyberSecurity Act theme mapping, cite existing evidence) [wave 1]
-- [ ] 30-02-PLAN.md — CMPL-02 GDPR verify (re-run gdpr_test.rs) + docs/compliance/gdpr-compliance.md (D-05 async reconciliation, D-06 consent scope) [wave 1]
+- [x] 30-02-PLAN.md — CMPL-02 GDPR verify (re-run gdpr_test.rs) + docs/compliance/gdpr-compliance.md (D-05 async reconciliation, D-06 consent scope) [wave 1]
 - [ ] 30-03-PLAN.md — DOCS-01 API contracts: net-new docs/api/asyncapi.yml + openapi.json symlink + grpc.md + api/README.md [wave 1]
 - [ ] 30-04-PLAN.md — DOCS-01 operator guides: docs/{deployment,admin,pki}/README.md [wave 1]
 
@@ -1305,7 +1305,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
 | 28. Functional Completeness | 5/5 | Complete    | 2026-07-05 |
 | 29. Structural Quality | 7/7 | Complete    | 2026-07-06 |
-| 30. Compliance & Documentation | 1/6 | In Progress|  |
+| 30. Compliance & Documentation | 2/6 | In Progress|  |
 
 ---
 

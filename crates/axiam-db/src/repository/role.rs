@@ -263,20 +263,44 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let id_str = id.to_string();
+        let tenant_id_str = tenant_id.to_string();
 
-        // Delete associated edges first, then the role record.
+        // D-13/CQ-B07/SEC-058: has_role/grants edge tables carry no
+        // tenant_id field of their own (schema v19 defines
+        // idx_has_role_unique / idx_grants_unique on (in, out) only), so
+        // tenant scoping on these two DELETEs is expressed as a
+        // node-tenant subquery guard on the edge's out/in endpoint record
+        // (out.tenant_id / in.tenant_id — dereferencing the linked
+        // record's field via graph traversal, the same syntax already used
+        // by get_user_role_assignments above) rather than a flat WHERE
+        // clause. Without this guard, a caller supplying a foreign-tenant
+        // role id could strip another tenant's has_role/grants edges even
+        // though the final record DELETE (which does carry a flat
+        // tenant_id predicate) would simply no-op for not matching the
+        // caller's tenant.
+        //
+        // All three deletes run inside one transaction so a concurrent
+        // reader never observes a partially-deleted role.
+        //
+        // Result slots: BEGIN=0, DELETE has_role=1, DELETE grants=2,
+        // DELETE role=3, COMMIT=4. delete() returns Ok(()) — no row data
+        // to extract, .check() alone proves the transaction committed.
         let query = format!(
-            "DELETE has_role WHERE out = role:`{id_str}`; \
-             DELETE grants WHERE in = role:`{id_str}`; \
-             DELETE type::record('role', $id) WHERE tenant_id = $tenant_id;"
+            "BEGIN TRANSACTION; \
+             DELETE has_role WHERE out = role:`{id_str}` AND out.tenant_id = $tenant_id; \
+             DELETE grants WHERE in = role:`{id_str}` AND in.tenant_id = $tenant_id; \
+             DELETE type::record('role', $id) WHERE tenant_id = $tenant_id; \
+             COMMIT TRANSACTION"
         );
 
         self.db
             .query(query)
             .bind(("id", id_str))
-            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("tenant_id", tenant_id_str))
             .await
-            .map_err(DbError::from)?;
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         Ok(())
     }

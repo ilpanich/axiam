@@ -174,6 +174,124 @@ async fn delete_role() {
     assert!(result.is_err(), "deleted role should not be found");
 }
 
+/// D-13/CQ-B07/SEC-058 lock-in: deleting a role via a foreign-tenant id must
+/// never strip that other tenant's has_role edge. `role.rs::delete` now
+/// guards the `has_role`/`grants` DELETEs with a node-tenant subquery
+/// (`out.tenant_id = $tenant_id`) since those edge tables carry no
+/// `tenant_id` field of their own — this proves a caller in tenant A cannot
+/// use tenant B's role id to strip tenant B's own (legitimate, same-tenant)
+/// has_role edge.
+#[tokio::test]
+async fn delete_role_does_not_strip_foreign_tenant_edge() {
+    let (db, tenant_a, _, _, _) = setup().await;
+
+    // Second, independent tenant sharing the same in-memory DB.
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: "org-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let tenant_b = tenant_repo
+        .create(CreateTenant {
+            organization_id: org_b.id,
+            name: "Tenant B".into(),
+            slug: "tenant-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let user_b = user_repo
+        .create(CreateUser {
+            tenant_id: tenant_b.id,
+            username: "carol".into(),
+            email: "carol@example.com".into(),
+            password: "pass123".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let repo = SurrealRoleRepository::new(db);
+
+    // A role + has_role edge that legitimately belongs to tenant B.
+    let role_b = repo
+        .create(CreateRole {
+            tenant_id: tenant_b.id,
+            name: "b-role".into(),
+            description: "tenant b role".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    repo.assign_to_user(tenant_b.id, user_b.id, role_b.id, None)
+        .await
+        .unwrap();
+
+    // Tenant A attempts to delete tenant B's role, supplying its foreign id
+    // while claiming tenant A as the caller's tenant (foreign-id delete
+    // attempt). This must be a no-op, not an error — every statement in the
+    // transaction is tenant-predicated and simply matches zero rows.
+    repo.delete(tenant_a, role_b.id)
+        .await
+        .expect("foreign-tenant delete must no-op, not error");
+
+    // Tenant B's has_role edge must survive.
+    let roles_b_after = repo.get_user_roles(tenant_b.id, user_b.id).await.unwrap();
+    assert_eq!(
+        roles_b_after.len(),
+        1,
+        "tenant B's has_role edge must survive a foreign-tenant-A delete attempt"
+    );
+    assert_eq!(roles_b_after[0].id, role_b.id);
+
+    // The role record itself must also survive (the final DELETE already
+    // carried a flat tenant_id predicate pre-fix; this confirms it still
+    // does post-fix).
+    let role_still_exists = repo.get_by_id(tenant_b.id, role_b.id).await;
+    assert!(
+        role_still_exists.is_ok(),
+        "tenant B's role record must survive a foreign-tenant-A delete attempt"
+    );
+}
+
+/// Regression: a legitimate same-tenant delete must still remove the role's
+/// has_role edge (the transactional rewrite must not silently stop deleting
+/// edges it's supposed to delete).
+#[tokio::test]
+async fn delete_role_removes_own_tenant_edges() {
+    let (db, tenant_id, user_a, _, _) = setup().await;
+    let repo = SurrealRoleRepository::new(db);
+
+    let role = repo
+        .create(CreateRole {
+            tenant_id,
+            name: "own-tenant-role".into(),
+            description: "temp".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    repo.assign_to_user(tenant_id, user_a, role.id, None)
+        .await
+        .unwrap();
+
+    repo.delete(tenant_id, role.id).await.unwrap();
+
+    let roles_after = repo.get_user_roles(tenant_id, user_a).await.unwrap();
+    assert!(
+        roles_after.is_empty(),
+        "same-tenant delete must still remove the has_role edge"
+    );
+    let result = repo.get_by_id(tenant_id, role.id).await;
+    assert!(result.is_err(), "deleted role should not be found");
+}
+
 #[tokio::test]
 async fn list_roles_with_pagination() {
     let (db, tenant_id, _, _, _) = setup().await;

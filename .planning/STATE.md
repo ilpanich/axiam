@@ -5,15 +5,15 @@ milestone_name: — MVP Release Hardening
 current_phase: 30
 current_phase_name: Compliance & Documentation
 status: executing
-stopped_at: Completed 30-04-PLAN.md (DOCS-01 deployment/admin/PKI guides)
-last_updated: "2026-07-06T17:44:03.073Z"
+stopped_at: Completed 30-05-PLAN.md (DOCS-01 docs/README.md index + link-check script)
+last_updated: "2026-07-06T17:51:05.000Z"
 last_activity: 2026-07-06
-last_activity_desc: Completed 30-04 (DOCS-01 deployment/admin/PKI guides)
+last_activity_desc: Completed 30-05 (DOCS-01 docs/README.md index + link-check script)
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 58
-  completed_plans: 56
+  completed_plans: 57
   percent: 88
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 ## Current Position
 
 Phase: 30 — Compliance & Documentation
-Plan: 30-04 complete (DOCS-01 deployment/admin/PKI guides); next: 30-05 (docs/README.md index + link-check script)
+Plan: 30-05 complete (DOCS-01 docs/README.md index + link-check script); next: 30-06 (.github/workflows/docs-ci.yml)
 Status: Executing
-Last activity: 2026-07-06 — Completed 30-04 (DOCS-01 deployment/admin/PKI guides)
+Last activity: 2026-07-06 — Completed 30-05 (DOCS-01 docs/README.md index + link-check script)
 
 ## Performance Metrics
 
@@ -213,6 +213,7 @@ Last activity: 2026-07-06 — Completed 30-04 (DOCS-01 deployment/admin/PKI guid
 | Phase 30 P02 | 35min | 2 tasks | 1 files |
 | Phase 30 P03 | 30min | 3 tasks | 5 files |
 | Phase 30 P04 | 40min | 3 tasks | 3 files |
+| Phase 30 P05 | 15min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -537,6 +538,7 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 30-03]: docs/api/openapi.json published as symlink to sdks/openapi.json (D-09/D-10); regenerated sdks/openapi.json in-place after fresh --dump-openapi diff found it stale (missing federation-sso OIDC + org/tenant email-config endpoints)
 - [Phase ?]: [Phase 30-04]: Documented admin bootstrap gate as the current SECHRD-04 EITHER/OR (AXIAM_BOOTSTRAP_ADMIN_EMAIL OR one-time setup token) per bootstrap.rs, not the Phase-3 env-var-only shorthand
 - [Phase ?]: [Phase 30-04]: PKI guide distinguishes service-account mTLS bind (certificates.rs::bind) from automatic Device fingerprint+CA-chain authentication (axiam-pki::mtls::DeviceAuthService) — no bind step for IoT devices
+- [Phase ?]: [Phase 30-05]: check-doc-links.sh written in bash (matches all 4 existing scripts/*.sh siblings) and uses `[ -e ]` not `[ -f ]` so directory-target links (../../sdks/, ../../k8s/) resolve, not just file links; docs/README.md validated clean (109/109 relative links resolve)
 
 ### Pending Todos
 
@@ -562,7 +564,7 @@ Raised 2026-06-02 (SAML feature-flag work):
 
 ## Session Continuity
 
-Last session: 2026-07-06T17:44:03.054Z
-Stopped at: Completed 30-04-PLAN.md (DOCS-01 deployment/admin/PKI guides)
+Last session: 2026-07-06T17:51:05.000Z
+Stopped at: Completed 30-05-PLAN.md (DOCS-01 docs/README.md index + link-check script)
 Resume file: None
 Next action: /gsd-execute-phase 23

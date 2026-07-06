@@ -1268,7 +1268,7 @@ Plans:
   2. `GET /api/v1/users/:id/export` covers every table incl. real sessions (optional PGP encryption), account deletion durably pseudonymizes audit PII (ties to SECHRD-06), and consent is recorded and exportable (CMPL-02)
   3. `docs/` consolidates REST (OpenAPI) / gRPC (proto) / AMQP (AsyncAPI) API docs, a Docker/K8s deployment guide (env/secrets/NetworkPolicies), admin + PKI/certificate guides, and links to the 7 SDK getting-started READMEs (DOCS-01)
 
-**Plans**: 4/6 plans executed
+**Plans**: 5/6 plans executed
 
 Plans:
 **Wave 1**
@@ -1280,7 +1280,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 30-05-PLAN.md — DOCS-01 docs/README.md index + scripts/check-doc-links.sh (zero-dependency link-check) [wave 2]
+- [x] 30-05-PLAN.md — DOCS-01 docs/README.md index + scripts/check-doc-links.sh (zero-dependency link-check) [wave 2]
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -1305,7 +1305,7 @@ security code. Compliance + docs (Phase 30) run last to certify/document the fin
 | 27. Performance & Load Hardening | 7/7 | Complete    | 2026-07-05 |
 | 28. Functional Completeness | 5/5 | Complete    | 2026-07-05 |
 | 29. Structural Quality | 7/7 | Complete    | 2026-07-06 |
-| 30. Compliance & Documentation | 4/6 | In Progress|  |
+| 30. Compliance & Documentation | 5/6 | In Progress|  |
 
 ---
 

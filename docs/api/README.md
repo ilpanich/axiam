@@ -76,6 +76,19 @@ or validate it locally:
 npx @asyncapi/cli validate docs/api/asyncapi.yml
 ```
 
+**Validation is local-only (not CI-enforced yet).** The docs CI job
+([`.github/workflows/docs-ci.yml`](../../.github/workflows/docs-ci.yml))
+enforces the internal link-check and the OpenAPI JSON parse-check, but
+**intentionally omits** the AsyncAPI meta-schema validation step above. The
+`@asyncapi/cli` package returned a `[SUS]` verdict from this project's
+automated Package Legitimacy Audit — a sandbox download-telemetry gap, not a
+genuine trust concern (`@asyncapi/cli` is the official AsyncAPI Initiative CLI,
+[github.com/asyncapi/cli](https://github.com/asyncapi/cli)). Rather than
+autonomously add a SUS-flagged supply-chain dependency to CI, the AsyncAPI half
+falls back to running the command above **locally before commit**. A maintainer
+may wire the step into `docs-ci.yml` after confirming the package at
+[npmjs.com/package/@asyncapi/cli](https://www.npmjs.com/package/@asyncapi/cli).
+
 ## See also
 
 - [`docs/README.md`](../README.md) — top-level documentation index

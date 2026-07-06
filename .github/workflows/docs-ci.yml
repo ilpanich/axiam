@@ -1,0 +1,56 @@
+name: Docs CI (spec-validate + link-check)
+
+# D-11: A light, egress-conscious drift/broken-link guard scoped to the docs.
+# Path-filtered so it only runs when docs or the spec sources change. Two
+# always-enforced, zero-external-dependency checks:
+#   1. Internal doc link-check  — scripts/check-doc-links.sh (stdlib bash, no npm/network)
+#   2. OpenAPI spec parse-check  — asserts docs/api/openapi.json is valid JSON (python3 stdlib)
+#
+# The AsyncAPI meta-schema validation step (`npx @asyncapi/cli validate
+# docs/api/asyncapi.yml`) is INTENTIONALLY OMITTED here pending human
+# confirmation of the @asyncapi/cli package. The automated Package Legitimacy
+# Audit returned a `[SUS]` verdict for @asyncapi/cli (30-RESEARCH § "Package
+# Legitimacy Audit"); that verdict is a sandbox download-telemetry gap, not a
+# genuine trust signal — @asyncapi/cli is the official AsyncAPI Initiative CLI
+# (github.com/asyncapi/cli). Rather than autonomously introduce a SUS-flagged
+# supply-chain dependency into CI, the AsyncAPI half falls back to manual/local
+# validation (30-RESEARCH § "Environment Availability"). docs/api/asyncapi.yml is
+# hand-authored and can be validated locally — see docs/api/README.md § "AMQP —
+# AsyncAPI". A maintainer may wire the CLI step in here after confirming the
+# package (npmjs.com/package/@asyncapi/cli).
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'claude_dev/security-audit.md'
+      - 'crates/axiam-amqp/**'
+      - 'crates/axiam-api-rest/src/openapi.rs'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'claude_dev/security-audit.md'
+      - 'crates/axiam-amqp/**'
+      - 'crates/axiam-api-rest/src/openapi.rs'
+
+permissions:
+  contents: read
+
+jobs:
+  docs-lint:
+    name: Docs lint (link-check + OpenAPI parse)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Internal doc link-check (zero-dependency, egress-free)
+        run: bash scripts/check-doc-links.sh
+      - name: OpenAPI spec parses as valid JSON
+        # docs/api/openapi.json is a symlink to sdks/openapi.json (single source
+        # of truth). Parse-only sanity check using the runner's stdlib python3 —
+        # no new npm/pip dependency, no network. Drift against the Rust source is
+        # already covered by sdk-openapi-drift.yml; this just guards validity.
+        run: python3 -c "import json; json.load(open('docs/api/openapi.json'))"
+      # AsyncAPI validation intentionally omitted — see file header comment.
+      # Run locally instead: npx @asyncapi/cli validate docs/api/asyncapi.yml

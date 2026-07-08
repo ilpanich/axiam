@@ -151,6 +151,28 @@ def test_expired_token_yields_401(eddsa_keypair, verifier_and_endpoint) -> None:
     assert response.status_code == 401
 
 
+def test_non_numeric_exp_yields_401_not_500(eddsa_keypair, verifier_and_endpoint) -> None:
+    """SDK-11: a signature-valid token whose ``exp`` claim is non-numeric
+    (e.g. a string) must degrade to the standardized 401, never an unhandled
+    500 from ``float(exp)`` raising outside the verify try/except."""
+    private_key, _jwk_dict = eddsa_keypair
+    verifier, _endpoint = verifier_and_endpoint
+    app = _make_app(verifier, configured_tenant="acme")
+    # raise_server_exceptions=False so a would-be 500 surfaces as a response.
+    client = TestClient(app, raise_server_exceptions=False)
+
+    token = _sign_eddsa_token(
+        private_key,
+        "test-kid-1",
+        {"sub": "user-1", "tenant_id": "acme", "exp": "not-a-number"},
+    )
+
+    response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code != 500
+    assert response.status_code == 401
+
+
 def test_cross_tenant_token_is_rejected(eddsa_keypair, verifier_and_endpoint) -> None:
     """A signature-valid token whose tenant_id does not match the
     configured tenant MUST be rejected (T-19-19, cross-tenant replay

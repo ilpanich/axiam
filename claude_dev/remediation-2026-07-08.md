@@ -47,10 +47,20 @@ The two headline escalations found in this review — **NEW-1** (cross-organizat
 | **SDK-19** | PHP | Discovered `jwks_uri` validated as `https` + same-origin, else falls back to `{baseUrl}/oauth2/jwks`. `php -l` + logic tests. |
 | **X-2** | Rust, TS | Reject plaintext base URLs (loopback exception); TS gRPC throws on non-secure targets unless explicit `allowInsecure`. |
 | **X-4 / SDK-04** | Rust, Java | Redacting `Debug`/`toString` on credential-bearing types; Rust redirect policy stops on `https→http` downgrade. |
+| **X-3** | TS, Python, Go, Java, C# | Error/log header redaction switched from a 3-entry denylist to a small case-insensitive **allowlist** (`content-type`/`content-length`/`date`/`server`/`retry-after`/`x-request-id`/`x-tenant-id`), so a custom `X-Auth-Token` is redacted by default. Tests added; TS `vitest` (99), Java `ErrorRedactionTest` (6), Go `go test` all green. |
+| **SDK-10** | Python | Decode-error message no longer interpolates the decoded payload (static message). |
+| **SDK-11** | Python | Non-numeric `exp` now maps to 401 (parse moved inside the verify try/except) in both the FastAPI dependency and Django middleware — `pytest` 145 pass. |
+| **SDK-17** | C# | `AllowAutoRedirect = false` on the REST handlers so a redirect can't re-send `X-Tenant-Id`/`X-CSRF-Token`. |
 
-## 4. Deferred
+## 4. Deferred (recommended follow-ups, with rationale)
 
-⏭️ **NEW-4 [LOW] — AMQP replay/nonce/timestamp protection.** A correct fix adds a `nonce` + `issued_at` *inside* the HMAC-signed body, plus a clock-skew window and per-tenant nonce dedup. That is a coordinated wire-format change across the server (`AuthzRequest`/`AuditEventMessage` declaration order) and all 7 SDK HMAC implementations — the exact canonicalization just fixed in SDK-Q01. A consumer-side content dedup *without* new fields is unsafe: `AuditEventMessage` carries no unique id, so two legitimately-identical events (e.g. two failed logins) would be wrongly dropped. This should be done as its own versioned protocol change; tracked for post-review follow-up.
+⏭️ **NEW-4 [LOW] — AMQP replay/nonce/timestamp protection.** A correct fix adds a `nonce` + `issued_at` *inside* the HMAC-signed body, plus a clock-skew window and per-tenant nonce dedup. That is a coordinated wire-format change across the server (`AuthzRequest`/`AuditEventMessage` declaration order) and all 7 SDK HMAC implementations — the exact canonicalization just fixed in SDK-Q01. A consumer-side content dedup *without* new fields is unsafe: `AuditEventMessage` carries no unique id, so two legitimately-identical events (e.g. two failed logins) would be wrongly dropped. This should be done as its own versioned protocol change.
+
+⏭️ **CQ-B11 / CQ-B16 [MED] — error-taxonomy polish.** Routing the remaining create/RELATE sites through `classify_write_error` (409-on-duplicate) and mapping delete-of-missing-id to 404 are broad, cross-cutting changes to the DB layer's error and idempotency semantics (delete-404 also touches the GDPR erasure path, which currently relies on idempotent delete). Worth doing behind per-path integration coverage rather than as a blind sweep.
+
+⏭️ **CQ-B13 / CQ-B23 [MED] — performance.** The authz per-role N+1 (`WHERE role_id IN $ids` + a single recursive ancestor query) and OIDC-discovery caching are optimizations, not correctness defects; they need benchmarking to validate and are best landed with the PERF-01 load-test harness.
+
+⏭️ **SDK-Q02/Q03/Q08/Q09/Q10 [MED, contract] — conformance/design rulings.** Surfacing the server's denied `action`/`resource_id` in `AuthzError`, the CONTRACT §8 `key_version` doc/struct sync, async-method naming, PHP `can()` arg order, and authz-model normalization are contract-design decisions the review itself flagged as "needs a ruling," not clear-cut bugs. They should be resolved with an explicit CONTRACT.md revision.
 
 ## 5. CI / supply chain
 

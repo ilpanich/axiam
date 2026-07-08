@@ -46,8 +46,12 @@ def _decode_unverified_claims(token: str) -> dict[str, Any]:
     try:
         decoded = base64.urlsafe_b64decode(payload + padding)
         claims: Any = json.loads(decoded)
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise AuthError(f"failed to decode access token claims: {exc}") from None
+    except (ValueError, json.JSONDecodeError):
+        # SDK-10: never interpolate the decoder's exception into the message —
+        # a ValueError/JSONDecodeError can echo back the decoded payload
+        # segment (non-secret but sensitive claims) into logs/exceptions. Keep
+        # the message static and content-free.
+        raise AuthError("failed to decode access token claims") from None
     # IN-02: json.loads succeeds for any valid JSON, including arrays/scalars.
     # The function's own signature promises a dict; every caller does
     # ``.get(...)`` on the result, which would raise AttributeError on a

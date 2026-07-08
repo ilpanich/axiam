@@ -170,11 +170,17 @@ class AxiamAuthMiddleware:
 
         try:
             claims = self._verifier.verify(token)
+            # SDK-11: coerce ``exp`` to float INSIDE the verify try/except so a
+            # signature-valid token carrying a non-numeric ``exp`` (e.g. a
+            # string) degrades to the standardized invalid-token 401 rather
+            # than a ValueError/TypeError propagating as an unhandled 500.
+            # Preserves the "malformed token -> 401" invariant (CONTRACT.md §10).
+            exp = claims.get("exp")
+            exp_ts = float(exp) if exp is not None else None
         except Exception:
             return _error_response("invalid or expired token")
 
-        exp = claims.get("exp")
-        if exp is not None and time.time() >= float(exp):
+        if exp_ts is not None and time.time() >= exp_ts:
             return _error_response("invalid or expired token")
 
         # Cross-tenant replay defense (T-19-19): the JWKS is organization-wide,

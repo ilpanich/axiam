@@ -465,6 +465,26 @@ def test_decode_unverified_claims_rejects_non_dict_scalar_payload() -> None:
             _decode_unverified_claims(token)
 
 
+def test_decode_error_message_does_not_leak_payload_content() -> None:
+    """SDK-10: a payload segment that base64url-decodes to non-JSON bytes
+    raises a static AuthError whose message never interpolates the decoded
+    body/claims content (which could carry sensitive claims into logs)."""
+    from axiam_sdk._client import _decode_unverified_claims
+
+    header = base64.urlsafe_b64encode(json.dumps({"alg": "EdDSA"}).encode()).rstrip(b"=").decode()
+    secret_marker = "SUPER-SECRET-CLAIM-VALUE"
+    # Decodes to raw bytes containing the marker, but is not valid JSON, so
+    # json.loads raises — the marker must not appear in the AuthError.
+    bad_payload = base64.urlsafe_b64encode(f"{{not-json {secret_marker}".encode()).rstrip(b"=").decode()
+    token = f"{header}.{bad_payload}.fake-signature"
+
+    with pytest.raises(AuthError) as exc_info:
+        _decode_unverified_claims(token)
+
+    assert secret_marker not in str(exc_info.value)
+    assert str(exc_info.value) == "authentication failed: failed to decode access token claims"
+
+
 def test_decode_unverified_claims_accepts_object_payload() -> None:
     """Control for IN-02: a normal JSON-object payload still decodes to the
     claims dict, so the shape check does not over-reject."""

@@ -82,6 +82,38 @@ func TestNetworkError_RedactsSensitiveHeaders(t *testing.T) {
 	})
 }
 
+// TestNetworkError_RedactsCustomSensitiveHeader proves the X-3 allowlist
+// redacts a custom sensitive header (X-Auth-Token) that a small denylist of
+// {Set-Cookie, Authorization, Cookie} would NOT catch, while an allowlisted
+// header (X-Request-Id) survives into the wrapped cause.
+func TestNetworkError_RedactsCustomSensitiveHeader(t *testing.T) {
+	const customSecret = "super-secret-custom-token"
+	const safeValue = "req-abc-123"
+
+	h := http.Header{}
+	h.Set("X-Auth-Token", customSecret)
+	h.Set("X-Request-Id", safeValue)
+	resp := &http.Response{StatusCode: 500, Header: h}
+
+	err := newNetworkError("server error", resp, nil)
+	out := fmt.Sprintf("%v", err.Unwrap())
+
+	if strings.Contains(out, customSecret) {
+		t.Fatalf("custom sensitive header X-Auth-Token leaked: %q", out)
+	}
+	if !strings.Contains(out, safeValue) {
+		t.Fatalf("allowlisted header X-Request-Id value must survive, got %q", out)
+	}
+	if !strings.Contains(out, redactedHeader) {
+		t.Fatalf("expected redacted placeholder in output, got %q", out)
+	}
+
+	// Caller's original response must not be mutated.
+	if resp.Header.Get("X-Auth-Token") != customSecret {
+		t.Fatalf("caller's original response was mutated by newNetworkError")
+	}
+}
+
 // TestErrors_As_Is verifies errors.As discriminates AuthError/AuthzError/
 // NetworkError and errors.Is matches each sentinel.
 func TestErrors_As_Is(t *testing.T) {

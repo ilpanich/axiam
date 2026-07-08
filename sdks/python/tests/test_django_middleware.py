@@ -232,6 +232,27 @@ def test_expired_token_yields_401(eddsa_keypair, bound_verifier) -> None:
     assert response.status_code == 401
 
 
+def test_non_numeric_exp_yields_401_not_500(eddsa_keypair, bound_verifier) -> None:
+    """SDK-11: a signature-valid token whose ``exp`` claim is non-numeric
+    (e.g. a string) must degrade to the standardized 401, never an unhandled
+    500 from ``float(exp)`` raising outside the verify try/except."""
+    private_key, _jwk_dict = eddsa_keypair
+    middleware = AxiamAuthMiddleware(_sync_get_response)
+    factory = RequestFactory()
+
+    token = _sign_eddsa_token(
+        private_key,
+        "test-kid-1",
+        {"sub": "user-1", "tenant_id": "acme", "exp": "not-a-number"},
+    )
+    request = factory.get("/", HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    response = middleware(request)
+
+    assert response.status_code == 401
+    assert not hasattr(request, "axiam_user")
+
+
 def test_axiam_user_populated_with_roles(eddsa_keypair, bound_verifier) -> None:
     private_key, _jwk_dict = eddsa_keypair
     middleware = AxiamAuthMiddleware(_sync_get_response)

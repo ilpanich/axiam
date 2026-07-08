@@ -4,6 +4,7 @@ import okhttp3.Headers;
 import okhttp3.Response;
 import org.jspecify.annotations.Nullable;
 
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -13,8 +14,8 @@ import java.util.Set;
  * tables exactly.
  *
  * <p>{@link #sanitize(Response)} is the SINGLE and ONLY path from a live
- * {@code okhttp3.Response} into a {@link NetworkError}: it strips
- * {@code Set-Cookie}/{@code Authorization}/{@code Cookie} headers and
+ * {@code okhttp3.Response} into a {@link NetworkError}: it redacts every
+ * header that is not on a small ALLOWLIST of known-safe headers and
  * returns a lightweight, redacted STRING summary — it never retains a
  * reference to the live {@code Response} object itself, which would keep
  * the unredacted headers reachable (D-18, CR-04 carry-forward: redact
@@ -22,7 +23,19 @@ import java.util.Set;
  */
 public final class ErrorMapper {
 
-    private static final Set<String> SENSITIVE_HEADERS = Set.of("set-cookie", "authorization", "cookie");
+    // ALLOWLIST (X-3): only these response headers are preserved verbatim in a
+    // NetworkError summary; every other header's value is redacted to a
+    // placeholder, so a custom sensitive header (e.g. X-Auth-Token) can never
+    // survive into a thrown error — unlike a small denylist, which only catches
+    // the headers it happens to enumerate. Compared case-insensitively (all
+    // entries lower-case). Keep small and strictly non-secret: standard
+    // diagnostic response headers plus this SDK's own non-secret request
+    // headers (e.g. x-tenant-id).
+    private static final Set<String> SAFE_HEADERS = Set.of(
+            "content-type", "content-length", "date", "server", "retry-after", "x-request-id", "x-tenant-id");
+
+    /** Placeholder substituted for the value of any non-allowlisted header. */
+    private static final String REDACTED_HEADER = "[REDACTED]";
 
     private ErrorMapper() {
     }
@@ -71,8 +84,8 @@ public final class ErrorMapper {
     }
 
     /**
-     * Strips {@code Set-Cookie}/{@code Authorization}/{@code Cookie}
-     * (case-insensitively) from {@code response}'s headers and returns a
+     * Redacts every header not on {@link #SAFE_HEADERS} (case-insensitively)
+     * from {@code response}'s headers to a placeholder and returns a
      * lightweight, redacted {@code String} summary — never the live
      * {@code Response} object, whose {@code headers()} would still retain
      * the unredacted values.
@@ -83,10 +96,12 @@ public final class ErrorMapper {
         }
         Headers.Builder safe = new Headers.Builder();
         for (String name : response.headers().names()) {
-            if (!SENSITIVE_HEADERS.contains(name.toLowerCase())) {
+            if (SAFE_HEADERS.contains(name.toLowerCase(Locale.ROOT))) {
                 for (String value : response.headers().values(name)) {
                     safe.add(name, value);
                 }
+            } else {
+                safe.add(name, REDACTED_HEADER);
             }
         }
         return "http status " + response.code() + ", headers: " + safe.build();

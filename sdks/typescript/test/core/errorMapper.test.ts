@@ -54,7 +54,8 @@ describe('mapHttpStatusToError', () => {
     const sanitizedCause = (err as NetworkError).cause as { response: { status: number; headers: Record<string, unknown> } };
     expect(sanitizedCause.response.status).toBe(401);
     expect(sanitizedCause.response.headers['content-type']).toBe('application/json');
-    expect(sanitizedCause.response.headers['set-cookie']).toBeUndefined();
+    // set-cookie is not allowlisted (X-3) -> redacted to a placeholder.
+    expect(sanitizedCause.response.headers['set-cookie']).toBe('[REDACTED]');
   });
 });
 

@@ -71,21 +71,38 @@ class NetworkError(Exception):
         self.__cause__ = cause
 
 
-# Response header names that must never survive into a NetworkError's
-# wrapped cause (D-08, CR-04 carry-forward).
-_SENSITIVE_RESPONSE_HEADERS = {"set-cookie", "authorization", "cookie"}
+# X-3: response headers use an ALLOWLIST, not a denylist. Only these known-safe,
+# non-secret headers may survive into a NetworkError's wrapped cause (D-08, CR-04
+# carry-forward); everything else is redacted. A denylist of known-sensitive
+# names (set-cookie/authorization/cookie) let a custom sensitive header such as
+# ``X-Auth-Token`` slip through simply because it was not on the list. Keep this
+# allowlist small and limited to diagnostic, non-credential headers:
+#   - content-type / content-length: response shape, no secrets
+#   - date / server: standard non-secret transport metadata
+#   - x-request-id: trace correlation id (non-secret), aids debugging
+_SAFE_RESPONSE_HEADERS = {
+    "content-type",
+    "content-length",
+    "date",
+    "server",
+    "x-request-id",
+}
 
 
 def _sanitize_response(response: httpx.Response) -> str:
-    """Redact sensitive headers BEFORE building any string representation
-    that could end up in a NetworkError's cause (D-08, CR-04 carry-forward).
+    """Redact all non-allowlisted headers BEFORE building any string
+    representation that could end up in a NetworkError's cause (D-08, CR-04
+    carry-forward, X-3).
 
     Never pass the raw ``httpx.Response`` (or its unredacted headers) into an
-    exception. A non-sensitive header (e.g. ``x-request-id``) is preserved so
-    the redaction can be proven selective, not blanket, in tests.
+    exception. Only headers on :data:`_SAFE_RESPONSE_HEADERS` are kept — a
+    non-sensitive header (e.g. ``x-request-id``) is preserved so the redaction
+    can be proven selective, not blanket, in tests, while any header not on the
+    allowlist (including custom credential headers like ``X-Auth-Token``) is
+    dropped.
     """
     safe_headers = {
-        k: v for k, v in response.headers.items() if k.lower() not in _SENSITIVE_RESPONSE_HEADERS
+        k: v for k, v in response.headers.items() if k.lower() in _SAFE_RESPONSE_HEADERS
     }
     return f"http status {response.status_code}, headers: {safe_headers}"
 

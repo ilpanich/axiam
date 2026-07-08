@@ -23,13 +23,24 @@ namespace Axiam.Sdk.Core;
 public sealed class NetworkError : Exception
 {
     /// <summary>
-    /// Headers stripped from any wrapped response before a message is ever built —
-    /// case-sensitive per the literal names used in CONTRACT.md &#167;2/&#167;7 and the
-    /// Go/Java sibling implementations; HTTP header lookups in .NET are already
-    /// case-insensitive, so this list need not enumerate casing variants.
+    /// X-3: ALLOWLIST of response headers whose <em>values</em> are known to be safe to
+    /// surface in an error/diagnostic message. Anything NOT on this list is redacted to
+    /// <c>[REDACTED]</c>. A denylist (Set-Cookie/Authorization/Cookie only) previously let
+    /// a custom sensitive header such as <c>X-Auth-Token</c> survive verbatim into an
+    /// exception message/log; an allowlist is fail-closed — a header we have not vetted is
+    /// never leaked. Kept deliberately small: only non-secret transport/caching/diagnostic
+    /// headers. HTTP header lookups in .NET are case-insensitive, so casing variants need
+    /// not be enumerated.
     /// </summary>
-    private static readonly HashSet<string> SensitiveResponseHeaders =
-        new(StringComparer.OrdinalIgnoreCase) { "Set-Cookie", "Authorization", "Cookie" };
+    private static readonly HashSet<string> SafeResponseHeaders =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Content-Type", "Content-Length", "Content-Language", "Content-Encoding",
+            "Date", "Server", "Cache-Control", "ETag", "Last-Modified", "Expires",
+            "Age", "Vary", "Retry-After", "Accept-Ranges",
+            // Non-secret diagnostic correlation IDs — useful for tracing, never carry credentials.
+            "X-Request-Id", "X-Correlation-Id",
+        };
 
     private NetworkError(string message, Exception? inner) : base(message, inner)
     {
@@ -45,9 +56,12 @@ public sealed class NetworkError : Exception
     public static NetworkError FromResponse(HttpResponseMessage response, string context)
     {
         ArgumentNullException.ThrowIfNull(response);
+        // X-3: fail-closed allowlist — a header whose name is not vetted as safe has its
+        // value replaced with [REDACTED]; only the name is kept for diagnostic context.
         var sanitizedHeaders = response.Headers
-            .Where(h => !SensitiveResponseHeaders.Contains(h.Key))
-            .Select(h => $"{h.Key}: {string.Join(",", h.Value)}");
+            .Select(h => SafeResponseHeaders.Contains(h.Key)
+                ? $"{h.Key}: {string.Join(",", h.Value)}"
+                : $"{h.Key}: [REDACTED]");
         var message =
             $"{context}: HTTP {(int)response.StatusCode} — headers: [{string.Join("; ", sanitizedHeaders)}]";
         // The raw `response` object itself is NEVER stored as InnerException/Data —

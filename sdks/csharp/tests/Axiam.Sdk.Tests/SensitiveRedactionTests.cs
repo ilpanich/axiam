@@ -22,12 +22,16 @@ public class SensitiveRedactionTests
     private const string RawToken = "abc123token";
     private const string ControlHeaderValue = "req-123";
 
+    private const string CustomAuthTokenValue = "xauth-secret-999";
+
     private static HttpResponseMessage BuildResponse(HttpStatusCode status)
     {
         var response = new HttpResponseMessage(status);
         response.Headers.TryAddWithoutValidation("Set-Cookie", $"axiam_access={RawToken}; HttpOnly");
         // Non-vacuous control: a benign, non-secret header that MUST survive redaction.
         response.Headers.TryAddWithoutValidation("X-Request-Id", ControlHeaderValue);
+        // X-3: a CUSTOM sensitive header not on the old denylist — must be redacted by the allowlist.
+        response.Headers.TryAddWithoutValidation("X-Auth-Token", CustomAuthTokenValue);
         return response;
     }
 
@@ -51,13 +55,30 @@ public class SensitiveRedactionTests
     [Fact]
     public void NetworkErrorRetainsNonSensitiveControlHeader()
     {
-        // Non-vacuous control: a benign header value MUST survive redaction, proving the
-        // filter is selective (Set-Cookie/Authorization/Cookie only) rather than a
-        // blanket wipe of every header.
+        // Non-vacuous control: a benign, allowlisted header value (X-Request-Id) MUST
+        // survive redaction, proving the filter is selective rather than a blanket wipe
+        // of every header.
         using HttpResponseMessage response = BuildResponse(HttpStatusCode.InternalServerError);
 
         Exception error = ErrorMapper.FromHttpResponse(response, "server error");
 
+        Assert.Contains(ControlHeaderValue, error.Message);
+    }
+
+    [Fact]
+    public void NetworkErrorRedactsCustomSensitiveHeaderNotOnAllowlist()
+    {
+        // X-3 regression: a custom sensitive header (X-Auth-Token) that no denylist would
+        // have caught must NOT leak its value — the allowlist is fail-closed, so anything
+        // unvetted is [REDACTED]. The header NAME may remain for diagnostic context.
+        using HttpResponseMessage response = BuildResponse(HttpStatusCode.InternalServerError);
+
+        Exception error = ErrorMapper.FromHttpResponse(response, "server error");
+
+        Assert.DoesNotContain(CustomAuthTokenValue, error.Message);
+        Assert.DoesNotContain(CustomAuthTokenValue, error.ToString());
+        Assert.DoesNotContain(CustomAuthTokenValue, JsonSerializer.Serialize(error, error.GetType()));
+        // The allowlisted header still comes through, proving redaction is selective.
         Assert.Contains(ControlHeaderValue, error.Message);
     }
 

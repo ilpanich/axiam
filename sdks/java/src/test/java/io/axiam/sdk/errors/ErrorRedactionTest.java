@@ -67,6 +67,30 @@ class ErrorRedactionTest {
     }
 
     @Test
+    void networkErrorRedactsCustomSensitiveHeaderNotOnAnyDenylist() {
+        // X-3: a custom sensitive header (X-Auth-Token) that a small denylist of
+        // {set-cookie, authorization, cookie} would NOT catch must still be
+        // redacted by the allowlist, while an allowlisted header survives.
+        Response response = new Response.Builder()
+                .request(new Request.Builder().url("https://api.axiam.test/api/v1/auth/login").build())
+                .protocol(Protocol.HTTP_1_1)
+                .code(500)
+                .message("status 500")
+                .header("X-Auth-Token", "super-secret-custom-token")
+                .header("X-Request-Id", CONTROL_HEADER_VALUE)
+                .build();
+
+        RuntimeException error = ErrorMapper.fromHttpStatus(500, "server error", response);
+        NetworkError networkError = (NetworkError) error;
+        String summary = networkError.toString() + String.valueOf(networkError.getCause());
+
+        assertFalse(summary.contains("super-secret-custom-token"),
+                "custom sensitive header X-Auth-Token value must be redacted by the allowlist");
+        assertTrue(summary.contains(CONTROL_HEADER_VALUE),
+                "allowlisted header X-Request-Id value must survive redaction");
+    }
+
+    @Test
     void httpStatusMappingMatchesContract() {
         assertInstanceOf(AuthError.class, ErrorMapper.fromHttpStatus(401, "unauthenticated", buildResponse(401)));
         assertInstanceOf(AuthzError.class, ErrorMapper.fromHttpStatus(403, "forbidden", buildResponse(403)));

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 )
@@ -82,21 +83,41 @@ var (
 	ErrNetwork = errors.New("axiam: network error")
 )
 
-// sensitiveResponseHeaders lists response headers that must never survive
-// into a NetworkError's wrapped cause (D-04, CR-04 carry-forward).
-var sensitiveResponseHeaders = []string{"Set-Cookie", "Authorization", "Cookie"}
+// safeResponseHeaders is the ALLOWLIST (X-3) of response headers preserved
+// verbatim in a NetworkError's wrapped cause; every header NOT listed here has
+// its value redacted to a placeholder, so a custom sensitive header (e.g.
+// X-Auth-Token) can never survive into a thrown error — unlike a small
+// denylist, which only catches the headers it happens to enumerate. Keys are
+// lower-case and compared case-insensitively. Keep small and strictly
+// non-secret: standard diagnostic response headers plus this SDK's own
+// non-secret request headers (e.g. x-tenant-id).
+var safeResponseHeaders = map[string]struct{}{
+	"content-type":   {},
+	"content-length": {},
+	"date":           {},
+	"server":         {},
+	"retry-after":    {},
+	"x-request-id":   {},
+	"x-tenant-id":    {},
+}
 
-// sanitizeResponse returns a shallow copy of resp with Set-Cookie/
-// Authorization/Cookie headers stripped, WITHOUT mutating the caller's
-// original *http.Response. Returns nil if resp is nil.
+// redactedHeader is the placeholder substituted for the value of any
+// non-allowlisted response header.
+const redactedHeader = "[REDACTED]"
+
+// sanitizeResponse returns a shallow copy of resp in which every header not on
+// safeResponseHeaders has its value redacted to redactedHeader, WITHOUT
+// mutating the caller's original *http.Response. Returns nil if resp is nil.
 func sanitizeResponse(resp *http.Response) *http.Response {
 	if resp == nil {
 		return nil
 	}
 	clone := *resp
 	clone.Header = resp.Header.Clone()
-	for _, h := range sensitiveResponseHeaders {
-		clone.Header.Del(h)
+	for name := range clone.Header {
+		if _, ok := safeResponseHeaders[strings.ToLower(name)]; !ok {
+			clone.Header.Set(name, redactedHeader)
+		}
 	}
 	return &clone
 }

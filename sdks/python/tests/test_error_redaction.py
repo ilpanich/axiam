@@ -169,6 +169,28 @@ class TestNetworkErrorRedaction:
         assert raw_refresh_secret not in repr(err)
         assert raw_refresh_secret not in repr(err.__cause__)
 
+    def test_network_error_redacts_custom_sensitive_header_allowlist(self) -> None:
+        """X-3: header redaction is an ALLOWLIST, not a denylist — a custom
+        sensitive header (e.g. ``X-Auth-Token``) that is NOT on the small
+        legacy denylist must still be redacted because it is not on the
+        known-safe allowlist."""
+        raw_custom_secret = "SEKRIT-x-auth-token-value-should-never-leak"
+        response = _response(
+            502,
+            {
+                "x-auth-token": raw_custom_secret,
+                "x-api-key": "SEKRIT-api-key-should-never-leak",
+                "content-type": "application/json",
+            },
+        )
+
+        err = error_from_http_status(502, "bad gateway", response=response)
+
+        assert isinstance(err, NetworkError)
+        assert raw_custom_secret not in repr(err)
+        assert raw_custom_secret not in repr(err.__cause__)
+        assert "SEKRIT-api-key-should-never-leak" not in repr(err.__cause__)
+
     def test_network_error_redaction_is_non_vacuous(self) -> None:
         """Control case: prove the tests above aren't vacuously passing
         because NO header content ever appears — assert a NON-sensitive

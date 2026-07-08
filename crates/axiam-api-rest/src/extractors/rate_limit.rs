@@ -31,15 +31,25 @@ use std::net::IpAddr;
 /// Extracts client IP from X-Forwarded-For header, falls back to peer address.
 ///
 /// `trusted_hops` controls how many rightmost entries in the XFF header to skip
-/// (they come from trusted proxies). A value of 0 uses the leftmost entry
-/// (original behaviour); 1 skips 1 trusted hop from the right.
+/// (they come from trusted proxies). The selected entry is the **rightmost
+/// untrusted** hop — `idx = len - 1 - trusted_hops` — which is correct for a
+/// single trusted reverse proxy that right-appends the real client IP (nginx
+/// `proxy_add_x_forwarded_for`). `trusted_hops = 1` selects the client IP a
+/// single proxy appended; `trusted_hops = 0` selects the rightmost entry
+/// verbatim. (SEC-070: earlier doc text wrongly described this as using the
+/// *leftmost* entry — the leftmost is the most attacker-controllable position
+/// and is never used.)
 #[derive(Debug, Clone, Default)]
 pub struct XForwardedForKeyExtractor {
     /// Number of trusted reverse-proxy hops to skip from the right of
     /// the X-Forwarded-For list. Set to the number of load-balancers/
     /// ingress proxies between the client and this server.
     ///
-    /// Default: 0 (use leftmost; compatible with previous behaviour).
+    /// Default: 0 (rightmost entry). NOTE: when the server is exposed directly
+    /// (no proxy), a client can still set XFF to mint fresh rate-limit buckets;
+    /// deploy behind a proxy that overwrites/right-appends XFF and set
+    /// `trusted_hops` to the proxy count so the untrusted client value is
+    /// skipped.
     pub trusted_hops: usize,
 }
 

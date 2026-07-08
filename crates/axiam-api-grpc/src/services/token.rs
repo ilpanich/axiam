@@ -5,6 +5,8 @@ use axiam_auth::error::AuthError;
 use axiam_auth::token::validate_access_token;
 use tonic::{Request, Response, Status};
 
+use axiam_auth::token::ValidatedClaims;
+
 use crate::proto::token_service_server::TokenService;
 use crate::proto::{
     IntrospectTokenRequest, IntrospectTokenResponse, ValidateTokenRequest, ValidateTokenResponse,
@@ -26,10 +28,22 @@ impl TokenService for TokenServiceImpl {
         &self,
         request: Request<ValidateTokenRequest>,
     ) -> Result<Response<ValidateTokenResponse>, Status> {
+        // SEC-068: the caller's tenant comes from the interceptor-verified JWT.
+        let caller_tenant = request
+            .extensions()
+            .get::<ValidatedClaims>()
+            .ok_or_else(|| Status::unauthenticated("missing validated claims"))?
+            .0
+            .tenant_id
+            .clone();
         let req = request.into_inner();
 
         match validate_access_token(&req.access_token, &self.config) {
-            Ok(validated) => {
+            // SEC-068: refuse to introspect a token belonging to a different
+            // tenant — report it as invalid (not merely denied) so a mesh peer
+            // in tenant A cannot read a tenant-B token's claims by observing the
+            // difference between "denied" and "invalid".
+            Ok(validated) if validated.0.tenant_id == caller_tenant => {
                 let claims = validated.0;
                 Ok(Response::new(ValidateTokenResponse {
                     valid: true,
@@ -42,7 +56,9 @@ impl TokenService for TokenServiceImpl {
             Err(AuthError::Crypto(msg)) => {
                 Err(Status::internal(format!("token validation error: {msg}")))
             }
-            Err(_) => Ok(Response::new(ValidateTokenResponse {
+            // Invalid token OR a cross-tenant token (guard above failed) — both
+            // report inactive so the two are indistinguishable to the caller.
+            _ => Ok(Response::new(ValidateTokenResponse {
                 valid: false,
                 subject_id: String::new(),
                 tenant_id: String::new(),
@@ -56,10 +72,21 @@ impl TokenService for TokenServiceImpl {
         &self,
         request: Request<IntrospectTokenRequest>,
     ) -> Result<Response<IntrospectTokenResponse>, Status> {
+        // SEC-068: the caller's tenant comes from the interceptor-verified JWT.
+        let caller_tenant = request
+            .extensions()
+            .get::<ValidatedClaims>()
+            .ok_or_else(|| Status::unauthenticated("missing validated claims"))?
+            .0
+            .tenant_id
+            .clone();
         let req = request.into_inner();
 
         match validate_access_token(&req.access_token, &self.config) {
-            Ok(validated) => {
+            // SEC-068: only introspect a token from the caller's own tenant; a
+            // cross-tenant token reports inactive (indistinguishable from an
+            // invalid one) so its sub/org/jti claims are not disclosed.
+            Ok(validated) if validated.0.tenant_id == caller_tenant => {
                 let claims = validated.0;
                 Ok(Response::new(IntrospectTokenResponse {
                     active: true,
@@ -75,7 +102,7 @@ impl TokenService for TokenServiceImpl {
             Err(AuthError::Crypto(msg)) => {
                 Err(Status::internal(format!("token validation error: {msg}")))
             }
-            Err(_) => Ok(Response::new(IntrospectTokenResponse {
+            _ => Ok(Response::new(IntrospectTokenResponse {
                 active: false,
                 sub: String::new(),
                 tenant_id: String::new(),

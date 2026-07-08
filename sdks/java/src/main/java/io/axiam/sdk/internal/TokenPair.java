@@ -12,4 +12,19 @@ package io.axiam.sdk.internal;
  * @param expiresAtEpochMs the access token's expiry, in epoch milliseconds
  */
 public record TokenPair(String access, String refresh, long expiresAtEpochMs) {
+
+    /**
+     * Redacted {@code toString()} (X-4/SDK-13): {@code access} and
+     * {@code refresh} are bearer credentials — the record's auto-generated
+     * {@code toString()} would print them verbatim, leaking both tokens into
+     * logs, stack traces, and debugger dumps. Mirrors {@link io.axiam.sdk.Sensitive}'s
+     * redaction posture (never surface a raw token via {@code toString()}); the
+     * non-secret {@code expiresAtEpochMs} is kept for diagnostics. Field
+     * accessors ({@link #access()}, {@link #refresh()}) are untouched, so
+     * legitimate in-SDK callers still read the raw values.
+     */
+    @Override
+    public String toString() {
+        return "TokenPair[access=***, refresh=***, expiresAtEpochMs=" + expiresAtEpochMs + "]";
+    }
 }

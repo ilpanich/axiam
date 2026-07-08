@@ -117,15 +117,38 @@ function promisifyUnary<TReq, TResp>(
 
 /**
  * Build the gRPC channel credentials for `baseUrl` (§6 — TLS is always
- * strict by default; `customCa` is the ONLY escape hatch, never an
- * insecure/skip-verification surface).
+ * strict by default; `customCa` is the ONLY certificate escape hatch, never
+ * an insecure/skip-verification surface).
+ *
+ * A plaintext target (`http://`/`grpc://`) is REFUSED by default (X-2): it
+ * would silently drop the channel to `createInsecure()`, sending bearer tokens
+ * and tenant metadata in cleartext. Callers who genuinely need a local dev
+ * plaintext channel must opt in explicitly with `allowInsecure: true`, which
+ * emits a `console.warn`. As a convenience the opt-in is required for ANY host
+ * (including loopback) — there is no silent path to an insecure channel.
  */
-function buildCredentials(baseUrl: string, customCa: string | undefined): grpc.ChannelCredentials {
+function buildCredentials(
+  baseUrl: string,
+  customCa: string | undefined,
+  allowInsecure: boolean,
+): grpc.ChannelCredentials {
   const isSecure = baseUrl.startsWith('https://') || baseUrl.startsWith('grpcs://');
   if (!isSecure) {
-    // Plaintext (http/grpc scheme) — dev-only local channels; not a TLS
-    // bypass, since there is no TLS negotiated in the first place for a
-    // non-TLS scheme.
+    if (!allowInsecure) {
+      throw new Error(
+        `AXIAM gRPC refuses to open an insecure (plaintext) channel to "${baseUrl}": ` +
+          'bearer tokens and tenant metadata would be sent in cleartext. Use an ' +
+          'https:// or grpcs:// target, or pass { allowInsecure: true } to opt in ' +
+          'explicitly for a trusted local/dev channel (CONTRACT.md §6).',
+      );
+    }
+    // Explicit opt-in only — never reached without allowInsecure.
+    // eslint-disable-next-line no-console
+    console.warn(
+      `AXIAM gRPC: opening an INSECURE (plaintext) channel to "${baseUrl}" because ` +
+        'allowInsecure was set. Bearer tokens and tenant metadata are transmitted in ' +
+        'cleartext — never use this outside a trusted local/dev environment.',
+    );
     return grpc.ChannelCredentials.createInsecure();
   }
   if (customCa) {
@@ -211,11 +234,11 @@ export class AuthzGrpcClient {
 
   constructor(
     session: NodeSession,
-    options: { baseUrl: string; customCa?: string },
+    options: { baseUrl: string; customCa?: string; allowInsecure?: boolean },
     clientFactory: AuthorizationServiceClientFactory = buildAuthorizationServiceClient,
   ) {
     this.#session = session;
-    const credentials = buildCredentials(options.baseUrl, options.customCa);
+    const credentials = buildCredentials(options.baseUrl, options.customCa, options.allowInsecure ?? false);
     this.#inner = clientFactory(options.baseUrl, credentials, [authInterceptor(session)]);
   }
 

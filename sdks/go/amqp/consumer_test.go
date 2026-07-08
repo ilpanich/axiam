@@ -76,13 +76,28 @@ func (l *recordingLogger) all() []string {
 
 func signedTestBody(t *testing.T, key []byte, action string) []byte {
 	t.Helper()
-	// Build canonical JSON the same way verifyHMAC re-serializes: sorted
-	// keys, hmac_signature absent, then sign it and re-insert the field.
-	canonical := []byte(`{"action":"` + action + `","correlation_id":"00000000-0000-0000-0000-000000000000"}`)
+	// Build a full, realistic AuthzRequest whose bytes are in the SERVER's
+	// field-DECLARATION order (correlation_id, tenant_id, subject_id, action,
+	// resource_id, [scope], key_version) with hmac_signature absent — exactly
+	// what serde_json signs (crates/axiam-amqp/src/messages.rs). NOT
+	// alphabetical order (the old buggy contract).
+	canonical := `{"correlation_id":"00000000-0000-0000-0000-000000000000",` +
+		`"tenant_id":"00000000-0000-0000-0000-000000000000",` +
+		`"subject_id":"00000000-0000-0000-0000-000000000000",` +
+		`"action":"` + action + `",` +
+		`"resource_id":"00000000-0000-0000-0000-000000000000",` +
+		`"key_version":1}`
 	mac := hmac.New(sha256.New, key)
-	mac.Write(canonical)
+	mac.Write([]byte(canonical))
 	sig := hex.EncodeToString(mac.Sum(nil))
-	return []byte(`{"action":"` + action + `","correlation_id":"00000000-0000-0000-0000-000000000000","hmac_signature":"` + sig + `"}`)
+	// hmac_signature is attached as the trailing field after signing.
+	return []byte(`{"correlation_id":"00000000-0000-0000-0000-000000000000",` +
+		`"tenant_id":"00000000-0000-0000-0000-000000000000",` +
+		`"subject_id":"00000000-0000-0000-0000-000000000000",` +
+		`"action":"` + action + `",` +
+		`"resource_id":"00000000-0000-0000-0000-000000000000",` +
+		`"key_version":1,` +
+		`"hmac_signature":"` + sig + `"}`)
 }
 
 func TestVerifyAndDispatch(t *testing.T) {

@@ -41,6 +41,23 @@ pub struct GrpcChannelConfig {
 /// TCP+TLS handshake (Pitfall 5). Store the returned `Channel` once and
 /// clone it for every RPC; never call this function per-call.
 pub fn build_channel(base_url: &str, config: &GrpcChannelConfig) -> Result<Channel, AxiamError> {
+    // X-2: refuse a plaintext `http://` gRPC endpoint (loopback excepted). The
+    // interceptor attaches the bearer/tenant metadata to every RPC, so the
+    // channel must be TLS-protected. Parsing via `url::Url` lets us inspect the
+    // scheme/host before handing the string to tonic.
+    if let Ok(parsed) = url::Url::parse(base_url) {
+        crate::url_guard::ensure_secure_scheme(
+            "gRPC base_url",
+            parsed.scheme(),
+            parsed.host_str(),
+            "https",
+        )
+        .map_err(|message| AxiamError::Network {
+            message,
+            source: None,
+        })?;
+    }
+
     let mut endpoint =
         Endpoint::from_shared(base_url.to_string()).map_err(|e| AxiamError::Network {
             message: format!("invalid gRPC base_url: {e}"),

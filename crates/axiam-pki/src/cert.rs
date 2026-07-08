@@ -12,6 +12,7 @@ use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::PkiConfig;
 use crate::crypto::{compute_fingerprint, decrypt_secret, generate_keypair};
@@ -107,7 +108,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable".into(),
             )
         })?;
-        let ca_private_key_pem = decrypt_ca_key_pem(&encrypted_key, &enc_key)?;
+        let mut ca_private_key_pem = decrypt_ca_key_pem(&encrypted_key, &enc_key)?;
 
         let not_before = now;
         let requested_not_after = now
@@ -135,13 +136,18 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             tokio::task::spawn_blocking(move || -> AxiamResult<(String, String, String)> {
                 let ca_key_pair = KeyPair::from_pem(&ca_private_key_pem)
                     .map_err(|e| AxiamError::Certificate(format!("invalid CA private key: {e}")))?;
+                // Scrub the decrypted CA private-key PEM from memory as soon as
+                // the KeyPair is parsed — it is not needed past this point and
+                // must not linger in the heap buffer (defense-in-depth).
+                ca_private_key_pem.zeroize();
 
                 // Reconstruct the signing CA from its real, stored certificate PEM —
                 // NOT from the (mutable) `subject` field — so the issuer DN embedded
                 // in every leaf cert can never drift from the CA's actual Subject DN
                 // (QUAL-05/D-08, T-29-11).
-                let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)
-                    .map_err(|e| AxiamError::Certificate(format!("invalid CA certificate PEM: {e}")))?;
+                let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem).map_err(|e| {
+                    AxiamError::Certificate(format!("invalid CA certificate PEM: {e}"))
+                })?;
                 let ca_certificate = ca_params
                     .self_signed(&ca_key_pair)
                     .map_err(|e| AxiamError::Certificate(format!("CA self-sign failed: {e}")))?;

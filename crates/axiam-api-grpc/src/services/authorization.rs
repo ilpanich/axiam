@@ -418,7 +418,11 @@ mod tests {
         });
         tonic_req.extensions_mut().insert(claims);
 
-        let batch_response = svc.batch_check_access(tonic_req).await.unwrap().into_inner();
+        let batch_response = svc
+            .batch_check_access(tonic_req)
+            .await
+            .unwrap()
+            .into_inner();
 
         assert_eq!(
             batch_response.results.len(),

@@ -94,12 +94,31 @@ where
     // Extract hmac_signature, then remove it from the body object before
     // re-serializing — matches the server's "field set to None before
     // signing" contract (CONTRACT.md §8.2b).
+    //
+    // Canonicalization contract (SDK-Q01): the server computes the HMAC over
+    // `serde_json::to_vec` of the concrete message struct with
+    // `hmac_signature` omitted, in FIELD-DECLARATION order (e.g. AuthzRequest:
+    // correlation_id, tenant_id, subject_id, action, resource_id, scope,
+    // key_version). To reproduce those exact bytes here we rely on two things:
+    //   1. `serde_json`'s `preserve_order` feature (enabled in Cargo.toml), so
+    //      this `Value`'s object map keeps the order the keys arrived in on the
+    //      wire — which IS the server's declaration order, since the server
+    //      serialized the struct in that order.
+    //   2. `shift_remove` (not `remove`, which is `swap_remove` under
+    //      `preserve_order` and would move the last field into the removed
+    //      slot). `shift_remove` deletes `hmac_signature` while preserving the
+    //      relative order of every remaining field, regardless of where
+    //      `hmac_signature` sat — so the re-serialized bytes are byte-identical
+    //      to what the server signed.
+    // This is exact only when the incoming JSON is what the server emitted
+    // (compact, declaration order); a re-encoded/pretty-printed body would not
+    // match and would (correctly) be rejected as unverifiable.
     let sig = body
         .get("hmac_signature")
         .and_then(|v| v.as_str())
         .map(str::to_owned);
     if let Some(obj) = body.as_object_mut() {
-        obj.remove("hmac_signature");
+        obj.shift_remove("hmac_signature");
     }
     let canonical = match serde_json::to_vec(&body) {
         Ok(bytes) => bytes,
@@ -162,6 +181,22 @@ where
     F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send,
 {
+    // X-2: refuse a plaintext `amqp://` broker URL (loopback excepted) — signed
+    // message bodies and the per-tenant context would otherwise cross an
+    // unencrypted link. Require `amqps://` for any routable host.
+    if let Ok(parsed) = url::Url::parse(amqp_url) {
+        crate::url_guard::ensure_secure_scheme(
+            "AMQP url",
+            parsed.scheme(),
+            parsed.host_str(),
+            "amqps",
+        )
+        .map_err(|message| AxiamError::Network {
+            message,
+            source: None,
+        })?;
+    }
+
     let connection = Connection::connect(amqp_url, ConnectionProperties::default())
         .await
         .map_err(|e| AxiamError::Network {
@@ -499,5 +534,132 @@ mod tests {
             );
         }
         assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+    }
+
+    // SDK-Q01 regression: the server signs the HMAC over the concrete struct
+    // serialized in FIELD-DECLARATION order (correlation_id, tenant_id,
+    // subject_id, action, resource_id, scope, key_version) — which is NOT
+    // alphabetical. This fixture builds the canonical signed bytes by HAND in
+    // that declaration order (never by round-tripping through the verifier's
+    // own `Value` path), then feeds the SDK a delivery whose body is exactly
+    // what the server put on the wire. Before the fix (no `preserve_order`),
+    // the verifier re-serialized the parsed `Value` alphabetically and HMACed
+    // over the wrong bytes, rejecting this genuine message.
+    //
+    // `AUTHZ_CANONICAL` is the payload the server signs: declaration order,
+    // compact, `hmac_signature` omitted (set to None before signing).
+    const AUTHZ_CANONICAL: &str = concat!(
+        "{",
+        "\"correlation_id\":\"11111111-1111-1111-1111-111111111111\",",
+        "\"tenant_id\":\"22222222-2222-2222-2222-222222222222\",",
+        "\"subject_id\":\"33333333-3333-3333-3333-333333333333\",",
+        "\"action\":\"read\",",
+        "\"resource_id\":\"44444444-4444-4444-4444-444444444444\",",
+        "\"scope\":\"sub\",",
+        "\"key_version\":1",
+        "}"
+    );
+
+    /// Build the on-the-wire delivery bytes: the canonical payload with
+    /// `hmac_signature` appended as the final key (exactly how the server
+    /// emits it after signing).
+    fn wire_bytes_with_signature(canonical: &str, sig: &str) -> Vec<u8> {
+        // Splice the signature in just before the closing brace, keeping the
+        // canonical field order intact and adding `hmac_signature` last.
+        let without_close = &canonical[..canonical.len() - 1];
+        format!("{without_close},\"hmac_signature\":\"{sig}\"}}").into_bytes()
+    }
+
+    #[tokio::test]
+    async fn server_declaration_order_message_is_accepted() {
+        let key = b"declaration-order-signing-key";
+        // Sign the hand-built declaration-order canonical bytes — NOT bytes
+        // produced by re-serializing a `Value` the same way the verifier does.
+        let sig = sign_payload(key, AUTHZ_CANONICAL.as_bytes());
+        let data = wire_bytes_with_signature(AUTHZ_CANONICAL, &sig);
+        let delivery = RecordingDelivery::new(data);
+
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls_clone = Arc::clone(&handler_calls);
+        let handler = move |_value: serde_json::Value| {
+            let calls = Arc::clone(&handler_calls_clone);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+
+        verify_and_dispatch(&delivery, key, &handler).await;
+
+        assert_eq!(
+            handler_calls.load(Ordering::SeqCst),
+            1,
+            "a genuine server message signed in declaration order must verify \
+             and reach the handler (SDK-Q01)"
+        );
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+        assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn server_declaration_order_message_tampered_is_rejected() {
+        let key = b"declaration-order-signing-key";
+        // Signature is over the pristine canonical bytes...
+        let sig = sign_payload(key, AUTHZ_CANONICAL.as_bytes());
+        // ...but the delivered body flips `action` from read -> write, so the
+        // recomputed HMAC must not match.
+        let tampered_canonical = AUTHZ_CANONICAL.replace("\"read\"", "\"write\"");
+        let data = wire_bytes_with_signature(&tampered_canonical, &sig);
+        let delivery = RecordingDelivery::new(data);
+
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls_clone = Arc::clone(&handler_calls);
+        let handler = move |_value: serde_json::Value| {
+            let calls = Arc::clone(&handler_calls_clone);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+
+        verify_and_dispatch(&delivery, key, &handler).await;
+
+        assert_eq!(
+            handler_calls.load(Ordering::SeqCst),
+            0,
+            "a tampered body must never reach the handler"
+        );
+        assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn hmac_signature_not_last_field_still_verifies() {
+        // Robustness of `shift_remove`: even if `hmac_signature` is not the
+        // final key, removing it must preserve the order of the remaining
+        // fields so the canonical bytes are reproduced. Here we place
+        // `hmac_signature` FIRST in the delivered object.
+        let key = b"declaration-order-signing-key";
+        let sig = sign_payload(key, AUTHZ_CANONICAL.as_bytes());
+        let canonical_inner = &AUTHZ_CANONICAL[1..]; // drop leading '{'
+        let data = format!("{{\"hmac_signature\":\"{sig}\",{canonical_inner}").into_bytes();
+        let delivery = RecordingDelivery::new(data);
+
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls_clone = Arc::clone(&handler_calls);
+        let handler = move |_value: serde_json::Value| {
+            let calls = Arc::clone(&handler_calls_clone);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+
+        verify_and_dispatch(&delivery, key, &handler).await;
+
+        assert_eq!(
+            handler_calls.load(Ordering::SeqCst),
+            1,
+            "shift_remove must preserve field order regardless of where \
+             hmac_signature sits, so the message still verifies"
+        );
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
     }
 }

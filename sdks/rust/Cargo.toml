@@ -65,7 +65,18 @@ hex = { version = "0.4", optional = true }
 actix-web = { version = "4", optional = true }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` (SDK-Q01): backs `serde_json::Value`'s object map with an
+# insertion-ordered `IndexMap` instead of the default alphabetical `BTreeMap`.
+# The AMQP consumer verifies HMACs by parsing the delivery body into a `Value`
+# and re-serializing it (minus `hmac_signature`); the server signs the SAME
+# bytes it emitted from a concrete struct in FIELD-DECLARATION order (e.g.
+# AuthzRequest: correlation_id, tenant_id, subject_id, action, resource_id,
+# scope, key_version — NOT alphabetical). Without this feature `Value` would
+# re-serialize alphabetically, so the SDK would HMAC over different bytes than
+# the server signed and reject every genuine message. With it, `Value`
+# preserves the order the keys arrived in — which, because the server emits
+# declaration order on the wire, reproduces the exact signed bytes.
+serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 url = "2"
 backon = "1"

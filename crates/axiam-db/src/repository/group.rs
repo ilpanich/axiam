@@ -270,10 +270,19 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         let id_str = id.to_string();
         let tenant_id_str = tenant_id.to_string();
 
-        // Delete associated membership edges first, then the group record.
+        // Delete associated membership edges first, then the group record —
+        // inside one transaction so a concurrent reader never observes a
+        // partially-deleted group. The member_of edge carries no flat
+        // tenant_id column, so tenant scoping is a node-tenant guard on the
+        // edge's `out` endpoint (out.tenant_id), mirroring role.delete;
+        // without it a caller with a foreign-tenant group id could strip
+        // another tenant's memberships. `.check()` surfaces per-statement
+        // failures instead of swallowing them as Ok.
         let query = format!(
-            "DELETE member_of WHERE out = group:`{id_str}`; \
-             DELETE type::record('group', $id) WHERE tenant_id = $tenant_id;"
+            "BEGIN TRANSACTION; \
+             DELETE member_of WHERE out = group:`{id_str}` AND out.tenant_id = $tenant_id; \
+             DELETE type::record('group', $id) WHERE tenant_id = $tenant_id; \
+             COMMIT TRANSACTION"
         );
 
         self.db
@@ -281,7 +290,9 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id_str))
             .await
-            .map_err(DbError::from)?;
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         Ok(())
     }
@@ -388,23 +399,32 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
 
     async fn remove_member(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         user_id: Uuid,
         group_id: Uuid,
     ) -> AxiamResult<()> {
         let user_id_str = user_id.to_string();
         let group_id_str = group_id.to_string();
 
+        // Tenant scoping: the member_of edge carries no flat tenant_id column,
+        // so scope the DELETE to the caller's tenant via node-tenant guards on
+        // both endpoints (in.tenant_id / out.tenant_id). Without this a caller
+        // with a foreign user+group id pair could sever another tenant's
+        // membership. `.check()` surfaces per-statement failures.
         self.db
             .query(
                 "DELETE member_of WHERE \
                  in = type::record('user', $user_id) AND \
-                 out = type::record('group', $group_id)",
+                 out = type::record('group', $group_id) AND \
+                 in.tenant_id = $tenant_id AND out.tenant_id = $tenant_id",
             )
             .bind(("user_id", user_id_str))
             .bind(("group_id", group_id_str))
+            .bind(("tenant_id", tenant_id.to_string()))
             .await
-            .map_err(DbError::from)?;
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         Ok(())
     }

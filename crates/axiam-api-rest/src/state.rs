@@ -250,6 +250,11 @@ pub struct AppState<C: Connection + Clone> {
     pub pgp_service: PgpServiceT<C>,
     pub webhook_repo: SurrealWebhookRepository<C>,
     pub webhook_delivery: WebhookDeliveryServiceT<C>,
+    /// AMQP publisher used by [`AppState::emit_webhook`] to dispatch domain
+    /// events onto the durable webhook queue (CQ-B22). `None` in tests and when
+    /// AMQP is unavailable — `emit_webhook` becomes a no-op rather than failing
+    /// the originating request (webhook delivery is a best-effort side effect).
+    pub webhook_publisher: Option<Arc<axiam_amqp::WebhookPublisher>>,
     pub notification_rule_repo: SurrealNotificationRuleRepository<C>,
     pub oauth2_client_repo: SurrealOAuth2ClientRepository<C>,
     pub authorize_service: AuthorizeServiceT<C>,
@@ -291,6 +296,24 @@ pub struct AppState<C: Connection + Clone> {
 }
 
 impl<C: Connection + Clone> AppState<C> {
+    /// Dispatch a domain event to any webhooks subscribed to `event_type` in
+    /// `tenant_id` (CQ-B22). Best-effort: if no AMQP publisher is wired
+    /// (`webhook_publisher` is `None`, e.g. tests or AMQP disabled) this is a
+    /// no-op, and publish failures inside `emit` are logged, never propagated —
+    /// a webhook side effect must not fail the originating API request.
+    pub async fn emit_webhook(
+        &self,
+        tenant_id: uuid::Uuid,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) {
+        if let Some(publisher) = &self.webhook_publisher {
+            self.webhook_delivery
+                .emit(publisher, tenant_id, event_type.to_string(), payload)
+                .await;
+        }
+    }
+
     /// Build a fully-populated `AppState<C>` for test harnesses from just a
     /// `db` handle and an `AuthConfig` — every field gets a working,
     /// connection-backed default (repos constructed via `::new(db.clone())`,
@@ -423,6 +446,7 @@ impl<C: Connection + Clone> AppState<C> {
             pgp_service,
             webhook_repo,
             webhook_delivery,
+            webhook_publisher: None,
             notification_rule_repo: SurrealNotificationRuleRepository::new(db.clone()),
             oauth2_client_repo,
             authorize_service,

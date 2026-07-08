@@ -234,10 +234,19 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let id_str = id.to_string();
 
-        // Delete associated grants edges first, then the permission record.
+        // Delete associated grants edges first, then the permission record —
+        // all inside one transaction so a concurrent reader never observes a
+        // partially-deleted permission. The grants edge carries no flat
+        // tenant_id column, so tenant scoping is expressed as a node-tenant
+        // guard on the edge's `out` endpoint (out.tenant_id) — mirroring
+        // role.delete. Without this guard a caller supplying a foreign-tenant
+        // permission id could strip another tenant's grants edges. `.check()`
+        // surfaces per-statement failures instead of swallowing them as Ok.
         let query = format!(
-            "DELETE grants WHERE out = permission:`{id_str}`; \
-             DELETE type::record('permission', $id) WHERE tenant_id = $tenant_id;"
+            "BEGIN TRANSACTION; \
+             DELETE grants WHERE out = permission:`{id_str}` AND out.tenant_id = $tenant_id; \
+             DELETE type::record('permission', $id) WHERE tenant_id = $tenant_id; \
+             COMMIT TRANSACTION"
         );
 
         self.db
@@ -245,7 +254,9 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id.to_string()))
             .await
-            .map_err(DbError::from)?;
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         Ok(())
     }

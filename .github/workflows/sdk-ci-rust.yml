@@ -62,6 +62,12 @@ jobs:
         working-directory: sdks/rust
         run: cargo test -p axiam-sdk --all-features
 
+      - name: Dependency vulnerability scan (CI-03)
+        working-directory: sdks/rust
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
       - name: Build examples (all features)
         working-directory: sdks/rust
         run: cargo build -p axiam-sdk --examples --all-features

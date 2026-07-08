@@ -17,8 +17,20 @@ export class AxiamClient {
   /** @internal — exposed for auth.ts/authz.ts method implementations and other transports (D-13). */
   readonly session: SharedSession;
 
-  constructor(options: AxiamClientOptions) {
-    this.session = createSession(options);
+  /**
+   * @param options client configuration (§5/§6).
+   * @param session optional pre-built session to adopt instead of the default
+   *   browser `SharedSession`. This is the injection point for the Node
+   *   persona (SDK-Q05): a Node REST consumer builds a `NodeSession` (cookie
+   *   jar + CSRF/refresh token sync) via `createNodeClient`/`createNodeSession`
+   *   from the Node-only `axiam-sdk/node` (or `axiam-sdk/grpc`) subpath and it
+   *   is adopted here, so httpOnly login/refresh cookies persist. When omitted
+   *   the browser `SharedSession` is built by default — the Node modules are
+   *   NEVER statically imported from this browser-safe module, so a `/rest`
+   *   browser bundle keeps pulling zero Node dependencies (SC#1).
+   */
+  constructor(options: AxiamClientOptions, session?: SharedSession) {
+    this.session = session ?? createSession(options);
     installInterceptors(this.session.axios, this.session);
   }
 

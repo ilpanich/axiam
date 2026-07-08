@@ -551,10 +551,20 @@ impl<
             return Err(AuthError::TokenExpired.into());
         }
 
-        // 3. Invalidate old session (single-use guarantee).
-        self.session_repo
-            .invalidate(input.tenant_id, session.id)
+        // 3. Atomically consume the old session (single-use guarantee, NEW-3).
+        //    `consume` returns false if another concurrent refresh already
+        //    deleted this session — treat that as an invalid/replayed token and
+        //    abort BEFORE minting a new session, so one refresh token can never
+        //    yield two live session lineages (defeats stolen-token reuse).
+        let won = self
+            .session_repo
+            .consume(input.tenant_id, session.id)
             .await?;
+        if !won {
+            return Err(
+                AuthError::TokenInvalid("refresh token not found or already used".into()).into(),
+            );
+        }
 
         // 4. Verify user is still active.
         let user = self

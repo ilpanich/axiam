@@ -489,6 +489,14 @@ pub trait SessionRepository: Send + Sync {
     /// Invalidate a single session.
     fn invalidate(&self, tenant_id: Uuid, id: Uuid)
     -> impl Future<Output = AxiamResult<()>> + Send;
+    /// Atomically consume (delete) a single session, returning `true` iff this
+    /// call removed the row. Unlike [`Self::invalidate`] (idempotent, always
+    /// `Ok(())`), this is the single-use gate for refresh-token rotation
+    /// (NEW-3): two concurrent refreshes racing on the same token both pass the
+    /// prior SELECT, but only one wins this delete — the loser gets `false` and
+    /// must abort before minting a new session, preserving single-use rotation
+    /// and stolen-token reuse detection.
+    fn consume(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<bool>> + Send;
     /// Invalidate all sessions for a user (e.g., on password change).
     fn invalidate_user_sessions(
         &self,

@@ -81,6 +81,16 @@ jobs:
       - name: dotnet test (full solution)
         run: dotnet test sdks/csharp -c Release --no-build --logger "console;verbosity=normal"
 
+      # CI-03: fail on any transitively-referenced package with a known
+      # vulnerability. `dotnet list --vulnerable` exits 0 even when it prints
+      # advisories, so grep the output and fail explicitly.
+      - name: Dependency vulnerability scan (CI-03)
+        run: |
+          dotnet list sdks/csharp package --vulnerable --include-transitive 2>&1 | tee vuln.txt
+          if grep -q "has the following vulnerable packages" vuln.txt; then
+            echo "::error::Vulnerable NuGet packages detected"; exit 1
+          fi
+
       # §6/SC#4/T-21-21: strict TLS is always on; the only escape hatch is the
       # additive customCa chain-trust-store callback (CustomTrustStore /
       # CustomRootTrust markers) — no unconditional-true

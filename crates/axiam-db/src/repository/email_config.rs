@@ -503,9 +503,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
 
         let mut encrypted = encrypt_provider(&input.provider, &self.key)?;
 
-        if secret_omitted
-            && let Some(existing) = self.fetch_org_secret_columns(org_id).await?
-        {
+        if secret_omitted && let Some(existing) = self.fetch_org_secret_columns(org_id).await? {
             match &input.provider {
                 ProviderConfig::Smtp(_) => {
                     if existing.smtp_password_ciphertext.is_some() {

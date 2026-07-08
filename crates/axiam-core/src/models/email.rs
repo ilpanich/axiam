@@ -614,8 +614,12 @@ mod tests {
     #[test]
     fn smtp_config_deserializes_without_password_field() {
         let json = r#"{"host":"smtp.example.com","port":587,"username":"user","starttls":true}"#;
-        let smtp: SmtpConfig = serde_json::from_str(json).expect("must deserialize without password");
-        assert_eq!(smtp.password, "", "omitted password must default to empty string (D-02 sentinel)");
+        let smtp: SmtpConfig =
+            serde_json::from_str(json).expect("must deserialize without password");
+        assert_eq!(
+            smtp.password, "",
+            "omitted password must default to empty string (D-02 sentinel)"
+        );
         assert_eq!(smtp.host, "smtp.example.com");
     }
 
@@ -624,7 +628,10 @@ mod tests {
         let json = r#"{"api_url":"https://api.sendgrid.com"}"#;
         let api: ApiProviderConfig =
             serde_json::from_str(json).expect("must deserialize without api_key");
-        assert_eq!(api.api_key, "", "omitted api_key must default to empty string (D-02 sentinel)");
+        assert_eq!(
+            api.api_key, "",
+            "omitted api_key must default to empty string (D-02 sentinel)"
+        );
         assert_eq!(api.api_url.as_deref(), Some("https://api.sendgrid.com"));
     }
 

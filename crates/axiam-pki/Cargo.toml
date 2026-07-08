@@ -26,6 +26,7 @@ rand = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = { workspace = true }
 pgp = { workspace = true }
+zeroize = { workspace = true }
 smallvec = "1"
 time = "0.3"
 

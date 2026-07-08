@@ -201,6 +201,11 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
                         message: "cycle detected in resource hierarchy".into(),
                     });
                 }
+                // Validate the new parent exists within the caller's tenant, so
+                // a re-parent cannot attach this resource under another tenant's
+                // node (get_by_id is tenant-scoped and returns NotFound
+                // otherwise).
+                self.get_by_id(tenant_id, *new_parent).await?;
                 // Walk the new parent's ancestors: if any equals `id`, it's a cycle.
                 let ancestors = self.get_ancestors(tenant_id, *new_parent).await?;
                 if ancestors.iter().any(|a| a.id == id) {
@@ -210,16 +215,34 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
                 }
             }
 
-            // Delete old child_of edge.
-            query = format!("DELETE child_of WHERE in = resource:`{id_str}`; {query}");
+            // Re-parenting mutates two-to-three statements (DELETE the old
+            // child_of edge, UPDATE the record, optionally RELATE the new
+            // edge). Wrap them in one transaction so a failure after the
+            // DELETE (e.g. the RELATE hitting a UNIQUE violation) cannot leave
+            // the resource orphaned with no rollback — the same class the
+            // resource.delete transaction closed. The child_of edge carries no
+            // flat tenant_id column, so the DELETE is tenant-scoped via a
+            // node-tenant guard on its `in` endpoint (in.tenant_id); without
+            // it a foreign-tenant resource id could strip another tenant's
+            // parent edge.
+            //
+            // Result slots become: BEGIN=0, DELETE child_of=1, UPDATE=2,
+            // [RELATE=3], COMMIT=last — so the UPDATE row lands at slot 2.
+            query = format!(
+                "BEGIN TRANSACTION; \
+                 DELETE child_of WHERE in = resource:`{id_str}` AND in.tenant_id = $tenant_id; \
+                 {query}"
+            );
 
             // If new parent is Some, create new child_of edge.
             if let Some(Some(new_parent)) = &input.parent_id {
                 let new_parent_str = new_parent.to_string();
                 query = format!(
-                    "{query}; RELATE resource:`{id_str}` -> child_of -> resource:`{new_parent_str}`;"
+                    "{query}; RELATE resource:`{id_str}` -> child_of -> resource:`{new_parent_str}`"
                 );
             }
+
+            query = format!("{query}; COMMIT TRANSACTION");
         }
 
         let parent_id_str: Option<String> = input
@@ -251,8 +274,9 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        // The UPDATE statement index depends on whether we prepended a DELETE.
-        let stmt_idx = if parent_id_changed { 1 } else { 0 };
+        // The UPDATE statement index depends on whether we wrapped the
+        // re-parent in a transaction: BEGIN=0, DELETE child_of=1, UPDATE=2.
+        let stmt_idx = if parent_id_changed { 2 } else { 0 };
         let rows: Vec<ResourceRow> = result.take(stmt_idx).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "resource", &id_str)?;
 

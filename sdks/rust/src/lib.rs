@@ -12,6 +12,9 @@
 
 mod error;
 mod sensitive;
+// X-2: shared TLS-scheme guard for transport URLs (REST/gRPC/AMQP). Always
+// compiled (transport modules below are feature-gated but all reuse this).
+mod url_guard;
 
 pub use error::AxiamError;
 pub use sensitive::Sensitive;

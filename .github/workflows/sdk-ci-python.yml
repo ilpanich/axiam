@@ -55,6 +55,11 @@ jobs:
       - name: Test
         run: pytest sdks/python/tests -v
 
+      - name: Dependency vulnerability scan (CI-03)
+        run: |
+          pip install pip-audit
+          pip-audit --skip-editable --desc
+
       - name: Byte-compile examples (D-13)
         run: python -m py_compile sdks/python/examples/*.py
 

@@ -34,7 +34,12 @@ pub async fn get_org_settings<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    RequirePermission::new("settings:get", Uuid::nil())
+    // SECURITY (NEW-2): org-baseline settings are a higher privilege than the
+    // per-tenant `settings:*` self-management permissions. Enforce the dedicated
+    // org-level permission declared in ROUTE_PERMISSION_MAP so a tenant-scoped
+    // `settings:get` grant cannot read the org baseline that cascades to every
+    // sibling tenant.
+    RequirePermission::new("organizations:get_settings", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let org_id = path.into_inner();
@@ -74,7 +79,11 @@ pub async fn set_org_settings<C: Connection + Clone>(
     path: web::Path<Uuid>,
     body: web::Json<SetOrgSettings>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    RequirePermission::new("settings:update", Uuid::nil())
+    // SECURITY (NEW-2): enforce the dedicated org-level permission (declared in
+    // ROUTE_PERMISSION_MAP) rather than the tenant-scoped `settings:update`, so a
+    // tenant admin cannot rewrite the org security baseline inherited by every
+    // sibling tenant.
+    RequirePermission::new("organizations:update_settings", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let org_id = path.into_inner();

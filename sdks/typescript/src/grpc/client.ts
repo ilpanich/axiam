@@ -17,9 +17,15 @@
 // buf-enabled CI run (RESEARCH.md D-20; environment note in this plan).
 
 import * as grpc from '@grpc/grpc-js';
+import type { AccessDecision } from '../core/index.js';
 import type { NodeSession } from '../node/session.js';
 import { authInterceptor } from './interceptor.js';
 import { callWithRefresh } from './callWithRefresh.js';
+
+// Re-exported (not re-declared) so `grpc/index.ts` can still export
+// `AccessDecision` from `./client.js` — see `core/authz.ts` for the single
+// shared definition (SDK-Q10, C2).
+export type { AccessDecision };
 
 // ---------------------------------------------------------------------------
 // Wire shapes (proto/axiam/v1/authorization.proto) — mirrored, not imported.
@@ -27,6 +33,11 @@ import { callWithRefresh } from './callWithRefresh.js';
 
 export interface WireCheckAccessRequest {
   tenant_id: string;
+  // `subject_id` is a required (non-`optional`) proto3 field
+  // (`proto/axiam/v1/authorization.proto`), unlike `scope` below — the wire
+  // contract always carries it, so it stays required here too rather than
+  // relaxed to match REST's optional `subjectId` (see `CheckAccessRequest`
+  // below for why the two transports differ).
   subject_id: string;
   action: string;
   resource_id: string;
@@ -68,19 +79,23 @@ export interface WireAuthorizationServiceClient {
   close(): void;
 }
 
-/** Public (camelCase, §1) single access-check request shape. */
+/**
+ * Public (camelCase, §1) single access-check request shape.
+ *
+ * `subjectId` is required here (unlike REST's optional `AccessCheck.subjectId`)
+ * because gRPC calls typically originate from a service-mesh caller with no
+ * request-scoped JWT to derive a subject from — the caller must pass it
+ * explicitly. REST, by contrast, derives the subject from the caller's JWT
+ * when `subjectId` is omitted (§5). This mirrors the proto's non-`optional`
+ * `subject_id` field (`proto/axiam/v1/authorization.proto`), which is not
+ * changed here (SDK-Q10, C2).
+ */
 export interface CheckAccessRequest {
   tenantId: string;
   subjectId: string;
   action: string;
   resourceId: string;
   scope?: string;
-}
-
-/** Public access-check result shape, shared with the REST `AccessDecision` (§1). */
-export interface AccessDecision {
-  allowed: boolean;
-  denyReason?: string;
 }
 
 function toWireRequest(req: CheckAccessRequest): WireCheckAccessRequest {
@@ -96,7 +111,7 @@ function toWireRequest(req: CheckAccessRequest): WireCheckAccessRequest {
 function fromWireResponse(resp: WireCheckAccessResponse): AccessDecision {
   return {
     allowed: resp.allowed,
-    denyReason: resp.deny_reason ? resp.deny_reason : undefined,
+    reason: resp.deny_reason ? resp.deny_reason : undefined,
   };
 }
 

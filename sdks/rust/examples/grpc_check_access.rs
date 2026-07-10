@@ -167,8 +167,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
     println!(
-        "gRPC CheckAccess -> allowed: {}, deny_reason: {:?}",
-        decision.allowed, decision.deny_reason
+        "gRPC CheckAccess -> allowed: {}, reason: {:?}",
+        decision.allowed, decision.reason
     );
 
     // BatchCheckAccess — results preserve input order (CONTRACT.md §1).

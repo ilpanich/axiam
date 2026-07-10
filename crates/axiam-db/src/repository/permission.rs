@@ -11,7 +11,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::{CountRow, paginate, take_first_or_not_found};
+use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
 struct PermissionRow {
@@ -337,7 +337,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
                     reason: "cross-tenant permission grant denied".into(),
                 });
             }
-            return Err(DbError::Migration(msg).into());
+            return Err(classify_write_error(msg, "permission_grant").into());
         }
 
         Ok(())
@@ -474,7 +474,10 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
                     reason: "cross-tenant permission grant denied".into(),
                 });
             }
-            return Err(DbError::Migration(msg).into());
+            // grant_to_role_with_scopes is the REST-reachable path
+            // (POST /api/v1/roles/{id}/permissions) — mirror grant_to_role's
+            // classify_write_error so a duplicate grant surfaces as 409, not 500.
+            return Err(classify_write_error(msg, "permission_grant").into());
         }
 
         Ok(())

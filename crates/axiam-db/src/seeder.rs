@@ -19,7 +19,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::CountRow;
+use crate::helpers::{CountRow, classify_write_error};
 use crate::repository::{SurrealPermissionRepository, SurrealRoleRepository};
 
 /// Row struct for reading a seeder_state record.
@@ -382,38 +382,36 @@ async fn find_or_create_role<C: Connection>(
         Ok(role) => Ok(role.id),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("already contains")
-                || msg.contains("already exists")
-                || msg.contains("unique")
-            {
-                let refreshed = role_repo
-                    .list(
-                        tenant_id,
-                        Pagination {
-                            offset: 0,
-                            limit: 1000,
-                        },
-                    )
-                    .await
-                    .map_err(|e| {
-                        DbError::Migration(format!(
-                            "find_or_create_role re-list '{name}' failed: {e}"
-                        ))
-                    })?;
-                refreshed
-                    .items
-                    .into_iter()
-                    .find(|r| r.name == name)
-                    .map(|r| r.id)
-                    .ok_or_else(|| {
-                        DbError::Migration(format!(
-                            "find_or_create_role: role '{name}' vanished after concurrent create race"
-                        ))
-                    })
-            } else {
-                Err(DbError::Migration(format!(
+            match classify_write_error(&msg, "role") {
+                DbError::AlreadyExists { .. } => {
+                    let refreshed = role_repo
+                        .list(
+                            tenant_id,
+                            Pagination {
+                                offset: 0,
+                                limit: 1000,
+                            },
+                        )
+                        .await
+                        .map_err(|e| {
+                            DbError::Migration(format!(
+                                "find_or_create_role re-list '{name}' failed: {e}"
+                            ))
+                        })?;
+                    refreshed
+                        .items
+                        .into_iter()
+                        .find(|r| r.name == name)
+                        .map(|r| r.id)
+                        .ok_or_else(|| {
+                            DbError::Migration(format!(
+                                "find_or_create_role: role '{name}' vanished after concurrent create race"
+                            ))
+                        })
+                }
+                _ => Err(DbError::Migration(format!(
                     "find_or_create_role '{name}' failed: {msg}"
-                )))
+                ))),
             }
         }
     }
@@ -453,17 +451,10 @@ async fn grant_to_role_idempotent<C: Connection>(
         .await
     {
         Ok(()) => Ok(()),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("already contains")
-                || msg.contains("already exists")
-                || msg.contains("unique")
-            {
-                Ok(())
-            } else {
-                Err(DbError::Migration(msg))
-            }
-        }
+        Err(e) => match classify_write_error(e.to_string(), "permission_grant") {
+            DbError::AlreadyExists { .. } => Ok(()),
+            other => Err(other),
+        },
     }
 }
 

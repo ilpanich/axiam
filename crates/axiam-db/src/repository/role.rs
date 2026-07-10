@@ -142,7 +142,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "role"))?;
 
         let rows: Vec<RoleRow> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {

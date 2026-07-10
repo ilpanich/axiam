@@ -46,46 +46,56 @@ import (
 //     safe (no false accept) and needs no separate discriminator field.
 //  4. Compare using hmac.Equal — constant-time, never bytes.Equal/==.
 //
-// Returns false (never panics) for malformed JSON, a missing/non-string
-// signature, or a non-hex signature.
-func verifyHMAC(signingKey []byte, body []byte) bool {
+// Returns (false, zero-value) (never panics) for malformed JSON, a
+// missing/non-string signature, or a non-hex signature. On a successful
+// match, the returned replayMeta carries the key_version/nonce/issued_at
+// extracted from whichever layout matched, for the NEW-4 replay-protection
+// checks the caller runs next (verifyAndDispatch) — the cryptographic check
+// here is deliberately silent on those checks; they are a separate, later
+// gate over an already-authentic message.
+func verifyHMAC(signingKey []byte, body []byte) (bool, replayMeta) {
 	// Step 1: extract the received signature, independent of field order.
 	var envelope struct {
 		HMACSignature *string `json:"hmac_signature"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return false
+		return false, replayMeta{}
 	}
 	if envelope.HMACSignature == nil {
 		// Strict mode default (CONTRACT.md §8.3): a message with no
 		// hmac_signature field (or a non-string value) is rejected, never
 		// silently accepted.
-		return false
+		return false, replayMeta{}
 	}
 
 	expected, err := hex.DecodeString(*envelope.HMACSignature)
 	if err != nil {
-		return false
+		return false, replayMeta{}
 	}
 
 	// Steps 2-4: try each known declaration-order layout; accept on the
 	// first cryptographic match.
-	for _, canonical := range canonicalCandidates(body) {
+	for _, candidate := range canonicalCandidates(body) {
 		mac := hmac.New(sha256.New, signingKey)
-		mac.Write(canonical)
+		mac.Write(candidate.bytes)
 		if hmac.Equal(mac.Sum(nil), expected) {
-			return true
+			return true, candidate.meta
 		}
 	}
-	return false
+	return false, replayMeta{}
 }
 
 // authzRequestCanonical mirrors the server's AuthzRequest struct
 // (crates/axiam-amqp/src/messages.rs) in EXACT field-declaration order.
 // UUIDs are serialized by serde as JSON strings, so plain Go strings
 // round-trip byte-identically. `scope` is optional (omitted when absent);
-// `key_version` is always emitted. `hmac_signature` is intentionally absent —
-// it is not part of the signed bytes.
+// `key_version` is always emitted. NEW-4: `nonce` and `issued_at` are ALWAYS
+// emitted (no server-side skip_serializing_if) and MUST land after
+// `key_version` and before `hmac_signature` in the signed bytes; both are
+// plain Go strings and are never re-parsed/reformatted here, so the UUID and
+// RFC3339 timestamp are echoed back byte-identically to what was received.
+// `hmac_signature` is intentionally absent — it is not part of the signed
+// bytes.
 type authzRequestCanonical struct {
 	CorrelationID string  `json:"correlation_id"`
 	TenantID      string  `json:"tenant_id"`
@@ -94,14 +104,19 @@ type authzRequestCanonical struct {
 	ResourceID    string  `json:"resource_id"`
 	Scope         *string `json:"scope,omitempty"`
 	KeyVersion    uint8   `json:"key_version"`
+	Nonce         string  `json:"nonce"`
+	IssuedAt      string  `json:"issued_at"`
 }
 
 // auditEventCanonical mirrors the server's AuditEventMessage struct
 // (crates/axiam-amqp/src/messages.rs) in EXACT field-declaration order.
 // `resource_id`, `ip_address`, and `metadata` are optional (omitted when
 // absent); `metadata` is kept as raw JSON so its inner bytes/key order are
-// preserved verbatim. `key_version` is always emitted; `hmac_signature` is
-// excluded from the signed bytes.
+// preserved verbatim. `key_version` is always emitted. NEW-4: `nonce` and
+// `issued_at` are ALWAYS emitted and MUST land after `key_version` and
+// before `hmac_signature`; both are plain Go strings, echoed verbatim (never
+// re-parsed/reformatted) so the signed bytes match exactly.
+// `hmac_signature` is excluded from the signed bytes.
 type auditEventCanonical struct {
 	TenantID   string          `json:"tenant_id"`
 	ActorID    string          `json:"actor_id"`
@@ -112,6 +127,26 @@ type auditEventCanonical struct {
 	IPAddress  *string         `json:"ip_address,omitempty"`
 	Metadata   json.RawMessage `json:"metadata,omitempty"`
 	KeyVersion uint8           `json:"key_version"`
+	Nonce      string          `json:"nonce"`
+	IssuedAt   string          `json:"issued_at"`
+}
+
+// replayMeta carries the NEW-4 replay-protection fields (key_version, nonce,
+// issued_at) extracted from whichever canonical layout the HMAC verified
+// against, so the caller (verifyAndDispatch) can enforce the key_version
+// gate, the issued_at freshness window, and nonce dedup AFTER the
+// cryptographic check succeeds.
+type replayMeta struct {
+	KeyVersion uint8
+	Nonce      string
+	IssuedAt   string
+}
+
+// canonicalCandidate pairs a re-marshaled canonical byte candidate with the
+// replay-protection metadata extracted from the same layout.
+type canonicalCandidate struct {
+	bytes []byte
+	meta  replayMeta
 }
 
 // canonicalCandidates reconstructs the server-signed canonical bytes for
@@ -119,20 +154,34 @@ type auditEventCanonical struct {
 // in the server's declaration order with hmac_signature excluded. Only the
 // layout the server actually signed can produce bytes whose HMAC matches the
 // received signature, so returning several is safe.
-func canonicalCandidates(body []byte) [][]byte {
-	candidates := make([][]byte, 0, 2)
+func canonicalCandidates(body []byte) []canonicalCandidate {
+	candidates := make([]canonicalCandidate, 0, 2)
 
 	var authz authzRequestCanonical
 	if json.Unmarshal(body, &authz) == nil {
 		if b, err := json.Marshal(&authz); err == nil {
-			candidates = append(candidates, b)
+			candidates = append(candidates, canonicalCandidate{
+				bytes: b,
+				meta: replayMeta{
+					KeyVersion: authz.KeyVersion,
+					Nonce:      authz.Nonce,
+					IssuedAt:   authz.IssuedAt,
+				},
+			})
 		}
 	}
 
 	var audit auditEventCanonical
 	if json.Unmarshal(body, &audit) == nil {
 		if b, err := json.Marshal(&audit); err == nil {
-			candidates = append(candidates, b)
+			candidates = append(candidates, canonicalCandidate{
+				bytes: b,
+				meta: replayMeta{
+					KeyVersion: audit.KeyVersion,
+					Nonce:      audit.Nonce,
+					IssuedAt:   audit.IssuedAt,
+				},
+			})
 		}
 	}
 

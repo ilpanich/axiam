@@ -1,11 +1,13 @@
-"""AxiamClient regression tests (Task 2/3, SC#1, D-01/D-19, Pitfall 3/4).
+"""AxiamClient / AsyncAxiamClient regression tests (Task 2/3, SC#1, D-01/D-19,
+Pitfall 3/4, SDK-Q08).
 
 Uses ``respx`` to mock ``/api/v1/auth/login``, ``/mfa/verify``,
-``/api/v1/auth/refresh``, and the REST authz endpoints — proving BOTH
-``client.login(...)`` and ``await client.async_login(...)`` return a typed
-``LoginResult`` with ``mfa_required`` (SC#1 literal), the two-phase MFA
-flow, org_id/tenant_id enforcement, single-flight 401-retry-once authz, and
-context-manager cleanup.
+``/api/v1/auth/refresh``, and the REST authz endpoints — proving BOTH sync
+``client.login(...)`` (on ``AxiamClient``) and async
+``await client.login(...)`` (on the dedicated ``AsyncAxiamClient``, SDK-Q08)
+return a typed ``LoginResult`` with ``mfa_required`` (SC#1 literal), the
+two-phase MFA flow, org_id/tenant_id enforcement, single-flight
+401-retry-once authz, and context-manager cleanup.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import httpx
 import pytest
 import respx
 
-from axiam_sdk import AuthError, AuthzError, AxiamClient, LoginResult
+from axiam_sdk import AsyncAxiamClient, AuthError, AuthzError, AxiamClient, LoginResult
 
 BASE_URL = "https://example.test"
 
@@ -106,6 +108,8 @@ def test_sync_login_returns_login_result_with_mfa_required(respx_mock: respx.Moc
 async def test_async_login_returns_login_result_with_mfa_required(
     respx_mock: respx.MockRouter,
 ) -> None:
+    """SDK-Q08: the async twin lives on the dedicated ``AsyncAxiamClient`` —
+    canonical method name ``login`` (not ``async_login``)."""
     access = _make_access_token()
     respx_mock.post(f"{BASE_URL}{'/api/v1/auth/login'}").mock(
         return_value=httpx.Response(
@@ -118,8 +122,8 @@ async def test_async_login_returns_login_result_with_mfa_required(
         )
     )
 
-    async with AxiamClient(base_url=BASE_URL, tenant_slug="acme") as client:
-        result = await client.async_login("user@example.com", "password123")
+    async with AsyncAxiamClient(base_url=BASE_URL, tenant_slug="acme") as client:
+        result = await client.login("user@example.com", "password123")
 
     assert isinstance(result, LoginResult)
     assert result.mfa_required is False
@@ -215,9 +219,9 @@ async def test_async_verify_mfa_completes_two_phase_flow(respx_mock: respx.MockR
         )
     )
 
-    async with AxiamClient(base_url=BASE_URL, tenant_slug="acme") as client:
-        first = await client.async_login("user@example.com", "password123")
-        second = await client.async_verify_mfa(first.mfa_token, "123456")
+    async with AsyncAxiamClient(base_url=BASE_URL, tenant_slug="acme") as client:
+        first = await client.login("user@example.com", "password123")
+        second = await client.verify_mfa(first.mfa_token, "123456")
 
     assert second.mfa_required is False
     assert second.session_id == "s3"
@@ -391,11 +395,15 @@ def test_authz_403_raises_authz_error(respx_mock: respx.MockRouter) -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_check_access_shares_session_with_sync_login(
+async def test_async_check_access_after_async_login(
     respx_mock: respx.MockRouter,
 ) -> None:
-    """Sync login() then async_check_access() on the same client must
-    reuse the session cookie (SC-adjacent: cross-paradigm session share)."""
+    """SDK-Q08: ``AsyncAxiamClient.login()`` then ``.check_access()`` on the
+    SAME ``AsyncAxiamClient`` instance reuse that instance's own session
+    cookie. Unlike the pre-SDK-Q08 design, ``AsyncAxiamClient`` and
+    ``AxiamClient`` are separate objects with independent sessions — this
+    test exercises session reuse within one ``AsyncAxiamClient``, not
+    cross-client sharing between the two classes."""
     access = _make_access_token()
     respx_mock.post(f"{BASE_URL}/api/v1/auth/login").mock(
         return_value=httpx.Response(
@@ -408,9 +416,9 @@ async def test_async_check_access_shares_session_with_sync_login(
         return_value=httpx.Response(200, json={"allowed": True, "reason": None})
     )
 
-    client = AxiamClient(base_url=BASE_URL, tenant_slug="acme")
-    client.login("user@example.com", "password123")
-    result = await client.async_check_access("users:read", "user-42")
+    client = AsyncAxiamClient(base_url=BASE_URL, tenant_slug="acme")
+    await client.login("user@example.com", "password123")
+    result = await client.check_access("users:read", "user-42")
 
     assert result.allowed is True
     sent_request = check_route.calls.last.request
@@ -424,12 +432,50 @@ async def test_async_check_access_shares_session_with_sync_login(
 
 def test_public_import_surface() -> None:
     from axiam_sdk import (  # noqa: F401
+        AsyncAxiamClient,
         AuthError,
         AuthzError,
         AxiamClient,
         LoginResult,
         NetworkError,
     )
+
+
+# ---------------------------------------------------------------------
+# SDK-Q08: sync AxiamClient has no async_* surface; AsyncAxiamClient
+# exposes the canonical async method names (async def, not async_*).
+# ---------------------------------------------------------------------
+
+
+def test_sync_client_has_no_async_star_methods() -> None:
+    forbidden = {
+        "async_login",
+        "async_verify_mfa",
+        "async_refresh",
+        "async_logout",
+        "async_check_access",
+        "async_can",
+        "async_batch_check",
+    }
+    present = forbidden & set(dir(AxiamClient))
+    assert not present, f"AxiamClient must not expose async_* methods, found: {present}"
+
+
+def test_async_client_exposes_canonical_async_method_names() -> None:
+    import asyncio
+    import inspect
+
+    canonical = ["login", "verify_mfa", "refresh", "logout", "check_access", "can", "batch_check"]
+    for name in canonical:
+        method = getattr(AsyncAxiamClient, name)
+        assert asyncio.iscoroutinefunction(method) or inspect.iscoroutinefunction(method), (
+            f"AsyncAxiamClient.{name} must be an async def method"
+        )
+    # And none of the forbidden async_* names leak onto AsyncAxiamClient either —
+    # it exposes the canonical names directly, not async_-prefixed twins.
+    forbidden = {f"async_{name}" for name in canonical}
+    present = forbidden & set(dir(AsyncAxiamClient))
+    assert not present, f"AsyncAxiamClient must use canonical names, found: {present}"
 
 
 # ---------------------------------------------------------------------

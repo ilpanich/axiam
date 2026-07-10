@@ -1,11 +1,14 @@
-"""Unified AxiamClient — sync + async REST surface (D-01/D-19, SC#1).
+"""Sync AxiamClient — the AXIAM SDK's sync REST surface (D-01/D-19, SC#1).
 
-One ``AxiamClient`` exposes sync ``login``/``verify_mfa``/``refresh``/
-``logout``/``check_access``/``can``/``batch_check`` AND their ``async_*``
-twins on the SAME object, sharing one ``_Session`` (cookie jar, CSRF state,
-tenant/org context, refresh guard). Mirrors ``sdks/go/client.go`` +
-``sdks/go/login.go`` + ``sdks/go/authz.go``, adapted to Python's sync+async
-duality.
+``AxiamClient`` exposes sync ``login``/``verify_mfa``/``refresh``/``logout``/
+``check_access``/``can``/``batch_check`` methods only. The async twins live on
+the dedicated :class:`~axiam_sdk.AsyncAxiamClient` (see ``_async_client.py``,
+SDK-Q08) — NOT as ``async_*`` methods on this class. Both classes share the
+``_AxiamClientBase`` construction/body-building/response-parsing logic defined
+below (one ``_Session``: cookie jar, CSRF state, tenant/org context, refresh
+guard); only the transport (sync vs. async httpx client) and the single-flight
+refresh-guard call differ. Mirrors ``sdks/go/client.go`` + ``sdks/go/login.go``
++ ``sdks/go/authz.go``, adapted to Python's sync+async duality.
 """
 
 from __future__ import annotations
@@ -63,12 +66,13 @@ def _decode_unverified_claims(token: str) -> dict[str, Any]:
     return claims
 
 
-class AxiamClient:
-    """The AXIAM SDK's unified REST entry point (CONTRACT.md §1-§10).
-
-    Both ``client.login(...)`` (sync) and ``await client.async_login(...)``
-    (async) exist on this SAME object and both return a typed
-    :class:`~axiam_sdk._models.LoginResult` with ``mfa_required`` (SC#1).
+class _AxiamClientBase:
+    """Shared construction + body-building/response-parsing logic for both
+    :class:`AxiamClient` (sync) and :class:`~axiam_sdk._async_client.AsyncAxiamClient`
+    (async, SDK-Q08). Not part of the public API (leading underscore) — holds
+    no transport-specific (sync vs. async httpx client) code itself; each
+    concrete subclass supplies its own ``login``/``verify_mfa``/``refresh``/
+    ``logout``/``check_access``/``can``/``batch_check`` using the helpers here.
     """
 
     def __init__(
@@ -105,30 +109,6 @@ class AxiamClient:
         )
 
     # ------------------------------------------------------------------
-    # Lifecycle (D-19)
-    # ------------------------------------------------------------------
-
-    def __enter__(self) -> AxiamClient:
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
-
-    async def __aenter__(self) -> AxiamClient:
-        return self
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        await self.aclose()
-
-    def close(self) -> None:
-        """Close the sync httpx client, if constructed (D-19)."""
-        self._session.close()
-
-    async def aclose(self) -> None:
-        """Close the async httpx client, if constructed (D-19)."""
-        await self._session.aclose()
-
-    # ------------------------------------------------------------------
     # org_id resolution (Pitfall 3 — the real login/refresh endpoints
     # require an org_id/org_slug beyond CONTRACT.md §5's tenant-only
     # minimum)
@@ -144,44 +124,8 @@ class AxiamClient:
         self._resolved_org_id = org_id
 
     # ------------------------------------------------------------------
-    # login / verify_mfa (sync + async)
+    # login / verify_mfa body-building + response handling (shared)
     # ------------------------------------------------------------------
-
-    def login(self, email: str, password: str) -> LoginResult:
-        """``POST /api/v1/auth/login`` (CONTRACT.md §1). Returns a typed
-        :class:`LoginResult`; check ``mfa_required`` before assuming the
-        session is established (SC#1)."""
-        request = self._session.sync_client.build_request(
-            "POST", LOGIN_PATH, json=self._login_body(email, password)
-        )
-        response = self._session._send_sync(request)
-        return self._handle_login_response(response)
-
-    async def async_login(self, email: str, password: str) -> LoginResult:
-        """Async twin of :meth:`login`, on the same client/session (SC#1)."""
-        request = self._session.async_client.build_request(
-            "POST", LOGIN_PATH, json=self._login_body(email, password)
-        )
-        response = await self._session._send_async(request)
-        return self._handle_login_response(response)
-
-    def verify_mfa(self, mfa_token: Any, code: str) -> LoginResult:
-        """``POST /api/v1/auth/mfa/verify`` (CONTRACT.md §1) — completes the
-        two-phase flow started by :meth:`login` when ``mfa_required`` was
-        true."""
-        request = self._session.sync_client.build_request(
-            "POST", MFA_VERIFY_PATH, json=self._mfa_verify_body(mfa_token, code)
-        )
-        response = self._session._send_sync(request)
-        return self._handle_login_response(response)
-
-    async def async_verify_mfa(self, mfa_token: Any, code: str) -> LoginResult:
-        """Async twin of :meth:`verify_mfa`."""
-        request = self._session.async_client.build_request(
-            "POST", MFA_VERIFY_PATH, json=self._mfa_verify_body(mfa_token, code)
-        )
-        response = await self._session._send_async(request)
-        return self._handle_login_response(response)
 
     def _login_body(self, email: str, password: str) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -245,8 +189,117 @@ class AxiamClient:
         self._session.refresh_guard.seed(access, refresh, claims.get("exp"))
 
     # ------------------------------------------------------------------
-    # refresh (sync + async) — exactly one literal /api/v1/auth/refresh
-    # POST, routed through the single-flight guard (Pitfall 4, §9.3)
+    # refresh body-building + response handling (shared) — exactly one
+    # literal /api/v1/auth/refresh POST, routed through the single-flight
+    # guard (Pitfall 4, §9.3)
+    # ------------------------------------------------------------------
+
+    def _refresh_identifiers(self, observed_access: str) -> tuple[str, str]:
+        claims = _decode_unverified_claims(observed_access)
+        tenant_id = claims.get("tenant_id")
+        if not tenant_id:
+            raise AuthError("tenant_id could not be resolved from the access token")
+        org_id = self.resolved_org_id() or claims.get("org_id")
+        if not org_id:
+            raise AuthError(
+                "org_id could not be resolved; login() must succeed before refresh() — "
+                "supply org_id/org_slug or call login() first"
+            )
+        return tenant_id, org_id
+
+    def _refresh_body(self, tenant_id: str, org_id: str) -> dict[str, str]:
+        return {"tenant_id": tenant_id, "org_id": org_id}
+
+    def _handle_refresh_response(self, response: httpx.Response) -> dict[str, Any]:
+        if response.status_code != httpx.codes.OK:
+            # §9.3: no retry loop on refresh failure — propagate as-is.
+            # D-15: status code only, never a token value.
+            self._logger.warning("axiam_sdk: token refresh failed: status=%s", response.status_code)
+            raise error_from_http_status(response.status_code, "refresh failed", response=response)
+
+        new_access = self._session.cookie_value(ACCESS_COOKIE)
+        if not new_access:
+            raise AuthError("refresh response did not set axiam_access")
+        new_refresh = self._session.cookie_value(REFRESH_COOKIE)
+        claims = _decode_unverified_claims(new_access)
+        return {"access": new_access, "refresh": new_refresh, "exp": claims.get("exp")}
+
+    # ------------------------------------------------------------------
+    # logout (shared)
+    # ------------------------------------------------------------------
+
+    def _session_id_for_logout(self) -> str:
+        access = self._session.cookie_value(ACCESS_COOKIE)
+        if not access:
+            raise AuthError("no active session to log out")
+        claims = _decode_unverified_claims(access)
+        jti = claims.get("jti")
+        if not jti:
+            raise AuthError("access token has no session id (jti) to log out")
+        return str(jti)
+
+    # ------------------------------------------------------------------
+    # REST authz body-building (shared)
+    # ------------------------------------------------------------------
+
+    def _access_check_body(
+        self, action: str, resource_id: str, scope: str | None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"action": action, "resource_id": resource_id}
+        if scope is not None:
+            body["scope"] = scope
+        return body
+
+
+class AxiamClient(_AxiamClientBase):
+    """The AXIAM SDK's sync REST entry point (CONTRACT.md §1-§10).
+
+    ``client.login(...)`` returns a typed :class:`~axiam_sdk._models.LoginResult`
+    with ``mfa_required`` (SC#1). For the async twin, use
+    :class:`~axiam_sdk.AsyncAxiamClient` (SDK-Q08) — a separate class, not an
+    ``async_*`` method on this one.
+    """
+
+    # ------------------------------------------------------------------
+    # Lifecycle (D-19)
+    # ------------------------------------------------------------------
+
+    def __enter__(self) -> AxiamClient:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the sync httpx client, if constructed (D-19)."""
+        self._session.close()
+
+    # ------------------------------------------------------------------
+    # login / verify_mfa
+    # ------------------------------------------------------------------
+
+    def login(self, email: str, password: str) -> LoginResult:
+        """``POST /api/v1/auth/login`` (CONTRACT.md §1). Returns a typed
+        :class:`LoginResult`; check ``mfa_required`` before assuming the
+        session is established (SC#1)."""
+        request = self._session.sync_client.build_request(
+            "POST", LOGIN_PATH, json=self._login_body(email, password)
+        )
+        response = self._session._send_sync(request)
+        return self._handle_login_response(response)
+
+    def verify_mfa(self, mfa_token: Any, code: str) -> LoginResult:
+        """``POST /api/v1/auth/mfa/verify`` (CONTRACT.md §1) — completes the
+        two-phase flow started by :meth:`login` when ``mfa_required`` was
+        true."""
+        request = self._session.sync_client.build_request(
+            "POST", MFA_VERIFY_PATH, json=self._mfa_verify_body(mfa_token, code)
+        )
+        response = self._session._send_sync(request)
+        return self._handle_login_response(response)
+
+    # ------------------------------------------------------------------
+    # refresh
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
@@ -266,34 +319,6 @@ class AxiamClient:
             observed_access, lambda: self._do_refresh_sync(tenant_id, org_id)
         )
 
-    async def async_refresh(self) -> None:
-        """Async twin of :meth:`refresh`."""
-        observed_access = self._session.cookie_value(ACCESS_COOKIE)
-        if not observed_access:
-            raise AuthError("no access token to refresh — call async_login() first")
-
-        tenant_id, org_id = self._refresh_identifiers(observed_access)
-        self._logger.debug("axiam_sdk: token refresh triggered")
-        await self._session.refresh_guard.refresh_if_needed_async(
-            observed_access, lambda: self._do_refresh_async(tenant_id, org_id)
-        )
-
-    def _refresh_identifiers(self, observed_access: str) -> tuple[str, str]:
-        claims = _decode_unverified_claims(observed_access)
-        tenant_id = claims.get("tenant_id")
-        if not tenant_id:
-            raise AuthError("tenant_id could not be resolved from the access token")
-        org_id = self.resolved_org_id() or claims.get("org_id")
-        if not org_id:
-            raise AuthError(
-                "org_id could not be resolved; login() must succeed before refresh() — "
-                "supply org_id/org_slug or call login() first"
-            )
-        return tenant_id, org_id
-
-    def _refresh_body(self, tenant_id: str, org_id: str) -> dict[str, str]:
-        return {"tenant_id": tenant_id, "org_id": org_id}
-
     def _do_refresh_sync(self, tenant_id: str, org_id: str) -> dict[str, Any]:
         # The literal /api/v1/auth/refresh path is required so the
         # Path-scoped axiam_refresh cookie attaches (Pitfall 4).
@@ -303,29 +328,8 @@ class AxiamClient:
         response = self._session._send_sync(request)
         return self._handle_refresh_response(response)
 
-    async def _do_refresh_async(self, tenant_id: str, org_id: str) -> dict[str, Any]:
-        request = self._session.async_client.build_request(
-            "POST", "/api/v1/auth/refresh", json=self._refresh_body(tenant_id, org_id)
-        )
-        response = await self._session._send_async(request)
-        return self._handle_refresh_response(response)
-
-    def _handle_refresh_response(self, response: httpx.Response) -> dict[str, Any]:
-        if response.status_code != httpx.codes.OK:
-            # §9.3: no retry loop on refresh failure — propagate as-is.
-            # D-15: status code only, never a token value.
-            self._logger.warning("axiam_sdk: token refresh failed: status=%s", response.status_code)
-            raise error_from_http_status(response.status_code, "refresh failed", response=response)
-
-        new_access = self._session.cookie_value(ACCESS_COOKIE)
-        if not new_access:
-            raise AuthError("refresh response did not set axiam_access")
-        new_refresh = self._session.cookie_value(REFRESH_COOKIE)
-        claims = _decode_unverified_claims(new_access)
-        return {"access": new_access, "refresh": new_refresh, "exp": claims.get("exp")}
-
     # ------------------------------------------------------------------
-    # logout (sync + async)
+    # logout
     # ------------------------------------------------------------------
 
     def logout(self) -> None:
@@ -339,27 +343,6 @@ class AxiamClient:
             raise error_from_http_status(response.status_code, "logout failed", response=response)
         self._session.refresh_guard = type(self._session.refresh_guard)()
 
-    async def async_logout(self) -> None:
-        """Async twin of :meth:`logout`."""
-        session_id = self._session_id_for_logout()
-        request = self._session.async_client.build_request(
-            "POST", LOGOUT_PATH, json={"session_id": session_id}
-        )
-        response = await self._session._send_async(request)
-        if response.status_code >= 300:
-            raise error_from_http_status(response.status_code, "logout failed", response=response)
-        self._session.refresh_guard = type(self._session.refresh_guard)()
-
-    def _session_id_for_logout(self) -> str:
-        access = self._session.cookie_value(ACCESS_COOKIE)
-        if not access:
-            raise AuthError("no active session to log out")
-        claims = _decode_unverified_claims(access)
-        jti = claims.get("jti")
-        if not jti:
-            raise AuthError("access token has no session id (jti) to log out")
-        return str(jti)
-
     # ------------------------------------------------------------------
     # REST authz: check_access / can / batch_check (Task 3)
     # ------------------------------------------------------------------
@@ -370,23 +353,10 @@ class AxiamClient:
         wire = self._authz_post_sync(CHECK_PATH, body)
         return AccessResult(**wire)
 
-    async def async_check_access(
-        self, action: str, resource_id: str, scope: str | None = None
-    ) -> AccessResult:
-        """Async twin of :meth:`check_access`."""
-        body = self._access_check_body(action, resource_id, scope)
-        wire = await self._authz_post_async(CHECK_PATH, body)
-        return AccessResult(**wire)
-
     def can(self, action: str, resource_id: str, scope: str | None = None) -> bool:
         """Alias for ``check_access`` returning only the allowed boolean
         (CONTRACT.md §1 note, browser/UI scenarios)."""
         return self.check_access(action, resource_id, scope).allowed
-
-    async def async_can(self, action: str, resource_id: str, scope: str | None = None) -> bool:
-        """Async twin of :meth:`can`."""
-        result = await self.async_check_access(action, resource_id, scope)
-        return result.allowed
 
     def batch_check(self, checks: list[AccessCheck]) -> list[AccessResult]:
         """``POST /api/v1/authz/check/batch`` (CONTRACT.md §1) — results
@@ -395,40 +365,12 @@ class AxiamClient:
         wire = self._authz_post_sync(BATCH_CHECK_PATH, body)
         return BatchCheckResult(**wire).results
 
-    async def async_batch_check(self, checks: list[AccessCheck]) -> list[AccessResult]:
-        """Async twin of :meth:`batch_check`."""
-        body = {"checks": [c.model_dump(exclude_none=True) for c in checks]}
-        wire = await self._authz_post_async(BATCH_CHECK_PATH, body)
-        return BatchCheckResult(**wire).results
-
-    def _access_check_body(
-        self, action: str, resource_id: str, scope: str | None
-    ) -> dict[str, Any]:
-        body: dict[str, Any] = {"action": action, "resource_id": resource_id}
-        if scope is not None:
-            body["scope"] = scope
-        return body
-
     def _authz_post_sync(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         request = self._session.sync_client.build_request("POST", path, json=body)
         response = self._session._send_sync(request)
 
         if response.status_code == httpx.codes.UNAUTHORIZED:
             response = self._retry_after_refresh_sync(request)
-
-        if response.status_code < 200 or response.status_code >= 300:
-            raise error_from_http_status(
-                response.status_code, "authz check failed", response=response
-            )
-        result: dict[str, Any] = response.json()
-        return result
-
-    async def _authz_post_async(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        request = self._session.async_client.build_request("POST", path, json=body)
-        response = await self._session._send_async(request)
-
-        if response.status_code == httpx.codes.UNAUTHORIZED:
-            response = await self._retry_after_refresh_async(request)
 
         if response.status_code < 200 or response.status_code >= 300:
             raise error_from_http_status(
@@ -454,21 +396,6 @@ class AxiamClient:
             },
         )
         return self._session._send_sync(retry_request)
-
-    async def _retry_after_refresh_async(self, original_request: httpx.Request) -> httpx.Response:
-        """Async twin of :meth:`_retry_after_refresh_sync`."""
-        await self.async_refresh()
-        retry_request = self._session.async_client.build_request(
-            original_request.method,
-            original_request.url,
-            content=original_request.content,
-            headers={
-                k: v
-                for k, v in original_request.headers.items()
-                if k.lower() not in ("content-length", "x-csrf-token")
-            },
-        )
-        return await self._session._send_async(retry_request)
 
 
 def _null_logger() -> logging.Logger:

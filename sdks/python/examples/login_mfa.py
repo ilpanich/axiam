@@ -1,9 +1,9 @@
 """login_mfa.py demonstrates the two-phase login/verify_mfa flow
-(CONTRACT.md §1, §5), for both the sync and async surfaces of the same
-AxiamClient object (SC#1).
+(CONTRACT.md §1, §5), on both the sync AxiamClient and the dedicated async
+AsyncAxiamClient (SC#1, SDK-Q08).
 
-It constructs an AxiamClient with a non-optional tenant_slug (§5 — there is
-no default tenant), calls login(), and branches on LoginResult.mfa_required:
+It constructs a client with a non-optional tenant_slug (§5 — there is no
+default tenant), calls login(), and branches on LoginResult.mfa_required:
 when the server responds with an MFA challenge instead of a completed
 session, it calls verify_mfa(mfa_token, code) with the challenge token and a
 TOTP code to complete the flow.
@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from axiam_sdk import AuthError, AxiamClient
+from axiam_sdk import AsyncAxiamClient, AuthError, AxiamClient
 
 
 def getenv(key: str, fallback: str) -> str:
@@ -69,18 +69,20 @@ async def async_login_mfa() -> None:
     password = getenv("AXIAM_PASSWORD", "changeme")
     totp_code = getenv("AXIAM_TOTP_CODE", "000000")
 
-    # await client.async_login(...) exists on the SAME AxiamClient object as
-    # the sync client.login(...) above (D-01/SC#1) — one shared session.
-    async with AxiamClient(base_url=base_url, tenant_slug=tenant_slug) as client:
+    # AsyncAxiamClient (SDK-Q08) is a SEPARATE class from the sync
+    # AxiamClient above (D-01/SC#1) — its own session, own cookie jar, own
+    # single-flight refresh guard — exposing the same canonical method names
+    # (`login`, `verify_mfa`, ...) as `async def`.
+    async with AsyncAxiamClient(base_url=base_url, tenant_slug=tenant_slug) as client:
         try:
-            result = await client.async_login(email, password)
+            result = await client.login(email, password)
         except AuthError as exc:
             print(f"async login failed: {exc}")
             return
 
         if result.mfa_required:
             print("MFA required (async) — completing the two-phase flow")
-            completed = await client.async_verify_mfa(result.mfa_token, totp_code)
+            completed = await client.verify_mfa(result.mfa_token, totp_code)
             print(
                 f"MFA verified (async) — session_id: {completed.session_id}, "
                 f"expires_in: {completed.expires_in}s"

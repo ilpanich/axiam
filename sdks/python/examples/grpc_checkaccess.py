@@ -22,7 +22,7 @@ import asyncio
 import os
 import threading
 
-from axiam_sdk import AuthError, AxiamClient
+from axiam_sdk import AsyncAxiamClient, AuthError, AxiamClient
 from axiam_sdk.grpc import AsyncAuthzGrpcClient, AuthzGrpcClient
 
 
@@ -114,9 +114,11 @@ async def async_grpc_checkaccess() -> None:
     subject_id = getenv("AXIAM_SUBJECT_ID", "00000000-0000-0000-0000-000000000000")
     tenant_id = getenv("AXIAM_TENANT_ID", "00000000-0000-0000-0000-000000000000")
 
-    rest = AxiamClient(base_url=base_url, tenant_slug=tenant_slug)
+    # AsyncAxiamClient (SDK-Q08) is a dedicated async client — a separate
+    # class from the sync AxiamClient above, not an `async_*`-prefixed twin.
+    rest = AsyncAxiamClient(base_url=base_url, tenant_slug=tenant_slug)
     try:
-        result = await rest.async_login(email, password)
+        result = await rest.login(email, password)
     except AuthError as exc:
         print(f"async login failed: {exc}")
         return
@@ -128,7 +130,7 @@ async def async_grpc_checkaccess() -> None:
     cache.set(os.environ.get("AXIAM_ACCESS_TOKEN"))
 
     async def async_refresh_fn() -> None:
-        await rest.async_refresh()
+        await rest.refresh()
         cache.set(os.environ.get("AXIAM_ACCESS_TOKEN"))
 
     # AsyncAuthzGrpcClient is a first-class async transport (D-12), not a

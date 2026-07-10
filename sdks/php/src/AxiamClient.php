@@ -285,8 +285,13 @@ final class AxiamClient
         return $this->authzDispatcher->checkAccess($action, $resourceId, $scope);
     }
 
-    /** `can` — the browser/UI-scenario alias for {@see self::checkAccess()} (CONTRACT.md §1 note). */
-    public function can(string $resource, string $action): bool
+    /**
+     * `can` — the browser/UI-scenario alias for {@see self::checkAccess()} (CONTRACT.md §1
+     * note). Argument order is `(action, resource)` — matching {@see self::checkAccess()}
+     * and every other AXIAM SDK's `can`/`Can` (D-09/SDK-Q09; this was previously reversed
+     * relative to the rest of the SDK family).
+     */
+    public function can(string $action, string $resource): bool
     {
         return $this->authzDispatcher->can($resource, $action);
     }

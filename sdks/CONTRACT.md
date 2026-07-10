@@ -25,10 +25,31 @@ each language uses its own idiomatic naming convention as shown below.
 | browser access alias| `can`             | `can`                     | `can`               | `can`            | `Can`           | `can`           | `Can`           |
 | batch access check  | `batch_check`     | `batchCheck`              | `batch_check`       | `batchCheck`     | `BatchCheck`    | `batchCheck`    | `BatchCheck`    |
 
+**Argument order:** every operation above takes the acted-upon subject before the object it
+acts on — concretely, `check_access`/`can` take `(action, resource[, scope])` in every SDK,
+with no exception. PHP's `can(action, resource)` (`sdks/php/src/AxiamClient.php`) was
+reversed relative to this rule prior to SDK-Q09 remediation (2026-07); it has been corrected
+to match its own `checkAccess(action, resource)` and every other SDK's `can`/`Can`.
+
 **Notes:**
 - `can` is an alias for `check_access` targeting browser/UI scenarios; it calls `POST /api/v1/authz/check` via REST (avoids N round-trips when combined with `batch_check` for page-level permission gating).
 - `batch_check` calls `POST /api/v1/authz/check/batch` and returns results in the same order as input.
 - No SDK is permitted to expose additional login/auth/authz method names that diverge from this map.
+
+### Async method naming (SDK-Q08)
+
+The canonical names above are what every SDK's **synchronous** (or, for languages with no
+sync/async distinction, single) surface exposes. Where a language also offers an async
+surface, the following per-language conventions are all accepted — a language MUST NOT mix
+approaches within itself, but different languages are not required to converge on one
+convention:
+
+| Language   | Accepted async convention                                                                | Notes |
+|------------|-------------------------------------------------------------------------------------------|-------|
+| Python     | A **separate `AsyncAxiamClient` class** exposing the canonical names (`login`, `verify_mfa`, `refresh`, `logout`, `check_access`, `can`, `batch_check`) as `async def` methods. | Confirmed-breaking (pre-1.0) fix, 2026-07: previously a single `AxiamClient` exposed both the sync methods AND `async_*`-prefixed twins (`async_login`, `async_check_access`, ...) on the same object. `async_*` names are no longer permitted anywhere in the Python SDK's public surface. |
+| Java       | The sync method PLUS a same-named class with an **`*Async` suffix companion method** (e.g. `checkAccess`/`checkAccessAsync`) on the same client object. | **Accepted exception** to the "no additional diverging names" rule above — Java idiom favors suffix-async twins on one object (mirrors `CompletableFuture`-returning sibling methods in the broader Java ecosystem, e.g. `java.util.concurrent` conventions). |
+| C#         | **`*Async`-only** methods (e.g. `CheckAccessAsync`), per the .NET Task-based Asynchronous Pattern (TAP) — no separate non-`Async` sync method is required to exist alongside it. | **Accepted exception**: TAP is the idiomatic .NET convention; C# is not required to also offer a blocking `CheckAccess`. |
+| Rust, TypeScript/JS, Go, PHP | No separate async naming convention — the canonical name IS the (only, or primarily-used) call form for that language's ecosystem (`async fn`/`Promise`-returning function/goroutine-friendly call/Fiber-safe call, respectively, under the same canonical name). | N/A |
 
 ---
 
@@ -321,6 +342,22 @@ Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conf
 ### C# `Grpc.Tools` Exception
 
 C# is the one documented deviation from the repository-wide `buf` codegen pipeline. The C# SDK uses `Grpc.Tools` MSBuild integration (via `<Protobuf Include="../../proto/**/*.proto" GrpcServices="Client" />` in the `.csproj`) to generate gRPC client stubs at build time, rather than a `buf generate` plugin entry. This is intentional (D-01 in `15-CONTEXT.md`) and does not affect behavioral conformance with §1–§10. All other SDKs (Rust, TypeScript, Go, Python, Java, PHP) run `buf generate` as their codegen step.
+
+### Breaking Changes Log
+
+No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
+recorded here until one exists.
+
+- **2026-07 (SDK-Q08/SDK-Q09, pre-1.0)** — confirmed-breaking, made now rather than deferred:
+  - PHP: `AxiamClient::can()` argument order reversed from `(resource, action)` to
+    `(action, resource)` — matches `checkAccess()` and every other SDK's `can`/`Can` (§1).
+  - Python: the `async_*`-prefixed methods (`async_login`, `async_verify_mfa`, `async_refresh`,
+    `async_logout`, `async_check_access`, `async_can`, `async_batch_check`) were removed from
+    `AxiamClient`. A new `AsyncAxiamClient` class exposes the canonical names (`login`,
+    `verify_mfa`, `refresh`, `logout`, `check_access`, `can`, `batch_check`) as `async def`
+    methods instead (§1 "Async method naming" table above).
+  - Java `*Async` companion methods and C# `*Async`-only (TAP) methods are unaffected —
+    formally documented as accepted per-language async conventions (§1).
 
 ### OpenAPI Export Feature Flag
 

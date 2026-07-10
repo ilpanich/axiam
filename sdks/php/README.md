@@ -43,7 +43,8 @@ if ($result->mfaRequired) {
 }
 
 // Same $client instance — the authenticated session's cookies/CSRF are shared automatically.
-$allowed = $client->can('documents', 'read');
+// `can(action, resource)` — same argument order as every other AXIAM SDK (CONTRACT.md §1).
+$allowed = $client->can('read', 'documents');
 ```
 
 See [`examples/login_mfa.php`](examples/login_mfa.php) and

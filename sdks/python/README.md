@@ -18,14 +18,15 @@ See [`../CONTRACT.md`](../CONTRACT.md) for the full cross-language behavioral co
 
 ## Status
 
-Implemented (Phase 19). A unified `AxiamClient` exposes both sync and async
-interfaces (`login`/`async_login`, `verify_mfa`/`async_verify_mfa`,
-`refresh`/`async_refresh`, `logout`/`async_logout`,
-`check_access`/`async_check_access`, `can`/`async_can`,
-`batch_check`/`async_batch_check`) sharing one session, one cookie jar, and
-one single-flight refresh guard. gRPC (sync `grpcio` + async `grpc.aio`),
-AMQP (async-only `aio-pika`), a FastAPI dependency, and a Django middleware
-are all available. Six runnable examples live under [`examples/`](./examples).
+Implemented (Phase 19). `AxiamClient` (sync) and the dedicated
+`AsyncAxiamClient` (async, SDK-Q08) each expose the same canonical operation
+names — `login`, `verify_mfa`, `refresh`, `logout`, `check_access`, `can`,
+`batch_check` — as sync or `async def` methods respectively (never an
+`async_*`-prefixed twin on the sync class). Each client owns its own session,
+cookie jar, and single-flight refresh guard. gRPC (sync `grpcio` + async
+`grpc.aio`), AMQP (async-only `aio-pika`), a FastAPI dependency, and a Django
+middleware are all available. Six runnable examples live under
+[`examples/`](./examples).
 
 ## Installation
 
@@ -48,11 +49,11 @@ from axiam_sdk import AxiamClient
 
 ## Quickstart
 
-### Login + MFA (§1, §5) — sync and async on the same client
+### Login + MFA (§1, §5) — sync `AxiamClient` or async `AsyncAxiamClient`
 
-Both `client.login(...)` (sync) and `await client.async_login(...)` (async)
-exist on the same `AxiamClient` object and share one session — construct the
-client once and use whichever paradigm fits your call site.
+`AxiamClient` (sync) and `AsyncAxiamClient` (async, SDK-Q08) are separate
+classes, each with their own session — pick the one that matches your call
+site's paradigm.
 
 ```python
 from axiam_sdk import AxiamClient
@@ -69,13 +70,13 @@ with AxiamClient(base_url="https://localhost:8443", tenant_slug="acme") as clien
 
 ```python
 import asyncio
-from axiam_sdk import AxiamClient
+from axiam_sdk import AsyncAxiamClient
 
 async def main() -> None:
-    async with AxiamClient(base_url="https://localhost:8443", tenant_slug="acme") as client:
-        result = await client.async_login(email, password)
+    async with AsyncAxiamClient(base_url="https://localhost:8443", tenant_slug="acme") as client:
+        result = await client.login(email, password)
         if result.mfa_required:
-            result = await client.async_verify_mfa(result.mfa_token, totp_code)
+            result = await client.verify_mfa(result.mfa_token, totp_code)
         print(result.session_id, result.expires_in)
 
 asyncio.run(main())
@@ -96,8 +97,9 @@ results = client.batch_check([
 ])
 ```
 
-Async twins (`async_check_access`, `async_can`, `async_batch_check`) share
-the same session and single-flight refresh guard (§9). See
+`AsyncAxiamClient` exposes the same `check_access`/`can`/`batch_check` names
+as `async def` methods, each backed by that client's own session and
+single-flight refresh guard (§9). See
 [`examples/rest_authz.py`](./examples/rest_authz.py).
 
 ### gRPC authorization checks (§1, §5, §9, §6)

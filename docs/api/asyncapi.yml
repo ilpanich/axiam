@@ -320,6 +320,16 @@ components:
         domain-separated and versioned by `key_version`. Consumers reject
         (nack, no requeue) whenever the signature is absent or invalid —
         there is no fail-open path (D-05c).
+
+
+        NEW-4 (v2, BREAKING): the signed body additionally carries a
+        mandatory `nonce` + `issued_at` for replay protection. This is a
+        HARD CUTOVER — consumers reject (nack, no requeue) any message with
+        `key_version < 2`, a stale/future `issued_at` (outside ±5 min), or a
+        replayed `nonce`. Producers MUST upgrade to emit v2 before the
+        enforcing server is deployed. Signed field order:
+        correlation_id, tenant_id, subject_id, action, resource_id,
+        scope?, key_version, nonce, issued_at (hmac_signature absent).
       required:
         - correlation_id
         - tenant_id
@@ -327,6 +337,8 @@ components:
         - action
         - resource_id
         - key_version
+        - nonce
+        - issued_at
       properties:
         correlation_id:
           type: string
@@ -353,7 +365,25 @@ components:
           description: >-
             HKDF master-key rotation version (SECHRD-08/D-05b). Selects
             which per-tenant subkey derivation the signature was produced
-            with. Defaults to `CURRENT_KEY_VERSION` (1) when absent.
+            with. As of NEW-4 the current value is 2; consumers reject
+            `key_version < 2` (hard cutover — no v1 grace path).
+        nonce:
+          type: string
+          format: uuid
+          description: >-
+            NEW-4 replay-protection nonce. Per-message unique UUID, ALWAYS
+            emitted (inside the signed body, immediately after
+            `key_version`). The consumer records (tenant_id, nonce) in a
+            durable store; a duplicate within the freshness window is a
+            replay and is rejected.
+        issued_at:
+          type: string
+          format: date-time
+          description: >-
+            NEW-4 producer send time (RFC3339 UTC), ALWAYS emitted (inside
+            the signed body, immediately after `nonce`). Rejected when
+            outside ±`AXIAM__AMQP__REPLAY_SKEW_SECS` (default 300s) of the
+            consumer clock.
         hmac_signature:
           type: string
           nullable: true
@@ -384,6 +414,14 @@ components:
         HMAC-SHA256-signed (SEC-022/055), same convention as `AuthzRequest`
         (per-tenant HKDF-derived subkey, `key_version` on the wire,
         fail-closed — no accept-when-absent path, SECHRD-08/D-05a/b/c).
+
+
+        NEW-4 (v2, BREAKING): also carries the mandatory `nonce` + `issued_at`
+        replay-protection fields (hard cutover — consumers reject
+        `key_version < 2`, stale `issued_at`, or a replayed `nonce`). Signed
+        field order: tenant_id, actor_id, actor_type, action, resource_id?,
+        outcome, ip_address?, metadata?, key_version, nonce, issued_at
+        (hmac_signature absent).
       required:
         - tenant_id
         - actor_id
@@ -391,6 +429,8 @@ components:
         - action
         - outcome
         - key_version
+        - nonce
+        - issued_at
       properties:
         tenant_id:
           type: string
@@ -419,6 +459,22 @@ components:
           type: integer
           minimum: 0
           maximum: 255
+          description: >-
+            As of NEW-4 the current value is 2; consumers reject
+            `key_version < 2` (hard cutover).
+        nonce:
+          type: string
+          format: uuid
+          description: >-
+            NEW-4 replay-protection nonce (per-message unique UUID), ALWAYS
+            emitted inside the signed body immediately after `key_version`.
+        issued_at:
+          type: string
+          format: date-time
+          description: >-
+            NEW-4 producer send time (RFC3339 UTC), ALWAYS emitted inside the
+            signed body immediately after `nonce`; rejected outside the
+            freshness window.
         hmac_signature:
           type: string
           nullable: true

@@ -1,6 +1,7 @@
 //! SurrealDB repository implementations.
 
 mod account_deletion;
+mod amqp_nonce_replay;
 mod audit;
 mod ca_certificate;
 mod certificate;
@@ -37,6 +38,7 @@ mod webauthn_credential;
 mod webhook;
 
 pub use account_deletion::SurrealAccountDeletionRepository;
+pub use amqp_nonce_replay::SurrealAmqpNonceRepository;
 pub use audit::SurrealAuditLogRepository;
 pub use ca_certificate::SurrealCaCertificateRepository;
 pub use certificate::SurrealCertificateRepository;

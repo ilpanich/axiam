@@ -2,9 +2,12 @@
 
 use axiam_authz::AuthorizationEngine;
 use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_core::error::AxiamError;
 use axiam_core::repository::{
-    GroupRepository, PermissionRepository, ResourceRepository, RoleRepository, ScopeRepository,
+    AmqpNonceRepository, GroupRepository, PermissionRepository, ResourceRepository, RoleRepository,
+    ScopeRepository,
 };
+use chrono::Utc;
 use futures_lite::StreamExt;
 use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions};
 use lapin::types::FieldTable;
@@ -12,7 +15,9 @@ use lapin::{BasicProperties, Channel, Confirmation};
 use tracing::{error, info, warn};
 
 use crate::connection::queues;
-use crate::messages::{AuthzRequest, AuthzResponse, verify_tenant_signature};
+use crate::messages::{
+    AuthzRequest, AuthzResponse, MIN_ACCEPTED_KEY_VERSION, is_fresh, verify_tenant_signature,
+};
 
 /// Start consuming authorization requests from the `axiam.authz.request` queue.
 ///
@@ -25,16 +30,25 @@ use crate::messages::{AuthzRequest, AuthzResponse, verify_tenant_signature};
 /// message's `tenant_id` + `key_version`, then the `hmac_signature` is
 /// checked against it. Messages with an invalid or missing signature are
 /// nacked and never processed; there is no fail-open path (D-05c).
-pub async fn start_authz_consumer<R, P, Res, S, G>(
+///
+/// NEW-4 (hard cutover): after a valid signature, the message is additionally
+/// rejected (nack, requeue:false) when its `key_version` is below
+/// [`MIN_ACCEPTED_KEY_VERSION`], its `issued_at` is outside the ±`replay_skew`
+/// freshness window, or its `nonce` has already been consumed (a duplicate in
+/// the durable `nonce_repo` store is a replay). There is no v1 grace path.
+pub async fn start_authz_consumer<R, P, Res, S, G, N>(
     channel: Channel,
     engine: AuthorizationEngine<R, P, Res, S, G>,
     master_signing_key: Vec<u8>,
+    nonce_repo: N,
+    replay_skew: chrono::Duration,
 ) where
     R: RoleRepository + 'static,
     P: PermissionRepository + 'static,
     Res: ResourceRepository + 'static,
     S: ScopeRepository + 'static,
     G: GroupRepository + 'static,
+    N: AmqpNonceRepository + 'static,
 {
     info!("Starting authorization AMQP consumer");
 
@@ -119,6 +133,87 @@ pub async fn start_authz_consumer<R, P, Res, S, G>(
                 })
                 .await;
             continue;
+        }
+
+        // NEW-4 (hard cutover): reject pre-v2 messages that predate the
+        // mandatory nonce/issued_at replay-protection fields.
+        if key_version < MIN_ACCEPTED_KEY_VERSION {
+            warn!(
+                delivery_tag = tag,
+                tenant_id = %tenant_id,
+                key_version,
+                "AuthzRequest key_version below minimum — rejecting (NEW-4 replay protection)"
+            );
+            let _ = delivery
+                .acker
+                .nack(BasicNackOptions {
+                    requeue: false,
+                    ..BasicNackOptions::default()
+                })
+                .await;
+            continue;
+        }
+
+        // NEW-4: reject stale/future messages outside the freshness window.
+        let now = Utc::now();
+        if !is_fresh(request.issued_at, now, replay_skew) {
+            warn!(
+                delivery_tag = tag,
+                tenant_id = %tenant_id,
+                issued_at = %request.issued_at,
+                "AuthzRequest issued_at outside freshness window — rejecting (NEW-4)"
+            );
+            let _ = delivery
+                .acker
+                .nack(BasicNackOptions {
+                    requeue: false,
+                    ..BasicNackOptions::default()
+                })
+                .await;
+            continue;
+        }
+
+        // NEW-4: durable nonce dedup. Insert-or-conflict; a ReplayDetected
+        // conflict means this exact signed message was already consumed. The
+        // nonce only needs to outlive the freshness window (issued_at + skew).
+        let nonce_expires_at = request.issued_at + replay_skew;
+        match nonce_repo
+            .insert_nonce(tenant_id, request.nonce, nonce_expires_at)
+            .await
+        {
+            Ok(()) => {}
+            Err(AxiamError::ReplayDetected) => {
+                warn!(
+                    delivery_tag = tag,
+                    tenant_id = %tenant_id,
+                    nonce = %request.nonce,
+                    "AuthzRequest nonce replay detected — rejecting (NEW-4)"
+                );
+                let _ = delivery
+                    .acker
+                    .nack(BasicNackOptions {
+                        requeue: false,
+                        ..BasicNackOptions::default()
+                    })
+                    .await;
+                continue;
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    delivery_tag = tag,
+                    tenant_id = %tenant_id,
+                    "Failed to record AuthzRequest nonce — rejecting (dead-letter, NEW-4)"
+                );
+                let _ = delivery
+                    .acker
+                    .nack(BasicNackOptions {
+                        requeue: false,
+                        ..BasicNackOptions::default()
+                    })
+                    .await;
+                continue;
+            }
         }
 
         let correlation_id = request.correlation_id;

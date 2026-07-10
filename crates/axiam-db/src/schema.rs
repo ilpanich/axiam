@@ -445,6 +445,25 @@ DEFINE INDEX IF NOT EXISTS idx_replay_expires_at ON TABLE saml_assertion_replay 
     COLUMNS expires_at;
 
 -- =======================================================================
+-- AMQP Nonce Replay Table (NEW-4)
+-- =======================================================================
+-- Durable per-tenant nonce store for AMQP message replay protection. The
+-- authz/audit consumers insert (tenant_id, nonce) after a valid HMAC + fresh
+-- issued_at; the UNIQUE index turns a replayed nonce into a conflict that the
+-- repository maps to ReplayDetected. Rows expire at issued_at + skew and are
+-- swept by the periodic cleanup task (no native SurrealDB TTL, RESEARCH §7).
+DEFINE TABLE IF NOT EXISTS amqp_nonce_replay SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE amqp_nonce_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS nonce ON TABLE amqp_nonce_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE amqp_nonce_replay TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE amqp_nonce_replay TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_amqp_nonce_uniq ON TABLE amqp_nonce_replay \
+    COLUMNS tenant_id, nonce UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_amqp_nonce_expires_at ON TABLE amqp_nonce_replay \
+    COLUMNS expires_at;
+
+-- =======================================================================
 -- Federation Login State Table (D-24)
 -- =======================================================================
 DEFINE TABLE IF NOT EXISTS federation_login_state SCHEMAFULL;

@@ -21,16 +21,17 @@ use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::gdpr::CreateErasureProof;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::repository::{
-    AccountDeletionRepository, AssertionReplayRepository, AuditLogFilter, AuditLogRepository,
-    ConsentRepository, ErasureProofRepository, ExportJobRepository, FederationLinkRepository,
-    FederationLoginStateRepository, GroupRepository, MailPublisher, Pagination,
-    PasswordHistoryRepository, RoleRepository, SessionRepository, TenantRepository, UserRepository,
-    WebauthnCredentialRepository,
+    AccountDeletionRepository, AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter,
+    AuditLogRepository, ConsentRepository, ErasureProofRepository, ExportJobRepository,
+    FederationLinkRepository, FederationLoginStateRepository, GroupRepository, MailPublisher,
+    Pagination, PasswordHistoryRepository, RoleRepository, SessionRepository, TenantRepository,
+    UserRepository, WebauthnCredentialRepository,
 };
 use axiam_db::{
-    SurrealAccountDeletionRepository, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
-    SurrealConsentRepository, SurrealErasureProofRepository, SurrealExportJobRepository,
-    SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
+    SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
+    SurrealAuditLogRepository, SurrealConsentRepository, SurrealErasureProofRepository,
+    SurrealExportJobRepository, SurrealFederationLinkRepository,
+    SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealPasswordHistoryRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
     SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
     SurrealWebauthnCredentialRepository,
@@ -57,6 +58,8 @@ pub struct CleanupTask<C: Connection> {
     // Existing federation cleanup repos.
     replay_repo: Arc<SurrealAssertionReplayRepository<C>>,
     state_repo: Arc<SurrealFederationLoginStateRepository<C>>,
+    // NEW-4: AMQP nonce replay store sweep.
+    amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
     // GDPR purge sweep (D-05/D-06/D-08).
     user_repo: Arc<SurrealUserRepository<C>>,
     auth_svc: Arc<AuthSvc<C>>,
@@ -160,6 +163,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     pub fn new(
         replay_repo: Arc<SurrealAssertionReplayRepository<C>>,
         state_repo: Arc<SurrealFederationLoginStateRepository<C>>,
+        amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
         user_repo: Arc<SurrealUserRepository<C>>,
         auth_svc: Arc<AuthSvc<C>>,
         audit_repo: Arc<SurrealAuditLogRepository<C>>,
@@ -183,6 +187,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         Self {
             replay_repo,
             state_repo,
+            amqp_nonce_repo,
             user_repo,
             auth_svc,
             audit_repo,
@@ -236,6 +241,17 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         Ok(_) => {}
                         Err(e) => {
                             tracing::warn!(error = ?e, "federation_login_state cleanup failed");
+                        }
+                    }
+
+                    // NEW-4: sweep expired AMQP replay-protection nonces.
+                    match self.amqp_nonce_repo.cleanup_expired().await {
+                        Ok(n) if n > 0 => {
+                            tracing::debug!(deleted = n, "amqp_nonce_replay cleanup");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(error = ?e, "amqp_nonce_replay cleanup failed");
                         }
                     }
 

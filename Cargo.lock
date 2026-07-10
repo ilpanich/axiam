@@ -1000,11 +1000,13 @@ dependencies = [
  "samael",
  "serde",
  "serde_json",
+ "surrealdb",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",
  "uuid",
+ "wiremock",
  "x509-parser 0.17.0",
 ]
 

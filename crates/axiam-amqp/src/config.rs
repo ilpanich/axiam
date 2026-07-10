@@ -35,6 +35,17 @@ pub struct AmqpConfig {
     /// fails closed (`AxiamError::ServiceUnavailable`) if unset.
     #[serde(default)]
     pub signing_key: Option<String>,
+    /// Freshness skew window (seconds) for AMQP replay protection (NEW-4). An
+    /// `AuthzRequest`/`AuditEventMessage` is accepted only when its `issued_at`
+    /// lies within ±this many seconds of the consumer's clock. Set via
+    /// `AXIAM__AMQP__REPLAY_SKEW_SECS`; defaults to
+    /// [`crate::messages::DEFAULT_FRESHNESS_SKEW_SECS`] (5 minutes).
+    #[serde(default = "default_replay_skew_secs")]
+    pub replay_skew_secs: u64,
+}
+
+fn default_replay_skew_secs() -> u64 {
+    crate::messages::DEFAULT_FRESHNESS_SKEW_SECS as u64
 }
 
 impl Default for AmqpConfig {
@@ -45,6 +56,7 @@ impl Default for AmqpConfig {
             reconnect_delay_ms: 5000,
             max_retries: 5,
             signing_key: None,
+            replay_skew_secs: default_replay_skew_secs(),
         }
     }
 }
@@ -82,6 +94,12 @@ impl AmqpConfig {
                     .to_string(),
             )),
         }
+    }
+
+    /// Resolve the configured freshness skew to a `chrono::Duration` for the
+    /// AMQP replay-protection gate (NEW-4).
+    pub fn replay_skew(&self) -> chrono::Duration {
+        chrono::Duration::seconds(self.replay_skew_secs as i64)
     }
 }
 

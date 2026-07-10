@@ -18,8 +18,8 @@ pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};
 pub use repository::{
-    SurrealAccountDeletionRepository, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
-    SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
+    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealConsentRepository, SurrealEmailConfigRepository,
     SurrealEmailTemplateRepository, SurrealEmailVerificationTokenRepository,
     SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,

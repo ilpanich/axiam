@@ -22,8 +22,9 @@ use axiam_auth::{
 };
 use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
 use axiam_db::{
-    DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
-    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
+    SurrealAssertionReplayRepository, SurrealAuditLogRepository,
+    SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
     SurrealEmailVerificationTokenRepository, SurrealErasureProofRepository,
     SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
@@ -494,6 +495,9 @@ async fn main() -> std::io::Result<()> {
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client_cloned().await);
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client_cloned().await);
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client_cloned().await);
+    // NEW-4: durable AMQP nonce store for replay protection, shared by the
+    // authz + audit consumers and swept by the periodic cleanup task.
+    let amqp_nonce_repo = SurrealAmqpNonceRepository::new(db.client_cloned().await);
     let federation_login_state_repo =
         SurrealFederationLoginStateRepository::new(db.client_cloned().await);
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
@@ -635,12 +639,17 @@ async fn main() -> std::io::Result<()> {
         .resolve_signing_key()
         .expect("AMQP signing key must resolve (SECHRD-08 / D-05c) — see AXIAM__AMQP__SIGNING_KEY");
     tracing::info!("AMQP signing key resolved (SEC-022/SECHRD-08)");
+    // NEW-4: freshness skew window shared by both consumers.
+    let amqp_replay_skew = config.amqp.replay_skew();
     let amqp_signing_key_clone = amqp_signing_key.clone();
+    let authz_nonce_repo = amqp_nonce_repo.clone();
     tokio::spawn(async move {
         axiam_amqp::authz_consumer::start_authz_consumer(
             amqp_channel,
             amqp_engine,
             amqp_signing_key_clone,
+            authz_nonce_repo,
+            amqp_replay_skew,
         )
         .await;
         tracing::error!("AMQP authz consumer exited — shutting down process");
@@ -669,11 +678,14 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to create AMQP audit consumer channel");
     let amqp_audit_repo = audit_repo.clone();
+    let audit_nonce_repo = amqp_nonce_repo.clone();
     tokio::spawn(async move {
         axiam_amqp::audit_consumer::start_audit_consumer(
             audit_channel,
             amqp_audit_repo,
             amqp_signing_key,
+            audit_nonce_repo,
+            amqp_replay_skew,
         )
         .await;
         tracing::error!("AMQP audit consumer exited — shutting down process");
@@ -819,6 +831,7 @@ async fn main() -> std::io::Result<()> {
     let cleanup = cleanup::CleanupTask::new(
         Arc::new(assertion_replay_repo.clone()),
         Arc::new(federation_login_state_repo.clone()),
+        Arc::new(amqp_nonce_repo.clone()),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),
         Arc::new(audit_repo.clone()),

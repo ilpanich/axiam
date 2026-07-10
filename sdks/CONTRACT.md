@@ -256,19 +256,61 @@ All SDKs that consume AXIAM AMQP messages (currently: Rust, TypeScript/Node, Go,
 3. **Missing signature**: A message arriving without `hmac_signature` SHOULD be nacked without requeue in strict mode. During rolling deployments, lenient mode (log-and-accept) is permitted as a temporary measure; strict mode MUST be the default.
 4. **Security event**: A failed HMAC check MUST be logged as a security event with at minimum: timestamp, exchange, routing key, and tenant context (if available from other message fields). Do NOT log the received or expected HMAC value.
 
+### v2 — Replay Protection (NEW-4, `key_version = 2`) — BREAKING
+
+**As of `CURRENT_KEY_VERSION = 2` the signed body carries two additional
+mandatory fields — `nonce` and `issued_at` — that are covered by the HMAC.**
+This is a **hard cutover with no grace window**: the AXIAM server **rejects**
+(nack, requeue:false) any `AuthzRequest`/`AuditEventMessage` with
+`key_version < 2`, a stale/future `issued_at`, or a replayed `nonce`. **Every
+producer MUST be upgraded to emit the v2 body BEFORE the enforcing server is
+deployed**, or its messages are dropped.
+
+New fields (always emitted — never omitted — so they are inside the signed bytes):
+
+| Field | Type | Position (signed body) | Meaning |
+|-------|------|------------------------|---------|
+| `nonce` | UUID | immediately AFTER `key_version` | Per-message unique value. The server records `(tenant_id, nonce)` in a durable store; a duplicate within the freshness window is a **replay** and is rejected. Producers MUST use a fresh UUIDv4 per message. |
+| `issued_at` | RFC3339 UTC timestamp | immediately AFTER `nonce` | Producer send time. The server rejects the message when `issued_at` is outside **±5 minutes** (`DEFAULT_FRESHNESS_SKEW_SECS = 300`, configurable via `AXIAM__AMQP__REPLAY_SKEW_SECS`) of its own clock. |
+
+**Exact signed field order (the HMAC is computed over these bytes, `hmac_signature` ABSENT):**
+
+- `AuthzRequest`: `correlation_id`, `tenant_id`, `subject_id`, `action`,
+  `resource_id`, `scope`(optional, omitted when null), `key_version`,
+  `nonce`, `issued_at`.
+- `AuditEventMessage`: `tenant_id`, `actor_id`, `actor_type`, `action`,
+  `resource_id`(optional), `outcome`, `ip_address`(optional),
+  `metadata`(optional), `key_version`, `nonce`, `issued_at`.
+
+**Consumer (SDK) obligations for v2 — hard-cutover parity with the server.**
+After a valid HMAC signature, an SDK consumer MUST additionally nack
+(requeue:false) when: (a) `key_version < 2`; (b) `issued_at` is outside the
+±skew freshness window; (c) the `nonce` has already been seen (SDKs that
+persist state SHOULD dedup nonces durably; at minimum reject within the
+freshness window). SDKs that re-serialize the received body minus
+`hmac_signature` (order-preserving) automatically cover `nonce`/`issued_at`
+in the HMAC and need only add these three validation gates plus the optional
+DTO fields.
+
+**Canonical reference vectors.** `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json`
+contains server-produced, byte-exact vectors (master key, derived subkey,
+canonical signed JSON, and resulting `hmac_signature`) for both message types.
+Every SDK MUST validate its HMAC implementation byte-for-byte against this file.
+
 ### Reference Implementation
 
 See `crates/axiam-amqp/src/messages.rs`:
 - `sign_payload(key, payload_json)` — HMAC-SHA256 of payload bytes, returns hex string.
 - `verify_payload(key, payload_json, signature_hex)` — constant-time comparison via the `hmac` crate's `verify_slice`.
-- `hmac_signature` field present on `AuthzRequest` and `AuditEventMessage`.
+- `is_fresh(issued_at, now, skew)` — the freshness gate (±skew acceptance window).
+- `hmac_signature`, `key_version`, `nonce`, `issued_at` fields present on `AuthzRequest` and `AuditEventMessage`.
 
 ### Message Types Subject to HMAC Verification
 
-| AMQP Exchange/Queue            | Message Type        | hmac_signature field |
-|-------------------------------|---------------------|----------------------|
-| `axiam.authz.request`          | `AuthzRequest`      | Yes                  |
-| `axiam.audit.events`           | `AuditEventMessage` | Yes                  |
+| AMQP Exchange/Queue            | Message Type        | hmac_signature field | Replay-protected (v2) |
+|-------------------------------|---------------------|----------------------|-----------------------|
+| `axiam.authz.request`          | `AuthzRequest`      | Yes                  | Yes (`nonce`+`issued_at`) |
+| `axiam.audit.events`           | `AuditEventMessage` | Yes                  | Yes (`nonce`+`issued_at`) |
 
 `AuthzResponse` and `NotificationEvent` are published by the server and do not carry `hmac_signature` in v1.0.
 

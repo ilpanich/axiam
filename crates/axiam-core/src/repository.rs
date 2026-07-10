@@ -924,6 +924,39 @@ pub trait AssertionReplayRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// AMQP Nonce Replay (NEW-4)
+// ---------------------------------------------------------------------------
+
+/// Repository for tracking consumed AMQP message nonces (NEW-4 replay
+/// protection).
+///
+/// Provides the same insert-or-conflict semantics as
+/// [`AssertionReplayRepository`]: inserting a `(tenant_id, nonce)` pair that
+/// has already been recorded returns `Err(AxiamError::ReplayDetected)`. The
+/// AMQP consumers call this AFTER a valid HMAC signature + a fresh `issued_at`
+/// so a replayed message (same signed nonce within the freshness window) is
+/// rejected. Rows live until the message's freshness window closes
+/// (`issued_at + skew`); `cleanup_expired` removes them.
+pub trait AmqpNonceRepository: Send + Sync {
+    /// Record a consumed AMQP message nonce.
+    ///
+    /// Returns `Ok(())` on first insertion. Returns
+    /// `Err(AxiamError::ReplayDetected)` if an identical `(tenant_id, nonce)`
+    /// pair already exists (UNIQUE constraint violation) — that is a replay.
+    fn insert_nonce(
+        &self,
+        tenant_id: Uuid,
+        nonce: Uuid,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired AMQP nonce rows across all tenants.
+    ///
+    /// Returns the number of rows deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // PKI / Certificates
 // ---------------------------------------------------------------------------
 

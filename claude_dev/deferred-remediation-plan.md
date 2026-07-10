@@ -57,16 +57,16 @@ Two loops on the hot `check_access` path:
 
 **Nature**: the server only *verifies* these messages; external producers sign them → a **versioned protocol change** gated on the existing `key_version` field.
 
-**DECISION (recommended default in bold)**: **Grace period + DB-backed nonce store.** Consumers accept both old (no replay fields) and new messages during a configurable window, then flip to mandatory; nonce dedup in a durable `amqp_nonce_replay` table modeled on the SAML replay repo (survives restarts, replica-shared). Alternatives: hard cutover (simpler, breaks un-upgraded producers); in-memory TTL store (lower latency, resets on restart, not replica-shared).
+**DECISION (confirmed)**: **Hard cutover + DB-backed nonce store.** Bump `CURRENT_KEY_VERSION` to **2** and require `nonce`+`issued_at` on every message. Consumers **reject** (nack, requeue:false) any message with `key_version < 2`, any message with a stale `issued_at` (outside the skew window), or a replayed `nonce`. No grace window / dual-accept path. Nonce dedup lives in a durable `amqp_nonce_replay` table modeled on the SAML replay repo (survives restarts, replica-shared). **This is a breaking change for external producers** — they must upgrade to emit the v2 schema *before* the server that enforces it is deployed; call this out prominently in `sdks/CONTRACT.md` §8, the AsyncAPI spec, and the changelog.
 
 **Server (5 files):**
-1. `crates/axiam-amqp/src/messages.rs` — add `nonce: Uuid` + `issued_at: DateTime<Utc>` to `AuthzRequest` (after `key_version`, ~L137) and `AuditEventMessage` (~L174), **always-emitted** (`#[serde(default=...)]`, no `skip_serializing_if`) so they are inside the HMAC before `hmac_signature`. Add a freshness helper (skew window). Bump/add a v2 key_version marker (`messages.rs:32-46`).
-2. `crates/axiam-amqp/src/authz_consumer.rs` — after signature verify (post-L122): reject stale `issued_at` + replayed `nonce`; extend `start_authz_consumer` (L28) with the nonce store + skew config.
+1. `crates/axiam-amqp/src/messages.rs` — set `CURRENT_KEY_VERSION = 2` (`messages.rs:32-46`); add `nonce: Uuid` + `issued_at: DateTime<Utc>` to `AuthzRequest` (after `key_version`, ~L137) and `AuditEventMessage` (~L174), **always-emitted** (`#[serde(default=...)]`, no `skip_serializing_if`) so they are inside the HMAC before `hmac_signature`. Add a freshness helper (configurable skew window, e.g. ±5 min).
+2. `crates/axiam-amqp/src/authz_consumer.rs` — after signature verify (post-L122): **reject** any message with `key_version < 2`, a stale `issued_at`, or a replayed `nonce` (nack requeue:false, mirror the existing invalid-signature path). Extend `start_authz_consumer` (L28) with the nonce store + skew config.
 3. `crates/axiam-amqp/src/audit_consumer.rs` — same, post-L119; extend `start_audit_consumer` (L39).
 4. `crates/axiam-server/src/main.rs` — thread nonce store + skew config into both spawns (L639-648, L672-681).
 5. New nonce store: trait in `crates/axiam-core/src/repository.rs` (mirror `AssertionReplayRepository` L895-912), impl mirroring `crates/axiam-db/src/repository/saml_replay.rs`, table in `schema.rs`, `cleanup_expired` hook in `cleanup.rs`.
 
-**SDKs**: 6 of 7 re-serialize the whole received body minus `hmac_signature` (order-preserving) → nonce/issued_at auto-covered by the HMAC; they need only **validation** (freshness + nonce dedup) plus optional DTO fields:
+**SDKs**: 6 of 7 re-serialize the whole received body minus `hmac_signature` (order-preserving) → nonce/issued_at auto-covered by the HMAC; they need only **validation** (reject `key_version < 2`, stale `issued_at`, and replayed `nonce` — hard-cutover parity with the server) plus optional DTO fields:
 - **Go — MANDATORY struct edit**: `sdks/go/amqp/hmac.go` typed canonical structs (`authzRequestCanonical` L89-97, `auditEventCanonical` L105-115) — add `Nonce`/`IssuedAt` json-tagged fields in the exact slot (after `KeyVersion`) in **both**, else verification breaks. Validation in `consumer.go`/`event.go`.
 - **Rust** `sdks/rust/src/amqp/consumer.rs` (validation) + `messages.rs` DTO (also add the missing `key_version`).
 - **TypeScript** `sdks/typescript/src/amqp/consumer.ts` (validation) + `messages.ts` DTO (also add missing `key_version`).
@@ -89,11 +89,12 @@ Only two typed mirrors drifted: **Rust SDK** `sdks/rust/src/amqp/messages.rs:28-
 - Align gRPC `subject_id` optionality with REST where the proto allows.
 - **Verify**: `cargo test` (rust sdk) + `tsc --noEmit && vitest`.
 
-### C3. SDK-Q02 — AuthzError fields + NetworkError cause
-**Key fact**: the server's 403 body is `{error, message}` only — no structured `action`/`resource_id` (`crates/axiam-api-rest/src/error.rs:29-33,67`), so "surface from the body" is unsatisfiable as-is.
-- **DECISION (recommended default in bold)**: **SDK-only** — populate the dead `action`/`resource_id` from client call-args (as TS does at `rest/authz.ts:76-91`) across Rust/Go/Python/Java, or remove them. Alternative: add structured fields to the server's `AuthorizationDenied` body (server change, more work).
+### C3. SDK-Q02 — AuthzError fields (server change) + NetworkError cause  ·  Model: **Sonnet** (spans server + SDKs)
+**Key fact**: the server's 403 body is `{error, message}` only — no structured `action`/`resource_id` (`crates/axiam-api-rest/src/error.rs:29-33,67`). **DECISION (confirmed): add structured fields to the server** so the CONTRACT §2 "from body" wording becomes genuinely satisfiable.
+- **Server**: extend `AxiamError::AuthorizationDenied` (`crates/axiam-core/src/error.rs:16-17`) with `action: Option<String>` + `resource_id: Option<String>`; serialize them in `ErrorBody` (`crates/axiam-api-rest/src/error.rs:29-33`, keep them optional/omitted-when-null so other error kinds are unaffected); populate them at the denial site in `RequirePermission::check` (`crates/axiam-api-rest/src/authz.rs`), which already holds the checked `action`/`resource_id`. Update the handful of other `AuthorizationDenied { reason }` constructors to the new field set (grep for `AuthorizationDenied`).
+- **SDKs**: each mapper now parses `action`/`resource_id` from the JSON error body — Rust (`error.rs:77-81,108-112`), Go (`errors.go:167,190`), Python (`_errors.py:176,222`), Java (`ErrorMapper.java:53,81`) fill their existing (currently-dead) fields; **C#** (`Core/AuthzError.cs`) and **PHP** (`Core/AuthzError.php`) gain the two fields. TS already populates from call-args — switch it to read the body too (`rest/authz.ts:76-91`).
 - **NetworkError cause (MUST per §2)**: C# (`Core/NetworkError.cs:69,82`), PHP (`Core/NetworkError.php:28-34,68-78`), Java (`errors/NetworkError.java:35-37`) drop the transport cause. Chain a **sanitized** cause exposed via `InnerException`/`getPrevious`/`getCause`. Rust/Go/Python/TS already retain a cause slot.
-- **Verify**: per-SDK error-mapper unit tests.
+- **Verify**: `cargo test -p axiam-api-rest` (assert the 403 body carries action/resource_id) + per-SDK error-mapper unit tests asserting the fields are parsed from the body.
 
 ### C4. SDK-Q08 / SDK-Q09 — async naming & PHP `can()` arg order (BREAKING)
 **DECISION (recommended default in bold)**: **Make the breaks now (pre-1.0).**
@@ -112,14 +113,15 @@ Only two typed mirrors drifted: **Rust SDK** `sdks/rust/src/amqp/messages.rs:28-
 | A3 CQ-B13 | **Opus** | SurrealQL recursive-query rewrite must preserve depth/cycle/tenant semantics. |
 | A4 CQ-B23 | **Sonnet** | Model a cache on `JwksCache`; mechanical error-mapping. |
 | B NEW-4 | **Opus** | 13+ files across 8 codebases, byte-exact HMAC ordering, backward-compat gating. |
-| C1 Q03, C2 Q10, C3 Q02 | **Sonnet** | Mechanical struct/field/doc edits once the rulings are set. |
-| C4 Q08/Q09 | **Sonnet** | Mechanical once the ruling (break vs document) is picked. |
+| C1 Q03, C2 Q10 | **Sonnet** | Mechanical struct/field/doc edits. |
+| C3 Q02 | **Sonnet** | Server error-type + all-SDK mapper change (mechanical but cross-cutting). |
+| C4 Q08/Q09 | **Sonnet** | Mechanical once the ruling is applied. |
 
-## Open decisions to confirm before executing
-1. **Scope** — all three groups, or skip Group B (NEW-4, largest, LOW) / the contract-design parts of Group C?
-2. **NEW-4 rollout** — grace-period + DB nonce store (recommended) vs hard cutover vs in-memory TTL.
-3. **Breaking SDK changes (Q08/Q09)** — make the breaks now (recommended, pre-1.0) vs document-only vs PHP-only.
-4. **SDK-Q02** — SDK-only field cleanup (recommended) vs add structured fields to the server denial body.
+## Confirmed decisions (2026-07-08)
+1. **Scope** — execute **all three groups** (A, B, and C).
+2. **NEW-4 rollout** — **hard cutover + DB nonce store** (bump `key_version` to 2, reject v1/missing-field/stale/replayed messages; durable `amqp_nonce_replay` table). Breaking for external producers — they must upgrade first; document in CONTRACT §8 + AsyncAPI + changelog.
+3. **Breaking SDK changes (Q08/Q09)** — **make the breaks now** (PHP `can(action, resource)`; separate `AsyncAxiamClient` for Python; document the Java/C# async exceptions in CONTRACT §1).
+4. **SDK-Q02** — **add structured `action`/`resource_id` to the server** `AuthorizationDenied` body, then parse them from the body in every SDK mapper.
 
 ## Verification (whole plan)
 - Rust: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; targeted `cargo test -p <crate>` per task (integration-test binaries **individually**).

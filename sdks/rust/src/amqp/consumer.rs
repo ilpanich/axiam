@@ -12,10 +12,30 @@
 //! ack/nack correctness onto the caller: the nack-without-requeue contract
 //! on verification failure is security-sensitive, so the API makes it
 //! impossible to misuse by never handing the caller an unverified message.
+//!
+//! ## NEW-4: v2 replay protection (CONTRACT.md §8 "v2 — Replay Protection")
+//!
+//! As of `key_version = 2` the signed body also carries `nonce` and
+//! `issued_at`. Because verification re-serializes the parsed
+//! `serde_json::Value` (minus `hmac_signature`) in the order the keys
+//! arrived on the wire (SDK-Q01/`preserve_order`), these two fields are
+//! automatically covered by the HMAC with no canonicalization change. Once a
+//! signature verifies, [`verify_and_dispatch`] applies three additional
+//! gates — the SAME nack-without-requeue path as an invalid signature —
+//! before the handler is ever invoked:
+//!   - `key_version` must be `>= 2` (the hard cutover; a v1 message is
+//!     rejected outright, there is no grace path).
+//!   - `issued_at` must lie within `±skew` of the consumer's clock (default
+//!     5 minutes, see [`DEFAULT_FRESHNESS_SKEW_SECS`]).
+//!   - `nonce` must not have already been seen within the freshness window
+//!     (an in-memory, TTL-bounded dedup set — see [`ReplayGuard`]).
 
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant};
 
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, QueueDeclareOptions};
 use lapin::types::FieldTable;
@@ -24,6 +44,145 @@ use lapin::{Channel, Connection, ConnectionProperties};
 use crate::amqp::hmac::verify_payload;
 use crate::error::AxiamError;
 use crate::sensitive::Sensitive;
+
+/// Minimum accepted envelope `key_version` (NEW-4 hard cutover,
+/// CONTRACT.md §8 "v2 — Replay Protection"). A message signed under an
+/// older key version predates the mandatory `nonce`/`issued_at`
+/// replay-protection fields and is rejected outright — there is no v1
+/// grace path (mirrors the server's `MIN_ACCEPTED_KEY_VERSION`,
+/// `crates/axiam-amqp/src/messages.rs:52`).
+pub(crate) const MIN_ACCEPTED_KEY_VERSION: u8 = 2;
+
+/// Default freshness skew for the `issued_at` acceptance window (NEW-4,
+/// CONTRACT.md §8): a message is accepted only when its `issued_at` lies
+/// within ±5 minutes of the consumer's current clock (mirrors the server's
+/// `DEFAULT_FRESHNESS_SKEW_SECS`, `crates/axiam-amqp/src/messages.rs:58`).
+/// [`consume`] lets a caller override this via its `freshness_skew`
+/// parameter.
+pub(crate) const DEFAULT_FRESHNESS_SKEW_SECS: i64 = 300;
+
+/// The v2 replay-protection fields extracted from a body whose HMAC has
+/// already verified. Extraction failing (missing/malformed field) is
+/// itself a rejection cause under the NEW-4 hard cutover — there is no
+/// fallback for a message that omits a mandatory v2 field.
+struct ReplayFields {
+    key_version: u8,
+    nonce: String,
+    issued_at: DateTime<Utc>,
+}
+
+/// Parse the mandatory NEW-4 fields out of a verified delivery body.
+/// Returns `None` if any of `key_version`/`nonce`/`issued_at` is absent or
+/// not the expected type/format.
+fn extract_replay_fields(body: &serde_json::Value) -> Option<ReplayFields> {
+    let key_version = u8::try_from(body.get("key_version")?.as_u64()?).ok()?;
+    let nonce = body.get("nonce")?.as_str()?.to_owned();
+    let issued_at = DateTime::parse_from_rfc3339(body.get("issued_at")?.as_str()?)
+        .ok()?
+        .with_timezone(&Utc);
+    Some(ReplayFields {
+        key_version,
+        nonce,
+        issued_at,
+    })
+}
+
+/// In-memory nonce-replay guard + `issued_at` freshness gate (NEW-4).
+///
+/// One `ReplayGuard` is shared (via `Arc`) across every delivery processed
+/// by [`consume`], so a nonce observed on one message is remembered for
+/// every subsequent one on the same consumer. It never touches durable
+/// storage — CONTRACT.md §8 permits "reject within the freshness window" as
+/// the minimum bar for SDKs that do not persist nonces, which this
+/// satisfies: a nonce is retained for `2 × skew` (the full width of the
+/// freshness window on either side of `now`), which is always at least as
+/// long as a replayed message could still pass the freshness gate on its
+/// own — so a replay can never sneak through after its entry has been
+/// pruned. Pruning is opportunistic (done inline on every check, see
+/// [`check_and_record_nonce`](Self::check_and_record_nonce)) rather than via
+/// a background sweep task, which is what keeps the map naturally bounded.
+pub(crate) struct ReplayGuard {
+    skew: chrono::Duration,
+    seen: Mutex<HashMap<String, Instant>>,
+}
+
+impl ReplayGuard {
+    /// Build a guard with an explicit freshness skew.
+    pub(crate) fn new(skew: chrono::Duration) -> Self {
+        Self {
+            skew,
+            seen: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Build a guard using [`DEFAULT_FRESHNESS_SKEW_SECS`] (5 minutes) — what
+    /// [`consume`] uses when no override is supplied.
+    pub(crate) fn with_default_skew() -> Self {
+        Self::new(chrono::Duration::seconds(DEFAULT_FRESHNESS_SKEW_SECS))
+    }
+
+    /// Nonce dedup TTL: `2 × skew`, i.e. the full width of the freshness
+    /// acceptance window. Falls back to `2 × DEFAULT_FRESHNESS_SKEW_SECS` in
+    /// the (practically unreachable, since skew is always a small duration)
+    /// case where the doubled skew overflows `std::time::Duration`.
+    fn ttl(&self) -> StdDuration {
+        (self.skew * 2)
+            .to_std()
+            .unwrap_or_else(|_| StdDuration::from_secs(DEFAULT_FRESHNESS_SKEW_SECS as u64 * 2))
+    }
+
+    /// `true` when `issued_at` lies within ±skew of `now` — mirrors the
+    /// server's `is_fresh` (`crates/axiam-amqp/src/messages.rs:86-88`).
+    fn is_fresh(&self, issued_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+        now.signed_duration_since(issued_at).abs() <= self.skew
+    }
+
+    /// Returns `true` the first time `nonce` is observed (accept); `false`
+    /// if it was already recorded and hasn't expired yet (a replay).
+    /// Expired entries are pruned on every call.
+    fn check_and_record_nonce(&self, nonce: &str) -> bool {
+        let ttl = self.ttl();
+        let now = Instant::now();
+        let mut seen = match self.seen.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        seen.retain(|_, expiry| *expiry > now);
+        if seen.contains_key(nonce) {
+            return false;
+        }
+        seen.insert(nonce.to_owned(), now + ttl);
+        true
+    }
+}
+
+impl Default for ReplayGuard {
+    fn default() -> Self {
+        Self::with_default_skew()
+    }
+}
+
+/// Check the NEW-4 replay-protection gates against an already-HMAC-verified
+/// body. `Ok(())` means the message passes all three gates; `Err` carries a
+/// short, HMAC-free reason string suitable for the security-event log.
+fn validate_v2_replay_protection(
+    body: &serde_json::Value,
+    replay: &ReplayGuard,
+) -> Result<(), &'static str> {
+    let fields = extract_replay_fields(body).ok_or(
+        "missing or malformed key_version/nonce/issued_at (NEW-4 v2 fields are mandatory)",
+    )?;
+    if fields.key_version < MIN_ACCEPTED_KEY_VERSION {
+        return Err("key_version below the minimum accepted version (NEW-4 hard cutover)");
+    }
+    if !replay.is_fresh(fields.issued_at, Utc::now()) {
+        return Err("issued_at outside the freshness skew window");
+    }
+    if !replay.check_and_record_nonce(&fields.nonce) {
+        return Err("nonce already seen (replay)");
+    }
+    Ok(())
+}
 
 /// A minimal seam over the AMQP acknowledgement primitives this module
 /// needs. `lapin::message::Delivery` implements this directly (via its
@@ -62,17 +221,23 @@ impl AckableDelivery for lapin::message::Delivery {
     }
 }
 
-/// Verify a single delivery's HMAC signature (CONTRACT.md §8 steps a-g)
-/// and, only on success, invoke `handler` with the parsed body before
-/// acking. On any failure the delivery is nacked without requeue and a
-/// security event is emitted (never containing the HMAC value).
+/// Verify a single delivery's HMAC signature (CONTRACT.md §8 steps a-g),
+/// then apply the NEW-4 v2 replay-protection gates (`key_version`,
+/// freshness, nonce dedup via `replay`) and, only if everything passes,
+/// invoke `handler` with the parsed body before acking. On any failure the
+/// delivery is nacked without requeue and a security event is emitted
+/// (never containing the HMAC value).
 ///
 /// This is the load-bearing, separately-testable unit backing
 /// [`consume`]'s per-message loop — kept generic over [`AckableDelivery`]
 /// so it can be exercised against a recording fake in unit tests without a
 /// live broker.
-pub(crate) async fn verify_and_dispatch<D, F, Fut>(delivery: &D, signing_key: &[u8], handler: &F)
-where
+pub(crate) async fn verify_and_dispatch<D, F, Fut>(
+    delivery: &D,
+    signing_key: &[u8],
+    handler: &F,
+    replay: &ReplayGuard,
+) where
     D: AckableDelivery,
     F: Fn(serde_json::Value) -> Fut + Send + Sync,
     Fut: Future<Output = ()> + Send,
@@ -153,6 +318,22 @@ where
         return;
     }
 
+    // NEW-4 (CONTRACT.md §8 "v2 — Replay Protection"): a verified signature
+    // is necessary but not sufficient. `nonce`/`issued_at` are already
+    // covered by the HMAC above (no canonicalization change needed — see
+    // the module doc comment), so this is purely acceptance-policy: reject
+    // key_version < 2, a stale/future issued_at, or an already-seen nonce
+    // via the SAME nack-without-requeue path as an invalid signature.
+    if let Err(reason) = validate_v2_replay_protection(&body, replay) {
+        tracing::warn!(
+            target: "axiam_sdk::security",
+            reason,
+            "AMQP v2 replay-protection check failed; nacking without requeue"
+        );
+        delivery.nack(false).await;
+        return;
+    }
+
     handler(body).await;
     delivery.ack().await;
 }
@@ -168,13 +349,20 @@ where
 /// signing key is prohibited. It is wrapped in [`Sensitive<Vec<u8>>`] so it
 /// can never be logged accidentally.
 ///
+/// `freshness_skew` overrides the NEW-4 `issued_at` acceptance window
+/// (default `±5 minutes`, i.e. [`DEFAULT_FRESHNESS_SKEW_SECS`]) — pass
+/// `None` to use the default. The same window (doubled) bounds how long a
+/// `nonce` is remembered for replay detection; see [`ReplayGuard`].
+///
 /// This function owns the full ack/nack loop; the closure `handler` is
-/// invoked only after successful verification and MUST NOT itself call
-/// ack/nack (there is no delivery handle exposed to it).
+/// invoked only after successful verification (HMAC signature AND the
+/// NEW-4 replay-protection gates) and MUST NOT itself call ack/nack (there
+/// is no delivery handle exposed to it).
 pub async fn consume<F, Fut>(
     amqp_url: &str,
     queue: &str,
     signing_key: Sensitive<Vec<u8>>,
+    freshness_skew: Option<StdDuration>,
     handler: F,
 ) -> Result<(), AxiamError>
 where
@@ -242,13 +430,24 @@ where
 
     let key = Arc::new(signing_key);
     let handler = Arc::new(handler);
+    // One ReplayGuard shared across every delivery on this consumer, so a
+    // nonce observed on one message is remembered for the lifetime of the
+    // loop (NEW-4).
+    let replay = Arc::new(
+        freshness_skew
+            .and_then(|skew| chrono::Duration::from_std(skew).ok())
+            .map(ReplayGuard::new)
+            .unwrap_or_default(),
+    );
 
     while let Some(delivery_result) = consumer.next().await {
         match delivery_result {
             Ok(delivery) => {
                 let key = Arc::clone(&key);
                 let handler = Arc::clone(&handler);
-                verify_and_dispatch(&delivery, key.expose(), handler.as_ref()).await;
+                let replay = Arc::clone(&replay);
+                verify_and_dispatch(&delivery, key.expose(), handler.as_ref(), replay.as_ref())
+                    .await;
             }
             Err(e) => {
                 tracing::warn!(target: "axiam_sdk::security", error = %e, "AMQP consumer stream error");
@@ -374,12 +573,29 @@ mod tests {
         THREAD_EVENTS.with(|events| events.borrow_mut().clear());
     }
 
-    async fn make_signed_body() -> (serde_json::Value, Vec<u8>) {
-        let key = b"consumer-test-signing-key";
-        let mut body = serde_json::json!({
+    /// Build a v2 message body (NEW-4: always carries `key_version`,
+    /// `nonce`, `issued_at`) with a fresh, unique `nonce` and `issued_at`
+    /// set to `Utc::now()` unless overridden. Used by tests that only care
+    /// about the HMAC verification step (not the replay-protection gates),
+    /// so a sensible, always-fresh default keeps them independent of wall-
+    /// clock timing.
+    fn v2_body(key_version: u8, nonce: &str, issued_at: DateTime<Utc>) -> serde_json::Value {
+        serde_json::json!({
             "correlation_id": "00000000-0000-0000-0000-000000000000",
             "action": "read",
-        });
+            "key_version": key_version,
+            "nonce": nonce,
+            "issued_at": issued_at.to_rfc3339(),
+        })
+    }
+
+    fn make_signed_body_with(
+        key_version: u8,
+        nonce: &str,
+        issued_at: DateTime<Utc>,
+    ) -> (serde_json::Value, Vec<u8>) {
+        let key = b"consumer-test-signing-key";
+        let mut body = v2_body(key_version, nonce, issued_at);
         let canonical = serde_json::to_vec(&body).unwrap();
         let sig = sign_payload(key, &canonical);
         body.as_object_mut()
@@ -389,11 +605,16 @@ mod tests {
         (body, data)
     }
 
+    fn make_signed_body() -> (serde_json::Value, Vec<u8>) {
+        make_signed_body_with(2, &uuid::Uuid::new_v4().to_string(), Utc::now())
+    }
+
     #[tokio::test]
     async fn valid_signature_invokes_handler_once_then_acks() {
         let key = b"consumer-test-signing-key";
-        let (_body, data) = make_signed_body().await;
+        let (_body, data) = make_signed_body();
         let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
         let handler_calls = Arc::new(AtomicUsize::new(0));
         let handler_calls_clone = Arc::clone(&handler_calls);
         let handler = move |_value: serde_json::Value| {
@@ -403,7 +624,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler).await;
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
 
         assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
         assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
@@ -414,7 +635,7 @@ mod tests {
     #[tokio::test]
     async fn mismatched_signature_never_invokes_handler_and_nacks_without_requeue() {
         let key = b"consumer-test-signing-key";
-        let (mut body, _data) = make_signed_body().await;
+        let (mut body, _data) = make_signed_body();
         // Corrupt the signature so it no longer matches the canonical body.
         body.as_object_mut().unwrap().insert(
             "hmac_signature".into(),
@@ -424,6 +645,7 @@ mod tests {
         );
         let data = serde_json::to_vec(&body).unwrap();
         let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
         let handler_calls = Arc::new(AtomicUsize::new(0));
         let handler_calls_clone = Arc::clone(&handler_calls);
         let handler = move |_value: serde_json::Value| {
@@ -433,7 +655,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler).await;
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -449,12 +671,10 @@ mod tests {
     async fn missing_signature_strict_mode_default_never_invokes_handler_and_nacks_without_requeue()
     {
         let key = b"consumer-test-signing-key";
-        let body = serde_json::json!({
-            "correlation_id": "00000000-0000-0000-0000-000000000000",
-            "action": "read",
-        });
+        let body = v2_body(2, &uuid::Uuid::new_v4().to_string(), Utc::now());
         let data = serde_json::to_vec(&body).unwrap();
         let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
         let handler_calls = Arc::new(AtomicUsize::new(0));
         let handler_calls_clone = Arc::clone(&handler_calls);
         let handler = move |_value: serde_json::Value| {
@@ -464,7 +684,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler).await;
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -480,6 +700,7 @@ mod tests {
     async fn invalid_json_body_never_invokes_handler_and_nacks_without_requeue() {
         let key = b"consumer-test-signing-key";
         let delivery = RecordingDelivery::new(b"not valid json {{{".to_vec());
+        let replay = ReplayGuard::with_default_skew();
         let handler_calls = Arc::new(AtomicUsize::new(0));
         let handler_calls_clone = Arc::clone(&handler_calls);
         let handler = move |_value: serde_json::Value| {
@@ -489,7 +710,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler).await;
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
 
         assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
         assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
@@ -502,7 +723,7 @@ mod tests {
         init_recording_subscriber();
 
         let key = b"consumer-test-signing-key";
-        let (mut body, _data) = make_signed_body().await;
+        let (mut body, _data) = make_signed_body();
         let leaked_signature_would_be = body
             .get("hmac_signature")
             .and_then(|v| v.as_str())
@@ -517,9 +738,10 @@ mod tests {
         );
         let data = serde_json::to_vec(&body).unwrap();
         let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
         let handler = |_value: serde_json::Value| async {};
 
-        verify_and_dispatch(&delivery, key, &handler).await;
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
 
         let captured = THREAD_EVENTS.with(|events| events.borrow().clone());
         assert!(
@@ -538,27 +760,39 @@ mod tests {
 
     // SDK-Q01 regression: the server signs the HMAC over the concrete struct
     // serialized in FIELD-DECLARATION order (correlation_id, tenant_id,
-    // subject_id, action, resource_id, scope, key_version) — which is NOT
-    // alphabetical. This fixture builds the canonical signed bytes by HAND in
-    // that declaration order (never by round-tripping through the verifier's
-    // own `Value` path), then feeds the SDK a delivery whose body is exactly
-    // what the server put on the wire. Before the fix (no `preserve_order`),
-    // the verifier re-serialized the parsed `Value` alphabetically and HMACed
-    // over the wrong bytes, rejecting this genuine message.
+    // subject_id, action, resource_id, scope, key_version, nonce, issued_at)
+    // — which is NOT alphabetical. This fixture builds the canonical signed
+    // bytes by HAND in that declaration order (never by round-tripping
+    // through the verifier's own `Value` path), then feeds the SDK a
+    // delivery whose body is exactly what the server put on the wire.
+    // Before the fix (no `preserve_order`), the verifier re-serialized the
+    // parsed `Value` alphabetically and HMACed over the wrong bytes,
+    // rejecting this genuine message.
     //
-    // `AUTHZ_CANONICAL` is the payload the server signs: declaration order,
-    // compact, `hmac_signature` omitted (set to None before signing).
-    const AUTHZ_CANONICAL: &str = concat!(
-        "{",
-        "\"correlation_id\":\"11111111-1111-1111-1111-111111111111\",",
-        "\"tenant_id\":\"22222222-2222-2222-2222-222222222222\",",
-        "\"subject_id\":\"33333333-3333-3333-3333-333333333333\",",
-        "\"action\":\"read\",",
-        "\"resource_id\":\"44444444-4444-4444-4444-444444444444\",",
-        "\"scope\":\"sub\",",
-        "\"key_version\":1",
-        "}"
-    );
+    // NEW-4: bumped to `key_version = 2` with `nonce`/`issued_at` appended
+    // in declaration order (immediately before `hmac_signature`).
+    // `issued_at` is computed at call time (not baked into a `const`) so
+    // these tests stay fresh regardless of when they actually run.
+    fn authz_canonical(key_version: u8, nonce: &str, issued_at: DateTime<Utc>) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"correlation_id\":\"11111111-1111-1111-1111-111111111111\",",
+                "\"tenant_id\":\"22222222-2222-2222-2222-222222222222\",",
+                "\"subject_id\":\"33333333-3333-3333-3333-333333333333\",",
+                "\"action\":\"read\",",
+                "\"resource_id\":\"44444444-4444-4444-4444-444444444444\",",
+                "\"scope\":\"sub\",",
+                "\"key_version\":{},",
+                "\"nonce\":\"{}\",",
+                "\"issued_at\":\"{}\"",
+                "}}"
+            ),
+            key_version,
+            nonce,
+            issued_at.to_rfc3339(),
+        )
+    }
 
     /// Build the on-the-wire delivery bytes: the canonical payload with
     /// `hmac_signature` appended as the final key (exactly how the server
@@ -573,11 +807,13 @@ mod tests {
     #[tokio::test]
     async fn server_declaration_order_message_is_accepted() {
         let key = b"declaration-order-signing-key";
+        let canonical = authz_canonical(2, "77777777-7777-7777-7777-777777777777", Utc::now());
         // Sign the hand-built declaration-order canonical bytes — NOT bytes
         // produced by re-serializing a `Value` the same way the verifier does.
-        let sig = sign_payload(key, AUTHZ_CANONICAL.as_bytes());
-        let data = wire_bytes_with_signature(AUTHZ_CANONICAL, &sig);
+        let sig = sign_payload(key, canonical.as_bytes());
+        let data = wire_bytes_with_signature(&canonical, &sig);
         let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
 
         let handler_calls = Arc::new(AtomicUsize::new(0));
         let handler_calls_clone = Arc::clone(&handler_calls);
@@ -588,7 +824,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler).await;
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -603,13 +839,15 @@ mod tests {
     #[tokio::test]
     async fn server_declaration_order_message_tampered_is_rejected() {
         let key = b"declaration-order-signing-key";
+        let canonical = authz_canonical(2, "88888888-8888-8888-8888-888888888888", Utc::now());
         // Signature is over the pristine canonical bytes...
-        let sig = sign_payload(key, AUTHZ_CANONICAL.as_bytes());
+        let sig = sign_payload(key, canonical.as_bytes());
         // ...but the delivered body flips `action` from read -> write, so the
         // recomputed HMAC must not match.
-        let tampered_canonical = AUTHZ_CANONICAL.replace("\"read\"", "\"write\"");
+        let tampered_canonical = canonical.replace("\"read\"", "\"write\"");
         let data = wire_bytes_with_signature(&tampered_canonical, &sig);
         let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
 
         let handler_calls = Arc::new(AtomicUsize::new(0));
         let handler_calls_clone = Arc::clone(&handler_calls);
@@ -620,7 +858,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler).await;
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -638,10 +876,12 @@ mod tests {
         // fields so the canonical bytes are reproduced. Here we place
         // `hmac_signature` FIRST in the delivered object.
         let key = b"declaration-order-signing-key";
-        let sig = sign_payload(key, AUTHZ_CANONICAL.as_bytes());
-        let canonical_inner = &AUTHZ_CANONICAL[1..]; // drop leading '{'
+        let canonical = authz_canonical(2, "99999999-9999-9999-9999-999999999999", Utc::now());
+        let sig = sign_payload(key, canonical.as_bytes());
+        let canonical_inner = &canonical[1..]; // drop leading '{'
         let data = format!("{{\"hmac_signature\":\"{sig}\",{canonical_inner}").into_bytes();
         let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
 
         let handler_calls = Arc::new(AtomicUsize::new(0));
         let handler_calls_clone = Arc::clone(&handler_calls);
@@ -652,7 +892,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler).await;
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -661,5 +901,208 @@ mod tests {
              hmac_signature sits, so the message still verifies"
         );
         assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+    }
+
+    // --- NEW-4: v2 replay-protection gate tests -----------------------------
+
+    #[tokio::test]
+    async fn key_version_below_minimum_is_rejected_even_with_valid_signature() {
+        let key = b"declaration-order-signing-key";
+        // key_version = 1 predates NEW-4; the HMAC over this body is
+        // perfectly valid, but the hard-cutover gate must still reject it.
+        let canonical = authz_canonical(1, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Utc::now());
+        let sig = sign_payload(key, canonical.as_bytes());
+        let data = wire_bytes_with_signature(&canonical, &sig);
+        let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
+
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls_clone = Arc::clone(&handler_calls);
+        let handler = move |_value: serde_json::Value| {
+            let calls = Arc::clone(&handler_calls_clone);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+
+        assert_eq!(
+            handler_calls.load(Ordering::SeqCst),
+            0,
+            "key_version < 2 must be rejected even when the signature verifies (NEW-4 hard cutover)"
+        );
+        assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+        assert_eq!(delivery.nacked_requeue_true.load(Ordering::SeqCst), 0);
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_issued_at_is_rejected_even_with_valid_signature() {
+        let key = b"declaration-order-signing-key";
+        // 10 minutes in the past — outside the default ±5 minute skew.
+        let stale = Utc::now() - chrono::Duration::minutes(10);
+        let canonical = authz_canonical(2, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", stale);
+        let sig = sign_payload(key, canonical.as_bytes());
+        let data = wire_bytes_with_signature(&canonical, &sig);
+        let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
+
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls_clone = Arc::clone(&handler_calls);
+        let handler = move |_value: serde_json::Value| {
+            let calls = Arc::clone(&handler_calls_clone);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+
+        assert_eq!(
+            handler_calls.load(Ordering::SeqCst),
+            0,
+            "a stale issued_at (outside the freshness skew) must be rejected"
+        );
+        assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn replayed_nonce_is_rejected_on_second_delivery() {
+        let key = b"declaration-order-signing-key";
+        let nonce = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let canonical = authz_canonical(2, nonce, Utc::now());
+        let sig = sign_payload(key, canonical.as_bytes());
+        // Same ReplayGuard for both deliveries — the nonce dedup only works
+        // if state is retained across messages on the same consumer.
+        let replay = ReplayGuard::with_default_skew();
+
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls_clone = Arc::clone(&handler_calls);
+        let handler = move |_value: serde_json::Value| {
+            let calls = Arc::clone(&handler_calls_clone);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+
+        let first_delivery = RecordingDelivery::new(wire_bytes_with_signature(&canonical, &sig));
+        verify_and_dispatch(&first_delivery, key, &handler, &replay).await;
+        assert_eq!(
+            handler_calls.load(Ordering::SeqCst),
+            1,
+            "the first delivery of a fresh nonce must be accepted"
+        );
+        assert_eq!(first_delivery.acked.load(Ordering::SeqCst), 1);
+
+        // Replay: identical body + signature, same nonce, delivered again.
+        let second_delivery = RecordingDelivery::new(wire_bytes_with_signature(&canonical, &sig));
+        verify_and_dispatch(&second_delivery, key, &handler, &replay).await;
+
+        assert_eq!(
+            handler_calls.load(Ordering::SeqCst),
+            1,
+            "a replayed nonce must not reach the handler a second time"
+        );
+        assert_eq!(second_delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+        assert_eq!(second_delivery.acked.load(Ordering::SeqCst), 0);
+    }
+
+    // --- NEW-4: byte-for-byte parity against the server reference vectors --
+    //
+    // `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json` is
+    // GENERATED by the AXIAM server sign path and is the ground truth every
+    // SDK's HMAC implementation must reproduce exactly (CONTRACT.md §8
+    // "Canonical reference vectors"). It carries, per message type, the
+    // exact canonical signed JSON bytes, the resulting hex HMAC, and the
+    // HKDF-derived per-tenant subkey used to compute it — this is a
+    // read-only reference (this crate never depends on `axiam-amqp`).
+    const REFERENCE_VECTORS_JSON: &str =
+        include_str!("../../../../crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json");
+
+    fn hex_decode(s: &str) -> Vec<u8> {
+        hex::decode(s).expect("fixture hex field must decode")
+    }
+
+    #[test]
+    fn fixture_v2_reference_vectors_hmac_byte_parity() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(REFERENCE_VECTORS_JSON).expect("fixture must parse as JSON");
+        let subkey = hex_decode(
+            fixture["hkdf"]["derived_subkey_hex"]
+                .as_str()
+                .expect("hkdf.derived_subkey_hex present"),
+        );
+
+        for message_type in ["authz_request", "audit_event"] {
+            let vector = &fixture[message_type];
+            let canonical = vector["canonical_signed_json"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{message_type}.canonical_signed_json present"));
+            let expected_hmac = vector["hmac_signature_hex"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{message_type}.hmac_signature_hex present"));
+
+            let sig = sign_payload(&subkey, canonical.as_bytes());
+            assert_eq!(
+                sig, expected_hmac,
+                "{message_type}: SDK sign_payload output must be byte-for-byte identical to \
+                 the server-generated reference vector"
+            );
+            assert!(
+                verify_payload(&subkey, canonical.as_bytes(), expected_hmac),
+                "{message_type}: the server-generated signature must verify against the same \
+                 derived subkey + canonical bytes"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fixture_v2_reference_vector_authz_request_accepted_by_consumer() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(REFERENCE_VECTORS_JSON).expect("fixture must parse as JSON");
+        let vector = &fixture["authz_request"];
+        let canonical = vector["canonical_signed_json"]
+            .as_str()
+            .expect("authz_request.canonical_signed_json present");
+        let expected_hmac = vector["hmac_signature_hex"]
+            .as_str()
+            .expect("authz_request.hmac_signature_hex present");
+        let subkey = hex_decode(
+            fixture["hkdf"]["derived_subkey_hex"]
+                .as_str()
+                .expect("hkdf.derived_subkey_hex present"),
+        );
+
+        let data = wire_bytes_with_signature(canonical, expected_hmac);
+        let delivery = RecordingDelivery::new(data);
+        // The fixture's `issued_at` (2026-07-10T12:00:00Z) is a fixed
+        // historical timestamp baked into the reference vectors. This test
+        // exercises HMAC/structure acceptance through the full dispatch
+        // pipeline, NOT the freshness gate (covered independently by
+        // `stale_issued_at_is_rejected_even_with_valid_signature`), so use a
+        // generous skew that tolerates the gap between the fixture's
+        // timestamp and whenever this test actually runs.
+        let replay = ReplayGuard::new(chrono::Duration::days(3650));
+
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls_clone = Arc::clone(&handler_calls);
+        let handler = move |_value: serde_json::Value| {
+            let calls = Arc::clone(&handler_calls_clone);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+
+        verify_and_dispatch(&delivery, &subkey, &handler, &replay).await;
+
+        assert_eq!(
+            handler_calls.load(Ordering::SeqCst),
+            1,
+            "a genuine server-signed v2 reference vector must be accepted end-to-end"
+        );
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+        assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 0);
     }
 }

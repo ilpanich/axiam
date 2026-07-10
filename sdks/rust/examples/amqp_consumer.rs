@@ -34,10 +34,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Consuming from '{queue}' — HMAC verification runs before every handler call.");
 
     // The SDK owns the full ack/nack loop (D-07): `handler` is invoked only
-    // after a delivery's HMAC signature has been verified; any failure is
-    // nacked without requeue and logged as a security event that never
-    // contains the HMAC value (CONTRACT.md §8.4).
-    consume(&amqp_url, &queue, signing_key, |event| async move {
+    // after a delivery's HMAC signature has been verified AND the NEW-4 v2
+    // replay-protection gates pass (key_version >= 2, fresh issued_at,
+    // unseen nonce); any failure is nacked without requeue and logged as a
+    // security event that never contains the HMAC value (CONTRACT.md §8.4).
+    // `None` below uses the default ±5 minute issued_at freshness window;
+    // pass `Some(Duration::from_secs(..))` to override it.
+    consume(&amqp_url, &queue, signing_key, None, |event| async move {
         println!("Verified AMQP event: {event}");
     })
     .await?;

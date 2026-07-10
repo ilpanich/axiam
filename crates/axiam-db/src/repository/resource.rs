@@ -432,58 +432,54 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
     async fn get_ancestors(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Vec<Resource>> {
         let tenant_id_str = tenant_id.to_string();
-        let mut ancestors = Vec::new();
-        let mut current_id = id;
+        let id_str = id.to_string();
 
-        // CQ-B08: walk at most MAX_ANCESTOR_DEPTH steps; if we exhaust the limit
-        // without reaching a root (parent_id = None), the hierarchy is either
-        // pathologically deep or contains a cycle — surface an error.
-        let mut steps = 0usize;
-        loop {
-            if steps >= MAX_ANCESTOR_DEPTH {
-                return Err(DbError::Migration(
-                    "resource hierarchy exceeds maximum depth — possible cycle".into(),
-                )
-                .into());
-            }
-            steps += 1;
+        // CQ-B13: walk the hierarchy in a SINGLE recursive graph query instead of
+        // one SELECT per level. The `child_of` edge points child -> parent, so
+        // `->child_of->resource` climbs one level; `.{..N+path}` follows that edge
+        // up to N times and yields the ordered path of ancestor records
+        // (nearest-first, EXCLUDING the starting resource — matching the previous
+        // loop's output). The `(resource WHERE tenant_id = $tenant_id)` node filter
+        // enforces tenant scoping: an ancestor in another tenant terminates the
+        // walk, exactly like the old per-level `WHERE tenant_id` guard.
+        //
+        // CQ-B08 preserved: `+path` does NOT deduplicate, so both a
+        // pathologically deep chain AND a cycle traverse until the depth cap and
+        // return exactly MAX_ANCESTOR_DEPTH records. The original loop errored as
+        // soon as it would step onto the MAX_ANCESTOR_DEPTH-th ancestor (i.e. when
+        // there are >= MAX_ANCESTOR_DEPTH ancestors), so we recurse to
+        // MAX_ANCESTOR_DEPTH and treat a result of that length as an
+        // overflow/cycle — surfacing the same error rather than silently
+        // truncating.
+        let query = format!(
+            "SELECT meta::id(id) AS record_id, tenant_id, name, resource_type, \
+                    parent_id, metadata, created_at, updated_at \
+             FROM array::flatten(\
+                 type::record('resource', $id).{{..{depth}+path}}(\
+                     ->child_of->(resource WHERE tenant_id = $tenant_id)));",
+            depth = MAX_ANCESTOR_DEPTH,
+        );
 
-            let current_str = current_id.to_string();
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("id", id_str))
+            .bind(("tenant_id", tenant_id_str))
+            .await
+            .map_err(DbError::from)?;
 
-            let mut result = self
-                .db
-                .query(
-                    "SELECT * FROM type::record('resource', $id) \
-                     WHERE tenant_id = $tenant_id",
-                )
-                .bind(("id", current_str))
-                .bind(("tenant_id", tenant_id_str.clone()))
-                .await
-                .map_err(DbError::from)?;
+        let rows: Vec<ResourceRowWithId> = result.take(0).map_err(DbError::from)?;
 
-            let rows: Vec<ResourceRow> = result.take(0).map_err(DbError::from)?;
-            let row = match rows.into_iter().next() {
-                Some(r) => r,
-                None => break,
-            };
-
-            let parent_id_str = row.parent_id.clone();
-            let resource = row_to_resource(row, current_id)?;
-
-            // Don't include the starting resource itself; only ancestors.
-            if current_id != id {
-                ancestors.push(resource);
-            }
-
-            match parent_id_str {
-                Some(pid) => {
-                    current_id = Uuid::parse_str(&pid)
-                        .map_err(|e| DbError::Migration(format!("invalid parent UUID: {e}")))?;
-                }
-                None => break,
-            }
+        if rows.len() >= MAX_ANCESTOR_DEPTH {
+            return Err(DbError::Migration(
+                "resource hierarchy exceeds maximum depth — possible cycle".into(),
+            )
+            .into());
         }
 
-        Ok(ancestors)
+        rows.into_iter()
+            .map(|row| row.try_into_resource())
+            .collect::<Result<Vec<_>, DbError>>()
+            .map_err(Into::into)
     }
 }

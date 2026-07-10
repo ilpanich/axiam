@@ -3,6 +3,8 @@
 //! All repository operations are async. Tenant-scoped repositories
 //! require a `tenant_id` parameter to enforce data isolation.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
@@ -381,6 +383,16 @@ pub trait PermissionRepository: Send + Sync {
         tenant_id: Uuid,
         role_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<PermissionGrant>>> + Send;
+
+    /// Batch variant of [`Self::get_role_permission_grants`]: fetch the permission
+    /// grants for many roles in a single query, grouped by role id. Roles with no
+    /// grants are simply absent from the returned map. Used on the hot authorization
+    /// path to avoid an N+1 query per applicable role.
+    fn get_role_permission_grants_for_roles(
+        &self,
+        tenant_id: Uuid,
+        role_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<HashMap<Uuid, Vec<PermissionGrant>>>> + Send;
 }
 
 pub trait ResourceRepository: Send + Sync {

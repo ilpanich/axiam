@@ -343,6 +343,30 @@ async fn delete_organization_returns_204() {
     assert_eq!(resp.status().as_u16(), 204);
 }
 
+/// CQ-B16: DELETE of a nonexistent organization id must return 404, not
+/// silently 204.
+#[actix_rt::test]
+async fn delete_nonexistent_organization_returns_404() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_user_with_role(&db, tenant_id, "admin", "admin@example.com", None).await;
+    let fake_id = Uuid::new_v4();
+    // Mint a token that claims org = fake_id so the ownership guard allows
+    // the delete attempt through to the repository, which must then 404.
+    let token = mint_token(&auth, user_id, tenant_id, fake_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/organizations/{fake_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
 // ---------------------------------------------------------------------------
 // SEC-002: Cross-org 403 negative tests
 // ---------------------------------------------------------------------------

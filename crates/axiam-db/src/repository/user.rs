@@ -476,17 +476,29 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let id_str = id.to_string();
         let tenant_id_str = tenant_id.to_string();
 
-        self.db
+        let result = self
+            .db
             .query(
                 "UPDATE type::record('user', $id) SET \
                  status = 'Inactive', updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id",
+                 WHERE tenant_id = $tenant_id RETURN BEFORE",
             )
-            .bind(("id", id_str))
+            .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
             .await
             .map_err(DbError::from)?;
 
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
+        if rows.is_empty() {
+            return Err(DbError::NotFound {
+                entity: "user".into(),
+                id: id_str,
+            }
+            .into());
+        }
         Ok(())
     }
 

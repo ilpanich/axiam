@@ -219,6 +219,40 @@ pub async fn guarded_fetch(
     Err(SsrfError::TooManyRedirects)
 }
 
+/// Read a response body with a hard streaming cap, aborting as soon as `cap`
+/// is exceeded — WITHOUT buffering the rest of the body first (CQ-B23).
+///
+/// This replaces the previous "buffer the whole body via `.bytes()`, then
+/// check `.len()` against the cap" pattern used by discovery/token-exchange
+/// reads. That pattern still let a malicious or misconfigured endpoint force
+/// full in-memory buffering of an arbitrarily large response before the
+/// existing size check ever ran (the coarse `Content-Length`-based check in
+/// [`guarded_fetch`] above only catches endpoints that both send the header
+/// AND tell the truth about it — a chunked, no-`Content-Length` response
+/// bypasses it entirely). Reading chunk-by-chunk with a running byte count
+/// bounds peak memory use to ~`cap` bytes regardless.
+///
+/// Uses `reqwest::Response::chunk()` (always available, unlike
+/// `bytes_stream()` which needs the `stream` cargo feature this workspace
+/// does not enable) so no new dependency/feature is required.
+pub async fn read_capped_body(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> Result<Vec<u8>, SsrfError> {
+    let mut buf = Vec::with_capacity(cap.min(64 * 1024));
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| SsrfError::RequestFailed(e.to_string()))?
+    {
+        buf.extend_from_slice(&chunk);
+        if buf.len() > cap {
+            return Err(SsrfError::ResponseTooLarge(cap));
+        }
+    }
+    Ok(buf)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -328,6 +362,86 @@ mod tests {
         assert!(
             matches!(result, Err(SsrfError::InsecureScheme)),
             "expected a plaintext first hop (no seam) to be rejected, got: {result:?}"
+        );
+    }
+
+    /// CQ-B23: a body within the cap is read in full.
+    #[tokio::test]
+    async fn read_capped_body_allows_body_within_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("local_addr");
+        let body = b"{\"hello\":\"world\"}";
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}/small", addr.port());
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        let result = read_capped_body(response, 1024).await;
+
+        assert_eq!(result.expect("body within cap must be read"), body);
+    }
+
+    /// CQ-B23: a body exceeding the cap is rejected — via a chunked,
+    /// no-`Content-Length` response so the ONLY thing that can catch it is
+    /// the streaming running-byte-count check, not the coarse
+    /// `Content-Length` gate in [`guarded_fetch`] (which this test bypasses
+    /// by calling `read_capped_body` directly on a plain `reqwest` response).
+    #[tokio::test]
+    async fn read_capped_body_rejects_body_over_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const CAP: usize = 16;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                // Chunked transfer-encoding, no Content-Length: a body far
+                // larger than CAP, split across multiple chunks so the
+                // reader must actually stream (not just look at one read).
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                let chunk = "x".repeat(32);
+                for _ in 0..8 {
+                    let framed = format!("{:x}\r\n{}\r\n", chunk.len(), chunk);
+                    let _ = stream.write_all(framed.as_bytes()).await;
+                }
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}/big", addr.port());
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        let result = read_capped_body(response, CAP).await;
+
+        assert!(
+            matches!(result, Err(SsrfError::ResponseTooLarge(CAP))),
+            "expected ResponseTooLarge({CAP}), got: {result:?}"
         );
     }
 }

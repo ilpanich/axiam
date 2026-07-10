@@ -129,6 +129,22 @@ impl From<FederationError> for axiam_core::error::AxiamError {
             FederationError::InvalidIdpCert(msg) => {
                 axiam_core::error::AxiamError::Validation { message: msg }
             }
+            // CQ-B23: upstream-IdP failures (discovery fetch/parse, token
+            // exchange, JWKS fetch) are NOT our bug — the local server did
+            // nothing wrong, but the external IdP is unreachable, timed out,
+            // misconfigured, or returned a malformed/erroring response.
+            // Mapping these to the generic `Internal` (500) catch-all
+            // mislabels an upstream dependency failure as a server bug.
+            // `AxiamError` has no dedicated 502 Bad Gateway variant; the
+            // closest existing variant is `ServiceUnavailable` (503), which
+            // — like a 502 — signals "an upstream dependency failed" rather
+            // than "the server itself is broken", so it is used here instead
+            // of inventing a new status/variant.
+            FederationError::DiscoveryFailed(msg)
+            | FederationError::TokenExchangeFailed(msg)
+            | FederationError::JwksFetchFailed(msg) => {
+                axiam_core::error::AxiamError::ServiceUnavailable(msg)
+            }
             other => axiam_core::error::AxiamError::Internal(other.to_string()),
         }
     }

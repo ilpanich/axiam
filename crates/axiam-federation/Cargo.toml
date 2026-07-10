@@ -50,3 +50,11 @@ saml = ["dep:samael", "dep:libxml"]
 [dev-dependencies]
 rcgen = { workspace = true }
 base64 = { workspace = true }
+# CQ-B23 DiscoveryCache test: a loopback mock IdP discovery endpoint, same
+# version already used by axiam-server/axiam-api-rest for equivalent OIDC
+# wiremock tests.
+wiremock = "0.6"
+# CQ-B23 DiscoveryCache test: an in-memory DB is only needed to construct a
+# real `OidcFederationService` (repos are unused by `discover`); mirrors
+# axiam-db's/axiam-server's own dev-dependency kv-mem setup.
+surrealdb = { workspace = true, features = ["kv-mem"] }

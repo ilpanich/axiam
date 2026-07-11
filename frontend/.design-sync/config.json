@@ -1,0 +1,147 @@
+{
+  "projectId": "827fb0d2-b847-49e4-ab2d-47d529af9bef",
+  "shape": "package",
+  "pkg": "frontend",
+  "globalName": "AxiamUI",
+  "entry": ".design-sync/entry.ts",
+  "srcDir": "src/components",
+  "tsconfig": ".design-sync/tsconfig.paths.json",
+  "cssEntry": ".design-sync/compiled.css",
+  "buildCmd": "npx tailwindcss -c .design-sync/tailwind.preview.config.js -i src/index.css -o .design-sync/compiled.css",
+  "componentSrcMap": {
+    "Button": "src/components/ui/button.tsx",
+    "Badge": "src/components/ui/badge.tsx",
+    "Card": "src/components/ui/card.tsx",
+    "Input": "src/components/ui/input.tsx",
+    "Label": "src/components/ui/label.tsx",
+    "Textarea": "src/components/ui/textarea.tsx",
+    "ConfirmDialog": "src/components/ConfirmDialog.tsx",
+    "DataTable": "src/components/DataTable.tsx",
+    "ForbiddenPage": "src/components/ForbiddenPage.tsx",
+    "FormDialog": "src/components/FormDialog.tsx",
+    "PageHeader": "src/components/PageHeader.tsx",
+    "PasswordPolicyChecker": "src/components/PasswordPolicyChecker.tsx",
+    "SearchInput": "src/components/SearchInput.tsx",
+    "SecretRevealModal": "src/components/SecretRevealModal.tsx",
+    "StatusBadge": "src/components/StatusBadge.tsx",
+    "Toaster": "src/components/Toaster.tsx",
+    "UserSearchDialog": "src/components/UserSearchDialog.tsx",
+    "ResourceTree": "src/components/ResourceTree.tsx",
+    "ToggleField": "src/components/shared.tsx",
+    "SectionCard": "src/components/shared.tsx",
+    "InfoRow": "src/components/shared.tsx",
+    "ActionBadge": "src/components/shared.tsx",
+    "AppLayout": "src/components/layout/AppLayout.tsx",
+    "PublicLayout": "src/components/layout/PublicLayout.tsx",
+    "Sidebar": "src/components/layout/Sidebar.tsx",
+    "Topbar": "src/components/layout/Topbar.tsx",
+    "TotpSetupPanel": "src/components/auth/TotpSetupPanel.tsx"
+  },
+  "docsDir": ".design-sync/docs",
+  "docsMap": {
+    "Button": ".design-sync/docs/Button.md",
+    "Badge": ".design-sync/docs/Badge.md",
+    "Card": ".design-sync/docs/Card.md",
+    "Input": ".design-sync/docs/Input.md",
+    "Label": ".design-sync/docs/Label.md",
+    "Textarea": ".design-sync/docs/Textarea.md",
+    "SearchInput": ".design-sync/docs/SearchInput.md",
+    "PasswordPolicyChecker": ".design-sync/docs/PasswordPolicyChecker.md",
+    "ToggleField": ".design-sync/docs/ToggleField.md",
+    "FormDialog": ".design-sync/docs/FormDialog.md",
+    "DataTable": ".design-sync/docs/DataTable.md",
+    "ResourceTree": ".design-sync/docs/ResourceTree.md",
+    "StatusBadge": ".design-sync/docs/StatusBadge.md",
+    "InfoRow": ".design-sync/docs/InfoRow.md",
+    "SectionCard": ".design-sync/docs/SectionCard.md",
+    "ActionBadge": ".design-sync/docs/ActionBadge.md",
+    "PageHeader": ".design-sync/docs/PageHeader.md",
+    "ConfirmDialog": ".design-sync/docs/ConfirmDialog.md",
+    "SecretRevealModal": ".design-sync/docs/SecretRevealModal.md",
+    "UserSearchDialog": ".design-sync/docs/UserSearchDialog.md",
+    "Toaster": ".design-sync/docs/Toaster.md",
+    "AppLayout": ".design-sync/docs/AppLayout.md",
+    "PublicLayout": ".design-sync/docs/PublicLayout.md",
+    "Sidebar": ".design-sync/docs/Sidebar.md",
+    "Topbar": ".design-sync/docs/Topbar.md",
+    "TotpSetupPanel": ".design-sync/docs/TotpSetupPanel.md",
+    "ForbiddenPage": ".design-sync/docs/ForbiddenPage.md"
+  },
+  "extraEntries": [
+    "./.design-sync/preview-frame.tsx"
+  ],
+  "provider": {
+    "component": "AxiamSurface"
+  },
+  "storyImports": {
+    "shim": [
+      "/node_modules/react-router",
+      "/node_modules/@tanstack/react-query",
+      "/src/stores/auth"
+    ]
+  },
+  "overrides": {
+    "AppLayout": {
+      "cardMode": "single",
+      "primaryStory": "AuthenticatedShell",
+      "viewport": "1280x800"
+    },
+    "PublicLayout": {
+      "cardMode": "single",
+      "primaryStory": "SignIn",
+      "viewport": "1000x760"
+    },
+    "Sidebar": {
+      "cardMode": "column",
+      "viewport": "900x820"
+    },
+    "Topbar": {
+      "cardMode": "column",
+      "viewport": "1100x260"
+    },
+    "ForbiddenPage": {
+      "cardMode": "single",
+      "primaryStory": "AccessDenied",
+      "viewport": "900x600"
+    },
+    "TotpSetupPanel": {
+      "cardMode": "column",
+      "viewport": "520x760"
+    },
+    "FormDialog": {
+      "cardMode": "single",
+      "primaryStory": "CreateServiceAccount",
+      "viewport": "900x720"
+    },
+    "ConfirmDialog": {
+      "cardMode": "single",
+      "primaryStory": "RevokeCertificate",
+      "viewport": "900x620"
+    },
+    "SecretRevealModal": {
+      "cardMode": "single",
+      "primaryStory": "OAuth2ClientCredentials",
+      "viewport": "900x720"
+    },
+    "UserSearchDialog": {
+      "cardMode": "single",
+      "primaryStory": "SearchResults",
+      "viewport": "900x720"
+    },
+    "Toaster": {
+      "cardMode": "single",
+      "primaryStory": "StackedToasts",
+      "viewport": "900x520"
+    },
+    "InfoRow": {
+      "cardMode": "column"
+    },
+    "PageHeader": {
+      "cardMode": "column"
+    },
+    "PasswordPolicyChecker": {
+      "cardMode": "column"
+    }
+  },
+  "readmeHeader": ".design-sync/conventions.md"
+}

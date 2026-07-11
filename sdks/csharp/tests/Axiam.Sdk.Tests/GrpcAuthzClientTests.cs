@@ -10,14 +10,7 @@ using Axiam.Sdk.Tests.Fixtures;
 using Axiam.V1;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
-using Grpc.Net.Client;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Hosting.Server;
-using Microsoft.AspNetCore.Hosting.Server.Features;
-using Microsoft.AspNetCore.Server.Kestrel.Core;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
+using Moq;
 using Xunit;
 
 namespace Axiam.Sdk.Tests;
@@ -29,31 +22,32 @@ namespace Axiam.Sdk.Tests;
 /// <see cref="ErrorMapper"/>, drives EXACTLY ONE shared-guard refresh + one retry on
 /// <c>UNAUTHENTICATED</c> (never a loop), and sources the wire <c>tenant_id</c>/
 /// <c>subject_id</c> from the access token's claims — never from the raw configured
-/// tenant string. Runs against a real, loopback, in-process gRPC server
-/// (<c>Grpc.AspNetCore.Server</c> over cleartext HTTP/2) — no live AXIAM backend
-/// required.
+/// tenant string.
 /// </summary>
+/// <remarks>
+/// The SDK's C# gRPC codegen is client-only (<c>GrpcServices="Client"</c>, [LOCKED] —
+/// the SDK never hosts a gRPC server), so there is no generated
+/// <c>AuthorizationServiceBase</c> to host a real in-process server against. Instead,
+/// this suite drives <see cref="AxiamGrpcAuthzClient"/>'s internal test seam (which
+/// accepts a raw <see cref="CallInvoker"/>) with a Moq-mocked <see cref="CallInvoker"/>
+/// that stands in for the wire — scripting canned <see cref="AsyncUnaryCall{TResponse}"/>
+/// responses/faults per test, exactly like the previous in-process Kestrel server did,
+/// without needing a real gRPC transport. The mocked invoker is wrapped with the SAME
+/// production <see cref="AuthInterceptor"/> the real client uses (via
+/// <c>CallInvoker.Intercept</c>), so metadata-injection and single-flight-retry
+/// behavior are still exercised end-to-end against the interceptor's real code.
+/// </remarks>
 [Trait("Category", "Fast")]
 public class GrpcAuthzClientTests
 {
-    static GrpcAuthzClientTests()
-    {
-        // Kestrel below is configured for cleartext HTTP/2 (h2c) — the officially
-        // documented switch to let Grpc.Net.Client's SocketsHttpHandler negotiate HTTP/2
-        // without TLS for this loopback test server (no live AXIAM backend / cert needed).
-        AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
-    }
-
     [Fact]
     public async Task CheckAccessAsync_Allowed_ReturnsTrue()
     {
-        var service = new FakeAuthorizationService(handleCheck: (_, _) => new CheckAccessResponse { Allowed = true });
-        await using FakeGrpcServer server = await FakeGrpcServer.StartAsync(service);
-        using GrpcChannel channel = CreateLoopbackChannel(server.Port);
+        var invoker = new FakeCallInvoker(handleCheck: (_, _) => new CheckAccessResponse { Allowed = true });
         using var refresh = new RefreshCounter();
         string jwt = MintUnverifiedJwt(subject: "user-1", tenantId: "tenant-1");
 
-        using AxiamGrpcAuthzClient client = BuildClient(channel, refresh.Guard, "tenant-1", () => jwt);
+        using AxiamGrpcAuthzClient client = BuildClient(invoker, refresh.Guard, "tenant-1", () => jwt);
 
         bool allowed = await client.CheckAccessAsync("documents:read", "doc-42");
 
@@ -64,13 +58,11 @@ public class GrpcAuthzClientTests
     [Fact]
     public async Task CheckAccessAsync_Denied_ReturnsFalse()
     {
-        var service = new FakeAuthorizationService(handleCheck: (_, _) => new CheckAccessResponse { Allowed = false, DenyReason = "no matching role" });
-        await using FakeGrpcServer server = await FakeGrpcServer.StartAsync(service);
-        using GrpcChannel channel = CreateLoopbackChannel(server.Port);
+        var invoker = new FakeCallInvoker(handleCheck: (_, _) => new CheckAccessResponse { Allowed = false, DenyReason = "no matching role" });
         using var refresh = new RefreshCounter();
         string jwt = MintUnverifiedJwt("user-1", "tenant-1");
 
-        using AxiamGrpcAuthzClient client = BuildClient(channel, refresh.Guard, "tenant-1", () => jwt);
+        using AxiamGrpcAuthzClient client = BuildClient(invoker, refresh.Guard, "tenant-1", () => jwt);
 
         bool allowed = await client.CheckAccessAsync("documents:delete", "doc-42");
 
@@ -80,14 +72,12 @@ public class GrpcAuthzClientTests
     [Fact]
     public async Task CheckAccessAsync_PermissionDenied_MapsToAuthzError()
     {
-        var service = new FakeAuthorizationService(
+        var invoker = new FakeCallInvoker(
             handleCheck: (_, _) => throw new RpcException(new Status(StatusCode.PermissionDenied, "caller lacks documents:delete")));
-        await using FakeGrpcServer server = await FakeGrpcServer.StartAsync(service);
-        using GrpcChannel channel = CreateLoopbackChannel(server.Port);
         using var refresh = new RefreshCounter();
         string jwt = MintUnverifiedJwt("user-1", "tenant-1");
 
-        using AxiamGrpcAuthzClient client = BuildClient(channel, refresh.Guard, "tenant-1", () => jwt);
+        using AxiamGrpcAuthzClient client = BuildClient(invoker, refresh.Guard, "tenant-1", () => jwt);
 
         await Assert.ThrowsAsync<AuthzError>(() => client.CheckAccessAsync("documents:delete", "doc-42"));
     }
@@ -96,7 +86,7 @@ public class GrpcAuthzClientTests
     public async Task CheckAccessAsync_Unauthenticated_TriggersExactlyOneRefreshThenRetries()
     {
         int callCount = 0;
-        var service = new FakeAuthorizationService(handleCheck: (_, _) =>
+        var invoker = new FakeCallInvoker(handleCheck: (_, _) =>
         {
             int n = Interlocked.Increment(ref callCount);
             if (n == 1)
@@ -108,12 +98,10 @@ public class GrpcAuthzClientTests
             }
             return new CheckAccessResponse { Allowed = true };
         });
-        await using FakeGrpcServer server = await FakeGrpcServer.StartAsync(service);
-        using GrpcChannel channel = CreateLoopbackChannel(server.Port);
         using var refresh = new RefreshCounter();
         string jwt = MintUnverifiedJwt("user-1", "tenant-1");
 
-        using AxiamGrpcAuthzClient client = BuildClient(channel, refresh.Guard, "tenant-1", () => jwt);
+        using AxiamGrpcAuthzClient client = BuildClient(invoker, refresh.Guard, "tenant-1", () => jwt);
 
         bool allowed = await client.CheckAccessAsync("documents:read", "doc-42");
 
@@ -125,7 +113,7 @@ public class GrpcAuthzClientTests
     [Fact]
     public async Task BatchCheckAsync_PreservesOrder()
     {
-        var service = new FakeAuthorizationService(handleBatch: (req, _) =>
+        var invoker = new FakeCallInvoker(handleBatch: req =>
         {
             bool[] pattern = { true, false, true };
             var response = new BatchCheckAccessResponse();
@@ -135,12 +123,10 @@ public class GrpcAuthzClientTests
             }
             return response;
         });
-        await using FakeGrpcServer server = await FakeGrpcServer.StartAsync(service);
-        using GrpcChannel channel = CreateLoopbackChannel(server.Port);
         using var refresh = new RefreshCounter();
         string jwt = MintUnverifiedJwt("user-1", "tenant-1");
 
-        using AxiamGrpcAuthzClient client = BuildClient(channel, refresh.Guard, "tenant-1", () => jwt);
+        using AxiamGrpcAuthzClient client = BuildClient(invoker, refresh.Guard, "tenant-1", () => jwt);
 
         var checks = new[]
         {
@@ -157,15 +143,13 @@ public class GrpcAuthzClientTests
     [Fact]
     public async Task CheckAccessAsync_NoActiveSession_ThrowsAuthError_WithoutAnyRpcCall()
     {
-        var service = new FakeAuthorizationService();
-        await using FakeGrpcServer server = await FakeGrpcServer.StartAsync(service);
-        using GrpcChannel channel = CreateLoopbackChannel(server.Port);
+        var invoker = new FakeCallInvoker();
         using var refresh = new RefreshCounter();
 
-        using AxiamGrpcAuthzClient client = BuildClient(channel, refresh.Guard, "tenant-1", () => null);
+        using AxiamGrpcAuthzClient client = BuildClient(invoker, refresh.Guard, "tenant-1", () => null);
 
         await Assert.ThrowsAsync<AuthError>(() => client.CheckAccessAsync("documents:read", "doc-42"));
-        Assert.Empty(service.ReceivedChecks);
+        Assert.Empty(invoker.ReceivedChecks);
     }
 
     [Fact]
@@ -176,21 +160,14 @@ public class GrpcAuthzClientTests
         const string configuredTenantSlug = "acme-corp"; // deliberately NOT the claim's tenant_id
         string jwt = MintUnverifiedJwt(claimSubjectId, claimTenantId);
 
-        CheckAccessRequest? received = null;
-        var service = new FakeAuthorizationService(handleCheck: (req, _) =>
-        {
-            received = req;
-            return new CheckAccessResponse { Allowed = true };
-        });
-        await using FakeGrpcServer server = await FakeGrpcServer.StartAsync(service);
-        using GrpcChannel channel = CreateLoopbackChannel(server.Port);
+        var invoker = new FakeCallInvoker(handleCheck: (req, _) => new CheckAccessResponse { Allowed = true });
         using var refresh = new RefreshCounter();
 
-        using AxiamGrpcAuthzClient client = BuildClient(channel, refresh.Guard, configuredTenantSlug, () => jwt);
+        using AxiamGrpcAuthzClient client = BuildClient(invoker, refresh.Guard, configuredTenantSlug, () => jwt);
 
         await client.CheckAccessAsync("documents:read", "doc-1");
 
-        Assert.NotNull(received);
+        CheckAccessRequest? received = Assert.Single(invoker.ReceivedChecks);
         Assert.Equal(claimTenantId, received!.TenantId);
         Assert.Equal(claimSubjectId, received.SubjectId);
         Assert.NotEqual(configuredTenantSlug, received.TenantId);
@@ -207,14 +184,7 @@ public class GrpcAuthzClientTests
         using var jwksHttpClient = new HttpClient(new FakeJwksHandler(fixture.BuildJwksDocument())) { BaseAddress = new Uri("https://axiam.test") };
         var jwksVerifier = new JwksVerifier(jwksHttpClient, new Uri("https://axiam.test"), TimeSpan.FromMinutes(5));
 
-        CheckAccessRequest? received = null;
-        var service = new FakeAuthorizationService(handleCheck: (req, _) =>
-        {
-            received = req;
-            return new CheckAccessResponse { Allowed = true };
-        });
-        await using FakeGrpcServer server = await FakeGrpcServer.StartAsync(service);
-        using GrpcChannel channel = CreateLoopbackChannel(server.Port);
+        var invoker = new FakeCallInvoker(handleCheck: (req, _) => new CheckAccessResponse { Allowed = true });
         using var refresh = new RefreshCounter();
 
         // The configured tenant MUST equal the JWT's tenant_id claim for the
@@ -223,12 +193,12 @@ public class GrpcAuthzClientTests
         // itself works end-to-end (real BouncyCastle Ed25519 verification against a
         // fetched JWKS document), which the unverified-fallback tests above do not
         // exercise.
-        using AxiamGrpcAuthzClient client = BuildClient(channel, refresh.Guard, tenantId, () => jwt, jwksVerifier);
+        using AxiamGrpcAuthzClient client = BuildClient(invoker, refresh.Guard, tenantId, () => jwt, jwksVerifier);
 
         bool allowed = await client.CheckAccessAsync("documents:read", "doc-1");
 
         Assert.True(allowed);
-        Assert.NotNull(received);
+        CheckAccessRequest? received = Assert.Single(invoker.ReceivedChecks);
         Assert.Equal(tenantId, received!.TenantId);
         Assert.Equal(subjectId, received.SubjectId);
     }
@@ -237,17 +207,11 @@ public class GrpcAuthzClientTests
     // Test helpers
     // ------------------------------------------------------------------
 
-    private static GrpcChannel CreateLoopbackChannel(int port) =>
-        GrpcChannel.ForAddress($"http://127.0.0.1:{port}", new GrpcChannelOptions
-        {
-            HttpHandler = new SocketsHttpHandler(),
-        });
-
     private static AxiamGrpcAuthzClient BuildClient(
-        GrpcChannel channel, RefreshGuard guard, string tenantId, Func<string?> tokenAccessor, JwksVerifier? jwksVerifier = null)
+        FakeCallInvoker fakeInvoker, RefreshGuard guard, string tenantId, Func<string?> tokenAccessor, JwksVerifier? jwksVerifier = null)
     {
         var interceptor = new AuthInterceptor(tokenAccessor, tenantId, guard);
-        CallInvoker invoker = channel.Intercept(interceptor);
+        CallInvoker invoker = fakeInvoker.Intercept(interceptor);
         return new AxiamGrpcAuthzClient(invoker, jwksVerifier, tokenAccessor, tenantId);
     }
 
@@ -308,22 +272,30 @@ public class GrpcAuthzClientTests
             });
     }
 
-    /// <summary>Fake <c>AuthorizationService</c> gRPC service implementation — records every
-    /// received <c>CheckAccess</c> request and answers via caller-supplied handlers, so each
-    /// test can script granted/denied/error responses without a live AXIAM backend.</summary>
-    private sealed class FakeAuthorizationService : AuthorizationService.AuthorizationServiceBase
+    /// <summary>
+    /// Mocked <see cref="CallInvoker"/> (Moq, over the abstract, virtual
+    /// <c>CallInvoker.AsyncUnaryCall&lt;TRequest,TResponse&gt;</c> members the generated
+    /// <c>AuthorizationServiceClient</c> actually calls) standing in for the wire —
+    /// records every received <c>CheckAccess</c> request and answers via caller-supplied
+    /// handlers, so each test can script granted/denied/error responses without a real
+    /// gRPC server. <c>AsyncUnaryCall&lt;T&gt;</c> results are built exactly as
+    /// <c>Grpc.Net.Client</c> itself would: a completed <see cref="Task{TResult}"/> (or a
+    /// faulted one carrying an <see cref="RpcException"/>) plus trivial
+    /// headers/status/trailers/dispose delegates.
+    /// </summary>
+    private sealed class FakeCallInvoker
     {
-        private readonly Func<CheckAccessRequest, ServerCallContext, CheckAccessResponse> _handleCheck;
-        private readonly Func<BatchCheckAccessRequest, ServerCallContext, BatchCheckAccessResponse> _handleBatch;
+        private readonly Func<CheckAccessRequest, CallOptions, CheckAccessResponse> _handleCheck;
+        private readonly Func<BatchCheckAccessRequest, BatchCheckAccessResponse> _handleBatch;
 
         public List<CheckAccessRequest> ReceivedChecks { get; } = new();
 
-        public FakeAuthorizationService(
-            Func<CheckAccessRequest, ServerCallContext, CheckAccessResponse>? handleCheck = null,
-            Func<BatchCheckAccessRequest, ServerCallContext, BatchCheckAccessResponse>? handleBatch = null)
+        public FakeCallInvoker(
+            Func<CheckAccessRequest, CallOptions, CheckAccessResponse>? handleCheck = null,
+            Func<BatchCheckAccessRequest, BatchCheckAccessResponse>? handleBatch = null)
         {
             _handleCheck = handleCheck ?? ((_, _) => new CheckAccessResponse { Allowed = true });
-            _handleBatch = handleBatch ?? ((req, context) =>
+            _handleBatch = handleBatch ?? (req =>
             {
                 var response = new BatchCheckAccessResponse();
                 foreach (CheckAccessRequest item in req.Requests)
@@ -334,54 +306,53 @@ public class GrpcAuthzClientTests
             });
         }
 
-        public override Task<CheckAccessResponse> CheckAccess(CheckAccessRequest request, ServerCallContext context)
+        /// <summary>Builds the mocked <see cref="CallInvoker"/> instance for this fake's
+        /// handlers, ready to be wrapped by the production <see cref="AuthInterceptor"/>
+        /// via <see cref="CallInvokerExtensions.Intercept(CallInvoker, Interceptor[])"/>.</summary>
+        public CallInvoker Intercept(Interceptor interceptor)
         {
-            ReceivedChecks.Add(request);
-            return Task.FromResult(_handleCheck(request, context));
+            var mock = new Mock<CallInvoker>();
+
+            mock.Setup(m => m.AsyncUnaryCall(
+                    It.IsAny<Method<CheckAccessRequest, CheckAccessResponse>>(),
+                    It.IsAny<string>(),
+                    It.IsAny<CallOptions>(),
+                    It.IsAny<CheckAccessRequest>()))
+                .Returns((Method<CheckAccessRequest, CheckAccessResponse> _, string _, CallOptions options, CheckAccessRequest request) =>
+                {
+                    ReceivedChecks.Add(request);
+                    return RunUnary(() => _handleCheck(request, options));
+                });
+
+            mock.Setup(m => m.AsyncUnaryCall(
+                    It.IsAny<Method<BatchCheckAccessRequest, BatchCheckAccessResponse>>(),
+                    It.IsAny<string>(),
+                    It.IsAny<CallOptions>(),
+                    It.IsAny<BatchCheckAccessRequest>()))
+                .Returns((Method<BatchCheckAccessRequest, BatchCheckAccessResponse> _, string _, CallOptions _, BatchCheckAccessRequest request) =>
+                    RunUnary(() => _handleBatch(request)));
+
+            return mock.Object.Intercept(interceptor);
         }
 
-        public override Task<BatchCheckAccessResponse> BatchCheckAccess(BatchCheckAccessRequest request, ServerCallContext context) =>
-            Task.FromResult(_handleBatch(request, context));
-    }
-
-    /// <summary>Real, loopback, in-process gRPC server hosting a single
-    /// <see cref="FakeAuthorizationService"/> instance over cleartext HTTP/2 on a random
-    /// port — the officially documented way to test a <c>Grpc.Net.Client</c> client
-    /// against a real gRPC server without a live AXIAM backend.</summary>
-    private sealed class FakeGrpcServer : IAsyncDisposable
-    {
-        private readonly WebApplication _app;
-
-        public int Port { get; }
-
-        private FakeGrpcServer(WebApplication app, int port)
+        private static AsyncUnaryCall<TResponse> RunUnary<TResponse>(Func<TResponse> handler)
         {
-            _app = app;
-            Port = port;
+            Task<TResponse> responseTask;
+            try
+            {
+                responseTask = Task.FromResult(handler());
+            }
+            catch (Exception ex)
+            {
+                responseTask = Task.FromException<TResponse>(ex);
+            }
+
+            return new AsyncUnaryCall<TResponse>(
+                responseTask,
+                Task.FromResult(new Metadata()),
+                () => Status.DefaultSuccess,
+                () => new Metadata(),
+                () => { });
         }
-
-        public static async Task<FakeGrpcServer> StartAsync(FakeAuthorizationService service)
-        {
-            WebApplicationBuilder builder = WebApplication.CreateBuilder();
-            builder.Logging.ClearProviders();
-            builder.WebHost.ConfigureKestrel(options =>
-                options.ListenLocalhost(0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
-            builder.Services.AddGrpc();
-            builder.Services.AddSingleton(service);
-
-            WebApplication app = builder.Build();
-            app.MapGrpcService<FakeAuthorizationService>();
-            await app.StartAsync().ConfigureAwait(false);
-
-            IServerAddressesFeature addressesFeature = app.Services
-                .GetRequiredService<IServer>()
-                .Features
-                .Get<IServerAddressesFeature>()!;
-            int port = new Uri(addressesFeature.Addresses.First()).Port;
-
-            return new FakeGrpcServer(app, port);
-        }
-
-        public async ValueTask DisposeAsync() => await _app.DisposeAsync().ConfigureAwait(false);
     }
 }

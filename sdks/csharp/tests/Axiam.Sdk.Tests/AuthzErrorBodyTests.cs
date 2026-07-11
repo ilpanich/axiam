@@ -81,7 +81,7 @@ public class AuthzErrorBodyTests
     [Fact]
     public void GrpcPermissionDenied_HasNoBody_ActionAndResourceIdAreNull()
     {
-        Exception error = ErrorMapper.FromGrpcStatus(Grpc.Core.StatusCode.PermissionDenied, "permission denied");
+        Exception error = ErrorMapper.FromGrpcStatus(global::Grpc.Core.StatusCode.PermissionDenied, "permission denied");
 
         var authzError = Assert.IsType<AuthzError>(error);
         Assert.Null(authzError.Action);

@@ -96,12 +96,12 @@ public class SensitiveRedactionTests
     [Fact]
     public void GrpcStatusMappingMatchesContract()
     {
-        Assert.IsType<AuthError>(ErrorMapper.FromGrpcStatus(Grpc.Core.StatusCode.Unauthenticated, "unauthenticated"));
-        Assert.IsType<AuthzError>(ErrorMapper.FromGrpcStatus(Grpc.Core.StatusCode.PermissionDenied, "permission denied"));
-        Assert.IsType<NetworkError>(ErrorMapper.FromGrpcStatus(Grpc.Core.StatusCode.Unavailable, "unavailable"));
-        Assert.IsType<NetworkError>(ErrorMapper.FromGrpcStatus(Grpc.Core.StatusCode.DeadlineExceeded, "deadline exceeded"));
-        Assert.IsType<NetworkError>(ErrorMapper.FromGrpcStatus(Grpc.Core.StatusCode.Internal, "internal"));
-        Assert.IsType<NetworkError>(ErrorMapper.FromGrpcStatus(Grpc.Core.StatusCode.ResourceExhausted, "resource exhausted"));
+        Assert.IsType<AuthError>(ErrorMapper.FromGrpcStatus(global::Grpc.Core.StatusCode.Unauthenticated, "unauthenticated"));
+        Assert.IsType<AuthzError>(ErrorMapper.FromGrpcStatus(global::Grpc.Core.StatusCode.PermissionDenied, "permission denied"));
+        Assert.IsType<NetworkError>(ErrorMapper.FromGrpcStatus(global::Grpc.Core.StatusCode.Unavailable, "unavailable"));
+        Assert.IsType<NetworkError>(ErrorMapper.FromGrpcStatus(global::Grpc.Core.StatusCode.DeadlineExceeded, "deadline exceeded"));
+        Assert.IsType<NetworkError>(ErrorMapper.FromGrpcStatus(global::Grpc.Core.StatusCode.Internal, "internal"));
+        Assert.IsType<NetworkError>(ErrorMapper.FromGrpcStatus(global::Grpc.Core.StatusCode.ResourceExhausted, "resource exhausted"));
     }
 
     [Fact]

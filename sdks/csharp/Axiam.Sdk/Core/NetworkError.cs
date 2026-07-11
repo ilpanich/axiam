@@ -47,6 +47,22 @@ public sealed class NetworkError : Exception
     }
 
     /// <summary>
+    /// CONTRACT.md &#167;2 MUST: "NetworkError MUST carry the underlying OS/transport
+    /// error as a `cause` (or equivalent chained exception)" — <see cref="Exception.InnerException"/>
+    /// must never be null. This sanitized carrier is the ONLY exception type ever placed
+    /// there: it holds nothing but a redacted summary string, so chaining a cause can
+    /// never reintroduce the token/header leak this file's class-level remarks describe
+    /// (no live <see cref="HttpResponseMessage"/>, no unredacted caught-exception message,
+    /// ever reaches it).
+    /// </summary>
+    private sealed class SanitizedCause : Exception
+    {
+        public SanitizedCause(string sanitizedSummary) : base(sanitizedSummary)
+        {
+        }
+    }
+
+    /// <summary>
     /// Builds a <see cref="NetworkError"/> from a live <see cref="HttpResponseMessage"/>.
     /// This is the ONLY construction path that accepts a live response — every other
     /// code path in the SDK MUST go through this factory (or <see cref="FromException"/>)
@@ -65,8 +81,10 @@ public sealed class NetworkError : Exception
         var message =
             $"{context}: HTTP {(int)response.StatusCode} — headers: [{string.Join("; ", sanitizedHeaders)}]";
         // The raw `response` object itself is NEVER stored as InnerException/Data —
-        // only the pre-sanitized string above survives past this method.
-        return new NetworkError(message, inner: null);
+        // only a sanitized status-code summary (no header values, safe or otherwise)
+        // survives past this method, satisfying the §2 MUST for a non-null cause chain.
+        var inner = new SanitizedCause($"HTTP {(int)response.StatusCode}");
+        return new NetworkError(message, inner);
     }
 
     /// <summary>
@@ -78,8 +96,13 @@ public sealed class NetworkError : Exception
     public static NetworkError FromException(Exception ex, string context)
     {
         ArgumentNullException.ThrowIfNull(ex);
-        var message = $"{context}: {ex.GetType().Name} — {SanitizeMessage(ex.Message)}";
-        return new NetworkError(message, inner: null);
+        string sanitizedDetail = SanitizeMessage(ex.Message);
+        var message = $"{context}: {ex.GetType().Name} — {sanitizedDetail}";
+        // Chain a cause per §2 MUST — never the caught exception itself (it may carry an
+        // unsanitized message/stack referencing request internals); only its type name
+        // plus the already-redacted detail above.
+        var inner = new SanitizedCause($"{ex.GetType().Name}: {sanitizedDetail}");
+        return new NetworkError(message, inner);
     }
 
     /// <summary>

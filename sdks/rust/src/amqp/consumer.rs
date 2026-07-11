@@ -1005,7 +1005,10 @@ mod tests {
             1,
             "a replayed nonce must not reach the handler a second time"
         );
-        assert_eq!(second_delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            second_delivery.nacked_requeue_false.load(Ordering::SeqCst),
+            1
+        );
         assert_eq!(second_delivery.acked.load(Ordering::SeqCst), 0);
     }
 

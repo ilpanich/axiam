@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -224,6 +225,56 @@ func TestErrorFromGRPCStatus(t *testing.T) {
 			assertErrorKind(t, err, tc.want)
 		})
 	}
+}
+
+// TestMapErrorResponse_ParsesAuthzFields proves that a 403 authorization_denied
+// response body's structured `action`/`resource_id` fields land on the
+// resulting *AuthzError, and that a missing `resource_id` (present only for
+// a resource-scoped denial per CONTRACT.md §2) correctly leaves the field "".
+func TestMapErrorResponse_ParsesAuthzFields(t *testing.T) {
+	newResp := func(body string) *http.Response {
+		return &http.Response{
+			StatusCode: 403,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+	}
+
+	t.Run("action and resource_id present", func(t *testing.T) {
+		body := `{"error":"authorization_denied","message":"you do not have permission","action":"users:get","resource_id":"9f9a1b2c-0000-4000-8000-000000000000"}`
+		err := mapErrorResponse(newResp(body))
+
+		var authzErr *AuthzError
+		if !errors.As(err, &authzErr) {
+			t.Fatalf("expected *AuthzError, got %T", err)
+		}
+		if authzErr.Action != "users:get" {
+			t.Fatalf("Action = %q, want %q", authzErr.Action, "users:get")
+		}
+		if authzErr.ResourceID != "9f9a1b2c-0000-4000-8000-000000000000" {
+			t.Fatalf("ResourceID = %q, want the uuid", authzErr.ResourceID)
+		}
+		// The free-text message field must stay redacted (WR-01) even
+		// though the structured fields were lifted out of the body.
+		if strings.Contains(authzErr.Message, "you do not have permission") {
+			t.Fatalf("Message leaked raw body text: %q", authzErr.Message)
+		}
+	})
+
+	t.Run("only action present, resource_id absent", func(t *testing.T) {
+		body := `{"error":"authorization_denied","message":"you do not have permission","action":"users:list"}`
+		err := mapErrorResponse(newResp(body))
+
+		var authzErr *AuthzError
+		if !errors.As(err, &authzErr) {
+			t.Fatalf("expected *AuthzError, got %T", err)
+		}
+		if authzErr.Action != "users:list" {
+			t.Fatalf("Action = %q, want %q", authzErr.Action, "users:list")
+		}
+		if authzErr.ResourceID != "" {
+			t.Fatalf("ResourceID = %q, want empty when absent from body", authzErr.ResourceID)
+		}
+	})
 }
 
 func assertErrorKind(t *testing.T, err error, want string) {

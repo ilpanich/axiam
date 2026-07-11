@@ -1,6 +1,7 @@
 package axiam
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -171,6 +172,36 @@ func errorFromHTTPStatus(status int, message string, resp *http.Response, cause 
 	}
 }
 
+// authzErrorBody is the shape of the server's structured authorization-denied
+// error body, e.g.:
+//
+//	{"error":"authorization_denied","message":"...","action":"users:get","resource_id":"<uuid>"}
+//
+// `action` is present when the denied action is known; `resource_id` is
+// present only for a resource-scoped denial (absent otherwise). We only ever
+// read the two structured fields here — the body's own `message`/`error`
+// keys are intentionally ignored (see readBodyForError's WR-01 redaction
+// rationale in login.go): only Action/ResourceID are safe, bounded,
+// non-free-text values to lift out of a server-controlled body.
+type authzErrorBody struct {
+	Action     string `json:"action"`
+	ResourceID string `json:"resource_id"`
+}
+
+// parseAuthzFields best-effort decodes body (the raw, bounded HTTP error
+// response body) as an authzErrorBody and returns its action/resource_id
+// fields. Any decode failure (non-JSON body, unexpected shape, empty body)
+// is swallowed and both results are "" — this is best-effort diagnostic
+// enrichment of an AuthzError, never load-bearing, so a malformed or
+// adversarial body must never surface as a decode error here.
+func parseAuthzFields(body []byte) (action, resourceID string) {
+	var parsed authzErrorBody
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", ""
+	}
+	return parsed.Action, parsed.ResourceID
+}
+
 // errorFromGRPCStatus maps a gRPC status code to an AxiamError-family value
 // per CONTRACT.md §2's gRPC status table:
 //
@@ -183,6 +214,11 @@ func errorFromHTTPStatus(status int, message string, resp *http.Response, cause 
 //	other                   -> NetworkError
 //
 // message is caller-controlled and MUST NOT contain a raw token value.
+//
+// Unlike the HTTP path, a gRPC status carries no structured JSON body to
+// parse action/resource_id out of, so the resulting AuthzError always leaves
+// those fields "" (CONTRACT.md §2: they are SHOULD-carry-if-available, not
+// MUST).
 func errorFromGRPCStatus(code int, message string) error {
 	switch codes.Code(code) {
 	case codes.Unauthenticated:

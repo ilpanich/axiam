@@ -36,9 +36,9 @@ export function PublicLayout({ children, maxWidth = "max-w-md" }: PublicLayoutPr
             />
             <div className="relative h-16 w-16 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center shadow-glow-cyan">
               <img
-                src="/axiam_logo.png"
+                src="/axiam_logo_mark.png"
                 alt="AXIAM"
-                className="h-10 w-10 object-contain"
+                className="h-10 w-10 rounded-full object-cover"
               />
             </div>
           </div>

@@ -25,12 +25,15 @@ final class NetworkError extends AxiamException
     /** @var list<string> lowercase header names whose VALUES are never echoed. */
     private const SENSITIVE_HEADERS = ['set-cookie', 'authorization', 'cookie'];
 
-    private function __construct(string $message)
+    private function __construct(string $message, ?\Throwable $previous = null)
     {
-        // Deliberately no $previous/$code — no wrapped exception or response object is
-        // ever attached to this exception, since a wrapped Guzzle exception can itself
-        // carry a live PSR-7 response with the same sensitive headers (see class doc).
-        parent::__construct($message);
+        // $previous, when given, MUST already be sanitized by the caller (a fresh
+        // \RuntimeException carrying only a redacted summary string) — never the raw
+        // wrapped exception or response object, since either can carry a live PSR-7
+        // response with the same sensitive headers (see class doc). This satisfies
+        // CONTRACT.md §2's cause-chaining requirement (getPrevious() !== null) without
+        // reintroducing the token-leak-via-cause class of bug the class doc describes.
+        parent::__construct($message, previous: $previous);
     }
 
     /**
@@ -67,14 +70,16 @@ final class NetworkError extends AxiamException
      */
     public static function fromException(\Throwable $exception, string $context = 'Transport error'): self
     {
-        $message = sprintf(
-            '%s: %s — %s',
-            $context,
-            $exception::class,
-            self::sanitizeMessage($exception->getMessage())
-        );
+        $sanitizedSummary = sprintf('%s: %s', $exception::class, self::sanitizeMessage($exception->getMessage()));
 
-        return new self($message);
+        $message = sprintf('%s: %s', $context, $sanitizedSummary);
+
+        // Chain a SANITIZED stand-in for the original exception as $previous, so
+        // getPrevious() !== null (CONTRACT.md §2 MUST: "carry the underlying OS/
+        // transport error as a cause"), without ever attaching the raw $exception
+        // itself — it (or something it wraps) could carry a live PSR-7 response with
+        // the same sensitive headers this class exists to redact (see class doc).
+        return new self($message, new \RuntimeException($sanitizedSummary));
     }
 
     /**

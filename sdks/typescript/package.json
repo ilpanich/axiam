@@ -122,7 +122,7 @@
     "@types/amqplib": "^0.10.0",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
-    "esbuild": "^0.24.0",
+    "esbuild": "^0.25.0",
     "express": "^5.0.0",
     "fastify": "^5.0.0",
     "jsdom": "^26.0.0",

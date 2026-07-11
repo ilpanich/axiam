@@ -10,7 +10,11 @@
 # ---------------------------------------------------------------------------
 FROM rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS builder
 
-# Install build-time dependencies: protobuf compiler for tonic/prost codegen
+# Install build-time dependencies: protobuf compiler for tonic/prost codegen.
+# DL3008 (apt version pinning) is intentionally ignored: Debian point releases
+# rotate old versions out of the archive, so pins break rebuilds; the digest-
+# pinned base image above is the reproducibility anchor for this stage.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         protobuf-compiler \
         libxml2-dev \

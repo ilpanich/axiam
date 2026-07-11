@@ -260,6 +260,9 @@ class _SelfSignedHttpsServer:
 
         self._httpd = http.server.HTTPServer(("localhost", self.port), _Handler)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        # PROTOCOL_TLS_SERVER alone still admits TLSv1/1.1 on older OpenSSL;
+        # match the project's TLS floor (CodeQL py/insecure-protocol).
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
         self._httpd.socket = ctx.wrap_socket(self._httpd.socket, server_side=True)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)

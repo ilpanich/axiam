@@ -60,7 +60,11 @@ services:
       # Default in code is true (prod-safe). NEVER set false in production.
       AXIAM__AUTH__COOKIE_SECURE: "false"
       # Bootstrap guard: only requests with this email are accepted by /admin/bootstrap.
-      AXIAM__BOOTSTRAP_ADMIN_EMAIL: "${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
+      # NOTE: the bootstrap handler reads this via `std::env::var` directly (NOT
+      # through the `AXIAM__`-prefixed config layer), so the OS env var name must
+      # be exactly AXIAM_BOOTSTRAP_ADMIN_EMAIL (single underscore). A double
+      # underscore here never reaches the gate and every bootstrap call 403s.
+      AXIAM_BOOTSTRAP_ADMIN_EMAIL: "${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
       # JWT signing keypair — load_config() asserts these are non-empty, otherwise
       # the server panics on startup (exit 101). The CI E2E job generates an
       # ephemeral Ed25519 keypair per run and exports these vars before

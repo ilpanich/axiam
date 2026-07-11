@@ -2,7 +2,7 @@
 //!
 //! Two tiers:
 //! 1. Non-ignored, broker-free assertions: `WebhookMessage` attempt-increment
-//!    + serialize round-trip, and the retry-TTL math a simulated failure
+//!    and serialize round-trip, and the retry-TTL math a simulated failure
 //!    would compute (`backoff_ttl_ms`).
 //! 2. An `#[ignore]`d live-RabbitMQ integration test (run via `just dev-up`)
 //!    proving the end-to-end AMQP wiring: a queued `WebhookMessage` is
@@ -71,9 +71,10 @@ fn sample_message() -> WebhookMessage {
 }
 
 /// Simulates the consumer's failure-path attempt-increment (mirrors
-/// `webhook_consumer::handle_delivery_failure`'s `next_attempt = msg.attempt
-/// + 1` + retry-message-clone logic) and proves the round-trip through
-/// serialize/deserialize preserves the incremented count.
+/// `webhook_consumer::handle_delivery_failure`'s
+/// `next_attempt = msg.attempt + 1` + retry-message-clone logic) and proves
+/// the round-trip through serialize/deserialize preserves the incremented
+/// count.
 #[test]
 fn webhook_message_round_trips_with_incremented_attempt() {
     let msg = sample_message();

@@ -43,8 +43,8 @@ type TestDb = surrealdb::engine::local::Db;
 /// Test-only placeholder password — not a real credential.
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
-/// Arbitrary CSRF double-submit token (SEC-046) — matching `axiam_csrf` cookie
-/// + `X-CSRF-Token` header; the middleware only checks they are equal.
+/// Arbitrary CSRF double-submit token (SEC-046) — matching the `axiam_csrf`
+/// cookie and `X-CSRF-Token` header; the middleware only checks they are equal.
 const CSRF_TOKEN: &str = "test-csrf-token";
 
 // -------------------------------------------------------------------------

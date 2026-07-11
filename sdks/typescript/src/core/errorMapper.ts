@@ -24,6 +24,31 @@ export interface HttpErrorContext {
   action?: string;
   resourceId?: string;
   cause?: unknown;
+  /**
+   * The parsed JSON response body (when available). For a 403/409
+   * authorization-denied response the server shapes this as
+   * `{ error: "authorization_denied", message, action?, resource_id? }`
+   * (`action` present when known, `resource_id` present only for a
+   * resource-scoped denial). `mapHttpStatusToError` prefers these body
+   * fields over `action`/`resourceId` above when populating `AuthzError`.
+   */
+  body?: unknown;
+}
+
+/**
+ * Extract `action`/`resource_id` (snake_case -> camelCase) from a parsed
+ * authorization-denied response body, if present and string-typed. Any other
+ * shape (missing fields, non-object body, older servers with no body at all)
+ * yields `{}`, so callers fall back to caller-supplied context.
+ */
+function extractAuthzFieldsFromBody(body: unknown): { action?: string; resourceId?: string } {
+  if (body === null || typeof body !== 'object') {
+    return {};
+  }
+  const record = body as Record<string, unknown>;
+  const action = typeof record.action === 'string' ? record.action : undefined;
+  const resourceId = typeof record.resource_id === 'string' ? record.resource_id : undefined;
+  return { action, resourceId };
 }
 
 /**
@@ -110,6 +135,12 @@ export function sanitizeAxiosError(err: unknown): unknown {
  * NetworkError's `cause` (when provided via `ctx.cause`) is always passed
  * through `sanitizeAxiosError` first (CR-04) — this is the single choke
  * point for both rest/ auth call sites and any future caller.
+ *
+ * For 403/409, `action`/`resourceId` are sourced from the response body
+ * (`ctx.body`) when the body carries them, falling back to the
+ * caller-supplied `ctx.action`/`ctx.resourceId` (the request call-args)
+ * otherwise — this keeps compatibility with older servers that don't yet
+ * echo `action`/`resource_id` in the denial body.
  */
 export function mapHttpStatusToError(
   status: number,
@@ -120,7 +151,8 @@ export function mapHttpStatusToError(
     return new AuthError(message);
   }
   if (status === 403 || status === 409) {
-    return new AuthzError(message, ctx?.action, ctx?.resourceId);
+    const fromBody = extractAuthzFieldsFromBody(ctx?.body);
+    return new AuthzError(message, fromBody.action ?? ctx?.action, fromBody.resourceId ?? ctx?.resourceId);
   }
   // 400, 408, 429, 5xx, and any other status fall through to NetworkError.
   return new NetworkError(message, sanitizeAxiosError(ctx?.cause));

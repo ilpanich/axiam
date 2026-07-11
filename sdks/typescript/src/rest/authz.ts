@@ -7,7 +7,7 @@
 // interceptor on every call). No client-side cache (D-08) — plain stateless
 // async functions.
 
-import { AuthzError, mapHttpStatusToError, NetworkError } from '../core/index.js';
+import { mapHttpStatusToError, NetworkError } from '../core/index.js';
 import type { AxiamClient } from './client.js';
 import type {
   AccessCheck,
@@ -78,11 +78,19 @@ function mapAuthzError(err: unknown, action?: string, resourceId?: string): Erro
     const response = (err as { response?: { status?: number; data?: { message?: string } } }).response;
     if (response?.status !== undefined) {
       if (response.status === 403) {
-        return new AuthzError(response.data?.message ?? 'authorization denied', action, resourceId);
+        // Body (response.data) carries the server's own action/resource_id
+        // for the denial (structured 403 body) — preferred by the mapper
+        // over the call-args action/resourceId below when present.
+        return mapHttpStatusToError(403, response.data?.message ?? 'authorization denied', {
+          action,
+          resourceId,
+          body: response.data,
+        });
       }
       return mapHttpStatusToError(response.status, response.data?.message ?? 'authz request failed', {
         action,
         resourceId,
+        body: response.data,
         cause: err,
       });
     }

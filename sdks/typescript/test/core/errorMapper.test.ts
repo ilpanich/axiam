@@ -25,6 +25,40 @@ describe('mapHttpStatusToError', () => {
     expect((err as AuthzError).resourceId).toBe('res-1');
   });
 
+  it('prefers action/resource_id from the response body over the call-arg ctx', () => {
+    const err = mapHttpStatusToError(403, 'denied', {
+      action: 'ctx:action',
+      resourceId: 'ctx-resource',
+      body: { error: 'authorization_denied', message: 'denied', action: 'users:get', resource_id: 'body-uuid' },
+    });
+    expect(err).toBeInstanceOf(AuthzError);
+    expect((err as AuthzError).action).toBe('users:get');
+    expect((err as AuthzError).resourceId).toBe('body-uuid');
+  });
+
+  it('populates only action from the body when resource_id is absent (non-resource-scoped denial), leaving resourceId to fall back to ctx', () => {
+    const err = mapHttpStatusToError(403, 'denied', {
+      action: 'ctx:action',
+      resourceId: 'ctx-resource',
+      body: { error: 'authorization_denied', message: 'denied', action: 'users:list' },
+    });
+    expect(err).toBeInstanceOf(AuthzError);
+    expect((err as AuthzError).action).toBe('users:list');
+    // No resource_id in the body -> falls back to the call-arg ctx value.
+    expect((err as AuthzError).resourceId).toBe('ctx-resource');
+  });
+
+  it('falls back entirely to ctx action/resourceId when the body has neither field (older server)', () => {
+    const err = mapHttpStatusToError(403, 'denied', {
+      action: 'ctx:action',
+      resourceId: 'ctx-resource',
+      body: { error: 'authorization_denied', message: 'denied' },
+    });
+    expect(err).toBeInstanceOf(AuthzError);
+    expect((err as AuthzError).action).toBe('ctx:action');
+    expect((err as AuthzError).resourceId).toBe('ctx-resource');
+  });
+
   it('carries cause on NetworkError from context (plain Error, no response headers to sanitize)', () => {
     const cause = new Error('ECONNREFUSED');
     const err = mapHttpStatusToError(500, 'server error', { cause });

@@ -348,9 +348,14 @@ jobs:
         timeout-minutes: 25
         run: |
           # Serve the production build on port 5173 for Playwright.
+          # `-s` (single-page mode) is REQUIRED: the admin UI uses client-side
+          # routing, so a direct GET of a deep link (/login, /users, …) must
+          # fall back to index.html. Without it, `serve` 404s every deep link
+          # and the whole Playwright suite fails at `page.goto('/login')`
+          # (only tests that navigate via `/` pass).
           # `--yes` prevents npx from stalling on an interactive
           # "Ok to proceed?" install prompt when `serve` isn't cached.
-          npx --yes serve dist -l 5173 &
+          npx --yes serve -s dist -l 5173 &
           SERVE_PID=$!
           # Wait for serve to be ready
           for i in $(seq 1 15); do

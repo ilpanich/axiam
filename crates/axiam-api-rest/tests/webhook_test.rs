@@ -831,8 +831,13 @@ async fn create_webhook_stores_ciphertext_not_plaintext() {
 /// entire `127.0.0.0/8` range to `lo`, so `127.0.0.2` is a valid, bindable
 /// loopback address without any extra host configuration.
 ///
-/// - `"localhost"` genuinely, deterministically resolves to `127.0.0.1` —
-///   that's where the REAL mock server listens.
+/// - `"localhost"` resolves to a loopback address — that's where the REAL
+///   mock server listens. On a dual-stack host it may resolve to `::1`
+///   BEFORE `127.0.0.1` (GitHub's runners do exactly this), and
+///   `resolve_and_pick` pins the first address returned, so the mock
+///   listens on BOTH loopback families at the same port. Binding only
+///   `127.0.0.1` would make the final `guarded_fetch` leg fail with a
+///   connection error on any IPv6-first host.
 /// - `ssrf::pinned_client` is the exact mechanism `guarded_fetch` (and
 ///   therefore `webhook.rs`'s delivery loop) uses to build the per-attempt
 ///   client. Pinning it to `127.0.0.2` (deliberately NOT where "localhost"
@@ -852,32 +857,45 @@ async fn create_webhook_stores_ciphertext_not_plaintext() {
 #[tokio::test]
 async fn webhook_pins_resolved_ip() {
     use axiam_federation::ssrf;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    // The REAL destination: what "localhost" genuinely, deterministically
-    // resolves to. A legitimate, correctly-pinned send lands here.
+    // The REAL destination: a loopback address "localhost" resolves to. A
+    // legitimate, correctly-pinned send lands here.
     let real_listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind real listener");
     let real_port = real_listener.local_addr().expect("local_addr").port();
 
     let real_hit = Arc::new(AtomicBool::new(false));
-    let real_hit_writer = real_hit.clone();
-    tokio::spawn(async move {
+
+    // Serve the mock 200 on an accepted connection, flagging that the real
+    // listener was reached.
+    async fn serve(listener: TcpListener, hit: Arc<AtomicBool>) {
         loop {
-            let Ok((mut stream, _)) = real_listener.accept().await else {
+            let Ok((mut stream, _)) = listener.accept().await else {
                 break;
             };
-            real_hit_writer.store(true, Ordering::SeqCst);
+            hit.store(true, Ordering::SeqCst);
             let mut buf = [0u8; 1024];
             let _ = stream.read(&mut buf).await;
             let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = stream.write_all(response).await;
         }
-    });
+    }
+
+    // Dual-stack: on an IPv6-first host (GitHub's runners), "localhost"
+    // resolves to ::1 before 127.0.0.1, and `resolve_and_pick` pins the first
+    // address — so the final `guarded_fetch` leg would connect to [::1] and
+    // find nothing listening. Also serve the IPv6 loopback on the SAME port.
+    // Best-effort: a host without IPv6 loopback simply skips it (there,
+    // "localhost" can only resolve to 127.0.0.1 anyway).
+    if let Ok(v6_listener) = TcpListener::bind((Ipv6Addr::LOCALHOST, real_port)).await {
+        tokio::spawn(serve(v6_listener, real_hit.clone()));
+    }
+    tokio::spawn(serve(real_listener, real_hit.clone()));
 
     let url = format!("http://localhost:{real_port}/webhook");
 

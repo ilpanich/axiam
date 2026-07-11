@@ -295,6 +295,11 @@ jobs:
           AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(openssl genpkey -algorithm ed25519)"
           AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(printf '%s' "$AXIAM__AUTH__JWT_PRIVATE_KEY_PEM" | openssl pkey -pubout)"
           export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM AXIAM__AUTH__JWT_PUBLIC_KEY_PEM
+          # SEC-022/SECHRD-08/D-05c: the AMQP master signing key is mandatory in
+          # a release build — unset means resolve_signing_key() fails closed and
+          # the server panics on startup (exit 101). Hex-encoded, 32 bytes.
+          AXIAM__AMQP__SIGNING_KEY="$(openssl rand -hex 32)"
+          export AXIAM__AMQP__SIGNING_KEY
           docker compose -f docker/docker-compose.e2e.yml up -d --build --wait
         timeout-minutes: 15
 

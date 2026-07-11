@@ -67,6 +67,12 @@ services:
       # `docker compose up`; never committed.
       AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:-}"
       AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:-}"
+      # SEC-022/SECHRD-08/D-05c: the AMQP master signing key is MANDATORY in a
+      # release build (this image) — resolve_signing_key() fails closed and the
+      # server panics on startup (exit 101) when it is unset. Hex-encoded; the
+      # CI E2E job generates an ephemeral 32-byte key per run and exports it
+      # before `docker compose up`; never committed.
+      AXIAM__AMQP__SIGNING_KEY: "${AXIAM__AMQP__SIGNING_KEY:-}"
     healthcheck:
       test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
       interval: 10s

@@ -120,6 +120,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The `secrets` context is NOT available in step-level `if:` expressions —
+    # referencing it there ("Unrecognized named-value: 'secrets'") invalidates
+    # the whole workflow file and every run fails at startup with zero jobs.
+    # Hoist the credentials into job-level `env` instead; the `env` context IS
+    # available in `if:`, so the credential-absent branches below still work.
+    env:
+      PHP_SDK_MIRROR_TOKEN: ${{ secrets.PHP_SDK_MIRROR_TOKEN }}
+      PHP_SDK_MIRROR_REPO: ${{ vars.PHP_SDK_MIRROR_REPO }}
     steps:
       # D-05: `git subtree split` needs the full history of sdks/php/ to
       # extract a faithful standalone branch — the default shallow checkout
@@ -159,10 +167,8 @@ jobs:
       # PHP_SDK_MIRROR_REPO set to that mirror's "owner/repo". Tag scheme:
       # sdks/php/vX.Y.Z (Phase 15 D-13).
       - name: Push split branch to the read-only mirror repo (requires PHP_SDK_MIRROR_TOKEN secret)
-        if: ${{ secrets.PHP_SDK_MIRROR_TOKEN != '' && vars.PHP_SDK_MIRROR_REPO != '' }}
+        if: ${{ env.PHP_SDK_MIRROR_TOKEN != '' && env.PHP_SDK_MIRROR_REPO != '' }}
         env:
-          PHP_SDK_MIRROR_TOKEN: ${{ secrets.PHP_SDK_MIRROR_TOKEN }}
-          PHP_SDK_MIRROR_REPO: ${{ vars.PHP_SDK_MIRROR_REPO }}
           PHP_SDK_VERSION: ${{ steps.version.outputs.version }}
         run: |
           git tag "v${PHP_SDK_VERSION}" sdks-php-split
@@ -172,7 +178,7 @@ jobs:
           echo "Pushed sdks/php/ subtree (v${PHP_SDK_VERSION}) to https://github.com/${PHP_SDK_MIRROR_REPO} -- Packagist will auto-update axiam/axiam-sdk via its registered GitHub webhook."
 
       - name: PHP_SDK_MIRROR_TOKEN / PHP_SDK_MIRROR_REPO absent — publish deferred to a maintainer action (D-05)
-        if: ${{ secrets.PHP_SDK_MIRROR_TOKEN == '' || vars.PHP_SDK_MIRROR_REPO == '' }}
+        if: ${{ env.PHP_SDK_MIRROR_TOKEN == '' || env.PHP_SDK_MIRROR_REPO == '' }}
         run: |
           echo "::warning::PHP_SDK_MIRROR_TOKEN and/or the PHP_SDK_MIRROR_REPO repository variable are not configured -- sdks/php/ was built, tested, and subtree-split successfully but NOT pushed to a mirror repo, so Packagist was NOT updated."
           echo "A maintainer must: (1) create a read-only mirror repo (e.g. ilpanich/axiam-php-sdk), (2) register it on Packagist (packagist.org 'Submit') with the GitHub webhook enabled, (3) add a push token as the PHP_SDK_MIRROR_TOKEN repository secret and the mirror's 'owner/repo' as the PHP_SDK_MIRROR_REPO repository variable, then re-run this workflow (or push the sdks-php-split branch/tag to the mirror manually) to complete the first publish."

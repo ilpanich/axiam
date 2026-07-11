@@ -96,7 +96,8 @@
     "build": "tsup",
     "test": "vitest",
     "typecheck": "tsc --noEmit",
-    "bundle-grep": "node scripts/bundle-grep.mjs"
+    "bundle-grep": "node scripts/bundle-grep.mjs",
+    "docs": "typedoc --entryPoints src/index.ts --out _docs --name \"AXIAM TypeScript SDK\""
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.0",
@@ -129,6 +130,7 @@
     "msw": "^2.0.0",
     "ts-proto": "^2.0.0",
     "tsup": "^8.0.0",
+    "typedoc": "^0.28.0",
     "typescript": "~5.9.0",
     "vitest": "^3.0.0"
   }

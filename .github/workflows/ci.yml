@@ -280,6 +280,10 @@ jobs:
     name: E2E Tests
     runs-on: ubuntu-latest
     needs: [build]
+    # Backstop: a Playwright spec that hangs on CI (no per-test signal) would
+    # otherwise run to GitHub's 6h default. Bound the whole job so a hang
+    # self-terminates and leaves a downloadable log instead of blocking the PR.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
@@ -338,9 +342,15 @@ jobs:
 
       - name: Serve frontend and run Playwright E2E tests
         working-directory: frontend
+        # Generous enough for a legitimately slow full suite (serial workers,
+        # 2 retries), but bounded so an actual hang fails here — with a log —
+        # rather than stalling the whole job.
+        timeout-minutes: 25
         run: |
-          # Serve the production build on port 5173 for Playwright
-          npx serve dist -l 5173 &
+          # Serve the production build on port 5173 for Playwright.
+          # `--yes` prevents npx from stalling on an interactive
+          # "Ok to proceed?" install prompt when `serve` isn't cached.
+          npx --yes serve dist -l 5173 &
           SERVE_PID=$!
           # Wait for serve to be ready
           for i in $(seq 1 15); do

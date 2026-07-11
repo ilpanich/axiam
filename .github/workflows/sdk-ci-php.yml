@@ -10,7 +10,7 @@ on:
       - 'buf.gen.yaml'
   push:
     tags:
-      - 'sdks/php/v*'
+      - 'axiam-php-sdk/v*'
 
 permissions:
   contents: read
@@ -28,7 +28,7 @@ jobs:
   build-test:
     name: Build, test, TLS-bypass gate
     # No event-name restriction: this job runs BOTH on a pull_request AND on
-    # a tag push (sdks/php/vX.Y.Z) — the publish job below is gated behind it
+    # a tag push (axiam-php-sdk/vX.Y.Z) — the publish job below is gated behind it
     # via `needs:`, so a tag can only publish after validate/install/test/the
     # SC#4 TLS-bypass grep gate have all passed on that exact tagged commit.
     runs-on: ubuntu-latest
@@ -149,10 +149,10 @@ jobs:
   publish:
     name: Publish to Packagist (subtree-split -> mirror)
     # Manual-on-tag, side-effecting job: only runs when a maintainer pushes a
-    # tag matching sdks/php/vX.Y.Z (Phase 15 D-13 monorepo tag convention),
+    # tag matching axiam-php-sdk/vX.Y.Z (Phase 15 D-13 monorepo tag convention),
     # and only after build-test (validate/install/test/PHPStan/TLS-gate) has
     # passed on that exact tagged commit.
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/php/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/axiam-php-sdk/v')
     needs: [build-test, verify-tag-on-main]
     runs-on: ubuntu-latest
     permissions:
@@ -175,7 +175,7 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "version=${GITHUB_REF#refs/tags/sdks/php/v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${GITHUB_REF#refs/tags/axiam-php-sdk/v}" >> "$GITHUB_OUTPUT"
 
       # D-05: Packagist has no native monorepo-subdirectory support, and this
       # repo's root is a Rust Cargo workspace — sdks/php/ cannot be published
@@ -202,7 +202,7 @@ jobs:
       # scoped to push to the read-only mirror repo, e.g.
       # ilpanich/axiam-php-sdk) and a repository variable
       # PHP_SDK_MIRROR_REPO set to that mirror's "owner/repo". Tag scheme:
-      # sdks/php/vX.Y.Z (Phase 15 D-13).
+      # axiam-php-sdk/vX.Y.Z (Phase 15 D-13).
       - name: Push split branch to the read-only mirror repo (requires PHP_SDK_MIRROR_TOKEN secret)
         if: ${{ env.PHP_SDK_MIRROR_TOKEN != '' && env.PHP_SDK_MIRROR_REPO != '' }}
         env:

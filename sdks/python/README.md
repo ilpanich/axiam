@@ -6,7 +6,7 @@ Official Python client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Ac
 
 - **PyPI package:** `axiam-sdk`
 - **Registry:** [pypi.org/project/axiam-sdk](https://pypi.org/project/axiam-sdk/) _(reserved, not yet published)_
-- **Version tags:** `sdks/python/vX.Y.Z` (monorepo subdir tagging convention, D-05/D-13)
+- **Version tags:** `axiam-python-sdk/vX.Y.Z` (monorepo subdir tagging convention, D-05/D-13)
 - **License:** Apache-2.0
 - **Python:** `>=3.10` (D-11)
 

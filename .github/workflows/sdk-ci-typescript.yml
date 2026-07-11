@@ -10,7 +10,7 @@ on:
       - 'buf.gen.yaml'
   push:
     tags:
-      - 'sdks/typescript/v*'
+      - 'axiam-typescript-sdk/v*'
 
 permissions:
   contents: read
@@ -156,11 +156,11 @@ jobs:
 
   publish:
     name: Publish to npm
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/typescript/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/axiam-typescript-sdk/v')
     needs: verify-tag-on-main
     runs-on: ubuntu-latest
     # Manual-on-tag, side-effecting step: this job only runs when a
-    # maintainer pushes a tag matching sdks/typescript/vX.Y.Z (D-13
+    # maintainer pushes a tag matching axiam-typescript-sdk/vX.Y.Z (D-13
     # monorepo tag convention). It is never triggered by a PR, so
     # NPM_TOKEN is never exposed to PR-triggered jobs (T-17-26).
     permissions:

@@ -117,7 +117,7 @@ no API token to create, rotate, or leak. Set it up once:
    - Repository name: `axiam`
    - Workflow name: `sdk-ci-python.yml`
    - Environment name: `pypi`
-4. Save. The first `sdks/python/v*` tag creates the project and publishes it.
+4. Save. The first `axiam-python-sdk/v*` tag creates the project and publishes it.
 
 > The environment name must match the `environment: pypi` in the workflow, or PyPI rejects
 > the OIDC token.
@@ -273,23 +273,69 @@ on a feature branch would otherwise ship unreviewed code to a registry under a v
 number that **can never be reclaimed** (crates.io, npm, PyPI, Maven Central, NuGet and
 Packagist all refuse to re-use a version).
 
+Every component is versioned and released **independently** — tagging the Rust SDK touches
+nothing else.
+
 | Tag you push | What happens |
 |---|---|
-| `v1.0.0` | Server + frontend images (amd64 **and** arm64) → GHCR, Trivy-scanned, cosign-signed; `x86_64` + `aarch64` binary tarballs → GitHub Release; server rustdoc → Pages |
-| `sdks/rust/v1.0.0` | crates.io → docs.rs picks it up automatically |
-| `sdks/python/v1.0.0` | PyPI (Trusted Publishing) + API docs → Pages |
-| `sdks/typescript/v1.0.0` | npm (with provenance) + API docs → Pages |
-| `sdks/java/v1.0.0` | Maven Central → javadoc.io picks it up automatically |
-| `sdks/csharp/v1.0.0` | NuGet + API docs → Pages |
-| `sdks/php/v1.0.0` | subtree-split → mirror repo → Packagist + API docs → Pages |
-| `sdks/go/v1.0.0` | proxy.golang.org nudge → pkg.go.dev |
+| `axiam-server/v1.0.0` | Server **and** frontend images (amd64 **and** arm64) → GHCR, Trivy-scanned, cosign-signed; `x86_64` + `aarch64` binary tarballs → GitHub Release; server rustdoc → Pages |
+| `axiam-rust-sdk/v1.0.0` | crates.io → docs.rs picks it up automatically |
+| `axiam-python-sdk/v1.0.0` | PyPI (Trusted Publishing) + API docs → Pages |
+| `axiam-typescript-sdk/v1.0.0` | npm (with provenance) + API docs → Pages |
+| `axiam-java-sdk/v1.0.0` | Maven Central → javadoc.io picks it up automatically |
+| `axiam-csharp-sdk/v1.0.0` | NuGet + API docs → Pages |
+| `axiam-php-sdk/v1.0.0` | subtree-split → mirror repo → Packagist + API docs → Pages |
+| **`sdks/go/v1.0.0`** | proxy.golang.org nudge → pkg.go.dev — **see the exception below** |
+
+Note that `axiam-server/…` ships the **admin-UI (frontend) image too**: the two are deployed
+as a pair (`docker-compose.prod.yml` runs both), so they share a version. Split them only if
+you ever want to ship a UI-only patch.
+
+### The Go tag is the one exception — and it cannot be renamed
+
+Go SDK releases **must** stay on `sdks/go/vX.Y.Z`. This is not a style choice: for a module
+that lives in a subdirectory, the Go module proxy requires the tag to be
+`<module-subdir>/vX.Y.Z`. The module path is `github.com/ilpanich/axiam/sdks/go`, so the
+subdirectory is `sdks/go` and the tag must be exactly `sdks/go/v1.0.0`. An
+`axiam-go-sdk/v1.0.0` tag would simply be invisible to `go get` and to pkg.go.dev.
+
+### Colons are not legal in git tags
+
+A tag like `axiamserver:1.0.0` cannot exist — git's `check-ref-format` rejects `:` (along
+with space, `~`, `^`, `?`, `*`, `[`, `\`):
+
+```
+$ git tag "axiamserver:1.0.0"
+fatal: 'axiamserver:1.0.0' is not a valid tag name.
+```
+
+The colon you see in `ghcr.io/ilpanich/axiam/server:1.0.0` belongs to the **Docker image
+reference**, not the git tag. The release workflow derives it from the namespaced git tag
+automatically (`docker/metadata-action` with `type=match`), so pushing `axiam-server/v1.0.0`
+still produces the conventional `server:1.0.0` and `server:1.0` image tags.
 
 Example:
 
 ```bash
 git checkout main && git pull
-git tag -s v1.0.0 -m "AXIAM v1.0.0"     # -s = signed tag
-git push origin v1.0.0
+
+# Server (+ admin UI) release
+git tag -s axiam-server/v1.0.0 -m "AXIAM server v1.0.0"
+git push origin axiam-server/v1.0.0
+
+# Rust SDK release, independently
+git tag -s axiam-rust-sdk/v1.0.0 -m "AXIAM Rust SDK v1.0.0"
+git push origin axiam-rust-sdk/v1.0.0
+
+# Go SDK release — MUST use the module-proxy layout
+git tag -s sdks/go/v1.0.0 -m "AXIAM Go SDK v1.0.0"
+git push origin sdks/go/v1.0.0
+```
+
+The namespacing also makes each component's history easy to list:
+
+```bash
+git tag --list 'axiam-rust-sdk/*'
 ```
 
 ### Known gap worth your attention
@@ -315,16 +361,16 @@ Do the free, zero-risk ones first and leave Maven Central (the only one with a r
 prerequisite) for last.
 
 1. Repo settings (§3) — Pages, workflow permissions, `pypi` environment.
-2. Tag `v1.0.0` → images land on GHCR; make the packages public. **This needs no secrets at
+2. Tag `axiam-server/v1.0.0` → images land on GHCR; make the packages public. **This needs no secrets at
    all.**
-3. `CRATES_IO_TOKEN` → tag `sdks/rust/v1.0.0`. docs.rs comes free.
-4. PyPI Trusted Publishing → tag `sdks/python/v1.0.0`.
-5. `NPM_TOKEN` → tag `sdks/typescript/v1.0.0`.
-6. `NUGET_API_KEY` → tag `sdks/csharp/v1.0.0`.
-7. Mirror repo + `PHP_SDK_MIRROR_TOKEN`/`PHP_SDK_MIRROR_REPO` → tag `sdks/php/v1.0.0`.
+3. `CRATES_IO_TOKEN` → tag `axiam-rust-sdk/v1.0.0`. docs.rs comes free.
+4. PyPI Trusted Publishing → tag `axiam-python-sdk/v1.0.0`.
+5. `NPM_TOKEN` → tag `axiam-typescript-sdk/v1.0.0`.
+6. `NUGET_API_KEY` → tag `axiam-csharp-sdk/v1.0.0`.
+7. Mirror repo + `PHP_SDK_MIRROR_TOKEN`/`PHP_SDK_MIRROR_REPO` → tag `axiam-php-sdk/v1.0.0`.
 8. Tag `sdks/go/v1.0.0` (no secret).
 9. **Decide the Java groupId** (`io.axiam` needs the `axiam.io` domain; `io.github.ilpanich`
-   is free) → namespace verification → the 4 Central/GPG secrets → tag `sdks/java/v1.0.0`.
+   is free) → namespace verification → the 4 Central/GPG secrets → tag `axiam-java-sdk/v1.0.0`.
 
 ---
 

@@ -35,12 +35,12 @@ on:
   push:
     tags:
       # Server / project docs
-      - "v*"
+      - "axiam-server/v*"
       # Per-SDK docs (Phase 15 D-13 monorepo tag convention)
-      - "sdks/python/v*"
-      - "sdks/typescript/v*"
-      - "sdks/csharp/v*"
-      - "sdks/php/v*"
+      - "axiam-python-sdk/v*"
+      - "axiam-typescript-sdk/v*"
+      - "axiam-csharp-sdk/v*"
+      - "axiam-php-sdk/v*"
       - "sdks/go/v*"
 
 permissions:
@@ -77,7 +77,7 @@ jobs:
   docs-python:
     name: Python SDK docs (pdoc)
     needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/sdks/python/v')
+    if: startsWith(github.ref, 'refs/tags/axiam-python-sdk/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -116,7 +116,7 @@ jobs:
   docs-typescript:
     name: TypeScript SDK docs (TypeDoc)
     needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/sdks/typescript/v')
+    if: startsWith(github.ref, 'refs/tags/axiam-typescript-sdk/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -152,7 +152,7 @@ jobs:
   docs-csharp:
     name: C# SDK docs (DocFX)
     needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/sdks/csharp/v')
+    if: startsWith(github.ref, 'refs/tags/axiam-csharp-sdk/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -190,7 +190,7 @@ jobs:
   docs-php:
     name: PHP SDK docs (phpDocumentor)
     needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/sdks/php/v')
+    if: startsWith(github.ref, 'refs/tags/axiam-php-sdk/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -259,7 +259,7 @@ jobs:
   docs-server:
     name: Server docs (rustdoc)
     needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/axiam-server/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write

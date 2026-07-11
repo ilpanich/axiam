@@ -205,11 +205,11 @@ try {
 
 ## Release / versioning
 
-Tagged releases follow the monorepo convention `sdks/typescript/vX.Y.Z`. CI runs the full
+Tagged releases follow the monorepo convention `axiam-typescript-sdk/vX.Y.Z`. CI runs the full
 gate suite (build, test, SC#1 bundle-and-grep, CJS-require smoke, token-leak, TLS-lint,
 `npm publish --dry-run`) on every pull request touching `sdks/typescript/**`, and publishes
 to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements) only when
-a `sdks/typescript/vX.Y.Z` tag is pushed.
+a `axiam-typescript-sdk/vX.Y.Z` tag is pushed.
 
 ## License
 

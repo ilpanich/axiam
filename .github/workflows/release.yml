@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "axiam-server/v*"
 
 permissions:
   contents: write
@@ -190,9 +190,14 @@ jobs:
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804  # v5.7.0
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          # `type=semver` CANNOT be used here: it parses the git tag as a bare
+          # semver, and our release tag is namespaced (axiam-server/v1.0.0), so
+          # it would fail to match and emit no version tag at all. `type=match`
+          # takes the version out of the prefixed tag explicitly.
+          # axiam-server/v1.2.3 -> image tags "1.2.3" and "1.2" (+ the sha tag).
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=match,pattern=axiam-server/v(\d+\.\d+\.\d+),group=1
+            type=match,pattern=axiam-server/v(\d+\.\d+),group=1
             type=sha
 
       - name: Create multi-arch manifest list

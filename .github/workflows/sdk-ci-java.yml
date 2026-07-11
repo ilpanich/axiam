@@ -11,7 +11,7 @@ on:
       - 'buf.gen.yaml'
   push:
     tags:
-      - 'sdks/java/v*'
+      - 'axiam-java-sdk/v*'
 
 permissions:
   contents: read
@@ -211,12 +211,12 @@ jobs:
   publish:
     name: Publish to Maven Central
     # Manual-on-tag, side-effecting step: this job only runs when a
-    # maintainer pushes a tag matching sdks/java/vX.Y.Z (Phase 15 D-13
+    # maintainer pushes a tag matching axiam-java-sdk/vX.Y.Z (Phase 15 D-13
     # monorepo tag convention, mirroring sdk-ci-python.yml's identical
     # publish-job gating). It is never triggered by a pull_request, so the
     # real GPG_PRIVATE_KEY/GPG_PASSPHRASE/CENTRAL_TOKEN_* secrets referenced
     # below are NEVER exposed to a PR-triggered job (T-20-12, Pitfall 4).
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/java/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/axiam-java-sdk/v')
     needs: verify-tag-on-main
     runs-on: ubuntu-latest
     environment: maven-central

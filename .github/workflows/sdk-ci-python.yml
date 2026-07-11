@@ -10,7 +10,7 @@ on:
       - 'buf.gen.yaml'
   push:
     tags:
-      - 'sdks/python/v*'
+      - 'axiam-python-sdk/v*'
 
 permissions:
   contents: read
@@ -197,11 +197,11 @@ jobs:
   publish:
     name: Publish to PyPI
     # Manual-on-tag, side-effecting step: this job only runs when a
-    # maintainer pushes a tag matching sdks/python/vX.Y.Z (D-05/D-13
+    # maintainer pushes a tag matching axiam-python-sdk/vX.Y.Z (D-05/D-13
     # monorepo tag convention). It is never triggered by a PR, so no
     # publish-adjacent secret/OIDC token is ever exposed to a PR-triggered
     # job (T-19-25, mirrors Rust T-16-26 / Go T-18-25).
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/python/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/axiam-python-sdk/v')
     needs: verify-tag-on-main
     runs-on: ubuntu-latest
     environment: pypi

@@ -68,6 +68,9 @@ public final class AuthClientInterceptor implements ClientInterceptor {
     private final String tenantId;
 
     /**
+     * Creates an interceptor that injects the {@code authorization} bearer token
+     * and {@code x-tenant-id} metadata on every outgoing gRPC call.
+     *
      * @param tokenAccessor a non-blocking accessor for the currently cached access token
      *                      ({@code null} when none is available yet) — MUST NOT acquire
      *                      {@link RefreshGuard}'s lock or perform I/O
@@ -120,6 +123,13 @@ public final class AuthClientInterceptor implements ClientInterceptor {
      * strict TLS (system trust store, plus {@code customCaPem} when
      * supplied). Callers still need to call {@code .intercept(...)} and
      * {@code .build()} themselves.
+     *
+     * @param target      a plain {@code host:port} gRPC target (e.g.
+     *                    {@code "dns:///localhost:9443"})
+     * @param customCaPem optional PEM-encoded custom CA (&sect;6) to trust in
+     *                    addition to the system trust store, or {@code null}
+     * @return a {@code NettyChannelBuilder} configured with strict TLS, not yet
+     *         built (caller still adds the interceptor and calls {@code .build()})
      */
     public static NettyChannelBuilder channelBuilder(String target, byte @Nullable [] customCaPem) {
         SslContext sslContext = buildSslContext(customCaPem);

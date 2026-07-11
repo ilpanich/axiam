@@ -170,7 +170,7 @@ identity into the request context, and surface `AuthError` as HTTP 401 / `AuthzE
 HTTP 403 with a standardized JSON error body (CONTRACT.md §10).
 
 More runnable examples (all compiling under `tsc --noEmit -p examples/tsconfig.json`) live
-in [`examples/`](./examples).
+in `examples/` at the package root.
 
 ## Error handling
 

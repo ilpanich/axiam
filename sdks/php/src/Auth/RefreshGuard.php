@@ -29,7 +29,6 @@ use GuzzleHttp\Promise\PromiseInterface;
 final class RefreshGuard
 {
     /**
-     * @template T
      * @param PromiseInterface $refreshCall The raw in-flight refresh request promise.
      * @param \Closure(): void $onClear Clears the caller's stored promise slot. Invoked
      *        exactly once, on EITHER the success or the failure path — never on both,

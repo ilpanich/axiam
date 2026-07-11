@@ -37,10 +37,16 @@ use uuid::Uuid;
 pub struct AuthzRequest {
     /// Caller-provided ID to correlate request with response.
     pub correlation_id: Uuid,
+    /// Tenant the authorization check is scoped to.
     pub tenant_id: Uuid,
+    /// Subject (user or service account) requesting access.
     pub subject_id: Uuid,
+    /// Permission action being checked (e.g. `"read"`, `"write"`).
     pub action: String,
+    /// Resource the action is being checked against.
     pub resource_id: Uuid,
+    /// Optional sub-resource scope narrowing the check (CONTRACT.md §1).
+    /// `None` means the check applies to the whole resource.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     /// HKDF master-key rotation version (NEW-4). The consumer rejects any
@@ -75,15 +81,24 @@ pub struct AuthzRequest {
 /// `hmac_signature`.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AuditEventMessage {
+    /// Tenant the audited event occurred in.
     pub tenant_id: Uuid,
+    /// User or service account that performed the action.
     pub actor_id: Uuid,
+    /// Kind of actor that performed the action (e.g. `"user"`, `"service_account"`).
     pub actor_type: String,
+    /// Action that was performed (e.g. `"login"`, `"role.assign"`).
     pub action: String,
+    /// Resource the action was performed on, if applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
+    /// Result of the action (e.g. `"success"`, `"denied"`, `"error"`).
     pub outcome: String,
+    /// Source IP address of the actor, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_address: Option<String>,
+    /// Arbitrary structured context attached to the event (e.g. changed
+    /// fields, request parameters).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// HKDF master-key rotation version (NEW-4). The consumer rejects any

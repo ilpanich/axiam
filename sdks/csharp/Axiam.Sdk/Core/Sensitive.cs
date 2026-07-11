@@ -118,9 +118,15 @@ public sealed class SensitiveJsonConverterFactory : JsonConverterFactory
 /// </summary>
 public sealed class SensitiveJsonConverter<T> : JsonConverter<Sensitive<T>>
 {
+    /// <summary>
+    /// Always throws — a <see cref="Sensitive{T}"/> is write-only for serialization, so no
+    /// wire format can ever deserialize a real value back into one (see type-level remarks).
+    /// </summary>
+    /// <exception cref="NotSupportedException">Always thrown; reading is never supported.</exception>
     public override Sensitive<T> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         => throw new NotSupportedException("Sensitive<T> is write-only for serialization.");
 
+    /// <summary>Writes the redacted literal <c>"[SENSITIVE]"</c>, never the wrapped value.</summary>
     public override void Write(Utf8JsonWriter writer, Sensitive<T> value, JsonSerializerOptions options)
         => writer.WriteStringValue("[SENSITIVE]");
 }

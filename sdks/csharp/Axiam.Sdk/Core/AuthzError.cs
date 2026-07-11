@@ -23,6 +23,12 @@ public sealed class AuthzError : Exception
     /// </summary>
     public string? ResourceId { get; }
 
+    /// <summary>
+    /// Constructs a message-only <see cref="AuthzError"/> — <see cref="Action"/> and
+    /// <see cref="ResourceId"/> are left null. Used when no structured 403 body was
+    /// available to parse (e.g. gRPC <c>PERMISSION_DENIED</c>, which carries no body).
+    /// </summary>
+    /// <param name="message">Describes the authorization failure (CONTRACT.md &#167;2 MUST).</param>
     public AuthzError(string message) : base(message)
     {
     }

@@ -138,6 +138,22 @@ class _MalformedClaims(Exception):
 
 
 def _build_user(claims: dict[str, Any]) -> AxiamUser:
+    """Build the :class:`AxiamUser` attached to ``request.axiam_user`` from
+    verified token claims.
+
+    Args:
+        claims: The decoded, signature-verified access token claims.
+
+    Returns:
+        An ``AxiamUser`` with ``user_id`` from ``sub``, ``tenant_id`` from
+        ``tenant_id``, and ``roles`` split from the space-delimited
+        ``scope`` claim (empty when ``scope`` is absent or ``null``).
+
+    Raises:
+        _MalformedClaims: if ``sub`` or ``tenant_id`` is missing, so the
+            caller can degrade to a standardized 401 instead of an
+            unhandled 500 (WR-02).
+    """
     # WR-02: ``dict.get("scope", "")`` returns ``None`` (not ``""``) when the
     # claim is PRESENT with an explicit JSON ``null`` value, and ``list(None)``
     # raises TypeError. ``claims.get("scope") or ""`` maps both absent AND null
@@ -152,6 +168,9 @@ def _build_user(claims: dict[str, Any]) -> AxiamUser:
 
 
 def _error_response(message: str) -> JsonResponse:
+    """Standardized 401 ``{"error": "authentication_failed", "message":
+    ...}`` JSON body (CONTRACT.md §10) — ``message`` must never contain a
+    raw token value (T-19-21)."""
     return JsonResponse(
         {"error": "authentication_failed", "message": message}, status=_AUTH_FAILED_STATUS
     )
@@ -193,6 +212,19 @@ class AxiamAuthMiddleware:
     async_capable = True
 
     def __init__(self, get_response: Any) -> None:
+        """Construct the middleware for Django's standard one-arg
+        middleware-factory protocol.
+
+        Args:
+            get_response: The next callable in the middleware chain (sync or
+                coroutine function); marked as a coroutine function itself
+                via ``markcoroutinefunction`` when ``get_response`` is async,
+                per Django's async-capable middleware contract.
+
+        Raises:
+            ValueError: if ``settings.AXIAM_JWKS_BASE_URL`` or
+                ``settings.AXIAM_TENANT_SLUG`` is not configured.
+        """
         self.get_response = get_response
         if iscoroutinefunction(self.get_response):
             markcoroutinefunction(self)
@@ -210,23 +242,44 @@ class AxiamAuthMiddleware:
         self._verifier = JwksVerifier(base_url)
 
     def __call__(self, request: HttpRequest) -> Any:
+        """Dispatch to the sync or async call path depending on whether the
+        wrapped ``get_response`` is a coroutine function — Django invokes
+        this same ``__call__`` regardless of chain type."""
         if iscoroutinefunction(self.get_response):
             return self.__acall__(request)
         return self._sync_call(request)
 
     def _sync_call(self, request: HttpRequest) -> HttpResponse:
+        """Synchronous request path: authenticate, then either short-circuit
+        with the auth/CSRF error response or forward to ``get_response``."""
         error = self._authenticate(request)
         if error is not None:
             return error
         return self.get_response(request)
 
     async def __acall__(self, request: HttpRequest) -> HttpResponse:
+        """Async twin of :meth:`_sync_call`, awaiting ``get_response``."""
         error = self._authenticate(request)
         if error is not None:
             return error
         return await self.get_response(request)
 
     def _authenticate(self, request: HttpRequest) -> JsonResponse | None:
+        """Run the full authentication + CSRF pipeline for one request.
+
+        Extracts the credential (Bearer header, else ``axiam_access``
+        cookie); for a cookie-sourced credential on a state-changing method,
+        enforces the CSRF double-submit check (§3) first. Verifies the
+        token's signature (:class:`~axiam_sdk._jwks.JwksVerifier`,
+        signature-only), then independently checks ``exp`` (T-19-20) and
+        that ``tenant_id`` matches the configured tenant (T-19-19,
+        cross-tenant replay defense) before attaching ``request.axiam_user``.
+
+        Returns:
+            ``None`` on success (``request.axiam_user`` has been set), or a
+            standardized 401/403 :class:`~django.http.JsonResponse` on any
+            failure — never propagating the raw token value (T-19-21).
+        """
         credential = _extract_token(request)
         if not credential:
             return _error_response("missing authentication credentials")

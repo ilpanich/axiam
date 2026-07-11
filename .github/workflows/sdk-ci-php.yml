@@ -93,6 +93,14 @@ jobs:
         working-directory: sdks/php
         run: vendor/bin/phpstan analyse --memory-limit=512M
 
+      # Docblock-coverage gate. phpstan checks what a docblock SAYS but never that
+      # one EXISTS, so without this the published API reference (phpDocumentor)
+      # silently rots as new public methods land undocumented. Generated protobuf
+      # stubs (src/Grpc/Gen) are excluded — see the script's header.
+      - name: Docblock coverage (public API must be 100% documented)
+        working-directory: sdks/php
+        run: php tools/docblock-coverage.php
+
       # D-12/SC#4: strict TLS is always on; the ONLY escape hatch is the
       # additive `customCa` CA-bundle-path pattern — there must be no Guzzle
       # `verify => false` (or equivalent TLS-verification-disable) surface

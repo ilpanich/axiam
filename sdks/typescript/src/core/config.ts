@@ -4,6 +4,16 @@
 // no default tenant. customCa is the sole TLS escape hatch (§6) — there is
 // no insecure/skip-verification option anywhere in this SDK.
 
+/**
+ * Configuration for {@link AxiamClient}, passed as its constructor's first
+ * argument.
+ *
+ * @remarks
+ * Either `tenantSlug` or `tenantId` MUST be provided — AXIAM is
+ * multi-tenant and has no default tenant, so construction throws when both
+ * are omitted (CONTRACT.md §5). `customCa` is the sole TLS escape hatch
+ * (CONTRACT.md §6); there is no option to disable certificate verification.
+ */
 export interface AxiamClientOptions {
   /** Base URL of the AXIAM server, e.g. "https://iam.example.com". */
   baseUrl: string;

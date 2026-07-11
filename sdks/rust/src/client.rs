@@ -81,7 +81,7 @@ pub(crate) enum OrgIdentifier {
 ///
 /// `base_url` and one of `tenant_slug`/`tenant_id` are required; omitting
 /// the tenant identifier is a `build()`-time [`AxiamError`], never a silent
-/// default (§5). `org_slug`/`org_id` are optional (see [`OrgIdentifier`]
+/// default (§5). `org_slug`/`org_id` are optional (see `OrgIdentifier`
 /// doc comment for why they exist beyond the CONTRACT.md §5 baseline).
 #[derive(Default)]
 pub struct AxiamClientBuilder {
@@ -134,14 +134,14 @@ impl AxiamClientBuilder {
         self
     }
 
-    /// Organization slug — optional; see [`OrgIdentifier`] doc comment.
+    /// Organization slug — optional; see `OrgIdentifier` doc comment.
     /// Mutually exclusive with [`Self::org_id`] — the last one called wins.
     pub fn org_slug(mut self, slug: impl Into<String>) -> Self {
         self.org = Some(OrgIdentifier::Slug(slug.into()));
         self
     }
 
-    /// Organization UUID — optional; see [`OrgIdentifier`] doc comment.
+    /// Organization UUID — optional; see `OrgIdentifier` doc comment.
     /// Mutually exclusive with [`Self::org_slug`] — the last one called wins.
     pub fn org_id(mut self, id: Uuid) -> Self {
         self.org = Some(OrgIdentifier::Id(id));
@@ -276,7 +276,7 @@ pub(crate) struct AxiamClientInner {
     pub(crate) csrf_token: std::sync::RwLock<Option<String>>,
     /// Organization UUID resolved from the `org_id` claim of the verified
     /// access token after the first successful login/verify_mfa. See
-    /// [`OrgIdentifier`] doc comment.
+    /// `OrgIdentifier` doc comment.
     pub(crate) resolved_org_id: std::sync::RwLock<Option<Uuid>>,
     /// The challenge token from the most recent `login()` call that
     /// returned `mfa_required: true`, so `verify_mfa(code)` can complete
@@ -365,7 +365,7 @@ impl AxiamClient {
     }
 
     /// The `org_slug`/`org_id` the client was constructed with, if any
-    /// (see [`OrgIdentifier`] doc comment for why this exists).
+    /// (see `OrgIdentifier` doc comment for why this exists).
     pub(crate) fn org_identifier(&self) -> Option<&OrgIdentifier> {
         self.inner.org.as_ref()
     }

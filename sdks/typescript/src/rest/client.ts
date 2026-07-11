@@ -13,6 +13,42 @@ import * as authMethods from './auth.js';
 import * as authzMethods from './authz.js';
 import type { AccessCheck, AccessDecision, LoginResult } from './types.js';
 
+/**
+ * The main entry point for the AXIAM TypeScript/JavaScript SDK — an
+ * isomorphic (browser + Node) REST client for authentication and
+ * authorization against an AXIAM server.
+ *
+ * @remarks
+ * `AxiamClient` implements the SDK's cross-language behavioral contract
+ * (see `CONTRACT.md` §1–§10): the canonical `login`/`verifyMfa`/`refresh`/
+ * `logout`/`checkAccess`/`can`/`batchCheck` method vocabulary (§1), the
+ * three-way `AuthError`/`AuthzError`/`NetworkError` taxonomy (§2), automatic
+ * CSRF forwarding (§3), the required tenant context (§5), and a per-instance
+ * single-flight refresh guard that de-duplicates concurrent token refreshes
+ * (§9).
+ *
+ * A `tenantSlug` or `tenantId` is mandatory at construction — there is no
+ * default tenant, and AXIAM is a multi-tenant system where every
+ * authenticated call is scoped by the `X-Tenant-ID` header this client
+ * injects on every request (§5). Session tokens never appear as a return
+ * value or public property anywhere on this class: they arrive exclusively
+ * via `httpOnly` cookies set by the server.
+ *
+ * @example
+ * ```ts
+ * const client = new AxiamClient({ baseUrl: 'https://iam.example.com', tenantSlug: 'acme' });
+ *
+ * const result = await client.login('user@example.com', 'hunter2');
+ * if (result.status === 'mfa_required') {
+ *   await client.verifyMfa(result.mfaToken, '123456');
+ * }
+ *
+ * const decision = await client.checkAccess({ action: 'read', resourceId: 'document:42' });
+ * if (!decision.allowed) {
+ *   throw new Error(decision.reason ?? 'access denied');
+ * }
+ * ```
+ */
 export class AxiamClient {
   /** @internal — exposed for auth.ts/authz.ts method implementations and other transports (D-13). */
   readonly session: SharedSession;

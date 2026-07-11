@@ -38,6 +38,18 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 @ConditionalOnClass(SecurityFilterChain.class)
 public class AxiamAutoConfiguration {
 
+    /** Creates a new auto-configuration instance (instantiated by Spring Boot, not user code). */
+    public AxiamAutoConfiguration() {
+    }
+
+    /**
+     * Builds the default {@link AxiamAuthenticationFilter} bean from {@code axiam.base-url}/
+     * {@code axiam.tenant-id}, unless the consuming application already defines its own.
+     *
+     * @param baseUrl  the AXIAM server base URL ({@code axiam.base-url} property)
+     * @param tenantId the configured tenant identifier ({@code axiam.tenant-id} property)
+     * @return the default {@link AxiamAuthenticationFilter} bean
+     */
     @Bean
     @ConditionalOnMissingBean(AxiamAuthenticationFilter.class)
     public AxiamAuthenticationFilter axiamAuthenticationFilter(
@@ -45,6 +57,15 @@ public class AxiamAutoConfiguration {
         return new AxiamAuthenticationFilter(new JwksVerifier(baseUrl), tenantId);
     }
 
+    /**
+     * Builds a default {@link SecurityFilterChain} requiring authentication for every
+     * request via {@code filter}, unless the consuming application already defines its own.
+     *
+     * @param http   the {@code HttpSecurity} builder to configure
+     * @param filter the {@link AxiamAuthenticationFilter} bean to register
+     * @return the default {@link SecurityFilterChain}
+     * @throws Exception if {@code http.build()} fails
+     */
     @Bean
     @ConditionalOnMissingBean(SecurityFilterChain.class)
     public SecurityFilterChain axiamSecurityFilterChain(HttpSecurity http, AxiamAuthenticationFilter filter)

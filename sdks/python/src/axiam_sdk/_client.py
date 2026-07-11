@@ -86,6 +86,23 @@ class _AxiamClientBase:
         timeout: httpx.Timeout | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
+        """Construct the shared client state (CONTRACT.md §5/§6/§7).
+
+        ``tenant_slug`` is required — AXIAM is multi-tenant with no default
+        tenant; omitting it is an ``AuthError`` at construction time, never a
+        silent fallback (§5). ``org_slug``/``org_id`` are mutually exclusive
+        and optional here — the real org UUID is usually only known after a
+        successful login/refresh resolves it from the access token's
+        ``org_id`` claim (Pitfall 3, see :meth:`resolved_org_id`). ``custom_ca``
+        is the sole TLS-bypass escape hatch permitted by §6 — a PEM-encoded CA
+        bundle, never a boolean. ``timeout`` overrides the default httpx
+        connect/read timeouts. ``logger`` is injectable (D-15); a silent
+        :func:`_null_logger` is used when omitted.
+
+        Raises:
+            AuthError: if ``tenant_slug`` is empty, or if both ``org_slug``
+                and ``org_id`` are supplied.
+        """
         if not tenant_slug:
             raise AuthError(
                 "tenant_slug is required — AXIAM is multi-tenant and there is no default "
@@ -121,6 +138,9 @@ class _AxiamClientBase:
         return self._resolved_org_id
 
     def _set_resolved_org_id(self, org_id: str) -> None:
+        """Cache ``org_id`` resolved from an access token's ``org_id`` claim
+        (Pitfall 3), so later :meth:`resolved_org_id` and refresh calls no
+        longer need it re-supplied explicitly."""
         self._resolved_org_id = org_id
 
     # ------------------------------------------------------------------
@@ -128,6 +148,10 @@ class _AxiamClientBase:
     # ------------------------------------------------------------------
 
     def _login_body(self, email: str, password: str) -> dict[str, Any]:
+        """Build the ``POST /api/v1/auth/login`` request body: tenant slug,
+        ``username_or_email``, ``password``, and whichever of ``org_id``/
+        ``org_slug`` was supplied at construction time (mutually exclusive,
+        §5)."""
         body: dict[str, Any] = {
             "tenant_slug": self._session.tenant_slug,
             "username_or_email": email,
@@ -140,12 +164,27 @@ class _AxiamClientBase:
         return body
 
     def _mfa_verify_body(self, mfa_token: Any, code: str) -> dict[str, str]:
+        """Build the ``POST /api/v1/auth/mfa/verify`` request body from the
+        ``challenge_token`` returned by :meth:`~AxiamClient.login` (accepted
+        as either a plain string or a ``Sensitive``-style wrapper exposing
+        ``get_secret_value()``, §7) and the user-supplied TOTP ``code``."""
         token_value = (
             mfa_token.get_secret_value() if hasattr(mfa_token, "get_secret_value") else mfa_token
         )
         return {"challenge_token": token_value, "totp_code": code}
 
     def _handle_login_response(self, response: httpx.Response) -> LoginResult:
+        """Parse a ``login``/``verify_mfa`` HTTP response into a typed
+        :class:`~axiam_sdk._models.LoginResult`.
+
+        A ``200`` means the session is fully established: absorbs the
+        Set-Cookie tokens via :meth:`_absorb_session_cookies` and returns
+        ``mfa_required=False``. A ``202`` means MFA is required: returns
+        ``mfa_required=True`` with the server's ``challenge_token`` for a
+        follow-up ``verify_mfa`` call, without touching cookies. Any other
+        status is logged (status code only, D-15) and raised via
+        :func:`~axiam_sdk._errors.error_from_http_status`.
+        """
         if response.status_code == httpx.codes.OK:
             wire = response.json()
             result = LoginResult(
@@ -195,6 +234,19 @@ class _AxiamClientBase:
     # ------------------------------------------------------------------
 
     def _refresh_identifiers(self, observed_access: str) -> tuple[str, str]:
+        """Derive the ``(tenant_id, org_id)`` pair required by the refresh
+        request body from the currently observed access token's claims.
+
+        ``tenant_id`` comes straight from the token claim. ``org_id`` prefers
+        the already-resolved value (:meth:`resolved_org_id`) and falls back
+        to the token's own ``org_id`` claim.
+
+        Raises:
+            AuthError: if ``tenant_id`` is absent from the claims, or if no
+                ``org_id`` can be resolved (the caller must ``login()``
+                successfully, or supply ``org_id``/``org_slug`` explicitly,
+                before ``refresh()`` can succeed).
+        """
         claims = _decode_unverified_claims(observed_access)
         tenant_id = claims.get("tenant_id")
         if not tenant_id:
@@ -208,9 +260,25 @@ class _AxiamClientBase:
         return tenant_id, org_id
 
     def _refresh_body(self, tenant_id: str, org_id: str) -> dict[str, str]:
+        """Build the ``POST /api/v1/auth/refresh`` request body."""
         return {"tenant_id": tenant_id, "org_id": org_id}
 
     def _handle_refresh_response(self, response: httpx.Response) -> dict[str, Any]:
+        """Parse a ``refresh`` HTTP response into the ``access``/``refresh``/
+        ``exp`` mapping consumed by
+        :class:`~axiam_sdk.token.refresh_guard.RefreshGuard`'s ``do_refresh``
+        contract.
+
+        A non-``200`` status is logged (status code only, D-15) and raised
+        immediately via :func:`~axiam_sdk._errors.error_from_http_status` —
+        no retry loop on refresh failure (§9.3). On success, re-reads the
+        fresh ``axiam_access``/``axiam_refresh`` cookies from the shared jar
+        and decodes the new access token's ``exp`` claim.
+
+        Raises:
+            AuthError: if the response is ``200`` but did not set a fresh
+                ``axiam_access`` cookie.
+        """
         if response.status_code != httpx.codes.OK:
             # §9.3: no retry loop on refresh failure — propagate as-is.
             # D-15: status code only, never a token value.
@@ -229,6 +297,13 @@ class _AxiamClientBase:
     # ------------------------------------------------------------------
 
     def _session_id_for_logout(self) -> str:
+        """Resolve the current session id (the access token's ``jti`` claim)
+        to send as ``POST /api/v1/auth/logout``'s ``session_id``.
+
+        Raises:
+            AuthError: if there is no active session (no ``axiam_access``
+                cookie), or the access token carries no ``jti`` claim.
+        """
         access = self._session.cookie_value(ACCESS_COOKIE)
         if not access:
             raise AuthError("no active session to log out")
@@ -245,6 +320,9 @@ class _AxiamClientBase:
     def _access_check_body(
         self, action: str, resource_id: str, scope: str | None
     ) -> dict[str, Any]:
+        """Build a single ``{action, resource_id, scope?}`` check body
+        shared by ``check_access``/``can`` (CONTRACT.md §1) — ``scope`` is
+        omitted entirely when ``None`` rather than sent as JSON ``null``."""
         body: dict[str, Any] = {"action": action, "resource_id": resource_id}
         if scope is not None:
             body["scope"] = scope
@@ -265,9 +343,13 @@ class AxiamClient(_AxiamClientBase):
     # ------------------------------------------------------------------
 
     def __enter__(self) -> AxiamClient:
+        """Context-manager entry — returns ``self`` (D-19); no separate
+        setup beyond what ``__init__`` already did."""
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        """Context-manager exit — always calls :meth:`close`, regardless of
+        whether the ``with`` block raised (D-19)."""
         self.close()
 
     def close(self) -> None:
@@ -320,6 +402,12 @@ class AxiamClient(_AxiamClientBase):
         )
 
     def _do_refresh_sync(self, tenant_id: str, org_id: str) -> dict[str, Any]:
+        """Perform the actual ``POST /api/v1/auth/refresh`` call — the
+        ``do_refresh`` closure passed to
+        :meth:`~axiam_sdk.token.refresh_guard.RefreshGuard.refresh_if_needed_sync`
+        by :meth:`refresh`. Not called directly by SDK users; always routed
+        through the single-flight guard so concurrent 401s collapse into
+        one in-flight call (§9)."""
         # The literal /api/v1/auth/refresh path is required so the
         # Path-scoped axiam_refresh cookie attaches (Pitfall 4).
         request = self._session.sync_client.build_request(
@@ -366,6 +454,10 @@ class AxiamClient(_AxiamClientBase):
         return BatchCheckResult(**wire).results
 
     def _authz_post_sync(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST an authz request body to *path*, transparently retrying once
+        via :meth:`_retry_after_refresh_sync` on a 401 (§9.3), and returning
+        the parsed JSON response body. Raises the mapped ``AxiamError``
+        family exception (CONTRACT.md §2) for any other non-2xx status."""
         request = self._session.sync_client.build_request("POST", path, json=body)
         response = self._session._send_sync(request)
 

@@ -59,6 +59,16 @@ jobs:
         working-directory: sdks/typescript
         run: npm test -- --run
 
+      # Docs gate: every export reachable from src/index.ts must carry a
+      # TSDoc comment. typedoc.json wires excludeInternal (so @internal
+      # cross-transport wiring like SharedSession.refreshGuard is exempt)
+      # plus validation.notDocumented + treatValidationWarningsAsErrors, so
+      # `npm run docs` itself already fails on regression — this step just
+      # runs it in CI without publishing the generated _docs/ output.
+      - name: Docs — no undocumented public API exports
+        working-directory: sdks/typescript
+        run: npm run docs
+
       - name: Dependency vulnerability scan (CI-03)
         working-directory: sdks/typescript
         run: npm audit --audit-level=high --omit=dev

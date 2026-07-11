@@ -231,10 +231,27 @@
           </execution>
         </executions>
       </plugin>
+      <!-- D-22, CI gate: javadoc.io serves this -javadoc.jar verbatim, so
+           missing/incomplete javadoc on the published API is a real user-facing
+           gap, not just a warning. doclint + failOnWarnings turn that gap into a
+           build failure. sourcepath is left at its default (project's compile
+           source roots, which includes target/generated-sources/protobuf) so
+           hand-written signatures that reference generated axiam.v1
+           protobuf/grpc types (e.g. GrpcAuthzClient) still resolve.
+           excludePackageNames drops axiam.v1 from the doclint-checked/
+           enumerated set: that package is protoc/protoc-gen-grpc-java output,
+           regenerated on every build (gitignored, D-21) and never hand-edited,
+           so its javadoc gaps are an accepted upstream limitation of the
+           generators, not an AXIAM SDK documentation gap. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-javadoc-plugin</artifactId>
         <version>3.11.2</version>
+        <configuration>
+          <excludePackageNames>axiam.v1</excludePackageNames>
+          <doclint>all</doclint>
+          <failOnWarnings>true</failOnWarnings>
+        </configuration>
         <executions>
           <execution>
             <id>attach-javadocs</id>

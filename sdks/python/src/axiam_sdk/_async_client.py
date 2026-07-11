@@ -50,9 +50,13 @@ class AsyncAxiamClient(_AxiamClientBase):
     # ------------------------------------------------------------------
 
     async def __aenter__(self) -> AsyncAxiamClient:
+        """Async context-manager entry — returns ``self`` (D-19); no
+        separate setup beyond what ``__init__`` already did."""
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
+        """Async context-manager exit — always calls :meth:`aclose`,
+        regardless of whether the ``async with`` block raised (D-19)."""
         await self.aclose()
 
     async def aclose(self) -> None:
@@ -106,6 +110,12 @@ class AsyncAxiamClient(_AxiamClientBase):
         )
 
     async def _do_refresh_async(self, tenant_id: str, org_id: str) -> dict[str, Any]:
+        """Perform the actual ``POST /api/v1/auth/refresh`` call — the
+        ``do_refresh`` closure passed to
+        :meth:`~axiam_sdk.token.refresh_guard.RefreshGuard.refresh_if_needed_async`
+        by :meth:`refresh`. Not called directly by SDK users; always routed
+        through the single-flight guard so concurrent 401s collapse into
+        one in-flight call (§9)."""
         # The literal /api/v1/auth/refresh path is required so the
         # Path-scoped axiam_refresh cookie attaches (Pitfall 4).
         request = self._session.async_client.build_request(
@@ -155,6 +165,11 @@ class AsyncAxiamClient(_AxiamClientBase):
         return BatchCheckResult(**wire).results
 
     async def _authz_post_async(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST an authz request body to *path*, transparently retrying once
+        via :meth:`_retry_after_refresh_async` on a 401 (§9.3), and
+        returning the parsed JSON response body. Raises the mapped
+        ``AxiamError`` family exception (CONTRACT.md §2) for any other
+        non-2xx status."""
         request = self._session.async_client.build_request("POST", path, json=body)
         response = await self._session._send_async(request)
 

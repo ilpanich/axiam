@@ -31,6 +31,9 @@ class AuthError(Exception):
     failure, or a 401 on refresh (CONTRACT.md §2)."""
 
     def __init__(self, message: str) -> None:
+        """Build the exception with ``message`` describing the failure
+        (CONTRACT.md §2 construction rule); the exception's own ``str()``
+        prefixes it with ``"authentication failed: "``."""
         super().__init__(f"authentication failed: {message}")
         self.message = message
 
@@ -47,6 +50,10 @@ class AuthzError(Exception):
         action: str | None = None,
         resource_id: str | None = None,
     ) -> None:
+        """Build the exception with ``message`` plus the optional denied
+        ``action``/``resource_id`` known from the response body
+        (CONTRACT.md §2 construction rule); the exception's own ``str()``
+        prefixes ``message`` with ``"authorization denied: "``."""
         super().__init__(f"authorization denied: {message}")
         self.message = message
         self.action = action
@@ -66,6 +73,11 @@ class NetworkError(Exception):
     """
 
     def __init__(self, message: str, cause: BaseException | None = None) -> None:
+        """Build the exception with ``message`` and an optional already-
+        redacted ``cause`` (CONTRACT.md §2 construction rule); the
+        exception's own ``str()`` prefixes ``message`` with ``"network
+        error: "``. See the class docstring for the redact-before-wrap
+        invariant governing ``cause``."""
         super().__init__(f"network error: {message}")
         self.message = message
         self.__cause__ = cause

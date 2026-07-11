@@ -67,6 +67,10 @@ if (class_exists(\Illuminate\Support\ServiceProvider::class)) {
             ));
         }
 
+        /**
+         * Registers the `axiam.auth` route-middleware alias so applications can guard routes with
+         * `->middleware('axiam.auth')` (D-02, §10) instead of referencing the middleware class.
+         */
         public function boot(): void
         {
             // Route middleware alias — `->middleware('axiam.auth')` (D-02, §10).

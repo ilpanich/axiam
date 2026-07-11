@@ -88,6 +88,14 @@ public final class AxiamAuthenticationFilter extends OncePerRequestFilter {
     private final JwksVerifier jwksVerifier;
     private final String configuredTenantId;
 
+    /**
+     * Creates a filter that verifies tokens via {@code jwksVerifier} and enforces the
+     * cross-tenant claim check against {@code configuredTenantId}.
+     *
+     * @param jwksVerifier       verifies a token's signature and returns its claims
+     * @param configuredTenantId the tenant this resource server accepts tokens for
+     *                           (CONTRACT.md &sect;10 "Spring Boot" row)
+     */
     public AxiamAuthenticationFilter(JwksVerifier jwksVerifier, String configuredTenantId) {
         this.jwksVerifier = jwksVerifier;
         this.configuredTenantId = configuredTenantId;

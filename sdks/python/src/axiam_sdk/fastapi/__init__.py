@@ -159,6 +159,9 @@ def require_authenticated_user(
     """
 
     async def _dependency(request: Request) -> AxiamUser:
+        """The actual ``Depends(...)``-injected coroutine — see
+        :func:`require_authenticated_user`'s docstring for the full
+        extract/CSRF/verify/exp/tenant pipeline this implements."""
         credential = _extract_token(request)
 
         if credential.from_cookie and request.method.upper() not in _SAFE_METHODS:

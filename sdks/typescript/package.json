@@ -97,7 +97,7 @@
     "test": "vitest",
     "typecheck": "tsc --noEmit",
     "bundle-grep": "node scripts/bundle-grep.mjs",
-    "docs": "typedoc --entryPoints src/index.ts --out _docs --name \"AXIAM TypeScript SDK\""
+    "docs": "typedoc"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.0",

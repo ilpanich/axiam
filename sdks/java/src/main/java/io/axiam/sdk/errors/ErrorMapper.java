@@ -54,6 +54,13 @@ public final class ErrorMapper {
      * {@link NetworkError} per CONTRACT.md &sect;2's HTTP status table:
      * 401&rarr;AuthError, 403/409&rarr;AuthzError, everything else
      * (400/408/429/5xx/other)&rarr;NetworkError via {@link #fromHttpResponse}.
+     *
+     * @param status   the HTTP response status code
+     * @param message  a human-readable description of the failure
+     * @param response the live response, used to build a redacted summary
+     *                 ({@link NetworkError} path) or parse the authz-denied
+     *                 body ({@link AuthzError} path), or {@code null}
+     * @return the mapped exception, ready to throw
      */
     public static RuntimeException fromHttpStatus(int status, String message, @Nullable Response response) {
         if (status == 401) {
@@ -108,6 +115,11 @@ public final class ErrorMapper {
      * may become a {@link NetworkError} (single choke point, D-18) — every
      * other constructor path in this SDK accepts only an already-sanitized
      * {@code String} summary or no response at all.
+     *
+     * @param status   the HTTP response status code
+     * @param message  a human-readable description of the failure
+     * @param response the live response to redact and summarize, or {@code null}
+     * @return a {@link NetworkError} carrying the redacted summary as its cause
      */
     public static NetworkError fromHttpResponse(int status, String message, @Nullable Response response) {
         String sanitizedSummary = sanitize(response);
@@ -120,6 +132,10 @@ public final class ErrorMapper {
      * UNAUTHENTICATED&rarr;AuthError, PERMISSION_DENIED&rarr;AuthzError,
      * everything else (UNAVAILABLE/DEADLINE_EXCEEDED/INTERNAL/
      * RESOURCE_EXHAUSTED/other)&rarr;NetworkError.
+     *
+     * @param code    the gRPC status code
+     * @param message a human-readable description of the failure
+     * @return the mapped exception, ready to throw
      */
     public static RuntimeException fromGrpcStatus(io.grpc.Status.Code code, String message) {
         return switch (code) {

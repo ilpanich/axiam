@@ -19,11 +19,21 @@ import org.jspecify.annotations.Nullable;
  */
 public final class NetworkError extends RuntimeException {
 
+    /**
+     * Creates a {@code NetworkError} with no attached transport-error summary
+     * (e.g. a failure with no live response/cause to redact).
+     *
+     * @param message caller-controlled, human-readable description; MUST NOT
+     *                contain a raw token value
+     */
     public NetworkError(String message) {
         this(message, (String) null);
     }
 
     /**
+     * Creates a {@code NetworkError} carrying an already-redacted transport
+     * summary as its cause.
+     *
      * @param message          caller-controlled, human-readable description;
      *                         MUST NOT contain a raw token value
      * @param sanitizedSummary an already-redacted transport-error summary

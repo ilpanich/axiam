@@ -87,6 +87,9 @@ public final class AxiamClient implements AutoCloseable {
      * compile-time guarantee (this factory is the sole way to obtain a
      * {@link Builder}, whose constructor is private).
      *
+     * @param baseUrl  the AXIAM server's base URL (e.g. {@code "https://axiam.example.com"})
+     * @param tenantId the tenant identifier (CONTRACT.md &sect;5); required, never {@code null}/blank
+     * @return a new {@link Builder} for further configuration
      * @throws AuthError if {@code tenantId} is {@code null} or blank
      *                    (CONTRACT.md &sect;5 — AXIAM is multi-tenant, there
      *                    is no default tenant)
@@ -99,6 +102,8 @@ public final class AxiamClient implements AutoCloseable {
         return new Builder(baseUrl, tenantId);
     }
 
+    /** Fluent builder for {@link AxiamClient} — the ONLY construction path (SC#1);
+     * obtain an instance via {@link AxiamClient#builder(String, String)}, never directly. */
     public static final class Builder {
         private final String baseUrl;
         private final String tenantId;
@@ -117,14 +122,22 @@ public final class AxiamClient implements AutoCloseable {
 
         /** Mutually exclusive with {@link #orgId(UUID)} — last call wins. The
          * real login/refresh endpoints need an org identifier beyond §5's
-         * documented tenant-only minimum (Pitfall 2). */
+         * documented tenant-only minimum (Pitfall 2).
+         *
+         * @param slug the organization slug to resolve login/refresh calls against
+         * @return this builder, for chaining
+         */
         public Builder orgSlug(String slug) {
             this.orgSlug = slug;
             this.orgId = null;
             return this;
         }
 
-        /** Mutually exclusive with {@link #orgSlug(String)} — last call wins. */
+        /** Mutually exclusive with {@link #orgSlug(String)} — last call wins.
+         *
+         * @param id the organization UUID to resolve login/refresh calls against
+         * @return this builder, for chaining
+         */
         public Builder orgId(UUID id) {
             this.orgId = id;
             this.orgSlug = null;
@@ -134,7 +147,12 @@ public final class AxiamClient implements AutoCloseable {
         /** The ONLY TLS escape hatch (§6) — adds a PEM-encoded CA certificate to
          * the verification chain, alongside (never instead of) the system trust
          * store. There is no API surface anywhere in this SDK that disables or
-         * weakens certificate verification. */
+         * weakens certificate verification.
+         *
+         * @param pem a PEM-encoded X.509 CA certificate to trust in addition to
+         *            the system trust store
+         * @return this builder, for chaining
+         */
         public Builder customCa(byte[] pem) {
             this.customCaPem = pem;
             return this;
@@ -144,27 +162,51 @@ public final class AxiamClient implements AutoCloseable {
          * (e.g. connection pool, timeouts, custom interceptors) is adopted. The
          * SDK ALWAYS re-applies its own cookie jar and strict TLS config over
          * this via {@code newBuilder()} afterward (D-27, SC#4) — an override
-         * can never silently drop the jar or weaken TLS verification. */
+         * can never silently drop the jar or weaken TLS verification.
+         *
+         * @param client the base {@code OkHttpClient} to adopt non-TLS/jar
+         *               configuration from
+         * @return this builder, for chaining
+         */
         public Builder httpClient(OkHttpClient client) {
             this.overrideHttpClient = client;
             return this;
         }
 
+        /** Sets the connect timeout (default 10s).
+         *
+         * @param d the connect timeout
+         * @return this builder, for chaining
+         */
         public Builder connectTimeout(Duration d) {
             this.connectTimeout = d;
             return this;
         }
 
+        /** Sets the read timeout (default 30s).
+         *
+         * @param d the read timeout
+         * @return this builder, for chaining
+         */
         public Builder readTimeout(Duration d) {
             this.readTimeout = d;
             return this;
         }
 
+        /** Sets the write timeout (default 30s).
+         *
+         * @param d the write timeout
+         * @return this builder, for chaining
+         */
         public Builder writeTimeout(Duration d) {
             this.writeTimeout = d;
             return this;
         }
 
+        /** Builds the configured {@link AxiamClient}.
+         *
+         * @return a new, ready-to-use {@link AxiamClient}
+         */
         public AxiamClient build() {
             return new AxiamClient(this);
         }
@@ -231,22 +273,42 @@ public final class AxiamClient implements AutoCloseable {
     // the language (mirrors the `internal` package's own convention).
     // ------------------------------------------------------------------
 
+    /** The single {@link RefreshGuard} this client's REST transport uses; shared with
+     * other transports (e.g. {@link io.axiam.sdk.grpc.GrpcAuthzClient}, D-07 "one guard").
+     *
+     * @return this client's {@link RefreshGuard} instance
+     */
     public RefreshGuard refreshGuard() {
         return refreshGuard;
     }
 
+    /** Returns this client's configured tenant identifier.
+     *
+     * @return this client's configured tenant identifier (CONTRACT.md &sect;5) */
     public String tenantId() {
         return tenantId;
     }
 
+    /** Returns this client's base URL.
+     *
+     * @return this client's configured, trailing-slash-stripped base URL */
     public String baseUrl() {
         return baseUrl;
     }
 
+    /** The shared, fully-configured {@code OkHttpClient} (cookie jar, strict TLS,
+     * {@code AuthInterceptor}/{@code AuthAuthenticator}) this client's REST calls run through.
+     *
+     * @return this client's {@code OkHttpClient}
+     */
     public OkHttpClient okHttpClient() {
         return httpClient;
     }
 
+    /** Returns the configured custom CA certificate, if any.
+     *
+     * @return the PEM-encoded custom CA certificate supplied via {@link Builder#customCa(byte[])},
+     *         or {@code null} if none was configured */
     public byte @Nullable [] customCa() {
         return customCaPem;
     }
@@ -257,6 +319,8 @@ public final class AxiamClient implements AutoCloseable {
      * constructor so the gRPC transport shares one session/guard pair with
      * REST (D-07/D-08 "one guard"), never a second, independently
      * constructed session.
+     *
+     * @return this client's shared {@link SessionState} instance
      */
     public SessionState session() {
         return session;
@@ -271,6 +335,11 @@ public final class AxiamClient implements AutoCloseable {
      * an MFA challenge (HTTP 202) is an expected outcome, not an exception;
      * check {@link LoginResult#mfaRequired()} before assuming a session was
      * established.
+     *
+     * @param email    the username or email to authenticate with
+     * @param password the account password
+     * @return the login outcome: either an established session ({@code mfaRequired=false})
+     *         or an MFA challenge to complete via {@link #verifyMfa}
      */
     public LoginResult login(String email, String password) {
         ObjectNode body = MAPPER.createObjectNode();
@@ -299,6 +368,12 @@ public final class AxiamClient implements AutoCloseable {
         }
     }
 
+    /** {@code CompletableFuture} async twin of {@link #login}.
+     *
+     * @param email    the username or email to authenticate with
+     * @param password the account password
+     * @return a future resolving to the login outcome
+     */
     public CompletableFuture<LoginResult> loginAsync(String email, String password) {
         return CompletableFuture.supplyAsync(() -> login(email, password));
     }
@@ -307,6 +382,11 @@ public final class AxiamClient implements AutoCloseable {
      * {@code POST /api/v1/auth/mfa/verify} (CONTRACT.md &sect;1), completing
      * the two-phase flow started by {@link #login} when {@code mfaRequired}
      * was {@code true}.
+     *
+     * @param mfaToken the MFA challenge token returned by {@link #login} (wrapped
+     *                 in {@link Sensitive} so it never appears in a naive log/toString)
+     * @param totpCode the current TOTP code from the user's authenticator app
+     * @return the login outcome; {@code mfaRequired} is always {@code false} on success
      */
     public LoginResult verifyMfa(Sensitive mfaToken, String totpCode) {
         ObjectNode body = MAPPER.createObjectNode();
@@ -322,6 +402,12 @@ public final class AxiamClient implements AutoCloseable {
         }
     }
 
+    /** {@code CompletableFuture} async twin of {@link #verifyMfa}.
+     *
+     * @param mfaToken the MFA challenge token returned by {@link #login}
+     * @param totpCode the current TOTP code from the user's authenticator app
+     * @return a future resolving to the login outcome
+     */
     public CompletableFuture<LoginResult> verifyMfaAsync(Sensitive mfaToken, String totpCode) {
         return CompletableFuture.supplyAsync(() -> verifyMfa(mfaToken, totpCode));
     }
@@ -339,6 +425,10 @@ public final class AxiamClient implements AutoCloseable {
         refreshGuard.refreshIfNeeded(observedAccess, session::doHttpRefresh);
     }
 
+    /** {@code CompletableFuture} async twin of {@link #refresh}.
+     *
+     * @return a future that completes once the refresh finishes
+     */
     public CompletableFuture<Void> refreshAsync() {
         return CompletableFuture.runAsync(this::refresh);
     }
@@ -370,6 +460,10 @@ public final class AxiamClient implements AutoCloseable {
         }
     }
 
+    /** {@code CompletableFuture} async twin of {@link #logout}.
+     *
+     * @return a future that completes once logout finishes
+     */
     public CompletableFuture<Void> logoutAsync() {
         return CompletableFuture.runAsync(this::logout);
     }
@@ -390,14 +484,29 @@ public final class AxiamClient implements AutoCloseable {
     // Authz methods (CONTRACT.md §1): checkAccess / can / batchCheck
     // ------------------------------------------------------------------
 
-    /** A single authorization check request (CONTRACT.md &sect;1). */
+    /** A single authorization check request (CONTRACT.md &sect;1).
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     */
     public record AccessCheck(String action, String resourceId, @Nullable String scope) {
+        /** Convenience constructor for a check with no sub-resource scope.
+         *
+         * @param action     the action being checked
+         * @param resourceId the resource identifier the action is checked against
+         */
         public AccessCheck(String action, String resourceId) {
             this(action, resourceId, null);
         }
     }
 
-    /** The outcome of a single authorization check (mirrors {@code CheckAccessResponse}). */
+    /** The outcome of a single authorization check (mirrors {@code CheckAccessResponse}).
+     *
+     * @param allowed whether the checked action is permitted
+     * @param reason  a human-readable deny reason, or {@code null} when {@code allowed}
+     *                is {@code true} or the server did not supply one
+     */
     public record AccessResult(boolean allowed, @Nullable String reason) {
     }
 
@@ -405,6 +514,11 @@ public final class AxiamClient implements AutoCloseable {
      * {@code POST /api/v1/authz/check} — evaluates a single authorization
      * check. Read-only/idempotent: eligible for {@link Retry}'s bounded
      * backoff on a transient {@link NetworkError}.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     * @return the check outcome (allowed/denied, with an optional deny reason)
      */
     public AccessResult checkAccess(String action, String resourceId, @Nullable String scope) {
         ObjectNode body = MAPPER.createObjectNode();
@@ -416,31 +530,75 @@ public final class AxiamClient implements AutoCloseable {
         return Retry.withRetry(() -> sendCheckAccess(body), AxiamClient::isRetryableNetworkError);
     }
 
+    /** {@link #checkAccess(String, String, String)} with no sub-resource scope.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @return the check outcome (allowed/denied, with an optional deny reason)
+     */
     public AccessResult checkAccess(String action, String resourceId) {
         return checkAccess(action, resourceId, null);
     }
 
+    /** {@code CompletableFuture} async twin of {@link #checkAccess(String, String, String)}.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     * @return a future resolving to the check outcome
+     */
     public CompletableFuture<AccessResult> checkAccessAsync(String action, String resourceId, @Nullable String scope) {
         return CompletableFuture.supplyAsync(() -> checkAccess(action, resourceId, scope));
     }
 
+    /** {@link #checkAccessAsync(String, String, String)} with no sub-resource scope.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @return a future resolving to the check outcome
+     */
     public CompletableFuture<AccessResult> checkAccessAsync(String action, String resourceId) {
         return checkAccessAsync(action, resourceId, null);
     }
 
-    /** Browser/UI-scenario alias for {@link #checkAccess} (CONTRACT.md &sect;1 note). */
+    /** Browser/UI-scenario alias for {@link #checkAccess} (CONTRACT.md &sect;1 note).
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     * @return {@code true} if the action is allowed
+     */
     public boolean can(String action, String resourceId, @Nullable String scope) {
         return checkAccess(action, resourceId, scope).allowed();
     }
 
+    /** {@link #can(String, String, String)} with no sub-resource scope.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @return {@code true} if the action is allowed
+     */
     public boolean can(String action, String resourceId) {
         return can(action, resourceId, null);
     }
 
+    /** {@code CompletableFuture} async twin of {@link #can(String, String, String)}.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     * @return a future resolving to {@code true} if the action is allowed
+     */
     public CompletableFuture<Boolean> canAsync(String action, String resourceId, @Nullable String scope) {
         return CompletableFuture.supplyAsync(() -> can(action, resourceId, scope));
     }
 
+    /** {@link #canAsync(String, String, String)} with no sub-resource scope.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @return a future resolving to {@code true} if the action is allowed
+     */
     public CompletableFuture<Boolean> canAsync(String action, String resourceId) {
         return canAsync(action, resourceId, null);
     }
@@ -449,6 +607,9 @@ public final class AxiamClient implements AutoCloseable {
      * {@code POST /api/v1/authz/check/batch} — evaluates an ordered list of
      * checks; results are returned in the same order as {@code checks}.
      * Read-only/idempotent: eligible for {@link Retry}'s bounded backoff.
+     *
+     * @param checks the ordered list of checks to evaluate
+     * @return the outcomes, in the same order as {@code checks}
      */
     public List<AccessResult> batchCheck(List<AccessCheck> checks) {
         ArrayNode checksArray = MAPPER.createArrayNode();
@@ -467,6 +628,11 @@ public final class AxiamClient implements AutoCloseable {
         return Retry.withRetry(() -> sendBatchCheck(body), AxiamClient::isRetryableNetworkError);
     }
 
+    /** {@code CompletableFuture} async twin of {@link #batchCheck}.
+     *
+     * @param checks the ordered list of checks to evaluate
+     * @return a future resolving to the outcomes, in the same order as {@code checks}
+     */
     public CompletableFuture<List<AccessResult>> batchCheckAsync(List<AccessCheck> checks) {
         return CompletableFuture.supplyAsync(() -> batchCheck(checks));
     }

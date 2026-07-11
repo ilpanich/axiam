@@ -213,6 +213,11 @@ async def consume(
     queue = await channel.declare_queue(queue_name, durable=True, passive=True)
 
     async def _callback(message: AbstractIncomingMessage) -> None:
+        """Per-delivery callback registered with ``queue.consume`` — binds
+        the fixed ``signing_key``/``handler``/``logger``/``nonce_store``/
+        ``skew_seconds`` for this ``consume()`` call and forwards each
+        incoming message to :func:`_on_message` for the actual verify/
+        parse/dispatch decision."""
         await _on_message(
             message,
             signing_key,

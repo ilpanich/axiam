@@ -73,6 +73,15 @@ public final class SessionState {
     // client so they pick up the shared cookie jar + tenant header injection.
     private final AtomicReference<OkHttpClient> httpClient = new AtomicReference<>();
 
+    /**
+     * Creates the session state for one {@code AxiamClient}.
+     *
+     * @param cookieManager       the SDK's shared cookie jar (access/refresh/CSRF cookies)
+     * @param baseUrl             the AXIAM server base URL (trailing slash stripped)
+     * @param tenantId            the client's configured tenant identifier
+     * @param configuredOrgSlug   the configured organization slug, or {@code null}
+     * @param configuredOrgId     the configured organization UUID, or {@code null}
+     */
     public SessionState(CookieManager cookieManager, String baseUrl, String tenantId,
                          @Nullable String configuredOrgSlug, @Nullable UUID configuredOrgId) {
         this.cookieManager = cookieManager;
@@ -84,15 +93,25 @@ public final class SessionState {
     }
 
     /** Two-phase wiring: called once by {@code AxiamClient} right after it builds
-     * the OkHttpClient this session's {@link #doHttpRefresh()} call is sent through. */
+     * the OkHttpClient this session's {@link #doHttpRefresh()} call is sent through.
+     *
+     * @param client the shared {@code OkHttpClient} the SDK's REST transport uses;
+     *               this session's own refresh POST is routed through it so it
+     *               shares the same cookie jar and header injection */
     public void attachHttpClient(OkHttpClient client) {
         httpClient.set(client);
     }
 
+    /** Returns this session's configured tenant identifier.
+     *
+     * @return this session's configured tenant identifier */
     public String tenantId() {
         return tenantId;
     }
 
+    /** Returns this session's base URL.
+     *
+     * @return this session's trailing-slash-stripped base URL */
     public String baseUrl() {
         return baseUrl;
     }
@@ -104,28 +123,50 @@ public final class SessionState {
      * so they never leak to an absolute third-party URL or a followed
      * cross-host redirect. Host comparison is case-insensitive; a {@code null}
      * host fails closed (treated as foreign).
+     *
+     * @param host the request URL's host, or {@code null}
+     * @return {@code true} if {@code host} equals this session's configured base
+     *         URL host (case-insensitive); {@code false} for any other host,
+     *         including {@code null}
      */
     public boolean isBaseHost(@Nullable String host) {
         return host != null && host.equalsIgnoreCase(baseUri.getHost());
     }
 
+    /** Returns the configured organization slug, if any.
+     *
+     * @return the configured organization slug, or {@code null} if none/an org id was configured instead */
     public @Nullable String configuredOrgSlug() {
         return configuredOrgSlug;
     }
 
+    /** Returns the configured organization UUID, if any.
+     *
+     * @return the configured organization UUID, or {@code null} if none/a slug was configured instead */
     public @Nullable UUID configuredOrgId() {
         return configuredOrgId;
     }
 
+    /**
+     * Checks whether {@code encodedPath} is the refresh endpoint's path.
+     *
+     * @param encodedPath a request URL's encoded path
+     * @return {@code true} if {@code encodedPath} is the refresh endpoint's path
+     */
     public static boolean isRefreshPath(String encodedPath) {
         return REFRESH_PATH.equals(encodedPath);
     }
 
+    /** Returns the last captured CSRF token, if any.
+     *
+     * @return the last captured CSRF token, or {@code null} if none has been observed yet */
     public @Nullable String csrfToken() {
         return csrfToken.get();
     }
 
-    /** Captures a freshly-observed {@code X-CSRF-Token} response header value (&sect;3). */
+    /** Captures a freshly-observed {@code X-CSRF-Token} response header value (&sect;3).
+     *
+     * @param token the CSRF token value read from the response's {@code X-CSRF-Token} header */
     public void setCsrfToken(String token) {
         csrfToken.set(token);
     }
@@ -134,6 +175,9 @@ public final class SessionState {
      * Non-blocking read of the current access token, sourced from the shared
      * cookie jar — never acquires {@link RefreshGuard}'s lock. Safe to call
      * from the {@code AuthInterceptor}/{@code AuthAuthenticator} hot path.
+     *
+     * @return the current {@code axiam_access} cookie value, or {@code null} if
+     *         no session cookie is present in the shared {@link CookieManager}
      */
     public @Nullable String cachedAccessToken() {
         return cookieValue(ACCESS_COOKIE);
@@ -144,6 +188,15 @@ public final class SessionState {
      * used ONLY as a proactive-refresh hint by {@code AuthInterceptor}. The
      * interceptor hot path must never block on a full, signature-verifying
      * JWKS fetch ({@link JwksVerifier#verify}).
+     *
+     * @param accessToken  the access token whose {@code exp} claim is checked
+     * @param bufferMillis how many milliseconds before the token's actual
+     *                     {@code exp} it should already be treated as near-expiry
+     * @return {@code true} once wall-clock time is within {@code bufferMillis} of
+     *         the token's {@code exp} claim; {@code false} if the token has no
+     *         decodable {@code exp} claim (treated conservatively as not-yet-near,
+     *         since this is only a proactive-refresh hint) or the buffer has not
+     *         yet been reached
      */
     public boolean isNearExpiry(String accessToken, long bufferMillis) {
         Claims claims = decodeUnverifiedClaims(accessToken);
@@ -179,6 +232,10 @@ public final class SessionState {
      * {@code AuthInterceptor}/{@code AuthAuthenticator} so this call can
      * never recursively trigger a nested refresh.
      *
+     * @return the newly issued {@link TokenPair} — the fresh access token, the
+     *         fresh refresh token (empty string if the response does not resend
+     *         one), and the expiry epoch millis derived from the new access
+     *         token's {@code exp} claim (falling back to "now" if undecodable)
      * @throws AuthError    if no access token / tenant_id / org_id can be
      *                       resolved, or the server rejects the refresh
      *                       (&sect;9.3: propagated as-is, no retry)
@@ -274,11 +331,25 @@ public final class SessionState {
      * verifying the signature. {@code roles} is derived from the
      * space-separated {@code scope} claim (empty when absent) — AXIAM's
      * access tokens have no dedicated {@code roles} claim.
+     *
+     * @param sub      the token subject (user id) from the {@code sub} claim, or {@code null} if absent
+     * @param tenantId the resolved tenant UUID string from the {@code tenant_id} claim, or {@code null} if absent
+     * @param orgId    the resolved organization UUID string from the {@code org_id} claim, or {@code null} if absent
+     * @param jti      the JWT id from the {@code jti} claim (used as the refresh {@code session_id}), or {@code null} if absent
+     * @param roles    the {@code scope} claim split on whitespace into individual tokens; empty (never {@code null}) when the claim is absent or blank
+     * @param exp      the {@code exp} claim as epoch seconds, or {@code 0} if absent
      */
     public record Claims(@Nullable String sub, @Nullable String tenantId, @Nullable String orgId,
                           @Nullable String jti, List<String> roles, long exp) {
     }
 
+    /**
+     * Decodes {@code token}'s claims WITHOUT verifying its signature (see {@link Claims}).
+     *
+     * @param token a compact-serialized JWT
+     * @return the decoded claims, or {@code null} if {@code token} is malformed
+     *         (wrong segment count, unparseable Base64url, or invalid JSON)
+     */
     public static @Nullable Claims decodeUnverifiedClaims(String token) {
         String[] parts = token.split("\\.", -1);
         if (parts.length != 3) {

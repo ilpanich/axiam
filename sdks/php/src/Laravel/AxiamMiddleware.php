@@ -48,12 +48,35 @@ final class AxiamMiddleware
     /** @var list<string> */
     private const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
 
+    /**
+     * @param AxiamClient $client Client used to verify the presented token against the cached JWKS.
+     * @param string      $tenant Tenant slug the verified token's claim must match (cross-tenant
+     *                            control: a JWKS is organization-wide, so a valid signature alone
+     *                            never implies tenant authorization).
+     */
     public function __construct(
         private readonly AxiamClient $client,
         private readonly string $tenant,
     ) {
     }
 
+    /**
+     * Authenticates the inbound request and, for cookie-authenticated writes, enforces CSRF.
+     *
+     * Sequence: extract the credential (`Authorization: Bearer` first, then the `axiam_access`
+     * cookie) → verify the JWT locally → enforce the cross-tenant claim check → inject the
+     * identity → call the next middleware.
+     *
+     * CSRF (CONTRACT.md §3a): when the credential came from the COOKIE and the method is
+     * state-changing (not GET/HEAD/OPTIONS), the `X-CSRF-Token` header must be present and equal
+     * (constant-time) to the `axiam_csrf` cookie, else the request is rejected with 403.
+     * Bearer-authenticated requests are exempt — a cross-site attacker cannot set custom headers.
+     *
+     * @param Request $request Inbound request.
+     * @param Closure $next    Next middleware in the pipeline.
+     *
+     * @return mixed The next middleware's response, or a 401/403 JSON error response.
+     */
     public function handle(Request $request, Closure $next): mixed
     {
         $credential = $this->extractToken($request);

@@ -110,6 +110,18 @@ public final class AmqpConsumer {
      * shared across every delivery it handles, so nonce replay is detected
      * across the lifetime of the consumer, not just within one delivery.
      *
+     * @param channel          the AMQP channel to consume on; the caller owns its
+     *                         lifecycle (creation/closing)
+     * @param queue            the queue name to consume from
+     * @param signingKey       the per-tenant AMQP HMAC signing secret (&sect;8.1
+     *                         &mdash; obtain from the AXIAM management API; never
+     *                         hardcode)
+     * @param handler          invoked ONLY after HMAC verification AND the NEW-4
+     *                         replay-protection checks succeed (see
+     *                         {@link #consume(Channel, String, byte[], Consumer, Logger)})
+     * @param logger           receives the &sect;8.4 security event on HMAC
+     *                         verification failure or a NEW-4 replay-protection
+     *                         rejection; the event never contains the HMAC value
      * @param allowedClockSkew the &plusmn; tolerance applied to a message's
      *                         {@code issued_at} versus wall-clock now; must
      *                         be positive

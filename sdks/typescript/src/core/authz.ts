@@ -16,6 +16,8 @@
  * `allowed` is `false`.
  */
 export interface AccessDecision {
+  /** Whether the checked action on the checked resource is permitted. */
   allowed: boolean;
+  /** Present (and non-empty) only when `allowed` is `false`; a human-readable reason the check was denied. */
   reason?: string;
 }

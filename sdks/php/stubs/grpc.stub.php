@@ -69,5 +69,65 @@ namespace Google\Protobuf\Internal {
         public function __construct($data = null)
         {
         }
+
+        /**
+         * Deserializes a wire-format payload into the concrete message type.
+         *
+         * Declared here because the gRPC-PHP deserializer convention is to pass
+         * `[MessageClass::class, 'decode']` as the deserialize callable. Without this
+         * signature PHPStan cannot infer what that array-callable returns, and every
+         * `unary()` call fails level 6 with "Unable to resolve the template type T".
+         *
+         * @return static
+         */
+        public static function decode(string $data): static
+        {
+            throw new \LogicException('stub only');
+        }
+    }
+
+    /**
+     * Repeated (list) protobuf field. Declared here because generated message getters —
+     * e.g. BatchCheckAccessResponse::getResults() — return one, and AuthzDispatcher
+     * `foreach`es over it; without this, PHPStan level 6 fails with "Iterating over an
+     * object of an unknown class".
+     *
+     * @template T
+     * @implements \IteratorAggregate<int, T>
+     */
+    class RepeatedField implements \IteratorAggregate, \ArrayAccess, \Countable
+    {
+        /** @return \Traversable<int, T> */
+        public function getIterator(): \Traversable
+        {
+            throw new \LogicException('stub only');
+        }
+
+        public function offsetExists(mixed $offset): bool
+        {
+            throw new \LogicException('stub only');
+        }
+
+        /** @return T */
+        public function offsetGet(mixed $offset): mixed
+        {
+            throw new \LogicException('stub only');
+        }
+
+        /** @param T $value */
+        public function offsetSet(mixed $offset, mixed $value): void
+        {
+            throw new \LogicException('stub only');
+        }
+
+        public function offsetUnset(mixed $offset): void
+        {
+            throw new \LogicException('stub only');
+        }
+
+        public function count(): int
+        {
+            throw new \LogicException('stub only');
+        }
     }
 }

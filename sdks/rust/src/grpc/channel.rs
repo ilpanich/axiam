@@ -28,7 +28,11 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// escape hatch — never an insecure/skip-verification surface).
 #[derive(Debug, Clone, Default)]
 pub struct GrpcChannelConfig {
+    /// Timeout for establishing the TCP+TLS connection. Defaults to 10
+    /// seconds when `None`.
     pub connect_timeout: Option<Duration>,
+    /// Timeout applied to each individual RPC. Defaults to 30 seconds when
+    /// `None`.
     pub request_timeout: Option<Duration>,
     /// PEM-encoded custom CA certificate bytes (§6). `None` means: verify
     /// strictly against the platform's native trust store only.

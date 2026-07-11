@@ -61,6 +61,22 @@ if (interface_exists(\Symfony\Component\EventDispatcher\EventSubscriberInterface
             return [\Symfony\Component\HttpKernel\KernelEvents::REQUEST => 'onKernelRequest'];
         }
 
+        /**
+         * Authenticates the inbound request and, for cookie-authenticated writes, enforces CSRF.
+         *
+         * Sequence: extract the credential (`Authorization: Bearer` first, then the
+         * `axiam_access` cookie) → verify the JWT locally against the cached JWKS → enforce the
+         * cross-tenant claim check → inject the identity onto the request.
+         *
+         * CSRF (CONTRACT.md §3a): when the credential came from the COOKIE and the method is
+         * state-changing (not GET/HEAD/OPTIONS), the `X-CSRF-Token` header must be present and
+         * equal (constant-time) to the `axiam_csrf` cookie, else a 403 response is set on the
+         * event. Bearer-authenticated requests are exempt — a cross-site attacker cannot set
+         * custom request headers.
+         *
+         * @param \Symfony\Component\HttpKernel\Event\RequestEvent $event Kernel request event; a
+         *        401/403 JSON response is set on it to short-circuit the request on failure.
+         */
         public function onKernelRequest(\Symfony\Component\HttpKernel\Event\RequestEvent $event): void
         {
             $request = $event->getRequest();

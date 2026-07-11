@@ -46,6 +46,15 @@ public final class AuthInterceptor implements Interceptor {
     private final RefreshGuard guard;
     private final SessionState session;
 
+    /**
+     * Creates an interceptor bound to the given shared refresh guard and session.
+     *
+     * @param guard   the single-flight refresh guard shared with
+     *                {@link AuthAuthenticator} and the gRPC transport (D-08) —
+     *                never a second instance
+     * @param session the client's session state (tenant id, cookie-jar-backed
+     *                token, CSRF token)
+     */
     public AuthInterceptor(RefreshGuard guard, SessionState session) {
         this.guard = guard;
         this.session = session;

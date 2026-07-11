@@ -133,6 +133,12 @@ public sealed class AxiamClient : IDisposable
     /// <summary>Non-blocking read of the current access token from the shared cookie jar; <c>null</c> if never logged in.</summary>
     internal string? CurrentAccessToken => ReadCookie(AccessCookieName);
 
+    /// <summary>
+    /// Disposes the owned <see cref="HttpClient"/> (and its handler chain) and the
+    /// <see cref="RefreshGuard"/>. Does not perform a server-side logout — call
+    /// <see cref="LogoutAsync"/> first if an active session should be terminated
+    /// server-side.
+    /// </summary>
     public void Dispose()
     {
         _httpClient.Dispose();

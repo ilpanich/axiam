@@ -114,7 +114,7 @@ jobs:
         run: git diff --exit-code sdks/python/src/axiam_sdk/grpc/gen
 
   lint:
-    name: Lint (mypy --strict + ruff) (D-20)
+    name: Lint (mypy --strict + ruff + interrogate) (D-20)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -140,6 +140,14 @@ jobs:
 
       - name: ruff format --check
         run: ruff format --check sdks/python
+
+      # Docstring-coverage gate on the public API surface (pdoc-published):
+      # config (fail-under = 100, the generated grpc/gen/* stub exclusion)
+      # lives in [tool.interrogate] in pyproject.toml, mirroring the
+      # generated-stub exemptions already documented there for ruff/mypy.
+      - name: interrogate (docstring coverage)
+        working-directory: sdks/python
+        run: interrogate -c pyproject.toml src/axiam_sdk
 
   build-check:
     name: Build + twine check (SC#5)

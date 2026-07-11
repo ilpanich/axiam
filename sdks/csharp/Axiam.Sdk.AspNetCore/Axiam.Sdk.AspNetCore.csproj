@@ -13,6 +13,10 @@
     <LangVersion>latest</LangVersion>
     <Deterministic>true</Deterministic>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- CS1591 = "missing XML doc comment on publicly visible member". Promoted from
+         warning to error so an undocumented public API member can never merge (DocFX/
+         IntelliSense coverage gate). Mirrors Axiam.Sdk.csproj's identical config. -->
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591</WarningsAsErrors>
 
     <!-- D-04 [LOCKED]: NuGet publish = SourceLink + deterministic build + snupkg
          symbol packages, so `dotnet pack -c Release` produces a valid, debuggable

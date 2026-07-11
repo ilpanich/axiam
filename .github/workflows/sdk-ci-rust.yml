@@ -62,6 +62,15 @@ jobs:
         working-directory: sdks/rust
         run: cargo test -p axiam-sdk --all-features
 
+      # `#![warn(missing_docs)]` in lib.rs keeps every public item documented;
+      # this step promotes it (plus broken intra-doc links) to a hard CI
+      # failure so docs.rs coverage for the published crate cannot regress.
+      - name: Docs coverage gate (docs.rs)
+        working-directory: sdks/rust
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p axiam-sdk --all-features --no-deps
+
       # Ignored advisory rationale (kept in sync with the root ci.yml / deny.toml policy):
       #   RUSTSEC-2023-0071 — Marvin attack (rsa timing sidechannel); no upstream fix.
       #   `rsa` is pulled in transitively by jsonwebtoken for RS* algorithm support.

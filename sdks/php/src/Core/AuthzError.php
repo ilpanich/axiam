@@ -16,6 +16,13 @@ namespace Axiam\Sdk\Core;
  */
 final class AuthzError extends AxiamException
 {
+    /**
+     * @param string      $message    Human-readable denial reason from the server.
+     * @param string|null $action     Action that was denied (e.g. `users:delete`), when the
+     *                                server reported it.
+     * @param string|null $resourceId Resource the denial applies to; `null` for a denial that
+     *                                is not resource-scoped.
+     */
     public function __construct(
         string $message,
         private readonly ?string $action = null,
@@ -24,11 +31,22 @@ final class AuthzError extends AxiamException
         parent::__construct($message);
     }
 
+    /**
+     * Action the caller was denied (e.g. `users:delete`).
+     *
+     * @return string|null `null` when the server did not report an action.
+     */
     public function getAction(): ?string
     {
         return $this->action;
     }
 
+    /**
+     * Resource the denial applies to.
+     *
+     * @return string|null `null` for a global (non-resource-scoped) denial, or when the
+     *                     server did not report a resource.
+     */
     public function getResourceId(): ?string
     {
         return $this->resourceId;

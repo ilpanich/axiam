@@ -7,6 +7,7 @@
 
 import { NetworkError } from '../core/index.js';
 
+/** Options controlling {@link withRetry}'s idempotent-retry behavior (CF-01). */
 export interface RetryOptions {
   /** Only idempotent (safe-to-repeat) calls are retried. */
   idempotent: boolean;

@@ -16,3 +16,9 @@ export type {
   AxiamUserInfo,
   LoginResult,
 } from './types.js';
+// AxiamClientOptions is the AxiamClient constructor's public parameter type
+// (docs-only addition — genuinely part of the public API surface, not an
+// internal detail; RefreshGuard, by contrast, stays unexported/@internal
+// since it's SDK-internal cross-transport wiring, not something consumers
+// invoke directly).
+export type { AxiamClientOptions } from '../core/index.js';

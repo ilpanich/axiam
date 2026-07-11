@@ -91,6 +91,8 @@ public final class JwksVerifier {
     private final ReentrantLock refreshLock = new ReentrantLock();
 
     /**
+     * Creates a verifier sourcing its JWKS from {@code {baseUrl}/oauth2/jwks}.
+     *
      * @param baseUrl the AXIAM server base URL (trailing slash tolerated);
      *                the JWKS URL is derived as {@code {baseUrl}/oauth2/jwks}
      */
@@ -119,6 +121,8 @@ public final class JwksVerifier {
      * tenant scoping. Callers MUST separately check {@code exp} and call
      * {@link #assertTenant(JWTClaimsSet, String)}.
      *
+     * @param token the compact-serialized JWS to verify
+     * @return the token's claims, once the signature has verified successfully
      * @throws AuthError if the token is malformed, the alg is not EdDSA,
      *                    no matching key is found in the JWKS (including
      *                    after a forced refetch on an unknown {@code kid}),
@@ -252,6 +256,8 @@ public final class JwksVerifier {
      * the token's {@code tenant_id} claim is absent or does not match
      * {@code configuredTenantId}.
      *
+     * @param claims             the verified token's claims (see {@link #verify(String)})
+     * @param configuredTenantId the caller's configured tenant identifier to check against
      * @throws AuthError if {@code tenant_id} is missing or mismatched
      */
     public static void assertTenant(JWTClaimsSet claims, String configuredTenantId) {

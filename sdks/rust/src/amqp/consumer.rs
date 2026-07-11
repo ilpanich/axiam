@@ -20,15 +20,15 @@
 //! `serde_json::Value` (minus `hmac_signature`) in the order the keys
 //! arrived on the wire (SDK-Q01/`preserve_order`), these two fields are
 //! automatically covered by the HMAC with no canonicalization change. Once a
-//! signature verifies, [`verify_and_dispatch`] applies three additional
+//! signature verifies, `verify_and_dispatch` applies three additional
 //! gates — the SAME nack-without-requeue path as an invalid signature —
 //! before the handler is ever invoked:
 //!   - `key_version` must be `>= 2` (the hard cutover; a v1 message is
 //!     rejected outright, there is no grace path).
 //!   - `issued_at` must lie within `±skew` of the consumer's clock (default
-//!     5 minutes, see [`DEFAULT_FRESHNESS_SKEW_SECS`]).
+//!     5 minutes, see `DEFAULT_FRESHNESS_SKEW_SECS`).
 //!   - `nonce` must not have already been seen within the freshness window
-//!     (an in-memory, TTL-bounded dedup set — see [`ReplayGuard`]).
+//!     (an in-memory, TTL-bounded dedup set — see `ReplayGuard`).
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -115,7 +115,7 @@ impl ReplayGuard {
         }
     }
 
-    /// Build a guard using [`DEFAULT_FRESHNESS_SKEW_SECS`] (5 minutes) — what
+    /// Build a guard using `DEFAULT_FRESHNESS_SKEW_SECS` (5 minutes) — what
     /// [`consume`] uses when no override is supplied.
     pub(crate) fn with_default_skew() -> Self {
         Self::new(chrono::Duration::seconds(DEFAULT_FRESHNESS_SKEW_SECS))
@@ -350,9 +350,9 @@ pub(crate) async fn verify_and_dispatch<D, F, Fut>(
 /// can never be logged accidentally.
 ///
 /// `freshness_skew` overrides the NEW-4 `issued_at` acceptance window
-/// (default `±5 minutes`, i.e. [`DEFAULT_FRESHNESS_SKEW_SECS`]) — pass
+/// (default `±5 minutes`, i.e. `DEFAULT_FRESHNESS_SKEW_SECS`) — pass
 /// `None` to use the default. The same window (doubled) bounds how long a
-/// `nonce` is remembered for replay detection; see [`ReplayGuard`].
+/// `nonce` is remembered for replay detection; see `ReplayGuard`.
 ///
 /// This function owns the full ack/nack loop; the closure `handler` is
 /// invoked only after successful verification (HMAC signature AND the

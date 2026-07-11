@@ -79,6 +79,9 @@ public sealed class AxiamAuthMiddleware
 
     private readonly RequestDelegate _next;
 
+    /// <summary>Constructs the middleware. Registered by the ASP.NET Core pipeline
+    /// (<c>app.UseMiddleware&lt;AxiamAuthMiddleware&gt;()</c>), which supplies <paramref name="next"/>.</summary>
+    /// <param name="next">The next delegate in the middleware pipeline.</param>
     public AxiamAuthMiddleware(RequestDelegate next)
     {
         _next = next ?? throw new ArgumentNullException(nameof(next));

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpdocumentor
+    configVersion="3"
+    xmlns="https://www.phpdoc.org"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="https://www.phpdoc.org/xsd/phpdoc.xsd">
+
+  <title>AXIAM PHP SDK</title>
+
+  <paths>
+    <output>.phpdoc/build</output>
+  </paths>
+
+  <version number="3.0.0">
+    <api>
+      <source dsn=".">
+        <path>src</path>
+      </source>
+      <!-- Grpc/Gen is protoc output: hundreds of generated accessors with no
+           hand-written docblocks. Publishing them would bury the SDK's real
+           surface, and they are already excluded from phpstan for the same
+           reason. The gRPC API users actually call is Grpc/AxiamGrpcAuthzClient,
+           which is documented and stays in scope. -->
+      <ignore hidden="true">
+        <path>src/Grpc/Gen/**/*</path>
+      </ignore>
+      <visibility>public</visibility>
+    </api>
+  </version>
+</phpdocumentor>

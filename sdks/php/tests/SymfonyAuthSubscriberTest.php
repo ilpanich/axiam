@@ -136,6 +136,15 @@ final class SymfonyAuthSubscriberTest extends TestCase
             public function __unserialize(array $data): void
             {
             }
+
+            /**
+             * Still declared (though deprecated) on Symfony 7.4's TokenInterface, so an
+             * implementing class MUST define it — omitting it makes this anonymous class
+             * abstract and PHP fatals before a single test in this file can run.
+             */
+            public function eraseCredentials(): void
+            {
+            }
         };
     }
 

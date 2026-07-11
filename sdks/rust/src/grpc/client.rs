@@ -55,10 +55,17 @@ use crate::AxiamError;
 /// request-scoped JWT) must always pass it explicitly.
 #[derive(Debug, Clone)]
 pub struct CheckAccessRequest {
+    /// Tenant the authorization check is scoped to.
     pub tenant_id: Uuid,
+    /// Subject to check access for. Unlike the REST transport, this is
+    /// always required — see the struct doc comment for why.
     pub subject_id: Uuid,
+    /// Permission action to check (CONTRACT.md §1 method vocabulary).
     pub action: String,
+    /// Resource the action is checked against.
     pub resource_id: Uuid,
+    /// Optional sub-resource scope narrowing the check. `None` means the
+    /// check applies to the whole resource.
     pub scope: Option<String>,
 }
 
@@ -75,7 +82,10 @@ pub struct CheckAccessRequest {
 /// new always-compiled shared module is deliberately out of scope here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessDecision {
+    /// Whether the checked action is permitted.
     pub allowed: bool,
+    /// Optional human-readable explanation for the decision. `None` when
+    /// the wire response's `deny_reason` was empty.
     pub reason: Option<String>,
 }
 

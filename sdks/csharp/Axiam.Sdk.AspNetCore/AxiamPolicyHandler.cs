@@ -27,11 +27,24 @@ public sealed class AxiamPolicyHandler : AuthorizationHandler<AxiamRequirement>
 {
     private readonly AxiamClient _client;
 
+    /// <summary>Constructs the handler over the shared <see cref="AxiamClient"/> registered by
+    /// <see cref="ServiceCollectionExtensions.AddAxiamAspNetCore"/>.</summary>
+    /// <param name="client">The shared client whose <c>Authz.CheckAccessAsync</c> this handler calls.</param>
     public AxiamPolicyHandler(AxiamClient client)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
     }
 
+    /// <summary>
+    /// Resolves the caller's <c>user_id</c> claim and the target resource id (from route
+    /// data), then calls <c>AxiamClient.Authz.CheckAccessAsync</c> fresh — see the
+    /// type-level remarks for why no decision is ever cached. Succeeds
+    /// <paramref name="requirement"/> when allowed; otherwise leaves it unsatisfied so
+    /// <see cref="AxiamAuthorizationMiddlewareResultHandler"/> can map the outcome to a
+    /// standardized 401/403 JSON body.
+    /// </summary>
+    /// <param name="context">The ASP.NET Core authorization evaluation context.</param>
+    /// <param name="requirement">The parsed <c>resource:action</c> requirement to check.</param>
     protected override async Task HandleRequirementAsync(AuthorizationHandlerContext context, AxiamRequirement requirement)
     {
         string? userIdClaim = context.User.FindFirst("user_id")?.Value;
@@ -121,6 +134,19 @@ public sealed class AxiamPolicyHandler : AuthorizationHandler<AxiamRequirement>
 /// </remarks>
 public sealed class AxiamAuthorizationMiddlewareResultHandler : IAuthorizationMiddlewareResultHandler
 {
+    /// <summary>
+    /// On success, continues the pipeline exactly like the framework default. On failure,
+    /// writes a standardized JSON error body: 403 (<c>authorization_denied</c>) when
+    /// <see cref="HttpContext.User"/> is already authenticated (an <see cref="AxiamRequirement"/>
+    /// was left unsatisfied by <see cref="AxiamPolicyHandler"/>), otherwise 401
+    /// (<c>authentication_failed</c>). See the type-level remarks for why this branches on
+    /// <c>User.Identity.IsAuthenticated</c> rather than <c>authorizeResult</c>'s own
+    /// Forbidden/Challenged distinction.
+    /// </summary>
+    /// <param name="next">The next delegate in the pipeline; invoked only on success.</param>
+    /// <param name="context">The current request's <see cref="HttpContext"/>.</param>
+    /// <param name="policy">The policy that was evaluated.</param>
+    /// <param name="authorizeResult">The outcome of evaluating <paramref name="policy"/>.</param>
     public Task HandleAsync(
         RequestDelegate next,
         HttpContext context,

@@ -66,6 +66,9 @@ public final class GrpcAuthzClient implements AutoCloseable {
     private final AuthorizationServiceFutureStub futureStub;
 
     /**
+     * Creates a gRPC authz client bound to {@code target}, sharing the given refresh
+     * guard and session with the SDK's REST transport.
+     *
      * @param target       a plain gRPC target (e.g. {@code "dns:///host:9443"}) for
      *                      AXIAM's {@code AuthorizationService} — distinct from the
      *                      REST {@code baseUrl}
@@ -123,18 +126,41 @@ public final class GrpcAuthzClient implements AutoCloseable {
     // Public request/result shapes (CONTRACT.md §1)
     // ------------------------------------------------------------------
 
-    /** The outcome of a single authorization check (mirrors {@code CheckAccessResponse}). */
+    /** The outcome of a single authorization check (mirrors {@code CheckAccessResponse}).
+     *
+     * @param allowed whether the checked action is permitted
+     * @param reason  a human-readable deny reason, or {@code null} when {@code allowed}
+     *                is {@code true} or the server did not supply one
+     */
     public record AccessResult(boolean allowed, @Nullable String reason) {
     }
 
     /** A single access check request for {@link #batchCheck}. {@code subjectId} defaults to
-     * the caller (the current access token's {@code sub} claim) when {@code null}. */
+     * the caller (the current access token's {@code sub} claim) when {@code null}.
+     *
+     * @param subjectId  the subject to check, or {@code null} to default to the caller
+     *                   (the current access token's {@code sub} claim)
+     * @param action     the action being checked (CONTRACT.md &sect;1)
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     */
     public record AccessCheck(@Nullable String subjectId, String action, String resourceId,
                                @Nullable String scope) {
+        /** Convenience constructor for a check on the caller's own subject, with no scope.
+         *
+         * @param action     the action being checked
+         * @param resourceId the resource identifier the action is checked against
+         */
         public AccessCheck(String action, String resourceId) {
             this(null, action, resourceId, null);
         }
 
+        /** Convenience constructor for a check on the caller's own subject.
+         *
+         * @param action     the action being checked
+         * @param resourceId the resource identifier the action is checked against
+         * @param scope      an optional sub-resource scope qualifier, or {@code null}
+         */
         public AccessCheck(String action, String resourceId, @Nullable String scope) {
             this(null, action, resourceId, scope);
         }
@@ -144,10 +170,23 @@ public final class GrpcAuthzClient implements AutoCloseable {
     // checkAccess (blocking + async)
     // ------------------------------------------------------------------
 
+    /** {@link #checkAccess(String, String, String, String)} on the caller's own subject, with no scope.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @return the check outcome (allowed/denied, with an optional deny reason)
+     */
     public AccessResult checkAccess(String action, String resourceId) {
         return checkAccess(null, action, resourceId, null);
     }
 
+    /** {@link #checkAccess(String, String, String, String)} on the caller's own subject.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     * @return the check outcome (allowed/denied, with an optional deny reason)
+     */
     public AccessResult checkAccess(String action, String resourceId, @Nullable String scope) {
         return checkAccess(null, action, resourceId, scope);
     }
@@ -156,6 +195,13 @@ public final class GrpcAuthzClient implements AutoCloseable {
      * {@code CheckAccess} (CONTRACT.md &sect;1). On {@code UNAUTHENTICATED}, drives the shared
      * {@link RefreshGuard} exactly once and retries the RPC exactly once (&sect;9.3); a terminal
      * error maps via {@link ErrorMapper#fromGrpcStatus}.
+     *
+     * @param subjectId  the subject to check, or {@code null} to default to the caller
+     *                   (the current access token's {@code sub} claim)
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     * @return the check outcome (allowed/denied, with an optional deny reason)
      */
     public AccessResult checkAccess(@Nullable String subjectId, String action, String resourceId,
                                      @Nullable String scope) {
@@ -164,17 +210,38 @@ public final class GrpcAuthzClient implements AutoCloseable {
         return callWithRefreshRetry(() -> toAccessResult(stub.checkAccess(wire)));
     }
 
+    /** {@link #checkAccessAsync(String, String, String, String)} on the caller's own subject, with no scope.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @return a future resolving to the check outcome
+     */
     public CompletableFuture<AccessResult> checkAccessAsync(String action, String resourceId) {
         return checkAccessAsync(null, action, resourceId, null);
     }
 
+    /** {@link #checkAccessAsync(String, String, String, String)} on the caller's own subject.
+     *
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     * @return a future resolving to the check outcome
+     */
     public CompletableFuture<AccessResult> checkAccessAsync(String action, String resourceId, @Nullable String scope) {
         return checkAccessAsync(null, action, resourceId, scope);
     }
 
     /** {@code CompletableFuture} async twin of {@link #checkAccess}, adapting the
      * {@code ListenableFuture}-based future stub (D-02). Same shared-guard refresh-retry
-     * semantics as the blocking path. */
+     * semantics as the blocking path.
+     *
+     * @param subjectId  the subject to check, or {@code null} to default to the caller
+     *                   (the current access token's {@code sub} claim)
+     * @param action     the action being checked
+     * @param resourceId the resource identifier the action is checked against
+     * @param scope      an optional sub-resource scope qualifier, or {@code null}
+     * @return a future resolving to the check outcome
+     */
     public CompletableFuture<AccessResult> checkAccessAsync(@Nullable String subjectId, String action,
                                                               String resourceId, @Nullable String scope) {
         CheckAccessRequest wire = toWire(subjectId, action, resourceId, scope);
@@ -190,6 +257,9 @@ public final class GrpcAuthzClient implements AutoCloseable {
      * {@code BatchCheckAccess} (CONTRACT.md &sect;1); results are returned in the same order as
      * {@code checks}. Shares the same UNAUTHENTICATED single-flight-retry behavior as
      * {@link #checkAccess}.
+     *
+     * @param checks the ordered list of checks to evaluate
+     * @return the outcomes, in the same order as {@code checks}
      */
     public List<AccessResult> batchCheck(List<AccessCheck> checks) {
         BatchCheckAccessRequest wire = toWireBatch(checks);
@@ -197,6 +267,11 @@ public final class GrpcAuthzClient implements AutoCloseable {
         return callWithRefreshRetry(() -> toAccessResults(stub.batchCheckAccess(wire)));
     }
 
+    /** {@code CompletableFuture} async twin of {@link #batchCheck}.
+     *
+     * @param checks the ordered list of checks to evaluate
+     * @return a future resolving to the outcomes, in the same order as {@code checks}
+     */
     public CompletableFuture<List<AccessResult>> batchCheckAsync(List<AccessCheck> checks) {
         BatchCheckAccessRequest wire = toWireBatch(checks);
         AuthorizationServiceFutureStub stub = deadlinedFutureStub(AuthClientInterceptor.BATCH_CHECK_ACCESS_DEADLINE);

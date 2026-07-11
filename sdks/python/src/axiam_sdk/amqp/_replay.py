@@ -60,6 +60,9 @@ class NonceStore:
     """
 
     def __init__(self, ttl_seconds: float) -> None:
+        """Build an empty store with entries expiring ``ttl_seconds`` after
+        they are recorded. Callers should size this to cover the freshness
+        window with margin — :func:`consume` uses ``2 * skew_seconds``."""
         self._ttl_seconds = ttl_seconds
         self._seen: dict[str, float] = {}
 
@@ -80,11 +83,17 @@ class NonceStore:
         return True
 
     def _prune(self, now: float) -> None:
+        """Drop every entry whose expiry is at or before ``now``. Called
+        opportunistically at the start of each :meth:`check_and_record`
+        rather than on a timer, so the store needs no background
+        scheduling."""
         expired = [n for n, expiry in self._seen.items() if expiry <= now]
         for n in expired:
             del self._seen[n]
 
     def __len__(self) -> int:
+        """The number of currently unexpired nonces on record (does not
+        trigger pruning itself)."""
         return len(self._seen)
 
 

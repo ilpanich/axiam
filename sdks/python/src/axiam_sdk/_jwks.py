@@ -53,6 +53,15 @@ class JwksVerifier:
     organization-wide EdDSA JWKS."""
 
     def __init__(self, base_url: str, *, lifespan: int = _DEFAULT_LIFESPAN_SECONDS) -> None:
+        """Build a verifier against ``{base_url}{JWKS_PATH}``.
+
+        Args:
+            base_url: The AXIAM server's base URL; ``JWKS_PATH`` is appended
+                after stripping any trailing slash.
+            lifespan: Normal (non-forced) JWKS cache TTL in seconds, passed
+                through to :class:`~jwt.PyJWKClient`'s ``cache_jwk_set``
+                lifespan (default :data:`_DEFAULT_LIFESPAN_SECONDS`).
+        """
         jwks_url = base_url.rstrip("/") + JWKS_PATH
         # The per-key LRU cache (opt-in via a separate constructor flag,
         # intentionally left at its default/disabled state here) has no

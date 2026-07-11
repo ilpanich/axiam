@@ -31,12 +31,12 @@
 //! cookie-sourced credential for a state-changing request without further
 //! checks is a classic CSRF hole.
 //!
-//! When the credential in [`extract_token`] was sourced from the
+//! When the credential in `extract_token` was sourced from the
 //! `axiam_access` COOKIE (not the `Authorization` header) and the request
 //! method is state-changing (anything other than GET/HEAD/OPTIONS), this
 //! extractor additionally requires the `X-CSRF-Token` request header to be
 //! present and equal, in constant time, to the `axiam_csrf` cookie value
-//! (see [`csrf_valid`]), rejecting with 403 on mismatch/absence — token
+//! (see `csrf_valid`), rejecting with 403 on mismatch/absence — token
 //! verification is never attempted in that case. In any same-site
 //! deployment where `axiam_access` reaches this app, the non-`HttpOnly`
 //! `axiam_csrf` cookie does too, so this mirrors, locally, the same
@@ -70,7 +70,9 @@ const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
 /// §10's closing "Interface contract" clause.
 #[derive(Debug, Clone)]
 pub struct AxiamUser {
+    /// Subject (`sub` claim) of the verified access token.
     pub user_id: Uuid,
+    /// Tenant the access token is scoped to.
     pub tenant_id: Uuid,
     /// Derived from the verified access token's `scope` claim (space-separated
     /// OAuth2 scopes) — AXIAM's `AccessTokenClaims` has no dedicated `roles`

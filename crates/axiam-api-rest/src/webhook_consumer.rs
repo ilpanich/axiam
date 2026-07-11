@@ -303,13 +303,33 @@ async fn handle_delivery_failure<A>(
         let mut retry_msg = msg.clone();
         retry_msg.attempt = next_attempt;
 
+        // CQ-B49: if the retry copy fails to enqueue, the original message must
+        // NOT be acked — acking it would drop the delivery entirely (no retry,
+        // no DLQ) while the audit trail falsely claims a retry was scheduled.
+        // Nack with requeue so the broker redelivers the original for another
+        // attempt, and skip the "retry scheduled" audit record.
         if let Err(e) = publisher.publish_retry(&retry_msg, ttl_ms).await {
             error!(
                 error = %e,
                 webhook_id = %msg.webhook_id,
                 delivery_id = %msg.delivery_id,
-                "Failed to publish webhook retry"
+                delivery_tag,
+                "Failed to publish webhook retry — requeuing original instead of acking"
             );
+            if let Err(nack_err) = acker
+                .nack(BasicNackOptions {
+                    requeue: true,
+                    ..BasicNackOptions::default()
+                })
+                .await
+            {
+                error!(
+                    error = %nack_err,
+                    delivery_tag,
+                    "Failed to nack original webhook delivery after retry-publish failure"
+                );
+            }
+            return;
         }
 
         let entry = build_audit_entry(

@@ -178,6 +178,16 @@ pub async fn create<C: Connection + Clone>(
         .create_with_consent(input, "terms_of_service", "current", ip_address, user_agent)
         .await?;
 
+    // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort;
+    // never blocks or fails the response).
+    state
+        .emit_webhook(
+            created.tenant_id,
+            "user.created",
+            serde_json::json!({ "id": created.id, "username": created.username }),
+        )
+        .await;
+
     Ok(HttpResponse::Created().json(UserResponse::from(created)))
 }
 
@@ -307,6 +317,16 @@ pub async fn update<C: Connection + Clone>(
         .user_repo
         .update(user.tenant_id, target_id, input)
         .await?;
+
+    // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort).
+    state
+        .emit_webhook(
+            updated.tenant_id,
+            "user.updated",
+            serde_json::json!({ "id": updated.id, "username": updated.username }),
+        )
+        .await;
+
     Ok(HttpResponse::Ok().json(UserResponse::from(updated)))
 }
 
@@ -331,10 +351,18 @@ pub async fn delete<C: Connection + Clone>(
     RequirePermission::new("users:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    let target_id = path.into_inner();
+    state.user_repo.delete(user.tenant_id, target_id).await?;
+
+    // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort).
     state
-        .user_repo
-        .delete(user.tenant_id, path.into_inner())
-        .await?;
+        .emit_webhook(
+            user.tenant_id,
+            "user.deleted",
+            serde_json::json!({ "id": target_id }),
+        )
+        .await;
+
     Ok(HttpResponse::NoContent().finish())
 }
 

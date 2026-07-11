@@ -5,6 +5,7 @@
 //! Shibboleth, ADFS, etc.).
 
 pub mod cert;
+pub mod discovery_cache;
 pub mod error;
 pub mod jwks_cache;
 pub mod oidc;

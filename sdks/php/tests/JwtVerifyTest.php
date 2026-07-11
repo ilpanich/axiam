@@ -166,6 +166,69 @@ final class JwtVerifyTest extends TestCase
         self::assertCount(2, $history, 'expected exactly one discovery + one jwks fetch (one refetch attempt)');
     }
 
+    // --- SDK-19 / T-key-substitution: discovered jwks_uri must be same-origin https --
+
+    private function discoveryWith(string $jwksUri): Response
+    {
+        return new Response(200, [], (string) json_encode(['jwks_uri' => $jwksUri]));
+    }
+
+    public function testSameOriginHttpsJwksUriIsHonoured(): void
+    {
+        $history = [];
+        $client = $this->clientWithQueue(
+            [$this->discoveryWith('https://api.test/oauth2/jwks'), $this->jwksResponse()],
+            $history,
+        );
+        $verifier = new JwksVerifier($client, 'https://api.test');
+
+        $claims = $verifier->verify($this->jwt(), self::FIXTURE_TENANT);
+
+        self::assertIsArray($claims, 'a valid same-origin https jwks_uri must be used and yield claims');
+        self::assertSame('https://api.test/oauth2/jwks', (string) $history[1]['request']->getUri());
+    }
+
+    public function testOffHostJwksUriIsRejectedAndFallsBackToBaseUrl(): void
+    {
+        $history = [];
+        $client = $this->clientWithQueue(
+            [$this->discoveryWith('https://evil.example/oauth2/jwks'), $this->jwksResponse()],
+            $history,
+        );
+        $verifier = new JwksVerifier($client, 'https://api.test');
+
+        // Still resolves (the fallback URL is served from the queue), but the
+        // attacker-controlled off-host URL must NEVER be the one fetched.
+        self::assertIsArray($verifier->verify($this->jwt(), self::FIXTURE_TENANT));
+        self::assertSame('https://api.test/oauth2/jwks', (string) $history[1]['request']->getUri());
+    }
+
+    public function testPlaintextHttpJwksUriIsRejectedAndFallsBackToBaseUrl(): void
+    {
+        $history = [];
+        $client = $this->clientWithQueue(
+            [$this->discoveryWith('http://api.test/oauth2/jwks'), $this->jwksResponse()],
+            $history,
+        );
+        $verifier = new JwksVerifier($client, 'https://api.test');
+
+        self::assertIsArray($verifier->verify($this->jwt(), self::FIXTURE_TENANT));
+        self::assertSame('https://api.test/oauth2/jwks', (string) $history[1]['request']->getUri());
+    }
+
+    public function testOffPortJwksUriIsRejectedAndFallsBackToBaseUrl(): void
+    {
+        $history = [];
+        $client = $this->clientWithQueue(
+            [$this->discoveryWith('https://api.test:9443/oauth2/jwks'), $this->jwksResponse()],
+            $history,
+        );
+        $verifier = new JwksVerifier($client, 'https://api.test');
+
+        self::assertIsArray($verifier->verify($this->jwt(), self::FIXTURE_TENANT));
+        self::assertSame('https://api.test/oauth2/jwks', (string) $history[1]['request']->getUri());
+    }
+
     // --- Malformed input: never throws, always fails closed --------------------------
 
     public function testMalformedTokenInputReturnsNullNeverThrows(): void

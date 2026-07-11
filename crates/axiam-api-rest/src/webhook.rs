@@ -97,12 +97,17 @@ impl From<SsrfError> for WebhookError {
             SsrfError::InvalidUrl => WebhookError::InvalidUrl,
             SsrfError::ResolveFailed => WebhookError::ResolveFailed,
             SsrfError::Blocked => WebhookError::SsrfBlocked,
-            // A request/client-build/redirect failure at send time is not
-            // itself an SSRF verdict — surface it as a resolve failure so it
+            // SEC-069: a non-HTTPS target is treated as a blocked delivery
+            // (webhooks must be HTTPS); an over-large response is also a
+            // fail-closed rejection.
+            SsrfError::InsecureScheme => WebhookError::SsrfBlocked,
+            // A request/client-build/redirect/oversize failure at send time is
+            // not itself an SSRF verdict — surface it as a resolve failure so it
             // still fails closed rather than panicking or leaking internals.
             SsrfError::ClientBuildFailed
             | SsrfError::RequestFailed(_)
-            | SsrfError::TooManyRedirects => WebhookError::ResolveFailed,
+            | SsrfError::TooManyRedirects
+            | SsrfError::ResponseTooLarge(_) => WebhookError::ResolveFailed,
         }
     }
 }

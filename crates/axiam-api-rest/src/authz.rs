@@ -107,7 +107,22 @@ impl RequirePermission {
             .map_err(AxiamApiError::from)?
         {
             AccessDecision::Allow => Ok(()),
-            AccessDecision::Deny(reason) => Err(AxiamError::AuthorizationDenied { reason }.into()),
+            AccessDecision::Deny(reason) => {
+                // SDK-Q02: surface the checked action/resource so clients can
+                // parse them from the 403 body. `Uuid::nil()` is the
+                // "global" (not resource-scoped) sentinel — omit it.
+                let resource_id = if self.resource_id.is_nil() {
+                    None
+                } else {
+                    Some(self.resource_id.to_string())
+                };
+                Err(AxiamError::AuthorizationDenied {
+                    reason,
+                    action: Some(self.action.clone()),
+                    resource_id,
+                }
+                .into())
+            }
         }
     }
 }

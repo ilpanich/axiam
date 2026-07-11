@@ -6,6 +6,8 @@
 // §1's camelCase convention and deliberately carries no session token field
 // anywhere — tokens arrive exclusively via Set-Cookie (D-05/T-17-07).
 
+import type { AccessDecision } from '../core/index.js';
+
 // ---------------------------------------------------------------------------
 // Wire types (snake_case, mirror server handlers)
 // ---------------------------------------------------------------------------
@@ -63,15 +65,18 @@ export type LoginResult =
 export interface AccessCheck {
   action: string;
   resourceId: string;
-  resourceType?: string;
   scope?: string;
   subjectId?: string;
 }
 
-export interface AccessDecision {
-  allowed: boolean;
-  reason?: string;
-}
+/**
+ * The result of a REST access check (mirrors `CheckAccessResponseWire`).
+ * Shared verbatim with the gRPC transport's `AuthzGrpcClient` result shape
+ * (SDK-Q10, C2) — defined once in `core/authz.ts` and re-exported here so
+ * both `axiam-sdk/rest` and `axiam-sdk/grpc` consumers see the identical
+ * `AccessDecision` type.
+ */
+export type { AccessDecision };
 
 /** Wire body for POST /api/v1/authz/check (mirrors CheckAccessBody). */
 export interface CheckAccessBodyWire {

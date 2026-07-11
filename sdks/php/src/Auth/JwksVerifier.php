@@ -221,12 +221,64 @@ final class JwksVerifier
         return $this->http->requestAsync('GET', '/.well-known/openid-configuration')
             ->then(function (ResponseInterface $response): string {
                 $discovery = json_decode((string) $response->getBody(), true);
-                if (is_array($discovery) && is_string($discovery['jwks_uri'] ?? null) && $discovery['jwks_uri'] !== '') {
+                if (is_array($discovery)
+                    && is_string($discovery['jwks_uri'] ?? null)
+                    && $discovery['jwks_uri'] !== ''
+                    && $this->isSameOriginHttps($discovery['jwks_uri'])
+                ) {
                     return $discovery['jwks_uri'];
                 }
 
                 return $this->baseUrl . '/oauth2/jwks';
             })
             ->otherwise(fn (): string => $this->baseUrl . '/oauth2/jwks');
+    }
+
+    /**
+     * Anti-key-substitution / anti-SSRF guard (SDK-19): the discovery document
+     * is fetched over the network and its `jwks_uri` is fetched next, then its
+     * keys are trusted to verify EdDSA signatures. If the discovery response is
+     * attacker-influenced, an unvalidated `jwks_uri` would let an attacker point
+     * key resolution at a host of their choosing (substituting their own signing
+     * keys) or coerce the client into fetching an arbitrary internal URL (SSRF).
+     *
+     * We therefore only honour a discovered `jwks_uri` that is same-origin with
+     * the configured `baseUrl`: it MUST be an absolute `https` URL whose host
+     * (case-insensitive) and port match `baseUrl`'s. Anything else — a relative
+     * path, a plaintext `http` URL, or an off-host absolute URL — is rejected by
+     * the caller, which falls back to the conventional `{baseUrl}/oauth2/jwks`
+     * (the path every sibling SDK hardcodes). This keeps key resolution pinned
+     * to the trusted origin regardless of what discovery returns.
+     */
+    private function isSameOriginHttps(string $candidate): bool
+    {
+        $candidateParts = parse_url($candidate);
+        $baseParts = parse_url($this->baseUrl);
+        if (!is_array($candidateParts) || !is_array($baseParts)) {
+            return false;
+        }
+
+        // Require an absolute https URL — a relative path (no scheme/host) or a
+        // plaintext http URL never qualifies. Scheme comparison is
+        // case-insensitive per RFC 3986 (`HTTPS` == `https`).
+        $candidateScheme = $candidateParts['scheme'] ?? null;
+        if (!is_string($candidateScheme) || strcasecmp($candidateScheme, 'https') !== 0) {
+            return false;
+        }
+
+        $candidateHost = $candidateParts['host'] ?? null;
+        $baseHost = $baseParts['host'] ?? null;
+        if (!is_string($candidateHost) || !is_string($baseHost) || $baseHost === '') {
+            return false;
+        }
+
+        // Same host (case-insensitive, mirroring SessionState::isBaseHost in the
+        // sibling SDKs) AND same effective port — together with the https scheme
+        // check above this is a same-origin comparison.
+        if (strcasecmp($candidateHost, $baseHost) !== 0) {
+            return false;
+        }
+
+        return ($candidateParts['port'] ?? null) === ($baseParts['port'] ?? null);
     }
 }

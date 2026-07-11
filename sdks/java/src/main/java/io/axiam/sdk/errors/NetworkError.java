@@ -33,6 +33,45 @@ public final class NetworkError extends RuntimeException {
      *                         (e.g. a gRPC status with no response body)
      */
     public NetworkError(String message, @Nullable String sanitizedSummary) {
-        super(message, sanitizedSummary == null ? null : new RuntimeException(sanitizedSummary));
+        super(message, sanitizedSummary == null ? null : new SanitizedCause(sanitizedSummary));
+    }
+
+    /**
+     * Chains an underlying transport failure (a caught {@code IOException},
+     * {@code GeneralSecurityException}, gRPC {@code Throwable}, etc.) onto a
+     * {@link NetworkError} as its {@link Throwable#getCause() cause}
+     * (CONTRACT.md &sect;2 MUST: "NetworkError MUST carry the underlying
+     * OS/transport error as a cause"). Before this constructor existed, call
+     * sites embedded {@code originalCause.getMessage()} into the outer
+     * {@code message} string but never chained {@code originalCause} itself
+     * — so {@code getCause()} was always {@code null} for every real
+     * transport failure. This restores the cause link while still never
+     * exposing {@code originalCause} directly: only its (inherently
+     * non-secret) class name is retained in the chained
+     * {@link SanitizedCause}, never {@code originalCause}'s own message or
+     * stack trace, which could in principle echo back request state (a URL,
+     * a partial header) that must not resurface in a thrown error.
+     *
+     * @param message       caller-controlled, human-readable description;
+     *                      MUST NOT contain a raw token value
+     * @param originalCause the real transport exception that triggered this
+     *                      {@link NetworkError}; never retained directly,
+     *                      only its class name
+     */
+    public NetworkError(String message, Throwable originalCause) {
+        super(message, new SanitizedCause(originalCause.getClass().getName()));
+    }
+
+    /**
+     * A minimal, redaction-safe stand-in for a real transport exception:
+     * carries only an already-sanitized summary as its message and no
+     * stack trace of its own construction site beyond this one, so it can
+     * never smuggle an unredacted header/token value that the original
+     * exception's message or cause chain might have held.
+     */
+    static final class SanitizedCause extends RuntimeException {
+        SanitizedCause(String sanitizedMessage) {
+            super(sanitizedMessage);
+        }
     }
 }

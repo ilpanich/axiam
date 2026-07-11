@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::client::AxiamClient;
+use crate::rest::auth::CsrfHeaderExt;
 use crate::AxiamError;
 
 const CHECK_PATH: &str = "/api/v1/authz/check";
@@ -146,6 +147,10 @@ impl AxiamClient {
             .http()
             .post(self.authz_url(path))
             .header("X-Tenant-ID", self.tenant_header_value())
+            // SDK-Q04: forward the captured `X-CSRF-Token` on this POST, the
+            // same way `refresh`/`logout` do (§3) — the server's CSRF
+            // protection covers state-changing verbs including authz POSTs.
+            .maybe_csrf_header(self)
             .json(body)
             .send()
             .await

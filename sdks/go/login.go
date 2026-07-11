@@ -423,21 +423,35 @@ func deserErr(err error) error {
 // CONTRACT.md §2, using the 18-01 status mappers. resp is consumed
 // (Body read and discarded) but NOT closed here — callers close it via
 // their own defer.
+//
+// When the mapped error is an *AuthzError (403/409), the raw body bytes are
+// additionally best-effort parsed for the structured `action`/`resource_id`
+// fields (CONTRACT.md §2) via parseAuthzFields — this is the only part of
+// the body ever read into caller-visible state; readBodyForError's WR-01
+// redaction of the free-text message is untouched.
 func mapErrorResponse(resp *http.Response) error {
-	message := readBodyForError(resp.Body)
-	return errorFromHTTPStatus(resp.StatusCode, message, resp, nil)
+	message, body := readBodyForError(resp.Body)
+	err := errorFromHTTPStatus(resp.StatusCode, message, resp, nil)
+	if authzErr, ok := err.(*AuthzError); ok {
+		authzErr.Action, authzErr.ResourceID = parseAuthzFields(body)
+	}
+	return err
 }
 
 // readBodyForError drains a bounded amount of the error response body (so the
-// connection can be reused) but deliberately does NOT echo the raw body into
-// the returned string. The result flows into an exported error Message field,
-// which participates in json.Marshal / %v / %+v / .Error() with no redaction
+// connection can be reused) and returns both a fixed, non-echoing message
+// string and the raw bounded body bytes for structured field extraction
+// (parseAuthzFields). The returned message deliberately does NOT echo the
+// raw body: it flows into an exported error Message field, which
+// participates in json.Marshal / %v / %+v / .Error() with no redaction
 // surface (unlike Sensitive). A server error body can reflect request headers,
 // cookies, or token-shaped payloads (WAF/proxy pages, misconfigured debug
 // handlers), so echoing it verbatim would defeat the header-redaction work in
 // errors.go (WR-01). Diagnostic detail belongs in the optional WithLogger sink,
-// not in caller-visible/loggable error state.
-func readBodyForError(r io.Reader) string {
-	_, _ = io.Copy(io.Discard, io.LimitReader(r, 4096))
-	return "server returned an error response (body redacted; enable WithLogger for details)"
+// not in caller-visible/loggable error state — the raw body bytes returned
+// here are only ever fed into the narrow, typed authzErrorBody parse, never
+// surfaced verbatim.
+func readBodyForError(r io.Reader) (message string, body []byte) {
+	body, _ = io.ReadAll(io.LimitReader(r, 4096))
+	return "server returned an error response (body redacted; enable WithLogger for details)", body
 }

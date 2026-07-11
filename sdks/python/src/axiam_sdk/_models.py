@@ -11,7 +11,7 @@ from pydantic import BaseModel, SecretStr
 
 
 class LoginResult(BaseModel):
-    """Result of ``login()``/``async_login()`` (D-21).
+    """Result of ``AxiamClient.login()`` / ``AsyncAxiamClient.login()`` (D-21, SDK-Q08).
 
     A single model with a literal ``mfa_required: bool`` field — the caller
     checks the flag, and if true, calls ``verify_mfa(mfa_token, code)``.

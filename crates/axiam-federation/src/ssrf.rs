@@ -61,7 +61,18 @@ pub enum SsrfError {
     RequestFailed(String),
     #[error("too many redirects")]
     TooManyRedirects,
+    #[error("SSRF blocked: non-HTTPS scheme not permitted for IdP fetches")]
+    InsecureScheme,
+    #[error("SSRF blocked: response body exceeds the {0}-byte cap")]
+    ResponseTooLarge(usize),
 }
+
+/// Maximum acceptable `Content-Length` for a guarded IdP response (SEC-069).
+/// Discovery/metadata/token/JWKS documents are small; a multi-GB body is a
+/// memory-exhaustion DoS vector. JWKS additionally applies its own 512 KiB
+/// read cap downstream; this is the coarse first line of defence for all four
+/// federation fetch types.
+const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
 /// Returns `true` for IP addresses that must never be contacted from a
 /// server-side outbound fetch to an admin/IdP-supplied URL.
@@ -160,6 +171,16 @@ pub async fn guarded_fetch(
         // Only the first hop honors the caller's test seam; every redirect
         // hop thereafter is always strictly validated (module docs above).
         let hop_allow_private = allow_private && hop == 0;
+
+        // SEC-069: enforce HTTPS for every hop. A plaintext `http://` IdP
+        // endpoint (admin-misconfigured, or an attacker-supplied redirect)
+        // would carry the decrypted client_secret / bearer material in the
+        // clear. `http` is tolerated only behind the private-network test seam
+        // (loopback/dev), exactly like the address checks.
+        if parsed.scheme() != "https" && !hop_allow_private {
+            return Err(SsrfError::InsecureScheme);
+        }
+
         let ip = resolve_and_pick(&host, port, hop_allow_private).await?;
         let client = pinned_client(&host, ip, port)?;
 
@@ -182,10 +203,54 @@ pub async fn guarded_fetch(
             continue;
         }
 
+        // SEC-069: reject an over-large advertised body before the caller
+        // buffers it. This is the coarse Content-Length gate; body readers that
+        // need a hard guarantee against a lying/chunked response still apply
+        // their own streaming cap (JWKS: 512 KiB).
+        if let Some(len) = resp.content_length()
+            && len > MAX_RESPONSE_BYTES as u64
+        {
+            return Err(SsrfError::ResponseTooLarge(MAX_RESPONSE_BYTES));
+        }
+
         return Ok(resp);
     }
 
     Err(SsrfError::TooManyRedirects)
+}
+
+/// Read a response body with a hard streaming cap, aborting as soon as `cap`
+/// is exceeded — WITHOUT buffering the rest of the body first (CQ-B23).
+///
+/// This replaces the previous "buffer the whole body via `.bytes()`, then
+/// check `.len()` against the cap" pattern used by discovery/token-exchange
+/// reads. That pattern still let a malicious or misconfigured endpoint force
+/// full in-memory buffering of an arbitrarily large response before the
+/// existing size check ever ran (the coarse `Content-Length`-based check in
+/// [`guarded_fetch`] above only catches endpoints that both send the header
+/// AND tell the truth about it — a chunked, no-`Content-Length` response
+/// bypasses it entirely). Reading chunk-by-chunk with a running byte count
+/// bounds peak memory use to ~`cap` bytes regardless.
+///
+/// Uses `reqwest::Response::chunk()` (always available, unlike
+/// `bytes_stream()` which needs the `stream` cargo feature this workspace
+/// does not enable) so no new dependency/feature is required.
+pub async fn read_capped_body(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> Result<Vec<u8>, SsrfError> {
+    let mut buf = Vec::with_capacity(cap.min(64 * 1024));
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| SsrfError::RequestFailed(e.to_string()))?
+    {
+        buf.extend_from_slice(&chunk);
+        if buf.len() > cap {
+            return Err(SsrfError::ResponseTooLarge(cap));
+        }
+    }
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,8 +300,12 @@ mod tests {
             if let Ok((mut stream, _)) = listener.accept().await {
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf).await;
+                // https target so the redirect hop is rejected by the ADDRESS
+                // re-validation (SsrfError::Blocked), independent of the
+                // SEC-069 scheme check — that scheme enforcement has its own
+                // test below.
                 let response = b"HTTP/1.1 302 Found\r\n\
-                    Location: http://10.0.0.5/internal\r\n\
+                    Location: https://10.0.0.5/internal\r\n\
                     Content-Length: 0\r\n\
                     Connection: close\r\n\r\n";
                 let _ = stream.write_all(response).await;
@@ -249,6 +318,130 @@ mod tests {
         assert!(
             matches!(result, Err(SsrfError::Blocked)),
             "expected redirect to internal address to be blocked, got: {result:?}"
+        );
+    }
+
+    /// SEC-069: a plaintext `http://` endpoint is rejected on a non-seam hop
+    /// (the redirect target below is a routable public host, so it is not
+    /// address-blocked — only the scheme gate rejects it).
+    #[tokio::test]
+    async fn ssrf_rejects_plaintext_redirect_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let response = b"HTTP/1.1 302 Found\r\n\
+                    Location: http://example.com/downgraded\r\n\
+                    Content-Length: 0\r\n\
+                    Connection: close\r\n\r\n";
+                let _ = stream.write_all(response).await;
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}/token", addr.port());
+        let result = guarded_fetch(&url, true, |c, u| c.get(u)).await;
+        assert!(
+            matches!(result, Err(SsrfError::InsecureScheme)),
+            "expected a plaintext redirect target to be rejected by the scheme gate, got: {result:?}"
+        );
+    }
+
+    /// SEC-069: a plaintext first hop with no private-network seam is rejected
+    /// by the scheme gate (before any DNS resolution).
+    #[tokio::test]
+    async fn ssrf_rejects_plaintext_first_hop() {
+        let result = guarded_fetch("http://example.com/x", false, |c, u| c.get(u)).await;
+        assert!(
+            matches!(result, Err(SsrfError::InsecureScheme)),
+            "expected a plaintext first hop (no seam) to be rejected, got: {result:?}"
+        );
+    }
+
+    /// CQ-B23: a body within the cap is read in full.
+    #[tokio::test]
+    async fn read_capped_body_allows_body_within_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("local_addr");
+        let body = b"{\"hello\":\"world\"}";
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}/small", addr.port());
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        let result = read_capped_body(response, 1024).await;
+
+        assert_eq!(result.expect("body within cap must be read"), body);
+    }
+
+    /// CQ-B23: a body exceeding the cap is rejected — via a chunked,
+    /// no-`Content-Length` response so the ONLY thing that can catch it is
+    /// the streaming running-byte-count check, not the coarse
+    /// `Content-Length` gate in [`guarded_fetch`] (which this test bypasses
+    /// by calling `read_capped_body` directly on a plain `reqwest` response).
+    #[tokio::test]
+    async fn read_capped_body_rejects_body_over_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const CAP: usize = 16;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                // Chunked transfer-encoding, no Content-Length: a body far
+                // larger than CAP, split across multiple chunks so the
+                // reader must actually stream (not just look at one read).
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                let chunk = "x".repeat(32);
+                for _ in 0..8 {
+                    let framed = format!("{:x}\r\n{}\r\n", chunk.len(), chunk);
+                    let _ = stream.write_all(framed.as_bytes()).await;
+                }
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}/big", addr.port());
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        let result = read_capped_body(response, CAP).await;
+
+        assert!(
+            matches!(result, Err(SsrfError::ResponseTooLarge(CAP))),
+            "expected ResponseTooLarge({CAP}), got: {result:?}"
         );
     }
 }

@@ -4,6 +4,7 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     'rest/index': 'src/rest/index.ts',
+    'node/index': 'src/node/index.ts',
     'grpc/index': 'src/grpc/index.ts',
     'amqp/index': 'src/amqp/index.ts',
     'middleware/index': 'src/middleware/index.ts',

@@ -24,7 +24,11 @@ const LOGOUT_PATH: &str = "/api/v1/auth/logout";
 // Request bodies (mirror crates/axiam-api-rest/src/handlers/auth.rs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+// X-4/SDK-13: `Debug` is NOT derived on the two request bodies that carry
+// plaintext credentials (`password`, `totp_code`) / a bearer challenge token —
+// a derived `Debug` would print those secrets verbatim into any log or panic
+// message. Manual `Debug` impls below redact the secret fields.
+#[derive(Serialize)]
 struct LoginRequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     tenant_id: Option<Uuid>,
@@ -38,10 +42,34 @@ struct LoginRequestBody {
     password: String,
 }
 
-#[derive(Debug, Serialize)]
+impl std::fmt::Debug for LoginRequestBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginRequestBody")
+            .field("tenant_id", &self.tenant_id)
+            .field("org_id", &self.org_id)
+            .field("tenant_slug", &self.tenant_slug)
+            .field("org_slug", &self.org_slug)
+            .field("username_or_email", &self.username_or_email)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
 struct MfaVerifyRequestBody {
     challenge_token: String,
     totp_code: String,
+}
+
+impl std::fmt::Debug for MfaVerifyRequestBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Both fields are sensitive: `totp_code` is a live second factor and
+        // `challenge_token` is a short-lived "logging in as this user" bearer.
+        f.debug_struct("MfaVerifyRequestBody")
+            .field("challenge_token", &"[REDACTED]")
+            .field("totp_code", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -453,8 +481,10 @@ fn deser_err(e: reqwest::Error) -> AxiamError {
 
 /// Small extension trait so state-changing request builders can forward the
 /// captured `X-CSRF-Token` (§3) in one line without repeating the
-/// `if-let`/`header` boilerplate everywhere.
-trait CsrfHeaderExt {
+/// `if-let`/`header` boilerplate everywhere. `pub(crate)` so sibling REST
+/// modules (e.g. `rest::authz`) reuse the exact same forwarding logic instead
+/// of duplicating it (SDK-Q04).
+pub(crate) trait CsrfHeaderExt {
     fn maybe_csrf_header(self, client: &AxiamClient) -> Self;
 }
 
@@ -464,5 +494,50 @@ impl CsrfHeaderExt for reqwest::RequestBuilder {
             Some(token) => self.header("X-CSRF-Token", token),
             None => self,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // X-4/SDK-13: the plaintext credential must never appear in a Debug render.
+    #[test]
+    fn login_body_debug_redacts_password() {
+        let body = LoginRequestBody {
+            tenant_id: None,
+            org_id: None,
+            tenant_slug: Some("acme".into()),
+            org_slug: None,
+            username_or_email: "user@example.com".into(),
+            password: "hunter2-super-secret".into(),
+        };
+        let rendered = format!("{body:?}");
+        assert!(
+            !rendered.contains("hunter2-super-secret"),
+            "password must never appear in Debug output: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED]"));
+        // Non-secret fields remain visible for diagnostics.
+        assert!(rendered.contains("user@example.com"));
+        assert!(rendered.contains("acme"));
+    }
+
+    #[test]
+    fn mfa_verify_body_debug_redacts_totp_and_challenge() {
+        let body = MfaVerifyRequestBody {
+            challenge_token: "challenge-abc-123".into(),
+            totp_code: "654321".into(),
+        };
+        let rendered = format!("{body:?}");
+        assert!(
+            !rendered.contains("654321"),
+            "totp_code must never appear in Debug output: {rendered}"
+        );
+        assert!(
+            !rendered.contains("challenge-abc-123"),
+            "challenge_token must never appear in Debug output: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED]"));
     }
 }

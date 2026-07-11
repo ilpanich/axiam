@@ -28,10 +28,38 @@ final class ErrorMapper
     ): AxiamException {
         return match (true) {
             $status === 401 => new AuthError(sprintf('%s: unauthenticated (HTTP 401)', $context)),
-            \in_array($status, [403, 409], true) => new AuthzError(sprintf('%s: forbidden (HTTP %d)', $context, $status)),
+            \in_array($status, [403, 409], true) => self::authzErrorFrom($response, sprintf('%s: forbidden (HTTP %d)', $context, $status)),
             $response !== null => NetworkError::fromResponse($response, $context),
             default => NetworkError::fromException(new \RuntimeException(sprintf('HTTP %d', $status)), $context),
         };
+    }
+
+    /**
+     * Builds an {@see AuthzError} from the (already-consumed-safe) `$message`, parsing
+     * `action`/`resource_id` out of the server's `authorization_denied` JSON body when a
+     * live `$response` is available. Both fields are `null` when the body is missing,
+     * unparsable, or simply doesn't carry them — a malformed/absent body never prevents
+     * the AuthzError from being constructed.
+     */
+    private static function authzErrorFrom(?ResponseInterface $response, string $message): AuthzError
+    {
+        if ($response === null) {
+            return new AuthzError($message);
+        }
+
+        $decoded = json_decode((string) $response->getBody(), true);
+        if (!\is_array($decoded)) {
+            return new AuthzError($message);
+        }
+
+        $action = $decoded['action'] ?? null;
+        $resourceId = $decoded['resource_id'] ?? null;
+
+        return new AuthzError(
+            $message,
+            \is_string($action) ? $action : null,
+            \is_string($resourceId) ? $resourceId : null,
+        );
     }
 
     /**

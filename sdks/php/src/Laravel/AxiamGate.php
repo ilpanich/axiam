@@ -38,7 +38,10 @@ final class AxiamGate
      */
     public function allows(string $resource, string $action): bool
     {
-        return $this->client->can($resource, $action);
+        // AxiamClient::can() takes (action, resource) (CONTRACT.md §1, SDK-Q09) — this
+        // method's own (resource, action) parameter order mirrors Laravel's
+        // `can:axiam,<resource>,<action>` middleware syntax and is unaffected.
+        return $this->client->can($action, $resource);
     }
 
     /**

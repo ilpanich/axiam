@@ -29,6 +29,16 @@
         "default": "./dist/rest/index.js"
       }
     },
+    "./node": {
+      "import": {
+        "types": "./dist/node/index.d.mts",
+        "default": "./dist/node/index.mjs"
+      },
+      "require": {
+        "types": "./dist/node/index.d.ts",
+        "default": "./dist/node/index.js"
+      }
+    },
     "./grpc": {
       "import": {
         "types": "./dist/grpc/index.d.mts",
@@ -90,7 +100,7 @@
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.0",
-    "amqplib": "^2.0.0",
+    "amqplib": "^0.10.5",
     "axios": "^1.7.0",
     "axios-cookiejar-support": "^7.0.0",
     "jose": "^6.0.0",
@@ -115,11 +125,11 @@
     "esbuild": "^0.24.0",
     "express": "^5.0.0",
     "fastify": "^5.0.0",
-    "jsdom": "^29.1.1",
+    "jsdom": "^26.0.0",
     "msw": "^2.0.0",
     "ts-proto": "^2.0.0",
     "tsup": "^8.0.0",
     "typescript": "~5.9.0",
-    "vitest": "^4.0.0"
+    "vitest": "^3.0.0"
   }
 }

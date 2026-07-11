@@ -284,6 +284,65 @@ async fn no_permission_returns_403() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 403);
+
+    // SDK-Q02: the 403 body carries structured `action`/`resource_id`
+    // fields so SDKs can parse them without string-matching `message`.
+    // `RequirePermission::new("users:create", Uuid::nil())` checks the
+    // "global" sentinel, so `resource_id` must be omitted (null), while
+    // `action` must echo the checked permission string.
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "authorization_denied");
+    assert_eq!(body["action"], "users:create");
+    assert!(
+        body.get("resource_id").is_none() || body["resource_id"].is_null(),
+        "expected no resource_id for a global (nil-resource) denial, got {body:?}"
+    );
+}
+
+/// `no_permission_returns_403_with_resource_scoped_fields`
+///
+/// A resource-scoped denial (not the `Uuid::nil()` "global" sentinel) must
+/// carry a non-null `resource_id` alongside `action` in the 403 body.
+/// `POST /api/v1/authz/check` with a `subject_id` override requires the
+/// `authz:check_as` permission, checked against `user.tenant_id` (never
+/// nil in a seeded tenant) — see `RequirePermission::new("authz:check_as",
+/// user.tenant_id)` in `handlers/authz_check.rs`.
+#[actix_rt::test]
+async fn no_permission_returns_403_with_resource_scoped_fields() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let viewer_id = create_user_with_role(
+        &db,
+        tenant_id,
+        "viewer2",
+        "viewer2@example.com",
+        Some("viewer"),
+    )
+    .await;
+    let token = mint_token(&auth, viewer_id, tenant_id, org_id);
+    let app = test_app!(db, auth, authz);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/authz/check")
+        .peer_addr("127.0.0.1:12345".parse().unwrap())
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "action": "users:get",
+            "resource_id": Uuid::new_v4(),
+            "subject_id": Uuid::new_v4(),
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "authorization_denied");
+    assert_eq!(body["action"], "authz:check_as");
+    assert_eq!(body["resource_id"], tenant_id.to_string());
 }
 
 /// `admin_can_access`
@@ -447,5 +506,163 @@ fn all_routes_have_permission() {
         missing.is_empty(),
         "ROUTE_PERMISSION_MAP references permissions not in PERMISSION_REGISTRY:\n  - {}",
         missing.join("\n  - ")
+    );
+}
+
+// -------------------------------------------------------------------------
+// NEW-2 — org-baseline settings must require the dedicated org-level
+// permission, NOT the tenant-scoped `settings:*` self-management permission.
+// -------------------------------------------------------------------------
+
+/// Create a fresh role granted exactly one permission (by its action string)
+/// and assign it to a new user. Returns the user id.
+async fn user_with_single_permission(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    username: &str,
+    permission_action: &str,
+) -> Uuid {
+    use axiam_core::models::role::CreateRole;
+    use axiam_core::repository::{Pagination, PermissionRepository, RoleRepository};
+
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: username.into(),
+            email: format!("{username}@example.com"),
+            password: TEST_PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: format!("role-{username}"),
+            description: format!("grants only {permission_action}"),
+            // Global so the grant applies to the nil-resource permission check
+            // the org-settings handlers perform (RequirePermission uses
+            // Uuid::nil()); a non-global role would be filtered out by the
+            // engine's resource-scope check.
+            is_global: true,
+        })
+        .await
+        .unwrap();
+
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let perms = perm_repo
+        .list(
+            tenant_id,
+            Pagination {
+                offset: 0,
+                limit: 1000,
+            },
+        )
+        .await
+        .unwrap();
+    let perm = perms
+        .items
+        .into_iter()
+        .find(|p| p.action == permission_action)
+        .unwrap_or_else(|| panic!("permission `{permission_action}` not seeded"));
+    perm_repo
+        .grant_to_role(tenant_id, role.id, perm.id)
+        .await
+        .unwrap();
+
+    role_repo
+        .assign_to_user(tenant_id, user.id, role.id, None)
+        .await
+        .unwrap();
+
+    user.id
+}
+
+/// Full valid org-settings body (mirrors settings_test::set_org_settings_returns_200).
+fn valid_org_settings_body() -> serde_json::Value {
+    serde_json::json!({
+        "min_length": 16,
+        "require_uppercase": true,
+        "require_lowercase": true,
+        "require_digits": true,
+        "require_symbols": true,
+        "password_history_count": 10,
+        "hibp_check_enabled": true,
+        "mfa_enforced": true,
+        "mfa_challenge_lifetime_secs": 300,
+        "max_failed_login_attempts": 3,
+        "lockout_duration_secs": 600,
+        "lockout_backoff_multiplier": 2.0,
+        "max_lockout_duration_secs": 3600,
+        "access_token_lifetime_secs": 900,
+        "refresh_token_lifetime_secs": 2592000,
+        "email_verification_required": true,
+        "email_verification_grace_period_hours": 24,
+        "default_cert_validity_days": 365,
+        "max_cert_validity_days": 730,
+        "admin_notifications_enabled": true
+    })
+}
+
+/// A tenant-scoped `settings:update` grant must NOT authorize writing the
+/// organization baseline settings (regression for NEW-2 — the handler used to
+/// enforce `settings:update` instead of `organizations:update_settings`).
+#[actix_rt::test]
+async fn org_settings_update_denies_tenant_settings_permission() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let user_id =
+        user_with_single_permission(&db, tenant_id, "tenantadmin", "settings:update").await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth, authz);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+        .peer_addr("127.0.0.1:12345".parse().unwrap())
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(valid_org_settings_body())
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "settings:update (tenant permission) must not authorize org-baseline writes"
+    );
+}
+
+/// The dedicated `organizations:update_settings` grant authorizes the org
+/// baseline write (confirms the handler now enforces the org-level permission).
+#[actix_rt::test]
+async fn org_settings_update_allows_org_settings_permission() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let user_id =
+        user_with_single_permission(&db, tenant_id, "orgadmin", "organizations:update_settings")
+            .await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth, authz);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+        .peer_addr("127.0.0.1:12345".parse().unwrap())
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(valid_org_settings_body())
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "organizations:update_settings must authorize the org-baseline write"
     );
 }

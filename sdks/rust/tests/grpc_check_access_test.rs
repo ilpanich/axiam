@@ -224,7 +224,7 @@ async fn grpc_check_access() {
         decision,
         AccessDecision {
             allowed: true,
-            deny_reason: None,
+            reason: None,
         }
     );
 }

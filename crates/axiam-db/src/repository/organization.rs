@@ -191,12 +191,24 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
     }
 
     async fn delete(&self, id: Uuid) -> AxiamResult<()> {
-        self.db
-            .query("DELETE type::record('organization', $id)")
+        let result = self
+            .db
+            .query("DELETE type::record('organization', $id) RETURN BEFORE")
             .bind(("id", id.to_string()))
             .await
             .map_err(DbError::from)?;
 
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<OrganizationRow> = result.take(0).map_err(DbError::from)?;
+        if rows.is_empty() {
+            return Err(DbError::NotFound {
+                entity: "organization".into(),
+                id: id.to_string(),
+            }
+            .into());
+        }
         Ok(())
     }
 

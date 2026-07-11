@@ -165,11 +165,8 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(DbError::from)?;
 
         let rows: Vec<SessionRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = take_first_or_not_found(
-            rows,
-            "session",
-            &format!("token_hash={token_hash_owned}"),
-        )?;
+        let row =
+            take_first_or_not_found(rows, "session", &format!("token_hash={token_hash_owned}"))?;
 
         row.try_into_session().map_err(Into::into)
     }
@@ -186,6 +183,26 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(DbError::from)?;
 
         Ok(())
+    }
+
+    async fn consume(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<bool> {
+        // NEW-3: `RETURN BEFORE` yields the pre-delete row; a non-empty result
+        // means THIS statement removed the session. SurrealDB serializes two
+        // concurrent DELETEs on the same record, so exactly one caller sees a
+        // non-empty BEFORE image — the single-use gate for refresh rotation.
+        let mut result = self
+            .db
+            .query(
+                "DELETE type::record('session', $id) \
+                 WHERE tenant_id = $tenant_id RETURN BEFORE",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
+        Ok(!deleted.is_empty())
     }
 
     async fn invalidate_user_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {

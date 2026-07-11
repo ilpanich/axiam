@@ -185,6 +185,17 @@ pub struct DbManager {
     /// and reconnect-loop tasks so all sides observe/refresh the SAME
     /// current handle (see module docs, Pitfall 2).
     db: Arc<RwLock<Surreal<Client>>>,
+    /// CQ-B48: a handle cloned ONCE at startup — the same auth-snapshot
+    /// generation the request-serving repositories receive from
+    /// `client_cloned()` during composition. The manager's own handle is
+    /// proactively re-signed-in, but those startup repo clones are NOT, so
+    /// after the root-token TTL (~4 weeks) they 401 while the manager handle
+    /// stays valid — an *undetectable* outage if `health_check` probes only the
+    /// manager. `health_check` also probes THIS handle so the readiness gate
+    /// trips exactly when the repositories' tokens expire (it shares their
+    /// lifetime); recovery still requires a restart, which is the honest signal
+    /// until the repo handles are made renewable.
+    health_probe: Surreal<Client>,
     /// Handle to the background proactive re-signin task (D-03/D-04),
     /// owned so it is explicitly droppable/abortable rather than a
     /// fire-and-forget detached task.
@@ -249,11 +260,15 @@ impl DbManager {
         info!("Successfully connected to SurrealDB");
 
         let db = Arc::new(RwLock::new(db));
+        // CQ-B48: capture a startup-generation clone (same lineage as the repo
+        // clones built during composition) for expiry-detecting health checks.
+        let health_probe = db.read().await.clone();
         let refresh_handle = Self::spawn_proactive_resignin(Arc::clone(&db), config, ttl);
         let reconnect_handle = Self::spawn_reconnect_loop(Arc::clone(&db), config.clone());
 
         Ok(Self {
             db,
+            health_probe,
             refresh_handle,
             reconnect_handle,
         })
@@ -513,6 +528,18 @@ impl DbManager {
             .map_err(Self::classify_query_error)?;
         // Surface any statement-level error (HTTP returns 200 even on SQL error).
         result.check().map_err(Self::classify_query_error)?;
+        drop(guard);
+
+        // CQ-B48: also exercise the startup-generation handle so the readiness
+        // probe alarms when the request-serving repositories' tokens expire —
+        // the manager handle above is proactively re-signed-in and would report
+        // healthy even while every repo DB request 401s.
+        let probe = self
+            .health_probe
+            .query("RETURN 1")
+            .await
+            .map_err(Self::classify_query_error)?;
+        probe.check().map_err(Self::classify_query_error)?;
         Ok(())
     }
 

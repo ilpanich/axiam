@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::discovery_cache::DiscoveryCache;
 use crate::error::FederationError;
 use crate::jwks_cache::JwksCache;
 use crate::secrets::decrypt_client_secret_or_legacy;
@@ -95,6 +96,15 @@ pub struct OidcFederationService<FC, FL, UR> {
     http_client: reqwest::Client,
     /// Process-wide JWKS cache (D-01/D-02/D-03).
     cache: Arc<JwksCache>,
+    /// Process-wide OIDC discovery-document cache (plan A4 / CQ-B23).
+    ///
+    /// Not a constructor parameter — derived from `cache`'s
+    /// `allow_private_networks` bit in [`OidcFederationService::new`] so
+    /// every existing call site (production and the `JwksCache::new()` /
+    /// `JwksCache::new_allow_private_networks()` test seam alike) gets a
+    /// consistently-configured discovery cache for free, without having to
+    /// thread a second constructor argument through every caller.
+    discovery_cache: Arc<DiscoveryCache>,
     /// AES-256-GCM key for decrypting the federation client_secret at use-time (SEC-045).
     encryption_key: [u8; 32],
 }
@@ -114,12 +124,21 @@ where
         cache: Arc<JwksCache>,
         encryption_key: [u8; 32],
     ) -> Self {
+        // Mirror the JWKS cache's SEC-054 allow-private-networks bit onto
+        // the discovery cache so both caches honor the same test seam under
+        // a single injected flag (see the `discovery_cache` field doc).
+        let discovery_cache = Arc::new(if cache.allow_private_networks() {
+            DiscoveryCache::new_allow_private_networks()
+        } else {
+            DiscoveryCache::new()
+        });
         Self {
             federation_config_repo,
             federation_link_repo,
             user_repo,
             http_client,
             cache,
+            discovery_cache,
             encryption_key,
         }
     }
@@ -128,6 +147,12 @@ where
     ///
     /// Only HTTPS URLs are accepted to mitigate SSRF risks, since the
     /// `metadata_url` originates from admin-provided configuration.
+    ///
+    /// CQ-B23: served from `self.discovery_cache` (1-h TTL, 24-h
+    /// stale-while-revalidate) rather than fetching fresh on every call —
+    /// both `build_authorization_url` and `handle_callback` call `discover`
+    /// once per login, so without a cache a single login round-trip cost
+    /// two full discovery fetches.
     pub async fn discover(
         &self,
         metadata_url: &str,
@@ -146,60 +171,9 @@ where
             validate_metadata_url(metadata_url)?;
         }
 
-        // SECHRD-02: route the discovery-document GET through the shared,
-        // IP-pinning SSRF guard (D-01a/b/c). Production always fails closed
-        // against private/loopback/link-local addresses and internal
-        // redirect targets — `allow_private=false`.
-        let response = crate::ssrf::guarded_fetch(metadata_url, allow_private, |c, u| c.get(u))
+        self.discovery_cache
+            .get_or_fetch(&self.http_client, metadata_url)
             .await
-            .map_err(|e| FederationError::DiscoveryFailed(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(FederationError::DiscoveryFailed(format!(
-                "HTTP {} from discovery endpoint",
-                response.status()
-            )));
-        }
-
-        // Enforce a maximum body size to prevent memory exhaustion from
-        // a malicious/misconfigured metadata endpoint.
-        const MAX_DISCOVERY_SIZE: usize = 256 * 1024; // 256 KiB
-        let bytes = response.bytes().await.map_err(|e| {
-            FederationError::DiscoveryFailed(format!("Failed to read response body: {e}"))
-        })?;
-        if bytes.len() > MAX_DISCOVERY_SIZE {
-            return Err(FederationError::DiscoveryFailed(format!(
-                "Discovery document too large: {} bytes (max {})",
-                bytes.len(),
-                MAX_DISCOVERY_SIZE
-            )));
-        }
-
-        let doc: OidcDiscoveryDocument = serde_json::from_slice(&bytes).map_err(|e| {
-            FederationError::DiscoveryFailed(format!("Failed to parse discovery document: {e}"))
-        })?;
-
-        // Validate that critical endpoints in the discovery document use
-        // HTTPS. A compromised/malicious discovery endpoint could return
-        // http:// URLs, leaking client_secret during token exchange.
-        // Skipped under the same test-only `allow_private` seam as above —
-        // a loopback wiremock IdP serves plain HTTP.
-        for (name, url) in [
-            ("authorization_endpoint", &doc.authorization_endpoint),
-            ("token_endpoint", &doc.token_endpoint),
-            ("jwks_uri", &doc.jwks_uri),
-        ] {
-            let parsed = url::Url::parse(url).map_err(|e| {
-                FederationError::DiscoveryFailed(format!("{name} is not a valid URL: {e}"))
-            })?;
-            if !allow_private && parsed.scheme() != "https" {
-                return Err(FederationError::DiscoveryFailed(format!(
-                    "{name} must use HTTPS, got: {url}"
-                )));
-            }
-        }
-
-        Ok(doc)
     }
 
     /// Build the authorization URL to redirect the user to the external IdP.
@@ -477,9 +451,19 @@ where
         .await
         .map_err(|e| FederationError::TokenExchangeFailed(e.to_string()))?;
 
+        // CQ-B23: same 256 KiB cap as `discover`, enforced via a streaming,
+        // running-byte-count read (`ssrf::read_capped_body`) rather than
+        // buffering the whole response first — see that function's doc
+        // comment for why buffer-then-check is insufficient against a
+        // chunked/lying response.
+        const MAX_TOKEN_RESPONSE_SIZE: usize = 256 * 1024; // 256 KiB
+
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body_bytes = crate::ssrf::read_capped_body(response, MAX_TOKEN_RESPONSE_SIZE)
+                .await
+                .unwrap_or_default();
+            let body = String::from_utf8_lossy(&body_bytes);
             // Log truncated body server-side for debugging; never
             // expose the raw IdP response to the API client.
             warn!(
@@ -492,7 +476,20 @@ where
             )));
         }
 
-        response.json::<TokenResponse>().await.map_err(|e| {
+        let body_bytes = crate::ssrf::read_capped_body(response, MAX_TOKEN_RESPONSE_SIZE)
+            .await
+            .map_err(|e| match e {
+                crate::ssrf::SsrfError::ResponseTooLarge(cap) => {
+                    FederationError::TokenExchangeFailed(format!(
+                        "Token response too large (max {cap} bytes)"
+                    ))
+                }
+                other => FederationError::TokenExchangeFailed(format!(
+                    "Failed to read token response: {other}"
+                )),
+            })?;
+
+        serde_json::from_slice::<TokenResponse>(&body_bytes).map_err(|e| {
             FederationError::TokenExchangeFailed(format!("Failed to parse token response: {e}"))
         })
     }
@@ -1033,5 +1030,98 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
             matches!(result, Err(FederationError::JwksKidUnknown)),
             "unknown kid after forced refetch must return JwksKidUnknown: {result:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CQ-B23: DiscoveryCache wired into `discover()` (plan A4)
+    // -----------------------------------------------------------------------
+
+    /// Build a real `OidcFederationService` backed by an in-memory,
+    /// unconfigured SurrealDB instance. `discover()` never touches the
+    /// repos, only `self.http_client` + `self.discovery_cache`, so a real
+    /// (but empty) DB is sufficient purely for construction — mirrors
+    /// `axiam-server`'s `req5_oidc_e2e.rs::make_oidc_svc` helper.
+    async fn make_test_service(
+        cache: Arc<JwksCache>,
+    ) -> OidcFederationService<
+        axiam_db::SurrealFederationConfigRepository<surrealdb::engine::local::Db>,
+        axiam_db::SurrealFederationLinkRepository<surrealdb::engine::local::Db>,
+        axiam_db::SurrealUserRepository<surrealdb::engine::local::Db>,
+    > {
+        use surrealdb::Surreal;
+        use surrealdb::engine::local::Mem;
+
+        let db = Surreal::new::<Mem>(()).await.expect("in-memory DB");
+        let http_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("http client");
+
+        OidcFederationService::new(
+            axiam_db::SurrealFederationConfigRepository::new(db.clone()),
+            axiam_db::SurrealFederationLinkRepository::new(db.clone()),
+            axiam_db::SurrealUserRepository::new(db.clone()),
+            http_client,
+            cache,
+            [0u8; 32], // gitleaks:allow
+        )
+    }
+
+    /// CQ-B23: a second `discover()` call for the same `metadata_url` within
+    /// the 1-h TTL must be served from the `DiscoveryCache` — the mock
+    /// discovery endpoint must receive exactly ONE request across both
+    /// calls. This exercises the full `discover()` wiring (not just the
+    /// isolated `DiscoveryCache` unit tests in `discovery_cache.rs`),
+    /// proving `build_authorization_url`/`handle_callback` no longer each
+    /// pay for their own fetch.
+    ///
+    /// Uses the same `allow_private_networks` wiremock seam as the
+    /// `JwksCache` tests elsewhere in this crate (`JwksCache::
+    /// new_allow_private_networks`), which `OidcFederationService::new`
+    /// mirrors onto the internal `DiscoveryCache` automatically.
+    #[tokio::test]
+    async fn discover_second_call_within_ttl_does_not_refetch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let doc_json = serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json))
+            // MUST be hit exactly once across BOTH `discover()` calls below —
+            // wiremock panics on drop if this expectation is not met exactly.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = Arc::new(JwksCache::new_allow_private_networks());
+        let svc = make_test_service(cache).await;
+        let metadata_url = format!("{base}/.well-known/openid-configuration");
+
+        let first = svc
+            .discover(&metadata_url)
+            .await
+            .expect("first discover() must succeed");
+        let second = svc
+            .discover(&metadata_url)
+            .await
+            .expect("second discover() must be served from cache, not error");
+
+        assert_eq!(first.issuer, second.issuer);
+        assert_eq!(second.jwks_uri, format!("{base}/jwks"));
+
+        // Explicit verification (in addition to the Drop-time check) so a
+        // failure here fails loudly at this line rather than shows up as a
+        // late panic-during-drop.
+        server.verify().await;
     }
 }

@@ -3,16 +3,19 @@
 use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
+use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::{CreateRole, UpdateRole};
+use axiam_core::models::scope::CreateScope;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
-    GroupRepository, OrganizationRepository, Pagination, PermissionRepository, RoleRepository,
-    TenantRepository, UserRepository,
+    GroupRepository, OrganizationRepository, Pagination, PermissionRepository, ResourceRepository,
+    RoleRepository, ScopeRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealRoleRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -652,6 +655,179 @@ async fn grant_and_get_role_permissions() {
     let actions: Vec<&str> = perms.iter().map(|p| p.action.as_str()).collect();
     assert!(actions.contains(&"read"));
     assert!(actions.contains(&"write"));
+}
+
+/// CQ-B13: the batched grant lookup groups grants per role in a SINGLE query,
+/// preserves scope constraints, omits roles with no grants, and stays
+/// tenant-scoped (a foreign-tenant role id leaks nothing).
+#[tokio::test]
+async fn batched_grants_group_by_role() {
+    let (db, tenant_id, _, _, _) = setup().await;
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let res_repo = SurrealResourceRepository::new(db.clone());
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+
+    let new_global_role = |name: &str| CreateRole {
+        tenant_id,
+        name: name.to_string(),
+        description: name.to_string(),
+        is_global: true,
+    };
+    let role1 = role_repo.create(new_global_role("role1")).await.unwrap();
+    let role2 = role_repo.create(new_global_role("role2")).await.unwrap();
+    let role3 = role_repo
+        .create(new_global_role("role3-empty"))
+        .await
+        .unwrap(); // no grants
+
+    let perm_read = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "read".into(),
+            description: "r".into(),
+        })
+        .await
+        .unwrap();
+    let perm_write = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "write".into(),
+            description: "w".into(),
+        })
+        .await
+        .unwrap();
+
+    // A resource + scope so role1's write grant carries a scope constraint.
+    let resource = res_repo
+        .create(CreateResource {
+            tenant_id,
+            name: "api".into(),
+            resource_type: "service".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: resource.id,
+            name: "s1".into(),
+            description: "s".into(),
+        })
+        .await
+        .unwrap();
+
+    // role1: wildcard read + scoped write. role2: wildcard read. role3: none.
+    perm_repo
+        .grant_to_role(tenant_id, role1.id, perm_read.id)
+        .await
+        .unwrap();
+    perm_repo
+        .grant_to_role_with_scopes(tenant_id, role1.id, perm_write.id, vec![scope.id])
+        .await
+        .unwrap();
+    perm_repo
+        .grant_to_role(tenant_id, role2.id, perm_read.id)
+        .await
+        .unwrap();
+
+    // Foreign tenant with its own role+grant — must never appear in tenant_id's batch.
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "OrgB".into(),
+            slug: "org-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let tenant_b = tenant_repo
+        .create(CreateTenant {
+            organization_id: org_b.id,
+            name: "TenantB".into(),
+            slug: "tenant-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let role_b = role_repo
+        .create(CreateRole {
+            tenant_id: tenant_b.id,
+            name: "roleB".into(),
+            description: "b".into(),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+    let perm_b = perm_repo
+        .create(CreatePermission {
+            tenant_id: tenant_b.id,
+            action: "read".into(),
+            description: "b".into(),
+        })
+        .await
+        .unwrap();
+    perm_repo
+        .grant_to_role(tenant_b.id, role_b.id, perm_b.id)
+        .await
+        .unwrap();
+
+    // Single batched call across all applicable role ids (including the empty
+    // role3 and the cross-tenant role_b).
+    let grouped = perm_repo
+        .get_role_permission_grants_for_roles(tenant_id, &[role1.id, role2.id, role3.id, role_b.id])
+        .await
+        .unwrap();
+
+    // role3 (no grants) and role_b (other tenant) are absent.
+    assert_eq!(
+        grouped.len(),
+        2,
+        "only role1 and role2 have in-tenant grants"
+    );
+    assert!(!grouped.contains_key(&role3.id));
+    assert!(!grouped.contains_key(&role_b.id));
+
+    let r1 = grouped.get(&role1.id).expect("role1 present");
+    assert_eq!(r1.len(), 2);
+    let write_grant = r1
+        .iter()
+        .find(|g| g.permission.action == "write")
+        .expect("write grant");
+    assert_eq!(
+        write_grant.scope_ids,
+        vec![scope.id],
+        "scope constraint preserved"
+    );
+    let read_grant = r1
+        .iter()
+        .find(|g| g.permission.action == "read")
+        .expect("read grant");
+    assert!(
+        read_grant.scope_ids.is_empty(),
+        "wildcard grant has empty scope_ids"
+    );
+
+    let r2 = grouped.get(&role2.id).expect("role2 present");
+    assert_eq!(r2.len(), 1);
+    assert_eq!(r2[0].permission.action, "read");
+
+    // The batched result matches the per-role method exactly (parity check).
+    let single1 = perm_repo
+        .get_role_permission_grants(tenant_id, role1.id)
+        .await
+        .unwrap();
+    assert_eq!(single1.len(), r1.len());
+
+    // Empty input short-circuits to an empty map.
+    let empty = perm_repo
+        .get_role_permission_grants_for_roles(tenant_id, &[])
+        .await
+        .unwrap();
+    assert!(empty.is_empty());
 }
 
 #[tokio::test]

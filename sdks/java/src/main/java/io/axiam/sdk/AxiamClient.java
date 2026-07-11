@@ -512,7 +512,7 @@ public final class AxiamClient implements AutoCloseable {
         try {
             payload = MAPPER.writeValueAsBytes(body);
         } catch (IOException e) {
-            throw new NetworkError("failed to encode request: " + e.getMessage());
+            throw new NetworkError("failed to encode request: " + e.getMessage(), e);
         }
         Request request = new Request.Builder()
                 .url(baseUrl + path)
@@ -521,7 +521,7 @@ public final class AxiamClient implements AutoCloseable {
         try {
             return httpClient.newCall(request).execute();
         } catch (IOException e) {
-            throw new NetworkError("request failed: " + e.getMessage());
+            throw new NetworkError("request failed: " + e.getMessage(), e);
         }
     }
 
@@ -533,7 +533,7 @@ public final class AxiamClient implements AutoCloseable {
             }
             return MAPPER.readTree(responseBody.byteStream());
         } catch (IOException e) {
-            throw new NetworkError("failed to parse response body: " + e.getMessage());
+            throw new NetworkError("failed to parse response body: " + e.getMessage(), e);
         }
     }
 
@@ -574,7 +574,7 @@ public final class AxiamClient implements AutoCloseable {
         } catch (GeneralSecurityException | IOException e) {
             // §6: a non-PEM/invalid custom CA MUST return a clear error at
             // construction time.
-            throw new NetworkError("invalid custom CA PEM: " + e.getMessage());
+            throw new NetworkError("invalid custom CA PEM: " + e.getMessage(), e);
         }
     }
 
@@ -593,7 +593,7 @@ public final class AxiamClient implements AutoCloseable {
             ctx.init(null, new TrustManager[]{trustManager}, new SecureRandom());
             return ctx;
         } catch (GeneralSecurityException e) {
-            throw new NetworkError("failed to initialize TLS context: " + e.getMessage());
+            throw new NetworkError("failed to initialize TLS context: " + e.getMessage(), e);
         }
     }
 

@@ -134,7 +134,7 @@ public final class AuthClientInterceptor implements ClientInterceptor {
                     .trustManager(trustManager)
                     .build();
         } catch (SSLException e) {
-            throw new NetworkError("failed to initialize gRPC TLS context: " + e.getMessage());
+            throw new NetworkError("failed to initialize gRPC TLS context: " + e.getMessage(), e);
         }
     }
 
@@ -161,7 +161,7 @@ public final class AuthClientInterceptor implements ClientInterceptor {
             return new CompositeX509TrustManager(systemTm, customTm);
         } catch (GeneralSecurityException | IOException e) {
             // §6: a non-PEM/invalid custom CA MUST return a clear error at construction time.
-            throw new NetworkError("invalid custom CA PEM: " + e.getMessage());
+            throw new NetworkError("invalid custom CA PEM: " + e.getMessage(), e);
         }
     }
 

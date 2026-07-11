@@ -1,8 +1,8 @@
 {
   "_derivation": {
-    "description": "Real, server-computed HMAC-SHA256 fixture vectors proving byte-for-byte cross-language compatibility between axiam_sdk.amqp._hmac.verify_hmac (Python) and crates/axiam-amqp/src/messages.rs::sign_payload (Rust). Each vector's hmac_signature was NOT hand-written — it was emitted by the canonical Rust signer via a throwaway #[test] harness, then independently cross-checked with Python's hmac.new(...).hexdigest() before being recorded here.",
+    "description": "Real, server-computed HMAC-SHA256 fixture vectors proving byte-for-byte cross-language compatibility between axiam_sdk.amqp._hmac.verify_hmac (Python) and crates/axiam-amqp/src/messages.rs::sign_payload (Rust). Each vector's hmac_signature was NOT hand-written — it was emitted by the canonical Rust signer via a throwaway #[test] harness, then independently cross-checked with Python's hmac.new(...).hexdigest() before being recorded here. Updated for NEW-4 (AMQP replay protection, v2): every message now carries key_version=2, nonce, and issued_at, positioned per crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json's field_order (after the schema-specific fields, before hmac_signature); signatures were recomputed with the exact same signing key over the v2-shaped canonical bytes (Jackson ObjectMapper.writeValueAsBytes, verified byte-identical to the Rust/Python canonicalization for this ASCII-only payload).",
     "reproduction_command": "cd /home/user/axiam && (temporarily add the `emit_python_sdk_hmac_fixture` test to crates/axiam-amqp/src/messages.rs's `tests` module, mirroring the AuthzRequest/AuditEventMessage construction below) && cargo test -p axiam-amqp emit_python_sdk_hmac_fixture -- --nocapture",
-    "note": "The field order in every 'message' object below is the Rust struct DECLARATION order (see AuthzRequest / AuditEventMessage in crates/axiam-amqp/src/messages.rs), NOT alphabetical order — e.g. AuthzRequest emits tenant_id before subject_id, and action before resource_id. This confirms 19-RESEARCH.md's Pitfall 2 finding: canonicalization MUST preserve wire/insertion order (json.dumps WITHOUT sort_keys), not sort keys alphabetically."
+    "note": "The field order in every 'message' object below is the Rust struct DECLARATION order (see AuthzRequest / AuditEventMessage in crates/axiam-amqp/src/messages.rs), NOT alphabetical order — e.g. AuthzRequest emits tenant_id before subject_id, and action before resource_id, with key_version/nonce/issued_at appended last (before hmac_signature). This confirms 19-RESEARCH.md's Pitfall 2 finding: canonicalization MUST preserve wire/insertion order (json.dumps WITHOUT sort_keys), not sort keys alphabetically. This fixture exercises Hmac.verify's raw-key structural behavior (ordering/tamper/edge cases); crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json is the authoritative HKDF-subkey cross-language vector for NEW-4."
   },
   "vectors": [
     {
@@ -15,7 +15,10 @@
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "read",
         "resource_id": "44444444-4444-4444-4444-444444444444",
-        "hmac_signature": "1cec2fad12c7545576eb17dc2fd5ba0cfebd8f5f1bba328ae36e895b918378e3"
+        "key_version": 2,
+        "nonce": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "issued_at": "2026-07-10T12:00:00Z",
+        "hmac_signature": "3139392774302f736c75ea25f0485b2cdc9434dc1565badfbd35f6c998f46f9c"
       },
       "expected_valid": true
     },
@@ -29,7 +32,10 @@
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "write",
         "resource_id": "44444444-4444-4444-4444-444444444444",
-        "hmac_signature": "1cec2fad12c7545576eb17dc2fd5ba0cfebd8f5f1bba328ae36e895b918378e3"
+        "key_version": 2,
+        "nonce": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "issued_at": "2026-07-10T12:00:00Z",
+        "hmac_signature": "3139392774302f736c75ea25f0485b2cdc9434dc1565badfbd35f6c998f46f9c"
       },
       "expected_valid": false,
       "note": "Same signature as authz_request_valid but with action mutated from 'read' to 'write' after signing — proves verification is non-vacuous."
@@ -45,7 +51,10 @@
         "action": "user.login",
         "outcome": "success",
         "ip_address": "203.0.113.7",
-        "hmac_signature": "89a65922a64177f6d19a322a8cdd29d631527947c13cc1f93b978f7d5b28392a"
+        "key_version": 2,
+        "nonce": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        "issued_at": "2026-07-10T12:00:00Z",
+        "hmac_signature": "6896fc7d5c6db55bd016294c899a47fadb397535c019c452750de7edcf724ba8"
       },
       "expected_valid": true
     },
@@ -60,7 +69,10 @@
         "action": "user.login",
         "outcome": "success",
         "ip_address": "203.0.113.7",
-        "hmac_signature": "89a65922a64177f6d19a322a8cdd29d631527947c13cc1f93b978f7d5b28392a"
+        "key_version": 2,
+        "nonce": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        "issued_at": "2026-07-10T12:00:00Z",
+        "hmac_signature": "6896fc7d5c6db55bd016294c899a47fadb397535c019c452750de7edcf724ba8"
       },
       "expected_valid": false,
       "note": "Same body/signature as audit_event_valid but verified against a different signing key (hex-decodes to 'wrong-key-for-test-only') — proves the wrong key is rejected."
@@ -74,7 +86,10 @@
         "tenant_id": "22222222-2222-2222-2222-222222222222",
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "read",
-        "resource_id": "44444444-4444-4444-4444-444444444444"
+        "resource_id": "44444444-4444-4444-4444-444444444444",
+        "key_version": 2,
+        "nonce": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "issued_at": "2026-07-10T12:00:00Z"
       },
       "expected_valid": false,
       "note": "hmac_signature field entirely absent — strict mode default (CONTRACT.md §8.3) rejects, never silently accepts."
@@ -89,6 +104,9 @@
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "read",
         "resource_id": "44444444-4444-4444-4444-444444444444",
+        "key_version": 2,
+        "nonce": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "issued_at": "2026-07-10T12:00:00Z",
         "hmac_signature": "not-hex-zzzz"
       },
       "expected_valid": false,
@@ -104,7 +122,10 @@
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "read",
         "resource_id": "44444444-4444-4444-4444-444444444444",
-        "hmac_signature": "1cec2f"
+        "key_version": 2,
+        "nonce": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "issued_at": "2026-07-10T12:00:00Z",
+        "hmac_signature": "3139392774"
       },
       "expected_valid": false,
       "note": "Truncated (wrong-length) hex signature must be rejected without raising."

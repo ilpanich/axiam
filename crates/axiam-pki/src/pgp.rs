@@ -19,6 +19,7 @@ use rand_core::OsRng;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::PkiConfig;
 use crate::crypto::{decrypt_secret, encrypt_secret};
@@ -150,7 +151,7 @@ impl<R: PgpKeyRepository> PgpService<R> {
             )
         })?;
         let private_key_pem = decrypt_secret(encrypted_pk, &enc_key)?;
-        let private_key_armored = String::from_utf8(private_key_pem)
+        let mut private_key_armored = String::from_utf8(private_key_pem)
             .map_err(|e| AxiamError::Crypto(format!("invalid UTF-8 in private key: {e}")))?;
 
         // CPU-bound PGP signing runs in spawn_blocking behind semaphore (CQ-B02).
@@ -169,6 +170,8 @@ impl<R: PgpKeyRepository> PgpService<R> {
         let signed_msg = tokio::task::spawn_blocking(move || -> AxiamResult<String> {
             let (secret_key, _) = SignedSecretKey::from_string(&private_key_armored)
                 .map_err(|e| AxiamError::Crypto(format!("failed to parse private key: {e}")))?;
+            // Scrub the decrypted armored private key once parsed (defense-in-depth).
+            private_key_armored.zeroize();
 
             let mut msg_builder = MessageBuilder::from_bytes("audit-batch", data);
             msg_builder.sign(

@@ -59,6 +59,10 @@ jobs:
         working-directory: sdks/typescript
         run: npm test -- --run
 
+      - name: Dependency vulnerability scan (CI-03)
+        working-directory: sdks/typescript
+        run: npm audit --audit-level=high --omit=dev
+
       # SC#1 / D-02: end-to-end proof (not config trust) that the browser
       # persona never pulls in a Node-only transport. esbuild
       # --platform=browser makes a Node built-in (net/tls/dns/etc.) pulled

@@ -62,6 +62,8 @@ pub async fn create<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "organization creation is restricted to super-admin".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
@@ -107,6 +109,8 @@ pub async fn list<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "organization listing is restricted to super-admin".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
@@ -143,6 +147,8 @@ pub async fn get<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
@@ -181,6 +187,8 @@ pub async fn update<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
@@ -223,6 +231,8 @@ pub async fn delete<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }

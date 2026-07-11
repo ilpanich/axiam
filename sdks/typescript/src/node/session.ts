@@ -16,6 +16,7 @@
 import type { CookieJar } from 'tough-cookie';
 import type { AxiamClientOptions } from '../core/index.js';
 import { createSession, SharedSession } from '../rest/session.js';
+import { AxiamClient } from '../rest/client.js';
 import { CSRF_COOKIE, createJar, extractCookieValue, wrapAxios } from './cookieJar.js';
 import { TokenManager } from './tokenManager.js';
 import { createVerifier, type Verifier } from './jwks.js';
@@ -83,4 +84,23 @@ export function createNodeSession(options: AxiamClientOptions): NodeSession {
   const jwksVerifier = createVerifier(options.baseUrl);
 
   return new NodeSession(options, base, tokenManager, jwksVerifier, jar);
+}
+
+/**
+ * Build an `AxiamClient` wired to the Node persona (SDK-Q05). This is the Node
+ * counterpart to `new AxiamClient(options)` (which builds the browser
+ * `SharedSession` with no cookie jar): it constructs a `NodeSession`
+ * (tough-cookie jar + CSRF/refresh token sync) and adopts it via the
+ * `AxiamClient` session-injection constructor, so httpOnly `Set-Cookie` tokens
+ * from login/refresh persist and every post-login REST call authenticates
+ * correctly under Node.
+ *
+ * Lives in this Node-only module (reachable via the `axiam-sdk/node` and
+ * `axiam-sdk/grpc` subpaths) rather than in the browser-safe `axiam-sdk/rest`
+ * entry, so browser bundles never pull in tough-cookie/jose/node:https (SC#1).
+ * The returned client shares the single session with any `AuthzGrpcClient`
+ * built from the same `NodeSession`.
+ */
+export function createNodeClient(options: AxiamClientOptions): AxiamClient {
+  return new AxiamClient(options, createNodeSession(options));
 }

@@ -70,15 +70,26 @@ impl AxiamError {
     ///
     /// `message` is caller-controlled and MUST NOT contain a raw token
     /// value.
+    ///
+    /// For 403/409 (mapped to `Authz`), `message` is also speculatively
+    /// parsed as the server's structured error body
+    /// (`{"error":"authorization_denied","message":"...","action":"...",
+    /// "resource_id":"..."}`) to populate `action`/`resource_id` when the
+    /// server included them. `message` itself is left exactly as passed in
+    /// (raw body text) — only `action`/`resource_id` are pulled out of the
+    /// same body.
     pub fn from_http_status(status: u16, message: impl Into<String>) -> AxiamError {
         let message = message.into();
         match status {
             401 => AxiamError::Auth { message },
-            403 | 409 => AxiamError::Authz {
-                message,
-                action: None,
-                resource_id: None,
-            },
+            403 | 409 => {
+                let (action, resource_id) = parse_authz_body_fields(&message);
+                AxiamError::Authz {
+                    message,
+                    action,
+                    resource_id,
+                }
+            }
             _ => AxiamError::Network {
                 message,
                 source: None,
@@ -105,6 +116,10 @@ impl AxiamError {
         let message = message.into();
         match code {
             16 => AxiamError::Auth { message },
+            // gRPC `PERMISSION_DENIED` carries no structured error body (no
+            // JSON payload analogous to the REST 403's
+            // `{"action":...,"resource_id":...}`) — `action`/`resource_id`
+            // stay `None` here.
             7 => AxiamError::Authz {
                 message,
                 action: None,
@@ -115,6 +130,31 @@ impl AxiamError {
                 source: None,
             },
         }
+    }
+}
+
+/// Best-effort extraction of `action`/`resource_id` out of a REST error
+/// body for the `Authz` variant (CONTRACT.md §2: "SHOULD carry the denied
+/// `action` and `resource_id` if available from the response body"). The
+/// server's structured 403 body looks like:
+/// `{"error":"authorization_denied","message":"...","action":"users:get","resource_id":"<uuid>"}`
+/// — `action` is present when known, `resource_id` only for a
+/// resource-scoped denial. Any parse failure (non-JSON body, missing keys,
+/// or a 409 body with a different shape) silently yields `(None, None)`
+/// rather than surfacing a secondary error — `action`/`resource_id` are
+/// best-effort extras, never load-bearing for the `Authz` variant itself.
+fn parse_authz_body_fields(body: &str) -> (Option<String>, Option<String>) {
+    #[derive(serde::Deserialize)]
+    struct AuthzErrorBody {
+        #[serde(default)]
+        action: Option<String>,
+        #[serde(default)]
+        resource_id: Option<String>,
+    }
+
+    match serde_json::from_str::<AuthzErrorBody>(body) {
+        Ok(parsed) => (parsed.action, parsed.resource_id),
+        Err(_) => (None, None),
     }
 }
 

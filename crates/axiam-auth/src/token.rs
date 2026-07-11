@@ -27,22 +27,17 @@ pub const AUD_M2M: &str = "axiam:m2m";
 /// which kind of subject minted the token. Tokens issued before this claim
 /// existed have no `sub_kind` key and deserialize to [`SubjectKind::User`]
 /// via `#[serde(default)]` on [`AccessTokenClaims::sub_kind`] (D-11).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SubjectKind {
     /// A human user authenticated via password/social login/MFA.
+    #[default]
     User,
     /// A service account authenticated via mTLS client certificate
     /// (device-auth cert-auth path).
     ServiceAccount,
     /// An OAuth2 client authenticated via the Client Credentials grant.
     OAuth2Client,
-}
-
-impl Default for SubjectKind {
-    fn default() -> Self {
-        Self::User
-    }
 }
 
 /// JWT claims embedded in every access token.

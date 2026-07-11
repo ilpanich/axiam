@@ -53,7 +53,8 @@ if (class_exists(\Symfony\Component\Security\Core\Authorization\Voter\Voter::cla
 
             // Server's additive-only RBAC is authoritative — no client-side
             // deny-override, no caching beyond the token's own remaining TTL.
-            return $this->client->can($resource, $action);
+            // AxiamClient::can() takes (action, resource) (CONTRACT.md §1, SDK-Q09).
+            return $this->client->can($action, $resource);
         }
     }
 }

@@ -11,6 +11,7 @@
 # aio-pika, pydantic, PyJWT). The optional web-framework integrations
 # (see [project.optional-dependencies]) MUST NOT be imported from here.
 
+from axiam_sdk._async_client import AsyncAxiamClient
 from axiam_sdk._client import AxiamClient
 from axiam_sdk._errors import AuthError, AuthzError, NetworkError
 from axiam_sdk._models import AccessCheck, AccessResult, BatchCheckResult, LoginResult, User
@@ -20,6 +21,7 @@ __version__ = "0.0.0"
 __all__ = [
     "__version__",
     "AxiamClient",
+    "AsyncAxiamClient",
     "LoginResult",
     "User",
     "AccessCheck",

@@ -180,6 +180,124 @@ async fn duplicate_user_create_returns_409() {
     assert_eq!(body["error"], "already_exists");
 }
 
+/// QUAL-03/D-09 (CQ-B11): a duplicate role name within the same tenant
+/// violates the idx_role_tenant_name UNIQUE(tenant_id, name) index and must
+/// return 409, not 500.
+#[actix_rt::test]
+async fn duplicate_role_create_returns_409() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let payload = serde_json::json!({
+        "name": "Duplicate-Create-Role",
+        "description": "role for duplicate-create test",
+        "is_global": true
+    });
+
+    // First create succeeds.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/roles")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(&payload)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+
+    // Second create with the identical (tenant_id, name) must be 409, not 500.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/roles")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(&payload)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        409,
+        "duplicate role create must return 409 (AlreadyExists), not 500"
+    );
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "already_exists");
+}
+
+/// QUAL-03/D-09 (CQ-B11): granting the same permission to the same role twice
+/// violates the `grants` edge's uniqueness and must return 409, not 500.
+#[actix_rt::test]
+async fn duplicate_permission_grant_returns_409() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // Create a role.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/roles")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Duplicate-Grant-Role",
+            "description": "role for duplicate-grant test",
+            "is_global": true
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let role: serde_json::Value = test::read_body_json(resp).await;
+    let role_id = role["id"].as_str().unwrap();
+
+    // Create a permission.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/permissions")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "action": "duplicate-grant:test",
+            "description": "permission for duplicate-grant test"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let permission: serde_json::Value = test::read_body_json(resp).await;
+    let permission_id = permission["id"].as_str().unwrap();
+
+    // First grant succeeds.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/roles/{role_id}/permissions"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "permission_id": permission_id }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 204);
+
+    // Second, identical grant must be 409, not 500.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/roles/{role_id}/permissions"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "permission_id": permission_id }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        409,
+        "duplicate permission grant must return 409 (AlreadyExists), not 500"
+    );
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "already_exists");
+}
+
 /// QUAL-03/D-09: a duplicate has_role RELATE (assigning a role to a user that
 /// already has it) violates the idx_has_role_unique UNIQUE(in,out) index and
 /// must return 409, not 500.

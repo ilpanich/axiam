@@ -24,6 +24,11 @@ namespace Axiam.Sdk.Amqp;
 /// <item><description>HMAC verification fails → <c>BasicNackAsync(requeue: false)</c>
 /// + a security-event log entry that never contains the received or
 /// expected HMAC value; the handler is never invoked.</description></item>
+/// <item><description>HMAC verifies but the NEW-4 replay-protection gate
+/// (<see cref="ReplayGuard"/>) rejects the delivery — <c>key_version</c> below
+/// <see cref="ReplayGuard.MinKeyVersion"/>, a stale/future <c>issued_at</c>, or a
+/// replayed <c>nonce</c> — → <c>BasicNackAsync(requeue: false)</c> + a security-event
+/// log entry; the handler is never invoked.</description></item>
 /// <item><description>Handler returns normally → <c>BasicAckAsync</c>.</description></item>
 /// <item><description>Handler throws <see cref="PoisonMessageException"/> (poison
 /// message) → <c>BasicNackAsync(requeue: false)</c>.</description></item>
@@ -54,12 +59,19 @@ public sealed class AxiamAmqpConsumer : IAsyncDisposable
     /// <param name="queue">The queue name to consume from.</param>
     /// <param name="signingKey">The per-tenant AMQP HMAC signing secret (§8.1
     /// — obtain from the AXIAM management API; never hardcode).</param>
-    /// <param name="handler">Invoked ONLY after HMAC verification succeeds.
+    /// <param name="handler">Invoked ONLY after HMAC verification AND the NEW-4
+    /// replay-protection gate (<see cref="ReplayGuard"/>) both succeed.
     /// Throw <see cref="PoisonMessageException"/> to drop a message without
     /// requeue; any other exception is treated as transient and requeues.</param>
     /// <param name="logger">Receives the §8.4 security event on HMAC
-    /// verification failure; the event never contains the HMAC value.
-    /// Defaults to a silent no-op logger.</param>
+    /// verification (or NEW-4 replay-protection) failure; the event never
+    /// contains the HMAC, nonce, or issued_at value. Defaults to a silent
+    /// no-op logger.</param>
+    /// <param name="replaySkew">The NEW-4 freshness window applied to each
+    /// delivery's <c>issued_at</c> field (also sets the nonce dedup store's TTL,
+    /// 2×<paramref name="replaySkew"/>). Defaults to
+    /// <see cref="ReplayGuard.DefaultSkew"/> (±5 minutes) when <c>null</c> or
+    /// non-positive.</param>
     /// <param name="cancellationToken">Cancellation token for connection/channel
     /// setup and for every ack/nack call issued by the registered consumer.</param>
     public async Task StartAsync(
@@ -68,6 +80,7 @@ public sealed class AxiamAmqpConsumer : IAsyncDisposable
         byte[] signingKey,
         Func<byte[], CancellationToken, Task> handler,
         ILogger? logger = null,
+        TimeSpan? replaySkew = null,
         CancellationToken cancellationToken = default)
     {
         logger ??= NullLogger.Instance;
@@ -86,8 +99,13 @@ public sealed class AxiamAmqpConsumer : IAsyncDisposable
         _channel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         await _channel.BasicQosAsync(0, DefaultPrefetchCount, false, cancellationToken).ConfigureAwait(false);
 
+        // One ReplayGuard per StartAsync call, shared across every delivery
+        // dispatched by this consumer — nonce dedup is meaningless if a fresh
+        // guard were created per delivery (NEW-4).
+        var replayGuard = new ReplayGuard(replaySkew);
+
         var consumer = new AsyncEventingBasicConsumer(_channel);
-        consumer.ReceivedAsync += CreateReceivedHandler(_channel, signingKey, handler, logger, cancellationToken);
+        consumer.ReceivedAsync += CreateReceivedHandler(_channel, signingKey, handler, logger, replayGuard, cancellationToken);
 
         await _channel.BasicConsumeAsync(queue, autoAck: false, consumerTag: string.Empty, noLocal: false,
             exclusive: false, arguments: null, consumer, cancellationToken).ConfigureAwait(false);
@@ -100,11 +118,17 @@ public sealed class AxiamAmqpConsumer : IAsyncDisposable
     /// <see cref="BasicDeliverEventArgs"/> and a fake <see cref="IChannel"/>,
     /// proving every matrix branch without a live broker.
     /// </summary>
+    /// <param name="replayGuard">The NEW-4 replay-protection gate, evaluated
+    /// immediately after <see cref="Hmac.Verify"/> succeeds and BEFORE
+    /// <paramref name="handler"/> is invoked. Callers MUST share one instance
+    /// across every delivery on a given consumer — a fresh instance per
+    /// delivery makes nonce dedup a no-op.</param>
     internal static AsyncEventHandler<BasicDeliverEventArgs> CreateReceivedHandler(
         IChannel channel,
         byte[] signingKey,
         Func<byte[], CancellationToken, Task> handler,
         ILogger logger,
+        ReplayGuard replayGuard,
         CancellationToken cancellationToken = default)
     {
         return async (_, ea) =>
@@ -122,6 +146,24 @@ public sealed class AxiamAmqpConsumer : IAsyncDisposable
                 await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false, cancellationToken)
                     .ConfigureAwait(false);
                 return; // handler is structurally unreachable for an unverified message
+            }
+
+            // NEW-4: HMAC verified, but the message may still predate the
+            // mandatory replay-protection fields, be stale/future-dated, or be
+            // a replay of a nonce already seen within the freshness window.
+            // hmac_signature (order-preserving canonicalization) already
+            // covers nonce/issued_at cryptographically — this gate is the
+            // policy check over the now-authenticated values.
+            if (!ReplayGuard.TryExtractMetadata(body, out ReplayMetadata metadata) || !replayGuard.Check(metadata))
+            {
+                // Security event: fact of rejection + routing context ONLY.
+                // NEVER the nonce, issued_at, or HMAC value.
+                logger.LogWarning(
+                    "axiam_sdk_security: AMQP replay-protection check failed (key_version/issued_at/nonce); nacking without requeue (exchange={Exchange}, routingKey={RoutingKey})",
+                    ea.Exchange, ea.RoutingKey);
+                await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false, cancellationToken)
+                    .ConfigureAwait(false);
+                return; // handler is structurally unreachable for a replay-rejected message
             }
 
             try

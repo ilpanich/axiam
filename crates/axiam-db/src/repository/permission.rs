@@ -6,12 +6,13 @@ use axiam_core::models::permission::{
 };
 use axiam_core::repository::{PaginatedResult, Pagination, PermissionRepository};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::{CountRow, paginate, take_first_or_not_found};
+use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
 struct PermissionRow {
@@ -58,6 +59,38 @@ struct PermissionGrantRow {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     scope_ids: Option<Vec<String>>,
+}
+
+/// Row for the batched grant lookup — carries the owning role id so callers can
+/// group the flattened result set back per role.
+#[derive(Debug, SurrealValue)]
+struct RolePermissionGrantRow {
+    role_id: String,
+    record_id: String,
+    tenant_id: String,
+    action: String,
+    description: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    scope_ids: Option<Vec<String>>,
+}
+
+impl RolePermissionGrantRow {
+    fn try_into_role_grant(self) -> Result<(Uuid, PermissionGrant), DbError> {
+        let role_id = Uuid::parse_str(&self.role_id)
+            .map_err(|e| DbError::Migration(format!("invalid role UUID: {e}")))?;
+        let grant = PermissionGrantRow {
+            record_id: self.record_id,
+            tenant_id: self.tenant_id,
+            action: self.action,
+            description: self.description,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            scope_ids: self.scope_ids,
+        }
+        .try_into_grant()?;
+        Ok((role_id, grant))
+    }
 }
 
 impl PermissionGrantRow {
@@ -234,10 +267,19 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let id_str = id.to_string();
 
-        // Delete associated grants edges first, then the permission record.
+        // Delete associated grants edges first, then the permission record —
+        // all inside one transaction so a concurrent reader never observes a
+        // partially-deleted permission. The grants edge carries no flat
+        // tenant_id column, so tenant scoping is expressed as a node-tenant
+        // guard on the edge's `out` endpoint (out.tenant_id) — mirroring
+        // role.delete. Without this guard a caller supplying a foreign-tenant
+        // permission id could strip another tenant's grants edges. `.check()`
+        // surfaces per-statement failures instead of swallowing them as Ok.
         let query = format!(
-            "DELETE grants WHERE out = permission:`{id_str}`; \
-             DELETE type::record('permission', $id) WHERE tenant_id = $tenant_id;"
+            "BEGIN TRANSACTION; \
+             DELETE grants WHERE out = permission:`{id_str}` AND out.tenant_id = $tenant_id; \
+             DELETE type::record('permission', $id) WHERE tenant_id = $tenant_id; \
+             COMMIT TRANSACTION"
         );
 
         self.db
@@ -245,7 +287,9 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id.to_string()))
             .await
-            .map_err(DbError::from)?;
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         Ok(())
     }
@@ -324,9 +368,11 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant permission grant denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
-            return Err(DbError::Migration(msg).into());
+            return Err(classify_write_error(msg, "permission_grant").into());
         }
 
         Ok(())
@@ -365,6 +411,8 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant permission revocation denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
             return Err(DbError::Migration(msg).into());
@@ -461,9 +509,14 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant permission grant denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
-            return Err(DbError::Migration(msg).into());
+            // grant_to_role_with_scopes is the REST-reachable path
+            // (POST /api/v1/roles/{id}/permissions) — mirror grant_to_role's
+            // classify_write_error so a duplicate grant surfaces as 409, not 500.
+            return Err(classify_write_error(msg, "permission_grant").into());
         }
 
         Ok(())
@@ -505,5 +558,54 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         Ok(grants)
+    }
+
+    async fn get_role_permission_grants_for_roles(
+        &self,
+        tenant_id: Uuid,
+        role_ids: &[Uuid],
+    ) -> AxiamResult<HashMap<Uuid, Vec<PermissionGrant>>> {
+        if role_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let tenant_id_str = tenant_id.to_string();
+        let role_id_strs: Vec<String> = role_ids.iter().map(|id| id.to_string()).collect();
+
+        // Batched mirror of get_role_permission_grants: one query for every
+        // applicable role. `meta::id(in)` yields the owning role's UUID so the
+        // flattened rows can be regrouped per role. Tenant scoping is enforced on
+        // the permission endpoint (out.tenant_id), identical to the single-role
+        // query.
+        let mut result = self
+            .db
+            .query(
+                "SELECT \
+                     meta::id(in) AS role_id, \
+                     meta::id(out.id) AS record_id, \
+                     out.tenant_id AS tenant_id, \
+                     out.action AS action, \
+                     out.description AS description, \
+                     out.created_at AS created_at, \
+                     out.updated_at AS updated_at, \
+                     scope_ids \
+                 FROM grants \
+                 WHERE meta::id(in) IN $role_ids \
+                 AND out.tenant_id = $tenant_id",
+            )
+            .bind(("role_ids", role_id_strs))
+            .bind(("tenant_id", tenant_id_str))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RolePermissionGrantRow> = result.take(0).map_err(DbError::from)?;
+
+        let mut grouped: HashMap<Uuid, Vec<PermissionGrant>> = HashMap::new();
+        for row in rows {
+            let (role_id, grant) = row.try_into_role_grant()?;
+            grouped.entry(role_id).or_default().push(grant);
+        }
+
+        Ok(grouped)
     }
 }

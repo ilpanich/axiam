@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http;
+using System.Text.Json;
 using Grpc.Core;
 
 namespace Axiam.Sdk.Core;
@@ -24,9 +25,54 @@ public static class ErrorMapper
         return (int)response.StatusCode switch
         {
             401 => new AuthError(context),
-            403 or 409 => new AuthzError(context),
+            403 or 409 => BuildAuthzError(response, context),
             _ => NetworkError.FromResponse(response, context),
         };
+    }
+
+    /// <summary>
+    /// Builds an <see cref="AuthzError"/> from a 403/409 response, parsing the server's
+    /// structured authorization-denied body (<c>{"error":"authorization_denied",
+    /// "message":"...","action":"users:get","resource_id":"&lt;uuid&gt;"}</c>) so
+    /// <see cref="AuthzError.Action"/>/<see cref="AuthzError.ResourceId"/> are populated
+    /// when the server supplied them. <c>action</c> is present when known; <c>resource_id</c>
+    /// only for a resource-scoped denial — both are simply absent (null) for a non-authz
+    /// 409 or a body the server didn't shape this way. Body parsing is best-effort: a
+    /// missing/non-JSON/malformed body never throws out of the error-mapping path itself,
+    /// it just falls back to a message-only <see cref="AuthzError"/>.
+    /// </summary>
+    private static AuthzError BuildAuthzError(HttpResponseMessage response, string context)
+    {
+        string? action = null;
+        string? resourceId = null;
+        try
+        {
+            // Synchronous read is safe here: this path only runs for the error branch of
+            // an already-awaited HTTP call, no caller re-reads the content afterwards, and
+            // there is no SynchronizationContext in this library/its tests to deadlock on.
+            string body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                using JsonDocument doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("action", out JsonElement actionEl) &&
+                    actionEl.ValueKind == JsonValueKind.String)
+                {
+                    action = actionEl.GetString();
+                }
+
+                if (doc.RootElement.TryGetProperty("resource_id", out JsonElement resourceIdEl) &&
+                    resourceIdEl.ValueKind == JsonValueKind.String)
+                {
+                    resourceId = resourceIdEl.GetString();
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // Non-JSON or malformed body — fall back to message-only AuthzError.
+        }
+
+        return new AuthzError(context, action, resourceId);
     }
 
     /// <summary>
@@ -55,6 +101,8 @@ public static class ErrorMapper
     public static Exception FromGrpcStatus(StatusCode code, string message) => code switch
     {
         StatusCode.Unauthenticated => new AuthError(message),
+        // gRPC PERMISSION_DENIED carries no response body to parse (unlike the REST 403
+        // path above) — message-only AuthzError; Action/ResourceId stay null.
         StatusCode.PermissionDenied => new AuthzError(message),
         _ => NetworkError.FromException(new InvalidOperationException($"gRPC {code}: {message}"), message),
     };

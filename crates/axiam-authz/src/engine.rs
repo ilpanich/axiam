@@ -123,19 +123,30 @@ where
 
         // 5. Collect permission grants from all applicable roles and check
         //    action + scope constraints.
-        let mut has_matching_grant = false;
+        //
+        // Dedupe applicable roles first (preserving the previous per-role
+        // `seen_roles` semantics), then fetch every role's grants in a SINGLE
+        // batched query instead of one query per role (CQ-B13 N+1 fix).
         let mut seen_roles = HashSet::new();
+        let unique_role_ids: Vec<Uuid> = applicable_role_ids
+            .iter()
+            .copied()
+            .filter(|role_id| seen_roles.insert(*role_id))
+            .collect();
 
-        for role_id in &applicable_role_ids {
-            if !seen_roles.insert(*role_id) {
-                continue; // skip duplicates
-            }
-            let grants = self
-                .permission_repo
-                .get_role_permission_grants(request.tenant_id, *role_id)
-                .await?;
+        let grants_by_role = self
+            .permission_repo
+            .get_role_permission_grants_for_roles(request.tenant_id, &unique_role_ids)
+            .await?;
 
-            for grant in &grants {
+        let mut has_matching_grant = false;
+
+        'roles: for role_id in &unique_role_ids {
+            let Some(grants) = grants_by_role.get(role_id) else {
+                continue;
+            };
+
+            for grant in grants {
                 if grant.permission.action != request.action {
                     continue;
                 }
@@ -147,17 +158,13 @@ where
                     // the grant's list.
                     if grant.scope_ids.is_empty() || grant.scope_ids.contains(&scope_id) {
                         has_matching_grant = true;
-                        break;
+                        break 'roles;
                     }
                 } else {
                     // No scope requested — action match is sufficient.
                     has_matching_grant = true;
-                    break;
+                    break 'roles;
                 }
-            }
-
-            if has_matching_grant {
-                break;
             }
         }
 

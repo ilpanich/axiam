@@ -296,6 +296,26 @@ pub async fn login<C: Connection + Clone>(
         }
     };
 
+    // SECURITY (NEW-1): the (tenant_id, org_id) pair must be proven consistent
+    // before it is stamped into a token. Credentials authenticate the user only
+    // against tenant_id, and the tenant∈org binding was previously enforced only
+    // in the slug-resolution branch — a client passing raw UUIDs could bind their
+    // own tenant to a *foreign* org_id and mint a token scoped to that org
+    // (cross-organization escalation). Derive the authoritative org from the
+    // tenant record and reject any mismatch (enumeration-safe 401). This also
+    // covers the MFA challenge/setup paths, whose tokens embed this org_id.
+    let tenant = state.tenant_repo.get_by_id(tenant_id).await.map_err(|_| {
+        AxiamError::AuthenticationFailed {
+            reason: "invalid credentials".into(),
+        }
+    })?;
+    if tenant.organization_id != org_id {
+        return Err(AxiamApiError(AxiamError::AuthenticationFailed {
+            reason: "invalid credentials".into(),
+        }));
+    }
+    let org_id = tenant.organization_id;
+
     // Fetch the effective MFA policy for the tenant.
     // Propagate errors instead of silently falling back to no-enforcement,
     // which could bypass MFA during DB outages.
@@ -413,9 +433,22 @@ pub async fn refresh<C: Connection + Clone>(
             reason: "missing refresh token cookie".into(),
         })?;
 
+    // SECURITY (NEW-1): org_id must not be trusted from the client. The session
+    // lookup inside `refresh` pins tenant_id (a wrong tenant fails), but org_id
+    // was previously stamped straight from the request body — a valid refresh
+    // could mint a token scoped to a foreign org. Derive it authoritatively from
+    // the tenant record; a bogus tenant_id maps to the same generic auth failure.
+    let tenant = state
+        .tenant_repo
+        .get_by_id(b.tenant_id)
+        .await
+        .map_err(|_| AxiamError::AuthenticationFailed {
+            reason: "invalid refresh token".into(),
+        })?;
+
     let input = RefreshInput {
         tenant_id: b.tenant_id,
-        org_id: b.org_id,
+        org_id: tenant.organization_id,
         raw_refresh_token,
         ip_address: client_ip(&req),
         user_agent: user_agent(&req),

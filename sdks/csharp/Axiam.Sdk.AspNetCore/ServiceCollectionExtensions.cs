@@ -69,7 +69,7 @@ public static class ServiceCollectionExtensions
         // (TryAdd never throws) — order is load-bearing, not just style.
         services.TryAddSingleton<IAuthorizationHandler, AxiamPolicyHandler>();
         services.TryAddSingleton<IAuthorizationPolicyProvider, AxiamPolicyProvider>();
-        services.TryAddSingleton<Microsoft.AspNetCore.Authorization.Policy.IAuthorizationMiddlewareResultHandler, AxiamAuthorizationMiddlewareResultHandler>();
+        services.TryAddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationMiddlewareResultHandler, AxiamAuthorizationMiddlewareResultHandler>();
         services.AddAuthorization();
         return services;
     }

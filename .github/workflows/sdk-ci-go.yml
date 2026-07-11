@@ -47,6 +47,12 @@ jobs:
         working-directory: sdks/go
         run: go test ./...
 
+      - name: Dependency vulnerability scan (CI-03)
+        working-directory: sdks/go
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
       - name: Build examples (SC#1)
         working-directory: sdks/go
         run: go build ./examples/...

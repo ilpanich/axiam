@@ -45,6 +45,14 @@ use crate::AxiamError;
 /// equivalent of `crate::rest::authz::AccessCheckRequest`, matching the
 /// `CheckAccessRequest` proto message shape
 /// (`proto/axiam/v1/authorization.proto`).
+///
+/// `subject_id` is required here (unlike REST's `AccessCheckRequest`, where
+/// `subject_id` is an `Option<Uuid>`) because it mirrors the proto's
+/// non-`optional` `subject_id` field — the wire contract always carries it,
+/// so it is not relaxed to match REST (SDK-Q10, C2). The two transports
+/// differ by design: REST derives the subject from the caller's JWT when
+/// omitted (§5), while a gRPC caller (typically a service-mesh peer with no
+/// request-scoped JWT) must always pass it explicitly.
 #[derive(Debug, Clone)]
 pub struct CheckAccessRequest {
     pub tenant_id: Uuid,
@@ -54,19 +62,28 @@ pub struct CheckAccessRequest {
     pub scope: Option<String>,
 }
 
-/// The result of a single access check (mirrors `CheckAccessResponse`,
-/// shared shape with `crate::rest::authz::AccessDecision`).
+/// The result of a single access check (mirrors `CheckAccessResponse`).
+///
+/// Field-for-field parallel to `crate::rest::authz::AccessDecision`
+/// (`allowed: bool`, `reason: Option<String>`) — SDK-Q10/C2 aligned the two
+/// deny-reason field names (this used to be `deny_reason` here vs. `reason`
+/// on REST). They remain two distinct types rather than one shared
+/// definition: this module is only compiled under `feature = "grpc"` and
+/// `crate::rest::authz::AccessDecision` only under `feature = "rest"`, and
+/// `src/lib.rs`'s module list is intentionally frozen post-16-01 (see its
+/// doc comment) to avoid parallel-plan merge conflicts, so introducing a
+/// new always-compiled shared module is deliberately out of scope here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessDecision {
     pub allowed: bool,
-    pub deny_reason: Option<String>,
+    pub reason: Option<String>,
 }
 
 impl From<WireCheckAccessResponse> for AccessDecision {
     fn from(wire: WireCheckAccessResponse) -> Self {
         AccessDecision {
             allowed: wire.allowed,
-            deny_reason: if wire.deny_reason.is_empty() {
+            reason: if wire.deny_reason.is_empty() {
                 None
             } else {
                 Some(wire.deny_reason)

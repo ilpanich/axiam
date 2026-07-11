@@ -11,7 +11,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
-use crate::helpers::{CountRow, paginate, take_first_or_not_found};
+use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -414,9 +414,11 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             if msg.contains("cross-tenant binding denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant certificate-to-service-account binding denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
-            return Err(DbError::Migration(msg).into());
+            return Err(classify_write_error(msg, "certificate_binding").into());
         }
         Ok(())
     }

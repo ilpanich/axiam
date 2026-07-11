@@ -3,6 +3,8 @@
 //! All repository operations are async. Tenant-scoped repositories
 //! require a `tenant_id` parameter to enforce data isolation.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
@@ -381,6 +383,16 @@ pub trait PermissionRepository: Send + Sync {
         tenant_id: Uuid,
         role_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<PermissionGrant>>> + Send;
+
+    /// Batch variant of [`Self::get_role_permission_grants`]: fetch the permission
+    /// grants for many roles in a single query, grouped by role id. Roles with no
+    /// grants are simply absent from the returned map. Used on the hot authorization
+    /// path to avoid an N+1 query per applicable role.
+    fn get_role_permission_grants_for_roles(
+        &self,
+        tenant_id: Uuid,
+        role_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<HashMap<Uuid, Vec<PermissionGrant>>>> + Send;
 }
 
 pub trait ResourceRepository: Send + Sync {
@@ -489,6 +501,14 @@ pub trait SessionRepository: Send + Sync {
     /// Invalidate a single session.
     fn invalidate(&self, tenant_id: Uuid, id: Uuid)
     -> impl Future<Output = AxiamResult<()>> + Send;
+    /// Atomically consume (delete) a single session, returning `true` iff this
+    /// call removed the row. Unlike [`Self::invalidate`] (idempotent, always
+    /// `Ok(())`), this is the single-use gate for refresh-token rotation
+    /// (NEW-3): two concurrent refreshes racing on the same token both pass the
+    /// prior SELECT, but only one wins this delete — the loser gets `false` and
+    /// must abort before minting a new session, preserving single-use rotation
+    /// and stolen-token reuse detection.
+    fn consume(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<bool>> + Send;
     /// Invalidate all sessions for a user (e.g., on password change).
     fn invalidate_user_sessions(
         &self,
@@ -898,6 +918,39 @@ pub trait AssertionReplayRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Delete expired assertion replay rows across all tenants.
+    ///
+    /// Returns the number of rows deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// AMQP Nonce Replay (NEW-4)
+// ---------------------------------------------------------------------------
+
+/// Repository for tracking consumed AMQP message nonces (NEW-4 replay
+/// protection).
+///
+/// Provides the same insert-or-conflict semantics as
+/// [`AssertionReplayRepository`]: inserting a `(tenant_id, nonce)` pair that
+/// has already been recorded returns `Err(AxiamError::ReplayDetected)`. The
+/// AMQP consumers call this AFTER a valid HMAC signature + a fresh `issued_at`
+/// so a replayed message (same signed nonce within the freshness window) is
+/// rejected. Rows live until the message's freshness window closes
+/// (`issued_at + skew`); `cleanup_expired` removes them.
+pub trait AmqpNonceRepository: Send + Sync {
+    /// Record a consumed AMQP message nonce.
+    ///
+    /// Returns `Ok(())` on first insertion. Returns
+    /// `Err(AxiamError::ReplayDetected)` if an identical `(tenant_id, nonce)`
+    /// pair already exists (UNIQUE constraint violation) — that is a replay.
+    fn insert_nonce(
+        &self,
+        tenant_id: Uuid,
+        nonce: Uuid,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired AMQP nonce rows across all tenants.
     ///
     /// Returns the number of rows deleted.
     fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;

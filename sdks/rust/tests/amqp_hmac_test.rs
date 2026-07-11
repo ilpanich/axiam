@@ -21,6 +21,14 @@
 
 use axiam_sdk::amqp::hmac::{sign_payload, verify_payload};
 use axiam_sdk::amqp::messages::{AuditEventMessage, AuthzRequest};
+use chrono::{TimeZone, Utc};
+
+/// A fixed, deterministic `issued_at` (NEW-4) for tests that only care
+/// about `hmac_signature` presence/ordering, not the freshness gate (which
+/// lives in the consumer, not these DTO-level tests).
+fn fixed_issued_at() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap()
+}
 
 /// Literal fixture shared with the server's test module
 /// (`crates/axiam-amqp/src/messages.rs::amqp_hmac_sign_verify_round_trip`).
@@ -89,6 +97,9 @@ fn authz_request_hmac_signature_omitted_when_none() {
         action: "read".into(),
         resource_id: uuid::Uuid::nil(),
         scope: None,
+        key_version: 2,
+        nonce: uuid::Uuid::nil(),
+        issued_at: fixed_issued_at(),
         hmac_signature: None,
     };
     let json = serde_json::to_string(&req).expect("serialize");
@@ -108,6 +119,9 @@ fn authz_request_hmac_signature_present_when_some() {
         action: "read".into(),
         resource_id: uuid::Uuid::nil(),
         scope: None,
+        key_version: 2,
+        nonce: uuid::Uuid::nil(),
+        issued_at: fixed_issued_at(),
         hmac_signature: Some("abc123".into()),
     };
     let json = serde_json::to_string(&req).expect("serialize");
@@ -120,14 +134,15 @@ fn authz_request_hmac_signature_present_when_some() {
 #[test]
 fn authz_request_field_declaration_order_matches_server() {
     // The server struct declares fields in this exact order:
-    // correlation_id, tenant_id, subject_id, action, resource_id, scope
-    // (crates/axiam-amqp/src/messages.rs:58-66). A derived `Serialize` impl
-    // on a plain struct emits keys via `serialize_struct`, which writes
-    // fields in declaration order regardless of the `serde_json::Value`
-    // map representation used on the read side — so we assert directly on
-    // the raw JSON text's key ordering rather than round-tripping through
-    // `Value` (whose `Map` type may reorder keys depending on the
-    // "preserve_order" feature).
+    // correlation_id, tenant_id, subject_id, action, resource_id, scope,
+    // key_version, nonce, issued_at
+    // (crates/axiam-amqp/src/messages.rs:166-197, NEW-4 v2). A derived
+    // `Serialize` impl on a plain struct emits keys via `serialize_struct`,
+    // which writes fields in declaration order regardless of the
+    // `serde_json::Value` map representation used on the read side — so we
+    // assert directly on the raw JSON text's key ordering rather than
+    // round-tripping through `Value` (whose `Map` type may reorder keys
+    // depending on the "preserve_order" feature).
     let req = AuthzRequest {
         correlation_id: uuid::Uuid::nil(),
         tenant_id: uuid::Uuid::nil(),
@@ -135,6 +150,9 @@ fn authz_request_field_declaration_order_matches_server() {
         action: "read".into(),
         resource_id: uuid::Uuid::nil(),
         scope: Some("sub".into()),
+        key_version: 2,
+        nonce: uuid::Uuid::nil(),
+        issued_at: fixed_issued_at(),
         hmac_signature: None,
     };
     let json = serde_json::to_string(&req).expect("serialize");
@@ -145,6 +163,9 @@ fn authz_request_field_declaration_order_matches_server() {
         "action",
         "resource_id",
         "scope",
+        "key_version",
+        "nonce",
+        "issued_at",
     ];
     let mut last_index = 0usize;
     for key in expected_order {
@@ -171,6 +192,9 @@ fn audit_event_message_hmac_signature_omitted_when_none() {
         outcome: "success".into(),
         ip_address: None,
         metadata: None,
+        key_version: 2,
+        nonce: uuid::Uuid::nil(),
+        issued_at: fixed_issued_at(),
         hmac_signature: None,
     };
     let json = serde_json::to_string(&msg).expect("serialize");

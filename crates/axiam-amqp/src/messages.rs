@@ -36,13 +36,55 @@ const APP_SALT: &[u8] = b"axiam-amqp-hkdf-salt-v1";
 /// any other purpose from the same master key.
 const DOMAIN_TAG: &[u8] = b"axiam-amqp-v1";
 
-/// Current message envelope key version (SECHRD-08 / D-05b). Bump this when
-/// rotating the master signing key; `key_version` travels on the wire so a
-/// verifier always derives the subkey the publisher actually used.
-pub const CURRENT_KEY_VERSION: u8 = 1;
+/// Current message envelope key version (SECHRD-08 / D-05b, NEW-4). Bump this
+/// when rotating the master signing key OR when changing the signed envelope
+/// shape; `key_version` travels on the wire so a verifier always derives the
+/// subkey the publisher actually used.
+///
+/// NEW-4 (v2): the signed body now MUST carry a `nonce` + `issued_at` for
+/// replay protection. Consumers **reject** (nack, requeue:false) any message
+/// with `key_version < 2` — this is a hard cutover, there is no v1 grace path.
+pub const CURRENT_KEY_VERSION: u8 = 2;
+
+/// Minimum accepted envelope key version (NEW-4 hard cutover). Any message
+/// with `key_version` below this is rejected outright — it predates the
+/// mandatory `nonce`/`issued_at` replay-protection fields.
+pub const MIN_ACCEPTED_KEY_VERSION: u8 = 2;
+
+/// Default freshness skew for the `issued_at` acceptance window (NEW-4).
+/// A message is accepted only when its `issued_at` lies within ±5 minutes of
+/// the consumer's current clock. This bounds both clock drift and how long a
+/// captured message stays replay-eligible before the freshness gate rejects it.
+pub const DEFAULT_FRESHNESS_SKEW_SECS: i64 = 300;
 
 fn default_key_version() -> u8 {
     CURRENT_KEY_VERSION
+}
+
+/// Serde default for `nonce` (NEW-4). A v1 message lacks this field; it
+/// deserializes to the nil UUID and is then rejected by the `key_version < 2`
+/// gate before the nonce is ever consulted, so the concrete value is inert.
+fn default_nonce() -> Uuid {
+    Uuid::nil()
+}
+
+/// Serde default for `issued_at` (NEW-4). A v1 message lacks this field; it
+/// deserializes to the Unix epoch — far outside any freshness window — so a
+/// message that somehow bypassed the `key_version` gate would still fail the
+/// freshness check. `from_timestamp(0, 0)` is infallible for a constant.
+fn default_issued_at() -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is a valid timestamp")
+}
+
+/// Return `true` when `issued_at` lies within `±skew` of `now` (NEW-4).
+///
+/// This is the freshness gate for AMQP replay protection: a captured message
+/// can only be replayed successfully inside this window, and the durable
+/// nonce store rejects duplicates within it. `skew` bounds legitimate clock
+/// drift between producer and consumer; [`DEFAULT_FRESHNESS_SKEW_SECS`] is the
+/// default.
+pub fn is_fresh(issued_at: DateTime<Utc>, now: DateTime<Utc>, skew: chrono::Duration) -> bool {
+    now.signed_duration_since(issued_at).abs() <= skew
 }
 
 /// Derive a per-tenant AMQP signing subkey from the shared master key
@@ -135,6 +177,17 @@ pub struct AuthzRequest {
     /// per-tenant subkey derivation the signature was produced with.
     #[serde(default = "default_key_version")]
     pub key_version: u8,
+    /// Per-message unique nonce for replay protection (NEW-4). ALWAYS emitted
+    /// (no `skip_serializing_if`) so it is inside the signed HMAC body. The
+    /// consumer records it in the durable `amqp_nonce_replay` store; a
+    /// duplicate within the freshness window is a replay and is rejected.
+    #[serde(default = "default_nonce")]
+    pub nonce: Uuid,
+    /// Producer-side send time for the freshness gate (NEW-4). ALWAYS emitted
+    /// (no `skip_serializing_if`) so it is inside the signed HMAC body. The
+    /// consumer rejects the message if this lies outside ±skew of its clock.
+    #[serde(default = "default_issued_at")]
+    pub issued_at: DateTime<Utc>,
     /// HMAC-SHA256 of the JSON-serialized message body (this field set to null).
     /// Computed with the per-tenant subkey derived via [`derive_tenant_key`]
     /// (SECHRD-08 / D-05a/b). Mandatory — the consumer rejects both unsigned
@@ -172,6 +225,17 @@ pub struct AuditEventMessage {
     /// per-tenant subkey derivation the signature was produced with.
     #[serde(default = "default_key_version")]
     pub key_version: u8,
+    /// Per-message unique nonce for replay protection (NEW-4). ALWAYS emitted
+    /// (no `skip_serializing_if`) so it is inside the signed HMAC body. The
+    /// consumer records it in the durable `amqp_nonce_replay` store; a
+    /// duplicate within the freshness window is a replay and is rejected.
+    #[serde(default = "default_nonce")]
+    pub nonce: Uuid,
+    /// Producer-side send time for the freshness gate (NEW-4). ALWAYS emitted
+    /// (no `skip_serializing_if`) so it is inside the signed HMAC body. The
+    /// consumer rejects the message if this lies outside ±skew of its clock.
+    #[serde(default = "default_issued_at")]
+    pub issued_at: DateTime<Utc>,
     /// HMAC-SHA256 of the JSON-serialized message body (SEC-022/055).
     /// Computed with the per-tenant subkey derived via [`derive_tenant_key`]
     /// (SECHRD-08 / D-05a/b). Mandatory — the consumer rejects both unsigned
@@ -332,12 +396,20 @@ mod tests {
             resource_id: Uuid::nil(),
             scope: None,
             key_version: CURRENT_KEY_VERSION,
+            nonce: Uuid::nil(),
+            issued_at: Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, 0).unwrap(),
             hmac_signature: Some("abc123".into()),
         };
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(
             json.contains("hmac_signature"),
             "hmac_signature must be in JSON when Some"
+        );
+        // NEW-4: nonce + issued_at are always emitted (inside the signed body).
+        assert!(json.contains("nonce"), "nonce must always be serialized");
+        assert!(
+            json.contains("issued_at"),
+            "issued_at must always be serialized"
         );
     }
 
@@ -351,12 +423,80 @@ mod tests {
             resource_id: Uuid::nil(),
             scope: None,
             key_version: CURRENT_KEY_VERSION,
+            nonce: Uuid::nil(),
+            issued_at: Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, 0).unwrap(),
             hmac_signature: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(
             !json.contains("hmac_signature"),
             "hmac_signature must be omitted when None"
+        );
+    }
+
+    // NEW-4: field/wire order of the signed AuthzRequest body is
+    // correlation_id, tenant_id, subject_id, action, resource_id,
+    // scope?, key_version, nonce, issued_at, hmac_signature? — this order is
+    // load-bearing (the HMAC is computed over these bytes) and the SDKs
+    // reproduce it byte-for-byte.
+    #[test]
+    fn authz_request_canonical_field_order() {
+        let req = AuthzRequest {
+            correlation_id: Uuid::nil(),
+            tenant_id: Uuid::nil(),
+            subject_id: Uuid::nil(),
+            action: "read".into(),
+            resource_id: Uuid::nil(),
+            scope: Some("s".into()),
+            key_version: CURRENT_KEY_VERSION,
+            nonce: Uuid::nil(),
+            issued_at: Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, 0).unwrap(),
+            hmac_signature: None,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let expected = [
+            "correlation_id",
+            "tenant_id",
+            "subject_id",
+            "action",
+            "resource_id",
+            "scope",
+            "key_version",
+            "nonce",
+            "issued_at",
+        ];
+        let positions: Vec<usize> = expected
+            .iter()
+            .map(|f| json.find(&format!("\"{f}\"")).expect("field present"))
+            .collect();
+        let mut sorted = positions.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            positions, sorted,
+            "AuthzRequest fields must serialize in declaration order (NEW-4 wire order)"
+        );
+    }
+
+    #[test]
+    fn is_fresh_accepts_within_and_rejects_outside_skew() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let skew = chrono::Duration::seconds(DEFAULT_FRESHNESS_SKEW_SECS);
+        assert!(is_fresh(now, now, skew), "exact-now must be fresh");
+        assert!(
+            is_fresh(now - chrono::Duration::seconds(299), now, skew),
+            "within skew (past) must be fresh"
+        );
+        assert!(
+            is_fresh(now + chrono::Duration::seconds(299), now, skew),
+            "within skew (future clock drift) must be fresh"
+        );
+        assert!(
+            !is_fresh(now - chrono::Duration::seconds(301), now, skew),
+            "stale past must be rejected"
+        );
+        assert!(
+            !is_fresh(now + chrono::Duration::seconds(301), now, skew),
+            "too-far-future must be rejected"
         );
     }
 

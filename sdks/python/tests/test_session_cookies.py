@@ -3,9 +3,12 @@
 Proves, against the pinned httpx 0.27.x, that the sync and async httpx
 clients built by ``_Session`` share ONE underlying cookie jar — a cookie set
 via the sync client's jar must be visible via the async client's jar (and
-vice versa), since a caller mixing ``client.login()`` (sync) then
-``await client.async_check_access()`` (async) on the same ``AxiamClient``
-must reuse the session established by the first call.
+vice versa). ``AxiamClient`` (sync) and ``AsyncAxiamClient`` (async, SDK-Q08)
+each own their own independent ``_Session``, so this sync/async sharing
+guarantee matters for ``_Session`` itself and for any single client object
+that happens to touch both (e.g. a framework bridge's local JWKS-verify /
+reactive-refresh fallback), not for cross-client sharing between the two
+public client classes.
 """
 
 from __future__ import annotations

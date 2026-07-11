@@ -30,6 +30,16 @@ impl From<AxiamError> for AxiamApiError {
 struct ErrorBody {
     error: String,
     message: String,
+    /// The action being checked (e.g. `"users:create"`), when known.
+    /// Populated only for `authorization_denied` (403) responses;
+    /// omitted from the JSON body otherwise (SDK-Q02).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
+    /// The resource id being checked, when known and not the "global"
+    /// nil-UUID sentinel. Populated only for `authorization_denied` (403)
+    /// responses; omitted from the JSON body otherwise (SDK-Q02).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_id: Option<String>,
 }
 
 impl actix_web::ResponseError for AxiamApiError {
@@ -100,9 +110,24 @@ impl actix_web::ResponseError for AxiamApiError {
             }
         };
 
+        // SDK-Q02: surface the checked action/resource on authorization
+        // denials so SDKs can parse them from the response body (CONTRACT
+        // §2 "if available from the response body"). Every other error
+        // kind omits both fields (skip_serializing_if above).
+        let (action, resource_id) = match &self.0 {
+            AxiamError::AuthorizationDenied {
+                action,
+                resource_id,
+                ..
+            } => (action.clone(), resource_id.clone()),
+            _ => (None, None),
+        };
+
         HttpResponse::build(self.status_code()).json(ErrorBody {
             error: error_code.into(),
             message,
+            action,
+            resource_id,
         })
     }
 }

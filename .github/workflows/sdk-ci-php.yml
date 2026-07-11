@@ -72,6 +72,10 @@ jobs:
         working-directory: sdks/php
         run: composer test
 
+      - name: Dependency vulnerability scan (CI-03)
+        working-directory: sdks/php
+        run: composer audit --no-interaction
+
       # PHPStan level 6 (sdks/php/phpstan.neon.dist, excludes generated
       # src/Grpc/Gen). Deferred to CI in every prior 22-* plan because this
       # sandbox's egress proxy returns a GitHub-auth 403 on phpstan/phpstan's

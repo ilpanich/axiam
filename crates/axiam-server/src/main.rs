@@ -22,8 +22,9 @@ use axiam_auth::{
 };
 use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
 use axiam_db::{
-    DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
-    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
+    SurrealAssertionReplayRepository, SurrealAuditLogRepository,
+    SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
     SurrealEmailVerificationTokenRepository, SurrealErasureProofRepository,
     SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
@@ -353,9 +354,14 @@ async fn main() -> std::io::Result<()> {
     }
 
     // Connect to RabbitMQ and declare queues.
-    let amqp = AmqpManager::connect_with_retry(&config.amqp)
-        .await
-        .expect("Failed to connect to RabbitMQ");
+    // Shared behind an Arc so background consumers can hold a handle and
+    // recreate their channel on a transient broker blip (CQ-B53) instead of
+    // taking the whole process down.
+    let amqp = Arc::new(
+        AmqpManager::connect_with_retry(&config.amqp)
+            .await
+            .expect("Failed to connect to RabbitMQ"),
+    );
     amqp.declare_queues()
         .await
         .expect("Failed to declare AMQP queues");
@@ -489,6 +495,9 @@ async fn main() -> std::io::Result<()> {
     let federation_config_repo = SurrealFederationConfigRepository::new(db.client_cloned().await);
     let federation_link_repo = SurrealFederationLinkRepository::new(db.client_cloned().await);
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client_cloned().await);
+    // NEW-4: durable AMQP nonce store for replay protection, shared by the
+    // authz + audit consumers and swept by the periodic cleanup task.
+    let amqp_nonce_repo = SurrealAmqpNonceRepository::new(db.client_cloned().await);
     let federation_login_state_repo =
         SurrealFederationLoginStateRepository::new(db.client_cloned().await);
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
@@ -630,12 +639,17 @@ async fn main() -> std::io::Result<()> {
         .resolve_signing_key()
         .expect("AMQP signing key must resolve (SECHRD-08 / D-05c) — see AXIAM__AMQP__SIGNING_KEY");
     tracing::info!("AMQP signing key resolved (SEC-022/SECHRD-08)");
+    // NEW-4: freshness skew window shared by both consumers.
+    let amqp_replay_skew = config.amqp.replay_skew();
     let amqp_signing_key_clone = amqp_signing_key.clone();
+    let authz_nonce_repo = amqp_nonce_repo.clone();
     tokio::spawn(async move {
         axiam_amqp::authz_consumer::start_authz_consumer(
             amqp_channel,
             amqp_engine,
             amqp_signing_key_clone,
+            authz_nonce_repo,
+            amqp_replay_skew,
         )
         .await;
         tracing::error!("AMQP authz consumer exited — shutting down process");
@@ -664,11 +678,14 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to create AMQP audit consumer channel");
     let amqp_audit_repo = audit_repo.clone();
+    let audit_nonce_repo = amqp_nonce_repo.clone();
     tokio::spawn(async move {
         axiam_amqp::audit_consumer::start_audit_consumer(
             audit_channel,
             amqp_audit_repo,
             amqp_signing_key,
+            audit_nonce_repo,
+            amqp_replay_skew,
         )
         .await;
         tracing::error!("AMQP audit consumer exited — shutting down process");
@@ -690,25 +707,42 @@ async fn main() -> std::io::Result<()> {
     // bounded exponential backoff read from AXIAM__WEBHOOK__* — D-20), and
     // writes per-attempt/terminal audit records (D-09).
     {
-        let webhook_channel = amqp
-            .create_channel()
-            .await
-            .expect("Failed to create AMQP webhook consumer channel");
         let webhook_delivery_for_consumer = webhook_delivery.clone();
         let webhook_publisher_for_consumer = webhook_publisher.clone();
         let webhook_audit_repo = audit_repo.clone();
         let webhook_retry_cfg = WebhookRetryConfig::from_env();
+        let webhook_amqp = Arc::clone(&amqp);
+        // CQ-B53: a transient broker disconnect (consumer stream ends, or the
+        // channel fails to open) must NOT kill the whole API server. Recreate
+        // the consume channel on the shared connection and restart the consumer
+        // with bounded exponential backoff instead of `process::exit(1)`.
         tokio::spawn(async move {
-            start_webhook_consumer(
-                webhook_channel,
-                webhook_delivery_for_consumer,
-                webhook_publisher_for_consumer,
-                webhook_audit_repo,
-                webhook_retry_cfg,
-            )
-            .await;
-            tracing::error!("Webhook AMQP consumer exited — shutting down process");
-            std::process::exit(1);
+            let mut backoff = Duration::from_secs(1);
+            let max_backoff = Duration::from_secs(30);
+            loop {
+                match webhook_amqp.create_channel().await {
+                    Ok(webhook_channel) => {
+                        backoff = Duration::from_secs(1);
+                        start_webhook_consumer(
+                            webhook_channel,
+                            webhook_delivery_for_consumer.clone(),
+                            webhook_publisher_for_consumer.clone(),
+                            webhook_audit_repo.clone(),
+                            webhook_retry_cfg,
+                        )
+                        .await;
+                        tracing::warn!("Webhook AMQP consumer exited — reconnecting");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to (re)create webhook consumer channel — retrying"
+                        );
+                    }
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+            }
         });
         tracing::info!("Webhook consumer spawned");
     }
@@ -797,6 +831,7 @@ async fn main() -> std::io::Result<()> {
     let cleanup = cleanup::CleanupTask::new(
         Arc::new(assertion_replay_repo.clone()),
         Arc::new(federation_login_state_repo.clone()),
+        Arc::new(amqp_nonce_repo.clone()),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),
         Arc::new(audit_repo.clone()),
@@ -858,6 +893,9 @@ async fn main() -> std::io::Result<()> {
         pgp_service: pgp_service.clone(),
         webhook_repo: webhook_repo.clone(),
         webhook_delivery: webhook_delivery.clone(),
+        // CQ-B22: hand the delivery publisher to AppState so handlers can
+        // dispatch domain events via `state.emit_webhook(...)`.
+        webhook_publisher: Some(std::sync::Arc::new(webhook_publisher.clone())),
         notification_rule_repo: notification_rule_repo.clone(),
         oauth2_client_repo: oauth2_client_repo.clone(),
         authorize_service: authorize_service.clone(),

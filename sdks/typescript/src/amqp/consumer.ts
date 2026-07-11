@@ -8,6 +8,15 @@
 // never contains the received/expected HMAC value or the signing key. Only
 // a verified delivery reaches the handler, and only then is it acked.
 //
+// NEW-4 (CONTRACT.md §8 "v2 — Replay Protection", hard cutover): once the
+// HMAC verifies, the delivery is ADDITIONALLY rejected (same nack-without-
+// requeue path) when `key_version < 2`, `issued_at` falls outside the
+// ±skew freshness window, or `nonce` has already been seen. Because this
+// module verifies by re-serializing the parsed body (minus
+// `hmac_signature`) in insertion order (Pitfall 5), `nonce`/`issued_at` are
+// already covered by the HMAC bytes with no canonicalization change — only
+// the three validation gates below are new.
+//
 // This is the TS port of the already-tested Rust `verify_and_dispatch`/
 // `consume` (sdks/rust/src/amqp/consumer.rs).
 
@@ -15,6 +24,97 @@ import amqp from 'amqplib';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import type { Sensitive } from '../core/index.js';
 import { verifyPayload } from './hmac.js';
+
+/**
+ * Default freshness skew for `issued_at` acceptance (NEW-4): a message is
+ * accepted only when its `issued_at` lies within ±5 minutes of the
+ * verifier's clock, matching the server's
+ * `DEFAULT_FRESHNESS_SKEW_SECS = 300` / `AXIAM__AMQP__REPLAY_SKEW_SECS`
+ * (CONTRACT.md §8 v2).
+ */
+export const DEFAULT_REPLAY_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * Nonce replay-dedup store (NEW-4). `checkAndRecord` returns `true` when
+ * `nonce` has already been recorded and its dedup entry has not yet
+ * expired (i.e. this delivery is a replay); otherwise it records the nonce
+ * with the given TTL and returns `false`.
+ */
+export interface NonceStore {
+  checkAndRecord(nonce: string, ttlMs: number): boolean;
+}
+
+/**
+ * Default in-memory nonce dedup store (NEW-4). Naturally bounded: each
+ * entry expires after `ttlMs` (the caller passes 2x the freshness skew, so
+ * a nonce can never still be "fresh" once its dedup entry has lapsed) and
+ * expired entries are pruned opportunistically on each check — no
+ * background timer and no unbounded growth under sustained traffic.
+ *
+ * Share ONE instance across every delivery from the same consumer (as
+ * `consume()` does by default) — a fresh store per call provides no
+ * cross-message replay protection.
+ */
+export class InMemoryNonceStore implements NonceStore {
+  private readonly seenUntilMs = new Map<string, number>();
+
+  checkAndRecord(nonce: string, ttlMs: number): boolean {
+    const now = Date.now();
+    this.prune(now);
+    const expiry = this.seenUntilMs.get(nonce);
+    if (expiry !== undefined && expiry > now) {
+      return true;
+    }
+    this.seenUntilMs.set(nonce, now + ttlMs);
+    return false;
+  }
+
+  private prune(now: number): void {
+    for (const [nonce, expiry] of this.seenUntilMs) {
+      if (expiry <= now) this.seenUntilMs.delete(nonce);
+    }
+  }
+}
+
+type ReplayRejectReason = 'key_version' | 'issued_at' | 'nonce';
+
+/**
+ * NEW-4 validation gates, checked only AFTER the HMAC has already verified.
+ * Returns the failing gate's name, or `undefined` when all three pass.
+ * `ttlMs` for the nonce store is 2x `skewMs` — the freshness window plus a
+ * margin so a nonce cannot be replayed the instant its dedup entry expires
+ * while `issued_at` might still (barely) be judged fresh by a differently-
+ * skewed verifier.
+ */
+function checkReplayProtection(
+  body: Record<string, unknown>,
+  skewMs: number,
+  nonceStore: NonceStore,
+): ReplayRejectReason | undefined {
+  const keyVersion = body.key_version;
+  if (typeof keyVersion !== 'number' || keyVersion < 2) {
+    return 'key_version';
+  }
+
+  const issuedAtRaw = body.issued_at;
+  if (typeof issuedAtRaw !== 'string') {
+    return 'issued_at';
+  }
+  const issuedAtMs = Date.parse(issuedAtRaw);
+  if (Number.isNaN(issuedAtMs) || Math.abs(Date.now() - issuedAtMs) > skewMs) {
+    return 'issued_at';
+  }
+
+  const nonce = body.nonce;
+  if (typeof nonce !== 'string' || nonce.length === 0) {
+    return 'nonce';
+  }
+  if (nonceStore.checkAndRecord(nonce, skewMs * 2)) {
+    return 'nonce';
+  }
+
+  return undefined;
+}
 
 /**
  * Minimal seam over the channel operations this module needs
@@ -47,6 +147,20 @@ export interface ConsumeOptions {
    * deployment measure only — strict MUST remain the default.
    */
   strict?: boolean;
+  /**
+   * Freshness skew window for `issued_at` validation (NEW-4), in
+   * milliseconds. Defaults to {@link DEFAULT_REPLAY_SKEW_MS} (5 minutes),
+   * matching the server default (CONTRACT.md §8 v2).
+   */
+  skewMs?: number;
+  /**
+   * Nonce replay-dedup store (NEW-4). Defaults to a fresh
+   * `InMemoryNonceStore` per call when omitted — `consume()` creates and
+   * shares ONE store across every delivery on that connection by default;
+   * callers invoking `verifyAndDispatch` directly across multiple messages
+   * must pass the same store explicitly for dedup to take effect.
+   */
+  nonceStore?: NonceStore;
 }
 
 /**
@@ -115,6 +229,32 @@ export async function verifyAndDispatch(
     return;
   }
 
+  // NEW-4 (CONTRACT.md §8 v2, hard cutover): only reached once the HMAC has
+  // verified. `body` was re-serialized in insertion order to compute
+  // `canonical` above, so `nonce`/`issued_at` are already inside the bytes
+  // that were just verified — these are the three ADDITIONAL validation
+  // gates (key_version, freshness, replay), not re-verification.
+  const skewMs = options.skewMs ?? DEFAULT_REPLAY_SKEW_MS;
+  const nonceStore = options.nonceStore ?? new InMemoryNonceStore();
+  const replayRejectReason = checkReplayProtection(body, skewMs, nonceStore);
+  if (replayRejectReason) {
+    const tenantContext: Record<string, unknown> = {};
+    if (typeof body.tenant_id === 'string') tenantContext.tenantId = body.tenant_id;
+    logger?.warn(
+      'axiam_sdk.security',
+      `AMQP v2 replay-protection check failed (${replayRejectReason}); nacking without requeue`,
+      {
+        timestamp: new Date().toISOString(),
+        exchange: msg.fields.exchange,
+        routingKey: msg.fields.routingKey,
+        ...tenantContext,
+      },
+    );
+    // channel.nack(msg, /* allUpTo */ false, /* requeue */ false)
+    channel.nack(msg, false, false);
+    return;
+  }
+
   try {
     await handler(body);
   } catch (err) {
@@ -157,8 +297,16 @@ export async function consume(
   const channel: Channel = await connection.createChannel();
   await channel.assertQueue(queue, { durable: true });
 
+  // NEW-4: one nonce store shared across every delivery on this consumer —
+  // a fresh store per message (the per-call default in `verifyAndDispatch`)
+  // would defeat replay dedup entirely.
+  const sharedOptions: ConsumeOptions = {
+    ...options,
+    nonceStore: options.nonceStore ?? new InMemoryNonceStore(),
+  };
+
   await channel.consume(queue, (msg) => {
     if (!msg) return;
-    void verifyAndDispatch(channel, msg, signingKey.expose(), handler, options);
+    void verifyAndDispatch(channel, msg, signingKey.expose(), handler, sharedOptions);
   });
 }

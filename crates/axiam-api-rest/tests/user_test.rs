@@ -377,6 +377,28 @@ async fn delete_user_returns_204() {
     assert_eq!(resp.status().as_u16(), 204);
 }
 
+/// CQ-B16: DELETE of a nonexistent user id must return 404, not silently 204.
+#[actix_rt::test]
+async fn delete_nonexistent_user_returns_404() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let fake_id = Uuid::new_v4();
+    let req = test::TestRequest::delete()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri(&format!("/api/v1/users/{fake_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
 #[actix_rt::test]
 async fn user_response_includes_lock_state_fields() {
     let (db, org_id, tenant_id) = setup_db().await;

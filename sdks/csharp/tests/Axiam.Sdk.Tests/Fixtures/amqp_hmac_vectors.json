@@ -2,7 +2,8 @@
   "_derivation": {
     "description": "Real, server-computed HMAC-SHA256 fixture vectors proving byte-for-byte cross-language compatibility between axiam_sdk.amqp._hmac.verify_hmac (Python) and crates/axiam-amqp/src/messages.rs::sign_payload (Rust). Each vector's hmac_signature was NOT hand-written — it was emitted by the canonical Rust signer via a throwaway #[test] harness, then independently cross-checked with Python's hmac.new(...).hexdigest() before being recorded here.",
     "reproduction_command": "cd /home/user/axiam && (temporarily add the `emit_python_sdk_hmac_fixture` test to crates/axiam-amqp/src/messages.rs's `tests` module, mirroring the AuthzRequest/AuditEventMessage construction below) && cargo test -p axiam-amqp emit_python_sdk_hmac_fixture -- --nocapture",
-    "note": "The field order in every 'message' object below is the Rust struct DECLARATION order (see AuthzRequest / AuditEventMessage in crates/axiam-amqp/src/messages.rs), NOT alphabetical order — e.g. AuthzRequest emits tenant_id before subject_id, and action before resource_id. This confirms 19-RESEARCH.md's Pitfall 2 finding: canonicalization MUST preserve wire/insertion order (json.dumps WITHOUT sort_keys), not sort keys alphabetically."
+    "note": "The field order in every 'message' object below is the Rust struct DECLARATION order (see AuthzRequest / AuditEventMessage in crates/axiam-amqp/src/messages.rs), NOT alphabetical order — e.g. AuthzRequest emits tenant_id before subject_id, and action before resource_id. This confirms 19-RESEARCH.md's Pitfall 2 finding: canonicalization MUST preserve wire/insertion order (json.dumps WITHOUT sort_keys), not sort keys alphabetically.",
+    "v2_update": "NEW-4 (key_version=2): every vector below now carries the mandatory key_version/nonce/issued_at fields (declared immediately after the message's pre-existing fields and before hmac_signature, per sdks/CONTRACT.md §8 v2 and crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json's field_order). Each hmac_signature was recomputed as HMAC-SHA256(key, canonical_bytes) over the exact declaration-order JSON including the new fields (compact, hmac_signature absent) — a deterministic, standard HMAC-SHA256 computation, not a value requiring the live Rust signer to reproduce. authz_request_tampered_action and audit_event_wrong_key intentionally keep their sibling valid vector's hmac_signature unchanged (that is the point of those two vectors)."
   },
   "vectors": [
     {
@@ -15,7 +16,10 @@
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "read",
         "resource_id": "44444444-4444-4444-4444-444444444444",
-        "hmac_signature": "1cec2fad12c7545576eb17dc2fd5ba0cfebd8f5f1bba328ae36e895b918378e3"
+        "key_version": 2,
+        "nonce": "10101010-1010-1010-1010-101010101010",
+        "issued_at": "2026-07-10T12:00:00Z",
+        "hmac_signature": "2686cdb990c652945b3cd32fdf82e37ed4447985dbf8153e9feef89b5eac889e"
       },
       "expected_valid": true
     },
@@ -29,7 +33,10 @@
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "write",
         "resource_id": "44444444-4444-4444-4444-444444444444",
-        "hmac_signature": "1cec2fad12c7545576eb17dc2fd5ba0cfebd8f5f1bba328ae36e895b918378e3"
+        "key_version": 2,
+        "nonce": "10101010-1010-1010-1010-101010101010",
+        "issued_at": "2026-07-10T12:00:00Z",
+        "hmac_signature": "2686cdb990c652945b3cd32fdf82e37ed4447985dbf8153e9feef89b5eac889e"
       },
       "expected_valid": false,
       "note": "Same signature as authz_request_valid but with action mutated from 'read' to 'write' after signing — proves verification is non-vacuous."
@@ -45,7 +52,10 @@
         "action": "user.login",
         "outcome": "success",
         "ip_address": "203.0.113.7",
-        "hmac_signature": "89a65922a64177f6d19a322a8cdd29d631527947c13cc1f93b978f7d5b28392a"
+        "key_version": 2,
+        "nonce": "20202020-2020-2020-2020-202020202020",
+        "issued_at": "2026-07-10T12:00:00Z",
+        "hmac_signature": "fdf1fda4554a60e8fbb773543ca829314eb240115759cb3562aa10836286ccd3"
       },
       "expected_valid": true
     },
@@ -60,7 +70,10 @@
         "action": "user.login",
         "outcome": "success",
         "ip_address": "203.0.113.7",
-        "hmac_signature": "89a65922a64177f6d19a322a8cdd29d631527947c13cc1f93b978f7d5b28392a"
+        "key_version": 2,
+        "nonce": "20202020-2020-2020-2020-202020202020",
+        "issued_at": "2026-07-10T12:00:00Z",
+        "hmac_signature": "fdf1fda4554a60e8fbb773543ca829314eb240115759cb3562aa10836286ccd3"
       },
       "expected_valid": false,
       "note": "Same body/signature as audit_event_valid but verified against a different signing key (hex-decodes to 'wrong-key-for-test-only') — proves the wrong key is rejected."
@@ -74,7 +87,10 @@
         "tenant_id": "22222222-2222-2222-2222-222222222222",
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "read",
-        "resource_id": "44444444-4444-4444-4444-444444444444"
+        "resource_id": "44444444-4444-4444-4444-444444444444",
+        "key_version": 2,
+        "nonce": "30303030-3030-3030-3030-303030303030",
+        "issued_at": "2026-07-10T12:00:00Z"
       },
       "expected_valid": false,
       "note": "hmac_signature field entirely absent — strict mode default (CONTRACT.md §8.3) rejects, never silently accepts."
@@ -89,6 +105,9 @@
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "read",
         "resource_id": "44444444-4444-4444-4444-444444444444",
+        "key_version": 2,
+        "nonce": "40404040-4040-4040-4040-404040404040",
+        "issued_at": "2026-07-10T12:00:00Z",
         "hmac_signature": "not-hex-zzzz"
       },
       "expected_valid": false,
@@ -104,6 +123,9 @@
         "subject_id": "33333333-3333-3333-3333-333333333333",
         "action": "read",
         "resource_id": "44444444-4444-4444-4444-444444444444",
+        "key_version": 2,
+        "nonce": "50505050-5050-5050-5050-505050505050",
+        "issued_at": "2026-07-10T12:00:00Z",
         "hmac_signature": "1cec2f"
       },
       "expected_valid": false,

@@ -28,8 +28,8 @@ function axiosErrorShapedCause(): unknown {
   };
 }
 
-describe('sanitizeAxiosError (CR-04, D-16)', () => {
-  it('strips set-cookie (case-insensitive) from response.headers, preserving other fields', () => {
+describe('sanitizeAxiosError (CR-04, D-16, X-3 allowlist)', () => {
+  it('redacts set-cookie (case-insensitive) from response.headers, preserving allowlisted fields', () => {
     const cause = axiosErrorShapedCause();
     const sanitized = sanitizeAxiosError(cause) as {
       message: string;
@@ -39,15 +39,35 @@ describe('sanitizeAxiosError (CR-04, D-16)', () => {
     expect(sanitized).not.toBe(cause);
     expect(sanitized.message).toBe('Request failed with status code 500');
     expect(sanitized.response.status).toBe(500);
+    // content-type is on the allowlist -> preserved verbatim.
     expect(sanitized.response.headers['content-type']).toBe('application/json');
-    expect(sanitized.response.headers['set-cookie']).toBeUndefined();
+    // set-cookie is NOT on the allowlist -> redacted to the placeholder.
+    expect(sanitized.response.headers['set-cookie']).toBe('[REDACTED]');
     expect(sanitized.response.data).toEqual({ error: 'internal_error' });
+  });
+
+  it('redacts a custom sensitive header not on any denylist (X-3: X-Auth-Token)', () => {
+    const cause = {
+      response: {
+        headers: {
+          'x-auth-token': 'super-secret-custom-token',
+          'content-type': 'application/json',
+        },
+      },
+    };
+    const sanitized = sanitizeAxiosError(cause) as { response: { headers: Record<string, unknown> } };
+    // A denylist of {set-cookie, authorization, cookie} would have let this
+    // survive; the allowlist redacts it.
+    expect(sanitized.response.headers['x-auth-token']).toBe('[REDACTED]');
+    // ...while a known-safe header is preserved.
+    expect(sanitized.response.headers['content-type']).toBe('application/json');
   });
 
   it('does not mutate the original input object', () => {
     const cause = axiosErrorShapedCause() as { response: { headers: Record<string, unknown> } };
     sanitizeAxiosError(cause);
     expect(cause.response.headers['set-cookie']).toBeDefined();
+    expect(cause.response.headers['set-cookie']).not.toBe('[REDACTED]');
   });
 
   it('passes through non-response-bearing causes unchanged (plain Error)', () => {
@@ -61,15 +81,17 @@ describe('sanitizeAxiosError (CR-04, D-16)', () => {
     expect(sanitizeAxiosError(null)).toBeNull();
   });
 
-  it('handles an uppercase Set-Cookie header key too', () => {
+  it('handles an uppercase Set-Cookie header key too (case-insensitive allowlist)', () => {
     const cause = {
       response: {
-        headers: { 'Set-Cookie': ['axiam_access=secret'], 'X-Other': 'kept' },
+        headers: { 'Set-Cookie': ['axiam_access=secret'], 'X-Request-Id': 'req-1' },
       },
     };
     const sanitized = sanitizeAxiosError(cause) as { response: { headers: Record<string, unknown> } };
-    expect(sanitized.response.headers['Set-Cookie']).toBeUndefined();
-    expect(sanitized.response.headers['X-Other']).toBe('kept');
+    // Non-allowlisted (any casing) -> redacted.
+    expect(sanitized.response.headers['Set-Cookie']).toBe('[REDACTED]');
+    // x-request-id is allowlisted regardless of header-key casing.
+    expect(sanitized.response.headers['X-Request-Id']).toBe('req-1');
   });
 });
 

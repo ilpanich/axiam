@@ -11,9 +11,12 @@ dimensions:
    **security profiles** (from plaintext HTTP up to mTLS with client-certificate
    authentication and TLS 1.3-only), measuring the cost of stronger security.
 
-It also includes **per-SDK client-side benchmarks** so that, as the AXIAM SDKs
-(Rust, TypeScript, Python, Java, C#, PHP, Go — see `feature/phase-17`) land, each
-one's client overhead can be measured against the raw protocol baseline.
+It also includes **per-SDK client-side benchmarks**, so each official AXIAM SDK's
+(Rust, TypeScript, Python, Java, C#, PHP, Go — `sdks/{rust,typescript,python,java,
+csharp,php,go}`) client overhead can be measured against the raw protocol
+baseline. All 7 SDKs are implemented; the Python and TypeScript bench harnesses
+are wired to their SDKs, the rest have bench glue pending (see
+`sdk/README.md`).
 
 ## Why a custom framework?
 
@@ -63,7 +66,8 @@ benchmarks/
 │   ├── token_refresh.js
 │   ├── jwks_fetch.js
 │   ├── userinfo.js
-│   └── authz_check_grpc.js
+│   ├── authz_check_grpc.js
+│   └── authz_batch_grpc.js
 ├── resource/                 # resource-consumption sampling
 │   ├── sampler.sh            # docker stats → CSV
 │   └── cadvisor-compose.yml  # optional richer telemetry
@@ -118,13 +122,24 @@ profile definitions.
 
 | Component                         | State                                                        |
 |-----------------------------------|--------------------------------------------------------------|
-| k6 protocol scenarios             | Implemented (HTTP); gRPC authz scenario implemented           |
+| k6 protocol scenarios             | Implemented (HTTP); gRPC authz check + batch scenarios implemented |
 | AXIAM target + seeding            | Implemented (wraps `docker-compose.prod.yml`)                 |
 | Keycloak / Zitadel targets        | Implemented (reference configs)                               |
 | Security profile matrix           | Implemented (p0–p3); mTLS requires per-target cert wiring     |
 | Resource sampler + report         | Implemented (stdlib python, no external deps)                 |
-| SDK client benchmarks             | Scaffolded behind `HARNESS-SPEC.md`; fill in as SDKs land     |
+| SDK client benchmarks             | Python/TypeScript wired to their SDKs; Rust/Go/Java/C#/PHP bench glue pending (SDKs themselves are implemented — see `sdk/README.md`) |
+| AMQP async-authz benchmarking     | Out of scope for v1.0-beta (see below)                        |
 
-> The SDK directories are intentionally scaffolds: the SDKs themselves are still
-> under development on `feature/phase-17`. Each scaffold documents and emits the
-> shared result contract so wiring a real SDK in later is a drop-in.
+> The five unwired SDK bench directories are scaffolds: the corresponding SDK is
+> already implemented (`sdks/<lang>`), only the bench entrypoint is pending — see
+> each language's `sdk/<lang>/TODO.md`. `sdk/HARNESS-SPEC.md` documents the shared
+> result contract every bench (wired or pending) emits.
+
+## Out of scope (v1.0-beta)
+
+**AMQP async-authz benchmarking** (server `axiam-amqp` + the Go/Python/TypeScript
+SDKs' AMQP modules) is deliberately deferred. k6 has no AMQP executor/protocol
+plugin, so measuring the async-authz-over-AMQP flow needs a custom load harness
+(publish decision requests, consume results, measure end-to-end latency and
+consumer throughput) rather than a k6 scenario. This is planned as a follow-up,
+not part of the current `scenarios/`/`sdk/` frameworks.

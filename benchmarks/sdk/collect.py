@@ -9,12 +9,20 @@ import json
 import os
 import sys
 
-# SDK op key -> server scenario name, for overhead deltas.
+# SDK op key -> server scenario name, for overhead deltas. Only ops with a
+# genuinely comparable wire scenario are mapped (see ../HARNESS-SPEC.md
+# "Comparing SDK overhead"): `login` hits the same /api/v1/auth/login path
+# both sides. `refresh` has no exact counterpart (the SDK's refresh() calls
+# /api/v1/auth/refresh; token_refresh.js exercises the OAuth2 refresh_token
+# grant instead) so it is intentionally left unmapped. `check_access`/
+# `batch_check` are REST in every SDK, while the closest k6 scenarios
+# (authz_check_grpc/authz_batch_grpc) measure gRPC — those scenarios already
+# flag themselves NON-COMPARATIVE, so any overhead shown for these two is
+# approximate until a REST-based k6 authz scenario exists.
 OP_TO_SCENARIO = {
-    "client_credentials": "oauth2_client_credentials",
-    "introspect": "token_introspection",
-    "userinfo": "userinfo",
-    "authz_check": "authz_check_grpc",
+    "login": "oauth2_password_login",
+    "check_access": "authz_check_grpc",
+    "batch_check": "authz_batch_grpc",
 }
 
 
@@ -77,9 +85,10 @@ def build(results, recs):
                             "p95 overhead vs wire(ms)"], rows), ""]
 
     if pending:
-        lines += ["## Pending (SDK not yet wired)", "",
-                  "These scaffolds are ready; fill them in as the SDKs land on "
-                  "`feature/phase-17`.", ""]
+        lines += ["## Pending (bench glue not yet wired)", "",
+                  "The SDK itself is implemented for each of these languages; "
+                  "only the bench entrypoint is outstanding — see each "
+                  "language's `sdk/<lang>/TODO.md`.", ""]
         lines += [md_table(["sdk", "note"],
                            [[r["sdk"], r.get("notes", "")] for r in pending]), ""]
     return "\n".join(lines)

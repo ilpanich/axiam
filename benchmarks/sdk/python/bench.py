@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""AXIAM Python SDK benchmark (reference scaffold).
+"""AXIAM Python SDK benchmark (reference harness, wired to axiam_sdk).
 
-The timing harness is complete; only the SDK calls are TODO, because the Python
-SDK is still under development (feature/phase-17, T17.3). When it lands:
-`pip install axiam-sdk`, implement the four ops, and set SDK_WIRED = True. Keep
-the stdout JSON contract (axiam.sdk-bench/v1) intact.
+Times ``axiam_sdk.AxiamClient``'s canonical CONTRACT.md §1 operations —
+``login``, ``refresh``, ``check_access``, ``batch_check`` — against a running,
+seeded AXIAM target. ``oauth2_token``/``introspect``/``userinfo`` are
+protocol-level ops with no SDK wrapper (see ../HARNESS-SPEC.md) and are not
+measured here. Keep the stdout JSON contract (axiam.sdk-bench/v1) intact.
 
 Run: python3 bench.py   (or: just sdk-bench sdk=python)
 """
 import concurrent.futures as cf
 import json
 import os
+import platform
 import time
 
 ITER = int(os.environ.get("SDK_BENCH_ITERATIONS", "2000"))
@@ -20,10 +22,23 @@ CONC = int(os.environ.get("SDK_BENCH_CONCURRENCY", "16"))
 CFG = {
     "base_url": f"{os.environ.get('BENCH_SCHEME','http')}://"
                 f"{os.environ.get('BENCH_HOST','localhost')}:{os.environ.get('BENCH_PORT','8090')}",
-    "tenant_id": os.environ.get("BENCH_TENANT_ID", ""),
-    "client_id": os.environ.get("BENCH_CLIENT_ID", "bench-client"),
-    "client_secret": os.environ.get("BENCH_CLIENT_SECRET", ""),
+    "tenant_slug": os.environ.get("BENCH_TENANT_SLUG", "default"),
+    "username": os.environ.get("BENCH_USERNAME", "benchuser"),
+    "password": os.environ.get("BENCH_PASSWORD", "Bench@User123!"),
+    "action": os.environ.get("BENCH_ACTION", "read"),
+    "resource_id": os.environ.get("BENCH_RESOURCE_ID", "bench-resource"),
 }
+
+OP_KEYS = ("login", "refresh", "check_access", "batch_check")
+
+try:
+    from axiam_sdk import AccessCheck, AxiamClient
+
+    SDK_WIRED = True
+    SDK_IMPORT_ERROR = None
+except ImportError as exc:  # SDK not installed in this environment
+    SDK_WIRED = False
+    SDK_IMPORT_ERROR = str(exc)
 
 
 def pct(arr, p):
@@ -36,27 +51,42 @@ def pct(arr, p):
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
 
 
-# ---------------------------------------------------------------------------
-# TODO(feature/phase-17 T17.3): build the client and implement each op.
-#   from axiam_sdk import AxiamClient
-#   client = AxiamClient(base_url=CFG["base_url"], tenant_id=CFG["tenant_id"],
-#                        client_id=CFG["client_id"], client_secret=CFG["client_secret"])
-#   OPS = {
-#     "client_credentials": lambda tok: client.auth.client_credentials(scope="openid"),
-#     "introspect":        lambda tok: client.tokens.introspect(tok),
-#     "userinfo":          lambda tok: client.oidc.userinfo(tok),
-#     "authz_check":       lambda tok: client.authz.check(action="read", resource_id="bench"),
-#   }
-SDK_WIRED = False
-OPS = None
-# ---------------------------------------------------------------------------
+def build_ops():
+    """Build one logged-in AxiamClient and return {op_key: zero-arg fn}.
+
+    ``login`` builds and discards its own short-lived client per call (a
+    fresh, unauthenticated session per iteration mirrors what the op
+    measures); ``refresh``/``check_access``/``batch_check`` share one
+    already-authenticated client — refresh is routed through the SDK's
+    single-flight guard, so concurrent callers are safe.
+    """
+    client = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"])
+    client.login(CFG["username"], CFG["password"])
+    checks = [
+        AccessCheck(action=CFG["action"], resource_id=f"{CFG['resource_id']}-{i}")
+        for i in range(3)
+    ]
+
+    def do_login():
+        fresh = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"])
+        try:
+            fresh.login(CFG["username"], CFG["password"])
+        finally:
+            fresh.close()
+
+    return {
+        "login": do_login,
+        "refresh": client.refresh,
+        "check_access": lambda: client.check_access(CFG["action"], CFG["resource_id"]),
+        "batch_check": lambda: client.batch_check(checks),
+    }
 
 
 def time_op(fn):
     lat, errors = [], 0
     for _ in range(WARMUP):
         try:
-            fn(None)
+            fn()
         except Exception:
             errors += 1
     start = time.perf_counter()
@@ -64,7 +94,7 @@ def time_op(fn):
     def one(_):
         t0 = time.perf_counter()
         try:
-            fn(None)
+            fn()
             return (time.perf_counter() - t0) * 1000.0
         except Exception:
             return None
@@ -80,27 +110,36 @@ def time_op(fn):
             "throughput_rps": (len(lat) / secs) if secs else 0.0, "errors": errors}
 
 
-def main():
-    ops, status, notes = {}, "ok", ""
-    if not SDK_WIRED or not OPS:
-        status, notes = "pending", \
-            "SDK not yet wired — implement OPS in sdk/python/bench.py (T17.3)."
-        for k in ("client_credentials", "introspect", "userinfo", "authz_check"):
-            ops[k] = {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0, "throughput_rps": 0, "errors": 0}
-    else:
-        for k, fn in OPS.items():
-            ops[k] = time_op(fn)
-    import platform
+def zero_ops():
+    return {k: {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0, "throughput_rps": 0, "errors": 0} for k in OP_KEYS}
+
+
+def emit(status, ops, iterations, concurrency, notes):
     print(json.dumps({
         "schema": "axiam.sdk-bench/v1", "sdk": "python",
         "sdk_version": "unreleased",
         "language_runtime": f"python {platform.python_version()}",
         "target": os.environ.get("BENCH_TARGET", "axiam"),
         "profile": os.environ.get("BENCH_PROFILE", "p0-plaintext"),
-        "status": status, "iterations": ITER if status == "ok" else 0,
-        "concurrency": CONC if status == "ok" else 0,
+        "status": status, "iterations": iterations, "concurrency": concurrency,
         "ops": ops, "client_cpu_ms_total": 0, "client_rss_mib_peak": 0, "notes": notes,
     }, indent=2))
+
+
+def main():
+    if not SDK_WIRED:
+        emit("pending", zero_ops(), 0, 0,
+             f"axiam_sdk not installed — pip install axiam-sdk ({SDK_IMPORT_ERROR}).")
+        return
+
+    try:
+        ops_fns = build_ops()
+    except Exception as exc:  # server not running / seed missing / auth failed
+        emit("error", zero_ops(), 0, 0, f"server unreachable or setup failed: {exc}")
+        return
+
+    ops = {k: time_op(fn) for k, fn in ops_fns.items()}
+    emit("ok", ops, ITER, CONC, "")
 
 
 if __name__ == "__main__":

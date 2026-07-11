@@ -55,11 +55,11 @@ else
   SCENARIOS=("$SCENARIO")
 fi
 
-# gRPC authz scenario is AXIAM-only; drop it for other targets.
+# gRPC authz scenarios are AXIAM-only; drop them for other targets.
 filter_scenarios() {
   local out=()
   for s in "${SCENARIOS[@]}"; do
-    if [ "$s" = "authz_check_grpc.js" ] && [ "$TARGET" != "axiam" ]; then
+    if { [ "$s" = "authz_check_grpc.js" ] || [ "$s" = "authz_batch_grpc.js" ]; } && [ "$TARGET" != "axiam" ]; then
       echo "[run] skipping $s (AXIAM-only) for target $TARGET"; continue
     fi
     out+=("$s")

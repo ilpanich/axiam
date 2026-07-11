@@ -50,10 +50,11 @@ Each cell produces one **result record** (JSON) under `results/`.
 | `jwks_fetch.js`                 | Fetch signing keys (RFC 7517)                  | HTTP          | Yes          |
 | `userinfo.js`                   | OIDC `/userinfo`                                | HTTP/OIDC     | Yes          |
 | `authz_check_grpc.js`           | Low-latency authorization decision             | gRPC          | AXIAM-only*  |
+| `authz_batch_grpc.js`           | Batch authorization decision                    | gRPC          | AXIAM-only*  |
 
 \* Most competitors do not expose a directly equivalent low-latency gRPC authz
-decision; this scenario is reported separately as an AXIAM capability metric, not
-a head-to-head number.
+decision (single or batch); these scenarios are reported separately as AXIAM
+capability metrics, not head-to-head numbers.
 
 ## 4. Load model
 

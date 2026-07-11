@@ -64,5 +64,5 @@ trusting any number from it.
 - Always publish alongside each figure: profile, VU level, resource caps, image
   digests, and host CPU/RAM (all embedded in each `*.meta.json`). A throughput
   number without its envelope is meaningless.
-- Never present the AXIAM-only `authz_check_grpc` number as a head-to-head — it has
-  no competitor equivalent and is labelled non-comparative.
+- Never present the AXIAM-only `authz_check_grpc`/`authz_batch_grpc` numbers as
+  head-to-head — they have no competitor equivalent and are labelled non-comparative.

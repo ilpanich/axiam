@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # _pending.sh — emit a valid axiam.sdk-bench/v1 record with status "pending".
-# Used by language scaffolds whose SDK is not yet wired (the SDKs are still under
-# development on feature/phase-17). Sourced or called as: _pending.sh <sdk-name>
+# Used by language scaffolds whose SDK (already implemented under sdks/<lang>)
+# has no bench glue wired up yet. Sourced or called as: _pending.sh <sdk-name>
 emit_pending() {
   local sdk="${1:?sdk name}"
   cat <<EOF
@@ -16,14 +16,14 @@ emit_pending() {
   "iterations": 0,
   "concurrency": 0,
   "ops": {
-    "client_credentials": {"p50_ms":0,"p95_ms":0,"p99_ms":0,"throughput_rps":0,"errors":0},
-    "introspect":         {"p50_ms":0,"p95_ms":0,"p99_ms":0,"throughput_rps":0,"errors":0},
-    "userinfo":           {"p50_ms":0,"p95_ms":0,"p99_ms":0,"throughput_rps":0,"errors":0},
-    "authz_check":        {"p50_ms":0,"p95_ms":0,"p99_ms":0,"throughput_rps":0,"errors":0}
+    "login":         {"p50_ms":0,"p95_ms":0,"p99_ms":0,"throughput_rps":0,"errors":0},
+    "refresh":       {"p50_ms":0,"p95_ms":0,"p99_ms":0,"throughput_rps":0,"errors":0},
+    "check_access":  {"p50_ms":0,"p95_ms":0,"p99_ms":0,"throughput_rps":0,"errors":0},
+    "batch_check":   {"p50_ms":0,"p95_ms":0,"p99_ms":0,"throughput_rps":0,"errors":0}
   },
   "client_cpu_ms_total": 0,
   "client_rss_mib_peak": 0,
-  "notes": "SDK not yet wired — replace the TODO in sdk/$sdk/ once the $sdk SDK lands (feature/phase-17)."
+  "notes": "SDK bench glue not yet wired — see sdk/$sdk/TODO.md (the $sdk SDK itself is implemented)."
 }
 EOF
 }

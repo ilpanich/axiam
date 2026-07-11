@@ -25,7 +25,7 @@ See [`../CONTRACT.md`](../CONTRACT.md) for the full cross-language behavioral co
 | §5 | Tenant is a required, non-optional constructor parameter | `AxiamClient`'s single public constructor (SC#1) |
 | §6 | Strict TLS always on; only escape hatch is a `customCa` chain-trust callback — no bypass surface | `Rest/AxiamHttpClientFactory.CreatePrimaryHandler` (verified by the `TlsBypassGrepGateTests` xUnit test + a CI grep gate, SC#4) |
 | §7 | `Sensitive<T>` struct redacting `ToString()`/JSON to `"[SENSITIVE]"` | `Core/Sensitive.cs` |
-| §8 | AMQP HMAC-SHA256 verify-before-handler, constant-time compare | `Amqp/Hmac.cs`, `Amqp/AxiamAmqpConsumer.cs` |
+| §8 | AMQP HMAC-SHA256 verify-before-handler, constant-time compare, NEW-4 replay protection (`key_version`/`nonce`/`issued_at`) | `Amqp/Hmac.cs`, `Amqp/AxiamAmqpConsumer.cs`, `Amqp/ReplayGuard.cs` |
 | §9 | `SemaphoreSlim(1,1)` single-flight refresh, one guard across REST + gRPC | `Auth/RefreshGuard.cs` (shared by `AxiamClient` and `Grpc/AuthInterceptor.cs`) |
 | §10 | `app.UseMiddleware<AxiamAuthMiddleware>()` + `ClaimsPrincipal` injection + policy-based `[Authorize]` | `Axiam.Sdk.AspNetCore/AxiamAuthMiddleware.cs`, `AxiamPolicyHandler.cs`/`AxiamPolicyProvider.cs` |
 

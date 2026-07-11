@@ -16,12 +16,23 @@ Ack/nack decision matrix (§8):
 
 - HMAC verification fails                -> nack(requeue=False) + security log
 - Post-verify JSON/body parse fails       -> nack(requeue=False) + security log
+- NEW-4 replay-protection check fails     -> nack(requeue=False) + security log
 - handler(event) returns ``None``         -> ack()
 - handler(event) raises :class:`ErrDrop`  -> nack(requeue=False)
 - handler(event) raises any other error   -> nack(requeue=True)
 
-The security-log message on HMAC/parse failure NEVER includes the received
-or computed signature value — only the fact of failure (§8.4).
+The security-log message on HMAC/parse/replay failure NEVER includes the
+received or computed signature, nonce, or timestamp value — only the fact
+of failure (§8.4).
+
+NEW-4 (AMQP replay protection, v2 wire protocol): once the HMAC verifies,
+the parsed body is additionally checked by
+:func:`axiam_sdk.amqp._replay.validate_freshness` — ``key_version`` must be
+>= 2, ``issued_at`` must be within a configurable clock-skew window (default
+5 minutes) of now, and ``nonce`` must not have been seen before within the
+freshness window (2x skew). A single :class:`axiam_sdk.amqp._replay.NonceStore`
+is created once per :func:`consume` call and threaded through every delivery
+so nonce dedup actually persists across the consumer's lifetime.
 """
 
 from __future__ import annotations
@@ -29,11 +40,13 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 
 from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
 
 from axiam_sdk.amqp._hmac import verify_hmac
+from axiam_sdk.amqp._replay import DEFAULT_SKEW_SECONDS, NonceStore, validate_freshness
 
 #: Default AMQP QoS prefetch count applied unless the caller overrides it
 #: via ``consume(..., prefetch=...)`` (CF-06; mirrors Go's ``defaultPrefetch
@@ -64,6 +77,10 @@ async def _on_message(
     signing_key: bytes,
     handler: Handler,
     logger: logging.Logger,
+    *,
+    nonce_store: NonceStore | None = None,
+    skew_seconds: float = DEFAULT_SKEW_SECONDS,
+    now: datetime | None = None,
 ) -> None:
     """Verify, parse, and dispatch a single delivery per the §8 matrix.
 
@@ -71,7 +88,25 @@ async def _on_message(
     ignore_processed=True)`` — this disables aio-pika's automatic
     ack-on-success-else-requeue context-manager behavior so every outcome
     below is an explicit, deliberate decision.
+
+    ``nonce_store`` SHOULD be a single instance shared across every
+    delivery on the consumer loop (:func:`consume` does this for you); if
+    omitted, a throwaway single-use store is created for this call only,
+    which makes replay detection meaningless beyond duplicate nonces
+    within this one call — acceptable for standalone/test invocations of
+    this private helper, never for production use via :func:`consume`.
+
+    ``now`` overrides the wall-clock reference used for the ``issued_at``
+    freshness check (default ``None`` uses real UTC now via
+    :func:`axiam_sdk.amqp._replay.validate_freshness`'s own default). This
+    parameter exists purely so tests can exercise the freshness check
+    deterministically against a fixed reference vector's ``issued_at``;
+    :func:`consume` never passes it, so production traffic always uses
+    the real clock.
     """
+    if nonce_store is None:
+        nonce_store = NonceStore(ttl_seconds=2 * skew_seconds)
+
     async with message.process(ignore_processed=True):
         # HMAC verification MUST happen before anything else touches the
         # body — the handler must never see an unverified message
@@ -98,6 +133,24 @@ async def _on_message(
             await message.nack(requeue=False)
             return
 
+        # NEW-4 replay protection: key_version/nonce/issued_at are already
+        # covered by the HMAC (verify_hmac is schema-agnostic and signs
+        # whatever keys arrived), but the signature alone can't express
+        # "not too old" or "not seen before" — that's checked here, after
+        # verification, never before (an attacker cannot forge these
+        # fields without also forging the signature).
+        rejection_reason = validate_freshness(
+            event, nonce_store, skew_seconds=skew_seconds, now=now
+        )
+        if rejection_reason is not None:
+            logger.warning(
+                "axiam_sdk_security: AMQP replay-protection check failed (%s); "
+                "nacking without requeue",
+                rejection_reason,
+            )
+            await message.nack(requeue=False)
+            return
+
         try:
             await handler(event)
         except ErrDrop:
@@ -120,6 +173,8 @@ async def consume(
     handler: Handler,
     *,
     prefetch: int = DEFAULT_PREFETCH,
+    skew_seconds: float = DEFAULT_SKEW_SECONDS,
+    nonce_store: NonceStore | None = None,
     logger: logging.Logger | None = None,
 ) -> None:
     """Consume ``queue_name`` on ``channel``, verifying HMAC before dispatch.
@@ -134,6 +189,16 @@ async def consume(
     tenant whose queue is being consumed (§8.1); hardcoding a signing key is
     prohibited.
 
+    NEW-4 (AMQP replay protection): ``skew_seconds`` bounds how far
+    ``issued_at`` may drift from wall-clock now (default 300s / 5 minutes)
+    before a message is rejected as stale. ``nonce_store`` is an optional
+    injectable :class:`axiam_sdk.amqp._replay.NonceStore`; if omitted, a
+    single store with TTL ``2 * skew_seconds`` is created here — once, for
+    the lifetime of this ``consume()`` call — and threaded through every
+    delivery's ``_on_message`` invocation so nonce replay detection
+    persists across the whole consumer loop rather than resetting per
+    message.
+
     ``logger`` is an injectable ``logging.Logger`` (D-15: observability
     off-by-default). If omitted, a module-level logger with a
     :class:`logging.NullHandler` is used so the consumer is silent unless
@@ -141,12 +206,21 @@ async def consume(
     """
     if logger is None:
         logger = _DEFAULT_LOGGER
+    if nonce_store is None:
+        nonce_store = NonceStore(ttl_seconds=2 * skew_seconds)
 
     await channel.set_qos(prefetch_count=prefetch)
     queue = await channel.declare_queue(queue_name, durable=True, passive=True)
 
     async def _callback(message: AbstractIncomingMessage) -> None:
-        await _on_message(message, signing_key, handler, logger)
+        await _on_message(
+            message,
+            signing_key,
+            handler,
+            logger,
+            nonce_store=nonce_store,
+            skew_seconds=skew_seconds,
+        )
 
     await queue.consume(_callback, no_ack=False, consumer_tag=CONSUMER_TAG)
 

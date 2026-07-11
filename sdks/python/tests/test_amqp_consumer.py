@@ -1,11 +1,20 @@
-"""Async AMQP consumer ack/nack decision matrix tests (CONTRACT.md §8).
+"""Async AMQP consumer ack/nack decision matrix tests (CONTRACT.md §8, NEW-4).
 
-Drives all five paths of ``axiam_sdk.amqp._consumer._on_message`` against a
+Drives all paths of ``axiam_sdk.amqp._consumer._on_message`` against a
 recording fake ``AbstractIncomingMessage`` double (no live broker) —
 mirroring Go's ``AckableDelivery``/``recordingDelivery`` seam
-(``sdks/go/amqp/consumer_test.go``). Reuses the real, server-signed HMAC
-fixture from 19-01 (``tests/fixtures/amqp_hmac_vectors.json``) for the
-valid-signature case so this plan does not hand-fabricate a signature.
+(``sdks/go/amqp/consumer_test.go``).
+
+Every message body used here is v2-shaped (``key_version=2`` + ``nonce`` +
+``issued_at``, per NEW-4 / ``crates/axiam-amqp/tests/fixtures/
+v2_reference_vectors.json``'s field order) and self-signed with a fixed
+test key via ``_sign()`` below — this file's job is exercising the ack/nack
+DECISION MATRIX itself, not proving cross-language HMAC byte-parity (that
+proof against the real server-signed v2 reference vectors, plus the NEW-4
+replay-protection reject paths, lives in ``test_amqp_v2_replay.py``).
+``issued_at`` defaults to the real wall clock at test-construction time so
+these tests satisfy NEW-4's freshness/nonce checks without injecting a
+fixed ``now``.
 """
 
 from __future__ import annotations
@@ -14,41 +23,52 @@ import hashlib
 import hmac
 import json
 import logging
-from pathlib import Path
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
 from axiam_sdk.amqp._consumer import ErrDrop, _on_message
 
-FIXTURES_PATH = Path(__file__).parent / "fixtures" / "amqp_hmac_vectors.json"
+#: Fixed HMAC signing key for this file's self-signed v2 test vectors
+#: (mirrors ``tests/conftest.py``'s ``signing_key`` fixture value).
+VALID_SIGNING_KEY = b"axiam-sdk-test-signing-key"
 
 
-def _load_valid_vector() -> dict[str, Any]:
-    with FIXTURES_PATH.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    for vector in data["vectors"]:
-        if vector["expected_valid"]:
-            return vector
-    raise AssertionError("fixtures file has no expected_valid=True vector")
-
-
-VALID_VECTOR = _load_valid_vector()
-VALID_SIGNING_KEY = bytes.fromhex(VALID_VECTOR["signing_key_hex"])
-VALID_BODY = json.dumps(VALID_VECTOR["message"], separators=(",", ":")).encode("utf-8")
-VALID_SIGNATURE_HEX = VALID_VECTOR["message"]["hmac_signature"]
+def _v2_fields(now: datetime | None = None) -> dict[str, Any]:
+    """Build the three NEW-4 signed-body fields with fresh defaults:
+    ``key_version=2``, a random ``nonce``, and ``issued_at`` = now — so a
+    message built from these fields naturally satisfies the freshness and
+    replay checks against the real wall clock unless a test overrides
+    ``now``."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return {
+        "key_version": 2,
+        "nonce": str(uuid.uuid4()),
+        "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 def _sign(signing_key: bytes, message: dict[str, Any]) -> bytes:
     """Build a wire body with a real HMAC-SHA256 signature for arbitrary
     message content, reusing the exact canonicalization axiam_sdk.amqp._hmac
-    expects (insertion order, no sort_keys) — used for the ErrDrop/other-
-    exception paths where the fixture's fixed content doesn't apply."""
+    expects (insertion order, no sort_keys)."""
     canonical = json.dumps(message, separators=(",", ":")).encode("utf-8")
     sig = hmac.new(signing_key, canonical, hashlib.sha256).hexdigest()
     signed = dict(message)
     signed["hmac_signature"] = sig
     return json.dumps(signed, separators=(",", ":")).encode("utf-8")
+
+
+VALID_MESSAGE: dict[str, Any] = {
+    "action": "read",
+    "resource_id": "44444444-4444-4444-4444-444444444444",
+    **_v2_fields(),
+}
+VALID_BODY = _sign(VALID_SIGNING_KEY, VALID_MESSAGE)
+VALID_SIGNATURE_HEX = json.loads(VALID_BODY)["hmac_signature"]
 
 
 class _RecordingProcessContext:
@@ -134,7 +154,7 @@ async def test_invalid_hmac_nacks_without_requeue_and_handler_never_called(
     security log emitted without the signature value (verify-before-handler,
     T-19-16/T-19-17)."""
     logger, handler_records = recording_logger
-    tampered = dict(VALID_VECTOR["message"])
+    tampered = json.loads(VALID_BODY)
     tampered["hmac_signature"] = "0" * len(VALID_SIGNATURE_HEX)  # wrong signature
     body = json.dumps(tampered, separators=(",", ":")).encode("utf-8")
     message = RecordingMessage(body)
@@ -162,7 +182,7 @@ async def test_handler_raises_errdrop_nacks_without_requeue(
 ) -> None:
     """Path 3: valid HMAC + handler raises ErrDrop -> nack(requeue=False)."""
     logger, _handler = recording_logger
-    body = _sign(VALID_SIGNING_KEY, {"action": "delete", "resource_id": "x"})
+    body = _sign(VALID_SIGNING_KEY, {"action": "delete", "resource_id": "x", **_v2_fields()})
     message = RecordingMessage(body)
 
     async def handler(event: dict[str, Any]) -> None:
@@ -179,7 +199,7 @@ async def test_handler_raises_other_exception_nacks_with_requeue(
 ) -> None:
     """Path 4: valid HMAC + handler raises a plain exception -> nack(requeue=True)."""
     logger, _handler = recording_logger
-    body = _sign(VALID_SIGNING_KEY, {"action": "update", "resource_id": "y"})
+    body = _sign(VALID_SIGNING_KEY, {"action": "update", "resource_id": "y", **_v2_fields()})
     message = RecordingMessage(body)
 
     async def handler(event: dict[str, Any]) -> None:

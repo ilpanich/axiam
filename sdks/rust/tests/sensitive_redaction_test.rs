@@ -88,3 +88,47 @@ fn from_http_status_maps_to_correct_category_and_never_leaks() {
         );
     }
 }
+
+/// SDK-Q02: a 403 body with both `action` and `resource_id` populates both
+/// fields on the `Authz` variant.
+#[test]
+fn from_http_status_403_extracts_action_and_resource_id() {
+    let body = r#"{"error":"authorization_denied","message":"not allowed","action":"users:get","resource_id":"3f9e2b7a-9b1a-4e9d-8b0a-1c2d3e4f5a6b"}"#;
+    let err = AxiamError::from_http_status(403, body);
+
+    match err {
+        AxiamError::Authz {
+            action,
+            resource_id,
+            ..
+        } => {
+            assert_eq!(action.as_deref(), Some("users:get"));
+            assert_eq!(
+                resource_id.as_deref(),
+                Some("3f9e2b7a-9b1a-4e9d-8b0a-1c2d3e4f5a6b")
+            );
+        }
+        other => panic!("expected AxiamError::Authz, got: {other:?}"),
+    }
+}
+
+/// SDK-Q02: a 403 body with only `action` (a global/nil-resource denial,
+/// no `resource_id` key) populates `action` and leaves `resource_id` as
+/// `None`.
+#[test]
+fn from_http_status_403_extracts_action_only_when_resource_id_absent() {
+    let body = r#"{"error":"authorization_denied","message":"not allowed","action":"users:list"}"#;
+    let err = AxiamError::from_http_status(403, body);
+
+    match err {
+        AxiamError::Authz {
+            action,
+            resource_id,
+            ..
+        } => {
+            assert_eq!(action.as_deref(), Some("users:list"));
+            assert_eq!(resource_id, None);
+        }
+        other => panic!("expected AxiamError::Authz, got: {other:?}"),
+    }
+}

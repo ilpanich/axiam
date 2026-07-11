@@ -48,6 +48,64 @@ class TestErrorFromHttpStatus:
             err = error_from_http_status(status, "x")
             assert isinstance(err, NetworkError), f"status {status} should map to NetworkError"
 
+    def test_403_body_with_action_and_resource_id_populates_authz_error(self) -> None:
+        response = httpx.Response(
+            403,
+            json={
+                "error": "authorization_denied",
+                "message": "not allowed",
+                "action": "users:get",
+                "resource_id": "8f14e45f-ceea-467e-adc8-f8a0f4b5e3c1",
+            },
+            request=httpx.Request("GET", "https://example.test/api/v1/users/1"),
+        )
+
+        err = error_from_http_status(403, "not allowed", response=response)
+
+        assert isinstance(err, AuthzError)
+        assert err.action == "users:get"
+        assert err.resource_id == "8f14e45f-ceea-467e-adc8-f8a0f4b5e3c1"
+
+    def test_403_body_with_only_action_leaves_resource_id_none(self) -> None:
+        response = httpx.Response(
+            403,
+            json={
+                "error": "authorization_denied",
+                "message": "not allowed",
+                "action": "users:list",
+            },
+            request=httpx.Request("GET", "https://example.test/api/v1/users"),
+        )
+
+        err = error_from_http_status(403, "not allowed", response=response)
+
+        assert isinstance(err, AuthzError)
+        assert err.action == "users:list"
+        assert err.resource_id is None
+
+    def test_403_without_response_leaves_action_and_resource_id_none(self) -> None:
+        err = error_from_http_status(403, "forbidden")
+
+        assert isinstance(err, AuthzError)
+        assert err.action is None
+        assert err.resource_id is None
+
+    def test_409_body_is_not_parsed_for_action_or_resource_id(self) -> None:
+        """409 (conflict) never carries the authorization_denied body shape,
+        so action/resource_id must stay None even if the body happens to
+        contain those keys."""
+        response = httpx.Response(
+            409,
+            json={"action": "should-be-ignored", "resource_id": "should-be-ignored"},
+            request=httpx.Request("POST", "https://example.test/api/v1/users"),
+        )
+
+        err = error_from_http_status(409, "conflict", response=response)
+
+        assert isinstance(err, AuthzError)
+        assert err.action is None
+        assert err.resource_id is None
+
 
 class TestErrorFromGrpcStatus:
     def test_unauthenticated_maps_to_auth_error(self) -> None:

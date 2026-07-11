@@ -170,11 +170,36 @@ def error_from_http_status(
     signature, closing the redact-before-wrap bypass this taxonomy exists to
     prevent (mirrors ``sdks/go/errors.go::newNetworkError``'s documented
     invariant).
+
+    On a 403, the server's authorization-denied body
+    (``{"error": "authorization_denied", "message": ..., "action": ...,
+    "resource_id": ...}``) is parsed from ``response`` to populate the
+    returned :class:`AuthzError`'s ``action``/``resource_id`` fields.
+    ``action`` is present when the denied action is known; ``resource_id``
+    is present only for a resource-scoped denial. Both are ``None`` when
+    absent from the body, when ``response`` is not provided, or when the
+    body is missing/not JSON/not an object.
     """
     if status == 401:
         return AuthError(message)
     if status in (403, 409):
-        return AuthzError(message)
+        action: str | None = None
+        resource_id: str | None = None
+        # Structured authorization-denied fields
+        # (``{"error": "authorization_denied", "action": ..., "resource_id": ...}``)
+        # are only emitted by the server on a 403; a 409 (conflict) body has
+        # no such shape, so only attempt to parse the body on 403. The body
+        # may be absent/non-JSON/non-dict for other 403 causes — fields stay
+        # ``None`` in that case rather than raising.
+        if status == 403 and response is not None:
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            if isinstance(body, dict):
+                action = body.get("action")
+                resource_id = body.get("resource_id")
+        return AuthzError(message, action=action, resource_id=resource_id)
 
     cause: BaseException | None = None
     if response is not None:
@@ -220,5 +245,8 @@ def error_from_grpc_status(code: object, message: str) -> Exception:
     if normalized == grpc.StatusCode.UNAUTHENTICATED:
         return AuthError(safe_message)
     if normalized == grpc.StatusCode.PERMISSION_DENIED:
+        # gRPC has no structured response body to parse (unlike the HTTP
+        # 403 path) — ``action``/``resource_id`` stay at their AuthzError
+        # defaults of None.
         return AuthzError(safe_message)
     return NetworkError(safe_message)

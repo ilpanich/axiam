@@ -111,6 +111,90 @@ public sealed class AspNetCoreMiddlewareTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
+    // --- CSRF cookie double-submit (CR: java/spring-disabled-csrf-protection, C# analog) ---
+
+    [Fact]
+    public async Task CookieAuth_StateChangingPost_WithoutCsrfHeader_Returns403()
+    {
+        var fixture = new JwksFixture();
+        var serverHandler = new FakeAxiamServerHandler(fixture.BuildJwksDocument());
+        using IHost host = await CreateHostAsync(serverHandler).ConfigureAwait(false);
+        HttpClient client = host.GetTestClient();
+        string token = fixture.SignJwt(Guid.NewGuid().ToString(), TenantId, new[] { "admin" }, DateTimeOffset.UtcNow.AddMinutes(15));
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/protected");
+        request.Headers.Add("Cookie", $"axiam_access={token}; axiam_csrf=csrf-abc");
+        // No X-CSRF-Token header attached.
+
+        HttpResponseMessage response = await client.SendAsync(request).ConfigureAwait(false);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CookieAuth_StateChangingPost_WithMatchingCsrfHeader_Returns200()
+    {
+        var fixture = new JwksFixture();
+        var serverHandler = new FakeAxiamServerHandler(fixture.BuildJwksDocument());
+        using IHost host = await CreateHostAsync(serverHandler).ConfigureAwait(false);
+        HttpClient client = host.GetTestClient();
+        string userId = Guid.NewGuid().ToString();
+        string token = fixture.SignJwt(userId, TenantId, new[] { "admin" }, DateTimeOffset.UtcNow.AddMinutes(15));
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/protected");
+        request.Headers.Add("Cookie", $"axiam_access={token}; axiam_csrf=csrf-abc");
+        request.Headers.Add("X-CSRF-Token", "csrf-abc");
+
+        HttpResponseMessage response = await client.SendAsync(request).ConfigureAwait(false);
+        string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(userId, body);
+    }
+
+    [Fact]
+    public async Task BearerAuth_StateChangingPost_WithoutCsrfHeader_Returns200()
+    {
+        var fixture = new JwksFixture();
+        var serverHandler = new FakeAxiamServerHandler(fixture.BuildJwksDocument());
+        using IHost host = await CreateHostAsync(serverHandler).ConfigureAwait(false);
+        HttpClient client = host.GetTestClient();
+        string userId = Guid.NewGuid().ToString();
+        string token = fixture.SignJwt(userId, TenantId, new[] { "admin" }, DateTimeOffset.UtcNow.AddMinutes(15));
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/protected");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        // No CSRF cookie/header at all — a Bearer-header request is CSRF-immune by
+        // construction (a cross-site attacker cannot set custom headers).
+
+        HttpResponseMessage response = await client.SendAsync(request).ConfigureAwait(false);
+        string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(userId, body);
+    }
+
+    [Fact]
+    public async Task CookieAuth_Get_WithoutCsrfHeader_Returns200()
+    {
+        var fixture = new JwksFixture();
+        var serverHandler = new FakeAxiamServerHandler(fixture.BuildJwksDocument());
+        using IHost host = await CreateHostAsync(serverHandler).ConfigureAwait(false);
+        HttpClient client = host.GetTestClient();
+        string userId = Guid.NewGuid().ToString();
+        string token = fixture.SignJwt(userId, TenantId, new[] { "admin" }, DateTimeOffset.UtcNow.AddMinutes(15));
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/protected");
+        request.Headers.Add("Cookie", $"axiam_access={token}");
+        // No CSRF cookie/header — a safe method must not require one.
+
+        HttpResponseMessage response = await client.SendAsync(request).ConfigureAwait(false);
+        string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(userId, body);
+    }
+
     /// <summary>
     /// Builds an in-memory ASP.NET Core 8+ host (<see cref="TestServer"/>) wiring
     /// <c>AddAxiamAspNetCore</c>, <c>UseMiddleware&lt;AxiamAuthMiddleware&gt;()</c>, an
@@ -163,6 +247,13 @@ public sealed class AspNetCoreMiddlewareTests
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync("ok").ConfigureAwait(false);
                         }).RequireAuthorization("documents:read");
+
+                        endpoints.MapPost("/protected", async context =>
+                        {
+                            string? userId = context.User.FindFirst("user_id")?.Value;
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(userId ?? string.Empty).ConfigureAwait(false);
+                        }).RequireAuthorization();
                     });
                 });
             });

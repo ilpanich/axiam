@@ -243,4 +243,82 @@ final class SymfonyAuthSubscriberTest extends TestCase
 
         self::assertSame(VoterInterface::ACCESS_ABSTAIN, $result);
     }
+
+    // --- CSRF (cookie double-submit, CONTRACT.md §3): cookie-auth state-changing request
+    // --- without X-CSRF-Token header -> 403, never reaches AxiamClient ---------------
+
+    public function testCookieAuthPostWithoutCsrfHeaderReturns403(): void
+    {
+        // Empty MockHandler queue: the CSRF check must reject BEFORE ever calling
+        // AxiamClient::verifyLocallyOrFallback() (no HTTP call attempted).
+        $client = $this->clientWith([]);
+        $subscriber = new AxiamAuthSubscriber($client, self::FIXTURE_TENANT);
+
+        $request = Request::create('/documents/1', 'POST');
+        $request->cookies->set('axiam_access', $this->fixtureJwt());
+        $request->cookies->set('axiam_csrf', 'csrf-secret-value');
+        $event = $this->requestEvent($request);
+        $subscriber->onKernelRequest($event);
+
+        self::assertTrue($event->hasResponse());
+        $response = $event->getResponse();
+        self::assertNotNull($response);
+        self::assertSame(403, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('AuthzError', $body['error']);
+        self::assertNull($request->attributes->get('axiam_user'));
+    }
+
+    // --- CSRF: cookie-auth state-changing request with matching X-CSRF-Token header + --
+    // --- axiam_csrf cookie -> passes auth (does not short-circuit) ------------------
+
+    public function testCookieAuthPostWithMatchingCsrfTokenPasses(): void
+    {
+        $client = $this->clientWith([$this->discoveryResponse(), $this->jwksResponse()]);
+        $subscriber = new AxiamAuthSubscriber($client, self::FIXTURE_TENANT);
+
+        $request = Request::create('/documents/1', 'POST');
+        $request->cookies->set('axiam_access', $this->fixtureJwt());
+        $request->cookies->set('axiam_csrf', 'csrf-secret-value');
+        $request->headers->set('X-CSRF-Token', 'csrf-secret-value');
+        $event = $this->requestEvent($request);
+        $subscriber->onKernelRequest($event);
+
+        self::assertFalse($event->hasResponse(), 'a matching CSRF token must never short-circuit the request');
+        self::assertSame(
+            ['user_id' => 'user-fixture-0001', 'tenant_id' => self::FIXTURE_TENANT, 'roles' => []],
+            $request->attributes->get('axiam_user'),
+        );
+    }
+
+    // --- CSRF: Bearer-auth state-changing request without CSRF -> passes (Bearer is ---
+    // --- immune by construction; a cross-site attacker cannot set custom headers) ---
+
+    public function testBearerAuthPostWithoutCsrfPasses(): void
+    {
+        $client = $this->clientWith([$this->discoveryResponse(), $this->jwksResponse()]);
+        $subscriber = new AxiamAuthSubscriber($client, self::FIXTURE_TENANT);
+
+        $request = Request::create('/documents/1', 'POST');
+        $request->headers->set('Authorization', 'Bearer ' . $this->fixtureJwt());
+        $event = $this->requestEvent($request);
+        $subscriber->onKernelRequest($event);
+
+        self::assertFalse($event->hasResponse(), 'Bearer-sourced credentials never require CSRF validation');
+    }
+
+    // --- CSRF: cookie-auth safe-method (GET) request without CSRF -> passes ----------
+
+    public function testCookieAuthGetWithoutCsrfPasses(): void
+    {
+        $client = $this->clientWith([$this->discoveryResponse(), $this->jwksResponse()]);
+        $subscriber = new AxiamAuthSubscriber($client, self::FIXTURE_TENANT);
+
+        $request = Request::create('/documents/1', 'GET');
+        $request->cookies->set('axiam_access', $this->fixtureJwt());
+        $event = $this->requestEvent($request);
+        $subscriber->onKernelRequest($event);
+
+        self::assertFalse($event->hasResponse(), 'a safe method never requires CSRF validation');
+    }
 }

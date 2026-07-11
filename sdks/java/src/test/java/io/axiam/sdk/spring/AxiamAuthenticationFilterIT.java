@@ -14,6 +14,7 @@ import com.nimbusds.jwt.SignedJWT;
 import io.axiam.sdk.internal.JwksVerifier;
 
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.http.Cookie;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -131,6 +132,101 @@ class AxiamAuthenticationFilterIT {
             assertTrue(chain.invoked, "an unauthenticated request must reach the chain so Spring Security's own"
                     + " access-control rules can 401/403 it");
             assertNull(SecurityContextHolder.getContext().getAuthentication());
+        }
+    }
+
+    // --- CSRF cookie double-submit (CR: java/spring-disabled-csrf-protection) ---
+
+    @Test
+    void cookieAuthenticatedStatePassingPostWithoutCsrfHeaderIsRejected() throws Exception {
+        OctetKeyPair keyPair = generateEd25519KeyPair("key-1");
+        try (MockWebServer server = startJwksServer(keyPair)) {
+            AxiamAuthenticationFilter filter = filterFor(server, CONFIGURED_TENANT);
+            String token = signEdDsa(keyPair, claims(CONFIGURED_TENANT, 900_000));
+
+            MockHttpServletRequest request = new MockHttpServletRequest();
+            request.setMethod("POST");
+            request.setCookies(new Cookie("axiam_access", token), new Cookie("axiam_csrf", "csrf-abc"));
+            // No X-CSRF-Token header attached.
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            RecordingFilterChain chain = new RecordingFilterChain();
+
+            filter.doFilter(request, response, chain);
+
+            assertFalse(chain.invoked, "a cookie-authenticated state-changing request without a CSRF header must be rejected");
+            assertEquals(403, response.getStatus());
+            assertNull(SecurityContextHolder.getContext().getAuthentication());
+            assertTrue(response.getContentAsString().contains("csrf_validation_failed"));
+        }
+    }
+
+    @Test
+    void cookieAuthenticatedPostWithMatchingCsrfHeaderPassesAuth() throws Exception {
+        OctetKeyPair keyPair = generateEd25519KeyPair("key-1");
+        try (MockWebServer server = startJwksServer(keyPair)) {
+            AxiamAuthenticationFilter filter = filterFor(server, CONFIGURED_TENANT);
+            String token = signEdDsa(keyPair, claims(CONFIGURED_TENANT, 900_000));
+
+            MockHttpServletRequest request = new MockHttpServletRequest();
+            request.setMethod("POST");
+            request.setCookies(new Cookie("axiam_access", token), new Cookie("axiam_csrf", "csrf-abc"));
+            request.addHeader("X-CSRF-Token", "csrf-abc");
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            RecordingFilterChain chain = new RecordingFilterChain();
+
+            filter.doFilter(request, response, chain);
+
+            assertTrue(chain.invoked, "a matching double-submit CSRF token must let the request through");
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            assertEquals("user-1", auth.getName());
+            assertEquals(200, response.getStatus());
+        }
+    }
+
+    @Test
+    void bearerAuthenticatedPostWithoutCsrfHeaderPassesAuth() throws Exception {
+        OctetKeyPair keyPair = generateEd25519KeyPair("key-1");
+        try (MockWebServer server = startJwksServer(keyPair)) {
+            AxiamAuthenticationFilter filter = filterFor(server, CONFIGURED_TENANT);
+            String token = signEdDsa(keyPair, claims(CONFIGURED_TENANT, 900_000));
+
+            MockHttpServletRequest request = new MockHttpServletRequest();
+            request.setMethod("POST");
+            request.addHeader("Authorization", "Bearer " + token);
+            // No CSRF cookie/header at all — a Bearer-header request is CSRF-immune
+            // by construction (a cross-site attacker cannot set custom headers).
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            RecordingFilterChain chain = new RecordingFilterChain();
+
+            filter.doFilter(request, response, chain);
+
+            assertTrue(chain.invoked, "Bearer-header auth must never require a CSRF token");
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            assertEquals("user-1", auth.getName());
+            assertEquals(200, response.getStatus());
+        }
+    }
+
+    @Test
+    void cookieAuthenticatedGetWithoutCsrfHeaderPassesAuth() throws Exception {
+        OctetKeyPair keyPair = generateEd25519KeyPair("key-1");
+        try (MockWebServer server = startJwksServer(keyPair)) {
+            AxiamAuthenticationFilter filter = filterFor(server, CONFIGURED_TENANT);
+            String token = signEdDsa(keyPair, claims(CONFIGURED_TENANT, 900_000));
+
+            MockHttpServletRequest request = new MockHttpServletRequest();
+            request.setMethod("GET");
+            request.setCookies(new Cookie("axiam_access", token));
+            // No CSRF cookie/header — a safe method must not require one.
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            RecordingFilterChain chain = new RecordingFilterChain();
+
+            filter.doFilter(request, response, chain);
+
+            assertTrue(chain.invoked, "a GET must never require a CSRF token, even when cookie-authenticated");
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            assertEquals("user-1", auth.getName());
+            assertEquals(200, response.getStatus());
         }
     }
 

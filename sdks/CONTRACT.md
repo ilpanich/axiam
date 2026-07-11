@@ -135,6 +135,25 @@ that matches your SDK's HTTP client model:
 hardcoded (non-dynamic, ReDoS-safe) regex against `document.cookie`, store nothing beyond
 that read — no `localStorage`/`sessionStorage` caching of the token value.
 
+### §3a Resource-Server Middleware CSRF (inbound)
+
+Every SDK's resource-server middleware (the component that authenticates requests to the
+*consuming application*, not to AXIAM) MUST additionally enforce the cookie double-submit
+check locally when — and only when — the credential it accepted was sourced from the
+`axiam_access` cookie rather than an `Authorization: Bearer` header, and the request
+method is state-changing (anything other than `GET`, `HEAD`, `OPTIONS`). The check: the
+`X-CSRF-Token` request header must be present and equal (constant-time comparison) to the
+`axiam_csrf` cookie value; reject with 403 on failure.
+
+Bearer-header-authenticated requests are exempt — a cross-site attacker cannot set custom
+request headers, so they are not subject to browser-driven CSRF. Cookie-sourced requests
+are not exempt: in any same-site deployment where the `axiam_access` cookie reaches the
+consuming application, the non-`httpOnly` `axiam_csrf` cookie does too. This clause is
+distinct from and independent of §3's client-to-AXIAM-server CSRF forwarding: the
+resource-server middleware must not assume the host framework's own CSRF protection is
+active (frameworks such as Spring or ASP.NET Core commonly disable it to avoid
+double-protecting Bearer clients).
+
 ---
 
 ## §4 Cookie-Jar Requirement

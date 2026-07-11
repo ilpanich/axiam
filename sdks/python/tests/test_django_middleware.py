@@ -336,6 +336,89 @@ def test_cookie_fallback_extraction(eddsa_keypair, bound_verifier) -> None:
     assert request.axiam_user.user_id == "user-1"
 
 
+def test_cookie_auth_post_without_csrf_header_yields_403(eddsa_keypair, bound_verifier) -> None:
+    """CSRF double-submit (CONTRACT.md §3): a cookie-sourced credential on a
+    state-changing method with no X-CSRF-Token header MUST be rejected —
+    otherwise a cross-site form POST would ride the same-site axiam_access
+    cookie and get authenticated (CSRF)."""
+    private_key, _jwk_dict = eddsa_keypair
+    middleware = AxiamAuthMiddleware(_sync_get_response)
+    factory = RequestFactory()
+
+    token = _sign_eddsa_token(
+        private_key, "test-kid-1", {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600}
+    )
+    request = factory.post("/")
+    request.COOKIES["axiam_access"] = token
+    request.COOKIES["axiam_csrf"] = "some-csrf-value"
+
+    response = middleware(request)
+
+    assert response.status_code == 403
+    import json
+
+    body = json.loads(response.content)
+    assert body["error"] == "authorization_denied"
+    assert not hasattr(request, "axiam_user")
+
+
+def test_cookie_auth_post_with_matching_csrf_header_passes(eddsa_keypair, bound_verifier) -> None:
+    """A cookie-sourced credential on a state-changing method with a
+    matching X-CSRF-Token header + axiam_csrf cookie passes auth."""
+    private_key, _jwk_dict = eddsa_keypair
+    middleware = AxiamAuthMiddleware(_sync_get_response)
+    factory = RequestFactory()
+
+    token = _sign_eddsa_token(
+        private_key, "test-kid-1", {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600}
+    )
+    request = factory.post("/", HTTP_X_CSRF_TOKEN="matching-csrf-value")
+    request.COOKIES["axiam_access"] = token
+    request.COOKIES["axiam_csrf"] = "matching-csrf-value"
+
+    response = middleware(request)
+
+    assert response.status_code == 200
+    assert request.axiam_user.user_id == "user-1"
+
+
+def test_bearer_auth_post_without_csrf_passes(eddsa_keypair, bound_verifier) -> None:
+    """Bearer-header requests are CSRF-immune by construction (a cross-site
+    attacker cannot set arbitrary request headers) — no CSRF check applies."""
+    private_key, _jwk_dict = eddsa_keypair
+    middleware = AxiamAuthMiddleware(_sync_get_response)
+    factory = RequestFactory()
+
+    token = _sign_eddsa_token(
+        private_key, "test-kid-1", {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600}
+    )
+    request = factory.post("/", HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    response = middleware(request)
+
+    assert response.status_code == 200
+    assert request.axiam_user.user_id == "user-1"
+
+
+def test_cookie_auth_get_without_csrf_passes(eddsa_keypair, bound_verifier) -> None:
+    """Safe methods (GET/HEAD/OPTIONS) never require the CSRF double-submit
+    check, even for cookie-sourced credentials."""
+    private_key, _jwk_dict = eddsa_keypair
+    middleware = AxiamAuthMiddleware(_sync_get_response)
+    factory = RequestFactory()
+
+    token = _sign_eddsa_token(
+        private_key, "test-kid-1", {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600}
+    )
+    request = factory.get("/")
+    request.COOKIES["axiam_access"] = token
+
+    response = middleware(request)
+
+    assert response.status_code == 200
+    assert request.axiam_user.user_id == "user-1"
+
+
 def test_sync_capable_and_async_capable_dispatch(bound_verifier) -> None:
     sync_middleware = AxiamAuthMiddleware(_sync_get_response)
     assert sync_middleware.sync_capable is True

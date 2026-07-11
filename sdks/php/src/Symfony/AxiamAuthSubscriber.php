@@ -28,9 +28,27 @@ if (interface_exists(\Symfony\Component\EventDispatcher\EventSubscriberInterface
      * of scope this phase). A consuming app must tag this class
      * `kernel.event_subscriber` in its own `config/services.yaml` in addition to listing
      * {@see AxiamBundle} in `config/bundles.php` — see `examples/symfony_app/`.
+     *
+     * CSRF (cookie double-submit, CONTRACT.md §3): when the credential was sourced from
+     * the `axiam_access` COOKIE (not the `Authorization` header) and the request method
+     * is state-changing (anything other than GET/HEAD/OPTIONS), this subscriber
+     * additionally requires the `X-CSRF-Token` request header to be present and equal
+     * (constant-time) to the `axiam_csrf` cookie value, short-circuiting with 403 on
+     * mismatch/absence. Bearer-header requests are CSRF-immune by construction — a
+     * cross-site attacker cannot set arbitrary request headers — but a cookie
+     * automatically attached by the browser is not, and in any same-site deployment
+     * where `axiam_access` reaches this app, the non-httpOnly `axiam_csrf` cookie does
+     * too. This mirrors, locally, the same double-submit check the AXIAM server performs
+     * on its own endpoints (§3).
      */
     final class AxiamAuthSubscriber implements \Symfony\Component\EventDispatcher\EventSubscriberInterface
     {
+        private const CSRF_COOKIE_NAME = 'axiam_csrf';
+        private const CSRF_HEADER_NAME = 'X-CSRF-Token';
+
+        /** @var list<string> */
+        private const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
+
         public function __construct(
             private readonly AxiamClient $client,
             private readonly string $tenant,
@@ -47,12 +65,24 @@ if (interface_exists(\Symfony\Component\EventDispatcher\EventSubscriberInterface
         {
             $request = $event->getRequest();
 
-            $token = $this->extractToken($request);
-            if ($token === null) {
+            $credential = $this->extractToken($request);
+            if ($credential === null) {
                 $event->setResponse($this->unauthorized('missing authentication credentials'));
 
                 return;
             }
+
+            if (
+                $credential['fromCookie']
+                && !in_array(strtoupper($request->getMethod()), self::SAFE_METHODS, true)
+                && !$this->isCsrfValid($request)
+            ) {
+                $event->setResponse($this->csrfValidationFailed());
+
+                return;
+            }
+
+            $token = $credential['token'];
 
             // §10: "read the X-Tenant-ID header (or use the client's configured tenant)".
             $tenantId = $request->headers->get('X-Tenant-ID') ?: $this->tenant;
@@ -88,14 +118,20 @@ if (interface_exists(\Symfony\Component\EventDispatcher\EventSubscriberInterface
          * middleware.py`'s `_extract_token`, `sdks/go/middleware/nethttp.go`'s
          * `extractToken`), a Shared Pattern documented across every framework bridge in
          * this repository.
+         *
+         * Returns which source the credential came from so {@see self::onKernelRequest()}
+         * can gate state-changing cookie-sourced requests behind the CSRF double-submit
+         * check — a Bearer-header credential never needs that check (§3).
+         *
+         * @return array{token: string, fromCookie: bool}|null
          */
-        private function extractToken(\Symfony\Component\HttpFoundation\Request $request): ?string
+        private function extractToken(\Symfony\Component\HttpFoundation\Request $request): ?array
         {
             $header = (string) $request->headers->get('Authorization', '');
             if ($header !== '') {
                 [$scheme, $credentials] = array_pad(explode(' ', $header, 2), 2, '');
                 if (strtolower($scheme) === 'bearer' && trim($credentials) !== '') {
-                    return trim($credentials);
+                    return ['token' => trim($credentials), 'fromCookie' => false];
                 }
 
                 return null;
@@ -103,7 +139,28 @@ if (interface_exists(\Symfony\Component\EventDispatcher\EventSubscriberInterface
 
             $cookie = $request->cookies->get('axiam_access');
 
-            return is_string($cookie) && $cookie !== '' ? $cookie : null;
+            return is_string($cookie) && $cookie !== '' ? ['token' => $cookie, 'fromCookie' => true] : null;
+        }
+
+        /**
+         * Cookie double-submit check (CONTRACT.md §3): the `X-CSRF-Token` header must be
+         * present and equal, constant-time (mirrors
+         * {@see \Axiam\Sdk\Amqp\Hmac::verify()}'s use of `hash_equals()`), to the
+         * `axiam_csrf` cookie value.
+         */
+        private function isCsrfValid(\Symfony\Component\HttpFoundation\Request $request): bool
+        {
+            $header = (string) $request->headers->get(self::CSRF_HEADER_NAME, '');
+            if ($header === '') {
+                return false;
+            }
+
+            $cookie = $request->cookies->get(self::CSRF_COOKIE_NAME);
+            if (!is_string($cookie) || $cookie === '') {
+                return false;
+            }
+
+            return hash_equals($cookie, $header);
         }
 
         /**
@@ -131,6 +188,18 @@ if (interface_exists(\Symfony\Component\EventDispatcher\EventSubscriberInterface
             return new \Symfony\Component\HttpFoundation\JsonResponse(
                 ['error' => 'AuthError', 'message' => $message],
                 401,
+            );
+        }
+
+        private function csrfValidationFailed(): \Symfony\Component\HttpFoundation\JsonResponse
+        {
+            // CONTRACT.md §3/§10: a cookie-sourced credential on a state-changing
+            // request without a valid double-submit token is an authorization failure
+            // -> HTTP 403, same "AuthzError" shape {@see \Axiam\Sdk\Laravel\AxiamGate::authorize()}
+            // (this SDK's sibling Laravel authorization class) uses.
+            return new \Symfony\Component\HttpFoundation\JsonResponse(
+                ['error' => 'AuthzError', 'message' => 'csrf validation failed'],
+                403,
             );
         }
     }

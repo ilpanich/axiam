@@ -47,8 +47,13 @@ observability = ["dep:tracing"]
 # §10 middleware/route-guard: the Actix-Web `FromRequest` extractor
 # (`AxiamUser`). Off by default so the core SDK does not pull actix-web
 # unconditionally (D-02 modularity). Depends on `rest` for the shared
-# `JwksVerifier` (broadened cfg gate in src/token/jwks.rs).
-actix = ["dep:actix-web", "rest"]
+# `JwksVerifier` (broadened cfg gate in src/token/jwks.rs). Also pulls in
+# `subtle` for the constant-time CSRF double-submit comparison (CSRF fix,
+# see src/middleware/actix.rs) — `subtle` is already an unconditional
+# transitive dependency via `jsonwebtoken` -> `ed25519-dalek`, so gating it
+# here adds no new supply-chain surface; it only makes an already-vendored
+# crate a direct dep for the code path that needs it.
+actix = ["dep:actix-web", "dep:subtle", "rest"]
 
 [dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
@@ -69,6 +74,10 @@ hex = { version = "0.4", optional = true }
 # `chrono::DateTime<Utc>` field type in `crates/axiam-amqp/src/messages.rs`).
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"], optional = true }
 actix-web = { version = "4", optional = true }
+# Constant-time comparison for the CSRF double-submit check in
+# `middleware::actix::csrf_valid`. See the `actix` feature comment above for
+# why this adds no new supply-chain surface.
+subtle = { version = "1", optional = true }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` (SDK-Q01): backs `serde_json::Value`'s object map with an

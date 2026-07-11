@@ -50,9 +50,14 @@ public class AxiamAutoConfiguration {
     public SecurityFilterChain axiamSecurityFilterChain(HttpSecurity http, AxiamAuthenticationFilter filter)
             throws Exception {
         http
-                // AXIAM's own X-CSRF-Token/cookie double-submit (CONTRACT.md
-                // §3) supersedes Spring's default CSRF token — do not
-                // double-protect (RESEARCH.md Pattern 8 example comment).
+                // Spring's own CSRF token protects Spring's session-cookie auth,
+                // which this app does not use. AxiamAuthenticationFilter enforces
+                // its OWN cookie double-submit check (X-CSRF-Token vs axiam_csrf,
+                // CONTRACT.md §3) for any request authenticated via the
+                // axiam_access cookie — see the filter's class Javadoc. Enabling
+                // Spring's CSRF filter here would 403 legitimate Bearer-token
+                // requests (which never carry a Spring CSRF token) without adding
+                // any protection the filter doesn't already provide.
                 .csrf(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
                 .addFilterBefore(filter, UsernamePasswordAuthenticationFilter.class);

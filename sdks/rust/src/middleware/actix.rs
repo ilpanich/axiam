@@ -21,16 +21,48 @@
 //! [`crate::token::JwksVerifier`] re-checks `exp` on every call, so no
 //! additional TTL bookkeeping is needed here (§10 "MUST NOT cache session
 //! verification results longer than the token's remaining TTL").
+//!
+//! ## CSRF (cookie double-submit, CONTRACT.md §3)
+//!
+//! `Authorization: Bearer` requests are CSRF-immune by construction — a
+//! cross-site attacker cannot set arbitrary request headers. The
+//! `axiam_access` cookie is not: in a same-site deployment the browser
+//! attaches it automatically to a cross-site form POST, so trusting a
+//! cookie-sourced credential for a state-changing request without further
+//! checks is a classic CSRF hole.
+//!
+//! When the credential in [`extract_token`] was sourced from the
+//! `axiam_access` COOKIE (not the `Authorization` header) and the request
+//! method is state-changing (anything other than GET/HEAD/OPTIONS), this
+//! extractor additionally requires the `X-CSRF-Token` request header to be
+//! present and equal, in constant time, to the `axiam_csrf` cookie value
+//! (see [`csrf_valid`]), rejecting with 403 on mismatch/absence — token
+//! verification is never attempted in that case. In any same-site
+//! deployment where `axiam_access` reaches this app, the non-`HttpOnly`
+//! `axiam_csrf` cookie does too, so this mirrors, locally, the same
+//! double-submit check the AXIAM server performs on its own endpoints (§3;
+//! see also `sdks/CONTRACT.md` §3 and the equivalent check in
+//! `AxiamAuthenticationFilter` on the Java SDK).
 
 use std::future::Future;
 use std::pin::Pin;
 
+use actix_web::http::Method;
 use actix_web::{dev::Payload, web, HttpRequest, HttpResponse};
 use serde::Serialize;
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::token::JwksVerifier;
 use crate::AxiamError;
+
+/// Name of the (non-`HttpOnly`) CSRF cookie set by AXIAM alongside
+/// `axiam_access` (CONTRACT.md §3) — reuses the same public constant the
+/// outbound client side uses ([`crate::token::manager::COOKIE_CSRF`]) so
+/// the cookie name lives in exactly one place.
+const CSRF_COOKIE_NAME: &str = crate::token::manager::COOKIE_CSRF;
+/// Name of the request header carrying the double-submit CSRF token.
+const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
 
 /// Authenticated identity injected by the [`AxiamUser`] extractor.
 ///
@@ -120,15 +152,85 @@ impl AxiamExtractorError {
             message: format!("invalid {name} claim"),
         })
     }
+
+    /// CSRF double-submit check failed (§3): a cookie-sourced credential on
+    /// a state-changing request with a missing or mismatched
+    /// `X-CSRF-Token` header. Mapped to `AxiamError::Authz` so it surfaces
+    /// as HTTP 403 with the same `"authorization_denied"` standardized
+    /// error body shape used elsewhere in this extractor — token
+    /// verification is never reached in this case.
+    fn csrf_validation_failed() -> Self {
+        Self(AxiamError::Authz {
+            message: "CSRF validation failed: missing or mismatched X-CSRF-Token header".into(),
+            action: None,
+            resource_id: None,
+        })
+    }
+}
+
+/// True for any HTTP method that mutates state on the resource server —
+/// i.e. everything except the safe methods GET, HEAD, and OPTIONS. Only
+/// state-changing requests are subject to the CSRF double-submit check
+/// (§3): a cross-site GET can be triggered by an `<img>`/`<a>` tag too, but
+/// it must not itself cause a side effect, so CSRF protection targets the
+/// methods that can.
+fn is_state_changing(method: &Method) -> bool {
+    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+/// CSRF double-submit check (§3): the `X-CSRF-Token` request header must be
+/// present and equal, in constant time, to the `axiam_csrf` cookie value.
+///
+/// Uses `subtle::ConstantTimeEq` rather than `==` so the comparison time
+/// does not leak how many leading bytes of a guessed token matched — the
+/// same rationale as the AMQP HMAC verification in
+/// `src/amqp/hmac.rs::verify_payload` (which gets constant-time comparison
+/// for free from `hmac::Mac::verify_slice`). This is a plain string
+/// compare, not a keyed MAC, so there is no `Mac` type to lean on here.
+/// `[u8]::ct_eq` itself short-circuits on a length mismatch without
+/// comparing content — safe because the token's length is not secret (an
+/// attacker can already observe the cookie's length off the wire).
+fn csrf_valid(req: &HttpRequest) -> bool {
+    let header_value = match req
+        .headers()
+        .get(CSRF_HEADER_NAME)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(v) if !v.is_empty() => v,
+        _ => return false,
+    };
+
+    let cookie_value = match req.cookie(CSRF_COOKIE_NAME) {
+        Some(c) if !c.value().is_empty() => c,
+        _ => return false,
+    };
+
+    bool::from(
+        header_value
+            .as_bytes()
+            .ct_eq(cookie_value.value().as_bytes()),
+    )
+}
+
+/// Where the credential returned by [`extract_token`] came from. Drives the
+/// §3 CSRF gate below: only a cookie-sourced credential on a
+/// state-changing request needs the double-submit check — a Bearer header
+/// cannot be set by a cross-site attacker in the first place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialSource {
+    Cookie,
+    AuthorizationHeader,
 }
 
 /// §10.1: extract the bearer token from the `axiam_access` cookie, falling
 /// back to the `Authorization: Bearer` header (cookie-then-header, matching
 /// the server-side extractor's parse logic — see the module doc comment for
-/// the analog file reference).
-fn extract_token(req: &HttpRequest) -> Result<String, AxiamExtractorError> {
+/// the analog file reference). Also reports which source the credential
+/// came from, so the caller can apply the §3 CSRF gate to cookie-sourced
+/// requests only.
+fn extract_token(req: &HttpRequest) -> Result<(String, CredentialSource), AxiamExtractorError> {
     if let Some(cookie) = req.cookie("axiam_access") {
-        return Ok(cookie.value().to_owned());
+        return Ok((cookie.value().to_owned(), CredentialSource::Cookie));
     }
 
     let header = req
@@ -146,7 +248,10 @@ fn extract_token(req: &HttpRequest) -> Result<String, AxiamExtractorError> {
         return Err(AxiamExtractorError::invalid_scheme());
     }
 
-    Ok(credentials.to_owned())
+    Ok((
+        credentials.to_owned(),
+        CredentialSource::AuthorizationHeader,
+    ))
 }
 
 impl actix_web::FromRequest for AxiamUser {
@@ -154,14 +259,28 @@ impl actix_web::FromRequest for AxiamUser {
     type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
-        // Clone what we need synchronously so the returned future is
-        // `'static` and does not borrow `req` (matches the server-side
+        // Clone/compute what we need synchronously so the returned future
+        // is `'static` and does not borrow `req` (matches the server-side
         // extractor's FromRequest shape — see the module doc comment).
         let token_result = extract_token(req);
+        // §3 CSRF gate inputs: only relevant for a cookie-sourced
+        // credential on a state-changing request, but cheap enough to
+        // compute unconditionally here (both are constant-time reads off
+        // `req`, no I/O).
+        let method_is_state_changing = is_state_changing(req.method());
+        let csrf_ok = csrf_valid(req);
         let verifier = req.app_data::<web::Data<JwksVerifier>>().cloned();
 
         Box::pin(async move {
-            let token = token_result?;
+            let (token, source) = token_result?;
+
+            // §3: a cookie-sourced credential is not CSRF-immune the way a
+            // Bearer header is — reject before any verification work if
+            // the double-submit check fails. Bearer-header requests always
+            // skip this branch.
+            if source == CredentialSource::Cookie && method_is_state_changing && !csrf_ok {
+                return Err(AxiamExtractorError::csrf_validation_failed());
+            }
 
             // §10.2: verify locally against the cached JWKS — no
             // AXIAM-server round-trip.

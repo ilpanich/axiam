@@ -24,11 +24,16 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
  * <p>Constructs ONE {@link JwksVerifier} against the configured AXIAM
  * {@code axiam.base-url}, builds an {@link AxiamAuthenticationFilter} bound
  * to {@code axiam.tenant-id}, disables Spring Security's own CSRF protection
- * (AXIAM's cookie double-submit {@code X-CSRF-Token} flow, CONTRACT.md
- * &sect;3, supersedes it — enabling both would double-protect state-changing
- * requests), permits {@code /public/**}, requires authentication for
- * everything else, and inserts the AXIAM filter immediately before
- * {@link UsernamePasswordAuthenticationFilter} in the chain.
+ * (this app has no Spring session-cookie auth for it to protect — it's the
+ * one AxiamAuthenticationFilter targets, and Spring's CSRF filter would 403
+ * legitimate Bearer-token requests, which never carry a Spring CSRF token;
+ * {@link AxiamAuthenticationFilter} enforces its OWN cookie double-submit
+ * check, {@code X-CSRF-Token} vs {@code axiam_csrf}, CONTRACT.md &sect;3, for
+ * any request authenticated via the {@code axiam_access} cookie — see the
+ * filter's class Javadoc), permits {@code /public/**}, requires
+ * authentication for everything else, and inserts the AXIAM filter
+ * immediately before {@link UsernamePasswordAuthenticationFilter} in the
+ * chain.
  */
 @Configuration
 public class SecurityConfig {
@@ -48,9 +53,11 @@ public class SecurityConfig {
     public SecurityFilterChain securityFilterChain(HttpSecurity http, AxiamAuthenticationFilter axiamAuthenticationFilter)
             throws Exception {
         http
-                // AXIAM's own X-CSRF-Token/cookie double-submit (CONTRACT.md
-                // §3) supersedes Spring's default CSRF token — do not
-                // double-protect.
+                // See class Javadoc: AxiamAuthenticationFilter enforces its own
+                // cookie double-submit CSRF check for axiam_access-cookie-sourced
+                // requests, so Spring's CSRF filter (which targets a different
+                // auth mechanism) is redundant and would break Bearer-token
+                // clients.
                 .csrf(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/public/**").permitAll()

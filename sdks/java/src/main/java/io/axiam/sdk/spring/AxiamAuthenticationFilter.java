@@ -24,10 +24,13 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Spring Security {@code OncePerRequestFilter} that locally verifies the
@@ -56,11 +59,30 @@ import java.util.List;
  * <p>{@link AuthError} maps to HTTP 401, {@link AuthzError} maps to HTTP
  * 403, both via a standardized JSON error body ({@link #writeJsonError}) —
  * the wrapped filter chain is never invoked on failure.
+ *
+ * <p><strong>CSRF (cookie double-submit, CONTRACT.md &sect;3):</strong> when
+ * the credential was sourced from the {@code axiam_access} COOKIE (not the
+ * {@code Authorization} header) and the request method is state-changing
+ * (anything other than GET/HEAD/OPTIONS), this filter additionally requires
+ * the {@code X-CSRF-Token} request header to be present and equal (constant
+ * time) to the {@code axiam_csrf} cookie value, rejecting with 403 on
+ * mismatch/absence. Bearer-header requests are CSRF-immune by construction
+ * — a cross-site attacker cannot set arbitrary request headers — but a
+ * cookie automatically attached by the browser is not, and in any
+ * same-site deployment where {@code axiam_access} reaches this app, the
+ * non-{@code httpOnly} {@code axiam_csrf} cookie does too. This mirrors,
+ * locally, the same double-submit check the AXIAM server performs on its
+ * own endpoints (&sect;3) — {@code AxiamAutoConfiguration} disables Spring
+ * Security's own CSRF filter specifically because this filter now covers
+ * that ground for cookie-sourced requests.
  */
 public final class AxiamAuthenticationFilter extends OncePerRequestFilter {
 
     private static final String ACCESS_COOKIE_NAME = "axiam_access";
+    private static final String CSRF_COOKIE_NAME = "axiam_csrf";
+    private static final String CSRF_HEADER_NAME = "X-CSRF-Token";
     private static final String BEARER_PREFIX = "Bearer ";
+    private static final Set<String> SAFE_METHODS = Set.of("GET", "HEAD", "OPTIONS");
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final JwksVerifier jwksVerifier;
@@ -74,14 +96,21 @@ public final class AxiamAuthenticationFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-        String token = extractToken(request);
-        if (token == null) {
+        Credential credential = extractToken(request);
+        if (credential == null) {
             // No credentials presented; let the request through unauthenticated
             // — Spring Security's own access-control rules 401/403 it.
             chain.doFilter(request, response);
             return;
         }
 
+        if (credential.fromCookie() && !SAFE_METHODS.contains(request.getMethod().toUpperCase(java.util.Locale.ROOT))
+                && !isCsrfValid(request)) {
+            writeJsonError(response, HttpServletResponse.SC_FORBIDDEN, "csrf_validation_failed");
+            return;
+        }
+
+        String token = credential.value();
         try {
             JWTClaimsSet claims = jwksVerifier.verify(token); // signature + alg=EdDSA pinned
 
@@ -132,23 +161,48 @@ public final class AxiamAuthenticationFilter extends OncePerRequestFilter {
     }
 
     /** Bearer header first, then the {@code axiam_access} cookie; {@code null} when neither is present. */
-    private static @Nullable String extractToken(HttpServletRequest request) {
+    private static @Nullable Credential extractToken(HttpServletRequest request) {
         String auth = request.getHeader("Authorization");
         if (auth != null && auth.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())) {
             String credentials = auth.substring(BEARER_PREFIX.length()).trim();
             if (!credentials.isEmpty()) {
-                return credentials;
+                return new Credential(credentials, false);
             }
         }
         Cookie[] cookies = request.getCookies();
         if (cookies != null) {
             for (Cookie c : cookies) {
                 if (ACCESS_COOKIE_NAME.equals(c.getName()) && !c.getValue().isEmpty()) {
-                    return c.getValue();
+                    return new Credential(c.getValue(), true);
                 }
             }
         }
         return null;
+    }
+
+    /** A verified-candidate token plus whether it was sourced from the {@code axiam_access} cookie. */
+    private record Credential(String value, boolean fromCookie) {}
+
+    /**
+     * Cookie double-submit check (CONTRACT.md &sect;3): the {@code X-CSRF-Token} header
+     * must be present and equal, constant-time, to the {@code axiam_csrf} cookie value.
+     */
+    private static boolean isCsrfValid(HttpServletRequest request) {
+        String header = request.getHeader(CSRF_HEADER_NAME);
+        if (header == null || header.isEmpty()) {
+            return false;
+        }
+        Cookie[] cookies = request.getCookies();
+        if (cookies == null) {
+            return false;
+        }
+        for (Cookie c : cookies) {
+            if (CSRF_COOKIE_NAME.equals(c.getName())) {
+                return MessageDigest.isEqual(
+                        header.getBytes(StandardCharsets.UTF_8), c.getValue().getBytes(StandardCharsets.UTF_8));
+            }
+        }
+        return false;
     }
 
     /**

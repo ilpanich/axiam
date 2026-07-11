@@ -347,6 +347,129 @@ func TestMiddleware_OutsideRequest_UserFromContextReturnsFalse(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// CSRF (cookie double-submit, CONTRACT.md §3) — mirrors the Java Spring
+// filter's isCsrfValid gate: cookie-sourced credentials on state-changing
+// requests must carry a matching X-CSRF-Token header / axiam_csrf cookie
+// pair. Bearer-header requests and safe methods (GET/HEAD/OPTIONS) are
+// exempt regardless of credential source.
+// ---------------------------------------------------------------------------
+
+func TestMiddleware_CookieAuthStateChanging_WithoutCSRFHeader_Rejected(t *testing.T) {
+	priv, pubJWK := generateTestKey(t, "kid-1")
+	jwksSrv := newTestJWKSServer(t, pubJWK)
+	verifier := newTestVerifier(t, jwksSrv)
+
+	mw := Middleware(verifier, testConfiguredTenant)
+
+	rec := &recordingHandler{}
+	h := mw(rec.handler())
+
+	token := signTestToken(t, priv, "kid-1", validClaims())
+	req := httptest.NewRequest(http.MethodPost, "/protected", nil)
+	req.AddCookie(&http.Cookie{Name: "axiam_access", Value: token})
+	req.AddCookie(&http.Cookie{Name: "axiam_csrf", Value: "csrf-secret"})
+	// Deliberately no X-CSRF-Token header — this is the CSRF attack shape: a
+	// cross-site form POST carries the browser-attached axiam_access and
+	// axiam_csrf cookies automatically, but cannot set a custom header.
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if rec.called {
+		t.Fatal("expected wrapped handler NOT to be called for a cookie-sourced state-changing request without X-CSRF-Token")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+	assertJSONErrorBody(t, w.Body.Bytes())
+}
+
+func TestMiddleware_CookieAuthStateChanging_WithMatchingCSRFHeader_Allowed(t *testing.T) {
+	priv, pubJWK := generateTestKey(t, "kid-1")
+	jwksSrv := newTestJWKSServer(t, pubJWK)
+	verifier := newTestVerifier(t, jwksSrv)
+
+	mw := Middleware(verifier, testConfiguredTenant)
+
+	rec := &recordingHandler{}
+	h := mw(rec.handler())
+
+	token := signTestToken(t, priv, "kid-1", validClaims())
+	req := httptest.NewRequest(http.MethodPost, "/protected", nil)
+	req.AddCookie(&http.Cookie{Name: "axiam_access", Value: token})
+	req.AddCookie(&http.Cookie{Name: "axiam_csrf", Value: "csrf-secret"})
+	req.Header.Set("X-CSRF-Token", "csrf-secret")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if !rec.called {
+		t.Fatal("expected wrapped handler to be called for a cookie-sourced request with a matching X-CSRF-Token")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestMiddleware_BearerAuthStateChanging_WithoutCSRF_Allowed(t *testing.T) {
+	priv, pubJWK := generateTestKey(t, "kid-1")
+	jwksSrv := newTestJWKSServer(t, pubJWK)
+	verifier := newTestVerifier(t, jwksSrv)
+
+	mw := Middleware(verifier, testConfiguredTenant)
+
+	rec := &recordingHandler{}
+	h := mw(rec.handler())
+
+	// Bearer-header requests are CSRF-immune by construction (a cross-site
+	// attacker cannot set arbitrary request headers), so no CSRF check
+	// applies even on a state-changing method with no CSRF cookie/header at
+	// all.
+	token := signTestToken(t, priv, "kid-1", validClaims())
+	req := httptest.NewRequest(http.MethodPost, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if !rec.called {
+		t.Fatal("expected wrapped handler to be called for a Bearer-authenticated POST with no CSRF token")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestMiddleware_CookieAuthSafeMethod_WithoutCSRF_Allowed(t *testing.T) {
+	priv, pubJWK := generateTestKey(t, "kid-1")
+	jwksSrv := newTestJWKSServer(t, pubJWK)
+	verifier := newTestVerifier(t, jwksSrv)
+
+	mw := Middleware(verifier, testConfiguredTenant)
+
+	rec := &recordingHandler{}
+	h := mw(rec.handler())
+
+	// GET is a safe method (RFC 9110 §9.2.1) — the CSRF double-submit check
+	// only guards state-changing methods, so a cookie-sourced GET with no
+	// CSRF token must still pass (matches
+	// TestMiddleware_AllowsValidTenant_ViaCookie's baseline behavior).
+	token := signTestToken(t, priv, "kid-1", validClaims())
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.AddCookie(&http.Cookie{Name: "axiam_access", Value: token})
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if !rec.called {
+		t.Fatal("expected wrapped handler to be called for a cookie-sourced GET with no CSRF token")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
 // assertJSONErrorBody verifies the response body decodes as JSON and
 // contains no raw token-looking value.
 func assertJSONErrorBody(t *testing.T, body []byte) {

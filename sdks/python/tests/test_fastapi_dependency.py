@@ -98,6 +98,10 @@ def _make_app(verifier: JwksVerifier, configured_tenant: str = "acme") -> FastAP
     async def me(user: AxiamUser = Depends(dependency)):  # noqa: B008 (idiomatic FastAPI DI)
         return {"user_id": user.user_id, "tenant_id": user.tenant_id, "roles": user.roles}
 
+    @app.post("/me")
+    async def me_post(user: AxiamUser = Depends(dependency)):  # noqa: B008
+        return {"user_id": user.user_id, "tenant_id": user.tenant_id, "roles": user.roles}
+
     return app
 
 
@@ -286,3 +290,93 @@ def test_no_token_value_in_exception_detail(eddsa_keypair, verifier_and_endpoint
     response = client.get("/me", headers={"Authorization": f"Bearer {expired_token}"})
     assert response.status_code == 401
     assert expired_token not in response.text
+
+
+def test_cookie_auth_post_without_csrf_header_yields_403(
+    eddsa_keypair, verifier_and_endpoint
+) -> None:
+    """CSRF double-submit (CONTRACT.md §3): a cookie-sourced credential on a
+    state-changing method with no X-CSRF-Token header MUST be rejected —
+    otherwise a cross-site form POST would ride the same-site axiam_access
+    cookie and get authenticated (CSRF)."""
+    private_key, _jwk_dict = eddsa_keypair
+    verifier, _endpoint = verifier_and_endpoint
+    app = _make_app(verifier, configured_tenant="acme")
+    client = TestClient(app)
+
+    token = _sign_eddsa_token(
+        private_key,
+        "test-kid-1",
+        {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600},
+    )
+    client.cookies.set("axiam_access", token)
+    client.cookies.set("axiam_csrf", "some-csrf-value")
+
+    response = client.post("/me")
+
+    assert response.status_code == 403
+
+
+def test_cookie_auth_post_with_matching_csrf_header_passes(
+    eddsa_keypair, verifier_and_endpoint
+) -> None:
+    """A cookie-sourced credential on a state-changing method with a
+    matching X-CSRF-Token header + axiam_csrf cookie passes auth."""
+    private_key, _jwk_dict = eddsa_keypair
+    verifier, _endpoint = verifier_and_endpoint
+    app = _make_app(verifier, configured_tenant="acme")
+    client = TestClient(app)
+
+    token = _sign_eddsa_token(
+        private_key,
+        "test-kid-1",
+        {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600},
+    )
+    client.cookies.set("axiam_access", token)
+    client.cookies.set("axiam_csrf", "matching-csrf-value")
+
+    response = client.post("/me", headers={"X-CSRF-Token": "matching-csrf-value"})
+
+    assert response.status_code == 200
+    assert response.json()["user_id"] == "user-1"
+
+
+def test_bearer_auth_post_without_csrf_passes(eddsa_keypair, verifier_and_endpoint) -> None:
+    """Bearer-header requests are CSRF-immune by construction (a cross-site
+    attacker cannot set arbitrary request headers) — no CSRF check applies."""
+    private_key, _jwk_dict = eddsa_keypair
+    verifier, _endpoint = verifier_and_endpoint
+    app = _make_app(verifier, configured_tenant="acme")
+    client = TestClient(app)
+
+    token = _sign_eddsa_token(
+        private_key,
+        "test-kid-1",
+        {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600},
+    )
+
+    response = client.post("/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["user_id"] == "user-1"
+
+
+def test_cookie_auth_get_without_csrf_passes(eddsa_keypair, verifier_and_endpoint) -> None:
+    """Safe methods (GET/HEAD/OPTIONS) never require the CSRF double-submit
+    check, even for cookie-sourced credentials."""
+    private_key, _jwk_dict = eddsa_keypair
+    verifier, _endpoint = verifier_and_endpoint
+    app = _make_app(verifier, configured_tenant="acme")
+    client = TestClient(app)
+
+    token = _sign_eddsa_token(
+        private_key,
+        "test-kid-1",
+        {"sub": "user-1", "tenant_id": "acme", "exp": time.time() + 3600},
+    )
+    client.cookies.set("axiam_access", token)
+
+    response = client.get("/me")
+
+    assert response.status_code == 200
+    assert response.json()["user_id"] == "user-1"

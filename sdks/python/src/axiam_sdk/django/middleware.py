@@ -23,10 +23,24 @@ token.
 
 Security-critical invariant — no token leakage (T-19-21): no raw token
 value is ever included in any response body.
+
+CSRF (cookie double-submit, CONTRACT.md §3): a request authenticated via
+the ``axiam_access`` COOKIE is not CSRF-immune the way a ``Authorization:
+Bearer`` header request is — a cross-site attacker cannot set arbitrary
+request headers, but a same-site cookie is attached to cross-site requests
+automatically by the browser. For any cookie-sourced credential on a
+state-changing method (anything other than GET/HEAD/OPTIONS), ``_authenticate``
+additionally requires the ``X-CSRF-Token`` request header to be present and
+equal (constant-time) to the ``axiam_csrf`` cookie value, rejecting with
+403 on mismatch/absence. This mirrors, locally, the same double-submit
+check the AXIAM server performs on its own endpoints (§3) — see also
+``sdks/java/.../AxiamAuthenticationFilter.java`` for the same pattern
+applied to the Spring integration.
 """
 
 from __future__ import annotations
 
+import hmac
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,6 +54,15 @@ from axiam_sdk._jwks import JwksVerifier
 #: Standardized 401 JSON error body shape (CONTRACT.md §10), no raw token
 #: value ever included — mirrors nethttp.go's errorBody{Error, Message}.
 _AUTH_FAILED_STATUS = 401
+
+#: CSRF double-submit failures surface as 403 (CONTRACT.md §3), mirroring
+#: the AXIAM server's own AuthorizationDenied -> "authorization_denied" (403)
+#: mapping (crates/axiam-api-rest/src/error.rs) rather than 401.
+_CSRF_FAILED_STATUS = 403
+
+_CSRF_COOKIE_NAME = "axiam_csrf"
+_CSRF_HEADER_NAME = "X-CSRF-Token"
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 @dataclass(frozen=True)
@@ -58,7 +81,17 @@ class AxiamUser:
     roles: list[str] = field(default_factory=list)
 
 
-def _extract_token(request: HttpRequest) -> str | None:
+@dataclass(frozen=True)
+class _Credential:
+    """A verified-candidate token plus whether it was sourced from the
+    ``axiam_access`` cookie (as opposed to the ``Authorization`` header) —
+    needed to decide whether the CSRF double-submit check applies."""
+
+    value: str
+    from_cookie: bool
+
+
+def _extract_token(request: HttpRequest) -> _Credential | None:
     """Extract the bearer token from ``Authorization: Bearer <token>``,
     falling back to the ``axiam_access`` session cookie.
 
@@ -71,11 +104,30 @@ def _extract_token(request: HttpRequest) -> str | None:
     if header:
         scheme, _, credentials = header.strip().partition(" ")
         if scheme.lower() == "bearer" and credentials.strip():
-            return str(credentials.strip())
+            return _Credential(str(credentials.strip()), from_cookie=False)
         return None
 
     cookie: str | None = request.COOKIES.get("axiam_access")
-    return cookie or None
+    if cookie:
+        return _Credential(cookie, from_cookie=True)
+    return None
+
+
+def _is_csrf_valid(request: HttpRequest) -> bool:
+    """Cookie double-submit check (CONTRACT.md §3): the ``X-CSRF-Token``
+    request header must be present and equal, constant-time, to the
+    ``axiam_csrf`` cookie value.
+
+    Only consulted for cookie-sourced credentials on state-changing methods
+    (see ``_authenticate``) — a Bearer-header request is CSRF-immune by
+    construction, since a cross-site attacker cannot set arbitrary request
+    headers.
+    """
+    header = request.headers.get(_CSRF_HEADER_NAME, "")
+    cookie = request.COOKIES.get(_CSRF_COOKIE_NAME, "")
+    if not header or not cookie:
+        return False
+    return hmac.compare_digest(header, cookie)
 
 
 class _MalformedClaims(Exception):
@@ -102,6 +154,17 @@ def _build_user(claims: dict[str, Any]) -> AxiamUser:
 def _error_response(message: str) -> JsonResponse:
     return JsonResponse(
         {"error": "authentication_failed", "message": message}, status=_AUTH_FAILED_STATUS
+    )
+
+
+def _csrf_error_response(message: str) -> JsonResponse:
+    """Standardized 403 JSON error body for CSRF double-submit failures
+    (CONTRACT.md §3) — mirrors the AXIAM server's own AuthorizationDenied ->
+    ``"authorization_denied"`` (403) error-code mapping
+    (crates/axiam-api-rest/src/error.rs), same body shape as
+    :func:`_error_response`."""
+    return JsonResponse(
+        {"error": "authorization_denied", "message": message}, status=_CSRF_FAILED_STATUS
     )
 
 
@@ -164,9 +227,15 @@ class AxiamAuthMiddleware:
         return await self.get_response(request)
 
     def _authenticate(self, request: HttpRequest) -> JsonResponse | None:
-        token = _extract_token(request)
-        if not token:
+        credential = _extract_token(request)
+        if not credential:
             return _error_response("missing authentication credentials")
+
+        if credential.from_cookie and request.method.upper() not in _SAFE_METHODS:
+            if not _is_csrf_valid(request):
+                return _csrf_error_response("CSRF validation failed")
+
+        token = credential.value
 
         try:
             claims = self._verifier.verify(token)

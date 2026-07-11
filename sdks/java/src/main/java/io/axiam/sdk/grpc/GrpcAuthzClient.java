@@ -384,6 +384,6 @@ public final class GrpcAuthzClient implements AutoCloseable {
         if (t instanceof RuntimeException re) {
             return re;
         }
-        return new NetworkError("gRPC call failed: " + t.getMessage());
+        return new NetworkError("gRPC call failed: " + t.getMessage(), t);
     }
 }

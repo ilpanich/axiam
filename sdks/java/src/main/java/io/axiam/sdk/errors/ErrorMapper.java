@@ -1,9 +1,13 @@
 package io.axiam.sdk.errors;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import okhttp3.Headers;
 import okhttp3.Response;
+import okhttp3.ResponseBody;
 import org.jspecify.annotations.Nullable;
 
+import java.io.IOException;
 import java.util.Locale;
 import java.util.Set;
 
@@ -37,6 +41,11 @@ public final class ErrorMapper {
     /** Placeholder substituted for the value of any non-allowlisted header. */
     private static final String REDACTED_HEADER = "[REDACTED]";
 
+    /** Only the first few KB of a 403/409 body are needed to find {@code action}/{@code resource_id}. */
+    private static final long MAX_AUTHZ_BODY_PEEK_BYTES = 8192;
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+
     private ErrorMapper() {
     }
 
@@ -51,9 +60,46 @@ public final class ErrorMapper {
             return new AuthError(message);
         }
         if (status == 403 || status == 409) {
-            return new AuthzError(message);
+            return authzErrorFromBody(message, response);
         }
         return fromHttpResponse(status, message, response);
+    }
+
+    /**
+     * Builds the {@link AuthzError} for a 403/409 response, parsing the
+     * server's structured authorization-denied body (CONTRACT.md &sect;2
+     * "Error Construction Rules"):
+     * {@code {"error":"authorization_denied","message":"...","action":"users:get","resource_id":"<uuid>"}}.
+     * {@code action} is present when known; {@code resource_id} is present
+     * only for a resource-scoped denial. Non-authz 403/409 bodies (or a
+     * missing/unparsable body) simply yield the message-only
+     * {@link AuthzError}, since {@code action}/{@code resource_id} are
+     * SHOULD-carry, not MUST-carry, fields.
+     *
+     * <p>Uses {@link Response#peekBody} — a non-destructive read — so this
+     * (unlike {@link #sanitize}) never consumes/closes the live response
+     * body as a side effect of error mapping, leaving it exactly as the
+     * caller received it.
+     */
+    private static AuthzError authzErrorFromBody(String message, @Nullable Response response) {
+        if (response == null || response.body() == null) {
+            return new AuthzError(message);
+        }
+        try {
+            ResponseBody peeked = response.peekBody(MAX_AUTHZ_BODY_PEEK_BYTES);
+            String bodyString = peeked.string();
+            if (bodyString.isBlank()) {
+                return new AuthzError(message);
+            }
+            JsonNode root = JSON.readTree(bodyString);
+            String action = root.hasNonNull("action") ? root.get("action").asText() : null;
+            String resourceId = root.hasNonNull("resource_id") ? root.get("resource_id").asText() : null;
+            return new AuthzError(message, action, resourceId);
+        } catch (IOException | RuntimeException e) {
+            // Malformed/non-JSON body: fall back to the message-only ctor
+            // rather than let a parse failure mask the real 403/409.
+            return new AuthzError(message);
+        }
     }
 
     /**
@@ -78,6 +124,8 @@ public final class ErrorMapper {
     public static RuntimeException fromGrpcStatus(io.grpc.Status.Code code, String message) {
         return switch (code) {
             case UNAUTHENTICATED -> new AuthError(message);
+            // gRPC PERMISSION_DENIED carries no response body to parse action/resource_id
+            // from (unlike the HTTP 403/409 path), so this stays message-only.
             case PERMISSION_DENIED -> new AuthzError(message);
             default -> new NetworkError(message);
         };

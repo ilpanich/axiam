@@ -208,7 +208,7 @@ public final class SessionState {
         try {
             payload = MAPPER.writeValueAsBytes(body);
         } catch (IOException e) {
-            throw new NetworkError("failed to encode refresh request: " + e.getMessage());
+            throw new NetworkError("failed to encode refresh request: " + e.getMessage(), e);
         }
 
         Request request = new Request.Builder()
@@ -237,7 +237,7 @@ public final class SessionState {
                     : System.currentTimeMillis();
             return new TokenPair(newAccess, newRefresh == null ? "" : newRefresh, expiresAtEpochMs);
         } catch (IOException e) {
-            throw new NetworkError("refresh request failed: " + e.getMessage());
+            throw new NetworkError("refresh request failed: " + e.getMessage(), e);
         }
     }
 

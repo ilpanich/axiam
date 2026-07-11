@@ -62,11 +62,16 @@ jobs:
         working-directory: sdks/rust
         run: cargo test -p axiam-sdk --all-features
 
+      # Ignored advisory rationale (kept in sync with the root ci.yml / deny.toml policy):
+      #   RUSTSEC-2023-0071 — Marvin attack (rsa timing sidechannel); no upstream fix.
+      #   `rsa` is pulled in transitively by jsonwebtoken for RS* algorithm support.
+      #   The SDK only VERIFIES tokens (public-key ops) and AXIAM signs with EdDSA
+      #   (Ed25519), so the vulnerable RSA private-key path is never exercised.
       - name: Dependency vulnerability scan (CI-03)
         working-directory: sdks/rust
         run: |
           cargo install cargo-audit --locked
-          cargo audit
+          cargo audit --ignore RUSTSEC-2023-0071
 
       - name: Build examples (all features)
         working-directory: sdks/rust

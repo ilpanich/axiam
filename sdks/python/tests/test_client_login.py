@@ -521,7 +521,9 @@ def test_decode_error_message_does_not_leak_payload_content() -> None:
     secret_marker = "SUPER-SECRET-CLAIM-VALUE"
     # Decodes to raw bytes containing the marker, but is not valid JSON, so
     # json.loads raises — the marker must not appear in the AuthError.
-    bad_payload = base64.urlsafe_b64encode(f"{{not-json {secret_marker}".encode()).rstrip(b"=").decode()
+    bad_payload = (
+        base64.urlsafe_b64encode(f"{{not-json {secret_marker}".encode()).rstrip(b"=").decode()
+    )
     token = f"{header}.{bad_payload}.fake-signature"
 
     with pytest.raises(AuthError) as exc_info:

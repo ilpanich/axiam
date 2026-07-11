@@ -550,7 +550,7 @@ where
         let username = claims
             .email
             .clone()
-            .unwrap_or_else(|| format!("federated-{}-{}", config_id, &claims.sub));
+            .unwrap_or_else(|| format!("federated-{}-{}", config_id, claims.sub));
 
         let email = claims
             .email

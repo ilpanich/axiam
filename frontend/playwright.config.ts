@@ -6,7 +6,10 @@ export default defineConfig({
   forbidOnly: !!process.env["CI"],
   retries: process.env["CI"] ? 2 : 0,
   workers: process.env["CI"] ? 1 : undefined,
-  reporter: "html",
+  // `list` streams each test's pass/fail to stdout so the CI log shows
+  // progress and failures even if the run is interrupted; `html` is still
+  // produced for the uploaded artifact.
+  reporter: [["list"], ["html"]],
   use: {
     baseURL: process.env["E2E_BASE_URL"] ?? "http://localhost:5173",
     trace: "on-first-retry",

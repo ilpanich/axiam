@@ -49,6 +49,8 @@ pub async fn get_org_settings<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot read settings for a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
@@ -93,6 +95,8 @@ pub async fn set_org_settings<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot modify settings for a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }

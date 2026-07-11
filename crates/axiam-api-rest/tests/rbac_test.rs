@@ -284,6 +284,65 @@ async fn no_permission_returns_403() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 403);
+
+    // SDK-Q02: the 403 body carries structured `action`/`resource_id`
+    // fields so SDKs can parse them without string-matching `message`.
+    // `RequirePermission::new("users:create", Uuid::nil())` checks the
+    // "global" sentinel, so `resource_id` must be omitted (null), while
+    // `action` must echo the checked permission string.
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "authorization_denied");
+    assert_eq!(body["action"], "users:create");
+    assert!(
+        body.get("resource_id").is_none() || body["resource_id"].is_null(),
+        "expected no resource_id for a global (nil-resource) denial, got {body:?}"
+    );
+}
+
+/// `no_permission_returns_403_with_resource_scoped_fields`
+///
+/// A resource-scoped denial (not the `Uuid::nil()` "global" sentinel) must
+/// carry a non-null `resource_id` alongside `action` in the 403 body.
+/// `POST /api/v1/authz/check` with a `subject_id` override requires the
+/// `authz:check_as` permission, checked against `user.tenant_id` (never
+/// nil in a seeded tenant) — see `RequirePermission::new("authz:check_as",
+/// user.tenant_id)` in `handlers/authz_check.rs`.
+#[actix_rt::test]
+async fn no_permission_returns_403_with_resource_scoped_fields() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let viewer_id = create_user_with_role(
+        &db,
+        tenant_id,
+        "viewer2",
+        "viewer2@example.com",
+        Some("viewer"),
+    )
+    .await;
+    let token = mint_token(&auth, viewer_id, tenant_id, org_id);
+    let app = test_app!(db, auth, authz);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/authz/check")
+        .peer_addr("127.0.0.1:12345".parse().unwrap())
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "action": "users:get",
+            "resource_id": Uuid::new_v4(),
+            "subject_id": Uuid::new_v4(),
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "authorization_denied");
+    assert_eq!(body["action"], "authz:check_as");
+    assert_eq!(body["resource_id"], tenant_id.to_string());
 }
 
 /// `admin_can_access`

@@ -56,6 +56,8 @@ pub async fn generate<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
@@ -103,6 +105,8 @@ pub async fn list<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
@@ -144,6 +148,8 @@ pub async fn get<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
@@ -182,6 +188,8 @@ pub async fn revoke<C: Connection + Clone>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }

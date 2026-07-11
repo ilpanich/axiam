@@ -368,6 +368,8 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant permission grant denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
             return Err(classify_write_error(msg, "permission_grant").into());
@@ -409,6 +411,8 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant permission revocation denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
             return Err(DbError::Migration(msg).into());
@@ -505,6 +509,8 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant permission grant denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
             // grant_to_role_with_scopes is the REST-reachable path

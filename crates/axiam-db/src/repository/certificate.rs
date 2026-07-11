@@ -414,6 +414,8 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             if msg.contains("cross-tenant binding denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant certificate-to-service-account binding denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
             return Err(classify_write_error(msg, "certificate_binding").into());

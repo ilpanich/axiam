@@ -371,6 +371,8 @@ pub async fn download_account_export<C: Connection + Clone>(
     if job.status != ExportJobStatus::Ready {
         return Err(AxiamError::AuthorizationDenied {
             reason: "export token already used or not ready".into(),
+            action: None,
+            resource_id: None,
         }
         .into());
     }
@@ -379,6 +381,8 @@ pub async fn download_account_export<C: Connection + Clone>(
     {
         return Err(AxiamError::AuthorizationDenied {
             reason: "export token expired".into(),
+            action: None,
+            resource_id: None,
         }
         .into());
     }
@@ -408,6 +412,8 @@ pub async fn download_account_export<C: Connection + Clone>(
     if !consumed {
         return Err(AxiamError::AuthorizationDenied {
             reason: "export token already consumed".into(),
+            action: None,
+            resource_id: None,
         }
         .into());
     }
@@ -578,12 +584,16 @@ pub async fn cancel_account_delete<C: Connection + Clone>(
     if deletion.status != AccountDeletionStatus::Pending {
         return Err(AxiamError::AuthorizationDenied {
             reason: "cancel token already used".into(),
+            action: None,
+            resource_id: None,
         }
         .into());
     }
     if deletion.scheduled_purge_at < Utc::now() {
         return Err(AxiamError::AuthorizationDenied {
             reason: "grace window expired — cannot cancel".into(),
+            action: None,
+            resource_id: None,
         }
         .into());
     }

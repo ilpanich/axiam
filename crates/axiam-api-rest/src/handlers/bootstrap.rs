@@ -157,6 +157,8 @@ pub async fn bootstrap<C: Connection + Clone>(
             if req.email != expected {
                 return Err(AxiamApiError(AxiamError::AuthorizationDenied {
                     reason: "email does not match AXIAM_BOOTSTRAP_ADMIN_EMAIL".into(),
+                    action: None,
+                    resource_id: None,
                 }));
             }
         }
@@ -171,12 +173,16 @@ pub async fn bootstrap<C: Connection + Clone>(
                                  AXIAM_BOOTSTRAP_ADMIN_EMAIL or provide a valid \
                                  setup_token"
                             .into(),
+                        action: None,
+                        resource_id: None,
                     }));
                 }
             };
             if !setup_token_is_valid(&state.db, &token_hash).await? {
                 return Err(AxiamApiError(AxiamError::AuthorizationDenied {
                     reason: "setup token is invalid, unknown, or already consumed".into(),
+                    action: None,
+                    resource_id: None,
                 }));
             }
             consumed_token_hash = Some(token_hash);

@@ -128,6 +128,8 @@ pub async fn get_org_email_config<C: Connection + Clone>(
     if org_id != user.org_id {
         return Err(AxiamApiError(AxiamError::AuthorizationDenied {
             reason: "cannot read email configuration for a different organization".into(),
+            action: None,
+            resource_id: None,
         }));
     }
 
@@ -171,6 +173,8 @@ pub async fn set_org_email_config<C: Connection + Clone>(
     if org_id != user.org_id {
         return Err(AxiamApiError(AxiamError::AuthorizationDenied {
             reason: "cannot modify email configuration for a different organization".into(),
+            action: None,
+            resource_id: None,
         }));
     }
 
@@ -208,6 +212,8 @@ pub async fn delete_org_email_config<C: Connection + Clone>(
     if org_id != user.org_id {
         return Err(AxiamApiError(AxiamError::AuthorizationDenied {
             reason: "cannot delete email configuration for a different organization".into(),
+            action: None,
+            resource_id: None,
         }));
     }
 
@@ -249,6 +255,8 @@ pub async fn get_tenant_email_config<C: Connection + Clone>(
     if tenant_id != user.tenant_id {
         return Err(AxiamApiError(AxiamError::AuthorizationDenied {
             reason: "cannot read email configuration for a different tenant".into(),
+            action: None,
+            resource_id: None,
         }));
     }
 
@@ -293,6 +301,8 @@ pub async fn set_tenant_email_config<C: Connection + Clone>(
     if tenant_id != user.tenant_id {
         return Err(AxiamApiError(AxiamError::AuthorizationDenied {
             reason: "cannot modify email configuration for a different tenant".into(),
+            action: None,
+            resource_id: None,
         }));
     }
 
@@ -330,6 +340,8 @@ pub async fn delete_tenant_email_config<C: Connection + Clone>(
     if tenant_id != user.tenant_id {
         return Err(AxiamApiError(AxiamError::AuthorizationDenied {
             reason: "cannot delete email configuration for a different tenant".into(),
+            action: None,
+            resource_id: None,
         }));
     }
 

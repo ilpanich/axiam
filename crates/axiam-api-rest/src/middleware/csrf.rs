@@ -170,6 +170,8 @@ where
         if !valid {
             let error: actix_web::Error = AxiamApiError(AxiamError::AuthorizationDenied {
                 reason: "CSRF validation failed".into(),
+                action: None,
+                resource_id: None,
             })
             .into();
             return Box::pin(async move {

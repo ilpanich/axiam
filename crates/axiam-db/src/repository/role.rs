@@ -388,6 +388,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant role assignment denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
             // QUAL-03/D-09: a duplicate has_role edge violates the
@@ -450,6 +452,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant role unassignment denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
             return Err(DbError::Migration(msg).into());
@@ -592,6 +596,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant group role assignment denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
             // QUAL-03/D-09: a duplicate has_role edge violates the
@@ -654,6 +660,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
             if msg.contains("cross-tenant edge denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant group role unassignment denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
             return Err(DbError::Migration(msg).into());

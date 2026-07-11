@@ -54,6 +54,8 @@ impl CertificateAuthenticated {
             AxiamError::Certificate(msg) if msg.contains("not bound to a service account") => {
                 AxiamError::AuthorizationDenied {
                     reason: msg.clone(),
+                    action: None,
+                    resource_id: None,
                 }
             }
             AxiamError::Certificate(msg) => AxiamError::AuthenticationFailed {

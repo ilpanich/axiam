@@ -277,16 +277,12 @@ async def test_on_message_rejects_replayed_nonce() -> None:
         handler_calls += 1
 
     first = RecordingMessage(body)
-    await _on_message(
-        first, SUBKEY, handler, logger, nonce_store=store, skew_seconds=300, now=now
-    )
+    await _on_message(first, SUBKEY, handler, logger, nonce_store=store, skew_seconds=300, now=now)
     assert first.acked is True
     assert handler_calls == 1
 
     second = RecordingMessage(body)  # identical body -> identical nonce
-    await _on_message(
-        second, SUBKEY, handler, logger, nonce_store=store, skew_seconds=300, now=now
-    )
+    await _on_message(second, SUBKEY, handler, logger, nonce_store=store, skew_seconds=300, now=now)
     assert second.acked is False
     assert second.nacked is False  # requeue=False
     assert handler_calls == 1  # handler NOT invoked a second time

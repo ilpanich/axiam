@@ -45,10 +45,16 @@ jobs:
       # sdk-ci-csharp.yml's actions/setup-dotnet@v4.
       # maintainer: repin to a commit SHA once GitHub network egress is
       # available in this environment.
-      - name: Set up PHP 8.1
+      # PHP 8.2 is the TEST runtime, not the SDK's minimum. The package itself
+      # still supports `php: >=8.1` (all four runtime deps — guzzle,
+      # php-amqplib, php-jwt, psr/log — resolve on 8.1), but the require-dev
+      # framework bridges do not: illuminate/support ^11 and symfony/* ^7 both
+      # require PHP ^8.2, so `composer install` (which installs dev deps) is
+      # unsatisfiable on 8.1 and the job died before running a single test.
+      - name: Set up PHP 8.2
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240  # v2.37.2
         with:
-          php-version: '8.1'
+          php-version: '8.2'
           extensions: sodium
           coverage: none
 

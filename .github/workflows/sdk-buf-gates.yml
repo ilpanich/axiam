@@ -6,7 +6,6 @@ on:
     paths:
       - 'proto/**'
       - 'buf.yaml'
-      - 'buf.gen.yaml'
 
 permissions:
   contents: read

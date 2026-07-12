@@ -38,15 +38,18 @@ deployment env-var reference).
 
 Client stubs are pre-generated and committed per SDK; you do not need to
 run codegen yourself to consume the API from a supported SDK language.
-Codegen is driven by [`buf.gen.yaml`](../../buf.gen.yaml) (`buf generate`)
-for Rust/TypeScript/Go, and by language-specific scripts for Python/Java/PHP
-(see the comments in `buf.gen.yaml` for the exact per-language mechanism).
+Each SDK lives in its own repository (`ilpanich/axiam-<lang>-sdk`), vendors a
+copy of `proto/` from here, and owns its codegen step — `buf generate` for
+Rust/TypeScript/Go, and language-specific tooling for Python (grpc_tools),
+Java (protobuf-maven-plugin) and C#/PHP (protoc); see each SDK's `buf.gen.yaml`
+or build file.
 The [`sdk-buf-gates.yml`](../../.github/workflows/sdk-buf-gates.yml) CI job
 runs `buf lint` + `buf breaking` against `proto/` on every change, so the
-`.proto` contracts are guarded against accidental breaking changes.
+`.proto` contracts are guarded against accidental breaking changes at the
+source.
 
 - **Rust:** `axiam-sdk`'s `grpc` feature exposes `AuthzGrpcClient` (see
-  [`sdks/rust/README.md`](../../sdks/rust/README.md)) — a shared,
+  the [Rust SDK](https://github.com/ilpanich/axiam-rust-sdk)) — a shared,
   lazily-connected `tonic::Channel` client for `check_access`/`batch_check`.
 - **Other languages:** each SDK's own README documents its gRPC client
   surface; all share the same `.proto` contract above.

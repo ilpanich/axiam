@@ -150,8 +150,25 @@ axiam/
 ├── claude_dev/             # Design document & roadmap
 ├── docker/                 # Docker Compose configs
 ├── k8s/                    # Kubernetes manifests
-└── sdks/                   # SDK projects
+└── sdks/                   # SDK contract + OpenAPI spec (the SDKs themselves
+                        #   live in ilpanich/axiam-<lang>-sdk repositories)
 ```
+
+## Client SDKs
+
+The seven client SDKs live in their own repositories. Each one vendors a copy of
+[`sdks/CONTRACT.md`](sdks/CONTRACT.md) (the binding cross-language behavioral contract),
+[`sdks/openapi.json`](sdks/openapi.json) and [`proto/`](proto/), which are maintained here:
+
+| Language | Repository | Package |
+|----------|------------|---------|
+| Rust | [axiam-rust-sdk](https://github.com/ilpanich/axiam-rust-sdk) | [crates.io](https://crates.io/crates/axiam-sdk) |
+| TypeScript | [axiam-typescript-sdk](https://github.com/ilpanich/axiam-typescript-sdk) | [npm](https://www.npmjs.com/package/axiam-sdk) |
+| Python | [axiam-python-sdk](https://github.com/ilpanich/axiam-python-sdk) | [PyPI](https://pypi.org/project/axiam-sdk/) |
+| Java | [axiam-java-sdk](https://github.com/ilpanich/axiam-java-sdk) | Maven Central (`io.github.ilpanich:axiam-sdk`) |
+| C# | [axiam-csharp-sdk](https://github.com/ilpanich/axiam-csharp-sdk) | [NuGet](https://www.nuget.org/packages/Axiam.Sdk) |
+| PHP | [axiam-php-sdk](https://github.com/ilpanich/axiam-php-sdk) | [Packagist](https://packagist.org/packages/axiam/axiam-sdk) |
+| Go | [axiam-go-sdk](https://github.com/ilpanich/axiam-go-sdk) | [pkg.go.dev](https://pkg.go.dev/github.com/ilpanich/axiam-go-sdk) |
 
 ## Benchmarking
 
@@ -164,7 +181,7 @@ HTTP up to mTLS with client-certificate auth, quantifying what each tier costs).
 
 It drives standard OAuth2/OIDC flows through a per-target adapter so every system
 is measured on equal footing, and includes scaffolded per-SDK client-overhead
-benchmarks that activate as the SDKs land. See
+benchmarks that consume each SDK from its published package. See
 [`benchmarks/README.md`](benchmarks/README.md) and
 [`benchmarks/docs/methodology.md`](benchmarks/docs/methodology.md).
 

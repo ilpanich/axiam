@@ -3,33 +3,60 @@
 Everything AXIAM publishes, where it goes, what credentials each destination needs, and
 exactly how to create them. All destinations are **free for open-source projects**.
 
-Nothing here is aspirational — every secret name below is one the workflows in
-`.github/workflows/` actually reference. If a secret is absent, the corresponding publish
-step degrades to a documented `::warning::` no-op rather than failing the pipeline, so you
-can set them up one at a time.
+> **Read this first — the repository layout changed (2026-07).**
+> The seven client SDKs no longer live in this repository. Each one is now its own GitHub
+> repository, and **each publishes itself, from its own tags, with its own secrets**:
+>
+> | Language | Repository | This repo (`ilpanich/axiam`) keeps |
+> |---|---|---|
+> | Rust | `ilpanich/axiam-rust-sdk` | `sdks/CONTRACT.md` — the binding cross-language contract |
+> | TypeScript | `ilpanich/axiam-typescript-sdk` | `sdks/openapi.json` — the REST spec (drift-gated in CI) |
+> | Python | `ilpanich/axiam-python-sdk` | `proto/` — the gRPC contract |
+> | Java | `ilpanich/axiam-java-sdk` | |
+> | C# | `ilpanich/axiam-csharp-sdk` | |
+> | PHP | `ilpanich/axiam-php-sdk` | |
+> | Go | `ilpanich/axiam-go-sdk` | |
+>
+> Those three inputs are **maintained here and vendored (copied) into each SDK repo**. When
+> one of them changes, the copies downstream must be re-synced — nothing enforces this
+> automatically yet (see §8).
+>
+> Consequences you must internalise before releasing anything:
+> - **Tags are now per-repo and plain.** An SDK release is `v1.0.0` **in its own repo** — no
+>   more `axiam-rust-sdk/v1.0.0` namespacing, which only existed to disambiguate components
+>   inside one repository. The **server** keeps `axiam-server/v1.0.0` in *this* repo.
+> - **Secrets live in the SDK repos**, not here. This repo now needs **zero** publishing
+>   secrets.
+> - **Two flows changed shape**, not just location — C# (§4.6) and PHP (§4.7). Read them.
+
+Nothing here is aspirational — every secret name below is one the workflows actually
+reference.
 
 ---
 
 ## 1. At a glance
 
-| Artifact | Registry | Free? | Secrets you must create |
-|---|---|---|---|
-| Server + frontend images | **GHCR** (`ghcr.io`) | Yes | **None** — uses the built-in `GITHUB_TOKEN` |
-| Image signatures | **Sigstore** (cosign keyless) | Yes | **None** — OIDC, no private key exists |
-| Rust SDK | **crates.io** | Yes | `CRATES_IO_TOKEN` |
-| Python SDK | **PyPI** | Yes | **None** — Trusted Publishing (OIDC), but needs one-time PyPI config |
-| TypeScript SDK | **npm** | Yes | `NPM_TOKEN` |
-| Java SDK | **Maven Central** | Yes | `CENTRAL_TOKEN_USERNAME`, `CENTRAL_TOKEN_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` |
-| C# SDK | **NuGet.org** | Yes | `NUGET_API_KEY` |
-| PHP SDK | **Packagist** | Yes | `PHP_SDK_MIRROR_TOKEN` (secret) + `PHP_SDK_MIRROR_REPO` (variable) |
-| Go SDK | **pkg.go.dev** | Yes | **None** — the module proxy pulls it from the git tag |
-| Rust SDK docs | **docs.rs** | Yes | **None** — built automatically from the crates.io release |
-| Java SDK docs | **javadoc.io** | Yes | **None** — served from the `-javadoc.jar` on Maven Central |
-| Go SDK docs | **pkg.go.dev** | Yes | **None** — automatic |
-| Python/TS/C#/PHP docs + server rustdoc | **GitHub Pages** | Yes | **None** — but Pages must be *enabled* (§3) |
+| Artifact | Published from | Registry | Free? | Secrets you must create |
+|---|---|---|---|---|
+| Server + frontend images | `axiam` | **GHCR** (`ghcr.io`) | Yes | **None** — built-in `GITHUB_TOKEN` |
+| Image signatures | `axiam` | **Sigstore** (cosign keyless) | Yes | **None** — OIDC, no private key exists |
+| Server rustdoc + docs index | `axiam` | **GitHub Pages** | Yes | **None** — but Pages must be enabled |
+| Rust SDK | `axiam-rust-sdk` | **crates.io** | Yes | `CRATES_IO_TOKEN` |
+| Python SDK | `axiam-python-sdk` | **PyPI** | Yes | **None** — Trusted Publishing (OIDC) + one-time PyPI config |
+| TypeScript SDK | `axiam-typescript-sdk` | **npm** | Yes | `NPM_TOKEN` |
+| Java SDK (+ BOM) | `axiam-java-sdk` | **Maven Central** | Yes | `CENTRAL_TOKEN_USERNAME`, `CENTRAL_TOKEN_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` |
+| C# SDK | `axiam-csharp-sdk` | **NuGet.org** | Yes | **None** — Trusted Publishing (OIDC) via the `production` environment |
+| PHP SDK | `axiam-php-sdk` | **Packagist** | Yes | **None** — Packagist's own GitHub webhook |
+| Go SDK | `axiam-go-sdk` | **pkg.go.dev** | Yes | **None** — the module proxy pulls it from the git tag |
+| Rust SDK docs | — | **docs.rs** | Yes | **None** — built from the crates.io release |
+| Java SDK docs | — | **javadoc.io** | Yes | **None** — served from the `-javadoc.jar` on Central |
+| Go SDK docs | — | **pkg.go.dev** | Yes | **None** — automatic |
+| Python/TS/C#/PHP SDK docs | each SDK repo | **that repo's GitHub Pages** | Yes | **None** — but Pages must be enabled per repo |
+| Test coverage (all 7 SDKs) | each SDK repo | **Coveralls** | Yes | **None** if the repo is public (`GITHUB_TOKEN`); otherwise `COVERALLS_REPO_TOKEN` |
 
-**Six secrets and one variable in total.** Everything else is automatic or uses the
-built-in token.
+**Six secrets in total, spread across three repos.** Everything else is OIDC, a webhook, or
+the built-in token. **No secret is a long-lived push credential for another repository** —
+the old PHP mirror PAT is gone (§4.7).
 
 ### Package identifiers (already set in the manifests)
 
@@ -38,68 +65,77 @@ built-in token.
 | crates.io | `axiam-sdk` |
 | PyPI | `axiam-sdk` |
 | npm | `axiam-sdk` (unscoped) |
-| Maven Central | `io.github.ilpanich:axiam-sdk` |
+| Maven Central | `io.github.ilpanich:axiam-sdk` (+ `axiam-sdk-bom`) |
 | NuGet | `Axiam.Sdk`, `Axiam.Sdk.AspNetCore` |
 | Packagist | `axiam/axiam-sdk` |
-| Go | `github.com/ilpanich/axiam/sdks/go` |
+| Go | **`github.com/ilpanich/axiam-go-sdk`** — changed, see §4.8 |
 | GHCR | `ghcr.io/ilpanich/axiam/server`, `.../frontend` |
 
 ---
 
 ## 2. How to add a secret or variable
 
-**UI:** repository → **Settings** → **Secrets and variables** → **Actions**
-- *Secrets* tab → **New repository secret** (encrypted, never printed in logs)
-- *Variables* tab → **New repository variable** (plaintext, fine for non-sensitive values like a repo name)
+**UI:** repository → **Settings** → **Secrets and variables** → **Actions** → *Secrets* tab
+→ **New repository secret**.
 
-**CLI** (faster, avoids pasting keys into a browser):
+**CLI** (faster, and avoids pasting keys into a browser) — note the `--repo` now names the
+**SDK's** repo, not `ilpanich/axiam`:
 
 ```bash
-gh secret set CRATES_IO_TOKEN --repo ilpanich/axiam            # prompts, reads from stdin
-gh secret set GPG_PRIVATE_KEY --repo ilpanich/axiam < key.asc  # from a file
-gh variable set PHP_SDK_MIRROR_REPO --repo ilpanich/axiam --body "ilpanich/axiam-php-sdk"
-gh secret list --repo ilpanich/axiam                            # verify
+gh secret set CRATES_IO_TOKEN --repo ilpanich/axiam-rust-sdk           # prompts, reads stdin
+gh secret set GPG_PRIVATE_KEY --repo ilpanich/axiam-java-sdk < key.asc # from a file
+gh secret list --repo ilpanich/axiam-rust-sdk                          # verify
 ```
 
 ---
 
-## 3. One-time repository settings (do these first)
+## 3. One-time repository settings
 
-1. **Enable GitHub Pages** — required before the first docs tag, or the docs jobs fail.
-   Settings → **Pages** → *Build and deployment* → Source: **Deploy from a branch** →
-   Branch: **`gh-pages`** / **`/ (root)`** → Save.
-   The branch is created automatically by the first `docs-publish.yml` run; if Pages
-   refuses to save because the branch does not exist yet, push any docs tag first, then
-   set it.
-   Site layout on `gh-pages` (all deploys use `keep_files: true`, so the subtrees never
-   clobber each other): the **root** (`https://ilpanich.github.io/axiam/`) is owned by the
-   AXIAM project **website** (Phase 20 showcase site); the generated **documentation index**
-   lands at `…/axiam/docs/`; per-artifact API docs stay under `…/axiam/server/` and
-   `…/axiam/sdk/<lang>/`.
+### 3.1 In `ilpanich/axiam` (this repo)
 
+1. **Enable GitHub Pages** — Settings → **Pages** → Source: **Deploy from a branch** →
+   Branch **`gh-pages`** / **`/ (root)`**. The branch is created by the first
+   `docs-publish.yml` run.
+   Site layout: the **root** (`https://ilpanich.github.io/axiam/`) is the AXIAM project
+   website; the **documentation index** lands at `…/axiam/docs/` and the server rustdoc at
+   `…/axiam/server/`. The index links *out* to each SDK's own docs site.
 2. **Allow Actions to write packages/contents** — Settings → **Actions** → **General** →
-   *Workflow permissions* → **Read and write permissions**. (GHCR pushes and the `gh-pages`
-   commit need this.)
+   *Workflow permissions* → **Read and write permissions** (GHCR pushes and the `gh-pages`
+   commit need this).
+3. **Make the GHCR packages public** after the first image push — profile → **Packages** →
+   `axiam/server` → *Package settings* → **Change visibility** → **Public**.
 
-3. **Create the `pypi` environment** — Settings → **Environments** → **New environment** →
-   name it exactly **`pypi`**. The Python publish job declares `environment: pypi`, and
-   PyPI Trusted Publishing binds to that name (§4.2). Optionally add yourself as a required
-   reviewer so a release to PyPI needs an explicit approval click.
+### 3.2 In every SDK repo
 
-4. **Make the GHCR packages public** (after the first image push) — the packages appear
-   under your profile → **Packages** → `axiam/server` → *Package settings* → **Change
-   visibility** → **Public**. Until you do this, `docker pull` requires authentication.
+1. **Enable GitHub Pages** (Python, TypeScript, C#, PHP — the four that build their own API
+   docs): Settings → **Pages** → Branch **`gh-pages`** / **`/ (root)`**. Rust, Java and Go
+   get their docs from docs.rs / javadoc.io / pkg.go.dev and need nothing.
+2. **Allow Actions read/write permissions** (the docs job commits to `gh-pages`).
+3. **Create the GitHub *environment*** the publish job declares — the name must match
+   **exactly**, because the registry's OIDC trust is bound to it:
+
+   | Repo | Environment name | Why |
+   |---|---|---|
+   | `axiam-python-sdk` | `pypi` | PyPI Trusted Publishing binds to it |
+   | `axiam-csharp-sdk` | `production` | NuGet Trusted Publishing binds to it |
+   | `axiam-java-sdk` | `maven-central` | Gates the Central deploy (not OIDC, but the job declares it) |
+
+   Optionally add yourself as a required reviewer on these, so a release needs an explicit
+   approval click.
+4. **Add the repo to Coveralls** — <https://coveralls.io/repos/new>, pick the repo. Public
+   repos need no token (the workflow authenticates with `GITHUB_TOKEN`); for a private repo,
+   copy the repo token and `gh secret set COVERALLS_REPO_TOKEN --repo ilpanich/axiam-<lang>-sdk`.
 
 ---
 
 ## 4. Per-registry setup
 
-### 4.1 GHCR — Docker images (no secret needed)
+### 4.1 GHCR — Docker images (`axiam` repo, no secret needed)
 
-`release.yml` authenticates with the automatically-provided `GITHUB_TOKEN`; there is
-nothing to create. Images are signed with **cosign keyless** — Sigstore issues a
-short-lived certificate from the workflow's OIDC identity, so **no signing key exists and
-none can leak**. Consumers verify with:
+`release.yml` authenticates with the automatically-provided `GITHUB_TOKEN`; there is nothing
+to create. Images are signed with **cosign keyless** — Sigstore issues a short-lived
+certificate from the workflow's OIDC identity, so **no signing key exists and none can
+leak**. Consumers verify with:
 
 ```bash
 cosign verify ghcr.io/ilpanich/axiam/server:1.0.0 \
@@ -107,165 +143,169 @@ cosign verify ghcr.io/ilpanich/axiam/server:1.0.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-Only do step 3.4 above (make the package public).
+### 4.2 PyPI — Python SDK (no secret, but one-time config) → `axiam-python-sdk`
 
-### 4.2 PyPI — Python SDK (no secret needed, but one-time config)
+Uses **Trusted Publishing**: PyPI trusts a specific GitHub workflow via OIDC, so there is no
+API token to create, rotate, or leak.
 
-Uses **Trusted Publishing**: PyPI trusts a specific GitHub workflow via OIDC, so there is
-no API token to create, rotate, or leak. Set it up once:
+> **⚠️ If you already configured this against the monorepo, you MUST update it.** A trusted
+> publisher is bound to `(owner, repository, workflow filename, environment)`. The repository
+> changed, so the old binding (`Repository: axiam`) will now **reject** the OIDC token.
 
-1. Create an account at <https://pypi.org/account/register/> and enable 2FA.
-2. Go to <https://pypi.org/manage/account/publishing/> → **Add a new pending publisher**.
+1. Account at <https://pypi.org/account/register/>, 2FA enabled.
+2. <https://pypi.org/manage/account/publishing/> → edit the existing publisher for
+   `axiam-sdk`, or **Add a new pending publisher**.
 3. Fill in **exactly**:
    - PyPI Project Name: `axiam-sdk`
    - Owner: `ilpanich`
-   - Repository name: `axiam`
+   - Repository name: **`axiam-python-sdk`**  ← changed
    - Workflow name: `sdk-ci-python.yml`
    - Environment name: `pypi`
-4. Save. The first `axiam-python-sdk/v*` tag creates the project and publishes it.
+4. Create the `pypi` environment in the repo (§3.2) — the names must match or PyPI rejects
+   the token.
 
-> The environment name must match the `environment: pypi` in the workflow, or PyPI rejects
-> the OIDC token.
-
-### 4.3 crates.io — Rust SDK → `CRATES_IO_TOKEN`
+### 4.3 crates.io — Rust SDK → `CRATES_IO_TOKEN` in `axiam-rust-sdk`
 
 1. Sign in at <https://crates.io/> with GitHub.
 2. **Account Settings** → **API Tokens** → **New Token**.
-3. Name: `axiam-ci`. Scopes: **`publish-new`** and **`publish-update`**.
-   Optionally restrict to the crate `axiam-sdk` (do this after the first publish, since the
-   crate must exist to be selectable).
-4. Copy the token (shown once) and store it:
-   ```bash
-   gh secret set CRATES_IO_TOKEN --repo ilpanich/axiam
-   ```
+3. Name `axiam-ci`; scopes **`publish-new`** + **`publish-update`**. Restrict it to the
+   `axiam-sdk` crate after the first publish (the crate must exist to be selectable).
+4. `gh secret set CRATES_IO_TOKEN --repo ilpanich/axiam-rust-sdk`
 
-docs.rs then builds the documentation automatically — nothing further to configure
-(`[package.metadata.docs.rs] all-features = true` is already in `sdks/rust/Cargo.toml`).
+docs.rs builds the documentation automatically — nothing further to configure
+(`[package.metadata.docs.rs] all-features = true` is already in the SDK's `Cargo.toml`).
 
-### 4.4 npm — TypeScript SDK → `NPM_TOKEN`
+### 4.4 npm — TypeScript SDK → `NPM_TOKEN` in `axiam-typescript-sdk`
 
-1. Create an account at <https://www.npmjs.com/signup> and enable 2FA.
+1. Account at <https://www.npmjs.com/signup>, 2FA enabled.
 2. Avatar → **Access Tokens** → **Generate New Token** → **Granular Access Token**.
-3. Configure:
-   - Expiration: your choice (a calendar reminder to rotate is wise)
-   - Packages and scopes: **Read and write**, limited to `axiam-sdk`
-     (on the very first publish the package does not exist yet — either allow all packages
-     for that one run, or run `npm publish` manually once to claim the name)
-   - **Important:** the token must be allowed to bypass 2FA for automation, otherwise
-     `npm publish` from CI prompts for an OTP and hangs. Granular tokens do this by
-     default; if you use a Classic token, choose type **Automation**.
-4. Store it:
-   ```bash
-   gh secret set NPM_TOKEN --repo ilpanich/axiam
-   ```
+3. Packages and scopes: **Read and write**, limited to `axiam-sdk` (on the very first publish
+   the package does not exist — either allow all packages for that one run, or `npm publish`
+   manually once to claim the name). The token must **bypass 2FA for automation**, or
+   `npm publish` from CI prompts for an OTP and hangs (granular tokens do this by default; a
+   Classic token must be type **Automation**).
+4. `gh secret set NPM_TOKEN --repo ilpanich/axiam-typescript-sdk`
 
-The workflow publishes with `--provenance`, which additionally attests the build to
-Sigstore using OIDC (no extra secret).
+The workflow publishes with `--provenance`, which attests the build to Sigstore over OIDC (no
+extra secret).
 
-### 4.5 Maven Central — Java SDK → 4 secrets
+### 4.5 Maven Central — Java SDK → 4 secrets in `axiam-java-sdk`
 
 The heaviest setup, because Central requires **namespace ownership** and **GPG-signed
 artifacts**.
 
-**Step A — claim the namespace.** The pom publishes under `io.github.ilpanich`, the
+**Step A — claim the namespace.** The poms publish under `io.github.ilpanich`, the
 GitHub-backed namespace Central verifies for free (the `axiam.io` domain is not owned, so the
-`io.axiam` groupId is not available). This decision is now locked in the poms.
+`io.axiam` groupId is not available).
 
 1. Register at <https://central.sonatype.com/> (sign in with GitHub).
-2. **View Namespaces** → **Add Namespace** → enter `io.github.ilpanich`.
+2. **View Namespaces** → **Add Namespace** → `io.github.ilpanich`.
 3. Central verifies GitHub-backed namespaces by having you create a temporary public repo it
-   names (no DNS TXT record needed — that path is only for domain-based namespaces).
+   names (no DNS TXT record — that path is only for domain-based namespaces).
 
-> **groupId is `io.github.ilpanich`** (set in `sdks/java/pom.xml`, `sdks/java-bom/pom.xml`,
-> the SDK README, the CI/publish workflow, and `benchmarks/sdk/java/TODO.md`). It was chosen
-> over `io.axiam` because that groupId would require proving ownership of the `axiam.io`
-> domain, which the project does not own. **The groupId cannot be changed after publishing
-> without shipping a new artifact — this is fixed before the first Java release.**
+> **The groupId cannot be changed after publishing** without shipping a new artifact. It is
+> fixed at `io.github.ilpanich` before the first Java release.
 
-**Step B — generate the publishing token** (this is a *portal token*, not your password):
-
-1. central.sonatype.com → your name → **View Account** → **Generate User Token**.
-2. It returns an XML block containing a `<username>` and `<password>`. Store both:
-   ```bash
-   gh secret set CENTRAL_TOKEN_USERNAME --repo ilpanich/axiam
-   gh secret set CENTRAL_TOKEN_PASSWORD --repo ilpanich/axiam
-   ```
-
-**Step C — create the GPG signing key** (Central rejects unsigned artifacts):
+**Step B — the publishing token** (a *portal token*, not your password):
+central.sonatype.com → your name → **View Account** → **Generate User Token**. It returns XML
+with a `<username>` and `<password>`:
 
 ```bash
-# 1. Generate a key (pick RSA 4096; use a real email; set a strong passphrase)
-gpg --full-generate-key
-
-# 2. Find its ID
-gpg --list-secret-keys --keyid-format=long
-#   sec   rsa4096/ABCD1234EF567890 2026-07-11 [SC]
-
-# 3. Publish the PUBLIC key — Central verifies signatures against a keyserver
-gpg --keyserver keyserver.ubuntu.com --send-keys ABCD1234EF567890
-
-# 4. Export the PRIVATE key and store it as a secret
-gpg --armor --export-secret-keys ABCD1234EF567890 > /tmp/axiam-signing-key.asc
-gh secret set GPG_PRIVATE_KEY --repo ilpanich/axiam < /tmp/axiam-signing-key.asc
-shred -u /tmp/axiam-signing-key.asc      # do not leave the private key on disk
-
-# 5. Store the passphrase
-gh secret set GPG_PASSPHRASE --repo ilpanich/axiam
+gh secret set CENTRAL_TOKEN_USERNAME --repo ilpanich/axiam-java-sdk
+gh secret set CENTRAL_TOKEN_PASSWORD --repo ilpanich/axiam-java-sdk
 ```
 
-> Use a **dedicated key for releases**, not your personal git-signing key — a CI secret
-> should be revocable without disrupting your commit signatures.
+**Step C — the GPG signing key** (Central rejects unsigned artifacts):
 
-javadoc.io then serves the docs automatically from the `-javadoc.jar` the build attaches —
-nothing further to configure.
+```bash
+gpg --full-generate-key                         # RSA 4096, real email, strong passphrase
+gpg --list-secret-keys --keyid-format=long      # -> sec rsa4096/ABCD1234EF567890
+gpg --keyserver keyserver.ubuntu.com --send-keys ABCD1234EF567890   # Central checks a keyserver
 
-### 4.6 NuGet.org — C# SDK → `NUGET_API_KEY`
+gpg --armor --export-secret-keys ABCD1234EF567890 > /tmp/axiam-signing-key.asc
+gh secret set GPG_PRIVATE_KEY --repo ilpanich/axiam-java-sdk < /tmp/axiam-signing-key.asc
+shred -u /tmp/axiam-signing-key.asc             # do not leave the private key on disk
+gh secret set GPG_PASSPHRASE --repo ilpanich/axiam-java-sdk
+```
 
-1. Sign in at <https://www.nuget.org/> (Microsoft account) and enable 2FA.
-2. **Reserve the package IDs first** (recommended): the `Axiam.*` prefix can be reserved so
-   nobody else can publish under it — see
-   <https://learn.microsoft.com/en-us/nuget/nuget-org/id-prefix-reservation>
-   (apply by emailing NuGet support from the account that owns the packages).
-3. Avatar → **API Keys** → **Create**.
-   - Key name: `axiam-ci`
-   - Select Scopes: **Push** (choose *Push new packages and package versions*)
-   - Glob pattern: `Axiam.*` (covers both `Axiam.Sdk` and `Axiam.Sdk.AspNetCore`)
-   - Expiration: max 365 days — **NuGet keys always expire**, so diarise the rotation.
-4. Copy it and store:
-   ```bash
-   gh secret set NUGET_API_KEY --repo ilpanich/axiam
-   ```
+> Use a **dedicated release key**, not your personal git-signing key — a CI secret should be
+> revocable without disrupting your commit signatures.
 
-### 4.7 Packagist — PHP SDK → `PHP_SDK_MIRROR_TOKEN` + `PHP_SDK_MIRROR_REPO`
+The release deploys **both** the SDK artifact and the BOM. javadoc.io then serves the docs
+automatically from the `-javadoc.jar` the build attaches.
 
-Packagist has **no monorepo-subdirectory support**, and this repository's root is a Rust
-Cargo workspace, so `sdks/php/` cannot be published directly. The workflow therefore does a
-`git subtree split` of `sdks/php/` and pushes the result to a **read-only mirror
-repository** that Packagist watches.
+### 4.6 NuGet.org — C# SDK → **Trusted Publishing**, no secret (`axiam-csharp-sdk`)
 
-1. **Create the mirror repo**: a new *public, empty* GitHub repo, e.g.
-   `ilpanich/axiam-php-sdk`. Do not add a README — the split branch becomes its `main`.
-2. **Create a token that can push to it.** Prefer a *fine-grained* PAT:
-   - GitHub → Settings → **Developer settings** → **Personal access tokens** →
-     **Fine-grained tokens** → **Generate new token**
-   - Repository access: **Only select repositories** → pick `ilpanich/axiam-php-sdk`
-   - Permissions: **Contents: Read and write**
-   - Generate, copy, then:
-     ```bash
-     gh secret set PHP_SDK_MIRROR_TOKEN --repo ilpanich/axiam
-     gh variable set PHP_SDK_MIRROR_REPO --repo ilpanich/axiam --body "ilpanich/axiam-php-sdk"
-     ```
-3. **Register on Packagist**: sign in at <https://packagist.org/> with GitHub → **Submit** →
-   paste `https://github.com/ilpanich/axiam-php-sdk` → Submit. Then on the package page
-   click **Settings** and confirm the **GitHub webhook / auto-update** is enabled, so each
-   mirrored tag publishes a new version automatically.
+**This replaces the old `NUGET_API_KEY` flow.** NuGet now supports OIDC trusted publishing,
+so there is no API key to create, store, or rotate — and, unlike a NuGet API key, **nothing
+expires** (NuGet keys are capped at 365 days and fail *silently at release time*).
 
-### 4.8 pkg.go.dev — Go SDK (nothing to create)
+1. Sign in at <https://www.nuget.org/> and enable 2FA.
+2. **Reserve the ID prefix** (recommended): the `Axiam.*` prefix can be reserved so nobody
+   else can publish under it — see
+   <https://learn.microsoft.com/en-us/nuget/nuget-org/id-prefix-reservation>.
+3. Avatar → **Trusted Publishing** → add a policy bound to:
+   - Repository owner: `ilpanich`
+   - Repository: `axiam-csharp-sdk`
+   - Workflow file: `sdk-ci-csharp.yml`
+   - Environment: **`production`**
+4. Create the `production` environment in the repo (§3.2). The publish job declares
+   `environment: production` + `permissions: id-token: write`, exchanges the GitHub OIDC
+   token for a **short-lived** NuGet key at publish time, and pushes both `Axiam.Sdk` and
+   `Axiam.Sdk.AspNetCore`.
 
-The Go module proxy fetches the module straight from the git tag; `docs-publish.yml` merely
-asks `proxy.golang.org` to fetch it immediately rather than waiting for the first user
-request. No account, no token. Docs appear at
-<https://pkg.go.dev/github.com/ilpanich/axiam/sdks/go>.
+No `NUGET_API_KEY` secret should exist anywhere. If one is left over, delete it.
+
+### 4.7 Packagist — PHP SDK → **no secret at all** (`axiam-php-sdk`)
+
+**The mirror-repo hack is gone.** In the monorepo, Packagist could not consume a
+subdirectory, so CI did a `git subtree split` of `sdks/php/` and force-pushed it to a mirror
+repo using a `PHP_SDK_MIRROR_TOKEN` PAT. `axiam-php-sdk` **is** the package now, so:
+
+- the subtree-split/mirror-push job is **deleted**;
+- `PHP_SDK_MIRROR_TOKEN` (secret) and `PHP_SDK_MIRROR_REPO` (variable) are **gone** — delete
+  them if they still exist anywhere;
+- **no PHP publishing secret is needed.** (This is why PHP is the one SDK repo with no
+  secrets to create.)
+
+Setup is one click: sign in at <https://packagist.org/> with GitHub → **Submit** → paste
+`https://github.com/ilpanich/axiam-php-sdk` → Submit. On the package page, confirm the
+**GitHub webhook / auto-update** is enabled. Every tag you push then publishes a new version
+automatically.
+
+### 4.8 pkg.go.dev — Go SDK → nothing to create (`axiam-go-sdk`)
+
+> **⚠️ Breaking: the module path changed.**
+> Old: `github.com/ilpanich/axiam/sdks/go` — New: **`github.com/ilpanich/axiam-go-sdk`**.
+> This is forced, not a preference: the Go module proxy derives the import path from the
+> repository URL. Consumers must update their imports and `go get`.
+>
+> The **tag scheme changed with it**: the old `sdks/go/v1.0.0` form existed only because the
+> module sat in a subdirectory (the proxy requires `<module-subdir>/vX.Y.Z`). At the repo
+> root the tag is simply **`v1.0.0`**.
+
+The module proxy fetches straight from the git tag; the workflow merely asks
+`proxy.golang.org` to fetch it immediately rather than waiting for the first user request. No
+account, no token. Docs appear at <https://pkg.go.dev/github.com/ilpanich/axiam-go-sdk>.
+
+### 4.9 Coveralls — test coverage for all 7 SDKs
+
+Each SDK repo has a `coverage.yml` workflow that runs its test suite with coverage and
+uploads the report to **Coveralls** on every push to `main` and every PR (so PRs get a
+coverage-delta comment).
+
+| Language | Coverage tool | Report format |
+|---|---|---|
+| Rust | `cargo llvm-cov` | lcov |
+| TypeScript | vitest + `@vitest/coverage-v8` | lcov |
+| Python | `pytest-cov` | lcov |
+| Java | JaCoCo | jacoco xml |
+| C# | coverlet (`--collect:"XPlat Code Coverage"`) | lcov |
+| PHP | PHPUnit + pcov | clover |
+| Go | `go test -coverprofile` | golang |
+
+Setup: add each repo at <https://coveralls.io/repos/new>. Public repos authenticate with the
+built-in `GITHUB_TOKEN` — no secret. Private repos need `COVERALLS_REPO_TOKEN` (§3.2).
 
 ---
 
@@ -273,73 +313,50 @@ request. No account, no token. Docs appear at
 
 Tags are the only trigger. **A release tag must be on `main`** — every publishing workflow
 runs a `verify-tag-on-main` gate first, because git tags are not branch-scoped and a tag cut
-on a feature branch would otherwise ship unreviewed code to a registry under a version
-number that **can never be reclaimed** (crates.io, npm, PyPI, Maven Central, NuGet and
-Packagist all refuse to re-use a version).
+on a feature branch would otherwise ship unreviewed code to a registry under a version number
+that **can never be reclaimed** (crates.io, npm, PyPI, Maven Central, NuGet and Packagist all
+refuse to re-use a version).
 
-Every component is versioned and released **independently** — tagging the Rust SDK touches
-nothing else.
+Every component is versioned and released **independently** — and now from its own repo.
 
-| Tag you push | What happens |
-|---|---|
-| `axiam-server/v1.0.0` | Server **and** frontend images (amd64 **and** arm64) → GHCR, Trivy-scanned, cosign-signed; `x86_64` + `aarch64` binary tarballs → GitHub Release; server rustdoc → Pages |
-| `axiam-rust-sdk/v1.0.0` | crates.io → docs.rs picks it up automatically |
-| `axiam-python-sdk/v1.0.0` | PyPI (Trusted Publishing) + API docs → Pages |
-| `axiam-typescript-sdk/v1.0.0` | npm (with provenance) + API docs → Pages |
-| `axiam-java-sdk/v1.0.0` | Maven Central → javadoc.io picks it up automatically |
-| `axiam-csharp-sdk/v1.0.0` | NuGet + API docs → Pages |
-| `axiam-php-sdk/v1.0.0` | subtree-split → mirror repo → Packagist + API docs → Pages |
-| **`sdks/go/v1.0.0`** | proxy.golang.org nudge → pkg.go.dev — **see the exception below** |
+| Repo | Tag you push | What happens |
+|---|---|---|
+| `axiam` | `axiam-server/v1.0.0` | Server **and** frontend images (amd64 + arm64) → GHCR, Trivy-scanned, cosign-signed; `x86_64` + `aarch64` binary tarballs → GitHub Release; server rustdoc + docs index → Pages |
+| `axiam-rust-sdk` | `v1.0.0` | crates.io → docs.rs picks it up automatically |
+| `axiam-python-sdk` | `v1.0.0` | PyPI (Trusted Publishing) + API docs → that repo's Pages |
+| `axiam-typescript-sdk` | `v1.0.0` | npm (with provenance) + API docs → that repo's Pages |
+| `axiam-java-sdk` | `v1.0.0` | Maven Central (SDK + BOM) → javadoc.io picks it up automatically |
+| `axiam-csharp-sdk` | `v1.0.0` | NuGet (Trusted Publishing) + API docs → that repo's Pages |
+| `axiam-php-sdk` | `v1.0.0` | Packagist picks up the tag via its webhook + API docs → that repo's Pages |
+| `axiam-go-sdk` | `v1.0.0` | proxy.golang.org nudge → pkg.go.dev |
 
-Note that `axiam-server/…` ships the **admin-UI (frontend) image too**: the two are deployed
-as a pair (`docker-compose.prod.yml` runs both), so they share a version. Split them only if
-you ever want to ship a UI-only patch.
+`axiam-server/…` ships the **admin-UI (frontend) image too**: the two are deployed as a pair
+(`docker-compose.prod.yml` runs both), so they share a version. Split them only if you ever
+want to ship a UI-only patch.
 
-### The Go tag is the one exception — and it cannot be renamed
-
-Go SDK releases **must** stay on `sdks/go/vX.Y.Z`. This is not a style choice: for a module
-that lives in a subdirectory, the Go module proxy requires the tag to be
-`<module-subdir>/vX.Y.Z`. The module path is `github.com/ilpanich/axiam/sdks/go`, so the
-subdirectory is `sdks/go` and the tag must be exactly `sdks/go/v1.0.0`. An
-`axiam-go-sdk/v1.0.0` tag would simply be invisible to `go get` and to pkg.go.dev.
+The server tag keeps its `axiam-server/` prefix because *this* repo still holds more than one
+releasable thing (server images, binaries, docs). The SDK repos hold exactly one artifact
+each, so a bare `v1.0.0` is unambiguous.
 
 ### Colons are not legal in git tags
 
 A tag like `axiamserver:1.0.0` cannot exist — git's `check-ref-format` rejects `:` (along
-with space, `~`, `^`, `?`, `*`, `[`, `\`):
-
-```
-$ git tag "axiamserver:1.0.0"
-fatal: 'axiamserver:1.0.0' is not a valid tag name.
-```
-
-The colon you see in `ghcr.io/ilpanich/axiam/server:1.0.0` belongs to the **Docker image
-reference**, not the git tag. The release workflow derives it from the namespaced git tag
-automatically (`docker/metadata-action` with `type=match`), so pushing `axiam-server/v1.0.0`
-still produces the conventional `server:1.0.0` and `server:1.0` image tags.
+with space, `~`, `^`, `?`, `*`, `[`, `\`). The colon in `ghcr.io/ilpanich/axiam/server:1.0.0`
+belongs to the **Docker image reference**, not the git tag; the release workflow derives it
+from the namespaced git tag automatically (`docker/metadata-action` with `type=match`).
 
 Example:
 
 ```bash
+# Server (+ admin UI) release — in the axiam repo
 git checkout main && git pull
-
-# Server (+ admin UI) release
 git tag -s axiam-server/v1.0.0 -m "AXIAM server v1.0.0"
 git push origin axiam-server/v1.0.0
 
-# Rust SDK release, independently
-git tag -s axiam-rust-sdk/v1.0.0 -m "AXIAM Rust SDK v1.0.0"
-git push origin axiam-rust-sdk/v1.0.0
-
-# Go SDK release — MUST use the module-proxy layout
-git tag -s sdks/go/v1.0.0 -m "AXIAM Go SDK v1.0.0"
-git push origin sdks/go/v1.0.0
-```
-
-The namespacing also makes each component's history easy to list:
-
-```bash
-git tag --list 'axiam-rust-sdk/*'
+# Rust SDK release — in the axiam-rust-sdk repo, independently
+cd ../axiam-rust-sdk && git checkout main && git pull
+git tag -s v1.0.0 -m "AXIAM Rust SDK v1.0.0"
+git push origin v1.0.0
 ```
 
 ### Known gap worth your attention
@@ -352,43 +369,64 @@ five therefore rely on the tests having passed on the PR *before* the merge, and
 happily publish a commit that main has since broken.
 
 `verify-tag-on-main` closes the dangerous half of this (you can no longer publish code that
-was never reviewed), but if you want tag-time test enforcement everywhere, the fix is to
-drop the `pull_request`-only condition from those five workflows' test jobs and add them to
-the publish job's `needs:`, exactly as PHP and C# already do. It is a small change; it is
-called out here rather than made silently because it changes when those jobs run.
+was never reviewed). If you want tag-time test enforcement everywhere, drop the
+`pull_request`-only condition from those five workflows' test jobs and add them to the publish
+job's `needs:`, exactly as PHP and C# already do. It is a small change; it is called out here
+rather than made silently because it changes when those jobs run.
 
 ---
 
 ## 6. Recommended order for the first release
 
-Do the free, zero-risk ones first and leave Maven Central (the only one with a real
-prerequisite) for last.
+Do the zero-secret ones first and leave Maven Central (the only one with a real prerequisite)
+for last.
 
-1. Repo settings (§3) — Pages, workflow permissions, `pypi` environment.
-2. Tag `axiam-server/v1.0.0` → images land on GHCR; make the packages public. **This needs no secrets at
-   all.**
-3. `CRATES_IO_TOKEN` → tag `axiam-rust-sdk/v1.0.0`. docs.rs comes free.
-4. PyPI Trusted Publishing → tag `axiam-python-sdk/v1.0.0`.
-5. `NPM_TOKEN` → tag `axiam-typescript-sdk/v1.0.0`.
-6. `NUGET_API_KEY` → tag `axiam-csharp-sdk/v1.0.0`.
-7. Mirror repo + `PHP_SDK_MIRROR_TOKEN`/`PHP_SDK_MIRROR_REPO` → tag `axiam-php-sdk/v1.0.0`.
-8. Tag `sdks/go/v1.0.0` (no secret).
-9. **Java groupId is `io.github.ilpanich`** (GitHub-backed, free; `io.axiam` was dropped as it
-   needs the `axiam.io` domain) → namespace verification → the 4 Central/GPG secrets → tag
-   `axiam-java-sdk/v1.0.0`.
+1. Repo settings (§3) — Pages, workflow permissions, and the three GitHub environments
+   (`pypi`, `production`, `maven-central`).
+2. `axiam`: tag `axiam-server/v1.0.0` → images on GHCR; make the packages public.
+   **This needs no secrets at all.**
+3. `axiam-go-sdk`: tag `v1.0.0` (no secret).
+4. `axiam-php-sdk`: submit to Packagist, tag `v1.0.0` (no secret).
+5. `axiam-csharp-sdk`: NuGet trusted-publishing policy + `production` environment → tag `v1.0.0`.
+6. `axiam-python-sdk`: PyPI trusted publisher **re-bound to the new repo** → tag `v1.0.0`.
+7. `axiam-rust-sdk`: `CRATES_IO_TOKEN` → tag `v1.0.0`. docs.rs comes free.
+8. `axiam-typescript-sdk`: `NPM_TOKEN` → tag `v1.0.0`.
+9. `axiam-java-sdk`: namespace verification → the 4 Central/GPG secrets → tag `v1.0.0`.
 
 ---
 
 ## 7. Rotation & hygiene
 
-- **NuGet keys expire** (365 days max) and **npm granular tokens** expire on the date you
-  chose. Both fail *silently at release time*, which is the worst moment to discover it —
-  set a calendar reminder.
-- `CRATES_IO_TOKEN` does not expire; scope it to the `axiam-sdk` crate after the first
-  publish so a leak cannot touch anything else.
+- **npm granular tokens** expire on the date you chose, and fail *silently at release time* —
+  set a calendar reminder. (NuGet's expiry problem is gone: C# now uses OIDC, §4.6.)
+- `CRATES_IO_TOKEN` does not expire; scope it to the `axiam-sdk` crate after the first publish
+  so a leak cannot touch anything else.
 - The **GPG release key should be dedicated to CI**, so it can be revoked without affecting
   your commit signatures. Keep the revocation certificate offline.
-- Nothing needs a *Classic* PAT with broad scopes. If you find yourself creating one, prefer
-  a fine-grained token limited to the single repository that needs it.
-- GHCR and cosign need **no long-lived credential at all** — that is deliberate, and worth
-  preserving as the model for anything added later.
+- **No Classic PAT with broad scopes is needed anywhere** — and after the PHP mirror removal
+  (§4.7), no repo holds a push credential for another repo at all. Keep it that way.
+- GHCR + cosign, PyPI, NuGet and Packagist need **no long-lived credential**. That is
+  deliberate, and it is the model to copy for anything added later.
+
+---
+
+## 8. Keeping the SDK repos in sync with this one
+
+Three files are authored here and **vendored** into every SDK repo:
+
+| Source (in `ilpanich/axiam`) | Copy (in each `axiam-<lang>-sdk`) |
+|---|---|
+| `sdks/CONTRACT.md` | `CONTRACT.md` |
+| `sdks/openapi.json` | `openapi.json` |
+| `proto/` | `proto/` |
+| `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json` | `testdata/v2_reference_vectors.json` (Rust/TS/Python/Go; C#/Java/PHP carry their own equivalent fixture in their test tree) |
+
+This repo's CI still guards the **sources**: `sdk-openapi-drift.yml` fails if
+`sdks/openapi.json` drifts from a fresh `--dump-openapi` export, and `sdk-buf-gates.yml` runs
+buf lint/breaking/format on `proto/`.
+
+Nothing yet detects a **stale copy downstream**. Until that gate exists, treat any change to
+the three files above as a change that must be propagated: open a follow-up PR in each SDK
+repo re-copying them, and re-run that SDK's codegen. This is the single sharpest edge
+introduced by the multi-repo split — a silently stale `proto/` in one SDK produces stubs that
+compile fine and talk to the server incorrectly.

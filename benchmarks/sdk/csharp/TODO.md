@@ -1,6 +1,6 @@
 # Csharp SDK benchmark — wiring TODO
 
-The C# SDK is implemented (`sdks/csharp`). This directory is the bench-glue
+The C# SDK is implemented (`ilpanich/axiam-csharp-sdk`). This directory is the bench-glue
 scaffold: it currently emits a `pending` record conforming to
 `../HARNESS-SPEC.md` because the bench entrypoint has not been wired to the
 SDK yet.

@@ -9,8 +9,8 @@ raw protocol calls, so users can choose an SDK with eyes open.
 - `rust/`, `go/`, `java/`, `csharp/`, `php/` are pending stubs with a per-language
   `TODO.md`; each currently emits a valid `pending` record.
 
-All 7 SDKs (`sdks/{rust,typescript,python,java,csharp,php,go}`) are implemented
-and conform to `sdks/CONTRACT.md`. The five stubs above are missing only their
+All 7 SDKs (`ilpanich/axiam-{rust,typescript,python,java,csharp,php,go}-sdk`) are
+implemented and conform to `sdks/CONTRACT.md`. The five stubs above are missing only their
 bench glue, not the SDK itself — wire each per its `TODO.md` and flip its status
 to `ok`.
 

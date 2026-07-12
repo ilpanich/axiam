@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the Java SDK bench. The Java SDK (sdks/java) is implemented; the bench
+# Run the Java SDK bench. The Java SDK (ilpanich/axiam-java-sdk) is implemented; the bench
 # glue in this directory is not yet wired, so this emits a 'pending' record.
 # Replace the body below with: mvn -q exec:java
 set -euo pipefail

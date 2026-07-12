@@ -11,11 +11,11 @@ dimensions:
    **security profiles** (from plaintext HTTP up to mTLS with client-certificate
    authentication and TLS 1.3-only), measuring the cost of stronger security.
 
-It also includes **per-SDK client-side benchmarks**, so each official AXIAM SDK's
-(Rust, TypeScript, Python, Java, C#, PHP, Go — `sdks/{rust,typescript,python,java,
-csharp,php,go}`) client overhead can be measured against the raw protocol
-baseline. All 7 SDKs are implemented; the Python and TypeScript bench harnesses
-are wired to their SDKs, the rest have bench glue pending (see
+It also includes **per-SDK client-side benchmarks**, so the client overhead of each
+official AXIAM SDK (Rust, TypeScript, Python, Java, C#, PHP, Go — each published from
+its own `ilpanich/axiam-<lang>-sdk` repository) can be measured against the raw
+protocol baseline. All 7 SDKs are implemented; the Python and TypeScript bench
+harnesses are wired to their SDKs, the rest have bench glue pending (see
 `sdk/README.md`).
 
 ## Why a custom framework?
@@ -131,7 +131,7 @@ profile definitions.
 | AMQP async-authz benchmarking     | Out of scope for v1.0-beta (see below)                        |
 
 > The five unwired SDK bench directories are scaffolds: the corresponding SDK is
-> already implemented (`sdks/<lang>`), only the bench entrypoint is pending — see
+> already implemented (in `ilpanich/axiam-<lang>-sdk`), only the bench entrypoint is pending — see
 > each language's `sdk/<lang>/TODO.md`. `sdk/HARNESS-SPEC.md` documents the shared
 > result contract every bench (wired or pending) emits.
 

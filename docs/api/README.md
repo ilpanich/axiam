@@ -93,5 +93,5 @@ may wire the step into `docs-ci.yml` after confirming the package at
 
 - [`docs/README.md`](../README.md) — top-level documentation index
 - [`docs/deployment/README.md`](../deployment/README.md) — required env vars, secrets, NetworkPolicies
-- [`../../sdks/`](../../sdks/) — per-language SDK READMEs (Rust, TypeScript, Python, Java, C#, PHP, Go)
+- [`../../sdks/CONTRACT.md`](../../sdks/CONTRACT.md) — the cross-language SDK contract (the SDKs themselves live in the `ilpanich/axiam-<lang>-sdk` repositories)
 - [`../../claude_dev/security-audit.md`](../../claude_dev/security-audit.md) — security/compliance master document

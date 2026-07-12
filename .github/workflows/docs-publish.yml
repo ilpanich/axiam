@@ -1,47 +1,29 @@
 name: Docs Publish
 
-# Publishes API documentation for each released artifact, on that artifact's own
-# tag. Three of the seven SDKs need no pipeline at all — their ecosystems host
-# docs automatically as a side effect of publishing the package:
+# Publishes the server's API documentation and the documentation landing page on
+# the server's own tag.
 #
-#   | Artifact    | Docs host        | How it gets there                        |
-#   |-------------|------------------|------------------------------------------|
-#   | Rust SDK    | docs.rs          | AUTOMATIC on `cargo publish` (docs.rs    |
-#   |             |                  | builds every crates.io release itself;   |
-#   |             |                  | `[package.metadata.docs.rs]` in          |
-#   |             |                  | sdks/rust/Cargo.toml drives it)          |
-#   | Go SDK      | pkg.go.dev       | AUTOMATIC once the module proxy sees the |
-#   |             |                  | tag (the `nudge-go-proxy` job below just |
-#   |             |                  | asks the proxy to fetch it immediately   |
-#   |             |                  | instead of on first user request)        |
-#   | Java SDK    | javadoc.io       | AUTOMATIC from Maven Central — javadoc.io|
-#   |             |                  | serves the `-javadoc.jar` that           |
-#   |             |                  | maven-javadoc-plugin already attaches    |
-#   | Python SDK  | GitHub Pages     | built here (pdoc)                        |
-#   | TypeScript  | GitHub Pages     | built here (TypeDoc)                     |
-#   | C# SDK      | GitHub Pages     | built here (DocFX)                       |
-#   | PHP SDK     | GitHub Pages     | built here (phpDocumentor)               |
-#   | Server      | GitHub Pages     | built here (rustdoc, workspace crates)   |
+# The client SDKs no longer live here — each one is its own repository
+# (`ilpanich/axiam-<lang>-sdk`) and publishes its own API docs to its own GitHub
+# Pages site (or gets them for free from its ecosystem: docs.rs for Rust,
+# pkg.go.dev for Go, javadoc.io for Java). This workflow therefore only:
 #
-# PyPI, npm, NuGet and Packagist render only a README — none of them host API
-# reference docs — so those four SDKs (plus the server's internal rustdoc, which
-# docs.rs will not build because axiam-server is a binary, not a published
-# library) are generated here and deployed to GitHub Pages under a stable path.
+#   | Artifact | Docs host    | How it gets there                            |
+#   |----------|--------------|----------------------------------------------|
+#   | Server   | GitHub Pages | built here (rustdoc, workspace crates)       |
+#   | Index    | GitHub Pages | built here — links out to each SDK's own docs|
+#
+# docs.rs will not build the server (axiam-server is a binary, not a published
+# library), so its rustdoc is generated here.
 #
 # Each job writes ONLY its own subdirectory of the gh-pages branch
-# (`keep_files: true`), so tagging one SDK never deletes another's docs.
+# (`keep_files: true`), so a deploy never clobbers the project website at the
+# site root.
 
 on:
   push:
     tags:
-      # Server / project docs
       - "axiam-server/v*"
-      # Per-SDK docs (Phase 15 D-13 monorepo tag convention)
-      - "axiam-python-sdk/v*"
-      - "axiam-typescript-sdk/v*"
-      - "axiam-csharp-sdk/v*"
-      - "axiam-php-sdk/v*"
-      - "sdks/go/v*"
 
 permissions:
   contents: read
@@ -72,194 +54,11 @@ jobs:
           echo "OK: ${GITHUB_REF_NAME} is on origin/main."
 
   # ---------------------------------------------------------------------------
-  # Python — pdoc -> /sdk/python
-  # ---------------------------------------------------------------------------
-  docs-python:
-    name: Python SDK docs (pdoc)
-    needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/axiam-python-sdk/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
-        with:
-          python-version: '3.12'
-      - name: Build API docs
-        working-directory: sdks/python
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          # pdoc IMPORTS the package to introspect it, so it must be installed
-          # for real — and with the framework extras, or importing
-          # axiam_sdk.fastapi / axiam_sdk.django raises ModuleNotFoundError.
-          pip install '.[fastapi,django]' pdoc
-          # The public subpackages must be named explicitly: pdoc only recurses
-          # into submodules re-exported from __init__, so a bare `pdoc axiam_sdk`
-          # silently documents the top-level module ALONE and drops the amqp,
-          # django and fastapi APIs.
-          pdoc axiam_sdk axiam_sdk.amqp axiam_sdk.django axiam_sdk.fastapi \
-            -o ../../_docs_out
-      - name: Deploy to GitHub Pages (/sdk/python)
-        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./_docs_out
-          destination_dir: sdk/python
-          keep_files: true
-          commit_message: "docs(python-sdk): publish API docs for ${{ github.ref_name }}"
-
-  # ---------------------------------------------------------------------------
-  # TypeScript — TypeDoc -> /sdk/typescript
-  # ---------------------------------------------------------------------------
-  docs-typescript:
-    name: TypeScript SDK docs (TypeDoc)
-    needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/axiam-typescript-sdk/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
-        with:
-          node-version: '22'
-      - name: Build API docs
-        working-directory: sdks/typescript
-        run: |
-          set -euo pipefail
-          npm ci
-          # The gRPC surface is generated from proto at build time; generate it
-          # first so TypeDoc can resolve those types.
-          npm run generate
-          # typedoc is a pinned devDependency (not `npx typedoc`, which would
-          # resolve a floating latest at release time).
-          npm run docs
-          mv _docs ../../_docs_out
-      - name: Deploy to GitHub Pages (/sdk/typescript)
-        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./_docs_out
-          destination_dir: sdk/typescript
-          keep_files: true
-          commit_message: "docs(ts-sdk): publish API docs for ${{ github.ref_name }}"
-
-  # ---------------------------------------------------------------------------
-  # C# — DocFX -> /sdk/csharp
-  # ---------------------------------------------------------------------------
-  docs-csharp:
-    name: C# SDK docs (DocFX)
-    needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/axiam-csharp-sdk/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4
-        with:
-          dotnet-version: '8.0.x'
-      - name: Build API docs
-        working-directory: sdks/csharp
-        run: |
-          set -euo pipefail
-          dotnet tool install -g docfx
-          export PATH="$PATH:$HOME/.dotnet/tools"
-          # REQUIRED before `docfx metadata`: the Axiam.V1 gRPC types are
-          # generated from proto/ by Grpc.Tools during the build. DocFX's Roslyn
-          # pass does not run codegen, so without a prior build it fails with
-          # CS0234 ("namespace 'V1' does not exist") and emits ZERO API files
-          # while still reporting "Build succeeded".
-          dotnet build -c Release
-          docfx metadata docfx.json
-          docfx build docfx.json
-      - name: Deploy to GitHub Pages (/sdk/csharp)
-        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./sdks/csharp/_site
-          destination_dir: sdk/csharp
-          keep_files: true
-          commit_message: "docs(csharp-sdk): publish API docs for ${{ github.ref_name }}"
-
-  # ---------------------------------------------------------------------------
-  # PHP — phpDocumentor -> /sdk/php
-  # ---------------------------------------------------------------------------
-  docs-php:
-    name: PHP SDK docs (phpDocumentor)
-    needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/axiam-php-sdk/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240  # v2
-        with:
-          # 8.2, not 8.1 — matches sdk-ci-php.yml (the dev-only Laravel/Symfony
-          # bridges require ^8.2).
-          php-version: '8.2'
-          extensions: sodium, sockets
-          coverage: none
-      - name: Build API docs
-        working-directory: sdks/php
-        run: |
-          set -euo pipefail
-          curl -sSL -o phpDocumentor.phar \
-            https://github.com/phpDocumentor/phpDocumentor/releases/latest/download/phpDocumentor.phar
-          chmod +x phpDocumentor.phar
-          # phpdoc.dist.xml drives the run: it excludes src/Grpc/Gen (protoc
-          # output — hundreds of generated accessors that would bury the real
-          # API surface) and restricts output to public visibility.
-          ./phpDocumentor.phar --target=../../_docs_out
-      - name: Deploy to GitHub Pages (/sdk/php)
-        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./_docs_out
-          destination_dir: sdk/php
-          keep_files: true
-          commit_message: "docs(php-sdk): publish API docs for ${{ github.ref_name }}"
-
-  # ---------------------------------------------------------------------------
-  # Go — ask the module proxy to fetch the new tag (pkg.go.dev then indexes it)
-  # ---------------------------------------------------------------------------
-  nudge-go-proxy:
-    name: Go SDK docs (pkg.go.dev)
-    needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/sdks/go/v')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Request the module from proxy.golang.org
-        env:
-          # Tag `sdks/go/vX.Y.Z` -> module version vX.Y.Z for the
-          # github.com/ilpanich/axiam/sdks/go module path.
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          version="${TAG##*/}"
-          module="github.com/ilpanich/axiam/sdks/go"
-          echo "Asking proxy.golang.org to fetch ${module}@${version}"
-          # A successful fetch is what makes pkg.go.dev index and render the
-          # package; this only front-runs the first user request, so a
-          # not-yet-propagated tag is a warning, never a release failure.
-          if curl -fsS "https://proxy.golang.org/${module}/@v/${version}.info"; then
-            echo "OK — pkg.go.dev will serve https://pkg.go.dev/${module}@${version}"
-          else
-            echo "::warning::proxy.golang.org has not picked up ${version} yet; pkg.go.dev will index it on first request."
-          fi
-
-  # ---------------------------------------------------------------------------
   # Server + workspace crates — rustdoc -> /server
   # ---------------------------------------------------------------------------
-  # docs.rs does NOT cover this: it only builds libraries published to crates.io,
-  # and axiam-server is an unpublished binary. Its rustdoc is built here instead.
   docs-server:
     name: Server docs (rustdoc)
     needs: verify-tag-on-main
-    if: startsWith(github.ref, 'refs/tags/axiam-server/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -296,8 +95,8 @@ jobs:
   # Published under /docs (NOT the site root): the site root is owned by the
   # AXIAM project website (Phase 20 showcase site), so this job must never write
   # a root index.html or it would clobber the website's homepage. keep_files
-  # preserves every /sdk/*, /server and root subtree; this job only ever writes
-  # its own /docs subtree.
+  # preserves the /server subtree and the root website; this job only ever
+  # writes its own /docs subtree.
   docs-index:
     name: Docs landing page
     needs: verify-tag-on-main
@@ -328,18 +127,20 @@ jobs:
             <li><a href="https://github.com/ilpanich/axiam/tree/main/docs">Guides</a> — deployment, admin, PKI, API contracts (REST / gRPC / AMQP)</li>
           </ul>
           <h2>SDKs</h2>
+          <p>Each SDK lives in its own repository and publishes its own documentation.</p>
           <table>
-            <tr><th>Language</th><th>API reference</th><th>Package</th></tr>
-            <tr><td>Rust</td><td><a href="https://docs.rs/axiam-sdk">docs.rs</a></td><td><a href="https://crates.io/crates/axiam-sdk">crates.io</a></td></tr>
-            <tr><td>Go</td><td><a href="https://pkg.go.dev/github.com/ilpanich/axiam/sdks/go">pkg.go.dev</a></td><td>Go modules</td></tr>
-            <tr><td>Java</td><td><a href="https://javadoc.io/doc/io.github.ilpanich/axiam-sdk">javadoc.io</a></td><td>Maven Central</td></tr>
-            <tr><td>Python</td><td><a href="../sdk/python/">API docs</a></td><td><a href="https://pypi.org/project/axiam-sdk/">PyPI</a></td></tr>
-            <tr><td>TypeScript</td><td><a href="../sdk/typescript/">API docs</a></td><td><a href="https://www.npmjs.com/package/axiam-sdk">npm</a></td></tr>
-            <tr><td>C#</td><td><a href="../sdk/csharp/">API docs</a></td><td><a href="https://www.nuget.org/packages/Axiam.Sdk">NuGet</a></td></tr>
-            <tr><td>PHP</td><td><a href="../sdk/php/">API docs</a></td><td><a href="https://packagist.org/packages/axiam/axiam-sdk">Packagist</a></td></tr>
+            <tr><th>Language</th><th>Repository</th><th>API reference</th><th>Package</th></tr>
+            <tr><td>Rust</td><td><a href="https://github.com/ilpanich/axiam-rust-sdk">axiam-rust-sdk</a></td><td><a href="https://docs.rs/axiam-sdk">docs.rs</a></td><td><a href="https://crates.io/crates/axiam-sdk">crates.io</a></td></tr>
+            <tr><td>Go</td><td><a href="https://github.com/ilpanich/axiam-go-sdk">axiam-go-sdk</a></td><td><a href="https://pkg.go.dev/github.com/ilpanich/axiam-go-sdk">pkg.go.dev</a></td><td>Go modules</td></tr>
+            <tr><td>Java</td><td><a href="https://github.com/ilpanich/axiam-java-sdk">axiam-java-sdk</a></td><td><a href="https://javadoc.io/doc/io.github.ilpanich/axiam-sdk">javadoc.io</a></td><td>Maven Central</td></tr>
+            <tr><td>Python</td><td><a href="https://github.com/ilpanich/axiam-python-sdk">axiam-python-sdk</a></td><td><a href="https://ilpanich.github.io/axiam-python-sdk/">API docs</a></td><td><a href="https://pypi.org/project/axiam-sdk/">PyPI</a></td></tr>
+            <tr><td>TypeScript</td><td><a href="https://github.com/ilpanich/axiam-typescript-sdk">axiam-typescript-sdk</a></td><td><a href="https://ilpanich.github.io/axiam-typescript-sdk/">API docs</a></td><td><a href="https://www.npmjs.com/package/axiam-sdk">npm</a></td></tr>
+            <tr><td>C#</td><td><a href="https://github.com/ilpanich/axiam-csharp-sdk">axiam-csharp-sdk</a></td><td><a href="https://ilpanich.github.io/axiam-csharp-sdk/">API docs</a></td><td><a href="https://www.nuget.org/packages/Axiam.Sdk">NuGet</a></td></tr>
+            <tr><td>PHP</td><td><a href="https://github.com/ilpanich/axiam-php-sdk">axiam-php-sdk</a></td><td><a href="https://ilpanich.github.io/axiam-php-sdk/">API docs</a></td><td><a href="https://packagist.org/packages/axiam/axiam-sdk">Packagist</a></td></tr>
           </table>
           <p>Every SDK implements the same
-            <a href="https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md">SDK contract</a>.</p>
+            <a href="https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md">SDK contract</a>,
+            which is maintained here and mirrored into each SDK repository.</p>
           HTML
       - name: Deploy landing page to GitHub Pages (/docs)
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4

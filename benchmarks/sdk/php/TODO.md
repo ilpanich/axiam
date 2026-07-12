@@ -1,6 +1,6 @@
 # Php SDK benchmark — wiring TODO
 
-The PHP SDK is implemented (`sdks/php`, Composer package `axiam/axiam-sdk`).
+The PHP SDK is implemented (`ilpanich/axiam-php-sdk`, Composer package `axiam/axiam-sdk`).
 This directory is the bench-glue scaffold: it currently emits a `pending`
 record conforming to `../HARNESS-SPEC.md` because the bench entrypoint has
 not been wired to the SDK yet.

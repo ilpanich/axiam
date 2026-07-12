@@ -1,6 +1,6 @@
 # Rust SDK benchmark — wiring TODO
 
-The Rust SDK is implemented (`sdks/rust`, crate `axiam-sdk`, Phase 16). This
+The Rust SDK is implemented (`ilpanich/axiam-rust-sdk`, crate `axiam-sdk`, Phase 16). This
 directory is the bench-glue scaffold: it currently emits a `pending` record
 conforming to `../HARNESS-SPEC.md` because the bench entrypoint has not been
 wired to the SDK yet.

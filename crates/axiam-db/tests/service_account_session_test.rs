@@ -77,6 +77,7 @@ async fn create_and_get_service_account() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "my-service".into(),
+            description: None,
         })
         .await
         .unwrap();
@@ -101,6 +102,7 @@ async fn get_by_client_id() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "lookup-test".into(),
+            description: None,
         })
         .await
         .unwrap();
@@ -121,6 +123,7 @@ async fn update_service_account() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "original".into(),
+            description: None,
         })
         .await
         .unwrap();
@@ -131,6 +134,7 @@ async fn update_service_account() {
             sa.id,
             UpdateServiceAccount {
                 name: Some("renamed".into()),
+                description: None,
                 status: Some(UserStatus::Inactive),
             },
         )
@@ -150,6 +154,7 @@ async fn delete_service_account() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "to-delete".into(),
+            description: None,
         })
         .await
         .unwrap();
@@ -169,6 +174,7 @@ async fn list_service_accounts_with_pagination() {
         repo.create(CreateServiceAccount {
             tenant_id,
             name: format!("sa-{i}"),
+            description: None,
         })
         .await
         .unwrap();
@@ -198,6 +204,7 @@ async fn rotate_secret() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "rotate-test".into(),
+            description: None,
         })
         .await
         .unwrap();
@@ -225,6 +232,7 @@ async fn verify_client_secret_hash() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "hash-test".into(),
+            description: None,
         })
         .await
         .unwrap();

@@ -1,6 +1,10 @@
 import { test, expect } from "@playwright/test";
 import { loginAsAdmin } from "./helpers/auth";
 
+// Drives login/MFA-setup flows (mocked and real) from an unauthenticated
+// starting point, so it opts out of the shared admin session.
+test.use({ storageState: { cookies: [], origins: [] } });
+
 // ---------------------------------------------------------------------------
 // mfa-setup.spec.ts — CORR-05b (D-16) no-dead-end + tenant-restore-after-reload
 // ---------------------------------------------------------------------------

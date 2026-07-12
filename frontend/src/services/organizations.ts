@@ -12,10 +12,15 @@ export interface Organization {
   updated_at?: string;
 }
 
+/** Backend `TenantStatus` enum, serialized PascalCase. */
+export type TenantStatus = "Active" | "Suspended";
+
 export interface Tenant {
   id: string;
   name: string;
   slug: string;
+  /** Lifecycle status; new tenants default to "Active". */
+  status: TenantStatus;
   metadata?: Record<string, unknown>;
   organization_id: string;
   created_at: string;
@@ -171,7 +176,9 @@ export interface CreateTenantPayload {
   metadata?: Record<string, unknown>;
 }
 
-export type UpdateTenantPayload = Partial<CreateTenantPayload>;
+export type UpdateTenantPayload = Partial<CreateTenantPayload> & {
+  status?: TenantStatus;
+};
 
 export interface GenerateCaCertPayload {
   subject: string;

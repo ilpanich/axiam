@@ -13,6 +13,8 @@ pub struct ServiceAccount {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
+    /// Optional human-readable description of the account's purpose.
+    pub description: Option<String>,
     pub client_id: String,
     /// HMAC-SHA256 hashed client secret.
     pub client_secret_hash: String,
@@ -25,10 +27,14 @@ pub struct ServiceAccount {
 pub struct CreateServiceAccount {
     pub tenant_id: Uuid,
     pub name: String,
+    /// Optional human-readable description of the account's purpose.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct UpdateServiceAccount {
     pub name: Option<String>,
+    pub description: Option<String>,
     pub status: Option<UserStatus>,
 }

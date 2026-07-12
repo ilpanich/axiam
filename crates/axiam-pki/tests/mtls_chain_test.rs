@@ -99,6 +99,7 @@ async fn mtls_chain_accept_leaf_signed_by_tenant_ca() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "Chain Test SA".into(),
+            description: None,
         })
         .await
         .expect("service account creation must succeed");
@@ -318,6 +319,7 @@ async fn mtls_rejects_revoked_issuing_ca() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "Revoked CA Test SA".into(),
+            description: None,
         })
         .await
         .expect("service account creation must succeed");
@@ -406,6 +408,7 @@ async fn mtls_rejects_expired_issuing_ca() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "Expired CA Test SA".into(),
+            description: None,
         })
         .await
         .expect("service account creation must succeed");

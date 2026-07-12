@@ -159,7 +159,7 @@ jobs:
           java-version: '21'
           cache: 'maven'
 
-      - name: mvn validate (io.axiam:axiam-bom)
+      - name: mvn validate (io.github.ilpanich:axiam-bom)
         run: mvn -f sdks/java-bom/pom.xml validate
 
   spring-boot-example:
@@ -175,7 +175,7 @@ jobs:
           java-version: '21'
           cache: 'maven'
 
-      # The example's io.axiam:axiam-sdk dependency is this phase's
+      # The example's io.github.ilpanich:axiam-sdk dependency is this phase's
       # not-yet-published version — install it into the local Maven
       # repository first so the example resolves + builds against the
       # just-built SDK (mirrors this plan's local verification sequence).
@@ -241,14 +241,14 @@ jobs:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: echo "${GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
 
-      - name: mvn deploy (io.axiam:axiam-sdk)
+      - name: mvn deploy (io.github.ilpanich:axiam-sdk)
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           CENTRAL_TOKEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
           CENTRAL_TOKEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
         run: mvn -f sdks/java/pom.xml deploy -Dgpg.skip=false -Dgpg.passphrase="${GPG_PASSPHRASE}"
 
-      - name: mvn deploy (io.axiam:axiam-bom)
+      - name: mvn deploy (io.github.ilpanich:axiam-bom)
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           CENTRAL_TOKEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}

@@ -100,12 +100,12 @@
     "docs": "typedoc"
   },
   "dependencies": {
-    "@grpc/grpc-js": "^1.14.0",
-    "amqplib": "^0.10.5",
-    "axios": "^1.7.0",
+    "@grpc/grpc-js": "^1.14.4",
+    "amqplib": "^0.10.9",
+    "axios": "^1.18.1",
     "axios-cookiejar-support": "^7.0.0",
-    "jose": "^6.0.0",
-    "tough-cookie": "^6.0.0"
+    "jose": "^6.2.3",
+    "tough-cookie": "^6.0.2"
   },
   "peerDependencies": {
     "express": "^5.0.0",
@@ -120,18 +120,18 @@
     }
   },
   "devDependencies": {
-    "@types/amqplib": "^0.10.0",
-    "@types/express": "^5.0.0",
-    "@types/node": "^22.0.0",
-    "esbuild": "^0.25.0",
-    "express": "^5.0.0",
-    "fastify": "^5.0.0",
-    "jsdom": "^26.0.0",
-    "msw": "^2.0.0",
-    "ts-proto": "^2.0.0",
-    "tsup": "^8.0.0",
-    "typedoc": "^0.28.0",
+    "@types/amqplib": "^0.10.8",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.1",
+    "esbuild": "^0.25.12",
+    "express": "^5.2.1",
+    "fastify": "^5.10.0",
+    "jsdom": "^26.1.0",
+    "msw": "^2.15.0",
+    "ts-proto": "^2.12.0",
+    "tsup": "^8.5.1",
+    "typedoc": "^0.28.20",
     "typescript": "~5.9.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.2.7"
   }
 }

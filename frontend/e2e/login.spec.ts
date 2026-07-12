@@ -1,6 +1,10 @@
 import { test, expect } from "@playwright/test";
 import { loginAsAdmin } from "./helpers/auth";
 
+// Exercises the login flow itself — must run unauthenticated, so opt out of the
+// shared admin session captured by the setup project.
+test.use({ storageState: { cookies: [], origins: [] } });
+
 test.describe("Login flow", () => {
   test("redirects unauthenticated users to /login", async ({ page }) => {
     await page.goto("/");

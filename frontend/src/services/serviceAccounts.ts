@@ -7,6 +7,8 @@ export interface ServiceAccount {
   id: string;
   tenant_id: string;
   name: string;
+  /** Optional human-readable description of the account's purpose. */
+  description?: string | null;
   client_id: string;
   /** Backend `UserStatus` enum, serialized PascalCase ("Active", "Inactive", …). */
   status: string;
@@ -16,10 +18,12 @@ export interface ServiceAccount {
 
 export interface CreateServiceAccountRequest {
   name: string;
+  description?: string;
 }
 
 export interface UpdateServiceAccountRequest {
   name?: string;
+  description?: string;
   /** Backend `UserStatus`, e.g. "Active" / "Inactive". */
   status?: string;
 }
@@ -29,6 +33,7 @@ export interface ServiceAccountCreatedResponse {
   id: string;
   tenant_id: string;
   name: string;
+  description?: string | null;
   client_id: string;
   client_secret: string;
   status: string;

@@ -1,6 +1,10 @@
 import { test, expect } from "@playwright/test";
 import { loginAsAdmin } from "./helpers/auth";
 
+// Logs in with its OWN fresh session and then logs out; it must not use (and
+// invalidate) the shared admin session, so it opts out of the stored state.
+test.use({ storageState: { cookies: [], origins: [] } });
+
 // SECFIX-05 / D-03: logout revokes the caller's own session from the
 // authenticated JWT (no request body sent by the client) and must not 400.
 // This spec drives the real Topbar "Sign out" control and asserts:

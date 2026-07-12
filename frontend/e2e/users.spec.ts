@@ -29,9 +29,13 @@ test.describe("Users list page", () => {
     // users table. Scope to the table and match the admin's unique email so
     // the assertion is unambiguous (the bare text "admin" also matches the
     // user-menu button, the username <code>, and the display-name cell).
+    // 15s (not the 5s default): with the shared session the page is reached
+    // immediately (no per-test login warm-up), so the first /users fetch is a
+    // cold query that can exceed 5s on a loaded runner — the sibling test that
+    // only checks the nav is unaffected because the shell renders instantly.
     await expect(
       page.getByRole("table").getByText("admin@axiam.dev")
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 15_000 });
   });
 
   test('"New User" button opens create modal with username/email/password fields', async ({

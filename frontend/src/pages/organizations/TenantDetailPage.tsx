@@ -2,6 +2,7 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { tenantService, orgService } from "@/services/organizations";
 import { PageHeader } from "@/components/PageHeader";
+import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft } from "lucide-react";
 import { formatDate } from "@/lib/utils";
@@ -87,6 +88,16 @@ export function TenantDetailPage() {
                 <code className="text-xs bg-white/5 px-1.5 py-0.5 rounded text-muted-foreground">
                   {tenant.slug}
                 </code>
+              </dd>
+            </div>
+            <div className="flex gap-4">
+              <dt className="w-36 shrink-0 text-sm text-muted-foreground">
+                Status
+              </dt>
+              <dd>
+                <StatusBadge
+                  status={tenant.status === "Active" ? "active" : "suspended"}
+                />
               </dd>
             </div>
             {(tenant.metadata?.description as string | undefined) && (

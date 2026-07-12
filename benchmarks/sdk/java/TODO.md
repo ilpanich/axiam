@@ -1,12 +1,12 @@
 # Java SDK benchmark — wiring TODO
 
-The Java SDK is implemented (`sdks/java`, Maven coords `io.axiam:axiam-sdk`).
+The Java SDK is implemented (`sdks/java`, Maven coords `io.github.ilpanich:axiam-sdk`).
 This directory is the bench-glue scaffold: it currently emits a `pending`
 record conforming to `../HARNESS-SPEC.md` because the bench entrypoint has
 not been wired to the SDK yet.
 
 ## To wire it up
-1. Add the SDK dependency: **pom.xml (add io.axiam:axiam-sdk)**.
+1. Add the SDK dependency: **pom.xml (add io.github.ilpanich:axiam-sdk)**.
 2. Implement a bench entrypoint in this directory that:
    - reads the `BENCH_*` / `SDK_BENCH_*` env (see HARNESS-SPEC.md),
    - times the four ops (`login`, `refresh`, `check_access`, `batch_check`)

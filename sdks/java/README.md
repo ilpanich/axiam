@@ -4,8 +4,8 @@ Official Java client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Package identity
 
-- **Maven coordinates:** `io.axiam:axiam-sdk`
-- **GroupId:** `io.axiam`
+- **Maven coordinates:** `io.github.ilpanich:axiam-sdk`
+- **GroupId:** `io.github.ilpanich`
 - **ArtifactId:** `axiam-sdk`
 - **Registry:** Maven Central _(reserved, not yet published)_
 - **License:** Apache-2.0
@@ -22,7 +22,7 @@ See [`../CONTRACT.md`](../CONTRACT.md) for the full cross-language behavioral co
 
 ```xml
 <dependency>
-  <groupId>io.axiam</groupId>
+  <groupId>io.github.ilpanich</groupId>
   <artifactId>axiam-sdk</artifactId>
   <version>0.1.0</version>
 </dependency>
@@ -36,7 +36,7 @@ versions:
 <dependencyManagement>
   <dependencies>
     <dependency>
-      <groupId>io.axiam</groupId>
+      <groupId>io.github.ilpanich</groupId>
       <artifactId>axiam-bom</artifactId>
       <version>0.1.0</version>
       <type>pom</type>
@@ -50,7 +50,7 @@ versions:
 
 ```kotlin
 dependencies {
-    implementation("io.axiam:axiam-sdk:0.1.0")
+    implementation("io.github.ilpanich:axiam-sdk:0.1.0")
 }
 ```
 
@@ -58,8 +58,8 @@ Or via the BOM:
 
 ```kotlin
 dependencies {
-    implementation(platform("io.axiam:axiam-bom:0.1.0"))
-    implementation("io.axiam:axiam-sdk")
+    implementation(platform("io.github.ilpanich:axiam-bom:0.1.0"))
+    implementation("io.github.ilpanich:axiam-sdk")
 }
 ```
 

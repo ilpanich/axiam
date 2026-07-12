@@ -7,6 +7,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Lifecycle status of a tenant.
+///
+/// A `Suspended` tenant remains stored and its data isolated, but is treated as
+/// administratively disabled. New tenants are `Active` by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, utoipa::ToSchema)]
+pub enum TenantStatus {
+    /// The tenant is operational.
+    #[default]
+    Active,
+    /// The tenant is administratively disabled.
+    Suspended,
+}
+
 /// A tenant is an isolated context within an organization.
 ///
 /// Each tenant has its own set of users, roles, permissions, resources,
@@ -21,6 +34,8 @@ pub struct Tenant {
     pub name: String,
     /// URL-safe unique identifier within the organization (e.g., `production`).
     pub slug: String,
+    /// Lifecycle status. New tenants default to [`TenantStatus::Active`].
+    pub status: TenantStatus,
     /// Arbitrary key-value metadata.
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
@@ -41,5 +56,7 @@ pub struct CreateTenant {
 pub struct UpdateTenant {
     pub name: Option<String>,
     pub slug: Option<String>,
+    /// Change the tenant's lifecycle status (e.g. suspend/reactivate).
+    pub status: Option<TenantStatus>,
     pub metadata: Option<serde_json::Value>,
 }

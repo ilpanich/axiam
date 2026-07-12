@@ -17,6 +17,7 @@ import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { formatDate } from "@/lib/utils";
 import { ToggleField } from "@/components/shared";
 
@@ -24,11 +25,19 @@ import { ToggleField } from "@/components/shared";
 
 interface CreateFieldsProps {
   name: string;
+  description: string;
   onNameChange: (v: string) => void;
+  onDescriptionChange: (v: string) => void;
   error?: string;
 }
 
-function CreateFields({ name, onNameChange, error }: CreateFieldsProps) {
+function CreateFields({
+  name,
+  description,
+  onNameChange,
+  onDescriptionChange,
+  error,
+}: CreateFieldsProps) {
   return (
     <>
       <div className="space-y-2">
@@ -42,6 +51,16 @@ function CreateFields({ name, onNameChange, error }: CreateFieldsProps) {
           autoComplete="off"
         />
       </div>
+      <div className="space-y-2">
+        <Label htmlFor="sa-description">Description</Label>
+        <Textarea
+          id="sa-description"
+          value={description}
+          onChange={(e) => onDescriptionChange(e.target.value)}
+          placeholder="Optional description of this account's purpose"
+          rows={3}
+        />
+      </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
@@ -51,16 +70,20 @@ function CreateFields({ name, onNameChange, error }: CreateFieldsProps) {
 
 interface EditFieldsProps {
   name: string;
+  description: string;
   isActive: boolean;
   onNameChange: (v: string) => void;
+  onDescriptionChange: (v: string) => void;
   onIsActiveChange: (v: boolean) => void;
   error?: string;
 }
 
 function EditFields({
   name,
+  description,
   isActive,
   onNameChange,
+  onDescriptionChange,
   onIsActiveChange,
   error,
 }: EditFieldsProps) {
@@ -75,6 +98,16 @@ function EditFields({
           placeholder="my-service-account"
           required
           autoComplete="off"
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="edit-sa-description">Description</Label>
+        <Textarea
+          id="edit-sa-description"
+          value={description}
+          onChange={(e) => onDescriptionChange(e.target.value)}
+          placeholder="Optional description of this account's purpose"
+          rows={3}
         />
       </div>
       <ToggleField
@@ -112,6 +145,7 @@ export function ServiceAccountsPage() {
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
+  const [createDescription, setCreateDescription] = useState("");
   const [createError, setCreateError] = useState("");
 
   // ─── Secret reveal ─────────────────────────────────────────────────────────
@@ -149,6 +183,7 @@ export function ServiceAccountsPage() {
 
   function resetCreateForm() {
     setCreateName("");
+    setCreateDescription("");
     setCreateError("");
   }
 
@@ -159,14 +194,17 @@ export function ServiceAccountsPage() {
       setCreateError("Name is required.");
       return;
     }
+    const description = createDescription.trim();
     createMutation.mutate({
       name: createName.trim(),
+      description: description || undefined,
     });
   }
 
   // ─── Edit state ────────────────────────────────────────────────────────────
   const [editAccount, setEditAccount] = useState<ServiceAccount | null>(null);
   const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
   const [editIsActive, setEditIsActive] = useState(true);
   const [editError, setEditError] = useState("");
 
@@ -196,6 +234,7 @@ export function ServiceAccountsPage() {
   function openEdit(sa: ServiceAccount) {
     setEditAccount(sa);
     setEditName(sa.name);
+    setEditDescription(sa.description ?? "");
     setEditIsActive(sa.status === "Active");
     setEditError("");
   }
@@ -211,6 +250,7 @@ export function ServiceAccountsPage() {
       id: editAccount.id,
       payload: {
         name: editName.trim(),
+        description: editDescription.trim(),
         status: editIsActive ? "Active" : "Inactive",
       },
     });
@@ -263,6 +303,21 @@ export function ServiceAccountsPage() {
       render: (row) => (
         <span className="font-medium text-foreground/90">{row.name}</span>
       ),
+    },
+    {
+      key: "description",
+      header: "Description",
+      render: (row) =>
+        row.description ? (
+          <span
+            className="text-sm text-muted-foreground max-w-[220px] truncate block"
+            title={row.description}
+          >
+            {row.description}
+          </span>
+        ) : (
+          <span className="text-sm text-muted-foreground/40">—</span>
+        ),
     },
     {
       key: "client_id",
@@ -374,7 +429,9 @@ export function ServiceAccountsPage() {
       >
         <CreateFields
           name={createName}
+          description={createDescription}
           onNameChange={setCreateName}
+          onDescriptionChange={setCreateDescription}
           error={createError}
         />
       </FormDialog>
@@ -390,8 +447,10 @@ export function ServiceAccountsPage() {
       >
         <EditFields
           name={editName}
+          description={editDescription}
           isActive={editIsActive}
           onNameChange={setEditName}
+          onDescriptionChange={setEditDescription}
           onIsActiveChange={setEditIsActive}
           error={editError}
         />

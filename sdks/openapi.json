@@ -9,7 +9,7 @@
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "0.1.0"
+    "version": "1.0.0-beta"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -3719,6 +3719,7 @@
                           "organization_id",
                           "name",
                           "slug",
+                          "status",
                           "metadata",
                           "created_at",
                           "updated_at"
@@ -3747,6 +3748,10 @@
                           "slug": {
                             "type": "string",
                             "description": "URL-safe unique identifier within the organization (e.g., `production`)."
+                          },
+                          "status": {
+                            "$ref": "#/components/schemas/TenantStatus",
+                            "description": "Lifecycle status. New tenants default to [`TenantStatus::Active`]."
                           },
                           "updated_at": {
                             "type": "string",
@@ -5883,6 +5888,12 @@
                           "created_at": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "description": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "id": {
                             "type": "string",
@@ -8463,6 +8474,13 @@
           "name"
         ],
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable description of the account's purpose."
+          },
           "name": {
             "type": "string"
           },
@@ -8478,6 +8496,13 @@
           "name"
         ],
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable description of the account's purpose."
+          },
           "name": {
             "type": "string"
           }
@@ -10787,6 +10812,13 @@
             "type": "string",
             "format": "date-time"
           },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable description of the account's purpose."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -10831,6 +10863,12 @@
             "type": "string",
             "format": "date-time"
           },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -10870,6 +10908,12 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "type": "string",
@@ -11202,6 +11246,7 @@
           "organization_id",
           "name",
           "slug",
+          "status",
           "metadata",
           "created_at",
           "updated_at"
@@ -11230,6 +11275,10 @@
           "slug": {
             "type": "string",
             "description": "URL-safe unique identifier within the organization (e.g., `production`)."
+          },
+          "status": {
+            "$ref": "#/components/schemas/TenantStatus",
+            "description": "Lifecycle status. New tenants default to [`TenantStatus::Active`]."
           },
           "updated_at": {
             "type": "string",
@@ -11385,6 +11434,14 @@
             ]
           }
         }
+      },
+      "TenantStatus": {
+        "type": "string",
+        "description": "Lifecycle status of a tenant.\n\nA `Suspended` tenant remains stored and its data isolated, but is treated as\nadministratively disabled. New tenants are `Active` by default.",
+        "enum": [
+          "Active",
+          "Suspended"
+        ]
       },
       "TokenPolicy": {
         "type": "object",
@@ -11833,6 +11890,12 @@
       "UpdateServiceAccount": {
         "type": "object",
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": [
               "string",
@@ -11866,6 +11929,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TenantStatus",
+                "description": "Change the tenant's lifecycle status (e.g. suspend/reactivate)."
+              }
             ]
           }
         }

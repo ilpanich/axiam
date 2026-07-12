@@ -9,7 +9,7 @@ use crate::handlers;
     info(
         title = "AXIAM API",
         description = "Access eXtended Identity and Authorization Management — REST API",
-        version = "0.1.0",
+        version = "1.0.0-beta",
         license(name = "Apache-2.0"),
     ),
     paths(
@@ -226,6 +226,7 @@ use crate::handlers;
         axiam_core::models::organization::UpdateOrganization,
         // Tenants
         axiam_core::models::tenant::Tenant,
+        axiam_core::models::tenant::TenantStatus,
         axiam_core::models::tenant::CreateTenant,
         axiam_core::models::tenant::UpdateTenant,
         handlers::tenants::CreateTenantRequest,

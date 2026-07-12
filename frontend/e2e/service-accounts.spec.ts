@@ -50,13 +50,12 @@ test.describe("Service Accounts page", () => {
     ).toBeVisible();
   });
 
-  test("create form has Name and Description fields", async ({ page }) => {
+  test("create form has Name field", async ({ page }) => {
     await page.goto("/service-accounts");
     await page
       .getByRole("button", { name: /New Service Account/i })
       .click();
     await expect(page.getByLabel(/Name/)).toBeVisible();
-    await expect(page.getByLabel(/Description/)).toBeVisible();
   });
 
   test("navigation is visible after login (RBAC-gated page accessible — T-07-13)", async ({

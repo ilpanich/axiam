@@ -106,11 +106,10 @@ test.describe("Permissions list page", () => {
   }) => {
     await page.goto("/permissions");
     await expect(page).not.toHaveURL(/\/login/);
-    // The bootstrap fixture seeds all AXIAM permissions — at least one should appear
-    // The permission table or empty-state must be visible
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page.getByText(/no permissions|empty/i).isVisible().catch(() => false);
-    expect(hasTable || hasEmptyState).toBe(true);
+    // PermissionsPage renders its rows (or the empty state) inside a DataTable,
+    // which always emits a semantic <table>. Assert it renders (auto-retries
+    // past the async React Query fetch).
+    await expect(page.getByRole("table")).toBeVisible();
   });
 });
 

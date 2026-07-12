@@ -38,7 +38,7 @@ test.describe("Federation page", () => {
       .isVisible()
       .catch(() => false);
     const hasNewButton = await page
-      .getByRole("button", { name: /New Provider/i })
+      .getByRole("button", { name: /New Config/i })
       .isVisible()
       .catch(() => false);
     // At minimum the page should be accessible with navigation
@@ -46,21 +46,21 @@ test.describe("Federation page", () => {
     expect(hasProviders || hasEmptyState || hasNewButton).toBe(true);
   });
 
-  test('"New Provider" button opens create modal', async ({ page }) => {
+  test('"New Config" button opens create modal', async ({ page }) => {
     await page.goto("/federation");
     await expect(page).not.toHaveURL(/\/login/);
-    await page.getByRole("button", { name: /New Provider/i }).click();
+    await page.getByRole("button", { name: /New Config/i }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "New Federation Provider" })
+      page.getByRole("heading", { name: "New Federation Config" })
     ).toBeVisible();
   });
 
-  test("create form has Name, Type, and Domain fields", async ({ page }) => {
+  test("create form has Provider and Client ID fields", async ({ page }) => {
     await page.goto("/federation");
-    await page.getByRole("button", { name: /New Provider/i }).click();
-    await expect(page.getByLabel(/Name/)).toBeVisible();
-    await expect(page.getByLabel(/Domain/)).toBeVisible();
+    await page.getByRole("button", { name: /New Config/i }).click();
+    await expect(page.getByLabel(/Provider/)).toBeVisible();
+    await expect(page.getByLabel(/Client ID/)).toBeVisible();
   });
 
   // ---------------------------------------------------------------------------

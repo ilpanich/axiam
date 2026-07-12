@@ -279,7 +279,10 @@ test.describe("Auth endpoint contract", () => {
 
       expect(capturedUrl).toBeDefined();
       expect(capturedUrl).toContain("/api/v1/auth/resend-verification");
-      expect(capturedUrl).not.toContain("/auth/resend-verification");
+      // The versioned path necessarily *contains* the substring
+      // "/auth/resend-verification"; assert via exact pathname that the request
+      // targeted the VERSIONED endpoint and not the unversioned root path.
+      expect(new URL(capturedUrl!).pathname).toBe("/api/v1/auth/resend-verification");
 
       // 23-06 / Pitfall 4: ResendVerificationRequest requires BOTH tenant_id
       // AND email — previously the frontend sent NO body at all (guaranteed
@@ -310,7 +313,10 @@ test.describe("Auth endpoint contract", () => {
 
       const newPassword = "Contract@Test123!";
       await page.getByLabel("Current Password").fill("OldPassword@123!");
-      await page.getByLabel("New Password").fill(newPassword);
+      // `exact: true` required: getByLabel does case-insensitive SUBSTRING
+      // matching, and "New Password" is a substring of "Confirm New Password",
+      // so the plain locator resolves to two inputs (strict-mode violation).
+      await page.getByLabel("New Password", { exact: true }).fill(newPassword);
       await page.getByLabel("Confirm New Password").fill(newPassword);
 
       const submitBtn = page.getByRole("button", { name: /Update Password/i });
@@ -326,7 +332,7 @@ test.describe("Auth endpoint contract", () => {
   });
 
   test.describe("MfaManagementPage", () => {
-    test("enroll POST /api/v1/auth/mfa/setup/enroll — not /auth/mfa/setup", async ({ page }) => {
+    test("enroll POST /api/v1/auth/mfa/enroll (self-service) — not the login-flow /mfa/setup/enroll", async ({ page }) => {
       let capturedEnrollUrl: string | undefined;
 
       await mockAuthMe(page);
@@ -358,11 +364,16 @@ test.describe("Auth endpoint contract", () => {
       await page.waitForTimeout(500);
 
       expect(capturedEnrollUrl).toBeDefined();
-      expect(capturedEnrollUrl).toContain("/api/v1/auth/mfa/setup/enroll");
-      expect(capturedEnrollUrl).not.toContain("/auth/mfa/setup");
+      // MfaManagementPage is the AUTHENTICATED self-service page and must call
+      // the session-authenticated enroll endpoint /api/v1/auth/mfa/enroll.
+      // /api/v1/auth/mfa/setup/enroll is the LOGIN-FLOW endpoint (takes no auth
+      // user, requires a login-issued setup_token, backs the public
+      // MfaSetupPage) — see crates/axiam-api-rest/src/handlers/auth.rs.
+      expect(new URL(capturedEnrollUrl!).pathname).toBe("/api/v1/auth/mfa/enroll");
+      expect(capturedEnrollUrl).not.toContain("/mfa/setup/enroll");
     });
 
-    test("confirm POST /api/v1/auth/mfa/setup/confirm — not /auth/mfa/confirm", async ({ page }) => {
+    test("confirm POST /api/v1/auth/mfa/confirm (self-service) — not the login-flow /mfa/setup/confirm", async ({ page }) => {
       let capturedConfirmUrl: string | undefined;
 
       await mockAuthMe(page);
@@ -378,9 +389,13 @@ test.describe("Auth endpoint contract", () => {
             route.fulfill({
               status: 200,
               contentType: "application/json",
+              // Must match the real MfaEnrollResponse shape
+              // ({secret_base32, totp_uri}) or TotpSetupPanel throws on
+              // `totp_uri.startsWith(...)` and the dialog never renders,
+              // blocking the confirm step below.
               body: JSON.stringify({
-                secret: "CONTRACTTESTBASE32SECRET",
-                qr_code_uri: "otpauth://totp/test:contract@test.example?secret=CONTRACTTESTBASE32SECRET",
+                secret_base32: "CONTRACTTESTBASE32SECRET",
+                totp_uri: "otpauth://totp/test:contract@test.example?secret=CONTRACTTESTBASE32SECRET",
               }),
             });
           } else {
@@ -415,8 +430,12 @@ test.describe("Auth endpoint contract", () => {
       await page.waitForTimeout(500);
 
       expect(capturedConfirmUrl).toBeDefined();
-      expect(capturedConfirmUrl).toContain("/api/v1/auth/mfa/setup/confirm");
-      expect(capturedConfirmUrl).not.toContain("/auth/mfa/confirm");
+      // Self-service confirm endpoint (session-authenticated,
+      // AuthenticatedUser). /api/v1/auth/mfa/setup/confirm is the login-flow
+      // endpoint (setup_token; issues login cookies; backs MfaSetupPage) — see
+      // crates/axiam-api-rest/src/handlers/auth.rs.
+      expect(new URL(capturedConfirmUrl!).pathname).toBe("/api/v1/auth/mfa/confirm");
+      expect(capturedConfirmUrl).not.toContain("/mfa/setup/confirm");
     });
   });
 });

@@ -27,7 +27,7 @@ test.describe("Settings page", () => {
     await page.goto("/settings");
     await expect(page).not.toHaveURL(/\/login/);
     await expect(
-      page.getByRole("heading", { name: "Security Policies", exact: true })
+      page.getByRole("heading", { name: "Password Policy", exact: true })
     ).toBeVisible();
     await expect(
       page.getByText("Password minimum length", { exact: true })
@@ -38,7 +38,7 @@ test.describe("Settings page", () => {
     await page.goto("/settings");
     await expect(page).not.toHaveURL(/\/login/);
     await expect(
-      page.getByRole("heading", { name: "Session Management", exact: true })
+      page.getByRole("heading", { name: "Lockout & Tokens", exact: true })
     ).toBeVisible();
     await expect(
       page.getByText("Access token lifetime", { exact: true })
@@ -59,7 +59,7 @@ test.describe("Settings page", () => {
     await expect(page).not.toHaveURL(/\/login/);
     await expect(
       page.getByRole("heading", {
-        name: "Notification Preferences",
+        name: "Email, Certificates & Notifications",
         exact: true,
       })
     ).toBeVisible();

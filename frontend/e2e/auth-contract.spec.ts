@@ -79,7 +79,14 @@ async function mockUserProfile(page: Page): Promise<void> {
  * Mock GET /api/v1/users/me/mfa-methods (ProfilePage + MfaManagementPage).
  */
 async function mockMfaMethods(page: Page): Promise<void> {
-  await page.route("**/api/v1/users/me/mfa-methods", (route) => {
+  // The app requests /api/v1/users/{userId}/mfa-methods using the REAL user id
+  // (there is no `/users/me` alias — see userService.listMfaMethods), so match
+  // any id segment. A stale `/users/me/...` glob left this GET unmocked, which
+  // 401'd against the backend and made the api interceptor fire a silent
+  // /auth/refresh POST — that extra POST desynced the enroll/confirm counter in
+  // the MFA-confirm contract test, so the enroll response was wrong and the
+  // TOTP dialog never opened.
+  await page.route("**/api/v1/users/*/mfa-methods", (route) => {
     route.fulfill({
       status: 200,
       contentType: "application/json",

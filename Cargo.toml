@@ -106,7 +106,7 @@ pgp = "0.19"
 pem = "3"
 
 # SAML
-samael = { version = "0.0.19", features = ["xmlsec"] }
+samael = { version = "0.0.22", features = ["xmlsec"] }
 flate2 = "1"
 # XSW (XML Signature Wrapping) binding check (SECFIX-04/SEC-005). Already
 # resolved transitively via samael's `xmlsec` feature (Cargo.lock pins

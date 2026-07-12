@@ -10,10 +10,20 @@ import { loginAsAdmin } from "./helpers/auth";
 // Test 1: Profile page redirects to login if not authenticated
 // ---------------------------------------------------------------------------
 
-test("profile page redirects to login if not authenticated", async ({ page }) => {
-  // No loginAsAdmin — no session cookie
-  await page.goto("/profile");
-  await expect(page).toHaveURL(/\/login/);
+// This test asserts the UNauthenticated redirect, so it must not inherit the
+// shared admin session captured by the setup project — run it with an empty
+// storageState. (Scoped to a describe so the authenticated tests below still
+// use the shared session.)
+test.describe("unauthenticated profile access", () => {
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test("profile page redirects to login if not authenticated", async ({
+    page,
+  }) => {
+    // No loginAsAdmin — no session cookie
+    await page.goto("/profile");
+    await expect(page).toHaveURL(/\/login/);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ dependencies = [
 fastapi = ["fastapi"]
 django = ["django"]
 dev = [
-    "grpcio-tools==1.78.*",
+    "grpcio-tools>=1.78,<1.83",
     "mypy",
     "ruff",
     "interrogate",

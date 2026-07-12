@@ -4,7 +4,11 @@ export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
   forbidOnly: !!process.env["CI"],
-  retries: process.env["CI"] ? 2 : 0,
+  // 3 retries on CI: the suite logs in per-test against a backend doing
+  // Argon2id verification on every login, and under a loaded runner the
+  // post-login redirect occasionally exceeds the wait — a real flake class
+  // that retries absorb (all such timeouts have recovered on retry).
+  retries: process.env["CI"] ? 3 : 0,
   workers: process.env["CI"] ? 1 : undefined,
   // `list` streams each test's pass/fail to stdout so the CI log shows
   // progress and failures even if the run is interrupted; `html` is still

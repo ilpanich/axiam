@@ -31,19 +31,12 @@ test.describe("Federation page", () => {
   }) => {
     await page.goto("/federation");
     await expect(page).not.toHaveURL(/\/login/);
-    // Fresh bootstrap has no federation providers — empty state is expected
-    const hasProviders = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page
-      .getByText(/no providers|no federation|empty/i)
-      .isVisible()
-      .catch(() => false);
-    const hasNewButton = await page
-      .getByRole("button", { name: /New Config/i })
-      .isVisible()
-      .catch(() => false);
-    // At minimum the page should be accessible with navigation
+    // The page must be accessible (nav present) and its DataTable rendered.
+    // DataTable always renders a <table> (rows or empty message inside), so
+    // wait for it (auto-retry) instead of one-shot isVisible() probes that
+    // raced the fetch and flaked.
     await expect(page.getByRole("navigation").first()).toBeVisible();
-    expect(hasProviders || hasEmptyState || hasNewButton).toBe(true);
+    await expect(page.getByRole("table")).toBeVisible();
   });
 
   test('"New Config" button opens create modal', async ({ page }) => {

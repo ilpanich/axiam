@@ -34,5 +34,5 @@ export async function loginAsAdmin(page: Page): Promise<void> {
   // and under a loaded CI runner sharing CPU with the server container the
   // post-login redirect can occasionally take >15s, which showed up as
   // intermittent `waitForURL` timeouts across the suite.
-  await page.waitForURL(/\/dashboard|\/$/, { timeout: 30_000 });
+  await page.waitForURL(/\/dashboard|\/$/, { timeout: 45_000 });
 }

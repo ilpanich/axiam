@@ -25,16 +25,10 @@ test.describe("Certificates page", () => {
   }) => {
     await page.goto("/certificates");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page
-      .getByText(/no certificates|empty/i)
-      .isVisible()
-      .catch(() => false);
-    const hasGenerateBtn = await page
-      .getByRole("button", { name: /Generate Certificate/i })
-      .isVisible()
-      .catch(() => false);
-    expect(hasTable || hasEmptyState || hasGenerateBtn).toBe(true);
+    // DataTable always renders a <table> (rows or the empty message inside),
+    // so wait for it — auto-retries through the async fetch instead of the
+    // one-shot isVisible() probes that raced the load and flaked.
+    await expect(page.getByRole("table")).toBeVisible();
   });
 
   test('"Generate Certificate" button opens modal with common name field', async ({
@@ -88,13 +82,9 @@ test.describe("Webhooks page", () => {
   }) => {
     await page.goto("/webhooks");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page.getByText(/no webhooks/i).isVisible().catch(() => false);
-    const hasNewBtn = await page
-      .getByRole("button", { name: /New Webhook/i })
-      .isVisible()
-      .catch(() => false);
-    expect(hasTable || hasEmptyState || hasNewBtn).toBe(true);
+    // DataTable always renders a <table>; wait for it (auto-retry) instead of
+    // one-shot isVisible() probes that raced the fetch and flaked.
+    await expect(page.getByRole("table")).toBeVisible();
   });
 
   test('"New Webhook" button opens create modal with URL field', async ({
@@ -136,9 +126,8 @@ test.describe("PGP Keys page", () => {
   }) => {
     await page.goto("/pgp-keys");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page.getByText(/no.*keys|empty/i).isVisible().catch(() => false);
-    const hasNewBtn = await page.getByRole("button").isVisible().catch(() => false);
-    expect(hasTable || hasEmptyState || hasNewBtn).toBe(true);
+    // DataTable always renders a <table>; wait for it (auto-retry) instead of
+    // one-shot isVisible() probes that raced the fetch and flaked.
+    await expect(page.getByRole("table")).toBeVisible();
   });
 });

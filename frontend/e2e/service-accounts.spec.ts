@@ -27,16 +27,10 @@ test.describe("Service Accounts page", () => {
   }) => {
     await page.goto("/service-accounts");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page
-      .getByText(/no service accounts|empty/i)
-      .isVisible()
-      .catch(() => false);
-    const hasNewBtn = await page
-      .getByRole("button", { name: /New Service Account/i })
-      .isVisible()
-      .catch(() => false);
-    expect(hasTable || hasEmptyState || hasNewBtn).toBe(true);
+    // DataTable always renders a <table> (rows or empty message inside), so
+    // wait for it (auto-retry) instead of one-shot isVisible() probes that
+    // raced the fetch and flaked.
+    await expect(page.getByRole("table")).toBeVisible();
   });
 
   test('"New Service Account" button opens create modal', async ({ page }) => {

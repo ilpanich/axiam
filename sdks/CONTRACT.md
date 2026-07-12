@@ -8,6 +8,26 @@
 >
 > Vocabulary locked: 2026-06-30 (D-10). Rust (Phase 16) implements this contract; it does not define it.
 
+### Where the SDKs live
+
+Each SDK is its own repository — the AXIAM repository keeps only this contract and
+[`openapi.json`](openapi.json), which are the two inputs every SDK builds against:
+
+| Language | Repository |
+|----------|------------|
+| Rust | [`ilpanich/axiam-rust-sdk`](https://github.com/ilpanich/axiam-rust-sdk) |
+| TypeScript | [`ilpanich/axiam-typescript-sdk`](https://github.com/ilpanich/axiam-typescript-sdk) |
+| Python | [`ilpanich/axiam-python-sdk`](https://github.com/ilpanich/axiam-python-sdk) |
+| Java | [`ilpanich/axiam-java-sdk`](https://github.com/ilpanich/axiam-java-sdk) |
+| C# | [`ilpanich/axiam-csharp-sdk`](https://github.com/ilpanich/axiam-csharp-sdk) |
+| PHP | [`ilpanich/axiam-php-sdk`](https://github.com/ilpanich/axiam-php-sdk) |
+| Go | [`ilpanich/axiam-go-sdk`](https://github.com/ilpanich/axiam-go-sdk) |
+
+**This file is the source of truth.** A copy is vendored at the root of every SDK repository
+(alongside a copy of `openapi.json` and of `proto/`); when this file changes, the copies must
+be re-synced. File paths quoted below (`crates/…`, `proto/…`) are relative to the AXIAM
+repository; SDK source paths are relative to that SDK's own repository root.
+
 ---
 
 ## §1 Method Naming Map
@@ -27,7 +47,7 @@ each language uses its own idiomatic naming convention as shown below.
 
 **Argument order:** every operation above takes the acted-upon subject before the object it
 acts on — concretely, `check_access`/`can` take `(action, resource[, scope])` in every SDK,
-with no exception. PHP's `can(action, resource)` (`sdks/php/src/AxiamClient.php`) was
+with no exception. PHP's `can(action, resource)` (`src/AxiamClient.php` in the PHP SDK repo) was
 reversed relative to this rule prior to SDK-Q09 remediation (2026-07); it has been corrected
 to match its own `checkAccess(action, resource)` and every other SDK's `can`/`Can`.
 
@@ -402,7 +422,7 @@ Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conf
 
 ### C# `Grpc.Tools` Exception
 
-C# is the one documented deviation from the repository-wide `buf` codegen pipeline. The C# SDK uses `Grpc.Tools` MSBuild integration (via `<Protobuf Include="../../proto/**/*.proto" GrpcServices="Client" />` in the `.csproj`) to generate gRPC client stubs at build time, rather than a `buf generate` plugin entry. This is intentional (D-01 in `15-CONTEXT.md`) and does not affect behavioral conformance with §1–§10. All other SDKs (Rust, TypeScript, Go, Python, Java, PHP) run `buf generate` as their codegen step.
+C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK uses `Grpc.Tools` MSBuild integration (via a `<Protobuf Include=... GrpcServices="Client" />` entry in the `.csproj`, pointed at the `proto/` copy vendored in its repo) to generate gRPC client stubs at build time, rather than a `buf generate` plugin entry. This is intentional (D-01 in `15-CONTEXT.md`) and does not affect behavioral conformance with §1–§10. All other SDKs (Rust, TypeScript, Go, Python, Java, PHP) run `buf generate` as their codegen step.
 
 ### Breaking Changes Log
 
@@ -422,7 +442,7 @@ recorded here until one exists.
 
 ### OpenAPI Export Feature Flag
 
-`sdks/openapi.json` is generated with `--no-default-features` (SAML endpoints excluded). Both the committed spec and the CI drift gate use identical flags. SDK consumers requiring SAML endpoint documentation should build AXIAM with the `saml` feature enabled and export locally.
+`openapi.json` (kept in this directory, and mirrored into every SDK repo) is generated with `--no-default-features` (SAML endpoints excluded). Both the committed spec and the CI drift gate use identical flags. SDK consumers requiring SAML endpoint documentation should build AXIAM with the `saml` feature enabled and export locally.
 
 ---
 

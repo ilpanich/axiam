@@ -16,7 +16,7 @@ AXIAM is a **multi-tenant** system. Organizations are top-level entities contain
 - **Frontend**: React + TypeScript (Vite)
 - **API Protocols**: REST (OpenAPI documented), gRPC (Protocol Buffers), AMQP
 - **Deployment**: Docker, Kubernetes
-- **SDKs**: Planned for Rust, Python, TypeScript, Java, C#, PHP, Go
+- **SDKs**: Rust, Python, TypeScript, Java, C#, PHP, Go — each in its own `axiam-<lang>-sdk` repository
 
 ## Core Domain Model
 
@@ -63,8 +63,13 @@ axiam/
 ├── frontend/               # React admin UI
 ├── docker/                 # Dockerfiles and compose configs
 ├── k8s/                    # Kubernetes manifests
-└── sdks/                   # SDK projects
+└── sdks/                   # SDK contract (CONTRACT.md) + OpenAPI spec only
 ```
+
+The seven client SDKs are **not** in this repository — each lives in its own
+`ilpanich/axiam-<lang>-sdk` repo (rust, typescript, python, java, csharp, php, go) and
+vendors a copy of `sdks/CONTRACT.md`, `sdks/openapi.json` and `proto/`, which are
+maintained here and must be re-synced downstream when they change.
 
 ## Development Artifacts
 

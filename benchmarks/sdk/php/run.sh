@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the Php SDK bench. The PHP SDK (sdks/php) is implemented; the bench
+# Run the Php SDK bench. The PHP SDK (ilpanich/axiam-php-sdk) is implemented; the bench
 # glue in this directory is not yet wired, so this emits a 'pending' record.
 # Replace the body below with: php bench.php
 set -euo pipefail

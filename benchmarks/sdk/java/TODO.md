@@ -1,6 +1,6 @@
 # Java SDK benchmark — wiring TODO
 
-The Java SDK is implemented (`sdks/java`, Maven coords `io.github.ilpanich:axiam-sdk`).
+The Java SDK is implemented (`ilpanich/axiam-java-sdk`, Maven coords `io.github.ilpanich:axiam-sdk`).
 This directory is the bench-glue scaffold: it currently emits a `pending`
 record conforming to `../HARNESS-SPEC.md` because the bench entrypoint has
 not been wired to the SDK yet.

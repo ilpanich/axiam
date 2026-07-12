@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # _pending.sh — emit a valid axiam.sdk-bench/v1 record with status "pending".
-# Used by language scaffolds whose SDK (already implemented under sdks/<lang>)
+# Used by language scaffolds whose SDK (already implemented in ilpanich/axiam-<lang>-sdk)
 # has no bench glue wired up yet. Sourced or called as: _pending.sh <sdk-name>
 emit_pending() {
   local sdk="${1:?sdk name}"

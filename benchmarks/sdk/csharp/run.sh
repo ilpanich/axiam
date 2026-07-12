@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the Csharp SDK bench. The C# SDK (sdks/csharp) is implemented; the
+# Run the Csharp SDK bench. The C# SDK (ilpanich/axiam-csharp-sdk) is implemented; the
 # bench glue in this directory is not yet wired, so this emits a 'pending'
 # record. Replace the body below with: dotnet run -c Release
 set -euo pipefail

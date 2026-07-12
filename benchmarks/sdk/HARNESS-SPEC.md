@@ -4,8 +4,8 @@ The protocol-level scenarios (`benchmarks/scenarios/`) measure the **server**. T
 SDK harness measures the **client**: how much latency/CPU each official AXIAM SDK
 adds on top of the raw wire calls, so users can pick an SDK knowing its overhead.
 
-All 7 SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go — `sdks/{rust,typescript,
-python,java,csharp,php,go}`) are implemented and conform to `sdks/CONTRACT.md`.
+All 7 SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go — the `ilpanich/axiam-<lang>-sdk`
+repositories) are implemented and conform to `sdks/CONTRACT.md`.
 The `python/` and `typescript/` bench directories are wired against the real SDKs
 (`SDK_WIRED = True`/`true`). The remaining five (`rust/`, `go/`, `java/`, `csharp/`,
 `php/`) are scaffolds with a per-language `TODO.md`: the SDK itself exists, only

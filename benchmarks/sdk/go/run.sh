@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the Go SDK bench. The Go SDK (sdks/go) is implemented; the bench glue
+# Run the Go SDK bench. The Go SDK (ilpanich/axiam-go-sdk) is implemented; the bench glue
 # in this directory is not yet wired, so this emits a 'pending' record.
 # Replace the body below with: go run .
 set -euo pipefail

@@ -1,6 +1,0 @@
-/vendor/
-composer.lock
-.phpunit.result.cache
-
-# phpDocumentor build cache/output (generated in CI, never committed)
-.phpdoc/

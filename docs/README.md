@@ -53,13 +53,15 @@ audit citation index.
 Official client SDKs, one per language. Each README is the getting-started
 guide for that SDK — linked here, not copied.
 
-- [`../sdks/rust/README.md`](../sdks/rust/README.md) — Rust
-- [`../sdks/typescript/README.md`](../sdks/typescript/README.md) — TypeScript / JavaScript
-- [`../sdks/python/README.md`](../sdks/python/README.md) — Python
-- [`../sdks/java/README.md`](../sdks/java/README.md) — Java
-- [`../sdks/csharp/README.md`](../sdks/csharp/README.md) — C#
-- [`../sdks/php/README.md`](../sdks/php/README.md) — PHP
-- [`../sdks/go/README.md`](../sdks/go/README.md) — Go
+Each SDK lives in its own repository:
+
+- [axiam-rust-sdk](https://github.com/ilpanich/axiam-rust-sdk) — Rust
+- [axiam-typescript-sdk](https://github.com/ilpanich/axiam-typescript-sdk) — TypeScript / JavaScript
+- [axiam-python-sdk](https://github.com/ilpanich/axiam-python-sdk) — Python
+- [axiam-java-sdk](https://github.com/ilpanich/axiam-java-sdk) — Java
+- [axiam-csharp-sdk](https://github.com/ilpanich/axiam-csharp-sdk) — C#
+- [axiam-php-sdk](https://github.com/ilpanich/axiam-php-sdk) — PHP
+- [axiam-go-sdk](https://github.com/ilpanich/axiam-go-sdk) — Go
 
 See [`../sdks/CONTRACT.md`](../sdks/CONTRACT.md) for the cross-language SDK contract.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the Rust SDK bench. The Rust SDK (sdks/rust) is implemented; the bench
+# Run the Rust SDK bench. The Rust SDK (ilpanich/axiam-rust-sdk) is implemented; the bench
 # glue in this directory is not yet wired, so this emits a 'pending' record.
 # Replace the body below with: cargo run --release
 set -euo pipefail

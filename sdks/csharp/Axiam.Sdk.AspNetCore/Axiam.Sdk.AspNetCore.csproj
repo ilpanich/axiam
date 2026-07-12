@@ -34,7 +34,7 @@
   <!-- D-04: SourceLink (GitHub) — dev-only dependency (PrivateAssets=All, never
        flows to consumers), mirrors Axiam.Sdk.csproj's identical config. -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0">
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.300">
       <PrivateAssets>All</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>

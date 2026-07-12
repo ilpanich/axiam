@@ -2,10 +2,12 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use actix_web::{HttpResponse, web};
 use serde::Serialize;
+use surrealdb::Connection;
+
+use crate::state::AppState;
 
 /// Trait for checking backend health (DB, etc.).
 ///
@@ -21,6 +23,18 @@ impl HealthChecker for axiam_db::DbManager {
                 .await
                 .map_err(|e| format!("db health check failed: {e}"))
         })
+    }
+}
+
+/// Always-healthy test double (mirrors the `AllowAllAuthzChecker` test
+/// fixture precedent already established in this crate). Used by
+/// `AppState::for_test` so test harnesses that don't specifically exercise
+/// `/ready` degraded-health behavior get a working default.
+pub struct AlwaysHealthy;
+
+impl HealthChecker for AlwaysHealthy {
+    fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -58,8 +72,8 @@ pub async fn health() -> HttpResponse {
         (status = 503, description = "Service is not ready", body = ReadyResponse),
     )
 )]
-pub async fn ready(checker: web::Data<Arc<dyn HealthChecker>>) -> HttpResponse {
-    match checker.check().await {
+pub async fn ready<C: Connection + Clone>(state: web::Data<AppState<C>>) -> HttpResponse {
+    match state.health_checker.check().await {
         Ok(()) => HttpResponse::Ok().json(ReadyResponse {
             status: "ok",
             database: "connected",

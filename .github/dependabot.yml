@@ -1,6 +1,7 @@
 # .github/dependabot.yml
 # Automated dependency updates — D-16 (CONTEXT.md)
-# Three ecosystems: cargo (workspace), npm (frontend), github-actions
+# Workspace + frontend + github-actions, plus every SDK ecosystem (CI-03):
+# cargo, npm, pip, gomod, maven, nuget, composer.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -30,3 +31,92 @@ updates:
     schedule:
       interval: weekly
       day: monday
+
+  # ---- Client SDK ecosystems (CI-03) --------------------------------------
+  - package-ecosystem: cargo
+    directory: /sdks/rust
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /sdks/typescript
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: pip
+    directory: /sdks/python
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: gomod
+    directory: /sdks/go
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: maven
+    directory: /sdks/java
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: maven
+    directory: /sdks/java-bom
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: nuget
+    directory: /sdks/csharp
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: composer
+    directory: /sdks/php
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch

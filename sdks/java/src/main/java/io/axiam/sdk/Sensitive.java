@@ -38,6 +38,13 @@ public final class Sensitive {
         this.value = Objects.requireNonNull(value, "value");
     }
 
+    /**
+     * Wraps {@code value} so it can never accidentally leak via {@code toString()},
+     * Jackson serialization, or Java reflective serialization.
+     *
+     * @param value the raw token-carrying string to wrap; must not be {@code null}
+     * @return a new {@code Sensitive} wrapping {@code value}
+     */
     public static Sensitive of(String value) {
         return new Sensitive(value);
     }

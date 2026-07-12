@@ -46,6 +46,8 @@ fn test_config() -> AuthConfig {
         jwt_issuer: "axiam-test".into(),
         pepper: None,
         min_password_length: 12,
+        hibp_breaker_threshold: 5,
+        hibp_breaker_cooldown_secs: 30,
         mfa_encryption_key: Some(TEST_MFA_KEY),
         federation_encryption_key: None,
         allow_missing_aud_as_user: true,
@@ -722,8 +724,10 @@ async fn mfa_login_challenge_flow() {
         other => panic!("expected MfaRequired, got {other:?}"),
     };
 
-    // Verify MFA with a valid code.
-    let new_code = totp.generate_current().unwrap();
+    // Verify MFA with a valid code from a LATER step — SECHRD-01 now seeds
+    // totp_last_used_step at confirm_mfa time, so reusing `code`'s step
+    // here would be correctly rejected as a replay.
+    let new_code = generate_next_step_code(&totp);
     let output = svc
         .verify_mfa(VerifyMfaInput {
             challenge_token,
@@ -1082,6 +1086,25 @@ fn totp_from_secret(secret_base32: &str, email: &str) -> totp_rs::TOTP {
     .unwrap()
 }
 
+/// Generate a TOTP code for the step AFTER the current wall-clock step.
+///
+/// SECHRD-01: `confirm_mfa` now seeds `totp_last_used_step` at
+/// enrollment-confirm time (not just at first login), so a second
+/// `verify_code_with_replay_check` call in the SAME step is correctly
+/// rejected as a replay. Tests that call `confirm_mfa`/`enable_mfa_for_alice`
+/// and then immediately `verify_mfa` must use a code from a LATER step —
+/// this generates one without needing to sleep past a real 30s boundary
+/// (the code is still accepted via the ±1 skew tolerance, since the real
+/// current step hasn't advanced yet).
+fn generate_next_step_code(totp: &totp_rs::TOTP) -> String {
+    let current_step = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / 30;
+    totp.generate((current_step + 1) * 30)
+}
+
 /// Helper: enroll + confirm MFA for user alice, returning the TOTP verifier.
 async fn enable_mfa_for_alice(
     svc: &AuthService<
@@ -1432,7 +1455,11 @@ async fn reset_mfa_clears_state_and_revokes_sessions() {
         "alice@example.com".into(),
     )
     .unwrap();
-    let code = totp.generate_current().unwrap();
+    // SECHRD-01: enable_mfa_for_alice's confirm_mfa already seeded
+    // totp_last_used_step at the current step, so use a code from the
+    // NEXT step here (still accepted via ±1 skew) rather than the same
+    // step, which would be correctly rejected as a replay.
+    let code = generate_next_step_code(&totp);
 
     let login_out = svc
         .verify_mfa(VerifyMfaInput {

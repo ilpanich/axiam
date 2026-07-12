@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   roleService,
   type Role,
@@ -17,6 +17,8 @@ import { Label } from "@/components/ui/label";
 import { Eye, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
+import { ToggleField } from "@/components/shared";
+import { useCrudMutations } from "@/hooks/useCrudMutations";
 
 // ─── Global badge ─────────────────────────────────────────────────────────────
 
@@ -32,35 +34,6 @@ function GlobalBadge({ isGlobal }: { isGlobal: boolean }) {
     >
       {isGlobal ? "Global" : "Tenant"}
     </span>
-  );
-}
-
-// ─── Toggle field ─────────────────────────────────────────────────────────────
-
-function ToggleField({
-  id,
-  label,
-  checked,
-  onChange,
-}: {
-  id: string;
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center gap-3">
-      <input
-        type="checkbox"
-        id={id}
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="w-4 h-4 accent-cyan-400 cursor-pointer"
-      />
-      <Label htmlFor={id} className="cursor-pointer">
-        {label}
-      </Label>
-    </div>
   );
 }
 
@@ -129,7 +102,6 @@ function RoleFormFields({
 
 export function RolesPage() {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
 
   const { data: roles = [], isLoading } = useQuery({
     queryKey: ["roles"],
@@ -143,19 +115,35 @@ export function RolesPage() {
   const [createIsGlobal, setCreateIsGlobal] = useState(false);
   const [createError, setCreateError] = useState("");
 
-  const createMutation = useMutation({
-    mutationFn: (payload: CreateRolePayload) => roleService.create(payload),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["roles"] });
-      setCreateOpen(false);
-      resetCreateForm();
-    },
-    onError: (err: unknown) => {
-      setCreateError(
-        err instanceof Error ? err.message : "Failed to create role."
-      );
-    },
-  });
+  // ─── Edit state ────────────────────────────────────────────────────────────
+  const [editRole, setEditRole] = useState<Role | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editIsGlobal, setEditIsGlobal] = useState(false);
+  const [editError, setEditError] = useState("");
+
+  // ─── Delete state ──────────────────────────────────────────────────────────
+  const [deleteRole, setDeleteRole] = useState<Role | null>(null);
+
+  // QUAL-06/D-16: adopted useCrudMutations (CQ-F15) — note the accepted UX
+  // delta: the hook's deleteMutation always toasts on error, whereas the
+  // previous inline deleteMutation had no onError (silent failure). This is
+  // an explicitly accepted improvement per D-15/RESEARCH A2.
+  const { createMutation, updateMutation: editMutation, deleteMutation } =
+    useCrudMutations<CreateRolePayload, UpdateRolePayload>({
+      queryKey: ["roles"],
+      createFn: (payload) => roleService.create(payload),
+      updateFn: (id, payload) => roleService.update(id, payload),
+      deleteFn: (id) => roleService.remove(id),
+      onCreateSuccess: () => {
+        setCreateOpen(false);
+        resetCreateForm();
+      },
+      onCreateError: (msg) => setCreateError(msg),
+      onUpdateSuccess: () => setEditRole(null),
+      onUpdateError: (msg) => setEditError(msg),
+      onDeleteSuccess: () => setDeleteRole(null),
+    });
 
   function resetCreateForm() {
     setCreateName("");
@@ -177,27 +165,6 @@ export function RolesPage() {
       is_global: createIsGlobal,
     });
   }
-
-  // ─── Edit state ────────────────────────────────────────────────────────────
-  const [editRole, setEditRole] = useState<Role | null>(null);
-  const [editName, setEditName] = useState("");
-  const [editDescription, setEditDescription] = useState("");
-  const [editIsGlobal, setEditIsGlobal] = useState(false);
-  const [editError, setEditError] = useState("");
-
-  const editMutation = useMutation({
-    mutationFn: ({ id, payload }: { id: string; payload: UpdateRolePayload }) =>
-      roleService.update(id, payload),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["roles"] });
-      setEditRole(null);
-    },
-    onError: (err: unknown) => {
-      setEditError(
-        err instanceof Error ? err.message : "Failed to update role."
-      );
-    },
-  });
 
   function openEdit(role: Role) {
     setEditRole(role);
@@ -223,17 +190,6 @@ export function RolesPage() {
       },
     });
   }
-
-  // ─── Delete state ──────────────────────────────────────────────────────────
-  const [deleteRole, setDeleteRole] = useState<Role | null>(null);
-
-  const deleteMutation = useMutation({
-    mutationFn: (id: string) => roleService.remove(id),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["roles"] });
-      setDeleteRole(null);
-    },
-  });
 
   // ─── Table columns ─────────────────────────────────────────────────────────
   const columns: Column<Role>[] = [

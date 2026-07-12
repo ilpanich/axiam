@@ -23,10 +23,22 @@ final class AuthMiddleware
     /** @var list<string> HTTP methods §3 requires the CSRF header on. */
     private const STATE_CHANGING_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
 
+    /** @param Session $session Session supplying the tenant, bearer token and CSRF token. */
     public function __construct(private readonly Session $session)
     {
     }
 
+    /**
+     * Wraps the next Guzzle handler, decorating same-origin requests with the tenant header,
+     * bearer token and — on state-changing methods (§3) — the `X-CSRF-Token` header.
+     *
+     * Cross-host requests (and cross-host redirects) are deliberately left undecorated so the
+     * credentials never leak to a third-party URL.
+     *
+     * @param callable $handler Next handler in the Guzzle stack.
+     *
+     * @return callable Decorated handler.
+     */
     public function __invoke(callable $handler): callable
     {
         $baseHost = parse_url($this->session->baseUrl(), PHP_URL_HOST);

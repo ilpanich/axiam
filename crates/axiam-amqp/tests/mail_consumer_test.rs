@@ -12,7 +12,10 @@ use axiam_core::models::email::{ProviderConfig, SetOrgEmailConfig, SmtpConfig};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, EmailConfigRepository, Pagination,
 };
-use axiam_db::{SurrealAuditLogRepository, SurrealEmailConfigRepository, SurrealUserRepository};
+use axiam_db::{
+    SurrealAuditLogRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
+    SurrealUserRepository,
+};
 use chrono::Utc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
@@ -21,6 +24,16 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
+//
+// FUNC-03 / D-05 / D-06 custom-template-resolution and fetch-error-fallback
+// tests live in their own file, `mail_consumer_template_test.rs` (a separate
+// cargo test binary/process), NOT here. They capture `tracing` debug/warn
+// output via a thread-local subscriber override; `tracing`'s per-callsite
+// `Interest` cache that override invalidates is process-global, so sharing a
+// process with other SurrealDB-touching tests risks a cross-test race that
+// silently drops captured log lines. Isolating them in their own test binary
+// (mirroring `axiam-api-rest/tests/gdpr_audit_dlq_test.rs`, which is the
+// sole test in its file for the same reason) avoids that race entirely.
 
 async fn setup_db() -> Surreal<Db> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
@@ -91,11 +104,13 @@ async fn delivery_failure_first_attempt_returns_retry_needed() {
     let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let user_repo = SurrealUserRepository::new(db.clone());
+    let template_repo = SurrealEmailTemplateRepository::new(db.clone());
 
     let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
-    let outcome = send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo)
-        .await
-        .unwrap();
+    let outcome =
+        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo)
+            .await
+            .unwrap();
 
     assert!(
         matches!(outcome, SendOutcome::RetryNeeded { .. }),
@@ -117,14 +132,16 @@ async fn exhausted_retries_writes_delivery_failed_audit_without_recipient() {
     let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let user_repo = SurrealUserRepository::new(db.clone());
+    let template_repo = SurrealEmailTemplateRepository::new(db.clone());
 
     // Set attempt_count to MAX_RETRIES - 1 so this is the exhausting attempt.
     let mut msg = make_msg(MailType::PasswordReset, org_id, tenant_id, MAX_RETRIES - 1);
     msg.user_id = user_id;
 
-    let outcome = send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo)
-        .await
-        .unwrap();
+    let outcome =
+        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo)
+            .await
+            .unwrap();
 
     assert!(
         matches!(outcome, SendOutcome::Exhausted),
@@ -185,13 +202,86 @@ async fn missing_email_config_returns_send_error() {
     let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let user_repo = SurrealUserRepository::new(db.clone());
+    let template_repo = SurrealEmailTemplateRepository::new(db.clone());
 
     let msg = make_msg(MailType::PasswordReset, Uuid::new_v4(), Uuid::new_v4(), 0);
-    let result = send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo).await;
+    let result =
+        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo).await;
 
     assert!(
         result.is_err(),
         "missing email config should return Err(SendError)"
+    );
+}
+
+/// SECHRD-08 / D-05d: an ExportReady message carrying a real (non-nil)
+/// `org_id` is deliverable end-to-end. `send_with_retry_and_audit` resolves
+/// the effective email config via `msg.org_id` *before* the template is
+/// rendered and a delivery attempt is made — so a successful render+send
+/// attempt (proven here by `RetryNeeded` against a fake/unreachable SMTP
+/// sink, not a `SendError` config failure) is only reachable when the real
+/// `org_id` resolves an email config. This proves the real `org_id` reaches
+/// (gates) the rendered template context on the consumer side.
+///
+/// The producer-side fix (cleanup.rs no longer enqueuing `Uuid::nil()`)
+/// lands in plan 25-05; this test is scoped to the consumer/rendering half
+/// per this plan (25-08).
+///
+/// Negative control: the identical message with `Uuid::nil()` as `org_id`
+/// (the pre-D-05d producer placeholder) must fail closed with a `SendError`
+/// *before* any template is rendered — reproducing the exact "ExportReady
+/// mail silently undeliverable" bug D-05d fixes.
+#[tokio::test]
+async fn export_ready_resolves_real_org_id() {
+    let db = setup_db().await;
+    let org_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+
+    // Seed an org-level email config keyed to the REAL org_id, pointing at a
+    // fake/unreachable SMTP sink (127.0.0.1:1 — nothing listens there, so
+    // delivery fails transiently but rendering/config-resolution succeeds).
+    seed_failing_email_config(&db, org_id, tenant_id).await;
+
+    let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let template_repo = SurrealEmailTemplateRepository::new(db.clone());
+
+    // ExportReady message carrying the real org_id, mirroring cleanup.rs's
+    // post-25-05 enqueue shape (action_url/expiry_time template context).
+    let mut msg = make_msg(MailType::ExportReady, org_id, tenant_id, 0);
+    msg.user_id = user_id;
+
+    let outcome =
+        send_with_retry_and_audit(&msg, &email_repo, &audit_repo, &user_repo, &template_repo)
+            .await
+            .expect("a real org_id must resolve an email config and reach the render/send attempt");
+
+    assert!(
+        matches!(outcome, SendOutcome::RetryNeeded { .. }),
+        "real org_id must resolve config, render the ExportReady template, and attempt \
+         delivery (RetryNeeded against the fake sink) — got {:?}",
+        outcome
+    );
+
+    // Negative control: same message, but org_id reset to Uuid::nil().
+    let mut nil_org_msg = msg.clone();
+    nil_org_msg.org_id = Uuid::nil();
+    let nil_result = send_with_retry_and_audit(
+        &nil_org_msg,
+        &email_repo,
+        &audit_repo,
+        &user_repo,
+        &template_repo,
+    )
+    .await;
+
+    assert!(
+        nil_result.is_err(),
+        "Uuid::nil() org_id must NOT resolve an email config (pre-D-05d bug reproduction) — \
+         mail would be silently undeliverable; got {:?}",
+        nil_result
     );
 }
 

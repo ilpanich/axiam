@@ -1,7 +1,5 @@
 //! OpenPGP key management — generation, audit signing, and encryption.
 
-use aes_gcm::aead::{Aead, OsRng as AeadOsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::AuditLogEntry;
 use axiam_core::models::pgp_key::{
@@ -21,8 +19,10 @@ use rand_core::OsRng;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::PkiConfig;
+use crate::crypto::{decrypt_secret, encrypt_secret};
 
 /// Service for OpenPGP key management, audit signing, and encryption.
 #[derive(Clone)]
@@ -86,10 +86,7 @@ impl<R: PgpKeyRepository> PgpService<R> {
                         .into(),
                 )
             })?;
-            Some(encrypt_private_key(
-                private_key_armored.as_bytes(),
-                &enc_key,
-            )?)
+            Some(encrypt_secret(private_key_armored.as_bytes(), &enc_key)?)
         } else {
             None
         };
@@ -153,8 +150,8 @@ impl<R: PgpKeyRepository> PgpService<R> {
                 "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable".into(),
             )
         })?;
-        let private_key_pem = decrypt_private_key(encrypted_pk, &enc_key)?;
-        let private_key_armored = String::from_utf8(private_key_pem)
+        let private_key_pem = decrypt_secret(encrypted_pk, &enc_key)?;
+        let mut private_key_armored = String::from_utf8(private_key_pem)
             .map_err(|e| AxiamError::Crypto(format!("invalid UTF-8 in private key: {e}")))?;
 
         // CPU-bound PGP signing runs in spawn_blocking behind semaphore (CQ-B02).
@@ -173,6 +170,8 @@ impl<R: PgpKeyRepository> PgpService<R> {
         let signed_msg = tokio::task::spawn_blocking(move || -> AxiamResult<String> {
             let (secret_key, _) = SignedSecretKey::from_string(&private_key_armored)
                 .map_err(|e| AxiamError::Crypto(format!("failed to parse private key: {e}")))?;
+            // Scrub the decrypted armored private key once parsed (defense-in-depth).
+            private_key_armored.zeroize();
 
             let mut msg_builder = MessageBuilder::from_bytes("audit-batch", data);
             msg_builder.sign(
@@ -272,31 +271,4 @@ fn generate_keypair(algorithm: &PgpKeyAlgorithm, user_id: &str) -> AxiamResult<S
         .map_err(|e| AxiamError::Crypto(format!("failed to generate keypair: {e}")))?;
 
     Ok(signed_secret_key)
-}
-
-fn encrypt_private_key(plaintext: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<Vec<u8>> {
-    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Aes256Gcm::generate_nonce(&mut AeadOsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
-        .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM encryption failed: {e}")))?;
-
-    let mut result = Vec::with_capacity(nonce.len() + ciphertext.len());
-    result.extend_from_slice(&nonce);
-    result.extend_from_slice(&ciphertext);
-    Ok(result)
-}
-
-fn decrypt_private_key(encrypted: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<Vec<u8>> {
-    if encrypted.len() < 12 {
-        return Err(AxiamError::Crypto("ciphertext too short".into()));
-    }
-    let (nonce_bytes, ciphertext) = encrypted.split_at(12);
-    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM decryption failed: {e}")))
 }

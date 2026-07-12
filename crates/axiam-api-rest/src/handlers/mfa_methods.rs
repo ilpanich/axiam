@@ -1,9 +1,7 @@
 //! MFA method management endpoints — list and delete.
 
 use actix_web::{HttpResponse, web};
-use axiam_auth::MfaMethodService;
 use axiam_core::models::mfa_method::{MfaMethod, MfaMethodType};
-use axiam_db::{SurrealUserRepository, SurrealWebauthnCredentialRepository};
 use serde::Serialize;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -11,9 +9,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission, is_own_resource};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
-
-type MfaMethodSvc<C> =
-    MfaMethodService<SurrealUserRepository<C>, SurrealWebauthnCredentialRepository<C>>;
+use crate::state::AppState;
 
 // -------------------------------------------------------------------
 // Response types
@@ -63,10 +59,10 @@ impl From<MfaMethod> for MfaMethodResponse {
     ),
     security(("bearer" = []))
 )]
-pub async fn list_mfa_methods<C: Connection>(
+pub async fn list_mfa_methods<C: Connection + Clone>(
     caller: AuthenticatedUser,
     authz: AuthzData,
-    svc: web::Data<MfaMethodSvc<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_id = path.into_inner();
@@ -77,7 +73,10 @@ pub async fn list_mfa_methods<C: Connection>(
             .await?;
     }
 
-    let methods = svc.list_methods(caller.tenant_id, user_id).await?;
+    let methods = state
+        .mfa_method_service
+        .list_methods(caller.tenant_id, user_id)
+        .await?;
     let response: Vec<MfaMethodResponse> = methods.into_iter().map(Into::into).collect();
     Ok(HttpResponse::Ok().json(response))
 }
@@ -104,10 +103,10 @@ pub async fn list_mfa_methods<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete_mfa_method<C: Connection>(
+pub async fn delete_mfa_method<C: Connection + Clone>(
     caller: AuthenticatedUser,
     authz: AuthzData,
-    svc: web::Data<MfaMethodSvc<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let (user_id, method_id) = path.into_inner();
@@ -118,7 +117,9 @@ pub async fn delete_mfa_method<C: Connection>(
             .await?;
     }
 
-    svc.delete_method(caller.tenant_id, user_id, &method_id)
+    state
+        .mfa_method_service
+        .delete_method(caller.tenant_id, user_id, &method_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }

@@ -37,6 +37,14 @@ public static class AxiamHttpClientFactory
         {
             UseCookies = true,
             CookieContainer = new CookieContainer(),
+            // SDK-17: never auto-follow redirects. .NET strips `Authorization` on a
+            // cross-origin redirect but NOT the SDK's custom `X-Tenant-Id`/`X-CSRF-Token`
+            // headers (added by AxiamHttpMessageHandler), so a downgrade/cross-origin 3xx
+            // could silently re-send them to an untrusted host. The SDK never relies on
+            // auto-redirect: auth endpoints are POSTs that must not 3xx-redirect, and no
+            // SDK call path expects a transparent redirect — a 3xx surfaces to the caller
+            // instead of being followed blindly.
+            AllowAutoRedirect = false,
         };
 
         if (customCaPem is not null && customCaPem.Length > 0)
@@ -104,6 +112,10 @@ public static class AxiamHttpClientFactory
         handler.UseCookies = true; // re-applied even if the caller supplied their own SocketsHttpHandler
         handler.CookieContainer = new CookieContainer();
         handler.PooledConnectionLifetime = TimeSpan.FromMinutes(15);
+        // SDK-17: same rationale as CreatePrimaryHandler — re-applied on the alt path so a
+        // caller-supplied SocketsHttpHandler can never re-enable auto-redirect and leak the
+        // SDK's custom X-Tenant-Id/X-CSRF-Token headers across a cross-origin 3xx.
+        handler.AllowAutoRedirect = false;
         // Same rule as CreatePrimaryHandler's additive CustomTrustStore callback: never
         // set an unconditional-true validation callback here.
     }

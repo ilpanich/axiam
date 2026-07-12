@@ -58,12 +58,16 @@ test.describe("Tenants list page", () => {
     await expect(page.getByLabel(/Description/)).toBeVisible();
   });
 
-  test("shows active status badge for bootstrapped tenant", async ({
+  test("shows the bootstrapped tenant row with its slug", async ({
     page,
   }) => {
     await page.goto("/tenants");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByText("Active").first()).toBeVisible();
+    // TenantsPage has no status column (the Tenant model has no status field),
+    // so verify the bootstrapped tenant renders as a real row: its name plus
+    // its slug ("default") shown in the table's slug cell.
+    await expect(page.getByText("E2E Default Tenant")).toBeVisible();
+    await expect(page.getByText("default", { exact: true }).first()).toBeVisible();
   });
 
   test("search filters tenants by name", async ({ page }) => {
@@ -74,7 +78,7 @@ test.describe("Tenants list page", () => {
       await searchBox.fill("E2E");
       await expect(page.getByText("E2E Default Tenant")).toBeVisible();
     } else {
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 
@@ -90,7 +94,7 @@ test.describe("Tenants list page", () => {
         page.getByRole("dialog", { name: /Delete Tenant/i })
       ).toBeVisible();
     } else {
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 });

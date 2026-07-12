@@ -67,6 +67,22 @@ class _Session:
         timeout: httpx.Timeout | None = None,
         logger: Any = None,
     ) -> None:
+        """Build the session state shared by the lazily-constructed sync and
+        async httpx clients.
+
+        Args:
+            base_url: The AXIAM server's base URL; also used to derive
+                ``_base_host`` for the same-origin header-injection guard in
+                :meth:`_prepare_request`.
+            tenant_slug: Injected as ``X-Tenant-ID`` on every same-origin
+                request (CONTRACT.md §5).
+            custom_ca: The sole TLS-bypass escape hatch (§6) — a PEM CA
+                bundle path/string, or ``None`` for strict default
+                verification. Never a boolean.
+            timeout: Overrides the default httpx connect/read/write/pool
+                timeouts when supplied.
+            logger: An injectable logger (D-15); stored as-is, not wrapped.
+        """
         self.base_url = base_url
         # Host of our own origin — used to gate tenant/CSRF header injection
         # so those secrets never travel to a different host (defense in depth
@@ -170,6 +186,10 @@ class _Session:
                 self._csrf_token = token
 
     def _get_csrf_token(self) -> str | None:
+        """Read the most recently captured CSRF token, if any, guarded by
+        the same lock as :meth:`_capture_csrf` (called from both sync and
+        async request paths). Returns ``None`` before any response has set
+        the ``X-CSRF-Token`` header."""
         with self._csrf_lock:
             return self._csrf_token
 

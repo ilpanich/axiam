@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
 struct RefreshTokenRow {
@@ -61,11 +62,6 @@ impl RefreshTokenRowWithId {
             created_at: self.created_at,
         })
     }
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 /// SurrealDB implementation of the RefreshToken repository.
@@ -123,10 +119,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "oauth2_refresh_token".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "oauth2_refresh_token", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -176,10 +169,11 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             .map_err(DbError::from)?;
 
         let rows: Vec<RefreshTokenRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "oauth2_refresh_token".into(),
-            id: format!("token_hash={token_hash_owned}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "oauth2_refresh_token",
+            &format!("token_hash={token_hash_owned}"),
+        )?;
 
         row.try_into_refresh_token().map_err(Into::into)
     }

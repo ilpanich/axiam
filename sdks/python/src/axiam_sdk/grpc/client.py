@@ -35,6 +35,10 @@ AsyncRefreshFn = Callable[[], Awaitable[None]]
 def _to_wire(
     subject_id: str, action: str, resource_id: str, tenant_id: str, scope: str | None
 ) -> authorization_pb2.CheckAccessRequest:
+    """Build a single ``CheckAccessRequest`` protobuf message, shared by
+    both the single-check and batch-check call sites of both the sync and
+    async clients. ``scope`` is left unset on the message entirely when
+    ``None`` rather than set to an empty string."""
     wire = authorization_pb2.CheckAccessRequest(
         tenant_id=tenant_id,
         subject_id=subject_id,
@@ -60,6 +64,22 @@ class AuthzGrpcClient:
         refresh_fn: SyncRefreshFn | None = None,
         custom_ca: str | None = None,
     ) -> None:
+        """Open a strict-TLS secure channel to ``target`` with the
+        auth/tenant interceptor installed.
+
+        Args:
+            target: The gRPC server address (``host:port``).
+            token_fn: Non-blocking accessor for the current cached access
+                token, forwarded to :class:`~axiam_sdk.grpc._interceptor.SyncAuthInterceptor`.
+            tenant_id: Injected as ``x-tenant-id`` metadata on every call
+                (CONTRACT.md §5).
+            refresh_fn: Optional zero-arg callable performing the caller-
+                owned single-flight refresh (§9); when ``None``, an
+                UNAUTHENTICATED response is mapped and raised immediately
+                with no retry.
+            custom_ca: The sole TLS-bypass escape hatch (§6) — a PEM CA
+                bundle, or ``None`` for strict default verification.
+        """
         self._tenant_id = tenant_id
         self._refresh_fn = refresh_fn
 
@@ -76,6 +96,7 @@ class AuthzGrpcClient:
         )
 
     def close(self) -> None:
+        """Close the underlying gRPC channel."""
         self._channel.close()
 
     def check_access(
@@ -113,6 +134,14 @@ class AuthzGrpcClient:
         ]
 
     def _retry_after_refresh(self, exc: grpc.RpcError, retry: Callable[[], object]) -> object:
+        """On UNAUTHENTICATED (and only when a ``refresh_fn`` was supplied),
+        call it exactly once, then invoke ``retry`` exactly once (§9.3).
+
+        Any other status code — or a UNAUTHENTICATED with no ``refresh_fn``
+        — is mapped and raised immediately via :meth:`_map_error`, with no
+        retry. A second failure after the retry also raises via
+        :meth:`_map_error`, chained from the retry's own exception.
+        """
         call = cast(grpc.Call, exc)
         if self._refresh_fn is not None and call.code() == grpc.StatusCode.UNAUTHENTICATED:
             self._refresh_fn()
@@ -123,6 +152,10 @@ class AuthzGrpcClient:
         raise self._map_error(exc) from exc
 
     def _map_error(self, exc: grpc.RpcError) -> Exception:
+        """Map a raw ``grpc.RpcError`` to the ``AxiamError`` family via
+        :func:`~axiam_sdk._errors.error_from_grpc_status` (CONTRACT.md §2),
+        substituting a generic message when the server supplied no
+        ``details()``."""
         call = cast(grpc.Call, exc)
         return error_from_grpc_status(call.code(), call.details() or "gRPC call failed")
 
@@ -142,6 +175,10 @@ class AsyncAuthzGrpcClient:
         refresh_fn: AsyncRefreshFn | None = None,
         custom_ca: str | None = None,
     ) -> None:
+        """Async twin of :meth:`AuthzGrpcClient.__init__` — opens a
+        strict-TLS ``grpc.aio`` secure channel to ``target`` with the async
+        auth/tenant interceptor installed. Args are identical except
+        ``refresh_fn`` is an async zero-arg callable."""
         self._tenant_id = tenant_id
         self._refresh_fn = refresh_fn
 
@@ -153,6 +190,8 @@ class AsyncAuthzGrpcClient:
         )
 
     async def close(self) -> None:
+        """Async twin of :meth:`AuthzGrpcClient.close` — closes the
+        underlying ``grpc.aio`` channel."""
         await self._channel.close()
 
     async def check_access(
@@ -190,6 +229,10 @@ class AsyncAuthzGrpcClient:
     async def _retry_after_refresh(
         self, exc: grpc.RpcError, retry: Callable[[], Awaitable[object]]
     ) -> object:
+        """Async twin of :meth:`AuthzGrpcClient._retry_after_refresh` — on
+        UNAUTHENTICATED (and only when a ``refresh_fn`` was supplied),
+        awaits it exactly once, then awaits ``retry`` exactly once (§9.3);
+        any other outcome maps and raises via :meth:`_map_error`."""
         aio_exc = cast(grpc.aio.AioRpcError, exc)
         if self._refresh_fn is not None and aio_exc.code() == grpc.StatusCode.UNAUTHENTICATED:
             await self._refresh_fn()
@@ -200,5 +243,10 @@ class AsyncAuthzGrpcClient:
         raise self._map_error(exc) from exc
 
     def _map_error(self, exc: grpc.RpcError) -> Exception:
+        """Map a raw ``grpc.RpcError`` (as ``AioRpcError``) to the
+        ``AxiamError`` family via
+        :func:`~axiam_sdk._errors.error_from_grpc_status` (CONTRACT.md §2),
+        substituting a generic message when the server supplied no
+        ``details()``."""
         aio_exc = cast(grpc.aio.AioRpcError, exc)
         return error_from_grpc_status(aio_exc.code(), aio_exc.details() or "gRPC call failed")

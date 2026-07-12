@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "axiam-server/v*"
 
 permissions:
   contents: write
@@ -16,19 +16,164 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  build-server:
-    name: Build Server Image
+  # ---------------------------------------------------------------------------
+  # Gate: a release tag must point at a commit that is on main.
+  # ---------------------------------------------------------------------------
+  # Git tags are not branch-scoped — `git tag v1.0.0` on a feature branch would
+  # otherwise publish a signed, attested image from unreviewed code. Every
+  # publishing job below `needs:` this gate.
+  verify-tag-on-main:
+    name: Verify tag is on main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Assert the tagged commit is an ancestor of origin/main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is NOT on origin/main. Release tags must be cut from main."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_REF_NAME} (${GITHUB_SHA}) is on origin/main."
+
+  # ---------------------------------------------------------------------------
+  # Build each image, once per architecture, on a NATIVE runner.
+  # ---------------------------------------------------------------------------
+  # linux/arm64 covers Raspberry Pi 5 (Cortex-A76, aarch64), Apple Silicon and
+  # AWS Graviton. It is built on GitHub's native `ubuntu-24.04-arm` runner
+  # rather than under QEMU: emulating a full Rust release build costs hours,
+  # while a native arm64 runner costs the same as amd64 (and is free for public
+  # repositories).
+  #
+  # Each matrix leg pushes an untagged, digest-addressed manifest; the merge job
+  # below assembles them into ONE multi-arch tag. `docker pull .../server:1.0.0`
+  # then resolves to the caller's architecture automatically.
+  build-images:
+    name: Build ${{ matrix.image }} (${{ matrix.platform }})
+    needs: verify-tag-on-main
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [server, frontend]
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2  # v3.10.0
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772  # v3.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # D-06 Step 1: build locally (load: true, no push) for scanning. The
+      # runner is native for this arch, so `load` works — no QEMU needed.
+      - name: Build image (scan target)
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6.15.0
+        with:
+          context: .
+          file: docker/Dockerfile.${{ matrix.image }}
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: axiam-${{ matrix.image }}:scan-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+
+      # D-06 Step 2: scan — block on HIGH/CRITICAL fixable vulns before push.
+      # Runs per architecture: an arm64 image can carry different package
+      # versions (and therefore different CVEs) than its amd64 sibling.
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: image
+          image-ref: axiam-${{ matrix.image }}:scan-${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+          format: sarif
+          output: trivy-image-${{ matrix.image }}-${{ matrix.arch }}.sarif
+
+      # D-07: upload SARIF to GitHub Security tab. The category must be unique
+      # per image AND per arch, or the second upload overwrites the first.
+      - name: Upload image scan SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
+        if: always()
+        with:
+          sarif_file: trivy-image-${{ matrix.image }}-${{ matrix.arch }}.sarif
+          category: trivy-image-${{ matrix.image }}-${{ matrix.arch }}
+
+      # D-06 Step 3: push by digest (no tag). Same GHA cache scope as the scan
+      # build → same layers → the digest published here is the image that was
+      # just scanned.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6.15.0
+        with:
+          context: .
+          file: docker/Dockerfile.${{ matrix.image }}
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: digests-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Assemble the per-arch digests into one multi-arch tag, then sign + attest.
+  # ---------------------------------------------------------------------------
+  # cosign signs (and provenance attests) the manifest LIST digest, so a single
+  # signature covers both architectures — `cosign verify .../server:1.0.0`
+  # succeeds regardless of which arch the verifier pulls.
+  merge-images:
+    name: Merge + sign ${{ matrix.image }} (multi-arch)
+    needs: build-images
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
       id-token: write
       attestations: write
-      security-events: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [server, frontend]
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Download digests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
+          path: /tmp/digests
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2  # v3.10.0
@@ -44,163 +189,68 @@ jobs:
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804  # v5.7.0
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/server
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          # `type=semver` CANNOT be used here: it parses the git tag as a bare
+          # semver, and our release tag is namespaced (axiam-server/v1.0.0), so
+          # it would fail to match and emit no version tag at all. `type=match`
+          # takes the version out of the prefixed tag explicitly.
+          # axiam-server/v1.2.3 -> image tags "1.2.3" and "1.2" (+ the sha tag).
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=match,pattern=axiam-server/v(\d+\.\d+\.\d+),group=1
+            type=match,pattern=axiam-server/v(\d+\.\d+),group=1
             type=sha
 
-      # D-06 Step 1: build locally (load: true, no push) for scanning
-      - name: Build image (scan target)
-        id: build-local
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6.15.0
-        with:
-          context: .
-          file: docker/Dockerfile.server
-          load: true
-          tags: axiam-server:scan-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create multi-arch manifest list
+        working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          # One -t per tag from metadata-action, one source ref per arch digest.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
 
-      # D-06 Step 2: scan — block on HIGH/CRITICAL fixable vulns before push
-      - name: Trivy image scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          scan-type: image
-          image-ref: axiam-server:scan-${{ github.sha }}
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: 1
-          format: sarif
-          output: trivy-image-server.sarif
-
-      # D-07: upload SARIF to GitHub Security tab
-      - name: Upload image scan SARIF
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
-        if: always()
-        with:
-          sarif_file: trivy-image-server.sarif
-          category: trivy-image-server
-
-      # D-06 Step 3: push (same GHA cache → same layers → same digest)
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6.15.0
-        with:
-          context: .
-          file: docker/Dockerfile.server
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+      - name: Resolve manifest-list digest
+        id: index
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}" --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Multi-arch index digest: ${digest}"
+          docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}" | grep -E "Name|MediaType|Platform"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a  # v3.8.1
 
-      # D-06: sign the pushed digest (after push, after passing scan)
+      # D-06: sign the manifest-list digest (after push, after passing scan)
       - name: Sign image with cosign
-        run: cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository }}/server@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}@${{ steps.index.outputs.digest }}
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ github.repository }}/server
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          subject-digest: ${{ steps.index.outputs.digest }}
 
-  build-frontend:
-    name: Build Frontend Image
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
-      attestations: write
-      security-events: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2  # v3.10.0
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772  # v3.4.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804  # v5.7.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/frontend
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-
-      # D-06 Step 1: build locally (load: true, no push) for scanning
-      - name: Build image (scan target)
-        id: build-local
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6.15.0
-        with:
-          context: .
-          file: docker/Dockerfile.frontend
-          load: true
-          tags: axiam-frontend:scan-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # D-06 Step 2: scan — block on HIGH/CRITICAL fixable vulns before push
-      - name: Trivy image scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          scan-type: image
-          image-ref: axiam-frontend:scan-${{ github.sha }}
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: 1
-          format: sarif
-          output: trivy-image-frontend.sarif
-
-      # D-07: upload SARIF to GitHub Security tab
-      - name: Upload image scan SARIF
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
-        if: always()
-        with:
-          sarif_file: trivy-image-frontend.sarif
-          category: trivy-image-frontend
-
-      # D-06 Step 3: push (same GHA cache → same layers → same digest)
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6.15.0
-        with:
-          context: .
-          file: docker/Dockerfile.frontend
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a  # v3.8.1
-
-      # D-06: sign the pushed digest (after push, after passing scan)
-      - name: Sign image with cosign
-        run: cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository }}/frontend@${{ steps.build.outputs.digest }}
-
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ github.repository }}/frontend
-          subject-digest: ${{ steps.build.outputs.digest }}
-
+  # Standalone binary tarballs, one per architecture, built natively (same
+  # rationale as the images: no QEMU). Keeps the bare-metal install path in
+  # step with the multi-arch container images.
   build-binary:
-    name: Build Release Binary
-    runs-on: ubuntu-latest
+    name: Build Release Binary (${{ matrix.arch }})
+    needs: verify-tag-on-main
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
@@ -212,8 +262,8 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxml2-dev libxmlsec1-dev libxmlsec1-openssl
 
       - name: Build release binary
         run: cargo build --release -p axiam-server
@@ -222,27 +272,29 @@ jobs:
         run: strip target/release/axiam-server
 
       - name: Create tarball
-        run: tar czf axiam-server-x86_64-linux.tar.gz -C target/release axiam-server
+        run: tar czf "axiam-server-${{ matrix.arch }}-linux.tar.gz" -C target/release axiam-server
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: axiam-server-x86_64-linux
-          path: axiam-server-x86_64-linux.tar.gz
+          name: axiam-server-${{ matrix.arch }}-linux
+          path: axiam-server-${{ matrix.arch }}-linux.tar.gz
 
   release:
     name: Create GitHub Release
-    needs: [build-server, build-frontend, build-binary]
+    needs: [merge-images, build-binary]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           fetch-depth: 0
 
-      - name: Download binary artifact
+      # Both arch tarballs (x86_64 + aarch64) land flat in the working dir.
+      - name: Download binary artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
-          name: axiam-server-x86_64-linux
+          pattern: axiam-server-*-linux
+          merge-multiple: true
 
       - name: Generate changelog
         id: changelog
@@ -256,5 +308,7 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           body_path: CHANGELOG.md
-          files: axiam-server-x86_64-linux.tar.gz
+          files: |
+            axiam-server-x86_64-linux.tar.gz
+            axiam-server-aarch64-linux.tar.gz
           generate_release_notes: false

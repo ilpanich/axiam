@@ -29,6 +29,13 @@ public final class AuthAuthenticator implements Authenticator {
     private final RefreshGuard guard;
     private final SessionState session;
 
+    /**
+     * Creates an authenticator bound to the given shared refresh guard and session.
+     *
+     * @param guard   the single-flight refresh guard shared with {@link AuthInterceptor}'s
+     *                proactive-refresh path (D-08) — never a second instance
+     * @param session the client's session state (tenant id, cookie-jar-backed token)
+     */
     public AuthAuthenticator(RefreshGuard guard, SessionState session) {
         this.guard = guard;
         this.session = session;

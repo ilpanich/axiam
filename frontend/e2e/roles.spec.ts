@@ -17,7 +17,7 @@ test.describe("Roles list page", () => {
   }) => {
     await page.goto("/roles");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows the seeded super-admin role from bootstrap fixture", async ({
@@ -98,7 +98,7 @@ test.describe("Permissions list page", () => {
   }) => {
     await page.goto("/permissions");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("permissions page shows seeded permissions from bootstrap", async ({
@@ -106,11 +106,10 @@ test.describe("Permissions list page", () => {
   }) => {
     await page.goto("/permissions");
     await expect(page).not.toHaveURL(/\/login/);
-    // The bootstrap fixture seeds all AXIAM permissions — at least one should appear
-    // The permission table or empty-state must be visible
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page.getByText(/no permissions|empty/i).isVisible().catch(() => false);
-    expect(hasTable || hasEmptyState).toBe(true);
+    // PermissionsPage renders its rows (or the empty state) inside a DataTable,
+    // which always emits a semantic <table>. Assert it renders (auto-retries
+    // past the async React Query fetch).
+    await expect(page.getByRole("table")).toBeVisible();
   });
 });
 
@@ -126,10 +125,15 @@ test.describe("Resources page", () => {
   test("resources page renders tree view by default", async ({ page }) => {
     await page.goto("/resources");
     await expect(page).not.toHaveURL(/\/login/);
-    // Tree view is default — either tree or empty state should be present
-    const hasTree = await page.getByRole("tree").isVisible().catch(() => false);
-    const hasEmptyState = await page.getByText(/no resources/i).isVisible().catch(() => false);
-    expect(hasTree || hasEmptyState).toBe(true);
+    // Tree view is the default: ResourceTree renders a role="tree" when there
+    // are resources, or "No resources defined yet." on a fresh bootstrap.
+    // Use an OR-locator with a real toBeVisible expectation so it auto-retries
+    // through the async data load (the old one-shot isVisible() probes raced
+    // the fetch and both returned false). Not weakened — a redirect to /login
+    // or a crashed page matches neither branch.
+    await expect(
+      page.getByRole("tree").or(page.getByText(/no resources/i)),
+    ).toBeVisible();
   });
 
   test("list view toggle switches from tree to table", async ({ page }) => {
@@ -141,7 +145,7 @@ test.describe("Resources page", () => {
       await expect(page.getByRole("tree")).not.toBeVisible();
     } else {
       // Page rendered without tree — acceptable for empty DB
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 });

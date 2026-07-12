@@ -42,6 +42,16 @@ final class Session
 
     private readonly CookieJar $cookieJar;
 
+    /**
+     * @param string         $baseUrl   AXIAM server base URL (HTTPS; `http://` is rejected
+     *                                  except on loopback).
+     * @param string         $tenant    Tenant slug every request is scoped to.
+     * @param Client         $http      Guzzle client carrying this session's middleware stack.
+     * @param CookieJar|null $cookieJar Persistent cookie store (CONTRACT.md §4). Defaults to a
+     *                                  fresh in-memory jar — REQUIRED, because AXIAM delivers the
+     *                                  access and refresh tokens as `httpOnly` cookies, so a client
+     *                                  that does not persist them fails every request after login.
+     */
     public function __construct(
         private readonly string $baseUrl,
         private readonly string $tenant,
@@ -51,11 +61,13 @@ final class Session
         $this->cookieJar = $cookieJar ?? new CookieJar();
     }
 
+    /** AXIAM server base URL this session is bound to. */
     public function baseUrl(): string
     {
         return $this->baseUrl;
     }
 
+    /** Tenant slug every request in this session is scoped to. */
     public function tenant(): string
     {
         return $this->tenant;

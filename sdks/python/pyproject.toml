@@ -34,6 +34,7 @@ dev = [
     "grpcio-tools==1.78.*",
     "mypy",
     "ruff",
+    "interrogate",
     "build",
     "twine",
     "pytest",
@@ -111,3 +112,21 @@ quote-style = "double"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.interrogate]
+fail-under = 100
+verbose = 2
+# Generated gRPC stubs (D-04, "DO NOT EDIT!" header) are out of every plan's
+# file-modification scope, same rationale as the [tool.ruff] extend-exclude
+# and [[tool.mypy.overrides]] exemptions for axiam_sdk.grpc.gen.* above —
+# grpc_tools.protoc's own codegen output is not something this SDK's own
+# docstring-coverage gate should enforce on upstream-generated code.
+exclude = ["src/axiam_sdk/grpc/gen", "build"]
+ignore-init-method = false
+ignore-init-module = false
+ignore-magic = false
+ignore-semiprivate = false
+ignore-private = false
+ignore-module = false
+ignore-nested-functions = false
+ignore-nested-classes = false

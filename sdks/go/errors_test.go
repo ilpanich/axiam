@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -80,6 +81,38 @@ func TestNetworkError_RedactsSensitiveHeaders(t *testing.T) {
 			t.Fatalf("control case did not leak as expected — test may be vacuous; got %q", out)
 		}
 	})
+}
+
+// TestNetworkError_RedactsCustomSensitiveHeader proves the X-3 allowlist
+// redacts a custom sensitive header (X-Auth-Token) that a small denylist of
+// {Set-Cookie, Authorization, Cookie} would NOT catch, while an allowlisted
+// header (X-Request-Id) survives into the wrapped cause.
+func TestNetworkError_RedactsCustomSensitiveHeader(t *testing.T) {
+	const customSecret = "super-secret-custom-token"
+	const safeValue = "req-abc-123"
+
+	h := http.Header{}
+	h.Set("X-Auth-Token", customSecret)
+	h.Set("X-Request-Id", safeValue)
+	resp := &http.Response{StatusCode: 500, Header: h}
+
+	err := newNetworkError("server error", resp, nil)
+	out := fmt.Sprintf("%v", err.Unwrap())
+
+	if strings.Contains(out, customSecret) {
+		t.Fatalf("custom sensitive header X-Auth-Token leaked: %q", out)
+	}
+	if !strings.Contains(out, safeValue) {
+		t.Fatalf("allowlisted header X-Request-Id value must survive, got %q", out)
+	}
+	if !strings.Contains(out, redactedHeader) {
+		t.Fatalf("expected redacted placeholder in output, got %q", out)
+	}
+
+	// Caller's original response must not be mutated.
+	if resp.Header.Get("X-Auth-Token") != customSecret {
+		t.Fatalf("caller's original response was mutated by newNetworkError")
+	}
 }
 
 // TestErrors_As_Is verifies errors.As discriminates AuthError/AuthzError/
@@ -192,6 +225,56 @@ func TestErrorFromGRPCStatus(t *testing.T) {
 			assertErrorKind(t, err, tc.want)
 		})
 	}
+}
+
+// TestMapErrorResponse_ParsesAuthzFields proves that a 403 authorization_denied
+// response body's structured `action`/`resource_id` fields land on the
+// resulting *AuthzError, and that a missing `resource_id` (present only for
+// a resource-scoped denial per CONTRACT.md §2) correctly leaves the field "".
+func TestMapErrorResponse_ParsesAuthzFields(t *testing.T) {
+	newResp := func(body string) *http.Response {
+		return &http.Response{
+			StatusCode: 403,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+	}
+
+	t.Run("action and resource_id present", func(t *testing.T) {
+		body := `{"error":"authorization_denied","message":"you do not have permission","action":"users:get","resource_id":"9f9a1b2c-0000-4000-8000-000000000000"}`
+		err := mapErrorResponse(newResp(body))
+
+		var authzErr *AuthzError
+		if !errors.As(err, &authzErr) {
+			t.Fatalf("expected *AuthzError, got %T", err)
+		}
+		if authzErr.Action != "users:get" {
+			t.Fatalf("Action = %q, want %q", authzErr.Action, "users:get")
+		}
+		if authzErr.ResourceID != "9f9a1b2c-0000-4000-8000-000000000000" {
+			t.Fatalf("ResourceID = %q, want the uuid", authzErr.ResourceID)
+		}
+		// The free-text message field must stay redacted (WR-01) even
+		// though the structured fields were lifted out of the body.
+		if strings.Contains(authzErr.Message, "you do not have permission") {
+			t.Fatalf("Message leaked raw body text: %q", authzErr.Message)
+		}
+	})
+
+	t.Run("only action present, resource_id absent", func(t *testing.T) {
+		body := `{"error":"authorization_denied","message":"you do not have permission","action":"users:list"}`
+		err := mapErrorResponse(newResp(body))
+
+		var authzErr *AuthzError
+		if !errors.As(err, &authzErr) {
+			t.Fatalf("expected *AuthzError, got %T", err)
+		}
+		if authzErr.Action != "users:list" {
+			t.Fatalf("Action = %q, want %q", authzErr.Action, "users:list")
+		}
+		if authzErr.ResourceID != "" {
+			t.Fatalf("ResourceID = %q, want empty when absent from body", authzErr.ResourceID)
+		}
+	})
 }
 
 func assertErrorKind(t *testing.T, err error, want string) {

@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
 struct ResourceRow {
@@ -77,11 +78,6 @@ fn row_to_resource(row: ResourceRow, id: Uuid) -> Result<Resource, DbError> {
     })
 }
 
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
 /// Maximum depth for ancestor traversal to prevent infinite loops.
 const MAX_ANCESTOR_DEPTH: usize = 50;
 
@@ -138,10 +134,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<ResourceRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "resource".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "resource", &id_str)?;
 
         row_to_resource(row, id).map_err(Into::into)
     }
@@ -161,10 +154,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .map_err(DbError::from)?;
 
         let rows: Vec<ResourceRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "resource".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "resource", &id_str)?;
 
         row_to_resource(row, id).map_err(Into::into)
     }
@@ -211,6 +201,11 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
                         message: "cycle detected in resource hierarchy".into(),
                     });
                 }
+                // Validate the new parent exists within the caller's tenant, so
+                // a re-parent cannot attach this resource under another tenant's
+                // node (get_by_id is tenant-scoped and returns NotFound
+                // otherwise).
+                self.get_by_id(tenant_id, *new_parent).await?;
                 // Walk the new parent's ancestors: if any equals `id`, it's a cycle.
                 let ancestors = self.get_ancestors(tenant_id, *new_parent).await?;
                 if ancestors.iter().any(|a| a.id == id) {
@@ -220,16 +215,34 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
                 }
             }
 
-            // Delete old child_of edge.
-            query = format!("DELETE child_of WHERE in = resource:`{id_str}`; {query}");
+            // Re-parenting mutates two-to-three statements (DELETE the old
+            // child_of edge, UPDATE the record, optionally RELATE the new
+            // edge). Wrap them in one transaction so a failure after the
+            // DELETE (e.g. the RELATE hitting a UNIQUE violation) cannot leave
+            // the resource orphaned with no rollback — the same class the
+            // resource.delete transaction closed. The child_of edge carries no
+            // flat tenant_id column, so the DELETE is tenant-scoped via a
+            // node-tenant guard on its `in` endpoint (in.tenant_id); without
+            // it a foreign-tenant resource id could strip another tenant's
+            // parent edge.
+            //
+            // Result slots become: BEGIN=0, DELETE child_of=1, UPDATE=2,
+            // [RELATE=3], COMMIT=last — so the UPDATE row lands at slot 2.
+            query = format!(
+                "BEGIN TRANSACTION; \
+                 DELETE child_of WHERE in = resource:`{id_str}` AND in.tenant_id = $tenant_id; \
+                 {query}"
+            );
 
             // If new parent is Some, create new child_of edge.
             if let Some(Some(new_parent)) = &input.parent_id {
                 let new_parent_str = new_parent.to_string();
                 query = format!(
-                    "{query}; RELATE resource:`{id_str}` -> child_of -> resource:`{new_parent_str}`;"
+                    "{query}; RELATE resource:`{id_str}` -> child_of -> resource:`{new_parent_str}`"
                 );
             }
+
+            query = format!("{query}; COMMIT TRANSACTION");
         }
 
         let parent_id_str: Option<String> = input
@@ -261,53 +274,93 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        // The UPDATE statement index depends on whether we prepended a DELETE.
-        let stmt_idx = if parent_id_changed { 1 } else { 0 };
+        // The UPDATE statement index depends on whether we wrapped the
+        // re-parent in a transaction: BEGIN=0, DELETE child_of=1, UPDATE=2.
+        let stmt_idx = if parent_id_changed { 2 } else { 0 };
         let rows: Vec<ResourceRow> = result.take(stmt_idx).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "resource".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "resource", &id_str)?;
 
         row_to_resource(row, id).map_err(Into::into)
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let id_str = id.to_string();
+        let tenant_id_str = tenant_id.to_string();
 
-        // CQ-B08: block delete if this resource has children (prevents orphaning).
-        let child_count_sql = format!(
-            "SELECT count() AS total FROM child_of \
-             WHERE out = resource:`{id_str}` GROUP ALL"
-        );
-        let mut count_result = self
-            .db
-            .query(&child_count_sql)
-            .await
-            .map_err(DbError::from)?;
-        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let child_count = count_rows.first().map(|r| r.total).unwrap_or(0);
-        if child_count > 0 {
-            return Err(AxiamError::Validation {
-                message: "cannot delete resource with children".into(),
-            });
-        }
-
-        // Clean up edges, scopes, then delete the resource.
+        // D-13/CQ-B46: fold the child-count guard into the SAME
+        // transaction as the deletes via a LET-capture (mirroring
+        // federation_login_state.rs's `LET $row = (...)` idiom). Before
+        // this fix, the guard ran as a separate `.query()` round-trip
+        // BEFORE the deletes — a classic TOCTOU: a concurrent child-create
+        // could commit in the gap between the count-check and the delete,
+        // leaving both a successful parent delete AND an orphaned child.
+        // Now the read-then-decide-then-delete happens atomically: either
+        // the transaction observes children and aborts before any DELETE
+        // runs, or it observes none and every DELETE below commits
+        // together.
+        //
+        // D-13/CQ-B07/SEC-058: child_of/on_resource edge tables carry no
+        // tenant_id field of their own (schema v19 defines
+        // idx_child_of_unique / idx_on_resource_unique on (in, out) only),
+        // so tenant scoping on those two DELETEs is expressed as a
+        // node-tenant subquery guard on the edge's in/out endpoint
+        // (in.tenant_id / out.tenant_id via graph-traversal dereference),
+        // not a flat WHERE clause. `scope` and the resource record itself
+        // DO carry their own tenant_id field, so those two keep their
+        // pre-existing flat predicates.
+        //
+        // Result slots: BEGIN=0, LET children=1, IF/THROW=2,
+        // DELETE child_of=3, DELETE on_resource=4, DELETE scope=5,
+        // DELETE resource=6, COMMIT=7. delete() returns Ok(()) — no row
+        // data to extract, .check() alone proves the transaction
+        // committed (or surfaces the child-guard THROW).
         let query = format!(
-            "DELETE child_of WHERE in = resource:`{id_str}` OR out = resource:`{id_str}`; \
-             DELETE on_resource WHERE out = resource:`{id_str}`; \
+            "BEGIN TRANSACTION; \
+             LET $children = (SELECT VALUE id FROM child_of WHERE out = resource:`{id_str}`); \
+             IF array::len($children) > 0 {{ \
+                 THROW 'cannot delete resource with children'; \
+             }}; \
+             DELETE child_of WHERE \
+                 (in = resource:`{id_str}` AND in.tenant_id = $tenant_id) OR \
+                 (out = resource:`{id_str}` AND out.tenant_id = $tenant_id); \
+             DELETE on_resource WHERE out = resource:`{id_str}` AND out.tenant_id = $tenant_id; \
              DELETE scope WHERE resource_id = $resource_id AND tenant_id = $tenant_id; \
-             DELETE type::record('resource', $id) WHERE tenant_id = $tenant_id;"
+             DELETE type::record('resource', $id) WHERE tenant_id = $tenant_id; \
+             COMMIT TRANSACTION"
         );
 
-        self.db
+        let mut result = self
+            .db
             .query(query)
             .bind(("id", id_str.clone()))
             .bind(("resource_id", id_str))
-            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("tenant_id", tenant_id_str))
             .await
             .map_err(DbError::from)?;
+
+        // The child-guard THROW fires on its own statement slot, but the
+        // trailing DELETE/COMMIT slots report the generic "not executed due
+        // to a failed transaction" error, and Response::check() can surface
+        // one of those instead of the THROW text — which silently downgraded
+        // the child-guard rejection to an opaque Migration error
+        // (req14_tenant_isolation_test::resource_delete_with_children_rejected
+        // regressed when 29-02 moved the guard from a Rust pre-check into the
+        // transaction). Scan every statement error so the THROW message is
+        // reliably detected regardless of which slot check() would return.
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let combined = errors
+                .into_values()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if combined.contains("cannot delete resource with children") {
+                return Err(AxiamError::Validation {
+                    message: "cannot delete resource with children".into(),
+                });
+            }
+            return Err(DbError::Migration(combined).into());
+        }
 
         Ok(())
     }
@@ -329,7 +382,6 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let mut result = self
             .db
@@ -352,12 +404,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .map(|row| row.try_into_resource())
             .collect::<Result<Vec<_>, DbError>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn get_children(&self, tenant_id: Uuid, parent_id: Uuid) -> AxiamResult<Vec<Resource>> {
@@ -385,58 +432,54 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
     async fn get_ancestors(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Vec<Resource>> {
         let tenant_id_str = tenant_id.to_string();
-        let mut ancestors = Vec::new();
-        let mut current_id = id;
+        let id_str = id.to_string();
 
-        // CQ-B08: walk at most MAX_ANCESTOR_DEPTH steps; if we exhaust the limit
-        // without reaching a root (parent_id = None), the hierarchy is either
-        // pathologically deep or contains a cycle — surface an error.
-        let mut steps = 0usize;
-        loop {
-            if steps >= MAX_ANCESTOR_DEPTH {
-                return Err(DbError::Migration(
-                    "resource hierarchy exceeds maximum depth — possible cycle".into(),
-                )
-                .into());
-            }
-            steps += 1;
+        // CQ-B13: walk the hierarchy in a SINGLE recursive graph query instead of
+        // one SELECT per level. The `child_of` edge points child -> parent, so
+        // `->child_of->resource` climbs one level; `.{..N+path}` follows that edge
+        // up to N times and yields the ordered path of ancestor records
+        // (nearest-first, EXCLUDING the starting resource — matching the previous
+        // loop's output). The `(resource WHERE tenant_id = $tenant_id)` node filter
+        // enforces tenant scoping: an ancestor in another tenant terminates the
+        // walk, exactly like the old per-level `WHERE tenant_id` guard.
+        //
+        // CQ-B08 preserved: `+path` does NOT deduplicate, so both a
+        // pathologically deep chain AND a cycle traverse until the depth cap and
+        // return exactly MAX_ANCESTOR_DEPTH records. The original loop errored as
+        // soon as it would step onto the MAX_ANCESTOR_DEPTH-th ancestor (i.e. when
+        // there are >= MAX_ANCESTOR_DEPTH ancestors), so we recurse to
+        // MAX_ANCESTOR_DEPTH and treat a result of that length as an
+        // overflow/cycle — surfacing the same error rather than silently
+        // truncating.
+        let query = format!(
+            "SELECT meta::id(id) AS record_id, tenant_id, name, resource_type, \
+                    parent_id, metadata, created_at, updated_at \
+             FROM array::flatten(\
+                 type::record('resource', $id).{{..{depth}+path}}(\
+                     ->child_of->(resource WHERE tenant_id = $tenant_id)));",
+            depth = MAX_ANCESTOR_DEPTH,
+        );
 
-            let current_str = current_id.to_string();
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("id", id_str))
+            .bind(("tenant_id", tenant_id_str))
+            .await
+            .map_err(DbError::from)?;
 
-            let mut result = self
-                .db
-                .query(
-                    "SELECT * FROM type::record('resource', $id) \
-                     WHERE tenant_id = $tenant_id",
-                )
-                .bind(("id", current_str))
-                .bind(("tenant_id", tenant_id_str.clone()))
-                .await
-                .map_err(DbError::from)?;
+        let rows: Vec<ResourceRowWithId> = result.take(0).map_err(DbError::from)?;
 
-            let rows: Vec<ResourceRow> = result.take(0).map_err(DbError::from)?;
-            let row = match rows.into_iter().next() {
-                Some(r) => r,
-                None => break,
-            };
-
-            let parent_id_str = row.parent_id.clone();
-            let resource = row_to_resource(row, current_id)?;
-
-            // Don't include the starting resource itself; only ancestors.
-            if current_id != id {
-                ancestors.push(resource);
-            }
-
-            match parent_id_str {
-                Some(pid) => {
-                    current_id = Uuid::parse_str(&pid)
-                        .map_err(|e| DbError::Migration(format!("invalid parent UUID: {e}")))?;
-                }
-                None => break,
-            }
+        if rows.len() >= MAX_ANCESTOR_DEPTH {
+            return Err(DbError::Migration(
+                "resource hierarchy exceeds maximum depth — possible cycle".into(),
+            )
+            .into());
         }
 
-        Ok(ancestors)
+        rows.into_iter()
+            .map(|row| row.try_into_resource())
+            .collect::<Result<Vec<_>, DbError>>()
+            .map_err(Into::into)
     }
 }

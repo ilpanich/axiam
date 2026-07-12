@@ -3,6 +3,8 @@
 //! All repository operations are async. Tenant-scoped repositories
 //! require a `tenant_id` parameter to enforce data isolation.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
@@ -158,16 +160,25 @@ pub trait UserRepository: Send + Sync {
     /// Soft-delete: sets status to Inactive.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// Persist the last-used TOTP step after a successful verification.
+    /// Atomically persist the last-used TOTP step after a successful
+    /// verification, guarded by a compare-and-set on the stored step.
     ///
     /// Called by `AuthService` after a TOTP code is accepted to prevent replay
-    /// within the same time window (SEC-008 / REQ-14 AC-5).
+    /// within the same time window (SEC-008 / SECHRD-01 / REQ-14 AC-5).
+    ///
+    /// The advance only applies `WHERE totp_last_used_step = NONE OR
+    /// totp_last_used_step < step`, so N concurrent submissions of one valid
+    /// code succeed at most once: returns `Ok(true)` if this call won the
+    /// CAS (the step advanced), `Ok(false)` if the guard did not match
+    /// (replay, or a concurrent caller already won). Callers MUST treat
+    /// `Ok(false)` as a rejected verification (e.g. `MfaInvalidCode`), not a
+    /// silent no-op.
     fn update_totp_step(
         &self,
         tenant_id: Uuid,
         id: Uuid,
         step: u64,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,
@@ -198,6 +209,22 @@ pub trait UserRepository: Send + Sync {
         base_lockout_secs: i64,
         backoff_multiplier: f64,
         max_lockout_secs: i64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Anonymize a user row in-place for GDPR Art. 17 erasure (D-05).
+    ///
+    /// Implementations MUST scrub every PII column (email, username,
+    /// password_hash, mfa_secret, metadata, lockout state) and clear
+    /// `deletion_pending`/`scheduled_purge_at` — this is the step that
+    /// clears the re-selection anchor `find_due_for_purge` keys on, so a
+    /// purge pipeline that fails before reaching this call leaves the user
+    /// due for a retry (SECHRD-06 / D-03a).
+    fn anonymize_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
@@ -356,6 +383,16 @@ pub trait PermissionRepository: Send + Sync {
         tenant_id: Uuid,
         role_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<PermissionGrant>>> + Send;
+
+    /// Batch variant of [`Self::get_role_permission_grants`]: fetch the permission
+    /// grants for many roles in a single query, grouped by role id. Roles with no
+    /// grants are simply absent from the returned map. Used on the hot authorization
+    /// path to avoid an N+1 query per applicable role.
+    fn get_role_permission_grants_for_roles(
+        &self,
+        tenant_id: Uuid,
+        role_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<HashMap<Uuid, Vec<PermissionGrant>>>> + Send;
 }
 
 pub trait ResourceRepository: Send + Sync {
@@ -464,6 +501,14 @@ pub trait SessionRepository: Send + Sync {
     /// Invalidate a single session.
     fn invalidate(&self, tenant_id: Uuid, id: Uuid)
     -> impl Future<Output = AxiamResult<()>> + Send;
+    /// Atomically consume (delete) a single session, returning `true` iff this
+    /// call removed the row. Unlike [`Self::invalidate`] (idempotent, always
+    /// `Ok(())`), this is the single-use gate for refresh-token rotation
+    /// (NEW-3): two concurrent refreshes racing on the same token both pass the
+    /// prior SELECT, but only one wins this delete — the loser gets `false` and
+    /// must abort before minting a new session, preserving single-use rotation
+    /// and stolen-token reuse detection.
+    fn consume(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<bool>> + Send;
     /// Invalidate all sessions for a user (e.g., on password change).
     fn invalidate_user_sessions(
         &self,
@@ -482,6 +527,18 @@ pub trait SessionRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
     /// Remove all expired sessions.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// List all sessions for a user, tenant-scoped.
+    ///
+    /// Returns complete `Session` rows (including `token_hash`) — this method
+    /// is a raw metadata read; redacting the token/hash before surfacing the
+    /// rows to a caller (e.g. the GDPR export) is the caller's responsibility
+    /// (D-03c, SECHRD-06).
+    fn list_by_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Session>>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -867,6 +924,39 @@ pub trait AssertionReplayRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// AMQP Nonce Replay (NEW-4)
+// ---------------------------------------------------------------------------
+
+/// Repository for tracking consumed AMQP message nonces (NEW-4 replay
+/// protection).
+///
+/// Provides the same insert-or-conflict semantics as
+/// [`AssertionReplayRepository`]: inserting a `(tenant_id, nonce)` pair that
+/// has already been recorded returns `Err(AxiamError::ReplayDetected)`. The
+/// AMQP consumers call this AFTER a valid HMAC signature + a fresh `issued_at`
+/// so a replayed message (same signed nonce within the freshness window) is
+/// rejected. Rows live until the message's freshness window closes
+/// (`issued_at + skew`); `cleanup_expired` removes them.
+pub trait AmqpNonceRepository: Send + Sync {
+    /// Record a consumed AMQP message nonce.
+    ///
+    /// Returns `Ok(())` on first insertion. Returns
+    /// `Err(AxiamError::ReplayDetected)` if an identical `(tenant_id, nonce)`
+    /// pair already exists (UNIQUE constraint violation) — that is a replay.
+    fn insert_nonce(
+        &self,
+        tenant_id: Uuid,
+        nonce: Uuid,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired AMQP nonce rows across all tenants.
+    ///
+    /// Returns the number of rows deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // PKI / Certificates
 // ---------------------------------------------------------------------------
 
@@ -1131,6 +1221,15 @@ pub trait EmailConfigRepository: Send + Sync {
         org_id: Uuid,
         input: SetOrgEmailConfig,
     ) -> impl Future<Output = AxiamResult<EmailConfig>> + Send;
+
+    /// Delete the org-level email config (D-13).
+    ///
+    /// Note (D-13-org-delete-orphaning): this does NOT cascade-delete tenant
+    /// overrides that depend on this org baseline. After deletion,
+    /// `get_effective_config` returns `None` for tenants without a full
+    /// override of their own, which surfaces as a clear "no email config"
+    /// condition at send time rather than silently sending broken mail.
+    fn delete_org_config(&self, org_id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Get tenant-level overrides.
     fn get_tenant_override(

@@ -1,7 +1,88 @@
+import { readFileSync } from 'node:fs';
+import { hkdfSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { signPayload, verifyPayload } from '../../src/amqp/hmac.js';
 
+/**
+ * Server-generated canonical bytes + expected HMAC for v2 `AuthzRequest`/
+ * `AuditEventMessage` (NEW-4). Ground truth for every SDK, not TS-owned —
+ * see `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json`.
+ */
+interface V2ReferenceVectors {
+  audit_event: { canonical_signed_json: string; hmac_signature_hex: string };
+  authz_request: { canonical_signed_json: string; hmac_signature_hex: string };
+  hkdf: { app_salt_utf8: string; derived_subkey_hex: string; domain_tag_utf8: string };
+  key_version: number;
+  master_signing_key_hex: string;
+  tenant_id: string;
+}
+
+const fixture: V2ReferenceVectors = JSON.parse(
+  readFileSync(
+    new URL(
+      '../../../../crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+) as V2ReferenceVectors;
+
+/**
+ * HKDF-SHA256(salt=APP_SALT, ikm=master, info=DOMAIN_TAG||key_version(1
+ * byte)||tenant_id(16 raw bytes)) — mirrors the server's
+ * `derive_tenant_key` (`crates/axiam-amqp/src/messages.rs`). Test-local
+ * only: the TS SDK's public API takes an already-derived per-tenant key
+ * (CONTRACT.md §8.1, out-of-band provisioning), so this is not exposed from
+ * `src/`.
+ */
+function deriveTenantKey(masterHex: string, tenantId: string, keyVersion: number): Buffer {
+  const master = Buffer.from(masterHex, 'hex');
+  const salt = Buffer.from(fixture.hkdf.app_salt_utf8, 'utf8');
+  const domainTag = Buffer.from(fixture.hkdf.domain_tag_utf8, 'utf8');
+  const tenantBytes = Buffer.from(tenantId.replace(/-/g, ''), 'hex');
+  const info = Buffer.concat([domainTag, Buffer.from([keyVersion]), tenantBytes]);
+  return Buffer.from(hkdfSync('sha256', master, salt, info, 32));
+}
+
 describe('amqp/hmac', () => {
+  describe('NEW-4 v2 reference vectors (server ground truth, byte-for-byte)', () => {
+    it('derives the same per-tenant HKDF subkey as the fixture', () => {
+      const subkey = deriveTenantKey(fixture.master_signing_key_hex, fixture.tenant_id, fixture.key_version);
+      expect(subkey.toString('hex')).toBe(fixture.hkdf.derived_subkey_hex);
+    });
+
+    it('reproduces the server hmac_signature_hex for the AuthzRequest vector', () => {
+      const subkey = deriveTenantKey(fixture.master_signing_key_hex, fixture.tenant_id, fixture.key_version);
+      const canonical = Buffer.from(fixture.authz_request.canonical_signed_json, 'utf8');
+
+      expect(signPayload(subkey, canonical)).toBe(fixture.authz_request.hmac_signature_hex);
+      expect(verifyPayload(subkey, canonical, fixture.authz_request.hmac_signature_hex)).toBe(true);
+    });
+
+    it('reproduces the server hmac_signature_hex for the AuditEventMessage vector', () => {
+      const subkey = deriveTenantKey(fixture.master_signing_key_hex, fixture.tenant_id, fixture.key_version);
+      const canonical = Buffer.from(fixture.audit_event.canonical_signed_json, 'utf8');
+
+      expect(signPayload(subkey, canonical)).toBe(fixture.audit_event.hmac_signature_hex);
+      expect(verifyPayload(subkey, canonical, fixture.audit_event.hmac_signature_hex)).toBe(true);
+    });
+
+    it('parsing the server message, deleting hmac_signature, and re-stringifying reproduces the canonical bytes (Pitfall 5)', () => {
+      // This is the exact TS consumer path (JSON.parse -> delete
+      // hmac_signature -> JSON.stringify) proving nonce/issued_at need no
+      // canonicalization change: the server's declared field order survives
+      // JSON parse/insertion-order re-stringify unchanged.
+      for (const vector of [fixture.authz_request, fixture.audit_event] as const) {
+        const parsed = JSON.parse(vector.canonical_signed_json) as Record<string, unknown> & {
+          hmac_signature?: string;
+        };
+        parsed.hmac_signature = vector.hmac_signature_hex;
+        delete parsed.hmac_signature;
+        expect(JSON.stringify(parsed)).toBe(vector.canonical_signed_json);
+      }
+    });
+  });
+
   describe('fixed-vector byte-identity (CONTRACT.md §8 / crates/axiam-amqp/src/messages.rs)', () => {
     // Known key + known canonical-JSON bytes -> known hex, cross-checked
     // independently via `openssl dgst -sha256 -hmac "test-fixed-vector-key"`

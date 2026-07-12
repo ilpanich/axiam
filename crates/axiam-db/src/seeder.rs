@@ -11,12 +11,15 @@
 
 use axiam_core::models::role::CreateRole;
 use axiam_core::repository::{Pagination, PermissionRepository, RoleRepository};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, classify_write_error};
 use crate::repository::{SurrealPermissionRepository, SurrealRoleRepository};
 
 /// Row struct for reading a seeder_state record.
@@ -129,6 +132,66 @@ pub async fn seed_permissions<C: Connection>(
     Ok(())
 }
 
+/// Mint a one-time first-run bootstrap setup token if the database has
+/// never been bootstrapped (SECHRD-04 / D-03b).
+///
+/// # Behavior
+///
+/// - On a fresh (never-bootstrapped) database — no `bootstrap_setup_token`
+///   row yet AND no `user` row anywhere — a cryptographically random token
+///   is generated, its sha256 hash is persisted as the
+///   `bootstrap_setup_token` record ID, and the returned `Some(token)`
+///   carries the PLAINTEXT token so the caller can log it exactly once
+///   (the one deliberate secret-log exception, per D-03b). Only the HASH
+///   is ever persisted to the database.
+/// - On any subsequent boot — a setup token already exists, or at least
+///   one user already exists — this is a no-op and returns `Ok(None)`;
+///   nothing is minted or re-logged.
+pub async fn mint_bootstrap_setup_token_if_needed<C: Connection>(
+    db: &Surreal<C>,
+) -> Result<Option<String>, DbError> {
+    // A setup token was already minted — no-op.
+    let existing_tokens: Vec<CountRow> = db
+        .query("SELECT count() AS total FROM bootstrap_setup_token GROUP ALL")
+        .await
+        .map_err(|e| DbError::Migration(format!("bootstrap_setup_token count failed: {e}")))?
+        .take(0)
+        .map_err(|e| DbError::Migration(format!("bootstrap_setup_token count take failed: {e}")))?;
+    if existing_tokens.first().map(|r| r.total).unwrap_or(0) > 0 {
+        return Ok(None);
+    }
+
+    // Bootstrap already completed somewhere — no-op.
+    let existing_users: Vec<CountRow> = db
+        .query("SELECT count() AS total FROM user GROUP ALL")
+        .await
+        .map_err(|e| DbError::Migration(format!("user count failed: {e}")))?
+        .take(0)
+        .map_err(|e| DbError::Migration(format!("user count take failed: {e}")))?;
+    if existing_users.first().map(|r| r.total).unwrap_or(0) > 0 {
+        return Ok(None);
+    }
+
+    // Generate a cryptographically random 32-byte token, base64url-encoded
+    // (same shape as `axiam_auth::token::generate_refresh_token`).
+    let mut rng = rand::rng();
+    let bytes: [u8; 32] = rand::Rng::random(&mut rng);
+    let token = URL_SAFE_NO_PAD.encode(bytes);
+
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let token_hash = hex::encode(hasher.finalize());
+
+    db.query("CREATE type::record('bootstrap_setup_token', $hash) SET created_at = time::now()")
+        .bind(("hash", token_hash))
+        .await
+        .map_err(|e| DbError::Migration(format!("bootstrap_setup_token mint failed: {e}")))?
+        .check()
+        .map_err(|e| DbError::Migration(format!("bootstrap_setup_token mint check failed: {e}")))?;
+
+    Ok(Some(token))
+}
+
 /// Seed the three default roles — super-admin, admin, and viewer — for the
 /// given tenant, assigning permissions according to D-12.
 ///
@@ -168,59 +231,37 @@ pub async fn seed_default_roles<C: Connection>(
 
     let find_role = |name: &str| existing.items.iter().find(|r| r.name == name).map(|r| r.id);
 
-    let super_admin_id = match find_role("super-admin") {
-        Some(id) => id,
-        None => {
-            let role = role_repo
-                .create(CreateRole {
-                    tenant_id,
-                    name: "super-admin".into(),
-                    description: "Full system access — all permissions".into(),
-                    is_global: true,
-                })
-                .await
-                .map_err(|e| {
-                    DbError::Migration(format!("seed_default_roles create super-admin failed: {e}"))
-                })?;
-            role.id
-        }
-    };
+    // SECHRD-04: role creation must tolerate a CONCURRENT racer creating the
+    // same default role for the same tenant — `find_or_create_role` treats
+    // the `idx_role_tenant_name` UNIQUE-index violation as "a concurrent
+    // caller already won" and re-fetches the winner's row instead of
+    // failing (see its doc comment for why this is now reachable).
+    let super_admin_id = find_or_create_role(
+        &role_repo,
+        tenant_id,
+        find_role("super-admin"),
+        "super-admin",
+        "Full system access — all permissions",
+    )
+    .await?;
 
-    let admin_id = match find_role("admin") {
-        Some(id) => id,
-        None => {
-            let role = role_repo
-                .create(CreateRole {
-                    tenant_id,
-                    name: "admin".into(),
-                    description: "Administrative access — all entity CRUD operations".into(),
-                    is_global: true,
-                })
-                .await
-                .map_err(|e| {
-                    DbError::Migration(format!("seed_default_roles create admin failed: {e}"))
-                })?;
-            role.id
-        }
-    };
+    let admin_id = find_or_create_role(
+        &role_repo,
+        tenant_id,
+        find_role("admin"),
+        "admin",
+        "Administrative access — all entity CRUD operations",
+    )
+    .await?;
 
-    let viewer_id = match find_role("viewer") {
-        Some(id) => id,
-        None => {
-            let role = role_repo
-                .create(CreateRole {
-                    tenant_id,
-                    name: "viewer".into(),
-                    description: "Read-only access — list and get operations".into(),
-                    is_global: true,
-                })
-                .await
-                .map_err(|e| {
-                    DbError::Migration(format!("seed_default_roles create viewer failed: {e}"))
-                })?;
-            role.id
-        }
-    };
+    let viewer_id = find_or_create_role(
+        &role_repo,
+        tenant_id,
+        find_role("viewer"),
+        "viewer",
+        "Read-only access — list and get operations",
+    )
+    .await?;
 
     // -----------------------------------------------------------------------
     // 2. Fetch all permissions for this tenant
@@ -240,25 +281,42 @@ pub async fn seed_default_roles<C: Connection>(
         })?;
 
     // -----------------------------------------------------------------------
-    // 3. Grant permissions to roles
+    // 3. Grant permissions to roles (idempotent — skip already-granted pairs)
     // -----------------------------------------------------------------------
+    //
+    // SECHRD-04: `grant_to_role` CREATEs a `grants` edge guarded by a UNIQUE
+    // (in, out) index (CQ-B17) — re-granting an already-granted permission
+    // is a hard error, not a silent no-op. Before this fix, `seed_default_roles`
+    // was only ever called once per tenant (the old bootstrap TOCTOU check
+    // disabled the endpoint before a second call could reach here). Now that
+    // bootstrap atomicity is enforced by the `bootstrap_lock` uniqueness
+    // invariant instead, this function can be reached again — including
+    // CONCURRENTLY, by two racing bootstrap requests — for a tenant whose
+    // roles+grants already exist. The pre-fetch below skips already-granted
+    // pairs in the common (sequential retry) case; `grant_to_role_idempotent`
+    // additionally tolerates the residual TOCTOU window between this
+    // pre-fetch and the CREATE, for true concurrent callers.
+
+    let super_admin_have = granted_permission_ids(&perm_repo, tenant_id, super_admin_id).await?;
+    let admin_have = granted_permission_ids(&perm_repo, tenant_id, admin_id).await?;
+    let viewer_have = granted_permission_ids(&perm_repo, tenant_id, viewer_id).await?;
 
     for perm in &permissions.items {
         // super-admin gets ALL permissions.
-        perm_repo
-            .grant_to_role(tenant_id, super_admin_id, perm.id)
-            .await
-            .map_err(|e| {
-                DbError::Migration(format!(
-                    "seed_default_roles grant super-admin permission {} failed: {e}",
-                    perm.action
-                ))
-            })?;
+        if !super_admin_have.contains(&perm.id) {
+            grant_to_role_idempotent(&perm_repo, tenant_id, super_admin_id, perm.id)
+                .await
+                .map_err(|e| {
+                    DbError::Migration(format!(
+                        "seed_default_roles grant super-admin permission {} failed: {e}",
+                        perm.action
+                    ))
+                })?;
+        }
 
         // admin gets every permission EXCEPT admin:bootstrap.
-        if perm.action != "admin:bootstrap" {
-            perm_repo
-                .grant_to_role(tenant_id, admin_id, perm.id)
+        if perm.action != "admin:bootstrap" && !admin_have.contains(&perm.id) {
+            grant_to_role_idempotent(&perm_repo, tenant_id, admin_id, perm.id)
                 .await
                 .map_err(|e| {
                     DbError::Migration(format!(
@@ -269,9 +327,10 @@ pub async fn seed_default_roles<C: Connection>(
         }
 
         // viewer gets only :list and :get permissions.
-        if perm.action.ends_with(":list") || perm.action.ends_with(":get") {
-            perm_repo
-                .grant_to_role(tenant_id, viewer_id, perm.id)
+        if (perm.action.ends_with(":list") || perm.action.ends_with(":get"))
+            && !viewer_have.contains(&perm.id)
+        {
+            grant_to_role_idempotent(&perm_repo, tenant_id, viewer_id, perm.id)
                 .await
                 .map_err(|e| {
                     DbError::Migration(format!(
@@ -287,6 +346,116 @@ pub async fn seed_default_roles<C: Connection>(
         admin_role_id: admin_id,
         viewer_role_id: viewer_id,
     })
+}
+
+/// Find an existing role by name, or create it — tolerating a CONCURRENT
+/// caller creating the SAME (tenant_id, name) role at the same time.
+///
+/// `role_repo.create()` CREATEs a fresh-UUID row guarded by the
+/// `idx_role_tenant_name` UNIQUE index; two racing bootstrap requests can
+/// both observe "role missing" and both attempt a create. The loser's
+/// UNIQUE-index violation is NOT a real failure here — a concurrent caller
+/// already won and the row exists — so it is treated as "re-fetch and use
+/// the winner's ID" rather than propagated (SECHRD-04: `seed_default_roles`
+/// is reachable from two concurrent bootstrap requests now that atomicity
+/// is enforced by `bootstrap_lock`, not the old TOCTOU check).
+async fn find_or_create_role<C: Connection>(
+    role_repo: &SurrealRoleRepository<C>,
+    tenant_id: Uuid,
+    existing_id: Option<Uuid>,
+    name: &str,
+    description: &str,
+) -> Result<Uuid, DbError> {
+    if let Some(id) = existing_id {
+        return Ok(id);
+    }
+
+    match role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: name.to_string(),
+            description: description.to_string(),
+            is_global: true,
+        })
+        .await
+    {
+        Ok(role) => Ok(role.id),
+        Err(e) => {
+            let msg = e.to_string();
+            match classify_write_error(&msg, "role") {
+                DbError::AlreadyExists { .. } => {
+                    let refreshed = role_repo
+                        .list(
+                            tenant_id,
+                            Pagination {
+                                offset: 0,
+                                limit: 1000,
+                            },
+                        )
+                        .await
+                        .map_err(|e| {
+                            DbError::Migration(format!(
+                                "find_or_create_role re-list '{name}' failed: {e}"
+                            ))
+                        })?;
+                    refreshed
+                        .items
+                        .into_iter()
+                        .find(|r| r.name == name)
+                        .map(|r| r.id)
+                        .ok_or_else(|| {
+                            DbError::Migration(format!(
+                                "find_or_create_role: role '{name}' vanished after concurrent create race"
+                            ))
+                        })
+                }
+                _ => Err(DbError::Migration(format!(
+                    "find_or_create_role '{name}' failed: {msg}"
+                ))),
+            }
+        }
+    }
+}
+
+/// The set of permission IDs already granted to `role_id` (tenant-scoped).
+///
+/// Shared by [`seed_default_roles`] and [`reconcile_default_role_grants`] so
+/// neither re-attempts a `grant_to_role` CREATE for a pair that already
+/// exists — the `grants` edge table's UNIQUE (in, out) index (CQ-B17) makes
+/// a duplicate grant a hard error, not a no-op.
+async fn granted_permission_ids<C: Connection>(
+    perm_repo: &SurrealPermissionRepository<C>,
+    tenant_id: Uuid,
+    role_id: Uuid,
+) -> Result<std::collections::HashSet<Uuid>, DbError> {
+    perm_repo
+        .get_role_permissions(tenant_id, role_id)
+        .await
+        .map(|perms| perms.into_iter().map(|p| p.id).collect())
+        .map_err(|e| DbError::Migration(format!("granted_permission_ids failed: {e}")))
+}
+
+/// Grant `permission_id` to `role_id`, treating "already granted" (a
+/// concurrent caller won the same grant) as success rather than an error.
+///
+/// Closes the residual TOCTOU between [`granted_permission_ids`]'s pre-fetch
+/// and this CREATE for two truly concurrent callers (SECHRD-04).
+async fn grant_to_role_idempotent<C: Connection>(
+    perm_repo: &SurrealPermissionRepository<C>,
+    tenant_id: Uuid,
+    role_id: Uuid,
+    permission_id: Uuid,
+) -> Result<(), DbError> {
+    match perm_repo
+        .grant_to_role(tenant_id, role_id, permission_id)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(e) => match classify_write_error(e.to_string(), "permission_grant") {
+            DbError::AlreadyExists { .. } => Ok(()),
+            other => Err(other),
+        },
+    }
 }
 
 /// Reconcile the default roles' permission grants with the current permission
@@ -308,8 +477,6 @@ pub async fn reconcile_default_role_grants<C: Connection>(
     db: &Surreal<C>,
     tenant_id: Uuid,
 ) -> Result<usize, DbError> {
-    use std::collections::HashSet;
-
     let role_repo = SurrealRoleRepository::new(db.clone());
     let perm_repo = SurrealPermissionRepository::new(db.clone());
 
@@ -351,20 +518,9 @@ pub async fn reconcile_default_role_grants<C: Connection>(
         .await
         .map_err(|e| DbError::Migration(format!("reconcile list permissions failed: {e}")))?;
 
-    async fn granted_ids<C: Connection>(
-        perm_repo: &SurrealPermissionRepository<C>,
-        tenant_id: Uuid,
-        role_id: Uuid,
-    ) -> Result<HashSet<Uuid>, DbError> {
-        perm_repo
-            .get_role_permissions(tenant_id, role_id)
-            .await
-            .map(|perms| perms.into_iter().map(|p| p.id).collect::<HashSet<Uuid>>())
-            .map_err(|e| DbError::Migration(format!("reconcile get_role_permissions failed: {e}")))
-    }
-    let sa_have = granted_ids(&perm_repo, tenant_id, super_admin_id).await?;
-    let admin_have = granted_ids(&perm_repo, tenant_id, admin_id).await?;
-    let viewer_have = granted_ids(&perm_repo, tenant_id, viewer_id).await?;
+    let sa_have = granted_permission_ids(&perm_repo, tenant_id, super_admin_id).await?;
+    let admin_have = granted_permission_ids(&perm_repo, tenant_id, admin_id).await?;
+    let viewer_have = granted_permission_ids(&perm_repo, tenant_id, viewer_id).await?;
 
     let mut created = 0usize;
     for perm in &permissions.items {

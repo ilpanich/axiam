@@ -81,7 +81,7 @@ pub(crate) enum OrgIdentifier {
 ///
 /// `base_url` and one of `tenant_slug`/`tenant_id` are required; omitting
 /// the tenant identifier is a `build()`-time [`AxiamError`], never a silent
-/// default (§5). `org_slug`/`org_id` are optional (see [`OrgIdentifier`]
+/// default (§5). `org_slug`/`org_id` are optional (see `OrgIdentifier`
 /// doc comment for why they exist beyond the CONTRACT.md §5 baseline).
 #[derive(Default)]
 pub struct AxiamClientBuilder {
@@ -95,9 +95,25 @@ pub struct AxiamClientBuilder {
 
 impl AxiamClientBuilder {
     /// The AXIAM server's base URL (required, no default per §14).
+    ///
+    /// The URL MUST use `https://` (X-2): a plaintext `http://` base URL is
+    /// rejected here because every request forwards tenant identifiers, CSRF
+    /// tokens, and session cookies that must never traverse cleartext. The
+    /// sole exception is a loopback host (localhost/127.0.0.1/::1) for local
+    /// development.
     pub fn base_url(mut self, url: impl AsRef<str>) -> Result<Self, AxiamError> {
         let parsed = url::Url::parse(url.as_ref()).map_err(|e| AxiamError::Network {
             message: format!("invalid base_url: {e}"),
+            source: None,
+        })?;
+        crate::url_guard::ensure_secure_scheme(
+            "base_url",
+            parsed.scheme(),
+            parsed.host_str(),
+            "https",
+        )
+        .map_err(|message| AxiamError::Network {
+            message,
             source: None,
         })?;
         self.base_url = Some(parsed);
@@ -118,14 +134,14 @@ impl AxiamClientBuilder {
         self
     }
 
-    /// Organization slug — optional; see [`OrgIdentifier`] doc comment.
+    /// Organization slug — optional; see `OrgIdentifier` doc comment.
     /// Mutually exclusive with [`Self::org_id`] — the last one called wins.
     pub fn org_slug(mut self, slug: impl Into<String>) -> Self {
         self.org = Some(OrgIdentifier::Slug(slug.into()));
         self
     }
 
-    /// Organization UUID — optional; see [`OrgIdentifier`] doc comment.
+    /// Organization UUID — optional; see `OrgIdentifier` doc comment.
     /// Mutually exclusive with [`Self::org_slug`] — the last one called wins.
     pub fn org_id(mut self, id: Uuid) -> Self {
         self.org = Some(OrgIdentifier::Id(id));
@@ -184,10 +200,24 @@ impl AxiamClientBuilder {
         // tenant identifier and CSRF token. Same-host redirects are followed
         // (capped at 10, matching reqwest's default); cross-host redirects are
         // not followed (the 3xx is returned as-is).
+        //
+        // Scheme-downgrade isolation (SDK-04): comparing host alone would let a
+        // same-host `https://…` -> `http://…` redirect be followed, re-sending
+        // X-Tenant-ID / X-CSRF-Token over cleartext. So a redirect that drops
+        // from the original secure scheme to a less-secure one (https -> http)
+        // is also refused, even on the same host.
         let redirect_base_host = base_url.host_str().map(str::to_owned);
+        let redirect_base_scheme = base_url.scheme().to_owned();
         let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= 10 {
                 return attempt.error("too many redirects");
+            }
+            // Refuse a downgrade from the original secure scheme (https) to a
+            // non-https scheme, regardless of host.
+            if redirect_base_scheme.eq_ignore_ascii_case("https")
+                && !attempt.url().scheme().eq_ignore_ascii_case("https")
+            {
+                return attempt.stop();
             }
             match (attempt.url().host_str(), redirect_base_host.as_deref()) {
                 (Some(next), Some(base)) if !next.eq_ignore_ascii_case(base) => attempt.stop(),
@@ -246,7 +276,7 @@ pub(crate) struct AxiamClientInner {
     pub(crate) csrf_token: std::sync::RwLock<Option<String>>,
     /// Organization UUID resolved from the `org_id` claim of the verified
     /// access token after the first successful login/verify_mfa. See
-    /// [`OrgIdentifier`] doc comment.
+    /// `OrgIdentifier` doc comment.
     pub(crate) resolved_org_id: std::sync::RwLock<Option<Uuid>>,
     /// The challenge token from the most recent `login()` call that
     /// returned `mfa_required: true`, so `verify_mfa(code)` can complete
@@ -335,7 +365,7 @@ impl AxiamClient {
     }
 
     /// The `org_slug`/`org_id` the client was constructed with, if any
-    /// (see [`OrgIdentifier`] doc comment for why this exists).
+    /// (see `OrgIdentifier` doc comment for why this exists).
     pub(crate) fn org_identifier(&self) -> Option<&OrgIdentifier> {
         self.inner.org.as_ref()
     }
@@ -370,5 +400,48 @@ impl AxiamClient {
             .write()
             .ok()
             .and_then(|mut guard| guard.take())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `AxiamClientBuilder` intentionally has no `Debug` impl, so match on the
+    // result rather than using `Result::expect_err`/`unwrap` (which require it).
+    fn base_url_is_ok(url: &str) -> bool {
+        AxiamClient::builder().base_url(url).is_ok()
+    }
+
+    // X-2: a plaintext http:// base URL against a routable host is rejected.
+    #[test]
+    fn plaintext_http_base_url_is_rejected() {
+        match AxiamClient::builder().base_url("http://iam.example.com") {
+            Ok(_) => panic!("plaintext http base_url must be rejected"),
+            Err(AxiamError::Network { message, .. }) => {
+                assert!(message.contains("https"), "message: {message}");
+            }
+            Err(other) => panic!("expected Network error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn https_base_url_is_accepted() {
+        assert!(base_url_is_ok("https://iam.example.com"));
+    }
+
+    // X-2: loopback dev exception — plaintext is tolerated only on localhost.
+    #[test]
+    fn plaintext_loopback_base_url_is_allowed() {
+        for url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(
+                base_url_is_ok(url),
+                "loopback dev URL must be allowed: {url}"
+            );
+        }
     }
 }

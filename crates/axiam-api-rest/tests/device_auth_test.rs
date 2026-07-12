@@ -6,15 +6,16 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
-use axiam_auth::token::issue_access_token;
+use axiam_auth::token::{SubjectKind, decode_access_token, issue_access_token};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::{
     SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealOrganizationRepository,
-    SurrealServiceAccountRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use axiam_pki::{CaService, CertService, DeviceAuthService, PkiConfig};
 use surrealdb::Surreal;
@@ -126,28 +127,28 @@ macro_rules! test_app {
         let pki_config = test_pki_config();
         let ca_repo = SurrealCaCertificateRepository::new($db.clone());
         let cert_repo = SurrealCertificateRepository::new($db.clone());
-        let tenant_repo = SurrealTenantRepository::new($db.clone());
-        let sa_repo = SurrealServiceAccountRepository::new($db.clone());
-        let device_auth_service = DeviceAuthService::new(cert_repo.clone(), ca_repo.clone());
         let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(CaService::new(
-                    ca_repo.clone(),
-                    pki_config.clone(),
-                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-                )))
-                .app_data(web::Data::new(CertService::new(
-                    ca_repo,
-                    cert_repo.clone(),
-                    pki_config,
-                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-                )))
-                .app_data(web::Data::new(cert_repo))
-                .app_data(web::Data::new(tenant_repo))
-                .app_data(web::Data::new(sa_repo))
-                .app_data(web::Data::new(device_auth_service))
+                .app_data(web::Data::new({
+                    let mut state = AppState::for_test($db.clone(), $auth.clone());
+                    state.device_auth_service =
+                        DeviceAuthService::new(cert_repo.clone(), ca_repo.clone());
+                    state.ca_service = CaService::new(
+                        ca_repo.clone(),
+                        pki_config.clone(),
+                        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+                    );
+                    state.cert_service = CertService::new(
+                        ca_repo,
+                        cert_repo.clone(),
+                        pki_config,
+                        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+                    );
+                    state.cert_repo = cert_repo;
+                    state
+                }))
                 .app_data(web::Data::new(authz))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
@@ -292,6 +293,47 @@ async fn device_auth_full_flow() {
     assert_eq!(status, 200, "device auth failed: {body}");
     assert!(body["access_token"].as_str().unwrap().len() > 10);
     assert_eq!(body["token_type"], "Bearer");
+}
+
+#[actix_rt::test]
+async fn device_auth_mints_service_account_sub_kind() {
+    // FUNC-04 (D-09): the SA cert-auth device-auth path mints a token whose
+    // decoded sub_kind claim is ServiceAccount (not the default User).
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth.clone());
+
+    let ca_id = generate_ca!(app, org_id, token);
+    let (cert_id, public_cert_pem) = generate_device_cert!(app, ca_id, token);
+    let sa_id = create_service_account!(app, token);
+
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/v1/service-accounts/{sa_id}/bind-certificate"
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({ "certificate_id": cert_id }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let encoded_pem = urlencode(&public_cert_pem);
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/device")
+        .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let access_token = body["access_token"].as_str().unwrap();
+
+    let claims = decode_access_token(access_token, &auth).unwrap();
+    assert_eq!(claims.sub_kind, SubjectKind::ServiceAccount);
 }
 
 #[actix_rt::test]

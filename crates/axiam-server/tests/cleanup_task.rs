@@ -10,13 +10,22 @@
 
 use std::time::Duration;
 
-use axiam_core::repository::{AssertionReplayRepository, FederationLoginStateRepository};
-use axiam_db::{
-    SurrealAssertionReplayRepository, SurrealFederationLoginStateRepository, run_migrations,
+use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::audit::{AuditLogEntry, CreateAuditLogEntry};
+use axiam_core::models::user::CreateUser;
+use axiam_core::repository::{
+    AssertionReplayRepository, AuditLogFilter, AuditLogRepository, FederationLoginStateRepository,
+    PaginatedResult, Pagination, UserRepository,
 };
+use axiam_db::{
+    SurrealAssertionReplayRepository, SurrealErasureProofRepository,
+    SurrealFederationLoginStateRepository, SurrealUserRepository, run_migrations,
+};
+use axiam_server::cleanup::run_erasure_pipeline;
 use chrono::Utc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
+use surrealdb_types::SurrealValue;
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -160,4 +169,145 @@ async fn cleanup_does_not_propagate_db_errors_as_panics() {
     // We just assert it doesn't panic; the result shape is already verified by
     // the trait contract (returns AxiamResult<u64>).
     let _ = result; // Ok or Err — both acceptable; no panic is the requirement.
+}
+
+// ---------------------------------------------------------------------------
+// run_erasure_pipeline: fatal pseudonymize_actor failure (SECHRD-06, D-03a)
+//
+// Exercises the Pattern 3 test-seam extraction directly (not the concrete,
+// non-generic `CleanupTask`): a synthetic failing `AuditLogRepository`
+// double is paired with real in-memory SurrealDB `user`/`erasure_proof`
+// repos to prove the erasure pipeline is atomic — a failed
+// `pseudonymize_actor` must abort the erasure, leave the user re-selectable,
+// and write NO erasure proof.
+// ---------------------------------------------------------------------------
+
+/// Synthetic `AuditLogRepository` whose `pseudonymize_actor` always fails.
+/// Every other method is unreachable by this test (`run_erasure_pipeline`
+/// never calls them), so they `unimplemented!()`.
+struct FailingAuditRepo;
+
+impl AuditLogRepository for FailingAuditRepo {
+    async fn append(&self, _: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
+        unimplemented!("not exercised by erasure_pipeline_fatal_on_pseudonymize_failure")
+    }
+    async fn list(
+        &self,
+        _: Uuid,
+        _: AuditLogFilter,
+        _: Pagination,
+    ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
+        unimplemented!("not exercised by erasure_pipeline_fatal_on_pseudonymize_failure")
+    }
+    async fn list_system(
+        &self,
+        _: AuditLogFilter,
+        _: Pagination,
+    ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
+        unimplemented!("not exercised by erasure_pipeline_fatal_on_pseudonymize_failure")
+    }
+    async fn get_by_ids(&self, _: Uuid, _: &[Uuid]) -> AxiamResult<Vec<AuditLogEntry>> {
+        unimplemented!("not exercised by erasure_pipeline_fatal_on_pseudonymize_failure")
+    }
+    async fn pseudonymize_actor(&self, _: Uuid, _: Uuid, _: &str) -> AxiamResult<u64> {
+        Err(AxiamError::Internal(
+            "synthetic pseudonymize_actor failure (test double)".into(),
+        ))
+    }
+}
+
+/// Row shape for a `SELECT count() ... GROUP ALL` query.
+#[derive(SurrealValue)]
+struct CountRow {
+    total: u64,
+}
+
+#[tokio::test]
+async fn erasure_pipeline_fatal_on_pseudonymize_failure() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let erasure_proof_repo = SurrealErasureProofRepository::new(db.clone());
+    let failing_audit_repo = FailingAuditRepo;
+
+    // Create a user and mark it deletion-pending, mirroring the real purge
+    // flow's precondition (find_due_for_purge selects on this).
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "fatal_pseudonymize_user".into(),
+            email: "fatal_pseudonymize@example.com".into(),
+            password: "FatalPseudo1234!".into(),
+            metadata: None,
+        })
+        .await
+        .expect("create user");
+    let past_purge = Utc::now() - chrono::Duration::seconds(1);
+    user_repo
+        .mark_deletion_pending(tenant_id, user.id, past_purge)
+        .await
+        .expect("mark deletion pending");
+
+    let pseudonym = "DELETED_USER_deadbeefcafe0000".to_string();
+    let email_hash = "irrelevant_email_hash_for_this_test".to_string();
+
+    // Run the pipeline with a FAILING audit repo — pseudonymize_actor is now
+    // FATAL, so this must return Err (not swallow-and-continue).
+    let result = run_erasure_pipeline(
+        &failing_audit_repo,
+        &erasure_proof_repo,
+        &user_repo,
+        tenant_id,
+        user.id,
+        &pseudonym,
+        &email_hash,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "run_erasure_pipeline must return Err when pseudonymize_actor fails (D-03a)"
+    );
+
+    // (1)/(2) The user remains re-selectable: deletion_pending is still
+    // true, and find_due_for_purge still returns the user — anonymize_user
+    // (the only step that clears deletion_pending) never ran because
+    // pseudonymize_actor aborted the pipeline before reaching it.
+    let still_pending = user_repo
+        .get_by_id(tenant_id, user.id)
+        .await
+        .expect("get_by_id");
+    assert!(
+        still_pending.deletion_pending,
+        "deletion_pending must remain true after a failed pseudonymize_actor \
+         — the user must stay re-selectable for a retry"
+    );
+    let due = user_repo
+        .find_due_for_purge(Utc::now())
+        .await
+        .expect("find_due_for_purge");
+    assert!(
+        due.iter().any(|u| u.id == user.id),
+        "the user must still be returned by find_due_for_purge (re-selectable) \
+         after the fatal pseudonymize_actor failure"
+    );
+
+    // (3) NO erasure proof was written for this user — the proof-last
+    // ordering means erasure_proof_repo.create() was never reached.
+    let mut count_result = db
+        .query(
+            "SELECT count() AS total FROM erasure_proof \
+             WHERE tenant_id = $tenant_id AND user_id = $user_id GROUP ALL",
+        )
+        .bind(("tenant_id", tenant_id.to_string()))
+        .bind(("user_id", user.id.to_string()))
+        .await
+        .expect("query erasure_proof count");
+    let rows: Vec<CountRow> = count_result.take(0).expect("take count rows");
+    let proof_count = rows.first().map(|r| r.total).unwrap_or(0);
+    assert_eq!(
+        proof_count, 0,
+        "no erasure_proof row must exist after a failed pseudonymize_actor — \
+         the proof must never certify an incomplete erasure"
+    );
 }

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use jsonwebtoken::{DecodingKey, EncodingKey};
+use secrecy::SecretString;
 use serde::Deserialize;
 
 fn default_true() -> bool {
@@ -29,7 +30,10 @@ pub struct AuthConfig {
     /// OIDC discovery endpoint URLs. Falls back to `jwt_issuer` if unset.
     pub oauth2_issuer_url: String,
     /// Optional pepper prepended to passwords before Argon2id verification.
-    pub pepper: Option<String>,
+    /// Wrapped in `SecretString` so `Debug`/logging never leaks it by
+    /// accident (SECHRD-12) — exposed only via `.expose_secret()` at the
+    /// `&str` boundary where a pepper value is consumed.
+    pub pepper: Option<SecretString>,
     /// Minimum password length for policy enforcement.
     pub min_password_length: usize,
     /// 256-bit AES-GCM key for encrypting TOTP secrets at rest.
@@ -88,6 +92,14 @@ pub struct AuthConfig {
     /// When `None`, they fall back to parsing from `jwt_public_key_pem`.
     #[serde(skip)]
     pub jwt_decoding_key: Option<Arc<DecodingKey>>,
+    /// PERF-01: Consecutive HIBP failures/timeouts before the process-wide
+    /// `HibpBreaker` trips open (default: 5). Overridable via
+    /// `AXIAM__AUTH__HIBP_BREAKER_THRESHOLD`.
+    pub hibp_breaker_threshold: u32,
+    /// PERF-01: Cooldown in seconds the `HibpBreaker` stays open before
+    /// allowing a half-open probe request (default: 30). Overridable via
+    /// `AXIAM__AUTH__HIBP_BREAKER_COOLDOWN_SECS`.
+    pub hibp_breaker_cooldown_secs: u64,
 }
 
 impl AuthConfig {
@@ -150,6 +162,8 @@ impl Default for AuthConfig {
             webauthn_rp_name: "AXIAM".into(),
             jwt_encoding_key: None,
             jwt_decoding_key: None,
+            hibp_breaker_threshold: 5,
+            hibp_breaker_cooldown_secs: 30,
         }
     }
 }

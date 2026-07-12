@@ -3,8 +3,6 @@
 //! Provides CRUD for federation configurations, the OIDC authorization
 //! and callback flow, and federation link management.
 
-use std::sync::Arc;
-
 use actix_web::{HttpResponse, web};
 use axiam_core::models::federation::{
     CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol,
@@ -14,30 +12,14 @@ use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, PaginatedResult, Pagination,
     UserRepository,
 };
-use axiam_db::{
-    SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealUserRepository,
-};
-// Replay protection is only used by the SAML ACS handlers.
-#[cfg(feature = "saml")]
-use axiam_db::SurrealAssertionReplayRepository;
-use axiam_federation::jwks_cache::JwksCache;
-use axiam_federation::oidc::OidcFederationService;
-#[cfg(feature = "saml")]
-use axiam_federation::saml::SamlFederationService;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
-use axiam_auth::AuthService;
-use axiam_auth::config::AuthConfig;
 use axiam_core::error::AxiamError;
 use axiam_core::repository::{
     FederationLoginStateRepository, OrganizationRepository, TenantRepository,
-};
-use axiam_db::{
-    SurrealFederationLoginStateRepository, SurrealOrganizationRepository,
-    SurrealRefreshTokenRepository, SurrealSessionRepository, SurrealTenantRepository,
 };
 use axiam_federation::secrets::{current_key_version, encrypt_client_secret};
 use base64::Engine;
@@ -46,6 +28,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Request / response DTOs
@@ -140,7 +123,14 @@ pub struct OidcCallbackRequest {
     pub code: String,
     /// Redirect URI that was used in the authorization request.
     pub redirect_uri: String,
-    /// The nonce originally sent in the authorization request.
+    /// CSRF state value from the authorization request. Used to look up the
+    /// server-side `FederationLoginState` row that holds the real nonce
+    /// (SECHRD-07/D-04) — required so the callback can find its login state.
+    pub state: String,
+    /// Client-supplied nonce (SECHRD-07/D-04: retained for backward
+    /// compatibility with older callers, but IGNORED for verification —
+    /// `expected_nonce` always comes from the server-side `FederationLoginState`
+    /// row looked up via `state`, never from this field).
     pub nonce: String,
 }
 
@@ -218,11 +208,10 @@ fn protocol_to_string(p: &FederationProtocol) -> &'static str {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealFederationConfigRepository<C>>,
-    auth_config: web::Data<AuthConfig>,
+    state: web::Data<AppState<C>>,
     body: web::Json<CreateFederationConfigRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("federation:create", Uuid::nil())
@@ -258,7 +247,7 @@ pub async fn create<C: Connection>(
             .map_err(|e| validation_err(format!("idp_signing_cert_pem is invalid: {e}")))?;
     }
 
-    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+    let enc_key = state.auth_config.federation_encryption_key.ok_or_else(|| {
         AxiamApiError(AxiamError::Validation {
             message: "federation encryption key not configured".into(),
         })
@@ -274,7 +263,8 @@ pub async fn create<C: Connection>(
         })?;
 
     // Store with empty legacy plaintext (field required by schema; nulled by set_encrypted_secret).
-    let config = repo
+    let config = state
+        .federation_config_repo
         .create(CreateFederationConfig {
             tenant_id: user.tenant_id,
             provider: req.provider,
@@ -289,17 +279,22 @@ pub async fn create<C: Connection>(
         .await?;
 
     // Write the encrypted secret columns (overwrites the empty plaintext row).
-    repo.set_encrypted_secret(
-        user.tenant_id,
-        config.id,
-        nonce_b64,
-        ciphertext_b64,
-        current_key_version(),
-    )
-    .await?;
+    state
+        .federation_config_repo
+        .set_encrypted_secret(
+            user.tenant_id,
+            config.id,
+            nonce_b64,
+            ciphertext_b64,
+            current_key_version(),
+        )
+        .await?;
 
     // Reload to return the canonical state (with ciphertext set, plaintext empty).
-    let config = repo.get_by_id(user.tenant_id, config.id).await?;
+    let config = state
+        .federation_config_repo
+        .get_by_id(user.tenant_id, config.id)
+        .await?;
 
     Ok(HttpResponse::Created().json(FederationConfigResponse::from(config)))
 }
@@ -316,16 +311,19 @@ pub async fn create<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealFederationConfigRepository<C>>,
+    state: web::Data<AppState<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("federation:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let result = repo.list(user.tenant_id, pagination.into_inner()).await?;
+    let result = state
+        .federation_config_repo
+        .list(user.tenant_id, pagination.into_inner())
+        .await?;
     let response = PaginatedResult {
         items: result
             .items
@@ -352,17 +350,20 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealFederationConfigRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("federation:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    let config = repo.get_by_id(user.tenant_id, id).await?;
+    let config = state
+        .federation_config_repo
+        .get_by_id(user.tenant_id, id)
+        .await?;
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
 }
 
@@ -380,12 +381,11 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealFederationConfigRepository<C>>,
-    auth_config: web::Data<AuthConfig>,
+    state: web::Data<AppState<C>>,
     body: web::Json<UpdateFederationConfigRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("federation:update", Uuid::nil())
@@ -427,7 +427,8 @@ pub async fn update<C: Connection>(
 
     // Update non-secret fields via the standard update path (client_secret = None means
     // "no change to secret columns").
-    let config = repo
+    let config = state
+        .federation_config_repo
         .update(
             user.tenant_id,
             id,
@@ -446,7 +447,7 @@ pub async fn update<C: Connection>(
 
     // If a new secret was provided, encrypt and store it now.
     if let Some(ref plaintext) = new_secret_plaintext {
-        let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+        let enc_key = state.auth_config.federation_encryption_key.ok_or_else(|| {
             AxiamApiError(AxiamError::Validation {
                 message: "federation encryption key not configured".into(),
             })
@@ -457,18 +458,23 @@ pub async fn update<C: Connection>(
                     "failed to encrypt federation secret: {e}"
                 )))
             })?;
-        repo.set_encrypted_secret(
-            user.tenant_id,
-            config.id,
-            nonce_b64,
-            ciphertext_b64,
-            current_key_version(),
-        )
-        .await?;
+        state
+            .federation_config_repo
+            .set_encrypted_secret(
+                user.tenant_id,
+                config.id,
+                nonce_b64,
+                ciphertext_b64,
+                current_key_version(),
+            )
+            .await?;
     }
 
     // Reload to return canonical state.
-    let config = repo.get_by_id(user.tenant_id, config.id).await?;
+    let config = state
+        .federation_config_repo
+        .get_by_id(user.tenant_id, config.id)
+        .await?;
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
 }
 
@@ -484,17 +490,20 @@ pub async fn update<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete<C: Connection>(
+pub async fn delete<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealFederationConfigRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("federation:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    repo.delete(user.tenant_id, id).await?;
+    state
+        .federation_config_repo
+        .delete(user.tenant_id, id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -523,14 +532,10 @@ pub async fn delete<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn oidc_authorize<C: Connection>(
+#[allow(clippy::too_many_arguments)]
+pub async fn oidc_authorize<C: Connection + Clone>(
     user: AuthenticatedUser,
-    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
-    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    http_client: web::Data<reqwest::Client>,
-    jwks_cache: web::Data<Arc<JwksCache>>,
-    auth_config: web::Data<AuthConfig>,
+    state: web::Data<AppState<C>>,
     body: web::Json<OidcAuthorizeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -545,22 +550,21 @@ pub async fn oidc_authorize<C: Connection>(
         return Err(validation_err("nonce must not be empty"));
     }
 
-    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+    // QUAL-07: OidcFederationService is now a hoisted AppState singleton
+    // (Option — None when the federation encryption key is unconfigured,
+    // resolved once at startup instead of per-request).
+    let service = state.oidc_federation_service.as_ref().ok_or_else(|| {
         AxiamApiError(AxiamError::Validation {
             message: "federation encryption key not configured".into(),
         })
     })?;
 
-    // TODO(T19): AppState refactor — CQ-B27/CQ-B43 deferred (per-request service rebuild;
-    // OidcFederationService constructed here instead of once at startup).
-    let service = OidcFederationService::new(
-        (**config_repo).clone(),
-        (**link_repo).clone(),
-        (**user_repo).clone(),
-        (**http_client).clone(),
-        Arc::clone(&jwks_cache),
-        enc_key,
-    );
+    // SECHRD-07/D-04: generate a server-side nonce and persist it in
+    // FederationLoginState keyed by `req.state`. `req.nonce` (client-supplied)
+    // is never stored or used for verification — mirrors
+    // `oidc_start_public` (:1160-1211).
+    let server_nonce = random_base64url();
+    let expires_at = Utc::now() + chrono::Duration::minutes(10);
 
     let auth_url = service
         .build_authorization_url(
@@ -568,10 +572,23 @@ pub async fn oidc_authorize<C: Connection>(
             req.config_id,
             &req.redirect_uri,
             &req.state,
-            &req.nonce,
+            &server_nonce,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
+
+    state
+        .federation_login_state_repo
+        .insert(&axiam_core::repository::FederationLoginState {
+            state: req.state,
+            nonce: server_nonce,
+            tenant_id: user.tenant_id,
+            federation_config_id: req.config_id,
+            redirect_uri: req.redirect_uri,
+            expires_at,
+            request_id: String::new(), // OIDC — no request ID
+        })
+        .await?;
 
     Ok(HttpResponse::Ok().json(OidcAuthorizeResponse { url: auth_url.url }))
 }
@@ -592,14 +609,10 @@ pub async fn oidc_authorize<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn oidc_callback<C: Connection>(
+#[allow(clippy::too_many_arguments)]
+pub async fn oidc_callback<C: Connection + Clone>(
     user: AuthenticatedUser,
-    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
-    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    http_client: web::Data<reqwest::Client>,
-    jwks_cache: web::Data<Arc<JwksCache>>,
-    auth_config: web::Data<AuthConfig>,
+    state: web::Data<AppState<C>>,
     body: web::Json<OidcCallbackRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -610,24 +623,31 @@ pub async fn oidc_callback<C: Connection>(
     if req.redirect_uri.is_empty() {
         return Err(validation_err("redirect_uri must not be empty"));
     }
-    if req.nonce.is_empty() {
-        return Err(validation_err("nonce must not be empty"));
+    if req.state.is_empty() {
+        return Err(validation_err("state must not be empty"));
     }
 
-    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+    // QUAL-07: OidcFederationService is now a hoisted AppState singleton.
+    let service = state.oidc_federation_service.as_ref().ok_or_else(|| {
         AxiamApiError(AxiamError::Validation {
             message: "federation encryption key not configured".into(),
         })
     })?;
 
-    let service = OidcFederationService::new(
-        (**config_repo).clone(),
-        (**link_repo).clone(),
-        (**user_repo).clone(),
-        (**http_client).clone(),
-        Arc::clone(&jwks_cache),
-        enc_key,
-    );
+    // SECHRD-07/D-04: consume the server-side login state and derive
+    // expected_nonce from it — req.nonce (client/attacker-supplied) is
+    // IGNORED entirely for verification. Mirrors `oidc_callback_public`
+    // (:1254-1267).
+    let login_state = state
+        .federation_login_state_repo
+        .consume_by_state(&req.state)
+        .await?
+        .ok_or_else(|| {
+            AxiamApiError(AxiamError::AuthenticationFailed {
+                reason: "state not found or expired".into(),
+            })
+        })?;
+    let expected_nonce = login_state.nonce.clone();
 
     let result = service
         .handle_callback(
@@ -635,7 +655,7 @@ pub async fn oidc_callback<C: Connection>(
             req.config_id,
             &req.code,
             &req.redirect_uri,
-            &req.nonce,
+            &expected_nonce,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -663,17 +683,20 @@ pub async fn oidc_callback<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list_user_links<C: Connection>(
+pub async fn list_user_links<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealFederationLinkRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("federation:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let target_user_id = path.into_inner();
-    let links = repo.get_by_user_id(user.tenant_id, target_user_id).await?;
+    let links = state
+        .federation_link_repo
+        .get_by_user_id(user.tenant_id, target_user_id)
+        .await?;
     let response: Vec<FederationLinkResponse> = links
         .into_iter()
         .map(FederationLinkResponse::from)
@@ -693,17 +716,20 @@ pub async fn list_user_links<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete_link<C: Connection>(
+pub async fn delete_link<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealFederationLinkRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("federation:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    repo.delete(user.tenant_id, id).await?;
+    state
+        .federation_link_repo
+        .delete(user.tenant_id, id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -749,6 +775,10 @@ pub struct SamlAcsRequest {
     pub saml_response: String,
     /// Relay state returned by the IdP.
     pub relay_state: Option<String>,
+    /// The real Assertion Consumer Service URL this response was posted to.
+    /// Required so the handler can validate `Response.Destination` against
+    /// it (SECFIX-04/SEC-005) instead of skipping the check.
+    pub acs_url: String,
 }
 
 /// Query parameters for SP metadata generation.
@@ -783,13 +813,9 @@ pub struct SamlMetadataQuery {
     ),
     security(("bearer" = []))
 )]
-pub async fn saml_authn_request<C: Connection>(
+pub async fn saml_authn_request<C: Connection + Clone>(
     user: AuthenticatedUser,
-    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
-    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
-    http_client: web::Data<reqwest::Client>,
+    state: web::Data<AppState<C>>,
     body: web::Json<SamlAuthnRequestRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -798,15 +824,9 @@ pub async fn saml_authn_request<C: Connection>(
         return Err(validation_err("acs_url must not be empty"));
     }
 
-    let service = SamlFederationService::new(
-        (**config_repo).clone(),
-        (**link_repo).clone(),
-        (**user_repo).clone(),
-        (**replay_repo).clone(),
-        (**http_client).clone(),
-    );
-
-    let result = service
+    // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
+    let result = state
+        .saml_federation_service
         .build_authn_request(user.tenant_id, req.config_id, &req.acs_url, req.relay_state)
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -836,13 +856,9 @@ pub async fn saml_authn_request<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn saml_acs<C: Connection>(
+pub async fn saml_acs<C: Connection + Clone>(
     user: AuthenticatedUser,
-    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
-    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
-    http_client: web::Data<reqwest::Client>,
+    state: web::Data<AppState<C>>,
     body: web::Json<SamlAcsRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
@@ -850,23 +866,21 @@ pub async fn saml_acs<C: Connection>(
     if req.saml_response.is_empty() {
         return Err(validation_err("saml_response must not be empty"));
     }
+    if req.acs_url.is_empty() {
+        return Err(validation_err("acs_url must not be empty"));
+    }
 
-    let service = SamlFederationService::new(
-        (**config_repo).clone(),
-        (**link_repo).clone(),
-        (**user_repo).clone(),
-        (**replay_repo).clone(),
-        (**http_client).clone(),
-    );
-
-    let result = service
+    // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
+    let result = state
+        .saml_federation_service
         .handle_saml_response(
             user.tenant_id,
             req.config_id,
             &req.saml_response,
             req.relay_state.as_deref(),
-            None, // no request ID available in the authenticated ACS path
-            None, // no expected destination in the authenticated ACS path
+            None,               // no stored request ID on the authenticated ACS path
+            Some(&req.acs_url), // SECFIX-04: validate Destination against the real ACS URL
+            true,               // SECFIX-04: require InResponseTo presence (reject unsolicited)
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -897,28 +911,18 @@ pub async fn saml_acs<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn saml_metadata<C: Connection>(
+pub async fn saml_metadata<C: Connection + Clone>(
     user: AuthenticatedUser,
-    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
-    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
-    http_client: web::Data<reqwest::Client>,
+    state: web::Data<AppState<C>>,
     query: web::Query<SamlMetadataQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let service = SamlFederationService::new(
-        (**config_repo).clone(),
-        (**link_repo).clone(),
-        (**user_repo).clone(),
-        (**replay_repo).clone(),
-        (**http_client).clone(),
-    );
-
     if query.acs_url.is_empty() {
         return Err(validation_err("acs_url must not be empty"));
     }
 
-    let xml = service
+    // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
+    let xml = state
+        .saml_federation_service
         .generate_sp_metadata(user.tenant_id, query.config_id, &query.acs_url)
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -946,13 +950,6 @@ pub async fn saml_metadata<C: Connection>(
 // ---------------------------------------------------------------------------
 // AuthSvc type alias (mirrors the one in handlers/auth.rs)
 // ---------------------------------------------------------------------------
-
-type PublicAuthSvc<C> = AuthService<
-    SurrealUserRepository<C>,
-    SurrealSessionRepository<C>,
-    axiam_db::SurrealFederationLinkRepository<C>,
-    SurrealRefreshTokenRepository<C>,
->;
 
 // ---------------------------------------------------------------------------
 // Request / response DTOs for the public SSO flow
@@ -1095,16 +1092,10 @@ fn validate_redirect_uri(uri: &str) -> Result<(), AxiamApiError> {
     )
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn oidc_start_public<C: Connection>(
-    org_repo: web::Data<SurrealOrganizationRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
-    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
-    http_client: web::Data<reqwest::Client>,
-    jwks_cache: web::Data<Arc<JwksCache>>,
-    auth_config: web::Data<AuthConfig>,
+pub async fn oidc_start_public<C: Connection + Clone>(
+    // Named `app_state` (not `state`) — this handler already has a local
+    // `state` variable (the OAuth2 CSRF state value).
+    app_state: web::Data<AppState<C>>,
     body: web::Json<OidcStartRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -1118,7 +1109,8 @@ pub async fn oidc_start_public<C: Connection>(
     let org_id = match (b.org_id, b.org_slug.as_deref()) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
-            org_repo
+            app_state
+                .org_repo
                 .get_by_slug(slug)
                 .await
                 .map_err(|_| AxiamError::AuthenticationFailed {
@@ -1135,7 +1127,8 @@ pub async fn oidc_start_public<C: Connection>(
     let tenant_id = match (b.tenant_id, b.tenant_slug.as_deref()) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
-            tenant_repo
+            app_state
+                .tenant_repo
                 .get_by_slug(org_id, slug)
                 .await
                 .map_err(|_| AxiamError::AuthenticationFailed {
@@ -1155,21 +1148,12 @@ pub async fn oidc_start_public<C: Connection>(
     let nonce = random_base64url();
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
 
-    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+    // QUAL-07: OidcFederationService is now a hoisted AppState singleton.
+    let service = app_state.oidc_federation_service.as_ref().ok_or_else(|| {
         AxiamApiError(AxiamError::Validation {
             message: "federation encryption key not configured".into(),
         })
     })?;
-
-    // Build OIDC authorize URL via the verified service.
-    let service = OidcFederationService::new(
-        (**config_repo).clone(),
-        (**link_repo).clone(),
-        (**user_repo).clone(),
-        (**http_client).clone(),
-        Arc::clone(&jwks_cache),
-        enc_key,
-    );
 
     let auth_url = service
         .build_authorization_url(
@@ -1183,7 +1167,8 @@ pub async fn oidc_start_public<C: Connection>(
         .map_err(axiam_core::error::AxiamError::from)?;
 
     // Persist the state row (single-use, 10-min TTL).
-    login_state_repo
+    app_state
+        .federation_login_state_repo
         .insert(&axiam_core::repository::FederationLoginState {
             state: state.clone(),
             nonce,
@@ -1223,15 +1208,8 @@ pub async fn oidc_start_public<C: Connection>(
     )
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn oidc_callback_public<C: Connection>(
-    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
-    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
-    auth_svc: web::Data<PublicAuthSvc<C>>,
-    auth_config: web::Data<AuthConfig>,
-    http_client: web::Data<reqwest::Client>,
-    jwks_cache: web::Data<Arc<JwksCache>>,
+pub async fn oidc_callback_public<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<OidcPublicCallbackRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -1244,7 +1222,8 @@ pub async fn oidc_callback_public<C: Connection>(
     }
 
     // Atomically consume the state row (single-use; expired → None → 401).
-    let login_state = login_state_repo
+    let login_state = state
+        .federation_login_state_repo
         .consume_by_state(&b.state)
         .await?
         .ok_or_else(|| {
@@ -1259,22 +1238,12 @@ pub async fn oidc_callback_public<C: Connection>(
     let expected_nonce = login_state.nonce.clone();
     let spa_redirect_uri = login_state.redirect_uri.clone();
 
-    let enc_key = auth_config.federation_encryption_key.ok_or_else(|| {
+    // QUAL-07: OidcFederationService is now a hoisted AppState singleton.
+    let service = state.oidc_federation_service.as_ref().ok_or_else(|| {
         AxiamApiError(AxiamError::Validation {
             message: "federation encryption key not configured".into(),
         })
     })?;
-
-    // Run the verified OIDC flow (04-02): code exchange + ID token
-    // signature + iss/aud/exp/nonce validation.
-    let service = OidcFederationService::new(
-        (**config_repo).clone(),
-        (**link_repo).clone(),
-        (**user_repo).clone(),
-        (**http_client).clone(),
-        Arc::clone(&jwks_cache),
-        enc_key,
-    );
 
     // The redirect_uri we pass to the IdP token endpoint is the AXIAM ACS
     // URL.  Since we built the authorize URL using the SPA redirect_uri as
@@ -1295,32 +1264,35 @@ pub async fn oidc_callback_public<C: Connection>(
     // TODO(T19.15): resolve real org_id from the tenant instead of Uuid::nil().
     // SSO-provisioned access tokens currently carry an empty org_id claim.
     // Wire a tenant->org_id lookup here (and at the OIDC callback below). Phase 19.
-    let auth_out = auth_svc
+    let auth_out = state
+        .auth_service
         .create_session_and_tokens(user.id, tenant_id, Uuid::nil(), None, None)
         .await?;
 
     let csrf_token = crate::middleware::csrf::generate_csrf_token();
-    let user_detail = user_repo.get_by_id(tenant_id, user.id).await.map_err(|_| {
-        AxiamError::AuthenticationFailed {
+    let user_detail = state
+        .user_repo
+        .get_by_id(tenant_id, user.id)
+        .await
+        .map_err(|_| AxiamError::AuthenticationFailed {
             reason: "user not found after federation login".into(),
-        }
-    })?;
+        })?;
 
     Ok(actix_web::HttpResponse::Ok()
         .cookie(crate::middleware::csrf::access_cookie(
             &auth_out.access_token,
-            auth_config.access_token_lifetime_secs,
-            auth_config.cookie_secure,
+            state.auth_config.access_token_lifetime_secs,
+            state.auth_config.cookie_secure,
         ))
         .cookie(crate::middleware::csrf::refresh_cookie(
             &auth_out.refresh_token,
-            auth_config.refresh_token_lifetime_secs,
-            auth_config.cookie_secure,
+            state.auth_config.refresh_token_lifetime_secs,
+            state.auth_config.cookie_secure,
         ))
         .cookie(crate::middleware::csrf::csrf_cookie(
             &csrf_token,
-            auth_config.access_token_lifetime_secs,
-            auth_config.cookie_secure,
+            state.auth_config.access_token_lifetime_secs,
+            state.auth_config.cookie_secure,
         ))
         .json(SsoLoginSuccessResponse {
             user_id: user_detail.id,
@@ -1352,15 +1324,10 @@ pub async fn oidc_callback_public<C: Connection>(
     )
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn saml_login_public<C: Connection>(
-    org_repo: web::Data<SurrealOrganizationRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
-    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
-    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
-    http_client: web::Data<reqwest::Client>,
+pub async fn saml_login_public<C: Connection + Clone>(
+    // Named `app_state` (not `state`) — this handler already has a local
+    // `state` variable (the RelayState CSRF value).
+    app_state: web::Data<AppState<C>>,
     body: web::Json<SamlLoginRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -1374,7 +1341,8 @@ pub async fn saml_login_public<C: Connection>(
     let org_id = match (b.org_id, b.org_slug.as_deref()) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
-            org_repo
+            app_state
+                .org_repo
                 .get_by_slug(slug)
                 .await
                 .map_err(|_| AxiamError::AuthenticationFailed {
@@ -1391,7 +1359,8 @@ pub async fn saml_login_public<C: Connection>(
     let tenant_id = match (b.tenant_id, b.tenant_slug.as_deref()) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
-            tenant_repo
+            app_state
+                .tenant_repo
                 .get_by_slug(org_id, slug)
                 .await
                 .map_err(|_| AxiamError::AuthenticationFailed {
@@ -1410,23 +1379,18 @@ pub async fn saml_login_public<C: Connection>(
     let state = random_base64url();
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
 
-    let service = SamlFederationService::new(
-        (**config_repo).clone(),
-        (**link_repo).clone(),
-        (**user_repo).clone(),
-        (**replay_repo).clone(),
-        (**http_client).clone(),
-    );
-
+    // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
     // Pass state as RelayState so the IdP echoes it back in the SAML response.
-    let result = service
+    let result = app_state
+        .saml_federation_service
         .build_authn_request(tenant_id, b.federation_config_id, "", Some(state.clone()))
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 
     // Persist state row (nonce = "" for SAML — unused but required by schema).
     // Store the AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).
-    login_state_repo
+    app_state
+        .federation_login_state_repo
         .insert(&axiam_core::repository::FederationLoginState {
             state: state.clone(),
             nonce: String::new(),
@@ -1468,15 +1432,8 @@ pub async fn saml_login_public<C: Connection>(
     )
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn saml_acs_public<C: Connection>(
-    config_repo: web::Data<SurrealFederationConfigRepository<C>>,
-    link_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    login_state_repo: web::Data<SurrealFederationLoginStateRepository<C>>,
-    replay_repo: web::Data<SurrealAssertionReplayRepository<C>>,
-    auth_svc: web::Data<PublicAuthSvc<C>>,
-    auth_config: web::Data<AuthConfig>,
-    http_client: web::Data<reqwest::Client>,
+pub async fn saml_acs_public<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<SamlAcsPublicRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -1489,7 +1446,8 @@ pub async fn saml_acs_public<C: Connection>(
     }
 
     // Atomically consume the state row (single-use; expired → 401).
-    let login_state = login_state_repo
+    let login_state = state
+        .federation_login_state_repo
         .consume_by_state(&b.relay_state)
         .await?
         .ok_or_else(|| {
@@ -1502,16 +1460,10 @@ pub async fn saml_acs_public<C: Connection>(
     let config_id = login_state.federation_config_id;
     let spa_redirect_uri = login_state.redirect_uri.clone();
 
+    // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
     // Run the verified SAML flow (04-03): signature verify + replay check.
-    let service = SamlFederationService::new(
-        (**config_repo).clone(),
-        (**link_repo).clone(),
-        (**user_repo).clone(),
-        (**replay_repo).clone(),
-        (**http_client).clone(),
-    );
-
-    let callback_result = service
+    let callback_result = state
+        .saml_federation_service
         .handle_saml_response(
             tenant_id,
             config_id,
@@ -1522,6 +1474,11 @@ pub async fn saml_acs_public<C: Connection>(
             // Destination check: pass empty string (ACS URL not available here;
             // callers that know the ACS URL should pass it explicitly).
             None,
+            // require_in_response_to has no effect when expected_request_id is
+            // Some (this path already enforces presence-and-equality above) —
+            // pass false for clarity; this call site is unchanged (out of
+            // SECFIX-04 scope per 23-04-PLAN.md Task 2).
+            false,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -1530,32 +1487,35 @@ pub async fn saml_acs_public<C: Connection>(
 
     // TODO(T19.15): resolve real org_id from the tenant instead of Uuid::nil()
     // (see the SAML callback above) — SSO tokens carry an empty org_id claim. Phase 19.
-    let auth_out = auth_svc
+    let auth_out = state
+        .auth_service
         .create_session_and_tokens(user.id, tenant_id, Uuid::nil(), None, None)
         .await?;
 
     let csrf_token = crate::middleware::csrf::generate_csrf_token();
-    let user_detail = user_repo.get_by_id(tenant_id, user.id).await.map_err(|_| {
-        AxiamError::AuthenticationFailed {
+    let user_detail = state
+        .user_repo
+        .get_by_id(tenant_id, user.id)
+        .await
+        .map_err(|_| AxiamError::AuthenticationFailed {
             reason: "user not found after SAML login".into(),
-        }
-    })?;
+        })?;
 
     Ok(actix_web::HttpResponse::Ok()
         .cookie(crate::middleware::csrf::access_cookie(
             &auth_out.access_token,
-            auth_config.access_token_lifetime_secs,
-            auth_config.cookie_secure,
+            state.auth_config.access_token_lifetime_secs,
+            state.auth_config.cookie_secure,
         ))
         .cookie(crate::middleware::csrf::refresh_cookie(
             &auth_out.refresh_token,
-            auth_config.refresh_token_lifetime_secs,
-            auth_config.cookie_secure,
+            state.auth_config.refresh_token_lifetime_secs,
+            state.auth_config.cookie_secure,
         ))
         .cookie(crate::middleware::csrf::csrf_cookie(
             &csrf_token,
-            auth_config.access_token_lifetime_secs,
-            auth_config.cookie_secure,
+            state.auth_config.access_token_lifetime_secs,
+            state.auth_config.cookie_secure,
         ))
         .json(SsoLoginSuccessResponse {
             user_id: user_detail.id,

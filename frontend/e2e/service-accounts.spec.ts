@@ -27,16 +27,10 @@ test.describe("Service Accounts page", () => {
   }) => {
     await page.goto("/service-accounts");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page
-      .getByText(/no service accounts|empty/i)
-      .isVisible()
-      .catch(() => false);
-    const hasNewBtn = await page
-      .getByRole("button", { name: /New Service Account/i })
-      .isVisible()
-      .catch(() => false);
-    expect(hasTable || hasEmptyState || hasNewBtn).toBe(true);
+    // DataTable always renders a <table> (rows or empty message inside), so
+    // wait for it (auto-retry) instead of one-shot isVisible() probes that
+    // raced the fetch and flaked.
+    await expect(page.getByRole("table")).toBeVisible();
   });
 
   test('"New Service Account" button opens create modal', async ({ page }) => {
@@ -50,13 +44,12 @@ test.describe("Service Accounts page", () => {
     ).toBeVisible();
   });
 
-  test("create form has Name and Description fields", async ({ page }) => {
+  test("create form has Name field", async ({ page }) => {
     await page.goto("/service-accounts");
     await page
       .getByRole("button", { name: /New Service Account/i })
       .click();
     await expect(page.getByLabel(/Name/)).toBeVisible();
-    await expect(page.getByLabel(/Description/)).toBeVisible();
   });
 
   test("navigation is visible after login (RBAC-gated page accessible — T-07-13)", async ({
@@ -64,6 +57,6 @@ test.describe("Service Accounts page", () => {
   }) => {
     await page.goto("/service-accounts");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 });

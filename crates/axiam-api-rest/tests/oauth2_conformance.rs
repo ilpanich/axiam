@@ -21,6 +21,7 @@ const TEST_PEER: &str = "127.0.0.1:12345";
 
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -28,12 +29,8 @@ use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
-    SurrealAuthorizationCodeRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealRefreshTokenRepository, SurrealTenantRepository,
-    SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
-use axiam_oauth2::authorize::AuthorizeService;
-use axiam_oauth2::token::TokenService;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
@@ -136,36 +133,13 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
 
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {{
-        let client_repo = SurrealOAuth2ClientRepository::new($db.clone());
-        let code_repo = SurrealAuthorizationCodeRepository::new($db.clone());
-        let tenant_repo = SurrealTenantRepository::new($db.clone());
-        let refresh_repo = SurrealRefreshTokenRepository::new($db.clone());
-        let user_repo = SurrealUserRepository::new($db.clone());
-
-        let authz_service = AuthorizeService::new(
-            client_repo.clone(),
-            code_repo.clone(),
-            600, // 10-minute code lifetime
-        );
-        let token_service = TokenService::new(
-            client_repo.clone(),
-            code_repo.clone(),
-            tenant_repo.clone(),
-            refresh_repo,
-            user_repo.clone(),
-            $auth.clone(),
-            2_592_000, // 30-day refresh token lifetime
-        );
-
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(client_repo))
-                .app_data(web::Data::new(code_repo))
-                .app_data(web::Data::new(tenant_repo))
-                .app_data(web::Data::new(user_repo))
-                .app_data(web::Data::new(authz_service))
-                .app_data(web::Data::new(token_service))
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
+                    $auth.clone(),
+                )))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))

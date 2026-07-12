@@ -1,0 +1,115 @@
+# Benchmark target: AXIAM (resource-capped).
+#
+# Mirrors docker/docker-compose.prod.yml but pins CPU/memory caps so that
+# "performance per resource" is meaningful and equal across targets. An optional
+# profile-driven TLS terminator (nginx) fronts the server for the p1/p2/p3
+# security profiles; for p0-plaintext it is left out and k6 hits :8090 directly.
+#
+# Caps default to 2 CPU / 1 GiB for the server and are overridable:
+#   BENCH_CPUS=2 BENCH_MEM=1024m BENCH_DB_MEM=1024m
+#
+# Secrets (JWT keys, DB/AMQP creds) are sourced the same way as `just prod-up`;
+# runner/run-benchmark.sh sources docker/.secrets before invoking compose.
+name: bench-axiam
+
+services:
+  axiam-server:
+    build:
+      context: ../../..
+      dockerfile: docker/Dockerfile.server
+    container_name: bench-axiam-server
+    cpus: ${BENCH_CPUS:-2}
+    mem_limit: ${BENCH_MEM:-1024m}
+    ports:
+      - "${BENCH_APP_PORT:-8090}:8090"
+      - "${BENCH_GRPC_PORT:-50051}:50051"
+    environment:
+      AXIAM__DB__URL: "surrealdb:8000"
+      AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?run via runner/run-benchmark.sh which sources docker/.secrets}"
+      AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?run via runner/run-benchmark.sh which sources docker/.secrets}"
+      AXIAM__DB__NAMESPACE: "axiam"
+      AXIAM__DB__DATABASE: "${AXIAM__DB__DATABASE:-main}"
+      AXIAM__AMQP__URL: "amqp://${RABBITMQ_DEFAULT_USER:?required}:${RABBITMQ_DEFAULT_PASS:?required}@rabbitmq:5672"
+      AXIAM__SERVER__HOST: "0.0.0.0"
+      AXIAM__GRPC__HOST: "0.0.0.0"
+      AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?required}"
+      AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?required}"
+      RUST_LOG: "${RUST_LOG:-axiam=warn}"
+    depends_on:
+      surrealdb: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: "no"
+    networks: [bench]
+
+  # Profile-driven TLS terminator. Enabled only for the `tls` compose profile
+  # (p1/p2/p3). The runner selects which nginx conf to mount via BENCH_NGINX_CONF
+  # (tls12.conf | tls13.conf | mtls.conf) and mounts the test certs read-only.
+  tls-edge:
+    image: nginx:1.27-alpine
+    container_name: bench-axiam-tls
+    profiles: ["tls"]
+    cpus: ${BENCH_EDGE_CPUS:-1}
+    mem_limit: ${BENCH_EDGE_MEM:-128m}
+    ports:
+      - "${BENCH_TLS_PORT:-8443}:8443"
+    volumes:
+      - ../../profiles/certs:/certs:ro
+      - ./tls/${BENCH_NGINX_CONF:-tls13.conf}:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      axiam-server: { condition: service_healthy }
+    restart: "no"
+    networks: [bench]
+
+  surrealdb-init:
+    image: busybox
+    command: ["sh", "-c", "chown -R 65532:65532 /data && chmod -R u+rwX /data"]
+    volumes:
+      - surrealdb-data:/data
+    restart: "no"
+
+  surrealdb:
+    image: surrealdb/surrealdb:v3
+    container_name: bench-axiam-surrealdb
+    cpus: ${BENCH_DB_CPUS:-2}
+    mem_limit: ${BENCH_DB_MEM:-1024m}
+    depends_on:
+      surrealdb-init: { condition: service_completed_successfully }
+    command: start --user ${AXIAM__DB__USERNAME:?required} --pass ${AXIAM__DB__PASSWORD:?required} --log warn surrealkv:/data/axiam.db
+    volumes:
+      - surrealdb-data:/data
+    healthcheck:
+      test: ["CMD", "/surreal", "isready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+    networks: [bench]
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: bench-axiam-rabbitmq
+    cpus: ${BENCH_MQ_CPUS:-1}
+    mem_limit: ${BENCH_MQ_MEM:-512m}
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:?required}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:?required}"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+    networks: [bench]
+
+volumes:
+  surrealdb-data:
+
+networks:
+  bench:
+    driver: bridge

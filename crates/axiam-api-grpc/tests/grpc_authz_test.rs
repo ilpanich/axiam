@@ -82,6 +82,8 @@ fn test_auth_config() -> AuthConfig {
         webauthn_rp_name: "AXIAM-Test".into(),
         jwt_encoding_key: None,
         jwt_decoding_key: None,
+        hibp_breaker_threshold: 5,
+        hibp_breaker_cooldown_secs: 30,
     }
 }
 
@@ -260,7 +262,7 @@ async fn start_test_server(
     // DO NOT attach build_grpc_governor_layer — SmartIpKeyExtractor panics
     // without a real peer IP on in-process connections.
     let authz_svc = AuthorizationServiceServer::with_interceptor(
-        AuthorizationServiceImpl::new(engine),
+        AuthorizationServiceImpl::new(engine, 16),
         AuthInterceptor::new(auth_config),
     );
 

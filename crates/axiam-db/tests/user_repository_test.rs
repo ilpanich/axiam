@@ -1,5 +1,6 @@
 //! Integration tests for User repository using in-memory SurrealDB.
 
+use axiam_auth::password::verify_password;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::{CreateUser, UserStatus};
@@ -9,7 +10,6 @@ use axiam_core::repository::{
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
-use axiam_db::verify_password;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 

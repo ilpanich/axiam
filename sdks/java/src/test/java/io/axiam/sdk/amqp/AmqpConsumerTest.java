@@ -14,6 +14,10 @@ import org.slf4j.Logger;
 import java.io.InputStream;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -53,6 +57,21 @@ class AmqpConsumerTest {
     private byte[] validBody;
     private byte[] tamperedBody;
 
+    /**
+     * NEW-4: every vector in {@code amqp_hmac_vectors.json} now carries
+     * {@code key_version=2} and a fixed {@code issued_at} of
+     * {@code "2026-07-10T12:00:00Z"} (see that fixture's {@code _derivation}
+     * note). These ack/nack-matrix tests are only exercising the pre-NEW-4
+     * behavior (HMAC verify + handler outcome), so a {@link Clock} pinned to
+     * that exact instant is used everywhere below to keep {@code issued_at}
+     * "fresh" regardless of when the test actually runs; the NEW-4 checks
+     * themselves are covered separately in {@link ReplayProtectionTest}.
+     */
+    private static final Instant FIXED_ISSUED_AT = Instant.parse("2026-07-10T12:00:00Z");
+    private static final Clock FIXED_CLOCK = Clock.fixed(FIXED_ISSUED_AT, ZoneOffset.UTC);
+
+    private NonceStore nonceStore;
+
     /** One recorded {@code basicAck}/{@code basicNack} invocation against {@link #fakeChannel}. */
     private record AckNackCall(String type, long deliveryTag, boolean multiple, boolean requeue) {
     }
@@ -64,6 +83,8 @@ class AmqpConsumerTest {
 
         securityWarnings = new ArrayList<>();
         fakeLogger = fakeLogger(securityWarnings);
+
+        nonceStore = new NonceStore(Duration.ofSeconds(600));
 
         JsonNode root = loadFixture();
         JsonNode vectors = root.get("vectors");
@@ -81,7 +102,8 @@ class AmqpConsumerTest {
     void validSignatureAndSuccessfulHandlerAcks() throws Exception {
         AtomicBoolean handlerInvoked = new AtomicBoolean(false);
         DeliverCallback callback = AmqpConsumer.deliverCallback(
-                fakeChannel, signingKey, body -> handlerInvoked.set(true), fakeLogger);
+                fakeChannel, signingKey, body -> handlerInvoked.set(true), fakeLogger,
+                Duration.ofSeconds(300), FIXED_CLOCK, nonceStore);
 
         callback.handle("consumer-tag", delivery(42L, validBody));
 
@@ -99,7 +121,8 @@ class AmqpConsumerTest {
     void invalidSignatureNacksWithoutRequeueAndNeverInvokesHandler() throws Exception {
         AtomicBoolean handlerInvoked = new AtomicBoolean(false);
         DeliverCallback callback = AmqpConsumer.deliverCallback(
-                fakeChannel, signingKey, body -> handlerInvoked.set(true), fakeLogger);
+                fakeChannel, signingKey, body -> handlerInvoked.set(true), fakeLogger,
+                Duration.ofSeconds(300), FIXED_CLOCK, nonceStore);
 
         callback.handle("consumer-tag", delivery(7L, tamperedBody));
 
@@ -117,7 +140,8 @@ class AmqpConsumerTest {
     @Test
     void securityLogNeverContainsAnHmacHexValue() throws Exception {
         DeliverCallback callback = AmqpConsumer.deliverCallback(
-                fakeChannel, signingKey, body -> { }, fakeLogger);
+                fakeChannel, signingKey, body -> { }, fakeLogger,
+                Duration.ofSeconds(300), FIXED_CLOCK, nonceStore);
 
         callback.handle("consumer-tag", delivery(7L, tamperedBody));
 
@@ -139,7 +163,7 @@ class AmqpConsumerTest {
         DeliverCallback callback = AmqpConsumer.deliverCallback(
                 fakeChannel, signingKey, body -> {
                     throw new ErrDrop("poison message");
-                }, fakeLogger);
+                }, fakeLogger, Duration.ofSeconds(300), FIXED_CLOCK, nonceStore);
 
         callback.handle("consumer-tag", delivery(99L, validBody));
 
@@ -158,7 +182,7 @@ class AmqpConsumerTest {
         DeliverCallback callback = AmqpConsumer.deliverCallback(
                 fakeChannel, signingKey, body -> {
                     throw new RuntimeException("transient downstream failure");
-                }, fakeLogger);
+                }, fakeLogger, Duration.ofSeconds(300), FIXED_CLOCK, nonceStore);
 
         callback.handle("consumer-tag", delivery(13L, validBody));
 

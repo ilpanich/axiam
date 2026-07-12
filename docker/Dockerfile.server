@@ -3,14 +3,23 @@
 # ============================================================================
 # Build:  docker build -f docker/Dockerfile.server -t axiam-server .
 # Run:    docker run -p 8090:8090 -p 50051:50051 axiam-server
+#
+# Multi-arch: linux/amd64 and linux/arm64 (the latter covers Raspberry Pi 5 /
+# Apple Silicon / Graviton). Both base images below are multi-platform indexes,
+# so the digest pins resolve per-architecture. Nothing here may hardcode an
+# architecture triplet — see the runtime-library staging step in the builder.
 # ============================================================================
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build the release binary
 # ---------------------------------------------------------------------------
-FROM rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS builder
+FROM rust:1.97-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a AS builder
 
-# Install build-time dependencies: protobuf compiler for tonic/prost codegen
+# Install build-time dependencies: protobuf compiler for tonic/prost codegen.
+# DL3008 (apt version pinning) is intentionally ignored: Debian point releases
+# rotate old versions out of the archive, so pins break rebuilds; the digest-
+# pinned base image above is the reproducibility anchor for this stage.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         protobuf-compiler \
         libxml2-dev \
@@ -76,6 +85,50 @@ RUN cargo build --release -p axiam-server \
 RUN ldd /build/target/release/axiam-server
 
 # ---------------------------------------------------------------------------
+# Stage the SAML runtime libraries into /rootfs (multi-arch, D-08)
+# ---------------------------------------------------------------------------
+# Debian installs these under a per-architecture multiarch triplet directory:
+#   amd64 -> /usr/lib/x86_64-linux-gnu    arm64 -> /usr/lib/aarch64-linux-gnu
+# A `COPY --from=builder /usr/lib/x86_64-linux-gnu/...` therefore breaks the
+# arm64 build outright. Resolve the triplet HERE (a shell stage can branch on
+# the BuildKit-provided TARGETARCH) and stage the libs into a /rootfs tree that
+# the runtime stage copies wholesale, so the final stage stays arch-agnostic.
+# `dpkg-architecture` is authoritative — no hand-maintained arch->triplet map.
+#
+# The list mirrors the binary's own `ldd` output above, minus what distroless/cc
+# already provides (glibc, libgcc, libssl3, libstdc++6, ca-certificates). A
+# missing lib aborts the loader at boot with exit 127, so `cp` failing here (set
+# -e, no globs that can silently match nothing) is deliberately fatal at BUILD
+# time rather than at run time.
+ARG TARGETARCH
+RUN set -eux; \
+    triplet="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"; \
+    echo "TARGETARCH=${TARGETARCH:-<unset>} -> multiarch triplet: ${triplet}"; \
+    libdir="/usr/lib/${triplet}"; \
+    mkdir -p "/rootfs${libdir}"; \
+    for lib in \
+        libxmlsec1.so.1 \
+        libxmlsec1-openssl.so.1 \
+        libxml2.so.2 \
+        libltdl.so.7 \
+        libxslt.so.1 \
+        liblzma.so.5 \
+        libz.so.1 \
+        libicuuc.so.72 \
+        libicudata.so.72 \
+    ; do \
+        # -L (dereference) is REQUIRED, not cosmetic: every one of these sonames
+        # is a symlink to a versioned file (libicuuc.so.72 -> libicuuc.so.72.1).
+        # `cp -a` would preserve the link and leave its target behind, so the
+        # runtime stage would receive a DANGLING symlink and the loader would
+        # abort at boot with exit 127. Dereferencing copies the real object under
+        # the soname — the same semantics as the `COPY --from` this replaces.
+        cp -aL "${libdir}/${lib}" "/rootfs${libdir}/${lib}"; \
+        test -f "/rootfs${libdir}/${lib}" && ! test -L "/rootfs${libdir}/${lib}"; \
+    done; \
+    ls -l "/rootfs${libdir}"
+
+# ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime image — distroless/cc-debian12 (D-08)
 # ---------------------------------------------------------------------------
 # nonroot = UID 65532 (username "nonroot") — no shell, no package manager.
@@ -90,39 +143,17 @@ LABEL org.opencontainers.image.title="axiam-server" \
 
 # ---------------------------------------------------------------------------
 # SAML runtime libraries (distroless has no apt — COPY from builder, D-08)
-# The cc variant provides glibc/libgcc/libssl3; COPY only the delta needed
-# for xmlsec1/libxml2. Soname symlinks (*.so.N) are the runtime entry points.
+# The cc variant provides glibc/libgcc/libssl3; we copy only the delta needed
+# for xmlsec1/libxml2: libxmlsec1(+openssl backend), libxml2, libltdl, libxslt,
+# liblzma, libz and the ICU pair. Soname symlinks (*.so.N) are the runtime
+# entry points.
+#
+# The builder staged them under /rootfs/usr/lib/<multiarch-triplet>/ (see the
+# staging step above), so this single COPY is architecture-agnostic and lands
+# each library in the exact directory the dynamic loader searches on the target
+# architecture — no x86_64 path may appear in this stage.
 # ---------------------------------------------------------------------------
-# Core xmlsec1 engine
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libxmlsec1.so.1 \
-                    /usr/lib/x86_64-linux-gnu/
-# OpenSSL backend for xmlsec1
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libxmlsec1-openssl.so.1 \
-                    /usr/lib/x86_64-linux-gnu/
-# libxml2 (xmlsec1 dependency)
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libxml2.so.2 \
-                    /usr/lib/x86_64-linux-gnu/
-# libltdl (libtool dlopen — xmlsec1 dynamic engine loading)
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libltdl.so.7 \
-                    /usr/lib/x86_64-linux-gnu/
-# libxslt (xmlsec1 transitive — XSLT transforms in XML-DSig). Required:
-# the binary's ldd lists libxslt.so.1 via libxmlsec1; distroless/cc has no apt,
-# so without this the loader aborts with "error while loading shared libraries"
-# (exit 127) before the server can boot.
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libxslt.so.1 \
-                    /usr/lib/x86_64-linux-gnu/
-# liblzma (libxml2 transitive — XML compression)
-COPY --from=builder /usr/lib/x86_64-linux-gnu/liblzma.so.5 \
-                    /usr/lib/x86_64-linux-gnu/
-# libz (libxml2 transitive — zlib compression). Also an ldd entry not provided
-# by distroless/cc; missing it likewise aborts the loader with exit 127.
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libz.so.1 \
-                    /usr/lib/x86_64-linux-gnu/
-# ICU libs (libxml2 transitive — Unicode normalisation); bookworm ships icu72
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libicuuc.so.72 \
-                    /usr/lib/x86_64-linux-gnu/
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libicudata.so.72 \
-                    /usr/lib/x86_64-linux-gnu/
+COPY --from=builder /rootfs/ /
 
 # Copy the release binary from the builder stage (nonroot UID 65532)
 COPY --from=builder --chown=65532:65532 \

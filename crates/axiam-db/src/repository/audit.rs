@@ -13,6 +13,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -43,11 +44,6 @@ struct AuditLogRowWithId {
     ip_address: Option<String>,
     metadata: serde_json::Value,
     timestamp: DateTime<Utc>,
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -272,10 +268,7 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<AuditLogRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "audit_log".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "audit_log", &id_str)?;
 
         Ok(row.into_entry(id)?)
     }
@@ -299,7 +292,6 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         count_query = apply_filter_binds(count_query, &binds);
         let mut count_result = count_query.await.map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         // Data query.
         let data_sql = format!(
@@ -322,12 +314,7 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
             .map(|r| r.try_into_entry())
             .collect::<Result<_, _>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn list_system(

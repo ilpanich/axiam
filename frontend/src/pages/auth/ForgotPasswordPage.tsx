@@ -1,5 +1,5 @@
 import { useActionState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Loader2, Mail, CheckCircle2 } from "lucide-react";
 import { authService } from "@/services/auth";
 import { PublicLayout } from "@/components/layout/PublicLayout";
@@ -23,12 +23,20 @@ interface ForgotPasswordState {
 // ---------------------------------------------------------------------------
 
 export function ForgotPasswordPage() {
+  // D-04 / Open Question 1: the public forgot-password page has no prior
+  // tenant context, so it carries the org/tenant slug in its OWN URL
+  // (e.g. from the "Forgot password?" link on LoginPage). No user-typed
+  // tenant field, no email-domain inference.
+  const [searchParams] = useSearchParams();
+  const orgSlug = searchParams.get("org") ?? undefined;
+  const tenantSlug = searchParams.get("tenant") ?? undefined;
+
   const [state, formAction, isPending] = useActionState<ForgotPasswordState, FormData>(
     async (_prev, formData) => {
       const email = (formData.get("email") as string).trim();
       let internalError = false;
       try {
-        await authService.requestPasswordReset(email);
+        await authService.requestPasswordReset(email, orgSlug, tenantSlug);
       } catch {
         // Intentionally swallow errors to prevent user enumeration.
         // We always show the same success message regardless of outcome.

@@ -19,9 +19,17 @@ use crate::Sensitive;
 /// `reqwest` dependency of its own beyond what the caller-supplied closure
 /// requires.
 pub struct RefreshedTokens {
+    /// The new access token issued by the refresh call.
     pub access: Sensitive<String>,
+    /// The rotated refresh token, if the server issued one. Refresh tokens
+    /// are single-use with rotation, so a `None` here means the caller
+    /// should keep using the refresh token it already has (not all refresh
+    /// flows rotate on every call).
     pub refresh: Option<Sensitive<String>>,
+    /// Access token expiry as a Unix timestamp (seconds), if known.
     pub exp: Option<i64>,
+    /// Tenant the new access token is scoped to, if the refresh response
+    /// carried one.
     pub tenant_id: Option<uuid::Uuid>,
 }
 

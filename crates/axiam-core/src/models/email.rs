@@ -27,24 +27,64 @@ pub enum EmailProviderKind {
 }
 
 /// SMTP-specific configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+///
+/// `password` is write-only (D-01): `#[serde(skip_serializing)]` means it is
+/// never emitted in a GET/serialized response. On the write path (D-02),
+/// `#[serde(default)]` lets a caller omit the field entirely (deserializing
+/// to `""`); an empty string is the sentinel for "no new secret supplied —
+/// preserve whatever is already stored" (see `SurrealEmailConfigRepository::
+/// set_org_config`). A non-empty value is a real secret to encrypt+replace.
+#[derive(Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    /// Stored encrypted at rest by the DB layer.
+    /// Stored encrypted at rest by the DB layer. Write-only + omit-preserving;
+    /// see struct docs (D-01/D-02).
+    #[serde(default, skip_serializing)]
     pub password: String,
     /// Use STARTTLS (true) or implicit TLS (false).
     pub starttls: bool,
 }
 
+/// Manual `Debug` impl (D-01, SECHRD-09 precedent): redacts `password` so
+/// `{:?}` never prints the plaintext secret while keeping every other field
+/// human-readable for logs/traces.
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("starttls", &self.starttls)
+            .finish()
+    }
+}
+
 /// API-based provider configuration (SendGrid, Postmark, Resend, Brevo).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+///
+/// `api_key` follows the same write-only + omit-preserving contract as
+/// [`SmtpConfig::password`] (D-01/D-02).
+#[derive(Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ApiProviderConfig {
-    /// Stored encrypted at rest by the DB layer.
+    /// Stored encrypted at rest by the DB layer. Write-only + omit-preserving;
+    /// see struct docs (D-01/D-02).
+    #[serde(default, skip_serializing)]
     pub api_key: String,
     /// Override base URL (useful for testing / self-hosted instances).
     pub api_url: Option<String>,
+}
+
+/// Manual `Debug` impl (D-01, SECHRD-09 precedent): redacts `api_key` so
+/// `{:?}` never prints the plaintext secret.
+impl std::fmt::Debug for ApiProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiProviderConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("api_url", &self.api_url)
+            .finish()
+    }
 }
 
 /// Provider-specific connection details.
@@ -162,13 +202,17 @@ pub fn validate_email_config(input: &SetOrgEmailConfig) -> AxiamResult<()> {
                 violations.push("SMTP port must be > 0".to_string());
             }
         }
-        ProviderConfig::SendGrid(api)
-        | ProviderConfig::Postmark(api)
-        | ProviderConfig::Resend(api)
-        | ProviderConfig::Brevo(api) => {
-            if api.api_key.is_empty() {
-                violations.push("API key must not be empty".to_string());
-            }
+        ProviderConfig::SendGrid(_)
+        | ProviderConfig::Postmark(_)
+        | ProviderConfig::Resend(_)
+        | ProviderConfig::Brevo(_) => {
+            // D-02: an empty api_key on the write path is the "no new
+            // secret supplied — preserve the stored ciphertext" sentinel,
+            // not a structural violation (mirrors SmtpConfig.password,
+            // which was never validated for emptiness either). Whether a
+            // secret is required at all (e.g. first-time creation with no
+            // prior stored value) is a repository-layer concern, not a
+            // structural validation concern.
         }
     }
 
@@ -340,14 +384,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_api_key_fails() {
+    fn empty_api_key_is_treated_as_omit_and_passes_validation() {
+        // D-02: an empty api_key means "no new secret supplied, preserve
+        // the stored ciphertext" — it must not be rejected as a structural
+        // violation (this was previously an error before D-02 landed).
         let mut input = sample_org_input();
         input.provider = ProviderConfig::SendGrid(ApiProviderConfig {
             api_key: String::new(),
             api_url: None,
         });
-        let err = validate_email_config(&input).unwrap_err();
-        assert!(err.to_string().contains("API key"));
+        assert!(validate_email_config(&input).is_ok());
     }
 
     #[test]
@@ -478,5 +524,127 @@ mod tests {
             api_url: None,
         });
         assert_eq!(sg.kind(), EmailProviderKind::SendGrid);
+    }
+
+    // --- D-01: secrets are write-only (never serialized) and redacted in Debug ---
+
+    #[test]
+    fn smtp_config_password_not_serialized() {
+        const SECRET: &str = "super-secret-smtp-password-do-not-leak";
+        let smtp = SmtpConfig {
+            host: "smtp.example.com".to_string(),
+            port: 587,
+            username: "user".to_string(),
+            password: SECRET.to_string(),
+            starttls: true,
+        };
+        let json = serde_json::to_string(&smtp).expect("serialization must succeed");
+        assert!(
+            !json.contains("password"),
+            "serialized JSON must not contain a password key: {json}"
+        );
+        assert!(
+            !json.contains(SECRET),
+            "serialized JSON must not contain the plaintext password"
+        );
+    }
+
+    #[test]
+    fn smtp_config_debug_redacts_password() {
+        const SECRET: &str = "super-secret-smtp-password-do-not-leak";
+        let smtp = SmtpConfig {
+            host: "smtp.example.com".to_string(),
+            port: 587,
+            username: "user".to_string(),
+            password: SECRET.to_string(),
+            starttls: true,
+        };
+        let debug_output = format!("{smtp:?}");
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output must contain the redaction marker: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains(SECRET),
+            "Debug output must not contain the plaintext password"
+        );
+        assert!(debug_output.contains("smtp.example.com"));
+        assert!(debug_output.contains("user"));
+    }
+
+    #[test]
+    fn api_provider_config_api_key_not_serialized() {
+        const SECRET: &str = "sg_super_secret_api_key_do_not_leak";
+        let api = ApiProviderConfig {
+            api_key: SECRET.to_string(),
+            api_url: Some("https://api.sendgrid.com".to_string()),
+        };
+        let json = serde_json::to_string(&api).expect("serialization must succeed");
+        assert!(
+            !json.contains("api_key"),
+            "serialized JSON must not contain an api_key key: {json}"
+        );
+        assert!(
+            !json.contains(SECRET),
+            "serialized JSON must not contain the plaintext api key"
+        );
+    }
+
+    #[test]
+    fn api_provider_config_debug_redacts_api_key() {
+        const SECRET: &str = "sg_super_secret_api_key_do_not_leak";
+        let api = ApiProviderConfig {
+            api_key: SECRET.to_string(),
+            api_url: Some("https://api.sendgrid.com".to_string()),
+        };
+        let debug_output = format!("{api:?}");
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output must contain the redaction marker: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains(SECRET),
+            "Debug output must not contain the plaintext api key"
+        );
+        assert!(debug_output.contains("https://api.sendgrid.com"));
+    }
+
+    // --- D-02: write-path input tolerates an omitted secret ---
+
+    #[test]
+    fn smtp_config_deserializes_without_password_field() {
+        let json = r#"{"host":"smtp.example.com","port":587,"username":"user","starttls":true}"#;
+        let smtp: SmtpConfig =
+            serde_json::from_str(json).expect("must deserialize without password");
+        assert_eq!(
+            smtp.password, "",
+            "omitted password must default to empty string (D-02 sentinel)"
+        );
+        assert_eq!(smtp.host, "smtp.example.com");
+    }
+
+    #[test]
+    fn api_provider_config_deserializes_without_api_key_field() {
+        let json = r#"{"api_url":"https://api.sendgrid.com"}"#;
+        let api: ApiProviderConfig =
+            serde_json::from_str(json).expect("must deserialize without api_key");
+        assert_eq!(
+            api.api_key, "",
+            "omitted api_key must default to empty string (D-02 sentinel)"
+        );
+        assert_eq!(api.api_url.as_deref(), Some("https://api.sendgrid.com"));
+    }
+
+    #[test]
+    fn set_org_email_config_with_omitted_smtp_secret_passes_validation() {
+        let mut input = sample_org_input();
+        input.provider = ProviderConfig::Smtp(SmtpConfig {
+            host: "smtp.example.com".to_string(),
+            port: 587,
+            username: "user".to_string(),
+            password: String::new(),
+            starttls: true,
+        });
+        assert!(validate_email_config(&input).is_ok());
     }
 }

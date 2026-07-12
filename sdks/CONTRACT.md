@@ -25,10 +25,31 @@ each language uses its own idiomatic naming convention as shown below.
 | browser access alias| `can`             | `can`                     | `can`               | `can`            | `Can`           | `can`           | `Can`           |
 | batch access check  | `batch_check`     | `batchCheck`              | `batch_check`       | `batchCheck`     | `BatchCheck`    | `batchCheck`    | `BatchCheck`    |
 
+**Argument order:** every operation above takes the acted-upon subject before the object it
+acts on — concretely, `check_access`/`can` take `(action, resource[, scope])` in every SDK,
+with no exception. PHP's `can(action, resource)` (`sdks/php/src/AxiamClient.php`) was
+reversed relative to this rule prior to SDK-Q09 remediation (2026-07); it has been corrected
+to match its own `checkAccess(action, resource)` and every other SDK's `can`/`Can`.
+
 **Notes:**
 - `can` is an alias for `check_access` targeting browser/UI scenarios; it calls `POST /api/v1/authz/check` via REST (avoids N round-trips when combined with `batch_check` for page-level permission gating).
 - `batch_check` calls `POST /api/v1/authz/check/batch` and returns results in the same order as input.
 - No SDK is permitted to expose additional login/auth/authz method names that diverge from this map.
+
+### Async method naming (SDK-Q08)
+
+The canonical names above are what every SDK's **synchronous** (or, for languages with no
+sync/async distinction, single) surface exposes. Where a language also offers an async
+surface, the following per-language conventions are all accepted — a language MUST NOT mix
+approaches within itself, but different languages are not required to converge on one
+convention:
+
+| Language   | Accepted async convention                                                                | Notes |
+|------------|-------------------------------------------------------------------------------------------|-------|
+| Python     | A **separate `AsyncAxiamClient` class** exposing the canonical names (`login`, `verify_mfa`, `refresh`, `logout`, `check_access`, `can`, `batch_check`) as `async def` methods. | Confirmed-breaking (pre-1.0) fix, 2026-07: previously a single `AxiamClient` exposed both the sync methods AND `async_*`-prefixed twins (`async_login`, `async_check_access`, ...) on the same object. `async_*` names are no longer permitted anywhere in the Python SDK's public surface. |
+| Java       | The sync method PLUS a same-named class with an **`*Async` suffix companion method** (e.g. `checkAccess`/`checkAccessAsync`) on the same client object. | **Accepted exception** to the "no additional diverging names" rule above — Java idiom favors suffix-async twins on one object (mirrors `CompletableFuture`-returning sibling methods in the broader Java ecosystem, e.g. `java.util.concurrent` conventions). |
+| C#         | **`*Async`-only** methods (e.g. `CheckAccessAsync`), per the .NET Task-based Asynchronous Pattern (TAP) — no separate non-`Async` sync method is required to exist alongside it. | **Accepted exception**: TAP is the idiomatic .NET convention; C# is not required to also offer a blocking `CheckAccess`. |
+| Rust, TypeScript/JS, Go, PHP | No separate async naming convention — the canonical name IS the (only, or primarily-used) call form for that language's ecosystem (`async fn`/`Promise`-returning function/goroutine-friendly call/Fiber-safe call, respectively, under the same canonical name). | N/A |
 
 ---
 
@@ -113,6 +134,25 @@ that matches your SDK's HTTP client model:
 **Implementation note for browser SDKs (TypeScript):** Read the `axiam_csrf` cookie via a
 hardcoded (non-dynamic, ReDoS-safe) regex against `document.cookie`, store nothing beyond
 that read — no `localStorage`/`sessionStorage` caching of the token value.
+
+### §3a Resource-Server Middleware CSRF (inbound)
+
+Every SDK's resource-server middleware (the component that authenticates requests to the
+*consuming application*, not to AXIAM) MUST additionally enforce the cookie double-submit
+check locally when — and only when — the credential it accepted was sourced from the
+`axiam_access` cookie rather than an `Authorization: Bearer` header, and the request
+method is state-changing (anything other than `GET`, `HEAD`, `OPTIONS`). The check: the
+`X-CSRF-Token` request header must be present and equal (constant-time comparison) to the
+`axiam_csrf` cookie value; reject with 403 on failure.
+
+Bearer-header-authenticated requests are exempt — a cross-site attacker cannot set custom
+request headers, so they are not subject to browser-driven CSRF. Cookie-sourced requests
+are not exempt: in any same-site deployment where the `axiam_access` cookie reaches the
+consuming application, the non-`httpOnly` `axiam_csrf` cookie does too. This clause is
+distinct from and independent of §3's client-to-AXIAM-server CSRF forwarding: the
+resource-server middleware must not assume the host framework's own CSRF protection is
+active (frameworks such as Spring or ASP.NET Core commonly disable it to avoid
+double-protecting Bearer clients).
 
 ---
 
@@ -235,19 +275,61 @@ All SDKs that consume AXIAM AMQP messages (currently: Rust, TypeScript/Node, Go,
 3. **Missing signature**: A message arriving without `hmac_signature` SHOULD be nacked without requeue in strict mode. During rolling deployments, lenient mode (log-and-accept) is permitted as a temporary measure; strict mode MUST be the default.
 4. **Security event**: A failed HMAC check MUST be logged as a security event with at minimum: timestamp, exchange, routing key, and tenant context (if available from other message fields). Do NOT log the received or expected HMAC value.
 
+### v2 — Replay Protection (NEW-4, `key_version = 2`) — BREAKING
+
+**As of `CURRENT_KEY_VERSION = 2` the signed body carries two additional
+mandatory fields — `nonce` and `issued_at` — that are covered by the HMAC.**
+This is a **hard cutover with no grace window**: the AXIAM server **rejects**
+(nack, requeue:false) any `AuthzRequest`/`AuditEventMessage` with
+`key_version < 2`, a stale/future `issued_at`, or a replayed `nonce`. **Every
+producer MUST be upgraded to emit the v2 body BEFORE the enforcing server is
+deployed**, or its messages are dropped.
+
+New fields (always emitted — never omitted — so they are inside the signed bytes):
+
+| Field | Type | Position (signed body) | Meaning |
+|-------|------|------------------------|---------|
+| `nonce` | UUID | immediately AFTER `key_version` | Per-message unique value. The server records `(tenant_id, nonce)` in a durable store; a duplicate within the freshness window is a **replay** and is rejected. Producers MUST use a fresh UUIDv4 per message. |
+| `issued_at` | RFC3339 UTC timestamp | immediately AFTER `nonce` | Producer send time. The server rejects the message when `issued_at` is outside **±5 minutes** (`DEFAULT_FRESHNESS_SKEW_SECS = 300`, configurable via `AXIAM__AMQP__REPLAY_SKEW_SECS`) of its own clock. |
+
+**Exact signed field order (the HMAC is computed over these bytes, `hmac_signature` ABSENT):**
+
+- `AuthzRequest`: `correlation_id`, `tenant_id`, `subject_id`, `action`,
+  `resource_id`, `scope`(optional, omitted when null), `key_version`,
+  `nonce`, `issued_at`.
+- `AuditEventMessage`: `tenant_id`, `actor_id`, `actor_type`, `action`,
+  `resource_id`(optional), `outcome`, `ip_address`(optional),
+  `metadata`(optional), `key_version`, `nonce`, `issued_at`.
+
+**Consumer (SDK) obligations for v2 — hard-cutover parity with the server.**
+After a valid HMAC signature, an SDK consumer MUST additionally nack
+(requeue:false) when: (a) `key_version < 2`; (b) `issued_at` is outside the
+±skew freshness window; (c) the `nonce` has already been seen (SDKs that
+persist state SHOULD dedup nonces durably; at minimum reject within the
+freshness window). SDKs that re-serialize the received body minus
+`hmac_signature` (order-preserving) automatically cover `nonce`/`issued_at`
+in the HMAC and need only add these three validation gates plus the optional
+DTO fields.
+
+**Canonical reference vectors.** `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json`
+contains server-produced, byte-exact vectors (master key, derived subkey,
+canonical signed JSON, and resulting `hmac_signature`) for both message types.
+Every SDK MUST validate its HMAC implementation byte-for-byte against this file.
+
 ### Reference Implementation
 
 See `crates/axiam-amqp/src/messages.rs`:
 - `sign_payload(key, payload_json)` — HMAC-SHA256 of payload bytes, returns hex string.
 - `verify_payload(key, payload_json, signature_hex)` — constant-time comparison via the `hmac` crate's `verify_slice`.
-- `hmac_signature` field present on `AuthzRequest` and `AuditEventMessage`.
+- `is_fresh(issued_at, now, skew)` — the freshness gate (±skew acceptance window).
+- `hmac_signature`, `key_version`, `nonce`, `issued_at` fields present on `AuthzRequest` and `AuditEventMessage`.
 
 ### Message Types Subject to HMAC Verification
 
-| AMQP Exchange/Queue            | Message Type        | hmac_signature field |
-|-------------------------------|---------------------|----------------------|
-| `axiam.authz.request`          | `AuthzRequest`      | Yes                  |
-| `axiam.audit.events`           | `AuditEventMessage` | Yes                  |
+| AMQP Exchange/Queue            | Message Type        | hmac_signature field | Replay-protected (v2) |
+|-------------------------------|---------------------|----------------------|-----------------------|
+| `axiam.authz.request`          | `AuthzRequest`      | Yes                  | Yes (`nonce`+`issued_at`) |
+| `axiam.audit.events`           | `AuditEventMessage` | Yes                  | Yes (`nonce`+`issued_at`) |
 
 `AuthzResponse` and `NotificationEvent` are published by the server and do not carry `hmac_signature` in v1.0.
 
@@ -321,6 +403,22 @@ Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conf
 ### C# `Grpc.Tools` Exception
 
 C# is the one documented deviation from the repository-wide `buf` codegen pipeline. The C# SDK uses `Grpc.Tools` MSBuild integration (via `<Protobuf Include="../../proto/**/*.proto" GrpcServices="Client" />` in the `.csproj`) to generate gRPC client stubs at build time, rather than a `buf generate` plugin entry. This is intentional (D-01 in `15-CONTEXT.md`) and does not affect behavioral conformance with §1–§10. All other SDKs (Rust, TypeScript, Go, Python, Java, PHP) run `buf generate` as their codegen step.
+
+### Breaking Changes Log
+
+No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
+recorded here until one exists.
+
+- **2026-07 (SDK-Q08/SDK-Q09, pre-1.0)** — confirmed-breaking, made now rather than deferred:
+  - PHP: `AxiamClient::can()` argument order reversed from `(resource, action)` to
+    `(action, resource)` — matches `checkAccess()` and every other SDK's `can`/`Can` (§1).
+  - Python: the `async_*`-prefixed methods (`async_login`, `async_verify_mfa`, `async_refresh`,
+    `async_logout`, `async_check_access`, `async_can`, `async_batch_check`) were removed from
+    `AxiamClient`. A new `AsyncAxiamClient` class exposes the canonical names (`login`,
+    `verify_mfa`, `refresh`, `logout`, `check_access`, `can`, `batch_check`) as `async def`
+    methods instead (§1 "Async method naming" table above).
+  - Java `*Async` companion methods and C# `*Async`-only (TAP) methods are unaffected —
+    formally documented as accepted per-language async conventions (§1).
 
 ### OpenAPI Export Feature Flag
 

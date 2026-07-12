@@ -1,0 +1,54 @@
+# Benchmark target: Zitadel (resource-capped reference setup).
+#
+# Same CPU/memory envelope as the other targets. Zitadel disables the
+# resource-owner-password grant by default, so the comparative "login" scenario
+# falls back to client_credentials (handled in scenarios/lib/targets.js). TLS mode
+# is controlled by ZITADEL_TLS_* set by the runner from the security profile.
+name: bench-zitadel
+
+services:
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v2.65.0
+    container_name: bench-zitadel
+    cpus: ${BENCH_CPUS:-2}
+    mem_limit: ${BENCH_MEM:-1024m}
+    command: 'start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode ${BENCH_ZITADEL_TLS_MODE:-disabled}'
+    environment:
+      ZITADEL_DATABASE_POSTGRES_HOST: postgres
+      ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_EXTERNALSECURE: "${BENCH_ZITADEL_EXTERNAL_SECURE:-false}"
+      ZITADEL_EXTERNALPORT: "${BENCH_APP_PORT:-8090}"
+      ZITADEL_EXTERNALDOMAIN: localhost
+    ports:
+      - "${BENCH_APP_PORT:-8090}:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+    networks: [bench]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: bench-zitadel-postgres
+    cpus: ${BENCH_DB_CPUS:-2}
+    mem_limit: ${BENCH_DB_MEM:-1024m}
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+    networks: [bench]
+
+networks:
+  bench:
+    driver: bridge

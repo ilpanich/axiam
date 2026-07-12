@@ -566,3 +566,558 @@ RUST-01 (reference) ──→ informs patterns for ──→ TS-01, GO-01, PY-01
 
 ---
 *v1.1 requirements added 2026-06-28 — Client SDKs milestone (phases 15–22). Foundation-first; 7 SDKs full multi-protocol where viable; auth flows P1+P2; publish pipelines included. Roadmap confirmed 2026-06-28.*
+
+---
+
+# Requirements — Milestone v1.2: MVP Release Hardening (final milestone)
+
+> Milestone: v1.2
+> Created: 2026-07-03
+> Source: `claude_dev/roadmap.md` Phases 18–19 + `claude_dev/security-review-postremediation.md` + `claude_dev/code-review-postremediation.md`
+> Scope decisions (user, 2026-07-03): FINAL milestone to MVP. Close all open SEC-*/CQ-*/T19.x findings. Structural-quality refactors IN scope (dedicated phase). Domain research skipped (enumerated findings, no new domain features). Phase numbering continues from Phase 23.
+
+This milestone remediates the **open findings against `ea85872`** (both post-remediation reviews) that the v1.1 SDK work did not touch, plus the outstanding roadmap Phase 18 (Hardening & Compliance) and Phase 19 (deferred improvements) tasks. Priority order per Core Value: **security > correctness > performance > compliance > structural quality > docs.** Each acceptance criterion cites the originating finding ID; planners MUST re-verify the finding against live `main` before implementing (some may have shifted since the review commit) and adjust the fix, but MUST NOT silently drop a criterion without recording why.
+
+## Verification baseline (applies to every requirement below)
+
+- Every fix ships with a **regression test that fails before and passes after** (unit or integration). Security fixes additionally get a **negative test** proving the attack is now rejected.
+- `cargo fmt` + `cargo clippy -D warnings` clean per touched crate; frontend `eslint .` + `tsc -b` clean when frontend is touched. Per-crate builds only (`cargo check/test -p <crate>`), never full-workspace.
+- No new `unwrap()`/`expect()`/`unwrap_or([0u8;32])`-style fallbacks on security paths; secrets never serialized, logged, or defaulted to constants.
+- Fail-closed is the default posture for every auth/authz/crypto/federation control.
+
+---
+
+## SECFIX-01: gRPC UserService & TokenService Authentication
+
+**Priority:** Critical | **Source:** SEC-003 (was CRITICAL), SEC-026b
+
+Attach the existing `AuthInterceptor` to `UserService` and `TokenService`; derive identity from verified JWT claims, not the request body.
+
+### Acceptance Criteria
+- [x] `UserServiceServer` and `TokenServiceServer` wrapped with `AuthInterceptor` (or a shared layer) — `server.rs`
+- [x] `GetUser`, `ValidateCredentials`, `IntrospectToken` read `tenant_id`/`user_id` from `ValidatedClaims` and reject any mismatched body field (mirror `authorization.rs:73-99`)
+- [x] `ValidateCredentials` accrues failed-login/lockout state via the shared helper (closes SEC-026b / T19.5 on the gRPC path)
+- [x] Reject-without-token negative tests added for both services
+- [x] Cross-tenant `GetUser` read returns permission error, proven by test
+
+## SECFIX-02: Tenant Guard on Live REST Grant Path
+
+**Priority:** Critical | **Source:** SEC-058, cross-ref SEC-007/CQ-B07
+
+The REST `POST /api/v1/roles/{role_id}/permissions` calls `grant_to_role_with_scopes`, which is unguarded; the SEC-007 tenant guard landed only on `grant_to_role`.
+
+### Acceptance Criteria
+- [x] `grant_to_role_with_scopes` applies the `LET … IF array::len = 0 { THROW }` tenant predicate on both the empty-scope and scoped branches — `permission.rs:428-459`
+- [x] Every scope id is validated to belong to the caller's tenant before `RELATE`
+- [x] The tenant-isolation test is repointed at the REST-reachable `grant_to_role_with_scopes` path (not the guarded `grant_to_role`)
+- [x] Negative test: caller with `permissions:grant` in tenant A cannot attach tenant B's permission to a tenant A role
+
+## SECFIX-03: Webhook Secret — Fail-Closed Key & Encrypt-at-Rest
+
+**Priority:** Critical | **Source:** SEC-059, SEC-031
+
+Remove the `unwrap_or([0u8; 32])` all-zero encryption-key fallback and actually encrypt webhook HMAC secrets on write.
+
+### Acceptance Criteria
+- [x] `main.rs:389-390` no longer substitutes an all-zero key; webhook subsystem fails closed (or disables webhook registration) when `AXIAM__PKI__ENCRYPTION_KEY` is unset — mirror the PKI `Option<[u8;32]>` pattern
+- [x] `encrypt_webhook_secret` is called on create AND update paths (`webhook.rs`, `handlers/webhooks.rs`); secret never bound verbatim
+- [x] Response exclusion (`skip_serializing`) retained; secret rotation exposed in the update DTO
+- [x] Round-trip test: stored ciphertext ≠ plaintext; delivery decrypt succeeds
+
+## SECFIX-04: SAML Signature-to-Assertion Binding
+
+**Priority:** Critical | **Source:** SEC-005 (XSW), cross-ref T19.7
+
+Bind the verified XML signature to the consumed assertion and enforce the remaining protocol checks (defends against XML Signature Wrapping).
+
+### Acceptance Criteria
+- [x] `handle_saml_response` consumes only the assertion whose ID equals the signed element's reference (no independent `response.assertion` read) — `bind_signature_to_assertion` (saml.rs) rejects unless exactly one `<Assertion>` exists and a verified `<Signature>` Reference resolves to it
+- [x] `Destination` validated against the real ACS URL (authenticated call site `handlers/federation.rs` `saml_acs` now passes `Some(&req.acs_url)` instead of `None`; public path `saml_acs_public` unchanged, out of scope)
+- [ ] `Recipient` / `SubjectConfirmationData` validated — **DEFERRED**: out of scope for 23-04 per 23-CONTEXT.md `<deferred>` / 23-RESEARCH.md "Deferred Ideas"; tracked as the SEC-005 residual for a future phase (see 23-04-SUMMARY.md "SEC-005 Residual")
+- [x] Authenticated ACS path rejects unsolicited responses (`InResponseTo` required) — `handle_saml_response` gained `require_in_response_to: bool`, `saml_acs` passes `true`
+- [x] XSW negative test: a wrapped/duplicated-assertion response is rejected; Destination/InResponseTo negative tests added — `req5_saml_e2e.rs`: `saml_rejects_xsw_wrapped_assertion`, `saml_rejects_wrong_destination_on_authenticated_path`, `saml_rejects_missing_in_response_to_on_authenticated_path`
+
+## SECFIX-05: Logout Revokes the Caller's Session
+
+**Priority:** High | **Source:** SEC-015, CQ-F05
+
+Make logout revoke the caller's own session from the JWT `jti` without requiring a client-supplied body.
+
+### Acceptance Criteria
+- [x] `POST /api/v1/auth/logout` derives the session from the authenticated JWT `jti`; no required `{session_id}` body (or client sends the correct body) — `LogoutRequest` DTO removed; handler revokes via `user.session_id` only
+- [x] Session invalidated and all three cookies cleared server-side; a subsequent request with the old cookies is unauthenticated — `logout_clears_cookies` replay-after-logout assertion (401 on `/api/v1/auth/me`)
+- [x] Frontend `handleLogout` succeeds (no 400); query cache + auth store cleared — `Topbar.tsx` posts with no body
+- [x] Test: logout then reload does not re-authenticate from surviving cookies — `frontend/e2e/logout.spec.ts` (authored + tsc/eslint clean; local Playwright run deferred per CORR-04, see 23-05-SUMMARY.md)
+
+## SECFIX-06: Password-Reset / Resend Flows Threaded with tenant_id
+
+**Priority:** High | **Source:** SEC-044, CQ-F27
+
+The reset/resend flows 400 because the frontend omits backend-required `tenant_id` (and resend omits `email`).
+
+### Acceptance Criteria
+- [x] `requestPasswordReset`, `confirmPasswordReset`, `resendVerification` send `{tenant_id, email/…}` matching the backend DTOs — `auth.ts` threads tenant context/email into all three calls; backend `request_reset`/`resend_verification` build a fully-substituted `action_url` into the emailed link (23-RESEARCH Pattern 6 / Pitfall 3)
+- [x] Reset/verify links carry `tenant_id` so the page can forward it — `ResetPasswordPage`/`VerifyEmailPage` read `?token=&tenant_id=`; `ForgotPasswordPage` reads `?org=&tenant=` slugs (D-04)
+- [x] Responses remain enumeration-safe (constant response regardless of account existence) — unresolvable/missing tenant slug funnels into the same uniform `{"sent": true}`/200 as an unknown account (D-05), proven by `unresolvable_tenant_slug_resolves_to_none_enumeration_safe`/`missing_tenant_context_resolves_to_none_enumeration_safe`
+- [x] Contract test asserts request **bodies** (not just paths) — `auth-contract.spec.ts` (authored + tsc/eslint clean; local Playwright execution blocked by sandbox proxy denying the browser-binary download, see 23-06-SUMMARY.md; CI wiring remains CORR-04)
+
+---
+
+## SECHRD-01: TOTP Atomic Replay Protection
+
+**Priority:** High | **Source:** SEC-008
+
+Make the TOTP step check-and-update atomic and close the skew-boundary and enrollment-confirm replay windows.
+
+### Acceptance Criteria
+- [x] Step update is a conditional compare-and-set in the DB (`WHERE totp_last_used_step < $step`) — concurrent submissions of one code succeed at most once — `SurrealUserRepository::update_totp_step` (24-01)
+- [x] The step actually matched (incl. the −1 skew window) is recorded, so a code accepted via skew is not replayable in later wall-clock steps — `verify_code_with_replay_check` (24-01)
+- [x] `totp_last_used_step` seeded at enrollment-confirm time — `AuthService::confirm_mfa` (24-01)
+- [x] Concurrency test: N parallel submissions of one valid code ⇒ exactly one success — `totp_step_cas_test.rs::totp_step_cas_concurrent` (24-01)
+
+## SECHRD-02: SSRF Address Pinning (webhook + federation fetches)
+
+**Priority:** High | **Source:** SEC-019, SEC-064
+
+Pin the validated IP and extend the private-IP guard beyond JWKS to all federation outbound fetches.
+
+### Acceptance Criteria
+- [x] Webhook delivery pins the validated `IpAddr` into the connection (custom resolver / `resolve()`) — no DNS-rebind between check and send — `ssrf::guarded_fetch` in `webhook.rs`'s delivery loop, proven by `webhook_pins_resolved_ip` (25-02)
+- [x] Private/loopback/link-local/ULA guard applied to OIDC discovery, token exchange, and SAML-metadata fetches (not just JWKS) — shared `axiam_federation::ssrf` module (25-01)
+- [x] Resolved address pinned for those fetches too (close the JWKS DNS-rebind TOCTOU) — `ssrf::pinned_client` via `ClientBuilder::resolve()` (25-01)
+- [x] Negative test: an internal/loopback `token_endpoint` from a discovery document is rejected — `ssrf_rejects_loopback_token_endpoint`, `ssrf_rejects_redirect_to_internal` (25-01)
+
+## SECHRD-03: Rate-Limit Client-IP Keying
+
+**Priority:** High | **Source:** SEC-048, SEC-060
+
+Fix the XFF fallback that returns the client-controlled leftmost hop and reconcile `trusted_hops` guidance with nginx's append semantics.
+
+### Acceptance Criteria
+- [x] When `trusted_hops >= hops.len()`, ignore XFF and use `peer_addr()` (do not return `hops[0]`) — `XForwardedForKeyExtractor::extract` (24-03)
+- [x] `trusted_hops` docs corrected for nginx `proxy_add_x_forwarded_for` (rightmost = real client) (24-03)
+- [x] Rotating `X-Forwarded-For` per request no longer yields a fresh bucket (test) — `rate_limit_xff_rotation_rejected` (24-03)
+- [x] Multi-replica shared rate-limit store implemented, or the per-replica multiplier documented loudly — `rate_limit_bucket` table + `RateLimitShared` middleware (24-04); gRPC parity implemented+tested (24-07) and wired into production `start_grpc_server`/`main.rs` (24-07 gap-closure)
+
+## SECHRD-04: Bootstrap Atomicity & Mandatory Gate
+
+**Priority:** High | **Source:** SEC-049
+
+Close the initialized-check TOCTOU and require the bootstrap gate unconditionally.
+
+### Acceptance Criteria
+- [x] First-super-admin creation is a single conditional/transactional operation keyed on a uniqueness invariant (two concurrent first-run requests ⇒ at most one super-admin) — `bootstrap_lock` uniqueness-invariant CREATE folded into the admin-creation transaction (24-08)
+- [x] `AXIAM_BOOTSTRAP_ADMIN_EMAIL` (or a one-time setup token) is required unconditionally — an unset var does NOT allow arbitrary bootstrap — mandatory fail-closed gate (24-08)
+- [x] Concurrency test proves single-admin invariant — `bootstrap_test.rs::bootstrap_concurrent_race_single_admin` (24-08)
+
+## SECHRD-05: mTLS CA Status & Validity Enforcement
+
+**Priority:** Medium | **Source:** SEC-061 (SEC-024 residual)
+
+Assert the issuing CA is Active and within its validity window before trusting it for device-cert auth.
+
+### Acceptance Criteria
+- [x] `mtls.rs` checks CA `status == Active` and current time within CA validity before `verify_signature` (25-03)
+- [x] Revoked/expired CA ⇒ device auth fails closed (test) — `mtls_rejects_revoked_issuing_ca`, `mtls_rejects_expired_issuing_ca` (25-03)
+
+## SECHRD-06: GDPR Erasure Durability & Ledger Integrity
+
+**Priority:** High | **Source:** SEC-063, SEC-065, SEC-066, CQ-B38 residual
+
+Never certify an erasure while PII survives; make the erasure ledger and export dedup correct.
+
+### Acceptance Criteria
+- [x] `audit_repo.pseudonymize_actor` failure is fatal to the purge (leave re-selection flags set) — proof written only after every PII-bearing step succeeds — `cleanup.rs:327-344` (25-05, extracted `run_erasure_pipeline`)
+- [x] Erasure-proof rows are unique per user (no duplicate proof on late-stage retry) — `cleanup.rs:337-380` (25-04 DB UNIQUE index on `(tenant_id, user_id)`; 25-05 proof-last ordering makes a retry's duplicate CREATE idempotently rejected)
+- [x] Export dedup also blocks when a `ready`-but-undownloaded or `failed` job exists (not only `queued`) — `export_job.rs:102-126` (25-04)
+- [x] Export includes real `sessions` data (not hardcoded `[]`) and honors per-item shutdown checks (25-05: `session_repo.list_by_user` projection, `token_hash` excluded; sweep-level shutdown handling is the pre-existing top-level `tokio::select!`/watch-channel behavior, unchanged by this plan)
+- [x] Tests: failed pseudonymize ⇒ user re-selected, no proof (25-05: `erasure_pipeline_fatal_on_pseudonymize_failure`); duplicate export request rejected (25-04: `export_job_dedup_blocks_ready_and_failed`)
+
+## SECHRD-07: Federation Nonce From Server State (authenticated path)
+
+**Priority:** Medium | **Source:** SEC-004 residual
+
+The account-linking OIDC callback must derive the expected nonce from server-side state, not the request body.
+
+### Acceptance Criteria
+- [x] `handlers/federation.rs:595-648` derives `expected_nonce` from stored login state (same as the public path), ignoring `req.nonce`
+- [x] Replay test: a request-supplied nonce cannot satisfy verification
+
+## SECHRD-08: AMQP Signing Key & ExportReady Delivery
+
+**Priority:** Medium | **Source:** SEC-022, SEC-055, CQ-B05 residual
+
+Make AMQP message signing mandatory in production, per-tenant, and fix undeliverable ExportReady mail.
+
+### Acceptance Criteria
+- [x] `AXIAM__AMQP__SIGNING_KEY` mandatory in production (fail closed; no warn-and-process) — 25-07
+- [x] Signing key scoped per tenant (or per-tenant queues + broker ACLs) so a tenant-A signature can't validate a tenant-B message — 25-07 (HKDF-derived per-tenant subkey, D-05a/b)
+- [x] ExportReady producer resolves real `org_id` from tenant (or consumer resolves it) — `cleanup.rs:510` no longer enqueues `Uuid::nil()` — 25-05 (`tenant_repo.get_by_id(tenant_id).organization_id`)
+- [x] Mail-retry republish uses a backoff delay — 25-08 (in-process `tokio::time::sleep`, scaled by `attempt_count`, mirrors `webhook.rs`)
+- [x] Test: ExportReady mail is deliverable end-to-end — 25-08 (`export_ready_resolves_real_org_id`; consumer-side proof, producer-side org_id fix still pending 25-05)
+
+## SECHRD-09: Federation Secret Non-Serialization
+
+**Priority:** Medium | **Source:** SEC-017, SEC-043 residual
+
+Prevent any future handler from leaking encrypted federation/PKI secrets by serializing the model directly.
+
+### Acceptance Criteria
+- [x] `#[serde(skip_serializing)]` on `FederationConfig` `client_secret` / `client_secret_ciphertext` / `_nonce` / `_key_version`
+- [x] `Debug` impls do not print CA/PGP/secret blobs; list queries do not hydrate encrypted columns needlessly
+
+## SECHRD-10: Network Egress & K8s Secret Completeness
+
+**Priority:** Medium | **Source:** SEC-053, SEC-052 residual
+
+Allow required egress under default-deny and complete the k8s secret set.
+
+### Acceptance Criteria
+- [x] SMTP egress NetworkPolicy (ports 25/465/587) added so verification/GDPR-export mail works in-cluster — fail-closed default (RFC 5737 TEST-NET-1 placeholder CIDR); runtime enforcement on a real relay CIDR deferred (see note below)
+- [x] `0.0.0.0/0:443` egress rule tightened with pod/service cluster-CIDR exclusions
+- [x] K8s secret includes federation/email/GDPR/pepper keys; CI `test` job uses the correct `AXIAM__…` prefix
+
+**Note (25-10):** Code/manifest deliverables above are complete and YAML-valid/fail-closed by construction. The plan's `checkpoint:human-verify` gate (NetworkPolicy enforcement + secret resolution on a real/kind cluster) could not be executed — no cluster was available — and was deferred to deploy time per user decision. Tracked as `.planning/phases/99-followups/25-10-networkpolicy-cluster-verification.md`.
+
+## SECHRD-11: Public-Path Allowlist Hardening
+
+**Priority:** Medium | **Source:** T19.25
+
+Require a segment boundary in public-path wildcard matching and normalize the path before the exclusion check.
+
+### Acceptance Criteria
+- [x] Wildcard public entries match only on a path-segment boundary (e.g. `/api/v1/auth/*` does not match `/api/v1/authz/...`)
+- [x] Path normalized before the allowlist check — collapse `//`, resolve/reject `..` traversal
+- [x] Negative test: a non-canonical route cannot slip past the allowlist
+
+## SECHRD-12: Auth Crypto & Recovery Side-Channels
+
+**Priority:** Medium | **Source:** T19.23, T19.24, T19.27, SEC-028 residual
+
+Close remaining auth-path timing/memory/durability side-channels.
+
+### Acceptance Criteria
+- [x] Constant-time password-reset: ineligible/unknown/federated path performs an equivalent dummy hash + async wait so response time doesn't distinguish valid emails (T19.23) — 24-09
+- [x] Peppered-password buffer wrapped with `zeroize` (pepper via `secrecy`) and wiped before return (T19.24) — 24-05
+- [x] GDPR audit-write failure falls back to a persistent dead-letter file / audit syslog for durability (T19.27) — 24-06
+- [x] Unauthenticated reset path blocks reuse of the current password; initial passwords seeded into history (SEC-028 residual) — 24-09
+
+---
+
+## CORR-01: gRPC Governor Throughput Semantics
+
+**Priority:** High | **Source:** CQ-B44
+
+The governor currently throttles the mesh to ~1 token / 100 s (per_second semantics inverted).
+
+### Acceptance Criteria
+- [x] Use `per_millisecond(1000 / authz_per_sec)` (or `Quota::per_second`) with a separate burst — `rate_limit.rs:40-47`
+- [x] Raising `grpc_authz_per_sec` increases throughput (not decreases it)
+- [x] Test asserts sustained throughput ≈ configured rate
+
+## CORR-02: SurrealDB Token Renewal / Reconnect
+
+**Priority:** High | **Source:** CQ-B45
+
+The 4-week root-token TTL with no renewal is an uptime ceiling on the control plane.
+
+### Acceptance Criteria
+- [x] Periodic re-`signin`/handle-refresh well inside the token TTL, OR reconnect-on-auth-error path — `connection.rs` (26-02: proactive re-signin task D-03/D-04 + reactive `DbManager::reconnect` seam)
+- [x] `health_check` surfaces auth-expiry as unhealthy (readiness alarm) — `DbError::Unhealthy` via `classify_query_error` (D-05)
+- [x] Test/simulation proves the client recovers after token expiry without a process restart — `connection_resilience_test.rs` (pure-logic interval/classification tests pass; live-broker recovery proof is `#[ignore]`d, requires `just dev-up`)
+
+## CORR-03: Webhook Delivery Wiring
+
+**Priority:** High | **Source:** CQ-B22 (+ depends on SECFIX-03)
+
+Wire webhook delivery through a durable path with retry; today `.deliver(` has zero call sites.
+
+### Acceptance Criteria
+- [x] Delivery driven from a persistent queue (AMQP) rather than a detached `tokio::spawn`; survives restart — 26-03: `emit()`/`deliver_once()` split + `axiam.webhook`/`axiam.webhook.retry`/`axiam.webhook.dlq` topology; 26-07: `start_webhook_consumer` drives `deliver_once` from the durable queue, wired into `main.rs` on startup
+- [x] HMAC-SHA256 signature header; exponential-backoff retry; delivery status written to the audit trail — 26-03: Stripe-style `t=,v1=` signature (D-10); 26-07: `backoff_ttl_ms` bounded exponential backoff via retry-queue TTL (D-08) + per-attempt/terminal `webhook.delivery_*` audit records (D-09)
+- [x] Depends on SECFIX-03 (secret encrypted on write) so the decrypt-on-deliver step succeeds — AES-256-GCM secret decrypt in `deliver_once` (SEC-031, 26-03)
+- [x] Integration test: registered webhook receives a signed delivery; failed delivery retries — `webhook_consumer_test.rs` (26-07): broker-free attempt-increment/backoff assertions pass; `#[ignore]`d live-RabbitMQ test proves retry->DLQ->audit end-to-end (requires `just dev-up`, not run in this sandbox — see 26-07-SUMMARY.md coverage D4)
+
+## CORR-04: Playwright Runs in CI with Body Assertions
+
+**Priority:** High | **Source:** CQ-F36, cross-ref SEC-044/CQ-F27
+
+The CI "e2e" job runs vitest, not Playwright — all 12 specs never execute.
+
+### Acceptance Criteria
+- [x] CI e2e step runs `npx playwright test` (vitest kept as its own step) — `.github/workflows/ci.yml` (26-04: `npm run test:e2e` wired as a distinct blocking step; `npm test`/vitest added as its own separate blocking step)
+- [x] The auth/login/contract specs execute against the seeded backend and gate the build — all 13 present specs (105 tests) discoverable via `playwright test --list`, none skipped; true CI pass is the manual/CI-only verification per 26-04-PLAN.md
+- [x] The contract spec asserts request **bodies**, catching SECFIX-06 regressions — `auth-contract.spec.ts` confirmed (already authored in 23-06) asserting `tenant_id`/`email`/`token`/`new_password`/`org_slug`/`tenant_slug` via `postDataJSON()`
+- [x] `playwright-report` artifact reflects real runs — upload step retained unchanged; now fed by an actual Playwright run instead of vitest
+
+## CORR-05: Frontend Tenant Context & MFA-Setup Landing
+
+**Priority:** High | **Source:** CQ-F29, CQ-F31
+
+### Acceptance Criteria
+- [x] `/auth/me` (`MeResponse`/`LoginUserInfo`) emits `tenant_slug`/`org_slug`; Topbar restores tenant after hard reload (CQ-F29 — backend + frontend) — 26-05 (backend slugs) + 26-08 (frontend restore verified via fetchCurrentUser + e2e)
+- [x] `mfa_setup_required` landing reads the `setup_token` and enrolls via the setup endpoint (no dead end for MFA-mandated users) — CQ-F31 (26-08: public `/auth/mfa-setup?setup_token=...` route, D-16)
+
+## CORR-06: Frontend Residual Correctness
+
+**Priority:** Medium | **Source:** CQ-F19, CQ-F37, CQ-F38
+
+### Acceptance Criteria
+- [x] VerifyEmailPage uses a `useRef` once-guard (no StrictMode double-fire / false "failed") — CQ-F19 (26-06: `verifiedRef` guard, `VerifyEmailPage.tsx`)
+- [x] Dashboard gets a distinct query key so `["users",1,""]` no longer collides with UsersPage's different page size — CQ-F37 (26-06: `DASHBOARD_USER_COUNT_QUERY_KEY` in `lib/queryClient.ts`, regression test in `DashboardPage.test.ts`)
+- [x] Org settings form guards init on first load / tracks dirtiness (no discard of in-progress edits on refocus) — CQ-F38 (26-06: `initializedRef`/`isDirty`/`beforeunload`/`useBlocker` in `OrganizationDetailPage.tsx`, pure logic tested in `OrganizationDetailPage.test.tsx`)
+
+---
+
+## PERF-01: HIBP Circuit Breaker & Hot-Path Pre-Sizing
+
+**Priority:** Medium | **Source:** T19.26
+
+### Acceptance Criteria
+- [x] `check_hibp` wrapped in a circuit breaker that trips on repeated failure/timeout and fails open (`Ok(None)`) for a cooldown window — 27-01: `HibpBreaker` (`crates/axiam-auth/src/hibp_breaker.rs`), short-circuits before the HTTP call, config-driven threshold/cooldown
+- [x] Hot-path violation/segment vectors pre-sized with `Vec::with_capacity(n)` (complexity checker, authz middleware, SDK serialization maps) — 27-01: complexity checker done (`check_complexity` → `Vec::with_capacity(5)`); no authz-middleware path-segment Vec exists (27-RESEARCH.md Pitfall 1); SDK serialization maps DEFERRED to a future performance milestone (accepted human scope call 2026-07-05)
+- [~] Load test: a credential-stuffing burst does not starve legitimate flows — DEFERRED to a future performance milestone (accepted human scope call 2026-07-05): breaker mechanism unit-proven (9/9 tests, short-circuits before the HTTP call); k6/HTTP-level load testing deferred per CONTEXT.md D-14/D-15
+
+## PERF-02: Concurrent Bounded BatchCheckAccess
+
+**Priority:** Medium | **Source:** T19.2, CQ-B20
+
+### Acceptance Criteria
+- [x] `BatchCheckAccess` evaluates requests concurrently with bounded concurrency (`buffer_unordered`/`FuturesUnordered`), result order preserved — 27-05: `AuthzConfig.batch_max_concurrency` (default 16) wired through gRPC (`AuthorizationServiceImpl`) and REST (`handlers::authz_check::batch_check_access`); both use `stream::iter(enumerate).map(...).buffer_unordered(n).collect()` then `sort_by_key(index)`
+- [x] Benchmark shows improvement over the sequential implementation — 27-07: `authz_bench` criterion run, sequential 95.9ms vs `buffer_unordered(16)` 11.4ms (~8.4x speedup), recorded in `claude_dev/performance-report.md`
+- [x] Correctness test: batch results match per-item `CheckAccess` — 27-05: correctness tests for both transports assert batch == sequential per-item results, same order
+
+## PERF-03: JWKS Single-Flight Across SDKs
+
+**Priority:** Medium | **Source:** T19.28
+
+### Acceptance Criteria
+- [x] JWKS fetch wrapped in a single-flight promise/future so N concurrent cache-misses await one network request
+- [x] Applied consistently across Python, Go, Rust, Java, C#, TypeScript, and PHP SDKs
+- [x] Test: burst of invalid-`kid` tokens triggers exactly one JWKS fetch
+
+## PERF-04: SurrealDB Reconnect Resilience
+
+**Priority:** Medium | **Source:** T19.33, T19.34
+
+### Acceptance Criteria
+- [x] Reconnect loop uses exponential backoff with **full jitter**, a `max_backoff` ceiling, and a bounded retry count that surfaces a critical error (no flat-interval hammering)
+- [x] Poisoned connections (topology anomaly / handshake timeout) are dropped and regenerated, never recycled into the healthy pool
+- [x] Test/simulation: competing workers desynchronize; a failed handshake does not leak a broken handle
+
+## PERF-05: Load Testing & Critical-Path Profiling
+
+**Priority:** Medium | **Source:** T18.3
+
+### Acceptance Criteria
+- [x] Load-test harness (k6 and/or criterion benches) for auth, authz check, and certificate validation
+- [x] Critical paths profiled; measurable optimizations applied where warranted
+- [x] Results documented in `claude_dev/performance-report.md` with baseline vs optimized numbers
+
+---
+
+## FUNC-01: Unauthenticated First-Time Federation Login
+
+**Priority:** High | **Source:** T19.9
+
+### Acceptance Criteria
+- [x] `POST /auth/federation/oidc/login` (OIDC) completes the external flow and returns AXIAM access/refresh tokens for first-time users (no pre-existing local account) — proven e2e (28-05). SAML first-time-login path is implemented + integration-covered; a full SAML end-to-end test is an accepted documented deferral (ROADMAP SC1 is met via the OIDC path — "oidc/login OR saml/login" — and the shared downstream provisioning is exercised by the OIDC e2e)
+- [x] Existing authenticated endpoints remain for account-linking (the `/api/v1/federation/*` link-account routes are unchanged and still require auth)
+- [x] Federation metadata endpoint auth model made consistent — RESOLVED (FUNC-01 human scope decision, D-15): SAML SP metadata is admin-authenticated (JWT via `AuthenticatedUser`), NOT public. The original "is public" wording was incorrect for this admin endpoint; the stale `PUBLIC_PATHS` entry was removed so the middleware allowlist matches the handler. Authenticated behavior covered by `federation_test::saml_metadata_returns_xml`
+- [x] E2e: create federation config via API, then complete a first-time login (closes CQ-B40 gap) — 28-05 `federation_first_time_sso_test::first_time_oidc_sso_sets_cookies_and_me_succeeds` (verifier-confirmed pass)
+
+## FUNC-02: Session Invalidation on Password Reset
+
+**Priority:** High | **Source:** T19.10, REQ-7 (v1.0 carryover), OWASP ASVS 3.3.1
+
+### Acceptance Criteria
+- [x] `confirm_reset` invalidates all active sessions/refresh tokens for the user (threads `SessionRepository` into `PasswordResetService`) — verifier-confirmed
+- [x] Test: after reset, prior sessions are rejected — `password_reset_confirm_revokes_existing_sessions` (1/1, verifier re-ran)
+
+## FUNC-03: Admin Email-Config API & Template Delivery
+
+**Priority:** Medium | **Source:** T19.20, T19.21, T19.22
+
+### Acceptance Criteria
+- [x] Admin REST CRUD for `email_config` (org- and tenant-scoped), guarded by `email_config:write` RBAC permission (T19.20) — Phase 28-04
+- [x] Mail consumer resolves per-org/per-tenant custom templates via `SurrealEmailTemplateRepository` (not the built-in default only) — T19.21 — Phase 28-03
+- [x] `backfill_plaintext_secrets` implements the UPDATE path (encrypt + update rows where ciphertext is NULL) — T19.22 — Phase 28-01 (documented as an honest no-op: `email_config` was created ciphertext-only in Schema v15, so there is no plaintext source to migrate; the anomaly-detector satisfies the "no plaintext secrets at rest" intent structurally instead)
+
+## FUNC-04: Admin User & MFA Management Endpoints
+
+**Priority:** Medium | **Source:** codebase CONCERNS.md T19 TODOs, REQ-7
+
+### Acceptance Criteria
+- [x] Admin user-listing endpoint enabled (RBAC-gated) — 28-02: `list_users_non_privileged_caller_returns_403` proves the `users:list` gate (9/9)
+- [x] Admin list/delete MFA methods for other users (RBAC-gated) — 28-02: verified by code read (`users:admin` gate + `is_own_resource` self-service bypass), per the plan's verify-only scope
+- [x] Service-account dedicated token type with `sub_kind: "ServiceAccount"` — 28-02: `issue_service_account_token` stamps `SubjectKind::ServiceAccount`, wired at the SA cert-auth call-site (24/24 token tests, 6/6 device_auth)
+
+## FUNC-05: OpenAPI Login Response Schema
+
+**Priority:** Low | **Source:** T19.4
+
+### Acceptance Criteria
+- [x] `POST /auth/login` OpenAPI documents both `LoginSuccessResponse` and `MfaRequiredResponse` (via `oneOf` or distinct status codes) so generated SDKs model it correctly — 28-04: `route_openapi_parity` (2/2, 200/202/403/401 distinct)
+
+---
+
+## QUAL-01: AppState Extraction
+
+**Priority:** Medium | **Source:** CQ-B43
+
+### Acceptance Criteria
+- [x] `main.rs` composes a single `AppState` instead of ~45 inline `app_data` registrations — 29-03: `AppState<C>` in `state.rs`, one `.app_data()` registration in `main.rs` (verifier-confirmed)
+- [x] Handlers extract dependencies from `AppState`; no behavior change (tests green) — 29-03: 28/29 handler files on `web::Data<AppState<C>>`, 0 taking individual repo `web::Data`; phase-end workspace regression gate green (886 tests, 0 failures)
+
+## QUAL-02: Generic Pagination & Shared Repo Helpers
+
+**Priority:** Medium | **Source:** CQ-B10
+
+### Acceptance Criteria
+- [x] A generic `paginate<T>` helper exists and is adopted; the 24 duplicated `CountRow` definitions collapse to the shared `helpers::CountRow` — **29-04: helper added + adopted in file-group A (8 of the 24 duplicates collapsed); 29-05: file-group B (16 remaining) collapsed — all 24 done**
+- [x] Repos use `helpers::parse_uuid`/`take_first_or_not_found` instead of inline duplicates — **29-04: file-group A + scope.rs migrated; 29-05: file-group B migrated and federation_link.rs's duplicate parse_uuid removed — done**
+
+## QUAL-03: Error Taxonomy Correctness
+
+**Priority:** Medium | **Source:** CQ-B11, CQ-B17, CQ-B18
+
+### Acceptance Criteria
+- [x] Index/unique violations on mainstream create paths map to `DbError::AlreadyExists` → HTTP 409 (not `Migration` → 500) — incl. user create, edge-uniqueness (CQ-B17)
+- [x] `helpers::parse_uuid` does not label a corrupt-data read as "Migration failed"
+- [x] OAuth2 handlers distinguish DB outage from `invalid_client` (CQ-B18)
+
+## QUAL-04: Transactional Multi-Statement Mutations
+
+**Priority:** Medium | **Source:** CQ-B07, CQ-B46, CQ-B38 setup
+
+### Acceptance Criteria
+- [x] Role/permission edge deletes are transactional AND tenant-predicated (closes the cross-tenant edge-strip in CQ-B07/SEC-058 family)
+- [x] `resource::delete` child-guard + delete wrapped in one transaction (no TOCTOU — CQ-B46)
+- [x] GDPR deletion setup is transactional (a `create` failure after `mark_deletion_pending` cannot strand an uncancellable purge — CQ-B39 residual)
+
+## QUAL-05: PKI Helper Deduplication
+
+**Priority:** Low | **Source:** CQ-B15
+
+### Acceptance Criteria
+- [x] `CertService` reconstructs the CA via `from_ca_cert_pem` (not from the subject CN) — **29-06: replaced `build_ca_params(&ca_cert.subject)` with `CertificateParams::from_ca_cert_pem(&ca_cert.public_cert_pem)`, locked by an identical-issuer-DN regression test (T-29-11/D-08)**
+- [x] Keypair/fingerprint/encrypt helpers are shared, not triplicated across ca/cert/pgp — **29-06: consolidated into `crates/axiam-pki/src/crypto.rs` (generate_keypair, compute_fingerprint, encrypt_secret, decrypt_secret); ca/cert import all four, pgp imports encrypt_secret/decrypt_secret only**
+
+## QUAL-06: Frontend Shared Components & Services Adoption
+
+**Priority:** Medium | **Source:** CQ-F15, CQ-F39, CQ-F17
+
+### Acceptance Criteria
+- [x] Pages import the extracted `ToggleField`/`SectionCard`/`InfoRow`/`ActionBadge`/`slugify`/`useCrudMutations` (local duplicates removed) — or the dead modules are deleted — **29-07: shared.tsx ActionBadge case/fallback/className fixed then adopted by 9 pages + RoleDetailPage's dead export removed; OrganizationsPage/OrganizationDetailPage on shared slugify; RolesPage on useCrudMutations. UserDetailPage's InfoRow and SettingsPage's ToggleField intentionally kept local (genuinely diverge from shared.tsx, not byte-identical as assumed — see 29-07-SUMMARY Deviations). Playwright suite + Task 3 manual smoke pending (sandbox could not run e2e — browser-binary version mismatch)**
+- [x] Profile/MFA pages call a typed users service instead of inline `api.*` calls — **29-07: ProfilePage/MfaManagementPage route through userService.get/update/listMfaMethods/deleteMfaMethod; raw @/lib/api import removed from both**
+
+## QUAL-07: Dead-Code & Per-Request-Construction Cleanup
+
+**Priority:** Low | **Source:** CQ-B47, CQ-B27
+
+### Acceptance Criteria
+- [x] The second `verify_password` Argon2 impl (`user.rs:829-852`, re-exported) is deleted (pepper-less-caller trap) — 29-04
+- [x] Federation/reset/verification services are constructed once (not per request across 9+ sites) — 29-03
+
+---
+
+## CMPL-01: Security Audit Checklist
+
+**Priority:** High | **Source:** T18.1
+
+### Acceptance Criteria
+- [x] Checklist mapped to OWASP ASVS (Level 2 for IAM controls), ISO 27001, and CyberSecurity Act — 30-01 (`claude_dev/security-audit.md` §2 ASVS L2, §3 ISO 27001 Annex A family level, §4 CyberSecurity Act/CRA theme level)
+- [x] Every authentication, session, access-control, cryptography, and PKI requirement verified with a pass/fail + evidence pointer — 30-01 (citation index over `docs/compliance/` + `.planning/REQUIREMENTS.md`, D-01/D-03)
+- [x] Findings and remediations documented in `claude_dev/security-audit.md`; open items cross-referenced to this milestone's REQ-IDs — 30-01 (§7 open-items register with v1.2 REQ-ID column; F-03/F-05 corrections + SBOM-01)
+
+## CMPL-02: GDPR Completeness
+
+**Priority:** High | **Source:** T18.2, REQ-8 (v1.0 carryover)
+
+### Acceptance Criteria
+- [x] User data export (`GET /api/v1/users/:id/export`) covers every table incl. real sessions; optional PGP encryption — 30-02 (async `POST /account/export` → `GET /account/export/{token}` flow documented as canonical per D-05; `export_completeness` + `export_includes_real_session_metadata` re-run and passing; optional PGP via `POST /api/v1/pgp-keys/{id}/encrypt`)
+- [x] Account deletion (right to be forgotten) pseudonymizes audit PII durably (ties to SECHRD-06) — 30-02 (`deletion_pseudonymization` re-run and passing; cites SECHRD-06 `pseudonymize_actor` + `erasure_proof` UNIQUE index)
+- [x] Consent tracking recorded and exportable — 30-02 (`consent_on_registration` re-run and passing; D-06 scope: record+export present, UI/withdrawal deferred)
+- [x] Compliance measures documented — 30-02 (`docs/compliance/gdpr-compliance.md`)
+
+---
+
+## DOCS-01: Comprehensive Documentation
+
+**Priority:** Medium | **Source:** T18.4
+
+### Acceptance Criteria
+- [x] REST (OpenAPI), gRPC (proto), and AMQP (AsyncAPI) API docs — 30-03 (`docs/api/asyncapi.yml` hand-authored AsyncAPI 2.6 spec covering all 11 AMQP queues/6 message types; `docs/api/openapi.json` symlinked to the drift-gated `sdks/openapi.json` (refreshed — was stale); `docs/api/grpc.md` + `docs/api/README.md`)
+- [x] Deployment guide (Docker/K8s, required env/secrets, NetworkPolicies) — 30-04 (`docs/deployment/README.md`: Docker Compose + Kubernetes paths, required `AXIAM__*` secret KEY names table, all 6 `k8s/network-policy/` files documented)
+- [x] Admin guide + PKI/certificate guide — 30-04 (`docs/admin/README.md`: SECHRD-04 bootstrap gate + org/tenant/user/role/permission task walkthroughs; `docs/pki/README.md`: CA/leaf cert issuance, service-account mTLS bind vs. Device fingerprint auth, revocation)
+- [x] SDK getting-started guides (link to the 7 SDK READMEs) — 30-05 (`docs/README.md` links all 7 `sdks/*/README.md`, D-09 link-out)
+- [x] Consolidated under `docs/` — 30-05 (`docs/README.md` top-level index links every section: `api/`, `deployment/`, `admin/`, `pki/`, `compliance/`, plus `claude_dev/security-audit.md`; validated end-to-end by new `scripts/check-doc-links.sh`, 109/109 relative links resolve)
+
+---
+
+## v1.2 Dependency Map
+
+```
+SECFIX-03 (encrypt-at-rest, fail-closed key) ── must precede ──► CORR-03 (webhook delivery decrypt)
+SECFIX-06 (reset/resend bodies) ──────────────── verified by ──► CORR-04 (Playwright body assertions)
+CORR-05 (/auth/me slugs) ─────────────────────── backend precedes frontend restore
+SECHRD-06 (erasure durability) ───────────────── feeds ────────► CMPL-02 (GDPR completeness)
+QUAL-03 (error taxonomy) / QUAL-04 (transactions) ── touch security-adjacent paths; sequence before/with QUAL-01 (AppState)
+FUNC-04 (admin endpoints) ────────────────────── depends on ───► per-endpoint RBAC being enforced (already landed; re-verify)
+```
+
+Security regressions (SECFIX-01..06) are the highest priority and should land first. Structural-quality (QUAL-*) lands after security/correctness so refactors don't churn unreviewed security code.
+
+## v1.2 Traceability (phase mapping filled by roadmapper)
+
+| Requirement | Phase | Description | Status |
+|-------------|-------|-------------|--------|
+| SECFIX-01 | Phase 23 | gRPC UserService/TokenService auth (SEC-003) | Complete |
+| SECFIX-02 | Phase 23 | Tenant guard on live grant path (SEC-058) | Complete |
+| SECFIX-03 | Phase 23 | Webhook fail-closed key + encrypt-at-rest (SEC-059/031) | Complete |
+| SECFIX-04 | Phase 23 | SAML signature↔assertion binding (SEC-005) | Complete (residual: Recipient/SubjectConfirmationData deferred) |
+| SECFIX-05 | Phase 23 | Logout revokes session (SEC-015) | Complete |
+| SECFIX-06 | Phase 23 | Reset/resend tenant_id (SEC-044) | Complete |
+| SECHRD-01 | Phase 24 | TOTP atomic replay protection (SEC-008) | Complete |
+| SECHRD-02 | Phase 25 | SSRF address pinning (SEC-019/064) | Complete |
+| SECHRD-03 | Phase 24 | Rate-limit client-IP keying (SEC-048/060) | Complete (REST keying + shared store 24-03/24-04; gRPC key-extractor parity live + shared-store layer implemented+tested+wired 24-07 + 24-07 gap-closure — `GrpcSharedRateLimitLayer` now `.layer()`'d into `start_grpc_server`/`main.rs`, fail-open ahead of the in-memory governor) |
+| SECHRD-04 | Phase 24 | Bootstrap atomicity + gate (SEC-049) | Complete |
+| SECHRD-05 | Phase 25 | mTLS CA status/validity (SEC-061) | Complete |
+| SECHRD-06 | Phase 25 | GDPR erasure durability + ledger (SEC-063/065/066) | Complete |
+| SECHRD-07 | Phase 25 | Federation nonce from server state (SEC-004) | Complete |
+| SECHRD-08 | Phase 25 | AMQP key + ExportReady delivery (SEC-022/055) | Complete (mandatory per-tenant HKDF signing 25-07; mail-retry backoff + deliverability test 25-08; producer-side org_id resolution 25-05) |
+| SECHRD-09 | Phase 25 | Federation secret skip_serializing (SEC-017) | Complete |
+| SECHRD-10 | Phase 25 | Egress + k8s secret completeness (SEC-053/052) | Complete (code) — cluster NetworkPolicy/secret verification deferred (99-followups/25-10-networkpolicy-cluster-verification.md) |
+| SECHRD-11 | Phase 24 | Public-path allowlist hardening (T19.25) | Complete |
+| SECHRD-12 | Phase 24 | Auth crypto/recovery side-channels (T19.23/24/27) | Complete |
+| CORR-01 | Phase 26 | gRPC governor throughput (CQ-B44) | Complete (26-01: Quota::per_second construction + sustained-throughput/monotonicity test) |
+| CORR-02 | Phase 26 | SurrealDB token renewal/reconnect (CQ-B45) | Complete (26-02: Arc-shared proactive re-signin + reactive reconnect seam + auth-aware health_check) |
+| CORR-03 | Phase 26 | Webhook delivery wiring (CQ-B22) | Complete (26-03: emit()/deliver_once() split + AMQP topology/publisher/signature; 26-07: durable consumer with TTL+DLX retry, DLQ, and per-attempt/terminal audit, wired into main.rs) |
+| CORR-04 | Phase 26 | Playwright in CI + body assertions (CQ-F36) | Complete |
+| CORR-05 | Phase 26 | Tenant context + MFA-setup landing (CQ-F29/F31) | Complete (26-05: backend tenant_slug/org_slug; 26-08: public /auth/mfa-setup route D-16 + tenant-restore e2e) |
+| CORR-06 | Phase 26 | Frontend residual correctness (CQ-F19/37/38) | Complete (26-06: VerifyEmailPage useRef guard D-17, Dashboard distinct query key D-18, org-settings init-guard/dirty-tracking/navigate-away guard D-19) |
+| PERF-01 | Phase 27 | HIBP circuit breaker + pre-sizing (T19.26) | Complete (27-01: `HibpBreaker` short-circuits before the HTTP call, 9/9 unit tests, complexity-checker pre-sizing done. Load-test starvation proof + SDK-serialization-map pre-sizing DEFERRED to a future performance milestone — accepted human scope call 2026-07-05, see 27-VERIFICATION) |
+| PERF-02 | Phase 27 | Concurrent BatchCheckAccess (T19.2/CQ-B20) | Complete (27-05: gRPC+REST `buffer_unordered`+`sort_by_key`, `AuthzConfig.batch_max_concurrency`=16, correctness tests batch==sequential; 27-07: `authz_bench` ~8.4x speedup) |
+| PERF-03 | Phase 27 | JWKS single-flight across SDKs (T19.28) | Complete (27-02: rust/python; 27-03: go/java/csharp; 27-04: typescript proven via jose's native pendingFetch guard + php Guzzle-promise guard) |
+| PERF-04 | Phase 27 | SurrealDB reconnect resilience (T19.33/34) | Complete (27-06: full-jitter backoff + Arc<RwLock<Surreal<Client>>> poisoned-handle eviction + exhaustion-stays-Unhealthy-forever reconnect loop) |
+| PERF-05 | Phase 27 | Load testing + profiling (T18.3) | Complete (27-07: criterion benches for auth/authz/cert-validation; performance-report.md with real baseline-vs-optimized numbers, ~8.4x authz batch speedup) |
+| FUNC-01 | Phase 28 | Unauthenticated federation login (T19.9) | Complete (28-05 + FUNC-01 human scope decision D-15): OIDC first-time SSO proven e2e (closes CQ-B40); SAML SP metadata correctly admin-authenticated — stale PUBLIC_PATHS entry removed so middleware matches the JWT-gated handler, AC reworded; full SAML first-time-login e2e test is an accepted documented deferral (ROADMAP SC1 met via OIDC). See 28-VERIFICATION.md. |
+| FUNC-02 | Phase 28 | Session invalidation on reset (T19.10) | Complete (28-05 verified: confirm_reset threads SessionRepository into PasswordResetService; password_reset_confirm_revokes_existing_sessions passes) |
+| FUNC-03 | Phase 28 | Admin email-config API + templates (T19.20/21/22) | Complete (28-01: T19.22 backfill honesty; 28-03: T19.21 custom-template resolution; 28-04: T19.20 admin REST CRUD, RBAC-gated, IDOR-safe, secret-omitting) |
+| FUNC-04 | Phase 28 | Admin user/MFA endpoints + SA token | Complete (28-02 verified: SubjectKind::ServiceAccount mint path + issue_service_account_token; admin user-listing RBAC-403 test; MFA admin-gating confirmed by code read per verify-only scope) |
+| FUNC-05 | Phase 28 | OpenAPI login response schema (T19.4) | Complete (28-04 verified: route_openapi_parity — POST /auth/login documents 200/202/403/401 distinctly for SDK accuracy) |
+| QUAL-01 | Phase 29 | AppState extraction (CQ-B43) | Complete (29-03: AppState<C> composition root in state.rs replaces ~48 inline app_data registrations in main.rs; every REST handler + the 7 non-handler extraction sites migrated to web::Data<AppState<C>>; 3 deps kept standalone for the non-generic AuthenticatedUser extractor + cross-crate AuditMiddleware, documented in state.rs. Executor stalled at commit-step on disk-quota; work recovered + full-suite verified by orchestrator — lib 69/69, all api-rest + server integration incl. OIDC/SAML e2e green; phase-end workspace regression gate green) |
+| QUAL-02 | Phase 29 | Generic paginate + shared helpers (CQ-B10) | Complete (29-04: helpers::paginate<T> added with unit tests; adopted across file-group A — organization, tenant, permission, resource, service_account, session, audit, group + scope.rs's take_first_or_not_found-only migration. 29-05: file-group B — ca_certificate, certificate, email_config, email_verification_token, export_job, federation_config, federation_login_state, notification_rule, oauth2_auth_code, oauth2_client, oauth2_refresh_token, password_reset_token, pgp_key, saml_replay, webauthn_credential, webhook — deduped; federation_link.rs's duplicate parse_uuid removed and its 7 call sites routed through helpers::parse_uuid. All 24 CountRow duplicates collapsed) |
+| QUAL-03 | Phase 29 | Error taxonomy correctness (CQ-B11/17/18) | Complete (29-01: helpers::classify_write_error centralizes marker-string detection for duplicate user/role-assignment/group-membership → 409; DbError::Serialization fixes parse_uuid mislabeling; OAuth2 client-lookup DB outage → ServerError distinct from invalid_client) |
+| QUAL-04 | Phase 29 | Transactional mutations (CQ-B07/46) | Complete (29-02: role/resource edge deletes are single tenant-predicated transactions via node-tenant subquery guards; resource child-guard folded into its transaction via LET-capture, closing the TOCTOU; GDPR deletion setup via create_with_pending_flag is one transaction with a duplicate-pending rollback guard) |
+| QUAL-05 | Phase 29 | PKI helper dedup (CQ-B15) | Complete (29-06: crypto.rs consolidation of generate_keypair/compute_fingerprint/encrypt_secret/decrypt_secret across ca/cert/pgp; CertService::generate reconstructs the CA via from_ca_cert_pem, closing the D-08/T-29-11 issuer-DN drift vector, locked by an identical-issuer-DN regression test) |
+| QUAL-06 | Phase 29 | Frontend shared components (CQ-F15/17/39) | Complete (29-07: shared.tsx ActionBadge fixed and adopted across 9 pages + RoleDetailPage dead export removed; slugify/userService/useCrudMutations adopted; Playwright + Task 3 manual smoke pending — see 29-07-SUMMARY.md) |
+| QUAL-07 | Phase 29 | Dead-code cleanup (CQ-B47/27) | Complete (29-03: federation/reset/verification services hoisted to shared AppState singletons, closing the per-request-construction half; 29-04: pepper-less axiam_db::verify_password duplicate deleted with re-exports removed, sole caller repointed to canonical axiam_auth::password::verify_password, closing the pepper-less-caller trap) |
+| CMPL-01 | Phase 30 | Security audit checklist (T18.1) | Complete (30-01: `claude_dev/security-audit.md` — master citation index mapping ASVS L2 + ISO 27001 Annex A (family) + CyberSecurity Act/CRA (theme) to pass/fail + evidence pointers, open items cross-referenced to v1.2 REQ-IDs; D-03 spot-verify corrected F-03→Fixed, F-05→Partially Mitigated, raised SBOM-01; CRA interpretation + [ASSUMED] rows remain for human PR-time confirmation) |
+| CMPL-02 | Phase 30 | GDPR completeness (T18.2) | Complete (30-02: `docs/compliance/gdpr-compliance.md` — re-ran `gdpr_test.rs` export_completeness/export_includes_real_session_metadata/deletion_pseudonymization/consent_on_registration as evidence; D-05 async-export reconciliation; D-06 consent scope; SECHRD-06 erasure durability cited; no production code change needed) |
+| DOCS-01 | Phase 30 | Comprehensive documentation (T18.4) | Complete (30-03: REST/gRPC/AMQP API docs complete under `docs/api/`; 30-04: deployment/admin/PKI guides complete under `docs/deployment/`, `docs/admin/`, `docs/pki/`; 30-05: top-level `docs/README.md` index links all sections + 7 SDK READMEs + security-audit.md, validated by new `scripts/check-doc-links.sh`; 30-06: light docs CI `.github/workflows/docs-ci.yml` — path-filtered, SHA-pinned, `contents: read`; enforces link-check + OpenAPI-parse; `@asyncapi/cli` validate omitted via documented SUS-verdict fallback, local-run note in `docs/api/README.md`, maintainer wire-in follow-up) |
+
+**Coverage: 44/44 v1.2 requirement IDs mapped to Phases 23–30 (100%).** NOTE: the enumerated set totals **44** (SECFIX 6 + SECHRD 12 + CORR 6 + PERF 5 + FUNC 5 + QUAL 7 + CMPL 2 + DOCS 1); the earlier "42" summary undercounted by 2. Roadmap: Phase 23 SECFIX · 24–25 SECHRD · 26 CORR · 27 PERF · 28 FUNC · 29 QUAL · 30 CMPL+DOCS.
+
+---
+*v1.2 requirements added 2026-07-03 — final MVP milestone. Consolidates roadmap Phases 18–19 + all open findings from `security-review-postremediation.md` and `code-review-postremediation.md`. Priority: security > correctness > performance > compliance > structural quality > docs.*

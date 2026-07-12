@@ -1,0 +1,145 @@
+# AXIAM Benchmark Framework
+
+A vendor-neutral, protocol-driven benchmark harness for comparing **AXIAM** against
+other open-source IAM systems (Keycloak, Zitadel, Authentik, Ory, …) across three
+dimensions:
+
+1. **Performance** — throughput (req/s) and latency (p50/p95/p99) under load.
+2. **Resource efficiency** — CPU and memory consumed to deliver that performance,
+   so we can answer *"can AXIAM match the competition with a smaller footprint?"*
+3. **Security posture** — the same workload is replayed across a matrix of
+   **security profiles** (from plaintext HTTP up to mTLS with client-certificate
+   authentication and TLS 1.3-only), measuring the cost of stronger security.
+
+It also includes **per-SDK client-side benchmarks**, so each official AXIAM SDK's
+(Rust, TypeScript, Python, Java, C#, PHP, Go — `sdks/{rust,typescript,python,java,
+csharp,php,go}`) client overhead can be measured against the raw protocol
+baseline. All 7 SDKs are implemented; the Python and TypeScript bench harnesses
+are wired to their SDKs, the rest have bench glue pending (see
+`sdk/README.md`).
+
+## Why a custom framework?
+
+There is **no vendor-neutral standard benchmark** for IAM systems. The de-facto
+reference is [`keycloak-benchmark`](https://github.com/keycloak/keycloak-benchmark)
+(Gatling-based), but it is Keycloak-specific in its provisioning, dataset add-on,
+and endpoint assumptions.
+
+AXIAM and every serious competitor speak the **same wire standards** — OAuth2
+(RFC 6749), OIDC, token introspection (RFC 7662), JWKS (RFC 7517). So instead of
+re-implementing a vendor-coupled tool, this framework drives those *standard flows*
+through a thin per-target **adapter layer** (`scenarios/lib/targets.js`). Every
+target is hit with the identical logical workload; only the endpoint paths and
+request encodings differ. That keeps the comparison apples-to-apples.
+
+The load generator is [**k6**](https://k6.io): a single static binary, scriptable
+in JavaScript, with native HTTP + gRPC support, built-in latency/throughput
+metrics, threshold gating, and machine-readable JSON output. It is deliberately
+lighter than a JVM-based generator (Gatling) so the load tool does not starve the
+system-under-test of the CPU we are trying to measure.
+
+## Directory layout
+
+```
+benchmarks/
+├── README.md                 # this file
+├── justfile                  # convenience commands (bench-up, bench-run, bench-report…)
+├── docs/
+│   ├── methodology.md        # how a fair run is defined; metric definitions
+│   ├── security-profiles.md  # the TLS/cert profile matrix
+│   └── interpreting-results.md
+├── targets/                  # each system-under-test as a resource-capped compose file
+│   ├── axiam/docker-compose.yml
+│   ├── keycloak/docker-compose.yml
+│   └── zitadel/docker-compose.yml
+├── profiles/                 # security profiles (env files + registry)
+│   ├── profiles.yaml
+│   ├── p0-plaintext.env
+│   ├── p1-tls12.env
+│   ├── p2-tls13.env
+│   └── p3-mtls.env
+├── scenarios/                # k6 load scenarios (vendor-neutral)
+│   ├── lib/{config,targets,metrics,auth}.js
+│   ├── oauth2_password_login.js
+│   ├── oauth2_client_credentials.js
+│   ├── token_introspection.js
+│   ├── token_refresh.js
+│   ├── jwks_fetch.js
+│   ├── userinfo.js
+│   ├── authz_check_grpc.js
+│   └── authz_batch_grpc.js
+├── resource/                 # resource-consumption sampling
+│   ├── sampler.sh            # docker stats → CSV
+│   └── cadvisor-compose.yml  # optional richer telemetry
+├── runner/
+│   ├── run-benchmark.sh      # orchestrator: target × profile × scenario matrix
+│   ├── seed.sh               # provision org/tenant/user/client per target
+│   └── report.py             # aggregate raw results → comparative report
+├── sdk/                      # per-language SDK client-side benchmarks (scaffolds)
+│   ├── HARNESS-SPEC.md       # the JSON contract every SDK bench must emit
+│   ├── run-all.sh
+│   └── {rust,typescript,python,go,java,csharp,php}/
+└── results/                  # run outputs (gitignored)
+```
+
+## Quick start
+
+```bash
+# 0. Prerequisites: docker, docker compose, k6, python3, jq, bash.
+cd benchmarks
+
+# 1. Bring up a target under a chosen security profile and seed it.
+just bench-up    target=axiam    profile=p2-tls13
+just bench-seed  target=axiam
+
+# 2. Run the full scenario suite (load + resource sampling) for that target/profile.
+just bench-run   target=axiam    profile=p2-tls13
+
+# 3. Repeat for a competitor.
+just bench-up    target=keycloak profile=p2-tls13
+just bench-seed  target=keycloak
+just bench-run   target=keycloak profile=p2-tls13
+
+# 4. Generate a comparative report across everything in results/.
+just bench-report
+
+# 5. Tear down.
+just bench-down  target=axiam
+just bench-down  target=keycloak
+```
+
+Or run the entire matrix (all targets × all profiles × all scenarios) unattended:
+
+```bash
+just bench-matrix targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls"
+```
+
+See [`docs/methodology.md`](docs/methodology.md) for the rules that make a run
+comparable, and [`docs/security-profiles.md`](docs/security-profiles.md) for the
+profile definitions.
+
+## Status of components
+
+| Component                         | State                                                        |
+|-----------------------------------|--------------------------------------------------------------|
+| k6 protocol scenarios             | Implemented (HTTP); gRPC authz check + batch scenarios implemented |
+| AXIAM target + seeding            | Implemented (wraps `docker-compose.prod.yml`)                 |
+| Keycloak / Zitadel targets        | Implemented (reference configs)                               |
+| Security profile matrix           | Implemented (p0–p3); mTLS requires per-target cert wiring     |
+| Resource sampler + report         | Implemented (stdlib python, no external deps)                 |
+| SDK client benchmarks             | Python/TypeScript wired to their SDKs; Rust/Go/Java/C#/PHP bench glue pending (SDKs themselves are implemented — see `sdk/README.md`) |
+| AMQP async-authz benchmarking     | Out of scope for v1.0-beta (see below)                        |
+
+> The five unwired SDK bench directories are scaffolds: the corresponding SDK is
+> already implemented (`sdks/<lang>`), only the bench entrypoint is pending — see
+> each language's `sdk/<lang>/TODO.md`. `sdk/HARNESS-SPEC.md` documents the shared
+> result contract every bench (wired or pending) emits.
+
+## Out of scope (v1.0-beta)
+
+**AMQP async-authz benchmarking** (server `axiam-amqp` + the Go/Python/TypeScript
+SDKs' AMQP modules) is deliberately deferred. k6 has no AMQP executor/protocol
+plugin, so measuring the async-authz-over-AMQP flow needs a custom load harness
+(publish decision requests, consume results, measure end-to-end latency and
+consumer throughput) rather than a k6 scenario. This is planned as a follow-up,
+not part of the current `scenarios/`/`sdk/` frameworks.

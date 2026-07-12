@@ -3,7 +3,7 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::models::tenant::{CreateTenant, Tenant, UpdateTenant};
 use axiam_core::repository::{PaginatedResult, Pagination, TenantRepository};
-use axiam_db::{SurrealTenantRepository, seed_permissions};
+use axiam_db::seed_permissions;
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -14,6 +14,7 @@ use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::permissions::PERMISSION_REGISTRY;
+use crate::state::AppState;
 
 /// Request body for tenant creation (organization_id comes from the URL path).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -48,11 +49,10 @@ pub struct TenantPath {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealTenantRepository<C>>,
-    db: web::Data<surrealdb::Surreal<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<OrgPath>,
     body: web::Json<CreateTenantRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -65,6 +65,8 @@ pub async fn create<C: Connection>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
@@ -76,10 +78,10 @@ pub async fn create<C: Connection>(
         slug: req.slug,
         metadata: req.metadata,
     };
-    let tenant = repo.create(input).await?;
+    let tenant = state.tenant_repo.create(input).await?;
 
     // Auto-seed permissions for the new tenant so RBAC works immediately.
-    seed_permissions(db.get_ref(), tenant.id, PERMISSION_REGISTRY)
+    seed_permissions(&state.db, tenant.id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -109,10 +111,10 @@ pub async fn create<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealTenantRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<OrgPath>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -125,11 +127,14 @@ pub async fn list<C: Connection>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
 
-    let result = repo
+    let result = state
+        .tenant_repo
         .list_by_organization(path.org_id, query.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(result))
@@ -150,10 +155,10 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealTenantRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<TenantPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("tenants:get", Uuid::nil())
@@ -165,11 +170,13 @@ pub async fn get<C: Connection>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
 
-    let tenant = repo.get_by_id(path.tenant_id).await?;
+    let tenant = state.tenant_repo.get_by_id(path.tenant_id).await?;
     if tenant.organization_id != path.org_id {
         return Err(AxiamError::NotFound {
             entity: "Tenant".into(),
@@ -196,10 +203,10 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealTenantRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<TenantPath>,
     body: web::Json<UpdateTenant>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -212,11 +219,13 @@ pub async fn update<C: Connection>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
 
-    let existing = repo.get_by_id(path.tenant_id).await?;
+    let existing = state.tenant_repo.get_by_id(path.tenant_id).await?;
     if existing.organization_id != path.org_id {
         return Err(AxiamError::NotFound {
             entity: "Tenant".into(),
@@ -224,7 +233,10 @@ pub async fn update<C: Connection>(
         }
         .into());
     }
-    let tenant = repo.update(path.tenant_id, body.into_inner()).await?;
+    let tenant = state
+        .tenant_repo
+        .update(path.tenant_id, body.into_inner())
+        .await?;
     Ok(HttpResponse::Ok().json(tenant))
 }
 
@@ -243,10 +255,10 @@ pub async fn update<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete<C: Connection>(
+pub async fn delete<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealTenantRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<TenantPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("tenants:delete", Uuid::nil())
@@ -258,11 +270,13 @@ pub async fn delete<C: Connection>(
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
                 reason: "cannot access a different organization".into(),
+                action: None,
+                resource_id: None,
             },
         ));
     }
 
-    let existing = repo.get_by_id(path.tenant_id).await?;
+    let existing = state.tenant_repo.get_by_id(path.tenant_id).await?;
     if existing.organization_id != path.org_id {
         return Err(AxiamError::NotFound {
             entity: "Tenant".into(),
@@ -270,6 +284,6 @@ pub async fn delete<C: Connection>(
         }
         .into());
     }
-    repo.delete(path.tenant_id).await?;
+    state.tenant_repo.delete(path.tenant_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

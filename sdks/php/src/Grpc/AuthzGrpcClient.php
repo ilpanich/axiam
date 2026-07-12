@@ -119,9 +119,17 @@ final class AuthzGrpcClient extends \Grpc\BaseStub
     }
 
     /**
+     * Issues a unary RPC and unwraps its (response, status) pair, mapping a non-OK status to
+     * the SDK's error taxonomy (§2).
+     *
      * @template T of object
-     * @param callable $deserialize
-     * @return T
+     *
+     * @param string             $method      Fully-qualified RPC method path.
+     * @param object             $argument    Request message.
+     * @param callable(string): T $deserialize Decodes the response body into the message type
+     *                                        this call returns — the parameter that binds `T`.
+     *
+     * @return T Decoded response message.
      */
     private function unary(string $method, object $argument, callable $deserialize): object
     {
@@ -139,7 +147,11 @@ final class AuthzGrpcClient extends \Grpc\BaseStub
         return $response;
     }
 
-    /** §5: Authorization + x-tenant-id metadata on EVERY RPC. */
+    /**
+     * §5: Authorization + x-tenant-id metadata on EVERY RPC.
+     *
+     * @return array<string, list<string>> gRPC metadata map (each header maps to a list of values).
+     */
     private function metadata(): array
     {
         $metadata = ['x-tenant-id' => [$this->tenantId]];

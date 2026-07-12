@@ -29,6 +29,10 @@ export async function loginAsAdmin(page: Page): Promise<void> {
   await page.getByLabel("Password").fill(adminPassword);
   await page.getByRole("button", { name: "Sign in" }).click();
 
-  // Wait for successful redirect off /login (httpOnly cookie is now set)
-  await page.waitForURL(/\/dashboard|\/$/, { timeout: 15_000 });
+  // Wait for successful redirect off /login (httpOnly cookie is now set).
+  // 30s (not 15s): every login runs an Argon2id verification on the backend,
+  // and under a loaded CI runner sharing CPU with the server container the
+  // post-login redirect can occasionally take >15s, which showed up as
+  // intermittent `waitForURL` timeouts across the suite.
+  await page.waitForURL(/\/dashboard|\/$/, { timeout: 45_000 });
 }

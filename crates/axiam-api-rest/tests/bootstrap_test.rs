@@ -4,8 +4,14 @@
 //!
 //! - `POST /api/v1/admin/bootstrap` creates the first admin user when the
 //!   tenant has no users yet.
-//! - After the first admin is created, the endpoint is disabled (returns 404).
+//! - After the first admin is created, the endpoint is disabled (returns 409
+//!   Conflict — SECHRD-04's `bootstrap_lock` uniqueness invariant, not the
+//!   old TOCTOU SELECT-then-branch check).
 //! - When `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set, a mismatching email returns 403.
+//! - The mandatory gate refuses bootstrap when neither the env var nor a
+//!   valid setup token is presented (SECHRD-04 / D-03a).
+//! - Two concurrent first-run requests create at most one super-admin
+//!   (SECHRD-04 / D-03c).
 //! - The newly-bootstrapped admin can authenticate via `/auth/login`.
 
 use std::net::SocketAddr;
@@ -16,21 +22,16 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::AuthzChecker;
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
-use axiam_auth::{AuthService, MfaMethodService};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::repository::{
-    SurrealAuditLogRepository, SurrealCaCertificateRepository, SurrealCertificateRepository,
-    SurrealFederationConfigRepository, SurrealFederationLinkRepository, SurrealGroupRepository,
-    SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -105,25 +106,6 @@ fn make_authz(db: &Surreal<TestDb>) -> Arc<dyn AuthzChecker> {
     ))
 }
 
-fn make_auth_service(
-    db: &Surreal<TestDb>,
-    auth: &AuthConfig,
-) -> AuthService<
-    SurrealUserRepository<TestDb>,
-    SurrealSessionRepository<TestDb>,
-    SurrealFederationLinkRepository<TestDb>,
-    SurrealRefreshTokenRepository<TestDb>,
-> {
-    AuthService::new(
-        SurrealUserRepository::new(db.clone()),
-        SurrealSessionRepository::new(db.clone()),
-        SurrealFederationLinkRepository::new(db.clone()),
-        SurrealRefreshTokenRepository::new(db.clone()),
-        auth.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-    )
-}
-
 /// Fresh in-memory DB with an org + tenant but NO users and NO seeded roles.
 /// The bootstrap handler is responsible for seeding permissions and default
 /// roles itself, so we deliberately leave the tenant empty.
@@ -162,58 +144,9 @@ macro_rules! test_app {
             App::new()
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new($authz.clone()))
-                .app_data(web::Data::new(make_auth_service(&$db, &$auth)))
-                .app_data(web::Data::new(MfaMethodService::new(
-                    SurrealUserRepository::new($db.clone()),
-                    SurrealWebauthnCredentialRepository::new($db.clone()),
-                )))
-                .app_data(web::Data::new($db.clone()))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
+                .app_data(web::Data::new(AppState::for_test(
                     $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealSettingsRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRoleRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealPermissionRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealGroupRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealResourceRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealScopeRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealAuditLogRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealCertificateRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealCaCertificateRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealServiceAccountRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealPgpKeyRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealWebhookRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealOAuth2ClientRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationConfigRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationLinkRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealNotificationRuleRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealSessionRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealRefreshTokenRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealPasswordHistoryRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealWebauthnCredentialRepository::new(
-                    $db.clone(),
+                    $auth.clone(),
                 )))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
@@ -227,6 +160,80 @@ macro_rules! test_app {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// `bootstrap_setup_token`
+///
+/// SECHRD-04 (Task 1, D-03b): on a fresh, never-bootstrapped database the
+/// mint routine mints a first-run setup token exactly once and persists
+/// only its sha256 hash — the plaintext token is never written to the
+/// database. Once minted (or once any user exists), subsequent calls are a
+/// no-op.
+#[actix_rt::test]
+async fn bootstrap_setup_token() {
+    use chrono::{DateTime, Utc};
+    use sha2::{Digest, Sha256};
+    use surrealdb::types::SurrealValue;
+
+    #[derive(Debug, SurrealValue)]
+    struct CountRow {
+        total: u64,
+    }
+
+    #[derive(Debug, SurrealValue)]
+    struct TokenRow {
+        #[allow(dead_code)]
+        created_at: DateTime<Utc>,
+    }
+
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    // Fresh DB, no users: mint must produce a token.
+    let minted = axiam_db::mint_bootstrap_setup_token_if_needed(&db)
+        .await
+        .unwrap();
+    let token = minted.expect("first mint on a fresh DB must produce a token");
+
+    // The persisted record ID is the token's sha256 hash, never the
+    // plaintext — verify the record exists at exactly that hash.
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let expected_hash = hex::encode(hasher.finalize());
+
+    let mut result = db
+        .query("SELECT created_at FROM type::record('bootstrap_setup_token', $hash)")
+        .bind(("hash", expected_hash))
+        .await
+        .unwrap();
+    let rows: Vec<TokenRow> = result.take(0).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the setup token's sha256 hash must be the exact persisted record ID"
+    );
+
+    // Second call: already minted -> no-op, no new token returned.
+    let second = axiam_db::mint_bootstrap_setup_token_if_needed(&db)
+        .await
+        .unwrap();
+    assert!(
+        second.is_none(),
+        "a setup token must be minted at most once per database"
+    );
+
+    // Exactly one row exists in the table overall after two mint calls.
+    let mut count_result = db
+        .query("SELECT count() AS total FROM bootstrap_setup_token GROUP ALL")
+        .await
+        .unwrap();
+    let counts: Vec<CountRow> = count_result.take(0).unwrap();
+    assert_eq!(
+        counts.first().map(|c| c.total).unwrap_or(0),
+        1,
+        "exactly one setup token row must exist after two mint calls"
+    );
+}
+
 /// `bootstrap_creates_admin`
 ///
 /// A fresh tenant with no users accepts the bootstrap request and creates the
@@ -234,10 +241,11 @@ macro_rules! test_app {
 #[actix_rt::test]
 async fn bootstrap_creates_admin() {
     let _guard = env_guard().await;
-    // Ensure the email gate is OFF for this test.
+    // SECHRD-04: the gate is now mandatory — set the env var to match the
+    // request email so the env-var gate path (D-10) is satisfied.
     // SAFETY: serialized via env_lock; no other thread reads env in this binary.
     unsafe {
-        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "first-admin@example.com");
     }
 
     let (db, org_id, tenant_id) = setup_empty_tenant().await;
@@ -261,6 +269,12 @@ async fn bootstrap_creates_admin() {
     let resp = test::call_service(&app, req).await;
     let status = resp.status().as_u16();
     let body = test::read_body(resp).await;
+
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+
     assert_eq!(
         status,
         201,
@@ -275,17 +289,23 @@ async fn bootstrap_creates_admin() {
     );
 }
 
-/// `bootstrap_returns_404_after_admin`
+/// `bootstrap_returns_409_after_admin`
 ///
-/// A second bootstrap call, against a tenant that already has an admin, must
-/// be rejected with 404 even with a different email. The endpoint is
-/// one-shot per tenant (D-09).
+/// A second bootstrap call, against a tenant that already has an admin
+/// (with the gate satisfied both times), must be rejected with 409 Conflict
+/// — the `bootstrap_lock` uniqueness invariant (SECHRD-04 / D-03c), not the
+/// old TOCTOU SELECT-then-branch check. The endpoint is one-shot per tenant
+/// (D-09) — mismatched-email gate refusal is covered separately by
+/// `bootstrap_rejects_wrong_email`.
 #[actix_rt::test]
-async fn bootstrap_returns_404_after_admin() {
+async fn bootstrap_returns_409_after_admin() {
     let _guard = env_guard().await;
+    // SECHRD-04: the gate is now mandatory — both calls use the same
+    // matching email so the "already bootstrapped" check (not the gate) is
+    // what's under test here.
     // SAFETY: serialized via env_lock.
     unsafe {
-        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "first@example.com");
     }
 
     let (db, org_id, tenant_id) = setup_empty_tenant().await;
@@ -310,23 +330,116 @@ async fn bootstrap_returns_404_after_admin() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 201, "first bootstrap must succeed");
 
-    // Second bootstrap — must be refused with 404.
+    // Second bootstrap — must be refused even though the gate is satisfied.
     let req = test::TestRequest::post()
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
         .set_json(serde_json::json!({
             "org_id": org_id,
             "tenant_id": tenant_id,
-            "email": "second@example.com",
+            "email": "first@example.com",
             "username": "secondadmin",
             "password": TEST_PASSWORD,
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     let status = resp.status().as_u16();
+
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+
     assert_eq!(
-        status, 404,
-        "second bootstrap must be refused with 404, got {status}"
+        status, 409,
+        "second bootstrap must be refused with 409 Conflict, got {status}"
+    );
+}
+
+/// `bootstrap_concurrent_race_single_admin`
+///
+/// SECHRD-04 (Task 3, D-03c): two concurrent first-run bootstrap requests
+/// against the SAME tenant must produce AT MOST ONE super-admin. The race
+/// loser gets `AxiamError::AlreadyExists` (409) and its whole transaction
+/// rolls back — no partial admin, no orphan role RELATE.
+#[actix_rt::test]
+async fn bootstrap_concurrent_race_single_admin() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+
+    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+
+    // Mint a single setup token both racers will present — proves the
+    // gate's fast-fail pre-check and the transaction's consumption-by-
+    // existence CREATE both tolerate/resolve the race correctly (the
+    // loser still loses on `bootstrap_lock`, independent of the token).
+    let token = axiam_db::mint_bootstrap_setup_token_if_needed(&db)
+        .await
+        .unwrap()
+        .expect("fresh tenant DB should mint a setup token");
+
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let peer: SocketAddr = TEST_PEER.parse().unwrap();
+
+    let make_req = |username: &str, email: &str, token: &str| {
+        test::TestRequest::post()
+            .uri("/api/v1/admin/bootstrap")
+            .peer_addr(peer)
+            .set_json(serde_json::json!({
+                "org_id": org_id,
+                "tenant_id": tenant_id,
+                "email": email,
+                "username": username,
+                "password": TEST_PASSWORD,
+                "setup_token": token,
+            }))
+            .to_request()
+    };
+
+    let req1 = make_req("racer-one", "racer-one@example.com", &token);
+    let req2 = make_req("racer-two", "racer-two@example.com", &token);
+
+    let (resp1, resp2) = tokio::join!(
+        test::call_service(&app, req1),
+        test::call_service(&app, req2)
+    );
+
+    let statuses = [resp1.status().as_u16(), resp2.status().as_u16()];
+    let created_count = statuses.iter().filter(|s| **s == 201).count();
+    let conflict_count = statuses.iter().filter(|s| **s == 409).count();
+
+    assert_eq!(
+        created_count, 1,
+        "exactly one concurrent bootstrap request must succeed (201), got statuses {statuses:?}"
+    );
+    assert_eq!(
+        conflict_count, 1,
+        "the race loser must get 409 AlreadyExists, got statuses {statuses:?}"
+    );
+
+    // Exactly one super-admin exists after the race.
+    use axiam_core::repository::{Pagination, UserRepository};
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let users = user_repo
+        .list(
+            tenant_id,
+            Pagination {
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        users.total, 1,
+        "exactly one super-admin must exist after a concurrent bootstrap race, got {}",
+        users.total
     );
 }
 
@@ -376,6 +489,86 @@ async fn bootstrap_rejects_wrong_email() {
     );
 }
 
+/// `bootstrap_refused_when_gate_unset`
+///
+/// SECHRD-04 (Task 2, D-03a): when `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is unset
+/// AND no (valid) setup token is presented, bootstrap must fail closed —
+/// a non-2xx response and zero admins created. An unset gate must never
+/// allow arbitrary bootstrap.
+#[actix_rt::test]
+async fn bootstrap_refused_when_gate_unset() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock; ensure the email gate is OFF.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+
+    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+
+    let peer: SocketAddr = TEST_PEER.parse().unwrap();
+
+    // No setup_token field at all — neither gate is satisfied.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "email": "nobody@example.com",
+            "username": "nobody",
+            "password": TEST_PASSWORD,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    assert!(
+        !(200..300).contains(&status),
+        "bootstrap with no gate satisfied must be refused (non-2xx), got {status}"
+    );
+
+    // An invalid/unknown setup token must also be refused.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(peer)
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "email": "nobody2@example.com",
+            "username": "nobody2",
+            "password": TEST_PASSWORD,
+            "setup_token": "not-a-real-token",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    assert!(
+        !(200..300).contains(&status),
+        "bootstrap with an invalid setup token must be refused (non-2xx), got {status}"
+    );
+
+    // No admin was created by either attempt.
+    use axiam_core::repository::{Pagination, UserRepository};
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let users = user_repo
+        .list(
+            tenant_id,
+            Pagination {
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        users.total, 0,
+        "no admin should be created when the gate is unset/invalid, got {} users",
+        users.total
+    );
+}
+
 /// `bootstrap_admin_can_login`
 ///
 /// After a successful bootstrap, the new admin can log in via `/auth/login`
@@ -385,9 +578,11 @@ async fn bootstrap_rejects_wrong_email() {
 #[actix_rt::test]
 async fn bootstrap_admin_can_login() {
     let _guard = env_guard().await;
+    // SECHRD-04: the gate is now mandatory — set the env var to match the
+    // request email so the env-var gate path (D-10) is satisfied.
     // SAFETY: serialized via env_lock.
     unsafe {
-        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "root@example.com");
     }
 
     let (db, org_id, tenant_id) = setup_empty_tenant().await;
@@ -410,6 +605,10 @@ async fn bootstrap_admin_can_login() {
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
     assert_eq!(resp.status().as_u16(), 201, "bootstrap must succeed");
 
     // 2. Activate the user directly — bootstrap creates them in

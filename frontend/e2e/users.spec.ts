@@ -17,7 +17,7 @@ test.describe("Users list page", () => {
   }) => {
     await page.goto("/users");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows the bootstrapped admin user in the list (RBAC-gated — T-07-13)", async ({
@@ -25,8 +25,13 @@ test.describe("Users list page", () => {
   }) => {
     await page.goto("/users");
     await expect(page).not.toHaveURL(/\/login/);
-    // The bootstrap fixture creates an admin user — it must appear
-    await expect(page.getByText("admin")).toBeVisible();
+    // The bootstrap fixture creates an admin user — it must appear in the
+    // users table. Scope to the table and match the admin's unique email so
+    // the assertion is unambiguous (the bare text "admin" also matches the
+    // user-menu button, the username <code>, and the display-name cell).
+    await expect(
+      page.getByRole("table").getByText("admin@axiam.dev")
+    ).toBeVisible();
   });
 
   test('"New User" button opens create modal with username/email/password fields', async ({
@@ -48,7 +53,15 @@ test.describe("Users list page", () => {
   }) => {
     await page.goto("/users");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
+    // isVisible() is an immediate (non-retrying) check, so it can race the
+    // initial data fetch / mount. Wait for the table to become visible (the
+    // DataTable always renders a <table> once loaded); fall back to the
+    // "No users found." empty state, which matches /no users/i.
+    const hasTable = await page
+      .getByRole("table")
+      .waitFor({ state: "visible", timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
     const hasEmptyState = await page.getByText(/no users/i).isVisible().catch(() => false);
     expect(hasTable || hasEmptyState).toBe(true);
   });
@@ -74,10 +87,10 @@ test.describe("User detail page", () => {
     if (await adminLink.isVisible()) {
       await adminLink.click();
       await expect(page).not.toHaveURL(/\/login/);
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     } else {
       // Fallback: user table is visible — that's enough
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 
@@ -133,10 +146,11 @@ test.describe("Groups list page", () => {
   }) => {
     await page.goto("/groups");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasGroups = await page.getByRole("button").filter({ hasText: /.+/ }).count().then(n => n > 0);
-    const hasEmptyState = await page.getByText(/no groups/i).isVisible().catch(() => false);
-    // Page must be accessible and show either a populated list or the empty state.
-    // (A `|| true` here would make the assertion unfalsifiable.)
-    expect(hasGroups || hasEmptyState).toBe(true);
+    // GroupsPage renders a DataTable (a real <table>) that holds either group
+    // rows or the "No groups yet…" empty message. Assert the table itself is
+    // visible — it auto-retries through the async data load, unlike the
+    // one-shot isVisible()/count() probes which raced the fetch and returned
+    // false. Not weakened: a redirect-to-/login or a crashed page has no table.
+    await expect(page.getByRole("table")).toBeVisible();
   });
 });

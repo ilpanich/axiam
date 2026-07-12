@@ -18,8 +18,8 @@ pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};
 pub use repository::{
-    SurrealAccountDeletionRepository, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
-    SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
+    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealConsentRepository, SurrealEmailConfigRepository,
     SurrealEmailTemplateRepository, SurrealEmailVerificationTokenRepository,
     SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
@@ -27,16 +27,16 @@ pub use repository::{
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
     SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
-    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnCredentialRepository, SurrealWebhookRepository, hash_client_secret,
-    verify_password,
+    SurrealRateLimitBucketRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    hash_client_secret,
 };
 pub use schema::{run_migrations, schema_v1};
 pub use seeder::{
-    SeedRolesResult, SeederStateRow, reconcile_default_role_grants, seed_default_roles,
-    seed_permissions,
+    SeedRolesResult, SeederStateRow, mint_bootstrap_setup_token_if_needed,
+    reconcile_default_role_grants, seed_default_roles, seed_permissions,
 };
 /// Re-export SurrealDB connection types for use in repository type aliases.
 pub use surrealdb::Connection;

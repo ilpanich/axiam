@@ -78,6 +78,17 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
 
     private volatile string? _csrfToken;
 
+    /// <summary>Constructs the handler. Register as the outermost link of the client's
+    /// <see cref="HttpClient"/> handler chain, with the SDK's cookie-jar/TLS handler
+    /// (<c>AxiamHttpClientFactory.CreatePrimaryHandler</c>) as <see cref="DelegatingHandler.InnerHandler"/>.</summary>
+    /// <param name="cookieContainer">The shared cookie jar (&#167;4) this handler reads
+    /// <c>axiam_access</c>/<c>axiam_csrf</c> from.</param>
+    /// <param name="baseUri">The AXIAM server's base URL — also used for the host-isolation
+    /// guard (3A) that withholds tenant/auth/CSRF headers from cross-origin requests.</param>
+    /// <param name="tenantId">The client's configured tenant identifier, injected as
+    /// <c>X-Tenant-Id</c> on every same-origin request (&#167;5).</param>
+    /// <param name="refreshGuard">The shared single-flight refresh guard (&#167;9) this
+    /// handler drives on a reactive 401.</param>
     public AxiamHttpMessageHandler(CookieContainer cookieContainer, Uri baseUri, string tenantId, RefreshGuard refreshGuard)
     {
         _cookieContainer = cookieContainer ?? throw new ArgumentNullException(nameof(cookieContainer));
@@ -93,6 +104,16 @@ public sealed class AxiamHttpMessageHandler : DelegatingHandler
     /// </summary>
     internal void ResetCsrfToken() => _csrfToken = null;
 
+    /// <summary>
+    /// Applies tenant/auth/CSRF headers (&#167;3/&#167;5), sends the request, and on a
+    /// non-exempt 401 drives exactly one reactive refresh-and-retry through the shared
+    /// <see cref="RefreshGuard"/> (&#167;9.3 — never a loop). See the type-level remarks for
+    /// the full sequence.
+    /// </summary>
+    /// <param name="request">The outgoing request.</param>
+    /// <param name="cancellationToken">Propagated to the refresh call and both send attempts.</param>
+    /// <returns>The final response — either the original response, or the retried
+    /// response after a successful reactive refresh.</returns>
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);

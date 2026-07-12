@@ -276,6 +276,159 @@ async fn expired_token_yields_401() {
     assert_eq!(err.status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
 }
 
+/// §3 CSRF double-submit: a cookie-sourced credential on a state-changing
+/// request (POST) with no `X-CSRF-Token` header must be rejected with 403
+/// before any token verification is attempted.
+#[tokio::test]
+async fn cookie_auth_state_changing_without_csrf_header_yields_403() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let token = issue_test_access_token(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        9_999_999_999,
+        None,
+    );
+
+    let req = TestRequest::post()
+        .app_data(web::Data::new(verifier))
+        .cookie(actix_web::cookie::Cookie::new("axiam_access", token))
+        .cookie(actix_web::cookie::Cookie::new(
+            "axiam_csrf",
+            "matching-csrf-token",
+        ))
+        // Deliberately no X-CSRF-Token header.
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let err = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect_err("cookie-sourced POST without X-CSRF-Token must fail");
+
+    use actix_web::ResponseError;
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::FORBIDDEN);
+
+    let resp = err.error_response();
+    let body_bytes = actix_web::body::to_bytes(resp.into_body())
+        .await
+        .expect("error body should be readable");
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("error body must be valid JSON");
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("authorization_denied")
+    );
+}
+
+/// §3 CSRF double-submit: a cookie-sourced credential on a state-changing
+/// request WITH a matching `X-CSRF-Token` header/`axiam_csrf` cookie pair
+/// must pass the CSRF gate and proceed to (successful) verification.
+#[tokio::test]
+async fn cookie_auth_state_changing_with_matching_csrf_token_succeeds() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let tenant_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let token = issue_test_access_token(
+        tenant_id,
+        Uuid::new_v4(),
+        user_id,
+        Uuid::new_v4(),
+        9_999_999_999,
+        None,
+    );
+
+    let req = TestRequest::post()
+        .app_data(web::Data::new(verifier))
+        .cookie(actix_web::cookie::Cookie::new("axiam_access", token))
+        .cookie(actix_web::cookie::Cookie::new(
+            "axiam_csrf",
+            "matching-csrf-token",
+        ))
+        .insert_header(("X-CSRF-Token", "matching-csrf-token"))
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let user = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect("cookie-sourced POST with matching CSRF token must succeed");
+
+    assert_eq!(user.user_id, user_id);
+    assert_eq!(user.tenant_id, tenant_id);
+}
+
+/// A Bearer-header-sourced request needs no CSRF token at all, even for a
+/// state-changing method — a cross-site attacker cannot set custom headers,
+/// so the header path is CSRF-immune by construction.
+#[tokio::test]
+async fn bearer_auth_state_changing_without_csrf_succeeds() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let tenant_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let token = issue_test_access_token(
+        tenant_id,
+        Uuid::new_v4(),
+        user_id,
+        Uuid::new_v4(),
+        9_999_999_999,
+        None,
+    );
+
+    let req = TestRequest::post()
+        .app_data(web::Data::new(verifier))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        // No CSRF cookie/header at all.
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let user = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect("Bearer-header POST needs no CSRF token");
+
+    assert_eq!(user.user_id, user_id);
+    assert_eq!(user.tenant_id, tenant_id);
+}
+
+/// A cookie-sourced credential on a safe method (GET) must NOT be subject
+/// to the CSRF gate — safe methods must not have side effects, so the §3
+/// double-submit check only applies to state-changing methods.
+#[tokio::test]
+async fn cookie_auth_safe_method_without_csrf_succeeds() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let tenant_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let token = issue_test_access_token(
+        tenant_id,
+        Uuid::new_v4(),
+        user_id,
+        Uuid::new_v4(),
+        9_999_999_999,
+        None,
+    );
+
+    let req = TestRequest::get()
+        .app_data(web::Data::new(verifier))
+        .cookie(actix_web::cookie::Cookie::new("axiam_access", token))
+        // No X-CSRF-Token header, no axiam_csrf cookie.
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let user = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect("cookie-sourced GET needs no CSRF token");
+
+    assert_eq!(user.user_id, user_id);
+    assert_eq!(user.tenant_id, tenant_id);
+}
+
 #[tokio::test]
 async fn local_verification_makes_no_outbound_axiam_server_request() {
     // Only the JWKS endpoint is mounted (no /api/v1/auth/* or /oauth2/introspect

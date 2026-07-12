@@ -42,7 +42,9 @@ public final class Retry {
      * waiting at least {@link #retryAfterMillis()} before the next attempt.
      */
     public interface RetryAfterHint {
-        /** @return the minimum wait before retrying, in milliseconds */
+        /** Returns the server-supplied minimum wait before retrying.
+         *
+         * @return the minimum wait before retrying, in milliseconds */
         long retryAfterMillis();
     }
 
@@ -56,6 +58,11 @@ public final class Retry {
      * Runs {@code op}, retrying up to {@link #DEFAULT_MAX_ATTEMPTS} times
      * when {@code retryable} matches the thrown exception.
      *
+     * @param <T>       the type {@code op} produces
+     * @param op        the idempotent operation to run
+     * @param retryable decides whether a thrown {@code RuntimeException} should
+     *                  trigger a retry
+     * @return {@code op}'s result, once it succeeds
      * @throws RuntimeException the last thrown exception, if {@code op}
      *                          never succeeds within the attempt cap, or
      *                          immediately if {@code retryable} rejects it
@@ -70,6 +77,12 @@ public final class Retry {
      * exponential backoff with jitter between attempts, honoring any
      * {@link RetryAfterHint} the thrown exception carries.
      *
+     * @param <T>         the type {@code op} produces
+     * @param maxAttempts the maximum number of attempts (must be &gt;= 1)
+     * @param op          the idempotent operation to run
+     * @param retryable   decides whether a thrown {@code RuntimeException} should
+     *                    trigger a retry
+     * @return {@code op}'s result, once it succeeds
      * @throws RuntimeException the last thrown exception, if {@code op}
      *                          never succeeds within {@code maxAttempts},
      *                          or immediately if {@code retryable} rejects

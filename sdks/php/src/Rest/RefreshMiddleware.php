@@ -24,10 +24,23 @@ use Psr\Http\Message\ResponseInterface;
  */
 final class RefreshMiddleware
 {
+    /** @param Session $session Session whose access token is refreshed on a 401. */
     public function __construct(private readonly Session $session)
     {
     }
 
+    /**
+     * Wraps the next Guzzle handler so a 401 triggers a single-flight token refresh and one
+     * replay of the original request.
+     *
+     * The replay is issued through the NEXT handler rather than the top of the stack, so it
+     * cannot re-enter this middleware's 401 check — retry-exactly-once by construction, with no
+     * explicit retry counter and no infinite refresh loop.
+     *
+     * @param callable $handler Next handler in the Guzzle stack.
+     *
+     * @return callable Decorated handler.
+     */
     public function __invoke(callable $handler): callable
     {
         return function (RequestInterface $request, array $options) use ($handler) {

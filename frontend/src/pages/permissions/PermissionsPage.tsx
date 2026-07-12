@@ -18,32 +18,7 @@ import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
-
-// ─── Action badge ─────────────────────────────────────────────────────────────
-
-function ActionBadge({ action }: { action: string }) {
-  const colorMap: Record<string, string> = {
-    read: "bg-blue-500/15 text-blue-400 border-blue-500/30",
-    write: "bg-amber-500/15 text-amber-400 border-amber-500/30",
-    delete: "bg-rose-500/15 text-rose-400 border-rose-500/30",
-    admin: "bg-purple-500/15 text-purple-400 border-purple-500/30",
-  };
-
-  const classes =
-    colorMap[action.toLowerCase()] ??
-    "bg-white/10 text-foreground/70 border-white/20";
-
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border",
-        classes
-      )}
-    >
-      {action}
-    </span>
-  );
-}
+import { ActionBadge } from "@/components/shared";
 
 // ─── Standard actions ─────────────────────────────────────────────────────────
 

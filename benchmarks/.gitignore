@@ -1,0 +1,9 @@
+# Generated benchmark artifacts
+results/**
+!results/.gitkeep
+# Throwaway TLS/mTLS material (regenerate with `just bench-certs`)
+profiles/certs/
+
+# Python bytecode
+__pycache__/
+*.pyc

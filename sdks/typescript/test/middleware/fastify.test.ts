@@ -116,4 +116,95 @@ describe('axiamPlugin (Fastify)', () => {
 
     await app.close();
   });
+
+  describe('CSRF (cookie double-submit, CONTRACT.md §3)', () => {
+    async function buildAppWithPost(session: {
+      jwksVerifier: ReturnType<typeof createVerifier>;
+      tenantHeaderValue: string;
+    }) {
+      const app = Fastify();
+      await app.register(axiamPlugin(session));
+      app.post('/protected', async (request) => {
+        const axiamUser = (request as AxiamFastifyRequest).axiamUser;
+        return { axiamUser };
+      });
+      await app.ready();
+      return app;
+    }
+
+    it('cookie-auth POST without X-CSRF-Token header -> 403', async () => {
+      const { privateKey, kid } = await setupJwks();
+      const token = await signedToken(privateKey, kid);
+      const verifier = createVerifier(BASE_URL);
+      const app = await buildAppWithPost({ jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/protected',
+        headers: { cookie: `axiam_access=${token}` },
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual(
+        expect.objectContaining({ error: 'authorization_denied' }),
+      );
+
+      await app.close();
+    });
+
+    it('cookie-auth POST with matching X-CSRF-Token header + axiam_csrf cookie -> passes auth', async () => {
+      const { privateKey, kid } = await setupJwks();
+      const token = await signedToken(privateKey, kid);
+      const verifier = createVerifier(BASE_URL);
+      const app = await buildAppWithPost({ jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/protected',
+        headers: {
+          cookie: `axiam_access=${token}; axiam_csrf=csrf-secret-1`,
+          'x-csrf-token': 'csrf-secret-1',
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().axiamUser.userId).toBe('user-1');
+
+      await app.close();
+    });
+
+    it('Bearer-auth POST without CSRF header -> passes (no CSRF required for Bearer)', async () => {
+      const { privateKey, kid } = await setupJwks();
+      const token = await signedToken(privateKey, kid);
+      const verifier = createVerifier(BASE_URL);
+      const app = await buildAppWithPost({ jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/protected',
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      await app.close();
+    });
+
+    it('cookie-auth GET without CSRF -> passes (safe method)', async () => {
+      const { privateKey, kid } = await setupJwks();
+      const token = await signedToken(privateKey, kid);
+      const verifier = createVerifier(BASE_URL);
+      const app = await buildApp({ jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/protected',
+        headers: { cookie: `axiam_access=${token}` },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      await app.close();
+    });
+  });
 });

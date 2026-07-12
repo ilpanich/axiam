@@ -26,6 +26,15 @@ samael = { workspace = true, optional = true }
 flate2 = { workspace = true }
 x509-parser = { workspace = true }
 pem = { workspace = true }
+# XSW (XML Signature Wrapping) binding check (SECFIX-04/SEC-005): raw-XML
+# introspection to bind the verified <ds:Signature> Reference to the
+# consumed Assertion. Already resolved transitively via samael 0.0.19's
+# `xmlsec` feature (Cargo.lock pins 0.3.3) — promoted to a direct dependency
+# here so axiam-federation can call it. Pinned (workspace) to the EXACT
+# Cargo.lock-resolved version to guarantee a single copy of the FFI bindings
+# (no new crate enters the dependency graph). Gated behind the `saml` feature
+# like samael itself.
+libxml = { workspace = true, optional = true }
 
 [features]
 # SAML Service Provider support. Pulls in `samael` (and transitively its
@@ -36,8 +45,16 @@ pem = { workspace = true }
 # whose system libxml2 is too new for samael's pinned bindings (e.g. Arch's
 # libxml2 2.15.x). OIDC federation is unaffected; SAML simply isn't compiled.
 default = ["saml"]
-saml = ["dep:samael"]
+saml = ["dep:samael", "dep:libxml"]
 
 [dev-dependencies]
 rcgen = { workspace = true }
 base64 = { workspace = true }
+# CQ-B23 DiscoveryCache test: a loopback mock IdP discovery endpoint, same
+# version already used by axiam-server/axiam-api-rest for equivalent OIDC
+# wiremock tests.
+wiremock = "0.6"
+# CQ-B23 DiscoveryCache test: an in-memory DB is only needed to construct a
+# real `OidcFederationService` (repos are unused by `discover`); mirrors
+# axiam-db's/axiam-server's own dev-dependency kv-mem setup.
+surrealdb = { workspace = true, features = ["kv-mem"] }

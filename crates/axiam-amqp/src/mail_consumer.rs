@@ -14,7 +14,9 @@ use crate::connection::queues;
 use crate::messages::{MailType, OutboundMailMessage};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::email_template::TemplateKind;
-use axiam_core::repository::{AuditLogRepository, EmailConfigRepository, UserRepository};
+use axiam_core::repository::{
+    AuditLogRepository, EmailConfigRepository, EmailTemplateRepository, UserRepository,
+};
 use axiam_email::service::EmailService;
 use axiam_email::template::{TemplateContext, render_email, resolve_template};
 use futures_lite::StreamExt;
@@ -30,6 +32,41 @@ use tracing::{error, info, warn};
 /// `MAX_RETRIES - 1`. On the `MAX_RETRIES`-th attempt failure the message
 /// is nack'd (→ DLQ) and `email.delivery_failed` is written.
 pub const MAX_RETRIES: u32 = 3;
+
+// ---------------------------------------------------------------------------
+// Retry backoff (SECHRD-08 / D-05d)
+// ---------------------------------------------------------------------------
+//
+// In-process exponential backoff before a `RetryNeeded` republish, mirroring
+// the only in-repo backoff precedent (`axiam-api-rest/src/webhook.rs`'s
+// `initial_delay * multiplier.powi((attempt - 1) as i32)` shape). No RabbitMQ
+// delayed-exchange plugin or TTL+DLX parking-lot is introduced — the "no new
+// infra" constraint (25-RESEARCH.md Pitfall 6 / Assumptions Log A2). Note the
+// single-consumer throughput tradeoff already flagged there: the consumer
+// loop blocks on `tokio::time::sleep` for the backoff duration before
+// republishing, so a burst of failing sends serializes through this delay.
+
+/// Initial backoff delay (seconds) applied before the first retry republish.
+const MAIL_RETRY_INITIAL_DELAY_SECS: f64 = 10.0;
+
+/// Exponential backoff multiplier applied per subsequent retry attempt.
+const MAIL_RETRY_BACKOFF_MULTIPLIER: f64 = 2.0;
+
+/// Upper bound on any single backoff delay, to avoid unbounded sleeps.
+const MAIL_RETRY_MAX_DELAY_SECS: f64 = 3600.0;
+
+/// Compute the exponential backoff delay (seconds) before republishing a
+/// `RetryNeeded` mail message, given the retry's `attempt_count` (the
+/// *post-increment* value about to be published: `1` for the first retry,
+/// `2` for the second, ...).
+///
+/// Mirrors `webhook.rs`'s shape: `initial_delay * multiplier.powi(attempt - 1)`,
+/// clamped to `[0, MAIL_RETRY_MAX_DELAY_SECS]`.
+fn backoff_delay_secs(attempt_count: u32) -> f64 {
+    let exponent = attempt_count.saturating_sub(1) as i32;
+    let delay = MAIL_RETRY_INITIAL_DELAY_SECS * MAIL_RETRY_BACKOFF_MULTIPLIER.powi(exponent);
+    delay.clamp(0.0, MAIL_RETRY_MAX_DELAY_SECS)
+}
 
 // ---------------------------------------------------------------------------
 // MailType → TemplateKind mapping
@@ -89,16 +126,18 @@ fn build_template_context(ctx: &serde_json::Value) -> TemplateContext {
 /// The actual recipient email is always resolved from `user_id` + `tenant_id`
 /// via the user repository, preventing recipient hijacking if a message is
 /// intercepted and tampered with in transit.
-pub async fn send_with_retry_and_audit<E, A, U>(
+pub async fn send_with_retry_and_audit<E, A, U, T>(
     msg: &OutboundMailMessage,
     email_config_repo: &E,
     audit_repo: &A,
     user_repo: &U,
+    template_repo: &T,
 ) -> Result<SendOutcome, SendError>
 where
     E: EmailConfigRepository,
     A: AuditLogRepository,
     U: UserRepository,
+    T: EmailTemplateRepository,
 {
     // 1. Resolve effective email config (tenant → org cascade).
     let email_config = email_config_repo
@@ -113,10 +152,40 @@ where
     // 2. Build EmailService from resolved config.
     let svc = EmailService::from_config(&config).map_err(|e| SendError(e.to_string()))?;
 
-    // 3. Resolve built-in template (no per-org/tenant custom templates fetched here;
-    //    template repository lookup is deferred to a future task — T19.21).
+    // 3. Resolve the effective template: tenant custom → org custom → built-in
+    //    (FUNC-03 / D-05). Each fetch is fail-safe (D-06): a DB error logs a
+    //    warning and falls back to `None` so a broken/unfetchable custom
+    //    template can never strand a security-critical email — mirroring the
+    //    SEC-055 recipient-resolution defensive shape below.
     let kind = template_kind_for(&msg.mail_type);
-    let template = resolve_template(kind, None, None);
+
+    let org_template = template_repo
+        .get_org_template(msg.org_id, kind)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(
+                org_id = %msg.org_id,
+                kind = ?kind,
+                error = %e,
+                "D-06: could not fetch org email template — falling back to built-in"
+            );
+            None
+        });
+
+    let tenant_template = template_repo
+        .get_tenant_template(msg.tenant_id, kind)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(
+                tenant_id = %msg.tenant_id,
+                kind = ?kind,
+                error = %e,
+                "D-06: could not fetch tenant email template — falling back to built-in"
+            );
+            None
+        });
+
+    let template = resolve_template(kind, org_template.as_ref(), tenant_template.as_ref());
 
     // 4. Build template context from message.
     let ctx = build_template_context(&msg.template_context);
@@ -258,15 +327,17 @@ fn error_class_for(error_msg: &str) -> &'static str {
 /// SEC-055: The `user_repo` is used to resolve the actual recipient email
 /// address from `user_id + tenant_id`, preventing recipient hijacking via
 /// a tampered `to_address` field in the AMQP message.
-pub async fn start_mail_consumer<E, A, U>(
+pub async fn start_mail_consumer<E, A, U, T>(
     channel: Channel,
     email_config_repo: E,
     audit_repo: A,
     user_repo: U,
+    template_repo: T,
 ) where
     E: EmailConfigRepository + 'static,
     A: AuditLogRepository + 'static,
     U: UserRepository + 'static,
+    T: EmailTemplateRepository + 'static,
 {
     info!("Starting mail AMQP consumer");
 
@@ -317,8 +388,14 @@ pub async fn start_mail_consumer<E, A, U>(
             }
         };
 
-        let outcome =
-            send_with_retry_and_audit(&msg, &email_config_repo, &audit_repo, &user_repo).await;
+        let outcome = send_with_retry_and_audit(
+            &msg,
+            &email_config_repo,
+            &audit_repo,
+            &user_repo,
+            &template_repo,
+        )
+        .await;
 
         match outcome {
             Ok(SendOutcome::Delivered) => {
@@ -330,6 +407,17 @@ pub async fn start_mail_consumer<E, A, U>(
                 // Re-publish with incremented attempt_count for backoff.
                 let mut retry_msg = msg.clone();
                 retry_msg.attempt_count += 1;
+
+                // SECHRD-08 / D-05d: wait an in-process exponential backoff
+                // BEFORE republishing — no zero-delay hot-retry loop against
+                // a possibly-down SMTP relay.
+                let delay_secs = backoff_delay_secs(retry_msg.attempt_count);
+                info!(
+                    attempt = retry_msg.attempt_count,
+                    delay_secs, "Backing off before mail retry republish"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+
                 match serde_json::to_vec(&retry_msg) {
                     Ok(payload) => {
                         let publish_result = channel
@@ -390,4 +478,55 @@ pub async fn start_mail_consumer<E, A, U>(
     }
 
     warn!("Mail AMQP consumer stream ended");
+}
+
+// ---------------------------------------------------------------------------
+// Tests: retry backoff (SECHRD-08 / D-05d)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod mail_retry_backoff_tests {
+    use super::*;
+
+    /// The `RetryNeeded` branch must sleep a nonzero, increasing backoff
+    /// delay before `basic_publish` — no zero-delay hot-retry loop.
+    #[test]
+    fn mail_retry_backoff_is_nonzero_and_increasing() {
+        let first = backoff_delay_secs(1);
+        let second = backoff_delay_secs(2);
+        let third = backoff_delay_secs(3);
+
+        assert!(
+            first > 0.0,
+            "first retry delay must not be a zero-delay hot-retry (D-05d)"
+        );
+        assert!(
+            second > first,
+            "backoff must increase exponentially between attempts"
+        );
+        assert!(
+            third > second,
+            "backoff must increase exponentially between attempts"
+        );
+    }
+
+    /// Backoff must be clamped so a runaway attempt_count can never produce
+    /// an unbounded sleep.
+    #[test]
+    fn mail_retry_backoff_is_clamped() {
+        let delay = backoff_delay_secs(1_000);
+        assert!(
+            delay <= MAIL_RETRY_MAX_DELAY_SECS,
+            "backoff delay must be clamped to MAIL_RETRY_MAX_DELAY_SECS, got {delay}"
+        );
+        assert!(delay >= 0.0, "backoff delay must never be negative");
+    }
+
+    /// `attempt_count = 0` (defensive — the retry branch always passes
+    /// `attempt_count >= 1`) must not panic or produce a negative delay.
+    #[test]
+    fn mail_retry_backoff_handles_zero_attempt_defensively() {
+        let delay = backoff_delay_secs(0);
+        assert!(delay >= 0.0);
+    }
 }

@@ -8,6 +8,7 @@ use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
@@ -17,8 +18,7 @@ use axiam_core::repository::{
     FederationConfigRepository, OrganizationRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealAssertionReplayRepository, SurrealFederationConfigRepository,
-    SurrealFederationLinkRepository, SurrealOrganizationRepository, SurrealTenantRepository,
+    SurrealFederationConfigRepository, SurrealOrganizationRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
 use axiam_federation::secrets::decrypt_client_secret_or_legacy;
@@ -136,23 +136,15 @@ macro_rules! test_app {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(SurrealFederationConfigRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealFederationLinkRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealAssertionReplayRepository::new(
-                    $db.clone(),
-                )))
-                .app_data(web::Data::new(
-                    reqwest::Client::builder()
+                .app_data(web::Data::new({
+                    let mut state = AppState::for_test($db.clone(), $auth.clone());
+                    state.http_client = reqwest::Client::builder()
                         .redirect(reqwest::redirect::Policy::none())
                         .timeout(std::time::Duration::from_secs(10))
                         .build()
-                        .unwrap(),
-                ))
+                        .unwrap();
+                    state
+                }))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))

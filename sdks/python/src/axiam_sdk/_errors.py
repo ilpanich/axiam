@@ -31,6 +31,9 @@ class AuthError(Exception):
     failure, or a 401 on refresh (CONTRACT.md §2)."""
 
     def __init__(self, message: str) -> None:
+        """Build the exception with ``message`` describing the failure
+        (CONTRACT.md §2 construction rule); the exception's own ``str()``
+        prefixes it with ``"authentication failed: "``."""
         super().__init__(f"authentication failed: {message}")
         self.message = message
 
@@ -47,6 +50,10 @@ class AuthzError(Exception):
         action: str | None = None,
         resource_id: str | None = None,
     ) -> None:
+        """Build the exception with ``message`` plus the optional denied
+        ``action``/``resource_id`` known from the response body
+        (CONTRACT.md §2 construction rule); the exception's own ``str()``
+        prefixes ``message`` with ``"authorization denied: "``."""
         super().__init__(f"authorization denied: {message}")
         self.message = message
         self.action = action
@@ -66,26 +73,48 @@ class NetworkError(Exception):
     """
 
     def __init__(self, message: str, cause: BaseException | None = None) -> None:
+        """Build the exception with ``message`` and an optional already-
+        redacted ``cause`` (CONTRACT.md §2 construction rule); the
+        exception's own ``str()`` prefixes ``message`` with ``"network
+        error: "``. See the class docstring for the redact-before-wrap
+        invariant governing ``cause``."""
         super().__init__(f"network error: {message}")
         self.message = message
         self.__cause__ = cause
 
 
-# Response header names that must never survive into a NetworkError's
-# wrapped cause (D-08, CR-04 carry-forward).
-_SENSITIVE_RESPONSE_HEADERS = {"set-cookie", "authorization", "cookie"}
+# X-3: response headers use an ALLOWLIST, not a denylist. Only these known-safe,
+# non-secret headers may survive into a NetworkError's wrapped cause (D-08, CR-04
+# carry-forward); everything else is redacted. A denylist of known-sensitive
+# names (set-cookie/authorization/cookie) let a custom sensitive header such as
+# ``X-Auth-Token`` slip through simply because it was not on the list. Keep this
+# allowlist small and limited to diagnostic, non-credential headers:
+#   - content-type / content-length: response shape, no secrets
+#   - date / server: standard non-secret transport metadata
+#   - x-request-id: trace correlation id (non-secret), aids debugging
+_SAFE_RESPONSE_HEADERS = {
+    "content-type",
+    "content-length",
+    "date",
+    "server",
+    "x-request-id",
+}
 
 
 def _sanitize_response(response: httpx.Response) -> str:
-    """Redact sensitive headers BEFORE building any string representation
-    that could end up in a NetworkError's cause (D-08, CR-04 carry-forward).
+    """Redact all non-allowlisted headers BEFORE building any string
+    representation that could end up in a NetworkError's cause (D-08, CR-04
+    carry-forward, X-3).
 
     Never pass the raw ``httpx.Response`` (or its unredacted headers) into an
-    exception. A non-sensitive header (e.g. ``x-request-id``) is preserved so
-    the redaction can be proven selective, not blanket, in tests.
+    exception. Only headers on :data:`_SAFE_RESPONSE_HEADERS` are kept — a
+    non-sensitive header (e.g. ``x-request-id``) is preserved so the redaction
+    can be proven selective, not blanket, in tests, while any header not on the
+    allowlist (including custom credential headers like ``X-Auth-Token``) is
+    dropped.
     """
     safe_headers = {
-        k: v for k, v in response.headers.items() if k.lower() not in _SENSITIVE_RESPONSE_HEADERS
+        k: v for k, v in response.headers.items() if k.lower() in _SAFE_RESPONSE_HEADERS
     }
     return f"http status {response.status_code}, headers: {safe_headers}"
 
@@ -153,11 +182,36 @@ def error_from_http_status(
     signature, closing the redact-before-wrap bypass this taxonomy exists to
     prevent (mirrors ``sdks/go/errors.go::newNetworkError``'s documented
     invariant).
+
+    On a 403, the server's authorization-denied body
+    (``{"error": "authorization_denied", "message": ..., "action": ...,
+    "resource_id": ...}``) is parsed from ``response`` to populate the
+    returned :class:`AuthzError`'s ``action``/``resource_id`` fields.
+    ``action`` is present when the denied action is known; ``resource_id``
+    is present only for a resource-scoped denial. Both are ``None`` when
+    absent from the body, when ``response`` is not provided, or when the
+    body is missing/not JSON/not an object.
     """
     if status == 401:
         return AuthError(message)
     if status in (403, 409):
-        return AuthzError(message)
+        action: str | None = None
+        resource_id: str | None = None
+        # Structured authorization-denied fields
+        # (``{"error": "authorization_denied", "action": ..., "resource_id": ...}``)
+        # are only emitted by the server on a 403; a 409 (conflict) body has
+        # no such shape, so only attempt to parse the body on 403. The body
+        # may be absent/non-JSON/non-dict for other 403 causes — fields stay
+        # ``None`` in that case rather than raising.
+        if status == 403 and response is not None:
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            if isinstance(body, dict):
+                action = body.get("action")
+                resource_id = body.get("resource_id")
+        return AuthzError(message, action=action, resource_id=resource_id)
 
     cause: BaseException | None = None
     if response is not None:
@@ -203,5 +257,8 @@ def error_from_grpc_status(code: object, message: str) -> Exception:
     if normalized == grpc.StatusCode.UNAUTHENTICATED:
         return AuthError(safe_message)
     if normalized == grpc.StatusCode.PERMISSION_DENIED:
+        # gRPC has no structured response body to parse (unlike the HTTP
+        # 403 path) — ``action``/``resource_id`` stay at their AuthzError
+        # defaults of None.
         return AuthzError(safe_message)
     return NetworkError(safe_message)

@@ -20,47 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { roleService, type Role } from "@/services/roles";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
-
-// ─── Section card ─────────────────────────────────────────────────────────────
-
-function SectionCard({
-  title,
-  action,
-  children,
-}: {
-  title: string;
-  action?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="glass-card mb-6">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-base font-semibold text-foreground">{title}</h2>
-        {action}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-// ─── Info row ─────────────────────────────────────────────────────────────────
-
-function InfoRow({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col sm:flex-row sm:items-start gap-1 sm:gap-4 py-2 border-b border-white/5 last:border-0">
-      <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground sm:w-36 shrink-0 pt-0.5">
-        {label}
-      </span>
-      <span className="text-sm text-foreground/90">{children}</span>
-    </div>
-  );
-}
+import { SectionCard, InfoRow } from "@/components/shared";
 
 // ─── Edit group form ──────────────────────────────────────────────────────────
 

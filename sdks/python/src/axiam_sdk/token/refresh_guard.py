@@ -49,6 +49,10 @@ class RefreshGuard:
     """
 
     def __init__(self) -> None:
+        """Build an empty guard with no cached tokens yet — the first
+        ``refresh_if_needed_sync``/``refresh_if_needed_async`` call always
+        performs a real refresh (:meth:`_should_skip_refresh` is ``False``
+        until ``_has_any`` is set by :meth:`_store_refreshed`/:meth:`seed`)."""
         # ONE OS-level lock guards the critical section for BOTH paradigms
         # (CR-01). The async path acquires it off the event loop; the sync
         # path acquires it directly.

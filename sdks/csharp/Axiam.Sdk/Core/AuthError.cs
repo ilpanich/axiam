@@ -7,6 +7,8 @@ namespace Axiam.Sdk.Core;
 /// </summary>
 public sealed class AuthError : Exception
 {
+    /// <summary>Constructs an <see cref="AuthError"/> with the given diagnostic message.</summary>
+    /// <param name="message">Describes the authentication failure (CONTRACT.md &#167;2 MUST).</param>
     public AuthError(string message) : base(message)
     {
     }

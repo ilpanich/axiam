@@ -14,7 +14,17 @@ pub enum AxiamError {
     AuthenticationFailed { reason: String },
 
     #[error("Authorization denied: {reason}")]
-    AuthorizationDenied { reason: String },
+    AuthorizationDenied {
+        reason: String,
+        /// The action being checked (e.g. `"users:create"`), when known at
+        /// the denial site. Surfaced to clients so SDKs can parse it from
+        /// the 403 response body (SDK-Q02).
+        action: Option<String>,
+        /// The resource id being checked, when known and not the
+        /// "global" nil-UUID sentinel. Surfaced to clients alongside
+        /// `action` (SDK-Q02).
+        resource_id: Option<String>,
+    },
 
     #[error("Validation error: {message}")]
     Validation { message: String },
@@ -45,6 +55,9 @@ pub enum AxiamError {
 
     #[error("Rate limit exceeded")]
     RateLimited,
+
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
 
     #[error("SAML assertion replay detected")]
     ReplayDetected,

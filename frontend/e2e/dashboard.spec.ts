@@ -25,7 +25,7 @@ test.describe("Dashboard page", () => {
   }) => {
     await page.goto("/dashboard");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("dashboard shows recent activity section", async ({ page }) => {
@@ -125,13 +125,13 @@ test.describe("Notification Rules page", () => {
     ).toBeVisible();
   });
 
-  test("notification rule create modal has Event Type and Recipient Emails fields", async ({
+  test("notification rule create modal has Events and Recipient Emails fields", async ({
     page,
   }) => {
     await page.goto("/notification-rules");
     await page.getByRole("button", { name: /New Rule/i }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
-    await expect(page.getByLabel(/Event Type/i)).toBeVisible();
+    await expect(page.getByRole("group", { name: "Events" })).toBeVisible();
     await expect(
       page.getByLabel("Recipient Emails (one per line)")
     ).toBeVisible();

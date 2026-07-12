@@ -45,6 +45,18 @@ class _AuthMetadataMixin:
     """
 
     def __init__(self, token_fn: Callable[[], str | None], tenant_id: str) -> None:
+        """Store the non-blocking token accessor and fixed tenant id used to
+        build metadata for every intercepted call.
+
+        Args:
+            token_fn: A synchronous, non-blocking zero-arg callable returning
+                the currently cached access token, or ``None``/empty when no
+                token is cached yet. MUST NOT acquire the refresh lock
+                (T-19-13) — typically
+                :meth:`~axiam_sdk.token.refresh_guard.RefreshGuard.cached_access_token`.
+            tenant_id: Injected as the ``x-tenant-id`` metadata key on every
+                call (CONTRACT.md §5).
+        """
         self._token_fn = token_fn
         self._tenant_id = tenant_id
 
@@ -78,6 +90,10 @@ class SyncAuthInterceptor(_AuthMetadataMixin, grpc.UnaryUnaryClientInterceptor):
         client_call_details: SyncClientCallDetails,
         request: _TRequest,
     ) -> Any:
+        """Inject Bearer/tenant metadata (via :meth:`_build_metadata`) into
+        ``client_call_details`` and forward synchronously to
+        ``continuation`` — ``grpc``'s sync interceptor contract, no
+        ``await`` involved."""
         new_details = client_call_details._replace(
             metadata=self._build_metadata(client_call_details.metadata)
         )
@@ -100,6 +116,10 @@ class AsyncAuthInterceptor(_AuthMetadataMixin, grpc.aio.UnaryUnaryClientIntercep
         client_call_details: AioClientCallDetails,
         request: _TRequest,
     ) -> _TResponse | UnaryUnaryCall[_TRequest, _TResponse]:
+        """Inject Bearer/tenant metadata (via :meth:`_build_metadata`) into
+        ``client_call_details`` and ``await`` ``continuation`` — the
+        ``grpc.aio``-specific divergence from the sync interceptor, which
+        calls ``continuation`` synchronously."""
         new_details = client_call_details._replace(
             metadata=self._build_metadata(client_call_details.metadata)
         )

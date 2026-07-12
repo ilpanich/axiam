@@ -89,9 +89,9 @@ export function ActionBadge({ action }: ActionBadgeProps) {
   return (
     <span
       className={cn(
-        "inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider border",
-        ACTION_COLOR_MAP[action] ??
-          "bg-white/5 text-muted-foreground border-white/10",
+        "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border",
+        ACTION_COLOR_MAP[action.toLowerCase()] ??
+          "bg-white/10 text-foreground/70 border-white/20",
       )}
     >
       {action}

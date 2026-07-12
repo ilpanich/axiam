@@ -61,7 +61,7 @@ test.describe("Organizations list page", () => {
       ).toBeVisible();
     } else {
       // Org row visible but delete control uses different pattern — assert page loaded
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 });
@@ -92,7 +92,7 @@ test.describe("Organization detail page", () => {
       await expect(page.getByRole("tab", { name: "Settings" })).toBeVisible();
     } else {
       // Fallback: org card links may use a different element — page is accessible
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 
@@ -109,7 +109,7 @@ test.describe("Organization detail page", () => {
         page.getByRole("button", { name: /Generate Certificate/i })
       ).toBeVisible();
     } else {
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 });

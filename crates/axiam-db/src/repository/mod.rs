@@ -1,6 +1,7 @@
 //! SurrealDB repository implementations.
 
 mod account_deletion;
+mod amqp_nonce_replay;
 mod audit;
 mod ca_certificate;
 mod certificate;
@@ -23,6 +24,7 @@ mod password_history;
 mod password_reset_token;
 mod permission;
 mod pgp_key;
+mod rate_limit;
 mod resource;
 mod role;
 mod saml_replay;
@@ -36,6 +38,7 @@ mod webauthn_credential;
 mod webhook;
 
 pub use account_deletion::SurrealAccountDeletionRepository;
+pub use amqp_nonce_replay::SurrealAmqpNonceRepository;
 pub use audit::SurrealAuditLogRepository;
 pub use ca_certificate::SurrealCaCertificateRepository;
 pub use certificate::SurrealCertificateRepository;
@@ -58,6 +61,7 @@ pub use password_history::SurrealPasswordHistoryRepository;
 pub use password_reset_token::SurrealPasswordResetTokenRepository;
 pub use permission::SurrealPermissionRepository;
 pub use pgp_key::SurrealPgpKeyRepository;
+pub use rate_limit::SurrealRateLimitBucketRepository;
 pub use resource::SurrealResourceRepository;
 pub use role::SurrealRoleRepository;
 pub use saml_replay::SurrealAssertionReplayRepository;
@@ -66,6 +70,6 @@ pub use service_account::{SurrealServiceAccountRepository, hash_client_secret};
 pub use session::SurrealSessionRepository;
 pub use settings::SurrealSettingsRepository;
 pub use tenant::SurrealTenantRepository;
-pub use user::{SurrealUserRepository, verify_password};
+pub use user::SurrealUserRepository;
 pub use webauthn_credential::SurrealWebauthnCredentialRepository;
 pub use webhook::SurrealWebhookRepository;

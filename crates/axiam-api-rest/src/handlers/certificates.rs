@@ -8,10 +8,6 @@ use axiam_core::models::certificate::{
 use axiam_core::repository::{
     CertificateRepository, PaginatedResult, Pagination, TenantRepository,
 };
-use axiam_db::{
-    SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealTenantRepository,
-};
-use axiam_pki::CertService;
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -19,6 +15,7 @@ use uuid::Uuid;
 use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
+use crate::state::AppState;
 
 // -----------------------------------------------------------------------
 // Request / response types (CQ-B25)
@@ -47,13 +44,10 @@ pub struct CreateCertificateRequest {
     ),
     security(("bearer" = []))
 )]
-pub async fn generate<C: Connection>(
+pub async fn generate<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    service: web::Data<
-        CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
-    >,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<CreateCertificateRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:generate", Uuid::nil())
@@ -71,14 +65,17 @@ pub async fn generate<C: Connection>(
     };
 
     // Read tenant-level max_certificate_validity_days from metadata
-    let tenant = tenant_repo.get_by_id(user.tenant_id).await?;
+    let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
     let max_validity = tenant
         .metadata
         .get("max_certificate_validity_days")
         .and_then(|v| v.as_u64())
         .map(|v| v as u32);
 
-    let result = service.generate(user.org_id, input, max_validity).await?;
+    let result = state
+        .cert_service
+        .generate(user.org_id, input, max_validity)
+        .await?;
     Ok(HttpResponse::Created().json(result))
 }
 
@@ -94,18 +91,17 @@ pub async fn generate<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    service: web::Data<
-        CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
-    >,
+    state: web::Data<AppState<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let result = service
+    let result = state
+        .cert_service
         .list(user.tenant_id, pagination.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(result))
@@ -122,19 +118,17 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    service: web::Data<
-        CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
-    >,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    let result = service.get(user.tenant_id, id).await?;
+    let result = state.cert_service.get(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -149,19 +143,17 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn revoke<C: Connection>(
+pub async fn revoke<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    service: web::Data<
-        CertService<SurrealCaCertificateRepository<C>, SurrealCertificateRepository<C>>,
-    >,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:revoke", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    service.revoke(user.tenant_id, id).await?;
+    state.cert_service.revoke(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
 }
 
@@ -177,12 +169,11 @@ pub async fn revoke<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn bind<C: Connection>(
+pub async fn bind<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    cert_repo: web::Data<SurrealCertificateRepository<C>>,
-    sa_repo: web::Data<axiam_db::SurrealServiceAccountRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<BindCertificate>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:bind", Uuid::nil())
@@ -192,15 +183,20 @@ pub async fn bind<C: Connection>(
     let input = body.into_inner();
 
     // Verify the certificate belongs to the same tenant.
-    let cert = cert_repo
+    let cert = state
+        .cert_repo
         .get_by_id(user.tenant_id, input.certificate_id)
         .await?;
 
     // Verify the service account belongs to the same tenant.
     use axiam_core::repository::ServiceAccountRepository;
-    sa_repo.get_by_id(user.tenant_id, sa_id).await?;
+    state
+        .service_account_repo
+        .get_by_id(user.tenant_id, sa_id)
+        .await?;
 
-    cert_repo
+    state
+        .cert_repo
         .bind_to_service_account(user.tenant_id, cert.id, sa_id)
         .await?;
 

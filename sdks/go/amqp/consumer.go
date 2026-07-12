@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
@@ -84,12 +85,27 @@ type ConsumeOption func(*consumeConfig)
 type consumeConfig struct {
 	prefetch int
 	logger   securityLogger
+	skew     time.Duration
 }
 
 // WithPrefetch overrides the default QoS prefetch count (CF-03).
 func WithPrefetch(n int) ConsumeOption {
 	return func(c *consumeConfig) {
 		c.prefetch = n
+	}
+}
+
+// WithSkew overrides the default ±5-minute freshness window (NEW-4) applied
+// to a delivery's issued_at field: a message whose issued_at falls outside
+// ±skew of the consumer's current clock is rejected (nacked without
+// requeue, handler never invoked) even though its HMAC signature verifies.
+// skew also sets the TTL (2×skew) of the in-memory nonce dedup set used for
+// replay detection. skew <= 0 is ignored (the default is kept).
+func WithSkew(skew time.Duration) ConsumeOption {
+	return func(c *consumeConfig) {
+		if skew > 0 {
+			c.skew = skew
+		}
 	}
 }
 
@@ -106,13 +122,19 @@ func WithSecurityLogger(l securityLogger) ConsumeOption {
 }
 
 // verifyAndDispatch verifies a single delivery's HMAC signature BEFORE
-// invoking handler (§8, D-07's core security invariant), then maps the
-// outcome to the ack/nack matrix:
+// invoking handler (§8, D-07's core security invariant), then applies the
+// NEW-4 replay-protection gate, then maps the outcome to the ack/nack
+// matrix:
 //
 //   - HMAC verification fails (missing/malformed/mismatched signature, or a
 //     body that fails to parse as JSON once verified) -> Nack(false); a
 //     security event is logged (never containing the HMAC value); handler
 //     is NEVER invoked.
+//   - HMAC verification succeeds but replay is non-nil and rejects the
+//     message (key_version < 2, stale issued_at, or a replayed nonce) ->
+//     Nack(false); a security event is logged; handler is NEVER invoked.
+//     A nil replay skips this gate entirely (used by tests that only
+//     exercise the ack/nack matrix).
 //   - handler(ctx, event) returns nil -> Ack.
 //   - handler returns ErrDrop -> Nack(false) (poison message).
 //   - handler returns any other error -> Nack(true) (transient, requeue).
@@ -120,19 +142,30 @@ func WithSecurityLogger(l securityLogger) ConsumeOption {
 // This is the load-bearing, separately-testable unit backing Consume's
 // per-delivery loop — generic over AckableDelivery so it is exercised
 // against recordingDelivery in tests without a live broker.
-func verifyAndDispatch(ctx context.Context, delivery AckableDelivery, signingKey []byte, handler Handler, logger securityLogger) {
+func verifyAndDispatch(ctx context.Context, delivery AckableDelivery, signingKey []byte, handler Handler, logger securityLogger, replay *replayGuard) {
 	if logger == nil {
 		logger = noopLogger{}
 	}
 
 	body := delivery.Data()
 
-	if !verifyHMAC(signingKey, body) {
+	ok, meta := verifyHMAC(signingKey, body)
+	if !ok {
 		// Security event (§8.4): fact of failure only. NEVER the received
 		// or expected HMAC value.
 		logger.SecurityWarn("axiam_sdk_security: AMQP HMAC verification failed; nacking without requeue")
 		delivery.Nack(false)
 		return
+	}
+
+	if replay != nil {
+		if err := replay.check(meta); err != nil {
+			// Security event (NEW-4): fact of rejection only, never the
+			// nonce/issued_at/HMAC values.
+			logger.SecurityWarn("axiam_sdk_security: AMQP replay-protection check failed; nacking without requeue")
+			delivery.Nack(false)
+			return
+		}
 	}
 
 	event, err := parseEvent(body)
@@ -162,14 +195,25 @@ func verifyAndDispatch(ctx context.Context, delivery AckableDelivery, signingKey
 // overridable via WithPrefetch) and blocks until ctx is cancelled or the
 // delivery channel closes.
 //
+// NEW-4 replay protection: after HMAC verification succeeds, Consume also
+// rejects (nacks without requeue, handler never invoked, security event
+// logged) any delivery whose key_version is below 2, whose issued_at falls
+// outside a ±5-minute freshness window of the consumer's clock (overridable
+// via WithSkew), or whose nonce has already been seen within that window
+// (replay). The nonce dedup set is in-memory only and is bounded by a TTL of
+// 2×skew, so it resets on process restart — this is a defense-in-depth
+// client-side check; the server maintains the durable nonce store.
+//
 // signingKey MUST be obtained from the AXIAM management API for the tenant
 // whose queue is being consumed (§8.1) — hardcoding a signing key is
 // prohibited.
 func Consume(ctx context.Context, ch *amqp091.Channel, queue string, signingKey []byte, handler Handler, opts ...ConsumeOption) error {
-	cfg := consumeConfig{prefetch: defaultPrefetch, logger: noopLogger{}}
+	cfg := consumeConfig{prefetch: defaultPrefetch, logger: noopLogger{}, skew: defaultSkew}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+
+	replay := newReplayGuard(cfg.skew)
 
 	if err := ch.Qos(cfg.prefetch, 0, false); err != nil {
 		return fmt.Errorf("axiam: failed to set AMQP QoS: %w", err)
@@ -199,7 +243,7 @@ func Consume(ctx context.Context, ch *amqp091.Channel, queue string, signingKey 
 			if !ok {
 				return fmt.Errorf("axiam: AMQP delivery channel closed")
 			}
-			verifyAndDispatch(ctx, deliveryAdapter{d: d}, signingKey, handler, cfg.logger)
+			verifyAndDispatch(ctx, deliveryAdapter{d: d}, signingKey, handler, cfg.logger, replay)
 		}
 	}
 }

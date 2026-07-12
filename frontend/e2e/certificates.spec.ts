@@ -17,7 +17,7 @@ test.describe("Certificates page", () => {
   }) => {
     await page.goto("/certificates");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows certificate list or empty state from live backend", async ({
@@ -25,16 +25,10 @@ test.describe("Certificates page", () => {
   }) => {
     await page.goto("/certificates");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page
-      .getByText(/no certificates|empty/i)
-      .isVisible()
-      .catch(() => false);
-    const hasGenerateBtn = await page
-      .getByRole("button", { name: /Generate Certificate/i })
-      .isVisible()
-      .catch(() => false);
-    expect(hasTable || hasEmptyState || hasGenerateBtn).toBe(true);
+    // DataTable always renders a <table> (rows or the empty message inside),
+    // so wait for it — auto-retries through the async fetch instead of the
+    // one-shot isVisible() probes that raced the load and flaked.
+    await expect(page.getByRole("table")).toBeVisible();
   });
 
   test('"Generate Certificate" button opens modal with common name field', async ({
@@ -48,7 +42,7 @@ test.describe("Certificates page", () => {
       await expect(page.getByRole("dialog")).toBeVisible();
       await expect(page.getByLabel("Common Name *")).toBeVisible();
     } else {
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 
@@ -63,7 +57,7 @@ test.describe("Certificates page", () => {
       await expect(page.getByLabel("Key Type")).toBeVisible();
       await expect(page.getByLabel("Validity Days")).toBeVisible();
     } else {
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 });
@@ -80,7 +74,7 @@ test.describe("Webhooks page", () => {
   test("renders webhooks page (not redirected to /login)", async ({ page }) => {
     await page.goto("/webhooks");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows webhook list or empty state from live backend", async ({
@@ -88,13 +82,9 @@ test.describe("Webhooks page", () => {
   }) => {
     await page.goto("/webhooks");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page.getByText(/no webhooks/i).isVisible().catch(() => false);
-    const hasNewBtn = await page
-      .getByRole("button", { name: /New Webhook/i })
-      .isVisible()
-      .catch(() => false);
-    expect(hasTable || hasEmptyState || hasNewBtn).toBe(true);
+    // DataTable always renders a <table>; wait for it (auto-retry) instead of
+    // one-shot isVisible() probes that raced the fetch and flaked.
+    await expect(page.getByRole("table")).toBeVisible();
   });
 
   test('"New Webhook" button opens create modal with URL field', async ({
@@ -128,7 +118,7 @@ test.describe("PGP Keys page", () => {
   test("renders PGP keys page (not redirected to /login)", async ({ page }) => {
     await page.goto("/pgp-keys");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows PGP key list or empty state from live backend", async ({
@@ -136,9 +126,8 @@ test.describe("PGP Keys page", () => {
   }) => {
     await page.goto("/pgp-keys");
     await expect(page).not.toHaveURL(/\/login/);
-    const hasTable = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page.getByText(/no.*keys|empty/i).isVisible().catch(() => false);
-    const hasNewBtn = await page.getByRole("button").isVisible().catch(() => false);
-    expect(hasTable || hasEmptyState || hasNewBtn).toBe(true);
+    // DataTable always renders a <table>; wait for it (auto-retry) instead of
+    // one-shot isVisible() probes that raced the fetch and flaked.
+    await expect(page.getByRole("table")).toBeVisible();
   });
 });

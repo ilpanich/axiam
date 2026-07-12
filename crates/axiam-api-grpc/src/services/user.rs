@@ -2,10 +2,12 @@
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::password;
+use axiam_auth::token::ValidatedClaims;
 use axiam_core::error::AxiamError;
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::UserRepository;
 use chrono::Utc;
+use secrecy::ExposeSecret;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -58,13 +60,29 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         &self,
         request: Request<GetUserRequest>,
     ) -> Result<Response<UserResponse>, Status> {
+        // SEC-003: derive authoritative identity from verified JWT claims;
+        // never trust the request body's tenant_id outright.
+        let claims = request
+            .extensions()
+            .get::<ValidatedClaims>()
+            .ok_or_else(|| Status::unauthenticated("missing validated claims"))?
+            .clone();
+        let claims_tenant_id = parse_uuid(&claims.0.tenant_id, "claims.tenant_id")?;
+
         let req = request.into_inner();
         let tenant_id = parse_uuid(&req.tenant_id, "tenant_id")?;
         let user_id = parse_uuid(&req.user_id, "user_id")?;
 
+        // Cross-validate body tenant_id against verified claims (reject on mismatch).
+        if tenant_id != claims_tenant_id {
+            return Err(Status::permission_denied(
+                "tenant_id mismatch: body does not match token claims",
+            ));
+        }
+
         let user = self
             .user_repo
-            .get_by_id(tenant_id, user_id)
+            .get_by_id(claims_tenant_id, user_id)
             .await
             .map_err(axiam_err_to_status)?;
 
@@ -83,8 +101,26 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         &self,
         request: Request<ValidateCredentialsRequest>,
     ) -> Result<Response<ValidateCredentialsResponse>, Status> {
+        // SEC-003: derive authoritative identity from verified JWT claims;
+        // never trust the request body's tenant_id outright.
+        let claims = request
+            .extensions()
+            .get::<ValidatedClaims>()
+            .ok_or_else(|| Status::unauthenticated("missing validated claims"))?
+            .clone();
+        let claims_tenant_id = parse_uuid(&claims.0.tenant_id, "claims.tenant_id")?;
+
         let req = request.into_inner();
         let tenant_id = parse_uuid(&req.tenant_id, "tenant_id")?;
+
+        // Cross-validate body tenant_id against verified claims (reject on mismatch,
+        // fail-closed — no cross-tenant credential oracle per 23-RESEARCH.md
+        // Open Question 1 / Assumption A1).
+        if tenant_id != claims_tenant_id {
+            return Err(Status::permission_denied(
+                "tenant_id mismatch: body does not match token claims",
+            ));
+        }
 
         let invalid = Response::new(ValidateCredentialsResponse {
             valid: false,
@@ -94,14 +130,14 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         // Look up user by username, then by email.
         let user = match self
             .user_repo
-            .get_by_username(tenant_id, &req.username_or_email)
+            .get_by_username(claims_tenant_id, &req.username_or_email)
             .await
         {
             Ok(u) => u,
             Err(AxiamError::NotFound { .. }) => {
                 match self
                     .user_repo
-                    .get_by_email(tenant_id, &req.username_or_email)
+                    .get_by_email(claims_tenant_id, &req.username_or_email)
                     .await
                 {
                     Ok(u) => u,
@@ -128,7 +164,7 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         let valid = password::verify_password(
             &req.password,
             &user.password_hash,
-            self.auth_config.pepper.as_deref(),
+            self.auth_config.pepper.as_ref().map(|p| p.expose_secret()),
         )
         .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -138,6 +174,17 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
                 user_id: user.id.to_string(),
             }))
         } else {
+            // SEC-026b / D-06: meter every failed credential check via the
+            // shared lockout helper — the single source of truth for
+            // failed-attempt accrual, no unmetered credential-check path.
+            axiam_auth::lockout::record_failed_login(
+                &self.user_repo,
+                &self.auth_config,
+                claims_tenant_id,
+                &user,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
             Ok(invalid)
         }
     }

@@ -15,6 +15,9 @@ public sealed class AxiamRequirement : IAuthorizationRequirement
     /// <summary>The action half of the policy name (e.g. <c>"read"</c>).</summary>
     public string Action { get; }
 
+    /// <summary>Constructs the requirement from the parsed halves of a <c>"resource:action"</c> policy name.</summary>
+    /// <param name="resource">The resource-type half of the policy name (e.g. <c>"documents"</c>). Required, non-blank.</param>
+    /// <param name="action">The action half of the policy name (e.g. <c>"read"</c>). Required, non-blank.</param>
     public AxiamRequirement(string resource, string action)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(resource);

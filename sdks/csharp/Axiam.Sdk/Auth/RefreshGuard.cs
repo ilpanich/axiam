@@ -50,6 +50,12 @@ public sealed class RefreshGuard : IDisposable
     private readonly Func<CancellationToken, Task<TokenPair>> _doRefresh;
     private Task<TokenPair>? _inFlight;
 
+    /// <summary>Constructs a <see cref="RefreshGuard"/> around the given refresh delegate.</summary>
+    /// <param name="doRefresh">
+    /// Performs the actual token-refresh call (e.g. <c>POST /api/v1/auth/refresh</c>).
+    /// Invoked at most once per in-flight refresh, regardless of how many concurrent
+    /// callers invoke <see cref="RefreshIfNeededAsync"/> (&#167;9 single-flight guarantee).
+    /// </param>
     public RefreshGuard(Func<CancellationToken, Task<TokenPair>> doRefresh)
     {
         _doRefresh = doRefresh ?? throw new ArgumentNullException(nameof(doRefresh));
@@ -100,5 +106,6 @@ public sealed class RefreshGuard : IDisposable
         }
     }
 
+    /// <summary>Disposes the underlying <see cref="SemaphoreSlim"/> gate.</summary>
     public void Dispose() => _gate.Dispose();
 }

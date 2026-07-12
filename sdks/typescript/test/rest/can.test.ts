@@ -17,6 +17,22 @@ const server = setupServer(
     if (body.action === 'denied:action') {
       return HttpResponse.json({ error: 'authorization_denied' }, { status: 403 });
     }
+    if (body.action === 'denied:with-body-fields') {
+      // Structured 403 body (SDK-Q02): the server echoes back the action it
+      // evaluated plus the resource_id of the denied resource. The SDK must
+      // populate AuthzError from THESE fields, not the call-arg ctx.
+      return HttpResponse.json(
+        { error: 'authorization_denied', message: 'not authorized', action: 'users:get', resource_id: 'server-uuid-1' },
+        { status: 403 },
+      );
+    }
+    if (body.action === 'denied:action-only') {
+      // Non-resource-scoped denial: body carries `action` but no `resource_id`.
+      return HttpResponse.json(
+        { error: 'authorization_denied', message: 'not authorized', action: 'users:list' },
+        { status: 403 },
+      );
+    }
     return HttpResponse.json({ allowed: body.action === 'users:read' }, { status: 200 });
   }),
   http.post(`${BASE_URL}/api/v1/authz/check/batch`, async ({ request }) => {
@@ -60,6 +76,34 @@ describe('checkAccess() (D-08)', () => {
     await expect(client.checkAccess({ action: 'denied:action', resourceId: 'resource-1' })).rejects.toBeInstanceOf(
       AuthzError,
     );
+  });
+
+  it('populates AuthzError.action/resourceId from the 403 response body, not just the call-args (SDK-Q02)', async () => {
+    const client = new AxiamClient({ baseUrl: BASE_URL, tenantSlug: 'acme' });
+
+    // Call-arg resourceId ('call-arg-resource') deliberately differs from the
+    // body's resource_id ('server-uuid-1') so the assertion proves the body
+    // value wins, rather than merely matching what was passed in.
+    const error = await client
+      .checkAccess({ action: 'denied:with-body-fields', resourceId: 'call-arg-resource' })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(AuthzError);
+    expect((error as AuthzError).action).toBe('users:get');
+    expect((error as AuthzError).resourceId).toBe('server-uuid-1');
+  });
+
+  it('populates AuthzError.action from a 403 body carrying only action (no resource_id)', async () => {
+    const client = new AxiamClient({ baseUrl: BASE_URL, tenantSlug: 'acme' });
+
+    const error = await client
+      .checkAccess({ action: 'denied:action-only', resourceId: 'call-arg-resource' })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(AuthzError);
+    expect((error as AuthzError).action).toBe('users:list');
+    // resource_id absent from body -> falls back to the call-arg ctx value.
+    expect((error as AuthzError).resourceId).toBe('call-arg-resource');
   });
 });
 

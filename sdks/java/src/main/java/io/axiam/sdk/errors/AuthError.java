@@ -11,6 +11,12 @@ package io.axiam.sdk.errors;
  */
 public final class AuthError extends RuntimeException {
 
+    /**
+     * Creates a new {@code AuthError} with the given message.
+     *
+     * @param message a human-readable, English-only description of the
+     *                authentication failure (D-29)
+     */
     public AuthError(String message) {
         super(message);
     }

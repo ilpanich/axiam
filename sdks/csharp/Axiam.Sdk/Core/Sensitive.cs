@@ -43,7 +43,7 @@ namespace Axiam.Sdk.Core;
 /// transitively leak into any compiler-synthesized record equality of a type that carries
 /// a <see cref="Sensitive{T}"/> field. Overriding to a constant closes that channel.
 /// </remarks>
-[JsonConverter(typeof(SensitiveJsonConverter<>))]
+[JsonConverter(typeof(SensitiveJsonConverterFactory))]
 public readonly struct Sensitive<T> : IEquatable<Sensitive<T>>
 {
     private readonly T _value;
@@ -88,6 +88,29 @@ internal static class Sensitive
 }
 
 /// <summary>
+/// Factory that produces the closed <see cref="SensitiveJsonConverter{T}"/> for a given
+/// <see cref="Sensitive{T}"/>. An open-generic converter referenced from a
+/// <see cref="JsonConverterAttribute"/> MUST be a <see cref="JsonConverterFactory"/>:
+/// <c>System.Text.Json</c> cannot instantiate an open-generic <c>JsonConverter&lt;T&gt;</c>
+/// directly (it throws because the type still contains generic parameters).
+/// </summary>
+public sealed class SensitiveJsonConverterFactory : JsonConverterFactory
+{
+    /// <inheritdoc />
+    public override bool CanConvert(Type typeToConvert)
+        => typeToConvert.IsGenericType
+           && typeToConvert.GetGenericTypeDefinition() == typeof(Sensitive<>);
+
+    /// <inheritdoc />
+    public override JsonConverter CreateConverter(Type typeToConvert, JsonSerializerOptions options)
+    {
+        Type valueType = typeToConvert.GetGenericArguments()[0];
+        Type converterType = typeof(SensitiveJsonConverter<>).MakeGenericType(valueType);
+        return (JsonConverter)Activator.CreateInstance(converterType)!;
+    }
+}
+
+/// <summary>
 /// <c>System.Text.Json</c> converter for <see cref="Sensitive{T}"/>. Write always emits
 /// the redacted literal; Read is intentionally unsupported — a <see cref="Sensitive{T}"/>
 /// is a write-only-for-serialization type, so no wire format can ever deserialize a real
@@ -95,9 +118,15 @@ internal static class Sensitive
 /// </summary>
 public sealed class SensitiveJsonConverter<T> : JsonConverter<Sensitive<T>>
 {
+    /// <summary>
+    /// Always throws — a <see cref="Sensitive{T}"/> is write-only for serialization, so no
+    /// wire format can ever deserialize a real value back into one (see type-level remarks).
+    /// </summary>
+    /// <exception cref="NotSupportedException">Always thrown; reading is never supported.</exception>
     public override Sensitive<T> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         => throw new NotSupportedException("Sensitive<T> is write-only for serialization.");
 
+    /// <summary>Writes the redacted literal <c>"[SENSITIVE]"</c>, never the wrapped value.</summary>
     public override void Write(Utf8JsonWriter writer, Sensitive<T> value, JsonSerializerOptions options)
         => writer.WriteStringValue("[SENSITIVE]");
 }

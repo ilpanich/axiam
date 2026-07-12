@@ -16,7 +16,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-rcgen = { workspace = true }
+rcgen = { workspace = true, features = ["x509-parser"] }
 x509-parser = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
@@ -26,10 +26,16 @@ rand = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = { workspace = true }
 pgp = { workspace = true }
+zeroize = { workspace = true }
 smallvec = "1"
 time = "0.3"
 
 [dev-dependencies]
 axiam-db = { workspace = true }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 uuid = { workspace = true }
+
+[[bench]]
+name = "cert_bench"
+harness = false

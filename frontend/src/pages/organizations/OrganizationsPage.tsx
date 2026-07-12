@@ -16,15 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Pencil, Trash2, Plus } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
-import { formatDate } from "@/lib/utils";
-
-function slugify(value: string): string {
-  return value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-}
+import { formatDate, slugify } from "@/lib/utils";
 
 // ─── Org form (shared between create/edit) ────────────────────────────────────
 

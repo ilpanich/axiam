@@ -14,6 +14,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 /// Generate a random client ID with the `sa_` prefix (32 hex chars).
 fn generate_client_id() -> String {
@@ -98,11 +99,6 @@ impl ServiceAccountRowWithId {
     }
 }
 
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
 /// SurrealDB implementation of the ServiceAccount repository.
 #[derive(Clone)]
 pub struct SurrealServiceAccountRepository<C: Connection> {
@@ -148,10 +144,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<ServiceAccountRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "service_account".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "service_account", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -185,10 +178,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map_err(DbError::from)?;
 
         let rows: Vec<ServiceAccountRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "service_account".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "service_account", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -224,10 +214,11 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map_err(DbError::from)?;
 
         let rows: Vec<ServiceAccountRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "service_account".into(),
-            id: format!("client_id={client_id_owned}"),
-        })?;
+        let row = take_first_or_not_found(
+            rows,
+            "service_account",
+            &format!("client_id={client_id_owned}"),
+        )?;
 
         row.try_into_service_account().map_err(Into::into)
     }
@@ -275,10 +266,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<ServiceAccountRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "service_account".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "service_account", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -298,10 +286,19 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let id_str = id.to_string();
 
+        // Delete the has_role edges then the record inside one transaction so
+        // a concurrent reader never observes a partial delete. The has_role
+        // edge carries no flat tenant_id column, so tenant scoping is a
+        // node-tenant guard on the edge's `in` endpoint (in.tenant_id),
+        // mirroring role.delete; without it a caller with a foreign-tenant
+        // service-account id could strip another tenant's role bindings.
+        // `.check()` surfaces per-statement failures instead of swallowing
+        // them as Ok.
         let query = format!(
-            "DELETE has_role WHERE in = service_account:`{id_str}`; \
-             DELETE type::record('service_account', $id) \
-             WHERE tenant_id = $tenant_id;"
+            "BEGIN TRANSACTION; \
+             DELETE has_role WHERE in = service_account:`{id_str}` AND in.tenant_id = $tenant_id; \
+             DELETE type::record('service_account', $id) WHERE tenant_id = $tenant_id; \
+             COMMIT TRANSACTION"
         );
 
         self.db
@@ -309,7 +306,9 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id.to_string()))
             .await
-            .map_err(DbError::from)?;
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         Ok(())
     }
@@ -331,7 +330,6 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let mut result = self
             .db
@@ -354,12 +352,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .map(|row| row.try_into_service_account())
             .collect::<Result<Vec<_>, DbError>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn rotate_secret(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<String> {

@@ -4,7 +4,7 @@
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { AuthError, AuthzError } from '../core/index.js';
-import { extractToken } from './cookieHeader.js';
+import { CSRF_HEADER_NAME, extractCredential, isCsrfValid, isSafeMethod } from './cookieHeader.js';
 import { authenticateRequest, type AxiamIdentity, type VerifiableSession } from './verifyCore.js';
 
 export interface AxiamFastifyRequest extends FastifyRequest {
@@ -28,6 +28,10 @@ function authzDeniedBody(message: string): ErrorBody {
   return { error: 'authorization_denied', message };
 }
 
+function csrfDeniedBody(): ErrorBody {
+  return { error: 'authorization_denied', message: 'csrf validation failed' };
+}
+
 /**
  * `axiamPlugin(session)` — a `FastifyPluginAsync` registering a
  * `preHandler` hook that extracts the session (cookie-first, then
@@ -35,6 +39,19 @@ function authzDeniedBody(message: string): ErrorBody {
  * cached JWKS (D-11), and injects `request.axiamUser` on success.
  * Replies 401 (AuthError) or 403 (AuthzError) with a standardized JSON
  * error body on failure.
+ *
+ * **CSRF (cookie double-submit, CONTRACT.md §3):** when the credential was
+ * sourced from the `axiam_access` COOKIE (not the `Authorization` header)
+ * and the request method is state-changing (anything other than
+ * GET/HEAD/OPTIONS), this hook additionally requires the `X-CSRF-Token`
+ * request header to be present and equal (constant time) to the
+ * `axiam_csrf` cookie value, replying 403 on mismatch/absence. Bearer-header
+ * requests are CSRF-immune by construction — a cross-site attacker cannot
+ * set arbitrary request headers — but a cookie automatically attached by
+ * the browser is not, and in any same-site deployment where `axiam_access`
+ * reaches this app, the non-`httpOnly` `axiam_csrf` cookie does too. This
+ * mirrors, locally, the same double-submit check the AXIAM server performs
+ * on its own endpoints (§3).
  *
  * Marked with fastify's own `skip-override` plugin symbol (the same
  * mechanism the `fastify-plugin` package wraps) so the `preHandler` hook
@@ -45,13 +62,21 @@ function authzDeniedBody(message: string): ErrorBody {
 export const axiamPlugin: (session: VerifiableSession) => FastifyPluginAsync = (session) => {
   const plugin: FastifyPluginAsync = async (fastify) => {
     fastify.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
-      const token = extractToken(request.headers.cookie, request.headers.authorization);
-      if (!token) {
+      const credential = extractCredential(request.headers.cookie, request.headers.authorization);
+      if (!credential) {
         return reply.code(401).send(missingCredentialsBody());
       }
 
+      if (credential.source === 'cookie' && !isSafeMethod(request.method)) {
+        const csrfHeader = request.headers[CSRF_HEADER_NAME];
+        const csrfValue = Array.isArray(csrfHeader) ? csrfHeader[0] : csrfHeader;
+        if (!isCsrfValid(request.headers.cookie, csrfValue)) {
+          return reply.code(403).send(csrfDeniedBody());
+        }
+      }
+
       try {
-        const identity = await authenticateRequest(session, token);
+        const identity = await authenticateRequest(session, credential.token);
         (request as AxiamFastifyRequest).axiamUser = identity;
       } catch (err) {
         if (err instanceof AuthzError) {

@@ -27,6 +27,7 @@ import java.net.URL;
 import java.text.ParseException;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Local JWT verification against the organization-wide EdDSA JWKS (D-19,
@@ -80,6 +81,18 @@ public final class JwksVerifier {
     private final RemoteJWKSet<SecurityContext> jwkSource;
 
     /**
+     * Serializes the forced-refetch path so a concurrent burst of
+     * unknown-{@code kid} verifications collapses to exactly one Nimbus
+     * refetch (D-08/D-09) &mdash; we do NOT rely on {@link RemoteJWKSet}'s
+     * own thread-safety for this guarantee (Assumption A3). The lock wraps
+     * only the fetch/refetch decision below; the EdDSA signature
+     * verification in {@link #verify(String)} is unaffected.
+     */
+    private final ReentrantLock refreshLock = new ReentrantLock();
+
+    /**
+     * Creates a verifier sourcing its JWKS from {@code {baseUrl}/oauth2/jwks}.
+     *
      * @param baseUrl the AXIAM server base URL (trailing slash tolerated);
      *                the JWKS URL is derived as {@code {baseUrl}/oauth2/jwks}
      */
@@ -108,6 +121,8 @@ public final class JwksVerifier {
      * tenant scoping. Callers MUST separately check {@code exp} and call
      * {@link #assertTenant(JWTClaimsSet, String)}.
      *
+     * @param token the compact-serialized JWS to verify
+     * @return the token's claims, once the signature has verified successfully
      * @throws AuthError if the token is malformed, the alg is not EdDSA,
      *                    no matching key is found in the JWKS (including
      *                    after a forced refetch on an unknown {@code kid}),
@@ -162,6 +177,16 @@ public final class JwksVerifier {
      * ({@link RemoteJWKSet}, which itself forces exactly one refetch +
      * retry when the sought {@code kid} is not found in the cached set —
      * key-rotation support carried by the library, not hand-rolled).
+     *
+     * <p>D-08/D-09: a concurrent burst of unknown-{@code kid} lookups must
+     * collapse to exactly one Nimbus refetch. The fast path below matches
+     * against {@link RemoteJWKSet#getCachedJWKSet()} — which never triggers
+     * a network call — before ever acquiring {@link #refreshLock}. Only on
+     * a cache miss is the lock acquired; the cache is re-checked once more
+     * under the lock (another thread may have just refreshed it while this
+     * one waited), and {@link RemoteJWKSet#get} — the call that may
+     * perform the actual network refetch — is invoked only if the key is
+     * still missing.
      */
     private OctetKeyPair selectKey(JWSHeader header) {
         JWKMatcher matcher = new JWKMatcher.Builder()
@@ -171,20 +196,57 @@ public final class JwksVerifier {
                 .algorithms(JWSAlgorithm.EdDSA, null)
                 .curves(Curve.Ed25519, Curve.Ed448)
                 .build();
+        JWKSelector selector = new JWKSelector(matcher);
 
-        List<JWK> matches;
-        try {
-            matches = jwkSource.get(new JWKSelector(matcher), null);
-        } catch (KeySourceException e) {
-            throw new AuthError("JWKS fetch failed: " + e.getMessage());
+        OctetKeyPair fastKey = selectFromCache(selector);
+        if (fastKey != null) {
+            return fastKey;
         }
 
-        for (JWK jwk : matches) {
+        refreshLock.lock();
+        try {
+            OctetKeyPair recheckKey = selectFromCache(selector);
+            if (recheckKey != null) {
+                return recheckKey;
+            }
+
+            List<JWK> matches;
+            try {
+                matches = jwkSource.get(selector, null);
+            } catch (KeySourceException e) {
+                throw new AuthError("JWKS fetch failed: " + e.getMessage());
+            }
+
+            OctetKeyPair key = firstOctetKeyPair(matches);
+            if (key == null) {
+                throw new AuthError("no matching EdDSA key found in JWKS (kid=" + header.getKeyID() + ")");
+            }
+            return key;
+        } finally {
+            refreshLock.unlock();
+        }
+    }
+
+    /**
+     * Matches {@code selector} against whatever is currently in
+     * {@link RemoteJWKSet#getCachedJWKSet()} WITHOUT triggering a network
+     * fetch (returns {@code null} on a cold/empty cache or no match).
+     */
+    private OctetKeyPair selectFromCache(JWKSelector selector) {
+        com.nimbusds.jose.jwk.JWKSet cached = jwkSource.getCachedJWKSet();
+        if (cached == null) {
+            return null;
+        }
+        return firstOctetKeyPair(selector.select(cached));
+    }
+
+    private static OctetKeyPair firstOctetKeyPair(List<JWK> jwks) {
+        for (JWK jwk : jwks) {
             if (jwk instanceof OctetKeyPair okp) {
                 return okp;
             }
         }
-        throw new AuthError("no matching EdDSA key found in JWKS (kid=" + header.getKeyID() + ")");
+        return null;
     }
 
     /**
@@ -194,6 +256,8 @@ public final class JwksVerifier {
      * the token's {@code tenant_id} claim is absent or does not match
      * {@code configuredTenantId}.
      *
+     * @param claims             the verified token's claims (see {@link #verify(String)})
+     * @param configuredTenantId the caller's configured tenant identifier to check against
      * @throws AuthError if {@code tenant_id} is missing or mismatched
      */
     public static void assertTenant(JWTClaimsSet claims, String configuredTenantId) {

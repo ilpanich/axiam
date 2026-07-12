@@ -88,7 +88,9 @@ export function Topbar({ onMenuClick }: TopbarProps) {
 
   const handleLogout = async () => {
     try {
-      await api.post("/api/v1/auth/logout", {});
+      // D-03 (SECFIX-05): logout revokes the caller's own session from the
+      // authenticated JWT — no request body, no client-supplied session_id.
+      await api.post("/api/v1/auth/logout");
     } catch {
       // Ignore errors — still clear local state
     }

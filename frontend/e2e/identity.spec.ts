@@ -155,7 +155,9 @@ test("Reset Password page shows error when no token in URL", async ({ page }) =>
 // ---------------------------------------------------------------------------
 
 test("Reset Password page shows password form when token is present in URL", async ({ page }) => {
-  await page.goto("/auth/reset-password?token=abc123");
+  // The page requires BOTH token and tenant_id (the emailed link carries both);
+  // with token alone it renders the "Invalid reset link" state instead of the form.
+  await page.goto("/auth/reset-password?token=abc123&tenant_id=t_123");
   await expect(page.getByLabel("New Password")).toBeVisible();
   await expect(page.getByLabel("Confirm Password")).toBeVisible();
   await expect(page.getByRole("button", { name: /Reset Password/i })).toBeVisible();
@@ -176,7 +178,9 @@ test("Verify Email page shows loading state on mount when token present", async 
     }
   });
 
-  await page.goto("/auth/verify-email?token=sometoken");
+  // Loading state only renders when BOTH token and tenant_id are present;
+  // the verification link carries both (token alone -> "Invalid verification link").
+  await page.goto("/auth/verify-email?token=sometoken&tenant_id=t_123");
   await expect(page.getByText(/Verifying your email/i)).toBeVisible({ timeout: 5000 });
 });
 

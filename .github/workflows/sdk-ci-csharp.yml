@@ -10,7 +10,7 @@ on:
       - 'buf.gen.yaml'
   push:
     tags:
-      - 'sdks/csharp/v*'
+      - 'axiam-csharp-sdk/v*'
 
 permissions:
   contents: read
@@ -28,7 +28,7 @@ jobs:
   build-test:
     name: Build, test, TLS-bypass gate, pack
     # No event-name restriction: this job runs BOTH on a pull_request AND on a
-    # tag push (sdks/csharp/vX.Y.Z) — the publish job below is gated behind it
+    # tag push (axiam-csharp-sdk/vX.Y.Z) — the publish job below is gated behind it
     # via `needs:`, so a tag can only publish after restore/build/test/the
     # SC#4 grep gate/pack have all passed on that exact tagged commit.
     runs-on: ubuntu-latest
@@ -81,6 +81,16 @@ jobs:
       - name: dotnet test (full solution)
         run: dotnet test sdks/csharp -c Release --no-build --logger "console;verbosity=normal"
 
+      # CI-03: fail on any transitively-referenced package with a known
+      # vulnerability. `dotnet list --vulnerable` exits 0 even when it prints
+      # advisories, so grep the output and fail explicitly.
+      - name: Dependency vulnerability scan (CI-03)
+        run: |
+          dotnet list sdks/csharp package --vulnerable --include-transitive 2>&1 | tee vuln.txt
+          if grep -q "has the following vulnerable packages" vuln.txt; then
+            echo "::error::Vulnerable NuGet packages detected"; exit 1
+          fi
+
       # §6/SC#4/T-21-21: strict TLS is always on; the only escape hatch is the
       # additive customCa chain-trust-store callback (CustomTrustStore /
       # CustomRootTrust markers) — no unconditional-true
@@ -120,17 +130,47 @@ jobs:
       # the package; no separate drift-check job is needed (D-05 marks it
       # optional).
 
+  # Publishing to a public registry is IRREVERSIBLE — crates.io, npm, PyPI, Maven
+  # Central, NuGet and Packagist all refuse to re-use a version number. Git tags are
+  # NOT branch-scoped, so without this gate a release tag cut on a feature branch would
+  # ship unreviewed code to the world under a version that can never be reclaimed.
+  # The publish job below `needs:` this.
+  verify-tag-on-main:
+    name: Verify tag is on main
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Assert the tagged commit is an ancestor of origin/main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is NOT on origin/main. Release tags must be cut from main."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_REF_NAME} (${GITHUB_SHA}) is on origin/main."
+
   publish:
     name: Publish to NuGet
     # Manual-on-tag, side-effecting job: only runs when a maintainer pushes a
-    # tag matching sdks/csharp/vX.Y.Z (Phase 15 D-13 monorepo tag convention),
+    # tag matching axiam-csharp-sdk/vX.Y.Z (Phase 15 D-13 monorepo tag convention),
     # and only after build-test (restore/build/test/grep-gate/pack) has
     # passed on that exact tagged commit.
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/csharp/v')
-    needs: build-test
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/axiam-csharp-sdk/v')
+    needs: [build-test, verify-tag-on-main]
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The `secrets` context is NOT available in step-level `if:` expressions —
+    # referencing it there ("Unrecognized named-value: 'secrets'") invalidates
+    # the whole workflow file and every run fails at startup with zero jobs.
+    # Hoist the credential into job-level `env` instead; the `env` context IS
+    # available in `if:`, so the credential-absent branch below still works.
+    env:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
@@ -160,15 +200,13 @@ jobs:
       # Credential setup: repository Settings -> Secrets and variables ->
       # Actions -> New repository secret -> NUGET_API_KEY (an API key scoped
       # to the reserved Axiam.Sdk / Axiam.Sdk.AspNetCore package IDs on
-      # nuget.org). Tag scheme: sdks/csharp/vX.Y.Z (Phase 15 D-13).
+      # nuget.org). Tag scheme: axiam-csharp-sdk/vX.Y.Z (Phase 15 D-13).
       - name: dotnet nuget push (requires NUGET_API_KEY secret)
-        if: ${{ secrets.NUGET_API_KEY != '' }}
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        if: ${{ env.NUGET_API_KEY != '' }}
         run: dotnet nuget push "./nupkgs/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
       - name: NUGET_API_KEY absent — publish deferred to a maintainer action (D-04)
-        if: ${{ secrets.NUGET_API_KEY == '' }}
+        if: ${{ env.NUGET_API_KEY == '' }}
         run: |
           echo "::warning::NUGET_API_KEY is not configured — Axiam.Sdk/Axiam.Sdk.AspNetCore were built, tested, and packed successfully but NOT pushed to nuget.org."
           echo "A maintainer must configure the NUGET_API_KEY repository secret (see this job's credential-setup comment above) and re-run this workflow, or push ./nupkgs/*.nupkg manually, to complete the first publish."

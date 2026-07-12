@@ -3,16 +3,22 @@
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::permissions::PERMISSION_REGISTRY;
 use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
+use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::repository::{
-    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
+    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
+use axiam_db::{seed_default_roles, seed_permissions};
 use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -108,16 +114,81 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
     .unwrap()
 }
 
+/// Fresh in-memory DB with org+tenant AND the real permission registry +
+/// default roles seeded — required for RBAC-gated (non-`AllowAllAuthzChecker`)
+/// tests (FUNC-04).
+async fn setup_db_with_rbac() -> (Surreal<TestDb>, Uuid, Uuid) {
+    let (db, org_id, tenant_id) = setup_db().await;
+    seed_permissions(&db, tenant_id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    seed_default_roles(&db, tenant_id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    (db, org_id, tenant_id)
+}
+
+/// Real RBAC engine (not `AllowAllAuthzChecker`) — needed to genuinely
+/// exercise `RequirePermission` gates rather than bypass them.
+fn make_real_authz(db: &Surreal<TestDb>) -> Arc<dyn AuthzChecker> {
+    Arc::new(AuthorizationEngine::new(
+        SurrealRoleRepository::new(db.clone()),
+        SurrealPermissionRepository::new(db.clone()),
+        SurrealResourceRepository::new(db.clone()),
+        SurrealScopeRepository::new(db.clone()),
+        SurrealGroupRepository::new(db.clone()),
+    ))
+}
+
+/// Create a user with NO role assigned — lacks every permission, including
+/// `users:list` (FUNC-04 non-privileged-caller fixture).
+async fn create_user_no_role(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    username: &str,
+    email: &str,
+) -> Uuid {
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: username.into(),
+            email: email.into(),
+            password: "password12345".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    user.id
+}
+
+macro_rules! test_app_real_authz {
+    ($db:expr, $auth:expr, $authz:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($auth.clone()))
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
+                    $auth.clone(),
+                )))
+                .app_data(web::Data::new($authz.clone()))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
+        )
+        .await
+    };
+}
+
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(SurrealOrganizationRepository::new(
+                .app_data(web::Data::new(AppState::for_test(
                     $db.clone(),
+                    $auth.clone(),
                 )))
-                .app_data(web::Data::new(SurrealTenantRepository::new($db.clone())))
-                .app_data(web::Data::new(SurrealUserRepository::new($db.clone())))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
@@ -306,6 +377,28 @@ async fn delete_user_returns_204() {
     assert_eq!(resp.status().as_u16(), 204);
 }
 
+/// CQ-B16: DELETE of a nonexistent user id must return 404, not silently 204.
+#[actix_rt::test]
+async fn delete_nonexistent_user_returns_404() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let fake_id = Uuid::new_v4();
+    let req = test::TestRequest::delete()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri(&format!("/api/v1/users/{fake_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
 #[actix_rt::test]
 async fn user_response_includes_lock_state_fields() {
     let (db, org_id, tenant_id) = setup_db().await;
@@ -358,4 +451,30 @@ async fn unlock_user_returns_200() {
     assert!(body["locked_until"].is_null());
     // status should be Active after unlock
     assert_eq!(body["status"], "Active");
+}
+
+/// FUNC-04 (Task 3, verify-only): a caller lacking `users:list` must be
+/// denied (403) on `GET /api/v1/users`. Uses the real `AuthorizationEngine`
+/// (not `AllowAllAuthzChecker`) so the existing
+/// `RequirePermission::new("users:list", ...)` gate in `handlers/users.rs`
+/// is genuinely exercised end-to-end. No handler code was changed — this
+/// test only proves the pre-existing gate works.
+#[actix_rt::test]
+async fn list_users_non_privileged_caller_returns_403() {
+    let (db, org_id, tenant_id) = setup_db_with_rbac().await;
+    let auth = test_auth_config();
+    let authz = make_real_authz(&db);
+    let no_role_user_id =
+        create_user_no_role(&db, tenant_id, "no-role", "no-role@example.com").await;
+    let token = mint_token(&auth, no_role_user_id, tenant_id, org_id);
+    let app = test_app_real_authz!(db, auth, authz);
+
+    let req = test::TestRequest::get()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri("/api/v1/users")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
 }

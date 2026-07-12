@@ -27,7 +27,7 @@ test.describe("Settings page", () => {
     await page.goto("/settings");
     await expect(page).not.toHaveURL(/\/login/);
     await expect(
-      page.getByRole("heading", { name: "Security Policies", exact: true })
+      page.getByRole("heading", { name: "Password Policy", exact: true })
     ).toBeVisible();
     await expect(
       page.getByText("Password minimum length", { exact: true })
@@ -38,7 +38,7 @@ test.describe("Settings page", () => {
     await page.goto("/settings");
     await expect(page).not.toHaveURL(/\/login/);
     await expect(
-      page.getByRole("heading", { name: "Session Management", exact: true })
+      page.getByRole("heading", { name: "Lockout & Tokens", exact: true })
     ).toBeVisible();
     await expect(
       page.getByText("Access token lifetime", { exact: true })
@@ -59,7 +59,7 @@ test.describe("Settings page", () => {
     await expect(page).not.toHaveURL(/\/login/);
     await expect(
       page.getByRole("heading", {
-        name: "Notification Preferences",
+        name: "Email, Certificates & Notifications",
         exact: true,
       })
     ).toBeVisible();
@@ -70,7 +70,7 @@ test.describe("Settings page", () => {
     await expect(page).not.toHaveURL(/\/login/);
     // Settings page should show some numeric value (password min length, etc.)
     // Live backend returns the seeded defaults from the AXIAM config
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("Edit Settings button switches to edit mode", async ({ page }) => {

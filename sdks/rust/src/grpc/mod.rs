@@ -23,7 +23,14 @@ pub mod interceptor;
 /// config available) from recursing into and reformatting this
 /// build-generated, gitignored file — it is never hand-formatted and is
 /// regenerated from `proto/axiam/v1/*.proto` on every `grpc`-feature build.
+///
+/// `#[allow(missing_docs)]` is intentional: hand-writing rustdoc on this
+/// file would be discarded on the next `grpc`-feature build (it is
+/// gitignored and fully regenerated from the `.proto` sources, never
+/// committed). Field/message semantics are documented at the `.proto`
+/// definitions in `proto/axiam/v1/*.proto` instead.
 #[rustfmt::skip]
+#[allow(missing_docs)]
 #[path = "../gen/axiam.v1.rs"]
 pub mod gen;
 

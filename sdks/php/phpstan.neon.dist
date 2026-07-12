@@ -7,12 +7,20 @@ parameters:
         # own quality bar, not this SDK's. Autoloading still works normally (these are
         # real PSR-4 files); this only skips analysis-for-errors bookkeeping on them.
         - src/Grpc/Gen/*
-    stubFiles:
+    scanFiles:
         # Grpc\BaseStub / Grpc\ChannelCredentials / Google\Protobuf\Internal\Message
         # signature-only stubs (Pitfall 4 / T-22-16) — lets PHPStan type-check
         # src/Grpc/AuthzGrpcClient.php and src/AuthzDispatcher.php at level 6 without
         # ext-grpc/grpc/grpc/google-protobuf actually installed (D-03: never a runtime
         # `require`, only `suggest`). This file is NEVER autoloaded/executed — see its
         # own header comment.
+        #
+        # MUST be scanFiles, NOT stubFiles: `stubFiles` only OVERRIDES the signatures of
+        # classes PHPStan can already reflect, so with an unautoloadable optional
+        # extension it left Grpc\BaseStub genuinely unknown and level 6 failed with
+        # class.notFound ("extends unknown class Grpc\BaseStub", "calls parent::__construct()
+        # but does not extend any class", ...). `scanFiles` is what REGISTERS symbols that
+        # exist at runtime but cannot be autoloaded here. It also stops PHPStan from
+        # analysing the stub as if it were source.
         - stubs/grpc.stub.php
     treatPhpDocTypesAsCertain: false

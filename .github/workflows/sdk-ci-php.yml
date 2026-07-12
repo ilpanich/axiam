@@ -10,7 +10,7 @@ on:
       - 'buf.gen.yaml'
   push:
     tags:
-      - 'sdks/php/v*'
+      - 'axiam-php-sdk/v*'
 
 permissions:
   contents: read
@@ -28,7 +28,7 @@ jobs:
   build-test:
     name: Build, test, TLS-bypass gate
     # No event-name restriction: this job runs BOTH on a pull_request AND on
-    # a tag push (sdks/php/vX.Y.Z) — the publish job below is gated behind it
+    # a tag push (axiam-php-sdk/vX.Y.Z) — the publish job below is gated behind it
     # via `needs:`, so a tag can only publish after validate/install/test/the
     # SC#4 TLS-bypass grep gate have all passed on that exact tagged commit.
     runs-on: ubuntu-latest
@@ -45,10 +45,16 @@ jobs:
       # sdk-ci-csharp.yml's actions/setup-dotnet@v4.
       # maintainer: repin to a commit SHA once GitHub network egress is
       # available in this environment.
-      - name: Set up PHP 8.1
+      # PHP 8.2 is the TEST runtime, not the SDK's minimum. The package itself
+      # still supports `php: >=8.1` (all four runtime deps — guzzle,
+      # php-amqplib, php-jwt, psr/log — resolve on 8.1), but the require-dev
+      # framework bridges do not: illuminate/support ^11 and symfony/* ^7 both
+      # require PHP ^8.2, so `composer install` (which installs dev deps) is
+      # unsatisfiable on 8.1 and the job died before running a single test.
+      - name: Set up PHP 8.2
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240  # v2.37.2
         with:
-          php-version: '8.1'
+          php-version: '8.2'
           extensions: sodium
           coverage: none
 
@@ -72,6 +78,10 @@ jobs:
         working-directory: sdks/php
         run: composer test
 
+      - name: Dependency vulnerability scan (CI-03)
+        working-directory: sdks/php
+        run: composer audit --no-interaction
+
       # PHPStan level 6 (sdks/php/phpstan.neon.dist, excludes generated
       # src/Grpc/Gen). Deferred to CI in every prior 22-* plan because this
       # sandbox's egress proxy returns a GitHub-auth 403 on phpstan/phpstan's
@@ -82,6 +92,14 @@ jobs:
       - name: PHPStan level 6
         working-directory: sdks/php
         run: vendor/bin/phpstan analyse --memory-limit=512M
+
+      # Docblock-coverage gate. phpstan checks what a docblock SAYS but never that
+      # one EXISTS, so without this the published API reference (phpDocumentor)
+      # silently rots as new public methods land undocumented. Generated protobuf
+      # stubs (src/Grpc/Gen) are excluded — see the script's header.
+      - name: Docblock coverage (public API must be 100% documented)
+        working-directory: sdks/php
+        run: php tools/docblock-coverage.php
 
       # D-12/SC#4: strict TLS is always on; the ONLY escape hatch is the
       # additive `customCa` CA-bundle-path pattern — there must be no Guzzle
@@ -105,17 +123,48 @@ jobs:
           fi
           echo "TLS-bypass gate passed — no disallowed usage found."
 
+  # Publishing to a public registry is IRREVERSIBLE — crates.io, npm, PyPI, Maven
+  # Central, NuGet and Packagist all refuse to re-use a version number. Git tags are
+  # NOT branch-scoped, so without this gate a release tag cut on a feature branch would
+  # ship unreviewed code to the world under a version that can never be reclaimed.
+  # The publish job below `needs:` this.
+  verify-tag-on-main:
+    name: Verify tag is on main
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Assert the tagged commit is an ancestor of origin/main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is NOT on origin/main. Release tags must be cut from main."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_REF_NAME} (${GITHUB_SHA}) is on origin/main."
+
   publish:
     name: Publish to Packagist (subtree-split -> mirror)
     # Manual-on-tag, side-effecting job: only runs when a maintainer pushes a
-    # tag matching sdks/php/vX.Y.Z (Phase 15 D-13 monorepo tag convention),
+    # tag matching axiam-php-sdk/vX.Y.Z (Phase 15 D-13 monorepo tag convention),
     # and only after build-test (validate/install/test/PHPStan/TLS-gate) has
     # passed on that exact tagged commit.
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/php/v')
-    needs: build-test
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/axiam-php-sdk/v')
+    needs: [build-test, verify-tag-on-main]
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The `secrets` context is NOT available in step-level `if:` expressions —
+    # referencing it there ("Unrecognized named-value: 'secrets'") invalidates
+    # the whole workflow file and every run fails at startup with zero jobs.
+    # Hoist the credentials into job-level `env` instead; the `env` context IS
+    # available in `if:`, so the credential-absent branches below still work.
+    env:
+      PHP_SDK_MIRROR_TOKEN: ${{ secrets.PHP_SDK_MIRROR_TOKEN }}
+      PHP_SDK_MIRROR_REPO: ${{ vars.PHP_SDK_MIRROR_REPO }}
     steps:
       # D-05: `git subtree split` needs the full history of sdks/php/ to
       # extract a faithful standalone branch — the default shallow checkout
@@ -126,7 +175,7 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "version=${GITHUB_REF#refs/tags/sdks/php/v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${GITHUB_REF#refs/tags/axiam-php-sdk/v}" >> "$GITHUB_OUTPUT"
 
       # D-05: Packagist has no native monorepo-subdirectory support, and this
       # repo's root is a Rust Cargo workspace — sdks/php/ cannot be published
@@ -153,12 +202,10 @@ jobs:
       # scoped to push to the read-only mirror repo, e.g.
       # ilpanich/axiam-php-sdk) and a repository variable
       # PHP_SDK_MIRROR_REPO set to that mirror's "owner/repo". Tag scheme:
-      # sdks/php/vX.Y.Z (Phase 15 D-13).
+      # axiam-php-sdk/vX.Y.Z (Phase 15 D-13).
       - name: Push split branch to the read-only mirror repo (requires PHP_SDK_MIRROR_TOKEN secret)
-        if: ${{ secrets.PHP_SDK_MIRROR_TOKEN != '' && vars.PHP_SDK_MIRROR_REPO != '' }}
+        if: ${{ env.PHP_SDK_MIRROR_TOKEN != '' && env.PHP_SDK_MIRROR_REPO != '' }}
         env:
-          PHP_SDK_MIRROR_TOKEN: ${{ secrets.PHP_SDK_MIRROR_TOKEN }}
-          PHP_SDK_MIRROR_REPO: ${{ vars.PHP_SDK_MIRROR_REPO }}
           PHP_SDK_VERSION: ${{ steps.version.outputs.version }}
         run: |
           git tag "v${PHP_SDK_VERSION}" sdks-php-split
@@ -168,7 +215,7 @@ jobs:
           echo "Pushed sdks/php/ subtree (v${PHP_SDK_VERSION}) to https://github.com/${PHP_SDK_MIRROR_REPO} -- Packagist will auto-update axiam/axiam-sdk via its registered GitHub webhook."
 
       - name: PHP_SDK_MIRROR_TOKEN / PHP_SDK_MIRROR_REPO absent — publish deferred to a maintainer action (D-05)
-        if: ${{ secrets.PHP_SDK_MIRROR_TOKEN == '' || vars.PHP_SDK_MIRROR_REPO == '' }}
+        if: ${{ env.PHP_SDK_MIRROR_TOKEN == '' || env.PHP_SDK_MIRROR_REPO == '' }}
         run: |
           echo "::warning::PHP_SDK_MIRROR_TOKEN and/or the PHP_SDK_MIRROR_REPO repository variable are not configured -- sdks/php/ was built, tested, and subtree-split successfully but NOT pushed to a mirror repo, so Packagist was NOT updated."
           echo "A maintainer must: (1) create a read-only mirror repo (e.g. ilpanich/axiam-php-sdk), (2) register it on Packagist (packagist.org 'Submit') with the GitHub webhook enabled, (3) add a push token as the PHP_SDK_MIRROR_TOKEN repository secret and the mirror's 'owner/repo' as the PHP_SDK_MIRROR_REPO repository variable, then re-run this workflow (or push the sdks-php-split branch/tag to the mirror manually) to complete the first publish."

@@ -5,21 +5,16 @@
 //! verification email if the original expired or was lost.
 
 use actix_web::{HttpResponse, web};
-use axiam_amqp::MailOutboundPublisher;
-use axiam_auth::EmailVerificationService;
 use axiam_core::error::AxiamError;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
-use axiam_core::repository::{MailPublisher, TenantRepository};
-use axiam_db::{
-    SurrealEmailVerificationTokenRepository, SurrealFederationLinkRepository,
-    SurrealTenantRepository, SurrealUserRepository,
-};
+use axiam_core::repository::TenantRepository;
 use chrono::Utc;
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -57,20 +52,17 @@ pub struct ResendVerificationRequest {
         (status = 400, description = "Invalid or expired token"),
     )
 )]
-pub async fn verify_email<C: Connection>(
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    token_repo: web::Data<SurrealEmailVerificationTokenRepository<C>>,
-    federation_repo: web::Data<SurrealFederationLinkRepository<C>>,
+pub async fn verify_email<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<VerifyEmailRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
-    let svc = EmailVerificationService::new(
-        user_repo.as_ref().clone(),
-        token_repo.as_ref().clone(),
-        federation_repo.as_ref().clone(),
-    );
 
-    svc.verify_email(req.tenant_id, &req.token).await?;
+    // QUAL-07: EmailVerificationService is now a hoisted AppState singleton.
+    state
+        .email_verification_service
+        .verify_email(req.tenant_id, &req.token)
+        .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({ "verified": true })))
 }
@@ -90,26 +82,22 @@ pub async fn verify_email<C: Connection>(
         (status = 200, description = "Verification email enqueued"),
     )
 )]
-pub async fn resend_verification<C: Connection>(
-    user_repo: web::Data<SurrealUserRepository<C>>,
-    token_repo: web::Data<SurrealEmailVerificationTokenRepository<C>>,
-    federation_repo: web::Data<SurrealFederationLinkRepository<C>>,
-    tenant_repo: web::Data<SurrealTenantRepository<C>>,
-    mail_publisher: web::Data<MailOutboundPublisher>,
+pub async fn resend_verification<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
     body: web::Json<ResendVerificationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
-    let svc = EmailVerificationService::new(
-        user_repo.as_ref().clone(),
-        token_repo.as_ref().clone(),
-        federation_repo.as_ref().clone(),
-    );
 
-    match svc.resend_verification(req.tenant_id, &req.email).await {
+    // QUAL-07: EmailVerificationService is now a hoisted AppState singleton.
+    match state
+        .email_verification_service
+        .resend_verification(req.tenant_id, &req.email)
+        .await
+    {
         Ok(Some((raw_token, user_id, expires_at))) => {
             // Resolve org_id from tenant for the mail message.
             // On failure, log and continue — D-15: never propagate to client.
-            let org_id = match tenant_repo.get_by_id(req.tenant_id).await {
+            let org_id = match state.tenant_repo.get_by_id(req.tenant_id).await {
                 Ok(tenant) => tenant.organization_id,
                 Err(e) => {
                     tracing::warn!(
@@ -121,6 +109,16 @@ pub async fn resend_verification<C: Connection>(
                 }
             };
 
+            // PHASE-DEFINING (23-RESEARCH Pattern 6 / Pitfall 3): build the
+            // action_url the same way gdpr.rs builds cancel_url — a
+            // relative-path frontend route carrying the raw token plus the
+            // raw tenant_id UUID (Open Question 2, mirroring the
+            // already-shipped VerifyEmailPage `?token=…&tenant_id=…`).
+            let verify_url = format!(
+                "/auth/verify-email?token={}&tenant_id={}",
+                raw_token, req.tenant_id
+            );
+
             let msg = OutboundMailMessage {
                 mail_type: MailType::EmailVerification,
                 tenant_id: req.tenant_id,
@@ -129,13 +127,14 @@ pub async fn resend_verification<C: Connection>(
                 to_address: req.email.clone(),
                 template_context: serde_json::json!({
                     "token": raw_token,
+                    "action_url": verify_url,
                     "expiry_time": expires_at.to_rfc3339(),
                 }),
                 attempt_count: 0,
                 enqueued_at: Utc::now(),
             };
 
-            if let Err(e) = mail_publisher.publish(msg).await {
+            if let Err(e) = state.mail_outbound_publisher.publish(msg).await {
                 // D-15: log warn but do NOT propagate — uniform 200 regardless
                 tracing::warn!(
                     error = %e,
@@ -262,5 +261,68 @@ mod tests {
             "response body MUST NOT contain token (D-15 / T-5-token-leak)"
         );
         assert_eq!(response_body["sent"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // PHASE-DEFINING (23-RESEARCH Pattern 6 / Pitfall 3): action_url
+    // substitution — a runtime assertion on the RENDERED email string, not
+    // a source-file grep.
+    // -----------------------------------------------------------------------
+
+    /// The action_url built by `resend_verification` (mirroring gdpr.rs's
+    /// cancel_url) fully substitutes into the rendered verification email
+    /// (`MailType::EmailVerification` -> `TemplateKind::Activation`): the
+    /// rendered link contains the token + tenant_id, and the literal
+    /// `{{action_url}}` mustache placeholder is gone.
+    #[tokio::test]
+    async fn action_url_is_substituted_in_rendered_verification_email() {
+        use axiam_core::models::email_template::TemplateKind;
+        use axiam_email::template::{TemplateContext, render_email, resolve_template};
+
+        let raw_token = "verify-token-substitution-check";
+        let tenant_id = Uuid::new_v4();
+        let expires_at = Utc::now() + chrono::Duration::hours(24);
+
+        // Exactly what `resend_verification` now builds into template_context.
+        let verify_url = format!("/auth/verify-email?token={raw_token}&tenant_id={tenant_id}");
+        let template_context = serde_json::json!({
+            "token": raw_token,
+            "action_url": verify_url,
+            "expiry_time": expires_at.to_rfc3339(),
+        });
+
+        // Mirror `axiam-amqp::mail_consumer::build_template_context`'s
+        // JSON-object -> TemplateContext conversion (string values as-is).
+        let mut ctx = TemplateContext::new();
+        if let serde_json::Value::Object(obj) = &template_context {
+            for (k, v) in obj {
+                if let serde_json::Value::String(s) = v {
+                    ctx.insert(k.clone(), s.clone());
+                }
+            }
+        }
+
+        // MailType::EmailVerification -> TemplateKind::Activation
+        // (crates/axiam-amqp/src/mail_consumer.rs::template_kind_for).
+        let template = resolve_template(TemplateKind::Activation, None, None);
+        let rendered = render_email(&template, "user@example.com", &ctx);
+        let html = rendered.html_body.expect("html body must be rendered");
+        let text = rendered.text_body.expect("text body must be rendered");
+
+        for body in [&html, &text] {
+            assert!(
+                body.contains(raw_token),
+                "rendered email must contain the raw verification token: {body}"
+            );
+            assert!(
+                body.contains(&tenant_id.to_string()),
+                "rendered email must contain the tenant_id: {body}"
+            );
+            assert!(
+                !body.contains("{{action_url}}"),
+                "rendered email MUST NOT contain the unsubstituted action_url \
+                 placeholder (23-RESEARCH Pitfall 3): {body}"
+            );
+        }
     }
 }

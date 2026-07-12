@@ -57,10 +57,10 @@ try {
     $allowed = $client->checkAccess('document:read', $resourceId);
     printf("checkAccess('document:read', '%s') -> allowed: %s\n", $resourceId, $allowed ? 'true' : 'false');
 
-    // `can` (CONTRACT.md §1 note): the browser/UI-scenario alias — same endpoint, args
-    // reordered (resource, action) for page-level permission-gating call sites.
-    $canRead = $client->can($resourceId, 'document:read');
-    printf("can('%s', 'document:read') -> %s\n", $resourceId, $canRead ? 'true' : 'false');
+    // `can` (CONTRACT.md §1 note): the browser/UI-scenario alias — same endpoint,
+    // same (action, resource) argument order as `checkAccess()` (SDK-Q09).
+    $canRead = $client->can('document:read', $resourceId);
+    printf("can('document:read', '%s') -> %s\n", $resourceId, $canRead ? 'true' : 'false');
 
     // `batchCheck` (CONTRACT.md §1): results preserve input order.
     $results = $client->batchCheck([

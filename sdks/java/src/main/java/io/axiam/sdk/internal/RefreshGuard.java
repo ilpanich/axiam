@@ -39,6 +39,10 @@ public final class RefreshGuard {
 
     private volatile @Nullable TokenPair current;
 
+    /** Creates a new, empty refresh guard (no cached token yet). */
+    public RefreshGuard() {
+    }
+
     /**
      * Ensures exactly one call to {@code doRefresh} is in flight at a time,
      * regardless of how many threads call this concurrently with the same
@@ -110,6 +114,9 @@ public final class RefreshGuard {
      * callers (the REST {@code Interceptor}, the gRPC client interceptor)
      * that must never synchronously acquire this guard's lock. A plain
      * volatile field read — never {@code lock.lock()}.
+     *
+     * @return the cached token pair, or {@link Optional#empty()} if no refresh
+     *         has completed yet
      */
     public Optional<TokenPair> cached() {
         return Optional.ofNullable(current);
@@ -118,6 +125,9 @@ public final class RefreshGuard {
     /**
      * Non-blocking read of the currently cached access token, or
      * {@code null} if none has been cached yet. See {@link #cached()}.
+     *
+     * @return the cached access token, or {@code null} if no refresh has
+     *         completed yet
      */
     public @Nullable String cachedAccessToken() {
         TokenPair snapshot = current;

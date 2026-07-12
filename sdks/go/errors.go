@@ -1,9 +1,11 @@
 package axiam
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 )
@@ -82,21 +84,41 @@ var (
 	ErrNetwork = errors.New("axiam: network error")
 )
 
-// sensitiveResponseHeaders lists response headers that must never survive
-// into a NetworkError's wrapped cause (D-04, CR-04 carry-forward).
-var sensitiveResponseHeaders = []string{"Set-Cookie", "Authorization", "Cookie"}
+// safeResponseHeaders is the ALLOWLIST (X-3) of response headers preserved
+// verbatim in a NetworkError's wrapped cause; every header NOT listed here has
+// its value redacted to a placeholder, so a custom sensitive header (e.g.
+// X-Auth-Token) can never survive into a thrown error — unlike a small
+// denylist, which only catches the headers it happens to enumerate. Keys are
+// lower-case and compared case-insensitively. Keep small and strictly
+// non-secret: standard diagnostic response headers plus this SDK's own
+// non-secret request headers (e.g. x-tenant-id).
+var safeResponseHeaders = map[string]struct{}{
+	"content-type":   {},
+	"content-length": {},
+	"date":           {},
+	"server":         {},
+	"retry-after":    {},
+	"x-request-id":   {},
+	"x-tenant-id":    {},
+}
 
-// sanitizeResponse returns a shallow copy of resp with Set-Cookie/
-// Authorization/Cookie headers stripped, WITHOUT mutating the caller's
-// original *http.Response. Returns nil if resp is nil.
+// redactedHeader is the placeholder substituted for the value of any
+// non-allowlisted response header.
+const redactedHeader = "[REDACTED]"
+
+// sanitizeResponse returns a shallow copy of resp in which every header not on
+// safeResponseHeaders has its value redacted to redactedHeader, WITHOUT
+// mutating the caller's original *http.Response. Returns nil if resp is nil.
 func sanitizeResponse(resp *http.Response) *http.Response {
 	if resp == nil {
 		return nil
 	}
 	clone := *resp
 	clone.Header = resp.Header.Clone()
-	for _, h := range sensitiveResponseHeaders {
-		clone.Header.Del(h)
+	for name := range clone.Header {
+		if _, ok := safeResponseHeaders[strings.ToLower(name)]; !ok {
+			clone.Header.Set(name, redactedHeader)
+		}
 	}
 	return &clone
 }
@@ -150,6 +172,36 @@ func errorFromHTTPStatus(status int, message string, resp *http.Response, cause 
 	}
 }
 
+// authzErrorBody is the shape of the server's structured authorization-denied
+// error body, e.g.:
+//
+//	{"error":"authorization_denied","message":"...","action":"users:get","resource_id":"<uuid>"}
+//
+// `action` is present when the denied action is known; `resource_id` is
+// present only for a resource-scoped denial (absent otherwise). We only ever
+// read the two structured fields here — the body's own `message`/`error`
+// keys are intentionally ignored (see readBodyForError's WR-01 redaction
+// rationale in login.go): only Action/ResourceID are safe, bounded,
+// non-free-text values to lift out of a server-controlled body.
+type authzErrorBody struct {
+	Action     string `json:"action"`
+	ResourceID string `json:"resource_id"`
+}
+
+// parseAuthzFields best-effort decodes body (the raw, bounded HTTP error
+// response body) as an authzErrorBody and returns its action/resource_id
+// fields. Any decode failure (non-JSON body, unexpected shape, empty body)
+// is swallowed and both results are "" — this is best-effort diagnostic
+// enrichment of an AuthzError, never load-bearing, so a malformed or
+// adversarial body must never surface as a decode error here.
+func parseAuthzFields(body []byte) (action, resourceID string) {
+	var parsed authzErrorBody
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", ""
+	}
+	return parsed.Action, parsed.ResourceID
+}
+
 // errorFromGRPCStatus maps a gRPC status code to an AxiamError-family value
 // per CONTRACT.md §2's gRPC status table:
 //
@@ -162,6 +214,11 @@ func errorFromHTTPStatus(status int, message string, resp *http.Response, cause 
 //	other                   -> NetworkError
 //
 // message is caller-controlled and MUST NOT contain a raw token value.
+//
+// Unlike the HTTP path, a gRPC status carries no structured JSON body to
+// parse action/resource_id out of, so the resulting AuthzError always leaves
+// those fields "" (CONTRACT.md §2: they are SHOULD-carry-if-available, not
+// MUST).
 func errorFromGRPCStatus(code int, message string) error {
 	switch codes.Code(code) {
 	case codes.Unauthenticated:

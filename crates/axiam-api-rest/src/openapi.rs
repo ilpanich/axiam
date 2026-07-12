@@ -152,6 +152,13 @@ use crate::handlers;
         handlers::settings::set_org_settings,
         handlers::settings::get_tenant_settings,
         handlers::settings::set_tenant_settings,
+        // Email Config (FUNC-03 / D-13)
+        handlers::email_config::get_org_email_config,
+        handlers::email_config::set_org_email_config,
+        handlers::email_config::delete_org_email_config,
+        handlers::email_config::get_tenant_email_config,
+        handlers::email_config::set_tenant_email_config,
+        handlers::email_config::delete_tenant_email_config,
         // Federation
         handlers::federation::create,
         handlers::federation::list,
@@ -164,6 +171,11 @@ use crate::handlers;
         // by `api_doc()` when the `saml` feature is enabled.
         handlers::federation::list_user_links,
         handlers::federation::delete_link,
+        // First-time SSO — public OIDC start/callback (FUNC-01 / D-12). The
+        // SAML counterparts (saml_login_public, saml_acs_public) are
+        // `#[cfg(feature = "saml")]` and documented in `SamlApiDoc` instead.
+        handlers::federation::oidc_start_public,
+        handlers::federation::oidc_callback_public,
         // Email Verification
         handlers::email_verification::verify_email,
         handlers::email_verification::resend_verification,
@@ -189,7 +201,6 @@ use crate::handlers;
         handlers::auth::LoginSuccessResponse,
         handlers::auth::MfaRequiredResponse,
         handlers::auth::RefreshRequest,
-        handlers::auth::LogoutRequest,
         handlers::auth::MfaConfirmRequest,
         handlers::auth::MfaVerifyRequest,
         handlers::auth::MfaEnrollResponse,
@@ -337,6 +348,19 @@ use crate::handlers;
         axiam_core::models::settings::EmailVerificationPolicy,
         axiam_core::models::settings::CertificatePolicy,
         axiam_core::models::settings::NotificationPolicy,
+        // Email Config (FUNC-03 / D-13)
+        axiam_core::models::email::EmailConfig,
+        axiam_core::models::email::EmailConfigOverride,
+        axiam_core::models::email::SetOrgEmailConfig,
+        axiam_core::models::email::ProviderConfig,
+        axiam_core::models::email::SmtpConfig,
+        axiam_core::models::email::ApiProviderConfig,
+        axiam_core::models::email::EmailProviderKind,
+        // First-time SSO — public OIDC start/callback (FUNC-01 / D-12)
+        handlers::federation::OidcStartRequest,
+        handlers::federation::OidcStartResponse,
+        handlers::federation::OidcPublicCallbackRequest,
+        handlers::federation::SsoLoginSuccessResponse,
         // Email Verification
         handlers::email_verification::VerifyEmailRequest,
         handlers::email_verification::ResendVerificationRequest,
@@ -379,7 +403,9 @@ use crate::handlers;
         (name = "oauth2", description = "OAuth2 authorization and token endpoints"),
         (name = "oidc", description = "OpenID Connect discovery, JWKS, and UserInfo"),
         (name = "settings", description = "Organization and tenant security settings"),
+        (name = "email-config", description = "Organization and tenant email provider configuration"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),
+        (name = "federation-sso", description = "First-time SSO — public OIDC/SAML start and callback endpoints"),
         (name = "notification_rules", description = "Notification rule management"),
         (name = "authz", description = "Authorization check (FND-04 REST surface)"),
     ),
@@ -399,12 +425,18 @@ pub struct ApiDoc;
         handlers::federation::saml_authn_request,
         handlers::federation::saml_acs,
         handlers::federation::saml_metadata,
+        // First-time SSO — public SAML login/ACS (FUNC-01 / D-12).
+        handlers::federation::saml_login_public,
+        handlers::federation::saml_acs_public,
     ),
     components(schemas(
         handlers::federation::SamlAuthnRequestRequest,
         handlers::federation::SamlAuthnRequestResponse,
         handlers::federation::SamlAcsRequest,
         handlers::federation::SamlMetadataQuery,
+        handlers::federation::SamlLoginRequest,
+        handlers::federation::SamlLoginResponse,
+        handlers::federation::SamlAcsPublicRequest,
     ))
 )]
 struct SamlApiDoc;

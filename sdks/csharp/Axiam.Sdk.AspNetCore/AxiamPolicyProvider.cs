@@ -20,6 +20,9 @@ public sealed class AxiamPolicyProvider : IAuthorizationPolicyProvider
 
     private readonly DefaultAuthorizationPolicyProvider _fallback;
 
+    /// <summary>Constructs the provider, wrapping a <see cref="DefaultAuthorizationPolicyProvider"/>
+    /// built from the same <paramref name="options"/> for the fallback path.</summary>
+    /// <param name="options">The framework's <see cref="AuthorizationOptions"/>, forwarded to the fallback provider.</param>
     public AxiamPolicyProvider(IOptions<AuthorizationOptions> options)
     {
         _fallback = new DefaultAuthorizationPolicyProvider(options);

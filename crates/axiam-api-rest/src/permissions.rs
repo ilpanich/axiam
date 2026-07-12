@@ -143,6 +143,15 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     // Settings
     ("settings:get", "Read tenant or organization settings"),
     ("settings:update", "Update tenant or organization settings"),
+    // Email Config (FUNC-03 / D-13)
+    (
+        "email_config:read",
+        "Read organization or tenant email configuration (secrets never returned)",
+    ),
+    (
+        "email_config:write",
+        "Create, update, or delete organization or tenant email configuration",
+    ),
     // Tenants
     ("tenants:list", "List tenants within an organization"),
     ("tenants:get", "Retrieve a single tenant"),
@@ -227,7 +236,11 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // Federation callback endpoints (unauthenticated — IdP redirects here)
     "/api/v1/federation/oidc/callback",
     "/api/v1/federation/saml/acs",
-    "/api/v1/federation/saml/metadata",
+    // NOTE: /api/v1/federation/saml/metadata is intentionally NOT public — its
+    // handler requires an authenticated admin (AuthenticatedUser/JWT). It was
+    // previously listed here, which contradicted the handler and returned 401
+    // to unauthenticated callers (Phase 28 FUNC-01 verification, D-15 scope
+    // decision: keep metadata JWT-gated rather than making it public).
     // First-time SSO (Phase 4 D-22) — unauthenticated, distinct from
     // /api/v1/federation/* link-account endpoints (which require auth).
     "/api/v1/auth/federation/oidc/start",
@@ -590,4 +603,36 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // Settings
     ("GET", "/api/v1/settings", "settings:get"),
     ("PUT", "/api/v1/settings", "settings:update"),
+    // Email Config (FUNC-03 / D-13) — single email_config:read/write permission
+    // shared across org and tenant scopes (D-03), NOT per-verb-per-scope.
+    (
+        "GET",
+        "/api/v1/organizations/{org_id}/email-config",
+        "email_config:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/organizations/{org_id}/email-config",
+        "email_config:write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/organizations/{org_id}/email-config",
+        "email_config:write",
+    ),
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/email-config",
+        "email_config:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/tenants/{tenant_id}/email-config",
+        "email_config:write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/tenants/{tenant_id}/email-config",
+        "email_config:write",
+    ),
 ];

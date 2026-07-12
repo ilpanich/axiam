@@ -77,6 +77,8 @@ fn test_auth_config(lifetime: u64) -> AuthConfig {
         webauthn_rp_name: "AXIAM-Test".into(),
         jwt_encoding_key: None,
         jwt_decoding_key: None,
+        hibp_breaker_threshold: 5,
+        hibp_breaker_cooldown_secs: 30,
     }
 }
 

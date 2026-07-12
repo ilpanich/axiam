@@ -13,8 +13,11 @@
  * Authorization check request received from `axiam.authz.request`.
  *
  * Field declaration order matches the server's `AuthzRequest`
- * (crates/axiam-amqp/src/messages.rs:56-73) exactly: correlation_id,
- * tenant_id, subject_id, action, resource_id, scope, hmac_signature.
+ * (crates/axiam-amqp/src/messages.rs) v2 (`key_version = 2`, NEW-4) exactly:
+ * correlation_id, tenant_id, subject_id, action, resource_id, scope,
+ * key_version, nonce, issued_at, hmac_signature. `key_version`, `nonce`, and
+ * `issued_at` are always emitted (never omitted) so they fall inside the
+ * HMAC-signed bytes — see CONTRACT.md §8 "v2 — Replay Protection".
  */
 export interface AuthzRequest {
   /** Caller-provided ID to correlate request with response. */
@@ -24,6 +27,25 @@ export interface AuthzRequest {
   action: string;
   resource_id: string;
   scope?: string;
+  /**
+   * HKDF master-key rotation version (SECHRD-08 / D-05b). The server
+   * rejects (nack, requeue:false) any message with `key_version < 2` — v1
+   * predates the mandatory `nonce`/`issued_at` replay-protection fields and
+   * has no grace-window acceptance path (NEW-4, hard cutover).
+   */
+  key_version: number;
+  /**
+   * Per-message unique value (UUIDv4) for replay protection (NEW-4).
+   * Always emitted so it is covered by the HMAC. A nonce already seen
+   * within the freshness window is a replay and MUST be rejected.
+   */
+  nonce: string;
+  /**
+   * Producer send time (RFC3339/ISO8601 UTC), always emitted so it is
+   * covered by the HMAC (NEW-4). A message outside ±skew (default 5
+   * minutes) of the verifier's clock MUST be rejected as stale.
+   */
+  issued_at: string;
   /**
    * HMAC-SHA256 of the JSON-serialized message body (this field removed
    * before signing). Computed with the per-tenant AMQP signing key
@@ -49,9 +71,12 @@ export interface AuthzResponse {
  * Audit event received from external services via `axiam.audit.events`.
  *
  * Field declaration order matches the server's `AuditEventMessage`
- * (crates/axiam-amqp/src/messages.rs:88-103) exactly: tenant_id, actor_id,
- * actor_type, action, resource_id, outcome, ip_address, metadata,
- * hmac_signature.
+ * (crates/axiam-amqp/src/messages.rs) v2 (`key_version = 2`, NEW-4) exactly:
+ * tenant_id, actor_id, actor_type, action, resource_id, outcome, ip_address,
+ * metadata, key_version, nonce, issued_at, hmac_signature. `key_version`,
+ * `nonce`, and `issued_at` are always emitted (never omitted) so they fall
+ * inside the HMAC-signed bytes — see CONTRACT.md §8 "v2 — Replay
+ * Protection".
  */
 export interface AuditEventMessage {
   tenant_id: string;
@@ -62,6 +87,25 @@ export interface AuditEventMessage {
   outcome: string;
   ip_address?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * HKDF master-key rotation version (SECHRD-08 / D-05b). The server
+   * rejects (nack, requeue:false) any message with `key_version < 2` — v1
+   * predates the mandatory `nonce`/`issued_at` replay-protection fields and
+   * has no grace-window acceptance path (NEW-4, hard cutover).
+   */
+  key_version: number;
+  /**
+   * Per-message unique value (UUIDv4) for replay protection (NEW-4).
+   * Always emitted so it is covered by the HMAC. A nonce already seen
+   * within the freshness window is a replay and MUST be rejected.
+   */
+  nonce: string;
+  /**
+   * Producer send time (RFC3339/ISO8601 UTC), always emitted so it is
+   * covered by the HMAC (NEW-4). A message outside ±skew (default 5
+   * minutes) of the verifier's clock MUST be rejected as stale.
+   */
+  issued_at: string;
   /** HMAC-SHA256 of the JSON-serialized message body (CONTRACT.md §8). */
   hmac_signature?: string;
 }

@@ -1,0 +1,84 @@
+# AXIAM benchmark commands. Run from the benchmarks/ directory: `just -f justfile <cmd>`
+# or add `mod benchmarks` to the root justfile. Most commands take target= and profile=.
+#
+#   just bench-up      target=axiam    profile=p2-tls13
+#   just bench-seed    target=axiam
+#   just bench-run     target=axiam    profile=p2-tls13
+#   just bench-report
+#   just bench-matrix  targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls"
+
+set shell := ["bash", "-uc"]
+
+target := "axiam"
+profile := "p0-plaintext"
+scenario := "all"
+sdk := "python"
+targets := "axiam keycloak"
+profiles := "p0-plaintext p2-tls13"
+
+# Generate throwaway TLS/mTLS certs for the security profiles (idempotent).
+bench-certs:
+    bash runner/gen-certs.sh
+
+# Bring a target up under a security profile (adds TLS edge for p1/p2/p3).
+bench-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source profiles/{{profile}}.env
+    [ "{{target}}" = "axiam" ] && [ -f ../docker/.secrets/env ] && source ../docker/.secrets/env || true
+    COMPOSE="targets/{{target}}/docker-compose.yml"
+    PROFILE_ARG=""
+    if [ "{{profile}}" != "p0-plaintext" ] && [ "{{target}}" = "axiam" ]; then
+      just bench-certs
+      case "{{profile}}" in
+        p1-tls12) export BENCH_NGINX_CONF=tls12.conf ;;
+        p2-tls13) export BENCH_NGINX_CONF=tls13.conf ;;
+        p3-mtls)  export BENCH_NGINX_CONF=mtls.conf ;;
+      esac
+      PROFILE_ARG="--profile tls"
+    fi
+    docker compose -f "$COMPOSE" $PROFILE_ARG up -d --wait
+
+# Provision org/tenant/user/client for a target; writes results/<target>.seed.env.
+bench-seed:
+    bash runner/seed.sh {{target}}
+
+# Run the scenario suite (load + resource sampling) for a target/profile.
+bench-run:
+    bash runner/run-benchmark.sh --target {{target}} --profile {{profile}} --scenario {{scenario}}
+
+# Tear a target down (and its volumes).
+bench-down:
+    docker compose -f targets/{{target}}/docker-compose.yml --profile tls down -v || \
+      docker compose -f targets/{{target}}/docker-compose.yml down -v
+
+# Aggregate everything under results/ into results/report.md.
+bench-report:
+    python3 runner/report.py --results results
+
+# Full unattended matrix: every target × profile × scenario, with up/seed/run/down.
+bench-matrix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for t in {{targets}}; do
+      for p in {{profiles}}; do
+        echo "=== $t / $p ==="
+        just bench-up target=$t profile=$p
+        just bench-seed target=$t
+        just bench-run target=$t profile=$p
+        just bench-down target=$t
+      done
+    done
+    just bench-report
+
+# --- SDK client benchmarks --- (pass the language as sdk=, e.g. sdk=python)
+sdk-bench:
+    bash sdk/{{sdk}}/run.sh
+
+sdk-bench-all:
+    bash sdk/run-all.sh
+    python3 sdk/collect.py --results results
+
+# Remove all run artifacts (keeps the dir).
+bench-clean:
+    find results -type f ! -name '.gitkeep' -delete || true

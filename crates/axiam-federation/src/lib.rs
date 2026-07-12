@@ -5,12 +5,14 @@
 //! Shibboleth, ADFS, etc.).
 
 pub mod cert;
+pub mod discovery_cache;
 pub mod error;
 pub mod jwks_cache;
 pub mod oidc;
 #[cfg(feature = "saml")]
 pub mod saml;
 pub mod secrets;
+pub mod ssrf;
 
 use error::FederationError;
 

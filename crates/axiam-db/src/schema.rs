@@ -142,6 +142,21 @@ static MIGRATIONS: &[Migration] = &[
         name: "seeder_state",
         sql: SCHEMA_V20,
     },
+    Migration {
+        version: 21,
+        name: "rate_limit_bucket",
+        sql: SCHEMA_V21,
+    },
+    Migration {
+        version: 22,
+        name: "bootstrap_atomicity_gate",
+        sql: SCHEMA_V22,
+    },
+    Migration {
+        version: 23,
+        name: "email_config_provider_kind_optional",
+        sql: SCHEMA_V23,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -427,6 +442,25 @@ DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_assertion_replay TYPE dateti
 DEFINE INDEX IF NOT EXISTS idx_replay_uniq ON TABLE saml_assertion_replay \
     COLUMNS tenant_id, assertion_id UNIQUE;
 DEFINE INDEX IF NOT EXISTS idx_replay_expires_at ON TABLE saml_assertion_replay \
+    COLUMNS expires_at;
+
+-- =======================================================================
+-- AMQP Nonce Replay Table (NEW-4)
+-- =======================================================================
+-- Durable per-tenant nonce store for AMQP message replay protection. The
+-- authz/audit consumers insert (tenant_id, nonce) after a valid HMAC + fresh
+-- issued_at; the UNIQUE index turns a replayed nonce into a conflict that the
+-- repository maps to ReplayDetected. Rows expire at issued_at + skew and are
+-- swept by the periodic cleanup task (no native SurrealDB TTL, RESEARCH §7).
+DEFINE TABLE IF NOT EXISTS amqp_nonce_replay SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE amqp_nonce_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS nonce ON TABLE amqp_nonce_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE amqp_nonce_replay TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE amqp_nonce_replay TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_amqp_nonce_uniq ON TABLE amqp_nonce_replay \
+    COLUMNS tenant_id, nonce UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_amqp_nonce_expires_at ON TABLE amqp_nonce_replay \
     COLUMNS expires_at;
 
 -- =======================================================================
@@ -959,10 +993,18 @@ DEFINE INDEX IF NOT EXISTS idx_export_job_token ON TABLE export_job
 DEFINE TABLE IF NOT EXISTS erasure_proof SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS pseudonym ON TABLE erasure_proof TYPE string;
 DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE erasure_proof TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE erasure_proof TYPE string;
 DEFINE FIELD IF NOT EXISTS erased_at ON TABLE erasure_proof TYPE datetime
     DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_erasure_proof_tenant ON TABLE erasure_proof
     COLUMNS tenant_id;
+-- Erasure proofs are tenant-scoped (like every other domain entity in this
+-- codebase — e.g. idx_user_tenant_username above), so uniqueness is defined
+-- on (tenant_id, user_id) rather than a bare user_id: a retried erasure's
+-- duplicate proof CREATE for the same user in the same tenant no-ops/fails
+-- idempotently at the schema level (D-03b/SECHRD-06).
+DEFINE INDEX IF NOT EXISTS idx_erasure_proof_tenant_user ON TABLE erasure_proof
+    COLUMNS tenant_id, user_id UNIQUE;
 
 -- =======================================================================
 -- ALTER user table: add GDPR deletion fields
@@ -1086,6 +1128,89 @@ DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE seeder_state TYPE string;
 DEFINE FIELD IF NOT EXISTS hash ON TABLE seeder_state TYPE string;
 DEFINE FIELD IF NOT EXISTS updated_at ON TABLE seeder_state TYPE datetime
     DEFAULT time::now();
+";
+
+// -----------------------------------------------------------------------
+// Schema v21 — rate_limit_bucket (SECHRD-03 / D-01a shared rate-limit store)
+// -----------------------------------------------------------------------
+//
+// Backs the multi-replica shared rate-limit counter (windowed CAS via
+// UPSERT ... RETURN AFTER). Record IDs are `format!("{endpoint}:{ip}")` so
+// per-endpoint limits are preserved across replicas under HPA. This table
+// is read/written ONLY by the REST shared-store pre-check middleware
+// (`axiam-api-rest::middleware::rate_limit_shared`), which fails OPEN to
+// the existing per-replica in-memory Governor on any error (D-01b) — never
+// a hard block on auth traffic.
+
+const SCHEMA_V21: &str = "\
+-- =======================================================================
+-- Rate limit bucket (global scope) — shared multi-replica counter
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS rate_limit_bucket SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS count ON TABLE rate_limit_bucket TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS window_start ON TABLE rate_limit_bucket TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE rate_limit_bucket TYPE datetime
+    DEFAULT time::now();
+";
+
+// -----------------------------------------------------------------------
+// Schema v22 — bootstrap atomicity + mandatory gate (SECHRD-04 / SEC-049)
+// -----------------------------------------------------------------------
+//
+// Three additive tables backing the atomic single-super-admin invariant
+// and the mandatory first-run gate:
+//
+// - `bootstrap_lock`: record ID = tenant_id. The bootstrap transaction
+//   CREATEs a lock record for the target tenant; a concurrent second
+//   request racing on the SAME tenant_id hits a UNIQUE-index violation on
+//   this CREATE (the record ID itself IS the uniqueness constraint) and
+//   its whole transaction rolls back — no partial admin, no orphan role
+//   RELATE (D-03c).
+// - `bootstrap_setup_token`: record ID = sha256(token) hex. Stores ONLY
+//   the token hash — the plaintext token is never persisted, only logged
+//   once at first boot (D-03b).
+// - `bootstrap_setup_token_consumed`: record ID = sha256(token) hex.
+//   Consumption-by-existence: the bootstrap transaction CREATEs this
+//   record in the SAME transaction as the admin user, so a replay of the
+//   same token also loses to the same UNIQUE-index violation.
+
+const SCHEMA_V22: &str = "\
+-- =======================================================================
+-- Bootstrap atomicity + mandatory gate (SECHRD-04 / SEC-049)
+-- =======================================================================
+DEFINE TABLE IF NOT EXISTS bootstrap_lock SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS locked_at ON TABLE bootstrap_lock TYPE datetime
+    DEFAULT time::now();
+
+DEFINE TABLE IF NOT EXISTS bootstrap_setup_token SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE bootstrap_setup_token TYPE datetime
+    DEFAULT time::now();
+
+DEFINE TABLE IF NOT EXISTS bootstrap_setup_token_consumed SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS consumed_at ON TABLE bootstrap_setup_token_consumed TYPE datetime
+    DEFAULT time::now();
+";
+
+// -----------------------------------------------------------------------
+// Schema v23 — email_config.provider_kind becomes optional (28-04/FUNC-03)
+// -----------------------------------------------------------------------
+//
+// `SurrealEmailConfigRepository::set_tenant_override` has always written
+// `provider_kind = ''` when the caller's override does not touch the
+// provider (a tenant may override only `from_name`/`enabled`, leaving the
+// provider inherited from the org baseline — `get_tenant_override` already
+// treats an empty `provider_kind` as "no provider override" on the read
+// side). The original v15 ASSERT only allowed the five real provider-kind
+// values, so this legitimate partial-override write path always violated
+// the schema constraint. `OVERWRITE` extends the ASSERT to also accept the
+// empty-string sentinel, matching the read-side contract, without touching
+// scope='org' rows (org config always sets a real provider_kind).
+
+const SCHEMA_V23: &str = "\
+-- Allow empty provider_kind (sentinel: tenant override does not touch the
+-- provider) alongside the five real provider kinds (28-04).
+DEFINE FIELD OVERWRITE provider_kind ON TABLE email_config TYPE string
+    ASSERT $value IN ['', 'smtp', 'send_grid', 'postmark', 'resend', 'brevo'];
 ";
 
 // -----------------------------------------------------------------------

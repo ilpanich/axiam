@@ -112,4 +112,89 @@ describe('axiamMiddleware (Express)', () => {
       expect.objectContaining({ error: 'authentication_failed' }),
     );
   });
+
+  describe('CSRF (cookie double-submit, CONTRACT.md §3)', () => {
+    it('cookie-auth POST without X-CSRF-Token header -> 403, next() not called', async () => {
+      const { privateKey, kid } = await setupJwks();
+      const token = await signedToken(privateKey, kid);
+      const verifier = createVerifier(BASE_URL);
+      const session = { jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' };
+
+      const req = {
+        method: 'POST',
+        headers: { cookie: `axiam_access=${token}` },
+      } as unknown as Request;
+      const res = fakeRes();
+      const next = vi.fn();
+
+      await axiamMiddleware(session)(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ error: 'authorization_denied' }),
+      );
+    });
+
+    it('cookie-auth POST with matching X-CSRF-Token header + axiam_csrf cookie -> passes auth', async () => {
+      const { privateKey, kid } = await setupJwks();
+      const token = await signedToken(privateKey, kid);
+      const verifier = createVerifier(BASE_URL);
+      const session = { jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' };
+
+      const req = {
+        method: 'POST',
+        headers: {
+          cookie: `axiam_access=${token}; axiam_csrf=csrf-secret-1`,
+          'x-csrf-token': 'csrf-secret-1',
+        },
+      } as unknown as Request;
+      const res = fakeRes();
+      const next = vi.fn();
+
+      await axiamMiddleware(session)(req, res, next);
+
+      expect(next).toHaveBeenCalledOnce();
+      expect(res.status).not.toHaveBeenCalled();
+      expect((req as AxiamRequest).axiamUser?.userId).toBe('user-1');
+    });
+
+    it('Bearer-auth POST without CSRF header -> passes (no CSRF required for Bearer)', async () => {
+      const { privateKey, kid } = await setupJwks();
+      const token = await signedToken(privateKey, kid);
+      const verifier = createVerifier(BASE_URL);
+      const session = { jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' };
+
+      const req = {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+      } as unknown as Request;
+      const res = fakeRes();
+      const next = vi.fn();
+
+      await axiamMiddleware(session)(req, res, next);
+
+      expect(next).toHaveBeenCalledOnce();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it('cookie-auth GET without CSRF -> passes (safe method)', async () => {
+      const { privateKey, kid } = await setupJwks();
+      const token = await signedToken(privateKey, kid);
+      const verifier = createVerifier(BASE_URL);
+      const session = { jwksVerifier: verifier, tenantHeaderValue: 'tenant-1' };
+
+      const req = {
+        method: 'GET',
+        headers: { cookie: `axiam_access=${token}` },
+      } as unknown as Request;
+      const res = fakeRes();
+      const next = vi.fn();
+
+      await axiamMiddleware(session)(req, res, next);
+
+      expect(next).toHaveBeenCalledOnce();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+  });
 });

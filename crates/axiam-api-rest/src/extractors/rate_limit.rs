@@ -10,11 +10,15 @@
 //!   trusted_hops = 1 → selects <real-client-ip> (skip 1 from right)
 //!
 //! Falls back to the direct peer address when the header is absent, unparseable,
-//! or has fewer hops than `trusted_hops`.
+//! or has fewer hops than `trusted_hops` (a client cannot manufacture extra
+//! trusted hops to force a fallback to an attacker-controlled entry: when there
+//! are not enough hops to trust, the XFF header is ignored entirely and the key
+//! is derived from `peer_addr()`).
 //!
 //! **nginx/ingress requirement**: The upstream proxy MUST append the real client
-//! IP to X-Forwarded-For (not inject it at position 0) for this to be effective.
-//! With `proxy_add_x_forwarded_for` in nginx this is the default behaviour.
+//! IP to the RIGHT of X-Forwarded-For (not inject it at position 0) for this to
+//! be effective. With `proxy_add_x_forwarded_for` in nginx this is the default
+//! behaviour — the real client is the RIGHTMOST trusted entry, not the leftmost.
 
 use actix_governor::governor::NotUntil;
 use actix_governor::governor::clock::{Clock, DefaultClock, QuantaInstant};
@@ -27,15 +31,25 @@ use std::net::IpAddr;
 /// Extracts client IP from X-Forwarded-For header, falls back to peer address.
 ///
 /// `trusted_hops` controls how many rightmost entries in the XFF header to skip
-/// (they come from trusted proxies). A value of 0 uses the leftmost entry
-/// (original behaviour); 1 skips 1 trusted hop from the right.
+/// (they come from trusted proxies). The selected entry is the **rightmost
+/// untrusted** hop — `idx = len - 1 - trusted_hops` — which is correct for a
+/// single trusted reverse proxy that right-appends the real client IP (nginx
+/// `proxy_add_x_forwarded_for`). `trusted_hops = 1` selects the client IP a
+/// single proxy appended; `trusted_hops = 0` selects the rightmost entry
+/// verbatim. (SEC-070: earlier doc text wrongly described this as using the
+/// *leftmost* entry — the leftmost is the most attacker-controllable position
+/// and is never used.)
 #[derive(Debug, Clone, Default)]
 pub struct XForwardedForKeyExtractor {
     /// Number of trusted reverse-proxy hops to skip from the right of
     /// the X-Forwarded-For list. Set to the number of load-balancers/
     /// ingress proxies between the client and this server.
     ///
-    /// Default: 0 (use leftmost; compatible with previous behaviour).
+    /// Default: 0 (rightmost entry). NOTE: when the server is exposed directly
+    /// (no proxy), a client can still set XFF to mint fresh rate-limit buckets;
+    /// deploy behind a proxy that overwrites/right-appends XFF and set
+    /// `trusted_hops` to the proxy count so the untrusted client value is
+    /// skipped.
     pub trusted_hops: usize,
 }
 
@@ -59,15 +73,16 @@ impl KeyExtractor for XForwardedForKeyExtractor {
             // Select the rightmost-untrusted hop.
             // hops = [client, proxy1, ..., trusted_proxy]
             // trusted_hops=1 → index = len - 1 - 1 = len - 2
-            let idx = if self.trusted_hops < hops.len() {
-                hops.len() - 1 - self.trusted_hops
-            } else {
-                // Fewer hops than expected: fall through to peer address.
-                0
-            };
-            if let Ok(ip) = hops[idx].parse::<IpAddr>() {
-                return Ok(ip);
+            if self.trusted_hops < hops.len() {
+                let idx = hops.len() - 1 - self.trusted_hops;
+                if let Ok(ip) = hops[idx].parse::<IpAddr>() {
+                    return Ok(ip);
+                }
             }
+            // Fewer hops than trusted_hops requires: the header cannot be
+            // trusted at all (an attacker could otherwise rotate it to get a
+            // fresh bucket per request via the old `hops[0]` fallback — SECHRD-03).
+            // Fall through to peer_addr() below instead of indexing into XFF.
         }
         req.peer_addr()
             .map(|addr| addr.ip())

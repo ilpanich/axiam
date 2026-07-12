@@ -1,5 +1,7 @@
 using System.Linq;
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Axiam.Sdk;
@@ -50,16 +52,36 @@ namespace Axiam.Sdk.AspNetCore;
 /// quotes/control characters can never produce malformed or injected JSON
 /// (PATTERNS.md "Standardized JSON error body").
 /// </description></item>
+/// <item><description>
+/// CSRF (cookie double-submit, CONTRACT.md &#167;3): when the credential was sourced
+/// from the <c>axiam_access</c> COOKIE (not the <c>Authorization</c> header) and the
+/// request method is state-changing (anything other than GET/HEAD/OPTIONS), this
+/// middleware additionally requires the <c>X-CSRF-Token</c> request header to be
+/// present and equal (constant-time, <see cref="CryptographicOperations.FixedTimeEquals"/>)
+/// to the <c>axiam_csrf</c> cookie value, rejecting with 403 on mismatch/absence.
+/// Bearer-header requests are CSRF-immune by construction — a cross-site attacker
+/// cannot set arbitrary request headers — but a cookie automatically attached by the
+/// browser is not, and in any same-site deployment where <c>axiam_access</c> reaches
+/// this app, the non-<c>httpOnly</c> <c>axiam_csrf</c> cookie does too. This mirrors,
+/// locally, the same double-submit check the AXIAM server performs on its own
+/// endpoints (&#167;3).
+/// </description></item>
 /// </list>
 /// </remarks>
 public sealed class AxiamAuthMiddleware
 {
     private const string AccessCookieName = "axiam_access";
+    private const string CsrfCookieName = "axiam_csrf";
+    private const string CsrfHeaderName = "X-CSRF-Token";
     private const string TenantHeaderName = "X-Tenant-ID";
     private const string BearerPrefix = "Bearer ";
+    private static readonly HashSet<string> SafeMethods = new(StringComparer.OrdinalIgnoreCase) { "GET", "HEAD", "OPTIONS" };
 
     private readonly RequestDelegate _next;
 
+    /// <summary>Constructs the middleware. Registered by the ASP.NET Core pipeline
+    /// (<c>app.UseMiddleware&lt;AxiamAuthMiddleware&gt;()</c>), which supplies <paramref name="next"/>.</summary>
+    /// <param name="next">The next delegate in the middleware pipeline.</param>
     public AxiamAuthMiddleware(RequestDelegate next)
     {
         _next = next ?? throw new ArgumentNullException(nameof(next));
@@ -90,13 +112,19 @@ public sealed class AxiamAuthMiddleware
             return;
         }
 
-        string? token = ExtractToken(context);
+        (string? token, bool fromCookie) = ExtractToken(context);
         if (token is null)
         {
             // No credentials presented at all — let the framework's own [Authorize] /
             // authorization middleware 401 it (Java filter lines 78-83 precedent). Do
             // NOT reject here; some endpoints downstream may be anonymous.
             await _next(context).ConfigureAwait(false);
+            return;
+        }
+
+        if (fromCookie && !SafeMethods.Contains(context.Request.Method) && !IsCsrfValid(context))
+        {
+            await WriteErrorAsync(context, StatusCodes.Status403Forbidden, "authorization_denied", "csrf_validation_failed").ConfigureAwait(false);
             return;
         }
 
@@ -165,8 +193,10 @@ public sealed class AxiamAuthMiddleware
     }
 
     /// <summary><c>Authorization: Bearer</c> header first, then the <c>axiam_access</c>
-    /// cookie; <c>null</c> when neither is present (Java filter lines 135-152).</summary>
-    private static string? ExtractToken(HttpContext context)
+    /// cookie; <c>(null, false)</c> when neither is present (Java filter lines 135-152).
+    /// The returned <c>bool</c> is <c>true</c> when the credential came from the cookie,
+    /// which callers use to decide whether the CSRF double-submit check applies.</summary>
+    private static (string? Token, bool FromCookie) ExtractToken(HttpContext context)
     {
         string? header = context.Request.Headers.Authorization.FirstOrDefault();
         if (!string.IsNullOrEmpty(header) && header.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
@@ -174,12 +204,30 @@ public sealed class AxiamAuthMiddleware
             string credentials = header[BearerPrefix.Length..].Trim();
             if (!string.IsNullOrEmpty(credentials))
             {
-                return credentials;
+                return (credentials, false);
             }
         }
 
         string? cookie = context.Request.Cookies[AccessCookieName];
-        return string.IsNullOrEmpty(cookie) ? null : cookie;
+        return string.IsNullOrEmpty(cookie) ? (null, false) : (cookie, true);
+    }
+
+    /// <summary>
+    /// Cookie double-submit check (CONTRACT.md &#167;3): the <c>X-CSRF-Token</c> header
+    /// must be present and equal, constant-time, to the <c>axiam_csrf</c> cookie value.
+    /// </summary>
+    private static bool IsCsrfValid(HttpContext context)
+    {
+        string? header = context.Request.Headers[CsrfHeaderName].FirstOrDefault();
+        string? cookie = context.Request.Cookies[CsrfCookieName];
+        if (string.IsNullOrEmpty(header) || string.IsNullOrEmpty(cookie))
+        {
+            return false;
+        }
+
+        byte[] headerBytes = Encoding.UTF8.GetBytes(header);
+        byte[] cookieBytes = Encoding.UTF8.GetBytes(cookie);
+        return headerBytes.Length == cookieBytes.Length && CryptographicOperations.FixedTimeEquals(headerBytes, cookieBytes);
     }
 
     private static Task WriteErrorAsync(HttpContext context, int statusCode, string error, string message)

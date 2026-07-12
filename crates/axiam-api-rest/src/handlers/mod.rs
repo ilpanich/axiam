@@ -4,6 +4,7 @@ pub mod authz_check;
 pub mod bootstrap;
 pub mod ca_certificates;
 pub mod certificates;
+pub mod email_config;
 pub mod email_verification;
 pub mod federation;
 pub mod gdpr;

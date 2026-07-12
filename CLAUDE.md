@@ -92,6 +92,28 @@ just dev-down          # Stop containers
 just check             # fmt + lint + test
 ```
 
+## Build & Disk Hygiene (sandbox / CI environments)
+
+This applies to every orchestrator run and every spawned executor, on **every wave and phase**.
+
+- **`cargo clean` between plan steps.** The sandbox disk is quota-limited (~38 GB) and Rust
+  `target/` build artifacts accumulate fast (a full `cargo test` builds ~15 integration-test
+  binaries per crate, each hundreds of MB). Run `cargo clean` in the gap **between** each plan
+  that involves Rust compilation — never *during* an executor run (it would wipe an in-progress
+  build). If the disk fills, Bash and all write tools fail with `ENOSPC`; recover by deleting
+  `target/` (`/dev/shm` is a separate writable tmpfs usable as an escape hatch).
+- **Prefer narrowly-scoped cargo commands** to keep `target/` small: `cargo test -p <crate> --lib`
+  or `-p <crate> --test <specific>`, `cargo clippy -p <crate> --lib`, `cargo fmt -p <crate> -- --check`.
+  Avoid unscoped `cargo test` / `cargo build` across the whole workspace unless required
+  (e.g. the end-of-phase regression gate).
+- **swagger-ui GitHub-egress workaround (required after any `target/` wipe).** `utoipa-swagger-ui`
+  downloads `swagger-ui-5.17.14.zip` from `github.com` at build time, which this environment's
+  proxy blocks (403). A durable placeholder zip is cached at
+  `/home/user/.axiam-build-cache/swagger-ui-5.17.14.zip`. Point the build script at it for any
+  build/test of `axiam-api-rest` (and anything depending on it) with:
+  `export SWAGGER_UI_DOWNLOAD_URL=file:///home/user/.axiam-build-cache/swagger-ui-5.17.14.zip`
+  This is a local-only build input substitution — it touches no tracked file, `Cargo.toml`, or CI config.
+
 ## Security Standards
 
 - Passwords: Argon2id (OWASP-recommended parameters)

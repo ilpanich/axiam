@@ -24,18 +24,65 @@ export interface HttpErrorContext {
   action?: string;
   resourceId?: string;
   cause?: unknown;
+  /**
+   * The parsed JSON response body (when available). For a 403/409
+   * authorization-denied response the server shapes this as
+   * `{ error: "authorization_denied", message, action?, resource_id? }`
+   * (`action` present when known, `resource_id` present only for a
+   * resource-scoped denial). `mapHttpStatusToError` prefers these body
+   * fields over `action`/`resourceId` above when populating `AuthzError`.
+   */
+  body?: unknown;
 }
 
-/** Response header names that must never survive into a NetworkError.cause (CR-04, D-16). */
-const SENSITIVE_RESPONSE_HEADERS = ['set-cookie', 'authorization', 'cookie'];
+/**
+ * Extract `action`/`resource_id` (snake_case -> camelCase) from a parsed
+ * authorization-denied response body, if present and string-typed. Any other
+ * shape (missing fields, non-object body, older servers with no body at all)
+ * yields `{}`, so callers fall back to caller-supplied context.
+ */
+function extractAuthzFieldsFromBody(body: unknown): { action?: string; resourceId?: string } {
+  if (body === null || typeof body !== 'object') {
+    return {};
+  }
+  const record = body as Record<string, unknown>;
+  const action = typeof record.action === 'string' ? record.action : undefined;
+  const resourceId = typeof record.resource_id === 'string' ? record.resource_id : undefined;
+  return { action, resourceId };
+}
 
 /**
- * Strip Set-Cookie (and other sensitive) response headers from an
- * axios-error-shaped `err` before it is attached as `NetworkError.cause`
- * (CR-04, D-16). On login/refresh error paths the server may have already
- * issued Set-Cookie headers containing raw `axiam_access`/`axiam_refresh`
- * values; those must never be reachable via `console.log`/`JSON.stringify`/
- * `util.inspect` of the thrown error.
+ * ALLOWLIST (X-3) of response headers that are safe to preserve in a
+ * NetworkError.cause. Every header NOT listed here has its value redacted to a
+ * placeholder, so a custom sensitive header (e.g. `X-Auth-Token`) can never
+ * survive into a thrown error — unlike a small denylist, which only catches the
+ * headers it happens to enumerate. Names are compared case-insensitively (all
+ * entries are lower-case). Keep this list small and strictly non-secret:
+ * standard diagnostic response headers plus this SDK's own non-secret request
+ * headers (e.g. `x-tenant-id`).
+ */
+const SAFE_RESPONSE_HEADERS = new Set([
+  'content-type',
+  'content-length',
+  'date',
+  'server',
+  'retry-after',
+  'x-request-id',
+  'x-tenant-id',
+]);
+
+/** Placeholder substituted for the value of any non-allowlisted header. */
+const REDACTED_HEADER = '[REDACTED]';
+
+/**
+ * Redact every non-allowlisted response header from an axios-error-shaped
+ * `err` before it is attached as `NetworkError.cause` (CR-04, D-16, X-3). On
+ * login/refresh error paths the server may have already issued Set-Cookie
+ * headers containing raw `axiam_access`/`axiam_refresh` values (and callers may
+ * set custom sensitive headers such as `X-Auth-Token`); none of these must be
+ * reachable via `console.log`/`JSON.stringify`/`util.inspect` of the thrown
+ * error. Only headers on `SAFE_RESPONSE_HEADERS` keep their value; all others
+ * are replaced with `[REDACTED]`.
  *
  * Returns a new, shallow-cloned object for any input shaped like
  * `{ response: { headers: {...} } }` — the caller's original axios error
@@ -57,8 +104,8 @@ export function sanitizeAxiosError(err: unknown): unknown {
 
   const sanitizedHeaders: Record<string, unknown> = { ...(response.headers as Record<string, unknown>) };
   for (const key of Object.keys(sanitizedHeaders)) {
-    if (SENSITIVE_RESPONSE_HEADERS.includes(key.toLowerCase())) {
-      delete sanitizedHeaders[key];
+    if (!SAFE_RESPONSE_HEADERS.has(key.toLowerCase())) {
+      sanitizedHeaders[key] = REDACTED_HEADER;
     }
   }
 
@@ -88,6 +135,12 @@ export function sanitizeAxiosError(err: unknown): unknown {
  * NetworkError's `cause` (when provided via `ctx.cause`) is always passed
  * through `sanitizeAxiosError` first (CR-04) — this is the single choke
  * point for both rest/ auth call sites and any future caller.
+ *
+ * For 403/409, `action`/`resourceId` are sourced from the response body
+ * (`ctx.body`) when the body carries them, falling back to the
+ * caller-supplied `ctx.action`/`ctx.resourceId` (the request call-args)
+ * otherwise — this keeps compatibility with older servers that don't yet
+ * echo `action`/`resource_id` in the denial body.
  */
 export function mapHttpStatusToError(
   status: number,
@@ -98,7 +151,8 @@ export function mapHttpStatusToError(
     return new AuthError(message);
   }
   if (status === 403 || status === 409) {
-    return new AuthzError(message, ctx?.action, ctx?.resourceId);
+    const fromBody = extractAuthzFieldsFromBody(ctx?.body);
+    return new AuthzError(message, fromBody.action ?? ctx?.action, fromBody.resourceId ?? ctx?.resourceId);
   }
   // 400, 408, 429, 5xx, and any other status fall through to NetworkError.
   return new NetworkError(message, sanitizeAxiosError(ctx?.cause));

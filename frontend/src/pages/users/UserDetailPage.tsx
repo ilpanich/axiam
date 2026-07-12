@@ -16,30 +16,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2, Trash2, ShieldX } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
-
-// ─── Section card wrapper ─────────────────────────────────────────────────────
-
-function SectionCard({
-  title,
-  action,
-  children,
-}: {
-  title: string;
-  action?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="glass-card mb-6">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-base font-semibold text-foreground">{title}</h2>
-        {action}
-      </div>
-      {children}
-    </div>
-  );
-}
+import { SectionCard, ToggleField } from "@/components/shared";
 
 // ─── Info row ─────────────────────────────────────────────────────────────────
+// NOTE: kept as a local copy — this InfoRow differs from components/shared.tsx's
+// InfoRow (sm:items-center vs sm:items-start, sm:w-40 vs sm:w-36, no pt-0.5 on the
+// label). Migrating would visibly change label alignment/width on this page, which
+// violates this plan's behavior-preservation constraint (D-03). Left as a
+// documented deviation for a future plan to reconcile intentionally.
 
 function InfoRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -48,35 +32,6 @@ function InfoRow({ label, children }: { label: string; children: React.ReactNode
         {label}
       </span>
       <span className="text-sm text-foreground/90">{children}</span>
-    </div>
-  );
-}
-
-// ─── Toggle field ─────────────────────────────────────────────────────────────
-
-function ToggleField({
-  id,
-  label,
-  checked,
-  onChange,
-}: {
-  id: string;
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center gap-3">
-      <input
-        type="checkbox"
-        id={id}
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="w-4 h-4 accent-cyan-400 cursor-pointer"
-      />
-      <Label htmlFor={id} className="cursor-pointer">
-        {label}
-      </Label>
     </div>
   );
 }

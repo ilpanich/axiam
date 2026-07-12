@@ -11,6 +11,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -47,11 +48,6 @@ struct CertificateRowWithId {
     status: String,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -291,10 +287,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<CertificateRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "certificate".into(),
-            id: fingerprint.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "certificate", fingerprint)?;
 
         row.try_into_entry().map_err(Into::into)
     }
@@ -347,7 +340,6 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let data_sql = "SELECT meta::id(id) AS record_id, * FROM certificate \
                         WHERE tenant_id = $tenant_id \
@@ -371,12 +363,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .map(|r| r.try_into_entry())
             .collect::<Result<_, _>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn get_by_fingerprint_global(&self, fingerprint: &str) -> AxiamResult<Certificate> {
@@ -394,10 +381,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<CertificateRowWithId> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "certificate".into(),
-            id: fingerprint.to_string(),
-        })?;
+        let row = take_first_or_not_found(rows, "certificate", fingerprint)?;
 
         row.try_into_entry().map_err(Into::into)
     }
@@ -430,9 +414,11 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             if msg.contains("cross-tenant binding denied") {
                 return Err(AxiamError::AuthorizationDenied {
                     reason: "cross-tenant certificate-to-service-account binding denied".into(),
+                    action: None,
+                    resource_id: None,
                 });
             }
-            return Err(DbError::Migration(msg).into());
+            return Err(classify_write_error(msg, "certificate_binding").into());
         }
         Ok(())
     }

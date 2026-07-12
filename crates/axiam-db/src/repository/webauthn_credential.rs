@@ -11,6 +11,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
 struct WebauthnCredentialRow {
@@ -35,11 +36,6 @@ struct WebauthnCredentialRowWithId {
     passkey_json: String,
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
 }
 
 fn parse_credential_type(s: &str) -> Result<WebauthnCredentialType, DbError> {
@@ -141,10 +137,7 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<WebauthnCredentialRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "webauthn_credential".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "webauthn_credential", &id_str)?;
 
         row_to_credential(row, id).map_err(Into::into)
     }
@@ -164,10 +157,7 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
             .map_err(DbError::from)?;
 
         let rows: Vec<WebauthnCredentialRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "webauthn_credential".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "webauthn_credential", &id_str)?;
 
         row_to_credential(row, id).map_err(Into::into)
     }

@@ -45,28 +45,55 @@ use crate::AxiamError;
 /// equivalent of `crate::rest::authz::AccessCheckRequest`, matching the
 /// `CheckAccessRequest` proto message shape
 /// (`proto/axiam/v1/authorization.proto`).
+///
+/// `subject_id` is required here (unlike REST's `AccessCheckRequest`, where
+/// `subject_id` is an `Option<Uuid>`) because it mirrors the proto's
+/// non-`optional` `subject_id` field — the wire contract always carries it,
+/// so it is not relaxed to match REST (SDK-Q10, C2). The two transports
+/// differ by design: REST derives the subject from the caller's JWT when
+/// omitted (§5), while a gRPC caller (typically a service-mesh peer with no
+/// request-scoped JWT) must always pass it explicitly.
 #[derive(Debug, Clone)]
 pub struct CheckAccessRequest {
+    /// Tenant the authorization check is scoped to.
     pub tenant_id: Uuid,
+    /// Subject to check access for. Unlike the REST transport, this is
+    /// always required — see the struct doc comment for why.
     pub subject_id: Uuid,
+    /// Permission action to check (CONTRACT.md §1 method vocabulary).
     pub action: String,
+    /// Resource the action is checked against.
     pub resource_id: Uuid,
+    /// Optional sub-resource scope narrowing the check. `None` means the
+    /// check applies to the whole resource.
     pub scope: Option<String>,
 }
 
-/// The result of a single access check (mirrors `CheckAccessResponse`,
-/// shared shape with `crate::rest::authz::AccessDecision`).
+/// The result of a single access check (mirrors `CheckAccessResponse`).
+///
+/// Field-for-field parallel to `crate::rest::authz::AccessDecision`
+/// (`allowed: bool`, `reason: Option<String>`) — SDK-Q10/C2 aligned the two
+/// deny-reason field names (this used to be `deny_reason` here vs. `reason`
+/// on REST). They remain two distinct types rather than one shared
+/// definition: this module is only compiled under `feature = "grpc"` and
+/// `crate::rest::authz::AccessDecision` only under `feature = "rest"`, and
+/// `src/lib.rs`'s module list is intentionally frozen post-16-01 (see its
+/// doc comment) to avoid parallel-plan merge conflicts, so introducing a
+/// new always-compiled shared module is deliberately out of scope here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessDecision {
+    /// Whether the checked action is permitted.
     pub allowed: bool,
-    pub deny_reason: Option<String>,
+    /// Optional human-readable explanation for the decision. `None` when
+    /// the wire response's `deny_reason` was empty.
+    pub reason: Option<String>,
 }
 
 impl From<WireCheckAccessResponse> for AccessDecision {
     fn from(wire: WireCheckAccessResponse) -> Self {
         AccessDecision {
             allowed: wire.allowed,
-            deny_reason: if wire.deny_reason.is_empty() {
+            reason: if wire.deny_reason.is_empty() {
                 None
             } else {
                 Some(wire.deny_reason)

@@ -20,8 +20,11 @@ const PEM_MARKER = '-----BEGIN CERTIFICATE-----';
  * `AxiamClient` instance.
  */
 export class SharedSession {
+  /** The underlying axios instance this session's requests are issued through, pre-configured with `baseUrl`, credential forwarding, and (Node) an optional custom-CA `httpsAgent`. */
   readonly axios: AxiosInstance;
+  /** The AXIAM server base URL this session was constructed with (`AxiamClientOptions.baseUrl`). */
   readonly baseUrl: string;
+  /** The resolved tenant identifier (`tenantSlug` or `tenantId`) injected as the `X-Tenant-ID` header on every same-origin request (§5.2). */
   readonly tenantHeaderValue: string;
   /** Mutable CSRF token store — populated by the request/response interceptors (D-05). */
   csrfToken: string | undefined;
@@ -32,6 +35,10 @@ export class SharedSession {
    * this session's REST and gRPC transports (rest/interceptors.ts,
    * grpc/callWithRefresh.ts both call `session.refreshGuard(...)`), but
    * NEVER shared with a different SharedSession/NodeSession instance.
+   *
+   * @internal SDK-internal transport wiring, not intended to be invoked
+   * directly by SDK consumers — refreshes are driven automatically by the
+   * response interceptor (rest) or `callWithRefresh` (grpc).
    */
   readonly refreshGuard: RefreshGuard;
 

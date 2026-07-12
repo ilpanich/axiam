@@ -11,7 +11,7 @@ on:
       - 'buf.gen.yaml'
   push:
     tags:
-      - 'sdks/java/v*'
+      - 'axiam-java-sdk/v*'
 
 permissions:
   contents: read
@@ -49,6 +49,31 @@ jobs:
 
       - name: mvn test (fast unit tier, no GPG signing)
         run: mvn -f sdks/java/pom.xml test
+
+  javadoc-gate:
+    name: Javadoc gate (D-22, javadoc.io)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  # v4.8.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      # javadoc.io serves the -javadoc.jar this plugin attaches (D-22)
+      # verbatim, so a missing/incomplete javadoc entry on the published API
+      # is a real user-facing gap. pom.xml's maven-javadoc-plugin config
+      # (doclint=all, failOnWarnings=true, axiam.v1 excluded from doc scope —
+      # see pom.xml) turns that gap into a build failure here. `compile` runs
+      # first so the generated axiam.v1 protobuf/grpc sources exist on disk
+      # for javadoc's default sourcepath to resolve (hand-written signatures,
+      # e.g. GrpcAuthzClient, reference those generated types even though
+      # their own javadoc gaps are excluded from this gate).
+      - name: mvn compile javadoc:javadoc (fails the build on any doclint warning)
+        run: mvn -f sdks/java/pom.xml compile javadoc:javadoc
 
   tls-bypass-gate:
     name: TLS-bypass gate (SC#4)
@@ -160,15 +185,39 @@ jobs:
       - name: mvn verify (spring-boot-app example — compiles + boots the complete app context, SC#3)
         run: mvn -f sdks/java/examples/spring-boot-app/pom.xml verify
 
+  # Publishing to a public registry is IRREVERSIBLE — crates.io, npm, PyPI, Maven
+  # Central, NuGet and Packagist all refuse to re-use a version number. Git tags are
+  # NOT branch-scoped, so without this gate a release tag cut on a feature branch would
+  # ship unreviewed code to the world under a version that can never be reclaimed.
+  # The publish job below `needs:` this.
+  verify-tag-on-main:
+    name: Verify tag is on main
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Assert the tagged commit is an ancestor of origin/main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is NOT on origin/main. Release tags must be cut from main."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_REF_NAME} (${GITHUB_SHA}) is on origin/main."
+
   publish:
     name: Publish to Maven Central
     # Manual-on-tag, side-effecting step: this job only runs when a
-    # maintainer pushes a tag matching sdks/java/vX.Y.Z (Phase 15 D-13
+    # maintainer pushes a tag matching axiam-java-sdk/vX.Y.Z (Phase 15 D-13
     # monorepo tag convention, mirroring sdk-ci-python.yml's identical
     # publish-job gating). It is never triggered by a pull_request, so the
     # real GPG_PRIVATE_KEY/GPG_PASSPHRASE/CENTRAL_TOKEN_* secrets referenced
     # below are NEVER exposed to a PR-triggered job (T-20-12, Pitfall 4).
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/java/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/axiam-java-sdk/v')
+    needs: verify-tag-on-main
     runs-on: ubuntu-latest
     environment: maven-central
     permissions:

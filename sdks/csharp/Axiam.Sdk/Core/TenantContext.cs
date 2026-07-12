@@ -28,6 +28,14 @@ public sealed class TenantContext
     /// <summary>Optional organization slug. Mutually exclusive with <see cref="OrgId"/>.</summary>
     public string? OrgSlug { get; }
 
+    /// <summary>
+    /// Constructs a <see cref="TenantContext"/>. Throws <see cref="ArgumentException"/>
+    /// when <paramref name="tenantId"/> is null/blank — the runtime guard backing
+    /// <c>AxiamClient</c>'s tenant-required constructor (CONTRACT.md &#167;5, SC#1).
+    /// </summary>
+    /// <param name="tenantId">The tenant slug or tenant UUID (as a string) — required, never blank.</param>
+    /// <param name="orgId">Optional organization UUID. Mutually exclusive with <paramref name="orgSlug"/>.</param>
+    /// <param name="orgSlug">Optional organization slug. Mutually exclusive with <paramref name="orgId"/>.</param>
     public TenantContext(string tenantId, Guid? orgId = null, string? orgSlug = null)
     {
         if (string.IsNullOrWhiteSpace(tenantId))

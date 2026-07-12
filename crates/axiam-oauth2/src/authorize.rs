@@ -1,5 +1,6 @@
 //! OAuth2 authorization code grant — authorization endpoint logic.
 
+use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::CreateAuthorizationCode;
 use axiam_core::repository::{AuthorizationCodeRepository, OAuth2ClientRepository};
 use base64::Engine;
@@ -64,7 +65,16 @@ where
             .client_repo
             .get_by_client_id(req.tenant_id, &req.client_id)
             .await
-            .map_err(|_| OAuth2Error::InvalidClient("client not found".into()))?;
+            .map_err(|e| match e {
+                // QUAL-03/D-11: only a genuinely-unknown client maps to
+                // invalid_client. Any other error (e.g. a DB outage) must
+                // surface as a distinct server error, never masquerade as
+                // bad client credentials (error-oracle).
+                AxiamError::NotFound { .. } => {
+                    OAuth2Error::InvalidClient("client not found".into())
+                }
+                other => OAuth2Error::ServerError(other.to_string()),
+            })?;
 
         // 2. Validate redirect_uri — also before any redirectable
         //    errors per RFC 6749 §4.1.2.1.
@@ -254,6 +264,47 @@ mod tests {
         }
     }
 
+    /// QUAL-03/D-11: a client-repo that always fails with a DB-outage-shaped
+    /// error (not `AxiamError::NotFound`), used to prove `authenticate_client`
+    /// (and its callers) distinguish a DB outage from a genuinely-unknown
+    /// client.
+    #[derive(Clone)]
+    struct MockClientRepoDbOutage;
+
+    impl OAuth2ClientRepository for MockClientRepoDbOutage {
+        async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+            unimplemented!()
+        }
+        async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
+            unimplemented!()
+        }
+        async fn get_by_client_id(
+            &self,
+            _tenant_id: Uuid,
+            _client_id: &str,
+        ) -> AxiamResult<OAuth2Client> {
+            Err(AxiamError::Database("simulated DB outage".into()))
+        }
+        async fn update(
+            &self,
+            _tid: Uuid,
+            _id: Uuid,
+            _input: UpdateOAuth2Client,
+        ) -> AxiamResult<OAuth2Client> {
+            unimplemented!()
+        }
+        async fn delete(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn list(
+            &self,
+            _tid: Uuid,
+            _page: Pagination,
+        ) -> AxiamResult<PaginatedResult<OAuth2Client>> {
+            unimplemented!()
+        }
+    }
+
     #[derive(Clone)]
     struct MockCodeRepo;
 
@@ -409,5 +460,27 @@ mod tests {
             "confidential client without PKCE must still succeed, got: {:?}",
             result
         );
+    }
+
+    // QUAL-03/D-11: a DB outage at client lookup must surface as a 5xx
+    // ServerError, never masquerade as invalid_client (error-oracle).
+    #[tokio::test]
+    async fn authorize_client_lookup_db_outage_returns_server_error_not_invalid_client() {
+        let svc = AuthorizeService::new(MockClientRepoDbOutage, MockCodeRepo, 300);
+        let req = make_authorize_request(
+            Uuid::new_v4(),
+            &make_client(false),
+            None, // confidential client path, PKCE irrelevant here
+        );
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err(), "a DB outage must be a hard error");
+        match result.unwrap_err() {
+            OAuth2Error::ServerError(_) => {}
+            other => panic!(
+                "expected OAuth2Error::ServerError on a DB outage, got: {other:?} \
+                 (a DB outage must never be reported as invalid_client)"
+            ),
+        }
     }
 }

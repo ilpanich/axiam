@@ -1,39 +1,50 @@
 //! AXIAM Server — Application entry point.
 
-mod cleanup;
+use axiam_server::cleanup;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::{App, HttpServer, web};
-use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher};
+use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher, WebhookPublisher};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
+use axiam_api_rest::state::AppState;
+use axiam_api_rest::webhook_consumer::{WebhookRetryConfig, start_webhook_consumer};
 use axiam_api_rest::{
     HealthChecker, RateLimitConfig, ServerConfig, build_cors, health_routes, openapi_routes,
     register_api_v1_routes,
 };
 use axiam_audit::AuditMiddleware;
 use axiam_auth::config::AuthConfig;
-use axiam_auth::{AuthService, MfaMethodService, WebauthnService};
+use axiam_auth::{
+    AuthService, EmailVerificationService, MfaMethodService, PasswordResetService, WebauthnService,
+};
 use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
 use axiam_db::{
-    DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
-    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
-    SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealErasureProofRepository,
+    DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
+    SurrealAssertionReplayRepository, SurrealAuditLogRepository,
+    SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
+    SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
+    SurrealEmailVerificationTokenRepository, SurrealErasureProofRepository,
     SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
     SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
-    SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealPgpKeyRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealOrganizationRepository, SurrealPasswordHistoryRepository,
+    SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
+    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
+use axiam_federation::oidc::OidcFederationService;
+#[cfg(feature = "saml")]
+use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
 use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use tracing_actix_web::TracingLogger;
 use tracing_subscriber::EnvFilter;
@@ -78,6 +89,8 @@ struct AppConfig {
     auth: AuthConfig,
     #[serde(default)]
     grpc: GrpcConfig,
+    #[serde(default)]
+    authz: axiam_authz::AuthzConfig,
     #[serde(default)]
     amqp: AmqpConfig,
     #[serde(default)]
@@ -181,9 +194,10 @@ async fn main() -> std::io::Result<()> {
 
     // Load auth pepper from env (REQ-14 AC-1). Plain string — no hex decode.
     // The pepper is prepended to passwords before Argon2id hashing/verification.
-    // SECURITY: do NOT log the pepper value.
+    // SECURITY: do NOT log the pepper value. Wrapped in `SecretString`
+    // (SECHRD-12) so the value can never be accidentally `Debug`-printed.
     if let Ok(value) = std::env::var("AXIAM__AUTH__PEPPER") {
-        config.auth.pepper = Some(value);
+        config.auth.pepper = Some(secrecy::SecretString::from(value));
         tracing::info!("Auth pepper loaded");
     } else {
         tracing::info!(
@@ -207,18 +221,44 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to connect to SurrealDB");
 
     // Run schema migrations
-    axiam_db::run_migrations(db.client())
+    axiam_db::run_migrations(&db.client_cloned().await)
         .await
         .expect("Failed to run database migrations");
 
     tracing::info!("Database connected and migrations applied");
 
+    // Boot: mint a one-time bootstrap setup token if this database has never
+    // been bootstrapped (SECHRD-04 / D-03b). No-op on every subsequent boot.
+    // Errors are logged, never fatal — an unminted token just means the
+    // env-var gate (AXIAM_BOOTSTRAP_ADMIN_EMAIL) remains the only way in,
+    // which is a safe (fail-closed) degraded state, not a startup blocker.
+    match axiam_db::mint_bootstrap_setup_token_if_needed(&db.client_cloned().await).await {
+        Ok(Some(token)) => {
+            // D-03b: the ONE deliberate secret-log exception — logged exactly
+            // once, at first boot only. Only the sha256 hash is ever
+            // persisted to the database (see `mint_bootstrap_setup_token_if_needed`).
+            tracing::info!(
+                setup_token = %token,
+                "AXIAM first-run bootstrap setup token minted. Use this token \
+                 ONCE to complete first-admin bootstrap (POST \
+                 /api/v1/admin/bootstrap, `setup_token` field) if \
+                 AXIAM_BOOTSTRAP_ADMIN_EMAIL is not set. This token will not \
+                 be shown again."
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to mint bootstrap setup token");
+        }
+    }
+
     // Boot backfill: encrypt any legacy plaintext federation client_secret rows (D-12).
     // Idempotent — rows that are already encrypted are skipped. Runs before HTTP bind
     // to avoid serving plaintext-secret rows after this deploy.
     {
-        let boot_fed_repo = axiam_db::SurrealFederationConfigRepository::new(db.client().clone());
-        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(db.client().clone());
+        let boot_fed_repo =
+            axiam_db::SurrealFederationConfigRepository::new(db.client_cloned().await);
+        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(db.client_cloned().await);
         if let Some(fed_key) = config.auth.federation_encryption_key {
             match axiam_federation::secrets::migrate_plaintext_federation_secrets(
                 &boot_fed_repo,
@@ -243,7 +283,8 @@ async fn main() -> std::io::Result<()> {
     // to avoid serving plaintext-secret rows after this deploy.
     {
         if let Some(email_key) = config.email_encryption_key {
-            let boot_email_repo = SurrealEmailConfigRepository::new(db.client().clone(), email_key);
+            let boot_email_repo =
+                SurrealEmailConfigRepository::new(db.client_cloned().await, email_key);
             match boot_email_repo.backfill_plaintext_secrets().await {
                 Ok(n) => tracing::info!(migrated = n, "email config secrets backfill complete"),
                 Err(e) => tracing::warn!(error = %e, "email config secrets backfill failed"),
@@ -259,8 +300,8 @@ async fn main() -> std::io::Result<()> {
     // Seed permissions for all existing tenants (D-07).
     // Uses UPSERT — safe to run on every startup.
     {
-        let seed_org_repo = SurrealOrganizationRepository::new(db.client().clone());
-        let seed_tenant_repo = SurrealTenantRepository::new(db.client().clone());
+        let seed_org_repo = SurrealOrganizationRepository::new(db.client_cloned().await);
+        let seed_tenant_repo = SurrealTenantRepository::new(db.client_cloned().await);
         let all_orgs = seed_org_repo
             .list(Pagination {
                 offset: 0,
@@ -282,7 +323,7 @@ async fn main() -> std::io::Result<()> {
                 .expect("Failed to list tenants for permission seeding");
             for tenant in tenants.items {
                 axiam_db::seed_permissions(
-                    db.client(),
+                    &db.client_cloned().await,
                     tenant.id,
                     axiam_api_rest::permissions::PERMISSION_REGISTRY,
                 )
@@ -291,9 +332,10 @@ async fn main() -> std::io::Result<()> {
                 // Back-fill default-role grants for any permissions added to the
                 // registry since this tenant was bootstrapped (bootstrap, which
                 // grants permissions to roles, self-disables after first admin).
-                let backfilled = axiam_db::reconcile_default_role_grants(db.client(), tenant.id)
-                    .await
-                    .expect("Failed to reconcile default role grants for tenant");
+                let backfilled =
+                    axiam_db::reconcile_default_role_grants(&db.client_cloned().await, tenant.id)
+                        .await
+                        .expect("Failed to reconcile default role grants for tenant");
                 if backfilled > 0 {
                     tracing::info!(
                         tenant = %tenant.id,
@@ -312,41 +354,56 @@ async fn main() -> std::io::Result<()> {
     }
 
     // Connect to RabbitMQ and declare queues.
-    let amqp = AmqpManager::connect_with_retry(&config.amqp)
-        .await
-        .expect("Failed to connect to RabbitMQ");
+    // Shared behind an Arc so background consumers can hold a handle and
+    // recreate their channel on a transient broker blip (CQ-B53) instead of
+    // taking the whole process down.
+    let amqp = Arc::new(
+        AmqpManager::connect_with_retry(&config.amqp)
+            .await
+            .expect("Failed to connect to RabbitMQ"),
+    );
     amqp.declare_queues()
         .await
         .expect("Failed to declare AMQP queues");
+    // CORR-03/D-06/D-07: primary/retry/DLQ webhook delivery topology (26-03).
+    amqp.declare_webhook_topology()
+        .await
+        .expect("Failed to declare webhook AMQP topology");
     tracing::info!("RabbitMQ connected and queues declared");
 
     // Raw SurrealDB handle — registered as app_data so handlers that need direct
     // access (e.g. /api/v1/admin/bootstrap) can request `web::Data<Surreal<C>>`.
-    let db_handle = db.client().clone();
-    let org_repo = SurrealOrganizationRepository::new(db.client().clone());
-    let tenant_repo = SurrealTenantRepository::new(db.client().clone());
+    let db_handle = db.client_cloned().await;
+    let org_repo = SurrealOrganizationRepository::new(db.client_cloned().await);
+    let tenant_repo = SurrealTenantRepository::new(db.client_cloned().await);
     let user_repo = SurrealUserRepository::with_pepper(
-        db.client().clone(),
-        config.auth.pepper.clone().unwrap_or_default(),
+        db.client_cloned().await,
+        config
+            .auth
+            .pepper
+            .as_ref()
+            .map(|p| p.expose_secret().to_string())
+            .unwrap_or_default(),
     );
-    let group_repo = SurrealGroupRepository::new(db.client().clone());
-    let role_repo = SurrealRoleRepository::new(db.client().clone());
-    let permission_repo = SurrealPermissionRepository::new(db.client().clone());
-    let resource_repo = SurrealResourceRepository::new(db.client().clone());
-    let scope_repo = SurrealScopeRepository::new(db.client().clone());
-    let service_account_repo = SurrealServiceAccountRepository::new(db.client().clone());
-    let session_repo = SurrealSessionRepository::new(db.client().clone());
+    let group_repo = SurrealGroupRepository::new(db.client_cloned().await);
+    let role_repo = SurrealRoleRepository::new(db.client_cloned().await);
+    let permission_repo = SurrealPermissionRepository::new(db.client_cloned().await);
+    let resource_repo = SurrealResourceRepository::new(db.client_cloned().await);
+    let scope_repo = SurrealScopeRepository::new(db.client_cloned().await);
+    let service_account_repo = SurrealServiceAccountRepository::new(db.client_cloned().await);
+    let session_repo = SurrealSessionRepository::new(db.client_cloned().await);
     // REQ-7 / D-15: per-request session-validity check so revoked sessions'
     // access tokens are rejected immediately (the AuthenticatedUser extractor
     // consults this on every authenticated request).
     let session_validator: std::sync::Arc<dyn axiam_api_rest::SessionValidator> =
         std::sync::Arc::new(session_repo.clone());
-    let audit_repo = SurrealAuditLogRepository::new(db.client().clone());
-    let ca_cert_repo = SurrealCaCertificateRepository::new(db.client().clone());
-    let federation_link_repo_for_auth = SurrealFederationLinkRepository::new(db.client().clone());
+    let audit_repo = SurrealAuditLogRepository::new(db.client_cloned().await);
+    let ca_cert_repo = SurrealCaCertificateRepository::new(db.client_cloned().await);
+    let federation_link_repo_for_auth =
+        SurrealFederationLinkRepository::new(db.client_cloned().await);
     // A separate refresh-token repo instance for AuthService (used by
     // revoke_all_sessions / revoke_all_sessions_except on password change and reset).
-    let auth_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
+    let auth_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client_cloned().await);
     // Single shared bounding semaphore for all CPU-bound crypto operations (CQ-B02 / REQ-14 AC-2).
     // Limits concurrent Argon2 and PKI keygen/sign operations to 4 to prevent DoS via
     // runtime thread starvation. Constructed once, cloned (Arc) into each service.
@@ -361,13 +418,13 @@ async fn main() -> std::io::Result<()> {
         Arc::clone(&crypto_semaphore),
     );
     // Password history repository — used by the password-change handler.
-    let password_history_repo = SurrealPasswordHistoryRepository::new(db.client().clone());
-    let consent_repo = axiam_db::SurrealConsentRepository::new(db.client().clone());
-    let account_deletion_repo = SurrealAccountDeletionRepository::new(db.client().clone());
-    let export_job_repo = SurrealExportJobRepository::new(db.client().clone());
-    let erasure_proof_repo = SurrealErasureProofRepository::new(db.client().clone());
+    let password_history_repo = SurrealPasswordHistoryRepository::new(db.client_cloned().await);
+    let consent_repo = axiam_db::SurrealConsentRepository::new(db.client_cloned().await);
+    let account_deletion_repo = SurrealAccountDeletionRepository::new(db.client_cloned().await);
+    let export_job_repo = SurrealExportJobRepository::new(db.client_cloned().await);
+    let erasure_proof_repo = SurrealErasureProofRepository::new(db.client_cloned().await);
 
-    let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(db.client().clone());
+    let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(db.client_cloned().await);
     let webauthn_service = WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
         .expect("Failed to build WebauthnService");
     let mfa_method_service = MfaMethodService::new(user_repo.clone(), webauthn_cred_repo.clone());
@@ -378,13 +435,13 @@ async fn main() -> std::io::Result<()> {
     let pki_config = PkiConfig {
         encryption_key: load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY"),
     };
-    let cert_repo = SurrealCertificateRepository::new(db.client().clone());
+    let cert_repo = SurrealCertificateRepository::new(db.client_cloned().await);
     let ca_service = CaService::new(
         ca_cert_repo.clone(),
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
     );
-    let pgp_repo = SurrealPgpKeyRepository::new(db.client().clone());
+    let pgp_repo = SurrealPgpKeyRepository::new(db.client_cloned().await);
     let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore));
     let cert_service = CertService::new(
         ca_cert_repo,
@@ -396,27 +453,53 @@ async fn main() -> std::io::Result<()> {
     // SurrealCaCertificateRepository is cloned; each clone shares the underlying Surreal<C>.
     let device_auth_service = DeviceAuthService::new(
         cert_repo.clone(),
-        SurrealCaCertificateRepository::new(db.client().clone()),
+        SurrealCaCertificateRepository::new(db.client_cloned().await),
     );
-    let webhook_repo = SurrealWebhookRepository::new(db.client().clone());
-    // SEC-031: Webhook secrets stored AES-256-GCM encrypted using the same PKI
-    // encryption key. Falls back to an all-zero key if env var is absent so the
-    // server still starts (will fail to decrypt secrets set under a real key).
-    let webhook_enc_key: [u8; 32] =
-        load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY").unwrap_or([0u8; 32]);
+    let webhook_repo = SurrealWebhookRepository::new(db.client_cloned().await);
+    // SEC-031/SEC-059: Webhook secrets stored AES-256-GCM encrypted using the
+    // same PKI encryption key. Absent key -> None (SEC-012 fail-closed
+    // pattern, mirrors `pki_config.encryption_key` above): the server still
+    // boots, but webhook registration and delivery are refused with an
+    // explicit error + `warn!` until a real key is configured. NEVER an
+    // all-zero/constant fallback key.
+    let webhook_enc_key: Option<[u8; 32]> = load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY");
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone(), webhook_enc_key);
-    let settings_repo = SurrealSettingsRepository::new(db.client().clone());
+    let settings_repo = SurrealSettingsRepository::new(db.client_cloned().await);
     // Notification-rule repository — required by the notification_rules handlers'
     // `web::Data<SurrealNotificationRuleRepository>` extractor. Without this
     // registration every /api/v1/notification-rules request 500s with
     // "App data is not configured".
-    let notification_rule_repo = SurrealNotificationRuleRepository::new(db.client().clone());
-    let federation_config_repo = SurrealFederationConfigRepository::new(db.client().clone());
-    let federation_link_repo = SurrealFederationLinkRepository::new(db.client().clone());
-    let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client().clone());
+    let notification_rule_repo = SurrealNotificationRuleRepository::new(db.client_cloned().await);
+    // Email-config repository (28-04, FUNC-03) — required by the
+    // `handlers::email_config::*` handlers' `web::Data<SurrealEmailConfigRepository<C>>`
+    // extractor. Only constructed when AXIAM__EMAIL_ENCRYPTION_KEY is present (same
+    // fail-closed, no-zero-key-fallback posture as the mail consumer above): when the
+    // key is absent, `email_config_repo` stays `None` and is NOT registered as
+    // app_data below, so the six email-config routes fail closed with actix's
+    // "App data is not configured" 500 rather than silently encrypting with a
+    // constant/zero key.
+    let email_config_repo: Option<SurrealEmailConfigRepository<axiam_db::DbClient>> =
+        match config.email_encryption_key {
+            Some(email_key) => Some(SurrealEmailConfigRepository::new(
+                db.client_cloned().await,
+                email_key,
+            )),
+            None => {
+                tracing::warn!(
+                    "AXIAM__EMAIL_ENCRYPTION_KEY missing — email-config admin endpoints disabled"
+                );
+                None
+            }
+        };
+    let federation_config_repo = SurrealFederationConfigRepository::new(db.client_cloned().await);
+    let federation_link_repo = SurrealFederationLinkRepository::new(db.client_cloned().await);
+    let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client_cloned().await);
+    // NEW-4: durable AMQP nonce store for replay protection, shared by the
+    // authz + audit consumers and swept by the periodic cleanup task.
+    let amqp_nonce_repo = SurrealAmqpNonceRepository::new(db.client_cloned().await);
     let federation_login_state_repo =
-        SurrealFederationLoginStateRepository::new(db.client().clone());
+        SurrealFederationLoginStateRepository::new(db.client_cloned().await);
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
     // Disable automatic redirects to prevent SSRF bypass (an HTTPS URL
@@ -427,12 +510,12 @@ async fn main() -> std::io::Result<()> {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("failed to build reqwest client");
-    let oauth2_client_repo = SurrealOAuth2ClientRepository::new(db.client().clone());
-    let auth_code_repo = SurrealAuthorizationCodeRepository::new(db.client().clone());
-    let refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
+    let oauth2_client_repo = SurrealOAuth2ClientRepository::new(db.client_cloned().await);
+    let auth_code_repo = SurrealAuthorizationCodeRepository::new(db.client_cloned().await);
+    let refresh_token_repo = SurrealRefreshTokenRepository::new(db.client_cloned().await);
     // Separate instance for password-reset/change handlers that need direct
     // RefreshTokenRepository access via web::Data (TokenService owns the main one).
-    let handler_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client().clone());
+    let handler_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client_cloned().await);
 
     // OAuth2 authorization code grant services.
     let authorize_service = AuthorizeService::new(
@@ -451,6 +534,61 @@ async fn main() -> std::io::Result<()> {
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
     );
 
+    // QUAL-07: hoist the 13 per-request service constructions
+    // (password_reset.rs/email_verification.rs/federation.rs) into
+    // once-at-startup singletons.
+    //
+    // These two repos were NEVER registered in main.rs before this plan (a
+    // pre-existing bug — see 29-03-SUMMARY.md): `SurrealPasswordResetTokenRepository`
+    // and `SurrealEmailVerificationTokenRepository` are constructed here
+    // purely to build the two hoisted services below; no handler touches
+    // them directly, so they are not their own AppState field.
+    let password_reset_token_repo =
+        SurrealPasswordResetTokenRepository::new(db.client_cloned().await);
+    let email_verification_token_repo =
+        SurrealEmailVerificationTokenRepository::new(db.client_cloned().await);
+
+    let password_reset_service = PasswordResetService::new(
+        user_repo.clone(),
+        password_reset_token_repo,
+        federation_link_repo.clone(),
+        password_history_repo.clone(),
+        session_repo.clone(),
+        handler_refresh_token_repo.clone(),
+        Arc::clone(&crypto_semaphore),
+    );
+    let email_verification_service = EmailVerificationService::new(
+        user_repo.clone(),
+        email_verification_token_repo,
+        federation_link_repo.clone(),
+    );
+    // OidcFederationService bakes in the federation encryption key at
+    // construction (unlike SamlFederationService, which needs none) — so
+    // absence of AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY is resolved ONCE
+    // here (`None`) rather than per-request; the 4 OIDC handler call sites
+    // return the identical fail-closed error as before.
+    let oidc_federation_service = config.auth.federation_encryption_key.map(|enc_key| {
+        OidcFederationService::new(
+            federation_config_repo.clone(),
+            federation_link_repo.clone(),
+            user_repo.clone(),
+            http_client.clone(),
+            Arc::clone(&jwks_cache),
+            enc_key,
+        )
+    });
+    // SamlFederationService::new needs no encryption key — constructed
+    // unconditionally regardless of the saml Cargo feature's own gating
+    // (only the SAML REST handlers/routes stay #[cfg(feature = "saml")]).
+    #[cfg(feature = "saml")]
+    let saml_federation_service = SamlFederationService::new(
+        federation_config_repo.clone(),
+        federation_link_repo.clone(),
+        user_repo.clone(),
+        assertion_replay_repo.clone(),
+        http_client.clone(),
+    );
+
     config.rate_limit.validate();
 
     let bind_addr = config.server.bind_address();
@@ -458,6 +596,14 @@ async fn main() -> std::io::Result<()> {
     let rate_limit_cfg = config.rate_limit.clone();
     let auth_config = config.auth.clone();
     let health_checker: Arc<dyn HealthChecker> = Arc::new(db);
+
+    // PERF-01: initialize the process-wide HIBP circuit breaker from
+    // AuthConfig (config-crate wired, not a manual env parse) before the
+    // HTTP server starts serving.
+    axiam_auth::hibp_breaker::init_global(
+        auth_config.hibp_breaker_threshold,
+        auth_config.hibp_breaker_cooldown_secs,
+    );
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
@@ -484,26 +630,26 @@ async fn main() -> std::io::Result<()> {
         scope_repo.clone(),
         group_repo.clone(),
     );
-    // SEC-022: Decode AMQP signing key (hex) for HMAC message verification.
-    let amqp_signing_key: Option<Vec<u8>> =
-        config.amqp.signing_key.as_deref().and_then(|hex| {
-            hex::decode(hex).map_err(|e| {
-                tracing::warn!(error = %e, "AXIAM__AMQP__SIGNING_KEY is not valid hex — ignoring");
-            }).ok()
-        });
-    if amqp_signing_key.is_some() {
-        tracing::info!("AMQP signing key loaded (SEC-022)");
-    } else {
-        tracing::warn!(
-            "AMQP signing key not configured — messages will not be HMAC-verified (SEC-022)"
-        );
-    }
+    // SEC-022/SECHRD-08: Resolve the mandatory AMQP master signing key. In a
+    // debug build this falls back to a documented dev-only default when
+    // unset; in a release build (the production container image) an unset
+    // key fails closed at startup — there is no unsigned code path (D-05c).
+    let amqp_signing_key: Vec<u8> = config
+        .amqp
+        .resolve_signing_key()
+        .expect("AMQP signing key must resolve (SECHRD-08 / D-05c) — see AXIAM__AMQP__SIGNING_KEY");
+    tracing::info!("AMQP signing key resolved (SEC-022/SECHRD-08)");
+    // NEW-4: freshness skew window shared by both consumers.
+    let amqp_replay_skew = config.amqp.replay_skew();
     let amqp_signing_key_clone = amqp_signing_key.clone();
+    let authz_nonce_repo = amqp_nonce_repo.clone();
     tokio::spawn(async move {
         axiam_amqp::authz_consumer::start_authz_consumer(
             amqp_channel,
             amqp_engine,
             amqp_signing_key_clone,
+            authz_nonce_repo,
+            amqp_replay_skew,
         )
         .await;
         tracing::error!("AMQP authz consumer exited — shutting down process");
@@ -532,16 +678,74 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to create AMQP audit consumer channel");
     let amqp_audit_repo = audit_repo.clone();
+    let audit_nonce_repo = amqp_nonce_repo.clone();
     tokio::spawn(async move {
         axiam_amqp::audit_consumer::start_audit_consumer(
             audit_channel,
             amqp_audit_repo,
             amqp_signing_key,
+            audit_nonce_repo,
+            amqp_replay_skew,
         )
         .await;
         tracing::error!("AMQP audit consumer exited — shutting down process");
         std::process::exit(1);
     });
+
+    // Webhook delivery publisher (CORR-03/D-06/D-07) — used by emit() to
+    // publish onto the durable axiam.webhook queue, and by the webhook
+    // consumer below to publish TTL-delayed retries onto axiam.webhook.retry.
+    let webhook_pub_channel = amqp
+        .create_publisher_channel()
+        .await
+        .expect("Failed to create AMQP webhook publisher channel");
+    let webhook_publisher = WebhookPublisher::new(webhook_pub_channel);
+
+    // Spawn the webhook AMQP consumer on a background task (CORR-03/D-06).
+    // Drives WebhookDeliveryService::deliver_once for each queued delivery,
+    // schedules retries natively via the retry-queue TTL+DLX (D-07/D-08,
+    // bounded exponential backoff read from AXIAM__WEBHOOK__* — D-20), and
+    // writes per-attempt/terminal audit records (D-09).
+    {
+        let webhook_delivery_for_consumer = webhook_delivery.clone();
+        let webhook_publisher_for_consumer = webhook_publisher.clone();
+        let webhook_audit_repo = audit_repo.clone();
+        let webhook_retry_cfg = WebhookRetryConfig::from_env();
+        let webhook_amqp = Arc::clone(&amqp);
+        // CQ-B53: a transient broker disconnect (consumer stream ends, or the
+        // channel fails to open) must NOT kill the whole API server. Recreate
+        // the consume channel on the shared connection and restart the consumer
+        // with bounded exponential backoff instead of `process::exit(1)`.
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(1);
+            let max_backoff = Duration::from_secs(30);
+            loop {
+                match webhook_amqp.create_channel().await {
+                    Ok(webhook_channel) => {
+                        backoff = Duration::from_secs(1);
+                        start_webhook_consumer(
+                            webhook_channel,
+                            webhook_delivery_for_consumer.clone(),
+                            webhook_publisher_for_consumer.clone(),
+                            webhook_audit_repo.clone(),
+                            webhook_retry_cfg,
+                        )
+                        .await;
+                        tracing::warn!("Webhook AMQP consumer exited — reconnecting");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to (re)create webhook consumer channel — retrying"
+                        );
+                    }
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+            }
+        });
+        tracing::info!("Webhook consumer spawned");
+    }
 
     // Spawn AMQP mail consumer on a background task (D-14).
     // Only spawned when AXIAM__EMAIL_ENCRYPTION_KEY is present; otherwise
@@ -555,12 +759,14 @@ async fn main() -> std::io::Result<()> {
             SurrealEmailConfigRepository::new(db_handle.clone(), email_key);
         let mail_audit_repo = audit_repo.clone();
         let mail_user_repo = user_repo.clone();
+        let mail_template_repo = SurrealEmailTemplateRepository::new(db_handle.clone());
         tokio::spawn(async move {
             axiam_amqp::start_mail_consumer(
                 mail_channel,
                 mail_email_config_repo,
                 mail_audit_repo,
                 mail_user_repo,
+                mail_template_repo,
             )
             .await;
             tracing::error!("AMQP mail consumer exited — shutting down process");
@@ -583,6 +789,13 @@ async fn main() -> std::io::Result<()> {
     let grpc_user_repo = user_repo.clone();
     let grpc_auth_config = config.auth.clone();
     let grpc_config = config.grpc.clone();
+    // SECHRD-03 gap closure (24-07 follow-up): thread the same shared
+    // Surreal<C> handle used by the REST repositories so the gRPC shared
+    // rate-limit pre-check can enforce the multi-replica bucket store
+    // (GrpcSharedRateLimitLayer), not just the per-replica in-memory
+    // governor.
+    let grpc_db = db_handle.clone();
+    let grpc_batch_max_concurrency = config.authz.batch_max_concurrency;
     tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
@@ -590,6 +803,8 @@ async fn main() -> std::io::Result<()> {
             grpc_user_repo,
             grpc_auth_config,
             &grpc_config,
+            grpc_db,
+            grpc_batch_max_concurrency,
         )
         .await
         {
@@ -616,6 +831,7 @@ async fn main() -> std::io::Result<()> {
     let cleanup = cleanup::CleanupTask::new(
         Arc::new(assertion_replay_repo.clone()),
         Arc::new(federation_login_state_repo.clone()),
+        Arc::new(amqp_nonce_repo.clone()),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),
         Arc::new(audit_repo.clone()),
@@ -628,6 +844,8 @@ async fn main() -> std::io::Result<()> {
         Arc::new(password_history_repo.clone()),
         Arc::new(export_job_repo.clone()),
         Arc::new(consent_repo.clone()),
+        Arc::new(tenant_repo.clone()),
+        Arc::new(session_repo.clone()),
         cleanup_mail_publisher,
         config.gdpr_pseudonym_pepper,
         config.email_encryption_key,
@@ -635,6 +853,68 @@ async fn main() -> std::io::Result<()> {
         cleanup_shutdown_rx,
     );
     let cleanup_handle = tokio::spawn(cleanup.run());
+
+    // QUAL-01: single composition root — one AppState<C> built here and
+    // registered once per worker below, replacing the ~49 individual
+    // `.app_data(web::Data::new(...))` calls this closure used to make.
+    let app_state = AppState {
+        authz_config: config.authz.clone(),
+        auth_config: auth_config.clone(),
+        db: db_handle.clone(),
+        health_checker: health_checker.clone(),
+        audit_repo: audit_repo.clone(),
+        org_repo: org_repo.clone(),
+        tenant_repo: tenant_repo.clone(),
+        user_repo: user_repo.clone(),
+        group_repo: group_repo.clone(),
+        role_repo: role_repo.clone(),
+        permission_repo: permission_repo.clone(),
+        resource_repo: resource_repo.clone(),
+        scope_repo: scope_repo.clone(),
+        service_account_repo: service_account_repo.clone(),
+        auth_service: auth_service.clone(),
+        webauthn_service: webauthn_service.clone(),
+        mfa_method_service: mfa_method_service.clone(),
+        mail_outbound_publisher: Arc::new(mail_outbound_publisher.clone())
+            as Arc<dyn axiam_api_rest::state::DynMailPublisher>,
+        session_repo: session_repo.clone(),
+        session_validator: session_validator.clone(),
+        refresh_token_repo: handler_refresh_token_repo.clone(),
+        password_history_repo: password_history_repo.clone(),
+        consent_repo: consent_repo.clone(),
+        account_deletion_repo: account_deletion_repo.clone(),
+        export_job_repo: export_job_repo.clone(),
+        erasure_proof_repo: erasure_proof_repo.clone(),
+        email_encryption_key: config.email_encryption_key,
+        ca_service: ca_service.clone(),
+        cert_service: cert_service.clone(),
+        cert_repo: cert_repo.clone(),
+        device_auth_service: device_auth_service.clone(),
+        pgp_service: pgp_service.clone(),
+        webhook_repo: webhook_repo.clone(),
+        webhook_delivery: webhook_delivery.clone(),
+        // CQ-B22: hand the delivery publisher to AppState so handlers can
+        // dispatch domain events via `state.emit_webhook(...)`.
+        webhook_publisher: Some(std::sync::Arc::new(webhook_publisher.clone())),
+        notification_rule_repo: notification_rule_repo.clone(),
+        oauth2_client_repo: oauth2_client_repo.clone(),
+        authorize_service: authorize_service.clone(),
+        token_service: token_service.clone(),
+        settings_repo: settings_repo.clone(),
+        federation_config_repo: federation_config_repo.clone(),
+        federation_link_repo: federation_link_repo.clone(),
+        assertion_replay_repo: assertion_replay_repo.clone(),
+        federation_login_state_repo: federation_login_state_repo.clone(),
+        http_client: http_client.clone(),
+        jwks_cache: jwks_cache.clone(),
+        crypto_semaphore: Arc::clone(&crypto_semaphore),
+        email_config_repo: email_config_repo.clone(),
+        password_reset_service: password_reset_service.clone(),
+        email_verification_service: email_verification_service.clone(),
+        oidc_federation_service: oidc_federation_service.clone(),
+        #[cfg(feature = "saml")]
+        saml_federation_service: saml_federation_service.clone(),
+    };
 
     HttpServer::new(move || {
         let rl = rate_limit_cfg.clone();
@@ -648,56 +928,23 @@ async fn main() -> std::io::Result<()> {
             // by every RBAC-protected handler. web::Data::from would unwrap the Arc and
             // register it as web::Data<dyn AuthzChecker>, causing "Requested application
             // data is not configured correctly" 500s on every admin endpoint.
+            //
+            // QUAL-01: this is 1 of 3 dependencies that stay registered OUTSIDE
+            // AppState<C> alongside the single AppState registration below — see
+            // `axiam_api_rest::state` module docs for the full rationale (Rust
+            // generics/dyn-safety: 118 handler call sites use `AuthzData` directly,
+            // `AuthenticatedUser`'s non-generic `FromRequest` impl needs
+            // `AuthConfig`/`SessionValidator` without knowing `C`, and
+            // `axiam-audit::AuditMiddleware` — a different crate wrapping the whole
+            // App — independently looks up `web::Data<AuthConfig>`).
             .app_data(web::Data::new(rest_authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
-            .app_data(web::Data::new(db_handle.clone()))
-            .app_data(web::Data::new(health_checker.clone()))
-            .app_data(web::Data::new(audit_repo.clone()))
-            .app_data(web::Data::new(org_repo.clone()))
-            .app_data(web::Data::new(tenant_repo.clone()))
-            .app_data(web::Data::new(user_repo.clone()))
-            .app_data(web::Data::new(group_repo.clone()))
-            .app_data(web::Data::new(role_repo.clone()))
-            .app_data(web::Data::new(permission_repo.clone()))
-            .app_data(web::Data::new(resource_repo.clone()))
-            .app_data(web::Data::new(scope_repo.clone()))
-            .app_data(web::Data::new(service_account_repo.clone()))
-            .app_data(web::Data::new(auth_service.clone()))
-            .app_data(web::Data::new(webauthn_service.clone()))
-            .app_data(web::Data::new(mfa_method_service.clone()))
-            // CQ-B29: NotificationPublisher removed from app_data — no handler extracts it;
-            // wiring NotificationDispatcher requires rule_repo + mail_publisher in the
-            // audit worker (deferred to Phase 19).
-            // .app_data(web::Data::new(notification_publisher.clone()))
-            .app_data(web::Data::new(mail_outbound_publisher.clone()))
-            .app_data(web::Data::new(session_repo.clone()))
             .app_data(web::Data::new(session_validator.clone()))
-            .app_data(web::Data::new(handler_refresh_token_repo.clone()))
-            .app_data(web::Data::new(password_history_repo.clone()))
-            .app_data(web::Data::new(consent_repo.clone()))
-            .app_data(web::Data::new(account_deletion_repo.clone()))
-            .app_data(web::Data::new(export_job_repo.clone()))
-            .app_data(web::Data::new(erasure_proof_repo.clone()))
-            .app_data(web::Data::new(config.email_encryption_key))
-            .app_data(web::Data::new(ca_service.clone()))
-            .app_data(web::Data::new(cert_service.clone()))
-            .app_data(web::Data::new(cert_repo.clone()))
-            .app_data(web::Data::new(device_auth_service.clone()))
-            .app_data(web::Data::new(pgp_service.clone()))
-            .app_data(web::Data::new(webhook_repo.clone()))
-            .app_data(web::Data::new(webhook_delivery.clone()))
-            .app_data(web::Data::new(notification_rule_repo.clone()))
-            .app_data(web::Data::new(oauth2_client_repo.clone()))
-            .app_data(web::Data::new(authorize_service.clone()))
-            .app_data(web::Data::new(token_service.clone()))
-            .app_data(web::Data::new(settings_repo.clone()))
-            .app_data(web::Data::new(federation_config_repo.clone()))
-            .app_data(web::Data::new(federation_link_repo.clone()))
-            .app_data(web::Data::new(assertion_replay_repo.clone()))
-            .app_data(web::Data::new(federation_login_state_repo.clone()))
-            .app_data(web::Data::new(http_client.clone()))
-            .app_data(web::Data::new(jwks_cache.clone()))
-            .configure(health_routes)
+            // QUAL-01: single composition root — every other REST handler
+            // dependency (repos, services, the 4 hoisted QUAL-07 singletons)
+            // lives on this one AppState<C> value (see above).
+            .app_data(web::Data::new(app_state.clone()))
+            .configure(health_routes::<axiam_db::DbClient>)
             .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
             .configure(openapi_routes)
     })

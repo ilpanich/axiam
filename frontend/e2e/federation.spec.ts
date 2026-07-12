@@ -31,36 +31,29 @@ test.describe("Federation page", () => {
   }) => {
     await page.goto("/federation");
     await expect(page).not.toHaveURL(/\/login/);
-    // Fresh bootstrap has no federation providers — empty state is expected
-    const hasProviders = await page.getByRole("table").isVisible().catch(() => false);
-    const hasEmptyState = await page
-      .getByText(/no providers|no federation|empty/i)
-      .isVisible()
-      .catch(() => false);
-    const hasNewButton = await page
-      .getByRole("button", { name: /New Provider/i })
-      .isVisible()
-      .catch(() => false);
-    // At minimum the page should be accessible with navigation
-    await expect(page.getByRole("navigation")).toBeVisible();
-    expect(hasProviders || hasEmptyState || hasNewButton).toBe(true);
+    // The page must be accessible (nav present) and its DataTable rendered.
+    // DataTable always renders a <table> (rows or empty message inside), so
+    // wait for it (auto-retry) instead of one-shot isVisible() probes that
+    // raced the fetch and flaked.
+    await expect(page.getByRole("navigation").first()).toBeVisible();
+    await expect(page.getByRole("table")).toBeVisible();
   });
 
-  test('"New Provider" button opens create modal', async ({ page }) => {
+  test('"New Config" button opens create modal', async ({ page }) => {
     await page.goto("/federation");
     await expect(page).not.toHaveURL(/\/login/);
-    await page.getByRole("button", { name: /New Provider/i }).click();
+    await page.getByRole("button", { name: /New Config/i }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "New Federation Provider" })
+      page.getByRole("heading", { name: "New Federation Config" })
     ).toBeVisible();
   });
 
-  test("create form has Name, Type, and Domain fields", async ({ page }) => {
+  test("create form has Provider and Client ID fields", async ({ page }) => {
     await page.goto("/federation");
-    await page.getByRole("button", { name: /New Provider/i }).click();
-    await expect(page.getByLabel(/Name/)).toBeVisible();
-    await expect(page.getByLabel(/Domain/)).toBeVisible();
+    await page.getByRole("button", { name: /New Config/i }).click();
+    await expect(page.getByLabel(/Provider/)).toBeVisible();
+    await expect(page.getByLabel(/Client ID/)).toBeVisible();
   });
 
   // ---------------------------------------------------------------------------
@@ -106,7 +99,7 @@ test.describe("Federation page", () => {
     await page.goto("/federation");
     await expect(page).not.toHaveURL(/\/login/);
     // Assertion: AXIAM UI is accessible and not on the login page (T-07-14)
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("OIDC SSO: page.route mocks external IdP and asserts AXIAM UI state after callback (T-07-14)", async ({
@@ -131,6 +124,6 @@ test.describe("Federation page", () => {
     await page.goto("/federation");
     await expect(page).not.toHaveURL(/\/login/);
     // Assertion: AXIAM UI is accessible post-redirect (T-07-14)
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 });

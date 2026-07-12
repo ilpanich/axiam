@@ -91,7 +91,10 @@ impl PolicyCheckResult {
 ///
 /// This is a pure function with no I/O — easy to unit test.
 pub fn check_complexity(password: &str, policy: &PasswordPolicy) -> Vec<PolicyViolation> {
-    let mut violations = Vec::new();
+    // PERF-01/D-05: exactly 5 possible violations (TooShort, MissingUppercase,
+    // MissingLowercase, MissingDigit, MissingSymbol) — pre-size to avoid
+    // reallocation on the hot path. Behavior unchanged.
+    let mut violations = Vec::with_capacity(5);
 
     let char_count = password.chars().count();
     if (char_count as u32) < policy.min_length {
@@ -174,6 +177,19 @@ pub async fn check_hibp(
     password: &str,
     http_client: &reqwest::Client,
 ) -> Result<Option<PolicyViolation>, AxiamError> {
+    // PERF-01/T-27-01: consult the process-wide circuit breaker BEFORE
+    // issuing the HTTP request. If it's open (sustained failures/timeouts),
+    // short-circuit to Ok(None) immediately — do NOT reach the 5s-timeout
+    // HTTP call. This is burst-protection only; check_hibp was ALREADY
+    // fail-open on every error branch below.
+    if !crate::hibp_breaker::global().should_attempt() {
+        tracing::warn!(
+            reason = "hibp_breaker_open",
+            "HIBP breaker open; skipping HTTP request, treating as not breached"
+        );
+        return Ok(None);
+    }
+
     let (prefix, suffix) = sha1_prefix_suffix(password);
 
     let url = format!("https://api.pwnedpasswords.com/range/{prefix}");
@@ -192,6 +208,7 @@ pub async fn check_hibp(
                 error = %e,
                 "HIBP API request failed; treating as not breached"
             );
+            crate::hibp_breaker::global().record_failure();
             return Ok(None);
         }
     };
@@ -201,6 +218,7 @@ pub async fn check_hibp(
             status = %response.status(),
             "HIBP API returned non-200; treating as not breached"
         );
+        crate::hibp_breaker::global().record_failure();
         return Ok(None);
     }
 
@@ -214,6 +232,8 @@ pub async fn check_hibp(
             return Ok(None);
         }
     };
+
+    crate::hibp_breaker::global().record_success();
 
     Ok(parse_hibp_response(&body, &suffix)
         .map(|occurrences| PolicyViolation::BreachedPassword { occurrences }))

@@ -5,7 +5,6 @@ use std::net::IpAddr;
 use actix_web::{HttpResponse, web};
 use axiam_core::models::webhook::{CreateWebhook, RetryPolicy, UpdateWebhook, Webhook};
 use axiam_core::repository::{PaginatedResult, Pagination, WebhookRepository};
-use axiam_db::SurrealWebhookRepository;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -14,6 +13,7 @@ use uuid::Uuid;
 use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Request / response DTOs
@@ -37,6 +37,10 @@ pub struct UpdateWebhookRequest {
     pub events: Option<Vec<String>>,
     pub enabled: Option<bool>,
     pub retry_policy: Option<RetryPolicy>,
+    /// New HMAC-SHA256 shared secret (D-02 secret rotation). Encrypted
+    /// server-side with AES-256-GCM before storage; omit to leave the
+    /// existing secret untouched.
+    pub secret: Option<String>,
 }
 
 /// Webhook response — omits the shared secret.
@@ -83,10 +87,10 @@ impl From<Webhook> for WebhookResponse {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealWebhookRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<CreateWebhookRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:create", Uuid::nil())
@@ -103,12 +107,18 @@ pub async fn create<C: Connection>(
         validate_retry_policy(rp)?;
     }
 
-    let webhook = repo
+    // D-01/D-02: encrypt before persisting — fails closed with a 503 when
+    // no encryption key is configured, rather than ever storing the
+    // plaintext secret.
+    let encrypted_secret = state.webhook_delivery.encrypt_secret(&req.secret)?;
+
+    let webhook = state
+        .webhook_repo
         .create(CreateWebhook {
             tenant_id: user.tenant_id,
             url: req.url,
             events: req.events,
-            secret: req.secret,
+            secret: encrypted_secret,
             retry_policy: req.retry_policy,
         })
         .await?;
@@ -127,16 +137,19 @@ pub async fn create<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealWebhookRepository<C>>,
+    state: web::Data<AppState<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let result = repo.list(user.tenant_id, pagination.into_inner()).await?;
+    let result = state
+        .webhook_repo
+        .list(user.tenant_id, pagination.into_inner())
+        .await?;
     let response = PaginatedResult {
         items: result
             .items
@@ -162,17 +175,17 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealWebhookRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    let webhook = repo.get_by_id(user.tenant_id, id).await?;
+    let webhook = state.webhook_repo.get_by_id(user.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(WebhookResponse::from(webhook)))
 }
 
@@ -189,11 +202,11 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealWebhookRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<UpdateWebhookRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:update", Uuid::nil())
@@ -210,7 +223,17 @@ pub async fn update<C: Connection>(
     if let Some(ref rp) = req.retry_policy {
         validate_retry_policy(rp)?;
     }
-    let webhook = repo
+    // D-02: secret rotation — encrypt the new secret (fail-closed) when the
+    // caller supplies one; otherwise leave the stored secret untouched.
+    let encrypted_secret = match req.secret {
+        Some(ref s) if s.is_empty() => {
+            return Err(validation_err("secret must not be empty"));
+        }
+        Some(ref s) => Some(state.webhook_delivery.encrypt_secret(s)?),
+        None => None,
+    };
+    let webhook = state
+        .webhook_repo
         .update(
             user.tenant_id,
             id,
@@ -219,6 +242,7 @@ pub async fn update<C: Connection>(
                 events: req.events,
                 enabled: req.enabled,
                 retry_policy: req.retry_policy,
+                secret: encrypted_secret,
             },
         )
         .await?;
@@ -236,17 +260,17 @@ pub async fn update<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete<C: Connection>(
+pub async fn delete<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealWebhookRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    repo.delete(user.tenant_id, id).await?;
+    state.webhook_repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
 }
 

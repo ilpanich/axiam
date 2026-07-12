@@ -6,4 +6,15 @@
 export { axiamMiddleware, type AxiamRequest } from './express.js';
 export { axiamPlugin, type AxiamFastifyRequest } from './fastify.js';
 export { authenticateRequest, type AxiamIdentity, type VerifiableSession } from './verifyCore.js';
-export { parseCookieHeader, extractToken } from './cookieHeader.js';
+export {
+  parseCookieHeader,
+  extractToken,
+  extractCredential,
+  isCsrfValid,
+  isSafeMethod,
+  type CredentialSource,
+  type ExtractedCredential,
+  ACCESS_COOKIE_NAME,
+  CSRF_COOKIE_NAME,
+  CSRF_HEADER_NAME,
+} from './cookieHeader.js';

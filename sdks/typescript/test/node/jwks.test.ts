@@ -70,6 +70,59 @@ describe('jwks verifier', () => {
     expect(claims.scope).toBe('read write');
   });
 
+  it('collapses N concurrent verifyAccessToken calls with an unknown kid to exactly one JWKS fetch (D-08/D-09)', async () => {
+    // Proves/documents whether jose's createRemoteJWKSet already coalesces
+    // concurrent in-flight fetches (RESEARCH.md Pattern 4, PATTERNS.md
+    // TypeScript entry) — if it does not, jwks.ts must grow an inFlightFetch
+    // guard mirroring the existing jwksPromise lazy-singleton shape.
+    const { publicKey, privateKey } = await generateKeyPair('EdDSA', { crv: 'Ed25519' });
+    const kid = 'burst-kid-1';
+    const jwk = await exportJWK(publicKey);
+    jwk.kid = kid;
+    jwk.alg = 'EdDSA';
+
+    let fetchCallCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = ((...args: Parameters<typeof fetch>) => {
+      fetchCallCount += 1;
+      return originalFetch(...args);
+    }) as typeof fetch;
+
+    server.use(
+      http.get(`${BASE_URL}${JWKS_PATH}`, () => HttpResponse.json({ keys: [jwk] })),
+    );
+
+    try {
+      const token = await new SignJWT({ tenant_id: 't-burst' })
+        .setProtectedHeader({ alg: 'EdDSA', kid })
+        .setSubject('user-burst')
+        .setIssuer('axiam')
+        .setExpirationTime('1h')
+        .sign(privateKey);
+
+      // Cold verifier — the getter/keyset has never been fetched yet.
+      const verifier = createVerifier(BASE_URL);
+
+      // Fire 8 genuinely concurrent verifyAccessToken() calls against the
+      // cold cache; none is individually awaited before the rest start.
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => verifier.verifyAccessToken(token)),
+      );
+
+      expect(fetchCallCount).toBe(1);
+      for (const claims of results) {
+        expect(claims.sub).toBe('user-burst');
+        expect(claims.tenant_id).toBe('t-burst');
+      }
+
+      // A subsequent verify reuses the already-resolved keyset — no extra fetch.
+      await verifier.verifyAccessToken(token);
+      expect(fetchCallCount).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('rejects a token with alg other than EdDSA even if otherwise well-formed', async () => {
     const { publicKey, privateKey } = await generateKeyPair('EdDSA', { crv: 'Ed25519' });
     const kid = 'test-kid-3';

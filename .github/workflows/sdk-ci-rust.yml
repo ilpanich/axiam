@@ -10,7 +10,7 @@ on:
       - 'buf.gen.yaml'
   push:
     tags:
-      - 'sdks/rust/v*'
+      - 'axiam-rust-sdk/v*'
 
 permissions:
   contents: read
@@ -61,6 +61,26 @@ jobs:
       - name: Test (all features)
         working-directory: sdks/rust
         run: cargo test -p axiam-sdk --all-features
+
+      # `#![warn(missing_docs)]` in lib.rs keeps every public item documented;
+      # this step promotes it (plus broken intra-doc links) to a hard CI
+      # failure so docs.rs coverage for the published crate cannot regress.
+      - name: Docs coverage gate (docs.rs)
+        working-directory: sdks/rust
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p axiam-sdk --all-features --no-deps
+
+      # Ignored advisory rationale (kept in sync with the root ci.yml / deny.toml policy):
+      #   RUSTSEC-2023-0071 — Marvin attack (rsa timing sidechannel); no upstream fix.
+      #   `rsa` is pulled in transitively by jsonwebtoken for RS* algorithm support.
+      #   The SDK only VERIFIES tokens (public-key ops) and AXIAM signs with EdDSA
+      #   (Ed25519), so the vulnerable RSA private-key path is never exercised.
+      - name: Dependency vulnerability scan (CI-03)
+        working-directory: sdks/rust
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --ignore RUSTSEC-2023-0071
 
       - name: Build examples (all features)
         working-directory: sdks/rust
@@ -114,12 +134,36 @@ jobs:
         working-directory: sdks/rust
         run: cargo publish --dry-run -p axiam-sdk --all-features --allow-dirty
 
+  # Publishing to a public registry is IRREVERSIBLE — crates.io, npm, PyPI, Maven
+  # Central, NuGet and Packagist all refuse to re-use a version number. Git tags are
+  # NOT branch-scoped, so without this gate a release tag cut on a feature branch would
+  # ship unreviewed code to the world under a version that can never be reclaimed.
+  # The publish job below `needs:` this.
+  verify-tag-on-main:
+    name: Verify tag is on main
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Assert the tagged commit is an ancestor of origin/main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is NOT on origin/main. Release tags must be cut from main."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_REF_NAME} (${GITHUB_SHA}) is on origin/main."
+
   publish:
     name: Publish to crates.io
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/sdks/rust/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/axiam-rust-sdk/v')
+    needs: verify-tag-on-main
     runs-on: ubuntu-latest
     # Manual-on-tag, side-effecting step: this job only runs when a
-    # maintainer pushes a tag matching sdks/rust/vX.Y.Z (D-13 monorepo tag
+    # maintainer pushes a tag matching axiam-rust-sdk/vX.Y.Z (D-13 monorepo tag
     # convention). It is never triggered by a PR, so CARGO_REGISTRY_TOKEN is
     # never exposed to PR-triggered jobs (T-16-26).
     steps:

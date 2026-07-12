@@ -25,6 +25,9 @@ const TOKEN_EXPIRY_HOURS: i64 = 24;
 /// rate limiting. Federated-user detection is also exposed
 /// here so the API layer can skip verification for social
 /// login users.
+///
+/// `Clone` (QUAL-07): hoisted `AppState<C>` singleton, cloned per worker.
+#[derive(Clone)]
 pub struct EmailVerificationService<U, V, F>
 where
     U: UserRepository,

@@ -6,7 +6,6 @@ use axiam_core::error::AxiamError;
 use axiam_core::models::settings::PasswordPolicy;
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
-use axiam_db::SurrealUserRepository;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -16,6 +15,7 @@ use crate::authz::{AuthzData, RequirePermission, is_own_resource};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::client_info::{client_ip, user_agent};
+use crate::state::AppState;
 
 // -----------------------------------------------------------------------
 // Input validation helpers (CQ-B26)
@@ -136,11 +136,11 @@ impl From<User> for UserResponse {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     http_req: HttpRequest,
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealUserRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<CreateUserRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("users:create", Uuid::nil())
@@ -173,9 +173,20 @@ pub async fn create<C: Connection>(
     // The user and its terms_of_service consent are written in one transaction:
     // a consent failure rolls back user creation, so a user can never exist
     // without proof-of-consent (REQ-8, threat T-5-consent-gap).
-    let created = repo
+    let created = state
+        .user_repo
         .create_with_consent(input, "terms_of_service", "current", ip_address, user_agent)
         .await?;
+
+    // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort;
+    // never blocks or fails the response).
+    state
+        .emit_webhook(
+            created.tenant_id,
+            "user.created",
+            serde_json::json!({ "id": created.id, "username": created.username }),
+        )
+        .await;
 
     Ok(HttpResponse::Created().json(UserResponse::from(created)))
 }
@@ -191,16 +202,19 @@ pub async fn create<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealUserRepository<C>>,
+    state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("users:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let result = repo.list(user.tenant_id, query.into_inner()).await?;
+    let result = state
+        .user_repo
+        .list(user.tenant_id, query.into_inner())
+        .await?;
     let items: Vec<UserResponse> = result.items.into_iter().map(UserResponse::from).collect();
     Ok(HttpResponse::Ok().json(PaginatedResult {
         items,
@@ -222,10 +236,10 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealUserRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let target_id = path.into_inner();
@@ -234,7 +248,7 @@ pub async fn get<C: Connection>(
             .check(&user, authz.get_ref().as_ref())
             .await?;
     }
-    let target = repo.get_by_id(user.tenant_id, target_id).await?;
+    let target = state.user_repo.get_by_id(user.tenant_id, target_id).await?;
     Ok(HttpResponse::Ok().json(UserResponse::from(target)))
 }
 
@@ -251,10 +265,10 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealUserRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateUserRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -276,7 +290,7 @@ pub async fn update<C: Connection>(
     // Load the current email to detect email changes on self-update.
     let email_changed_for_self = if self_update {
         if let Some(ref new_email) = req.email {
-            let current = repo.get_by_id(user.tenant_id, target_id).await?;
+            let current = state.user_repo.get_by_id(user.tenant_id, target_id).await?;
             new_email != &current.email
         } else {
             false
@@ -299,7 +313,20 @@ pub async fn update<C: Connection>(
         },
         ..Default::default()
     };
-    let updated = repo.update(user.tenant_id, target_id, input).await?;
+    let updated = state
+        .user_repo
+        .update(user.tenant_id, target_id, input)
+        .await?;
+
+    // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort).
+    state
+        .emit_webhook(
+            updated.tenant_id,
+            "user.updated",
+            serde_json::json!({ "id": updated.id, "username": updated.username }),
+        )
+        .await;
+
     Ok(HttpResponse::Ok().json(UserResponse::from(updated)))
 }
 
@@ -315,16 +342,27 @@ pub async fn update<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete<C: Connection>(
+pub async fn delete<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealUserRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("users:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    repo.delete(user.tenant_id, path.into_inner()).await?;
+    let target_id = path.into_inner();
+    state.user_repo.delete(user.tenant_id, target_id).await?;
+
+    // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort).
+    state
+        .emit_webhook(
+            user.tenant_id,
+            "user.deleted",
+            serde_json::json!({ "id": target_id }),
+        )
+        .await;
+
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -343,10 +381,10 @@ pub async fn delete<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn unlock<C: Connection>(
+pub async fn unlock<C: Connection + Clone>(
     auth_user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealUserRepository<C>>,
+    state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("users:admin", Uuid::nil())
@@ -363,7 +401,7 @@ pub async fn unlock<C: Connection>(
         ..Default::default()
     };
 
-    let user = repo.update(tenant_id, user_id, update).await?;
+    let user = state.user_repo.update(tenant_id, user_id, update).await?;
     Ok(HttpResponse::Ok().json(UserResponse::from(user)))
 }
 

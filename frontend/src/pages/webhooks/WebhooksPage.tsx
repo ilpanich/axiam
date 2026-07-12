@@ -18,6 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 
 import { formatDate } from "@/lib/utils";
+import { ToggleField } from "@/components/shared";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -65,32 +66,6 @@ function EventTypeSelector({ selected, onChange }: EventTypeSelectorProps) {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-// ─── Toggle field ─────────────────────────────────────────────────────────────
-
-interface ToggleFieldProps {
-  id: string;
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}
-
-function ToggleField({ id, label, checked, onChange }: ToggleFieldProps) {
-  return (
-    <div className="flex items-center gap-3">
-      <input
-        type="checkbox"
-        id={id}
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="w-4 h-4 accent-cyan-400 cursor-pointer"
-      />
-      <Label htmlFor={id} className="cursor-pointer">
-        {label}
-      </Label>
     </div>
   );
 }

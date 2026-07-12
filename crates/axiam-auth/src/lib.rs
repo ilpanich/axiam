@@ -4,6 +4,8 @@
 pub mod config;
 pub mod crypto;
 pub mod error;
+pub mod hibp_breaker;
+pub mod lockout;
 pub mod mfa_methods;
 pub mod password;
 pub mod password_reset;
@@ -16,6 +18,7 @@ pub mod webauthn;
 
 pub use config::AuthConfig;
 pub use error::AuthError;
+pub use hibp_breaker::HibpBreaker;
 pub use mfa_methods::MfaMethodService;
 pub use password_reset::PasswordResetService;
 pub use service::{

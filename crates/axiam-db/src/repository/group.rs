@@ -10,6 +10,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
@@ -114,12 +115,6 @@ impl MemberRow {
     }
 }
 
-/// Row struct for count queries.
-#[derive(Debug, SurrealValue)]
-struct CountRow {
-    total: u64,
-}
-
 /// SurrealDB implementation of the Group repository.
 #[derive(Clone)]
 pub struct SurrealGroupRepository<C: Connection> {
@@ -163,10 +158,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<GroupRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "group".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "group", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&tenant_id_str)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -198,10 +190,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .map_err(DbError::from)?;
 
         let rows: Vec<GroupRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "group".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "group", &id_str)?;
 
         let tenant_id_parsed = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -261,10 +250,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let rows: Vec<GroupRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "group".into(),
-            id: id_str,
-        })?;
+        let row = take_first_or_not_found(rows, "group", &id_str)?;
 
         let tenant_id_parsed = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -284,10 +270,19 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         let id_str = id.to_string();
         let tenant_id_str = tenant_id.to_string();
 
-        // Delete associated membership edges first, then the group record.
+        // Delete associated membership edges first, then the group record —
+        // inside one transaction so a concurrent reader never observes a
+        // partially-deleted group. The member_of edge carries no flat
+        // tenant_id column, so tenant scoping is a node-tenant guard on the
+        // edge's `out` endpoint (out.tenant_id), mirroring role.delete;
+        // without it a caller with a foreign-tenant group id could strip
+        // another tenant's memberships. `.check()` surfaces per-statement
+        // failures instead of swallowing them as Ok.
         let query = format!(
-            "DELETE member_of WHERE out = group:`{id_str}`; \
-             DELETE type::record('group', $id) WHERE tenant_id = $tenant_id;"
+            "BEGIN TRANSACTION; \
+             DELETE member_of WHERE out = group:`{id_str}` AND out.tenant_id = $tenant_id; \
+             DELETE type::record('group', $id) WHERE tenant_id = $tenant_id; \
+             COMMIT TRANSACTION"
         );
 
         self.db
@@ -295,7 +290,9 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id_str))
             .await
-            .map_err(DbError::from)?;
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         Ok(())
     }
@@ -317,7 +314,6 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         let mut result = self
             .db
@@ -340,12 +336,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .map(|row| row.try_into_group())
             .collect::<Result<Vec<_>, DbError>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn add_member(&self, tenant_id: Uuid, user_id: Uuid, group_id: Uuid) -> AxiamResult<()> {
@@ -388,33 +379,52 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .into());
         }
 
-        // Create the membership edge (IF NOT EXISTS avoids duplicates).
+        // Create the membership edge.
         let query = format!("RELATE user:`{user_id_str}` -> member_of -> group:`{group_id_str}`;");
 
-        self.db.query(query).await.map_err(DbError::from)?;
+        let result = self.db.query(query).await.map_err(DbError::from)?;
+
+        // QUAL-03/D-09: a RELATE's per-statement failure (e.g. a duplicate
+        // membership violating idx_member_of_unique) only surfaces via
+        // `.check()` — without it, a duplicate add_member call silently
+        // "succeeded" while the edge was never (re-)created. classify_write_error
+        // routes a genuine duplicate to 409; anything else (e.g. a DB outage)
+        // still falls through to Migration (5xx).
+        result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "group_membership"))?;
 
         Ok(())
     }
 
     async fn remove_member(
         &self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         user_id: Uuid,
         group_id: Uuid,
     ) -> AxiamResult<()> {
         let user_id_str = user_id.to_string();
         let group_id_str = group_id.to_string();
 
+        // Tenant scoping: the member_of edge carries no flat tenant_id column,
+        // so scope the DELETE to the caller's tenant via node-tenant guards on
+        // both endpoints (in.tenant_id / out.tenant_id). Without this a caller
+        // with a foreign user+group id pair could sever another tenant's
+        // membership. `.check()` surfaces per-statement failures.
         self.db
             .query(
                 "DELETE member_of WHERE \
                  in = type::record('user', $user_id) AND \
-                 out = type::record('group', $group_id)",
+                 out = type::record('group', $group_id) AND \
+                 in.tenant_id = $tenant_id AND out.tenant_id = $tenant_id",
             )
             .bind(("user_id", user_id_str))
             .bind(("group_id", group_id_str))
+            .bind(("tenant_id", tenant_id.to_string()))
             .await
-            .map_err(DbError::from)?;
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
 
         Ok(())
     }
@@ -439,7 +449,6 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-        let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         // Fetch member users via the edge.
         let mut result = self
@@ -468,12 +477,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .map(|row| row.try_into_user())
             .collect::<Result<Vec<_>, DbError>>()?;
 
-        Ok(PaginatedResult {
-            items,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        })
+        Ok(paginate(items, count_rows, &pagination))
     }
 
     async fn get_user_groups(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<Vec<Group>> {

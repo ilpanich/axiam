@@ -8,6 +8,7 @@
 pub mod ca;
 pub mod cert;
 pub mod config;
+mod crypto;
 pub mod mtls;
 pub mod pgp;
 

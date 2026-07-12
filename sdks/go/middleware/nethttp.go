@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,25 @@ import (
 
 	"github.com/ilpanich/axiam/sdks/go/internal/jwks"
 )
+
+// csrfCookieName is the non-httpOnly cookie AXIAM's login flow sets
+// alongside axiam_access specifically so same-site consumer apps can read it
+// back for a cookie double-submit check (CONTRACT.md §3).
+const csrfCookieName = "axiam_csrf"
+
+// csrfHeaderName is the request header a same-site browser client is
+// expected to echo the axiam_csrf cookie value into on state-changing
+// requests (CONTRACT.md §3).
+const csrfHeaderName = "X-CSRF-Token"
+
+// safeMethods are exempt from the cookie double-submit CSRF check: they must
+// not have side effects (RFC 9110 §9.2.1), so there is nothing for a
+// cross-site forgery to change.
+var safeMethods = map[string]bool{
+	http.MethodGet:     true,
+	http.MethodHead:    true,
+	http.MethodOptions: true,
+}
 
 // jwksVerifier is the minimal interface this package needs from
 // internal/jwks.Verifier (Plan 04) — kept as an interface so tests may
@@ -41,6 +61,20 @@ type errorBody struct {
 //     standardized JSON error body; the wrapped handler is never called on
 //     failure.
 //
+// CSRF (cookie double-submit, CONTRACT.md §3): when the credential was
+// sourced from the axiam_access COOKIE (not the Authorization header) and
+// the request method is state-changing (anything other than GET/HEAD/
+// OPTIONS), this middleware additionally requires the X-CSRF-Token request
+// header to be present and equal, constant-time, to the axiam_csrf cookie
+// value — rejecting with 403 on mismatch/absence. Bearer-header requests are
+// CSRF-immune by construction (a cross-site attacker cannot set arbitrary
+// request headers), but a cookie the browser attaches automatically is not:
+// in any same-site deployment where axiam_access reaches this app, the
+// non-httpOnly axiam_csrf cookie does too. This mirrors, locally, the same
+// double-submit check the AXIAM server performs on its own endpoints (§3;
+// see also the equivalent gate in the Java Spring filter,
+// AxiamAuthenticationFilter#isCsrfValid).
+//
 // logger is optional (nil is safe) and, when supplied, MUST NOT be given a
 // logger that would emit raw token values — this middleware never passes
 // the token itself to the logger regardless.
@@ -52,9 +86,19 @@ func Middleware(verifier jwksVerifier, configuredTenant string, opts ...Option) 
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, err := extractToken(r)
+			token, fromCookie, err := extractToken(r)
 			if err != nil {
 				writeError(w, cfg, http.StatusUnauthorized, "authentication_failed", err.Error())
+				return
+			}
+
+			// Cookie-sourced credentials aren't CSRF-immune the way a
+			// Bearer header is: a cross-site form/fetch can't set custom
+			// headers, but the browser attaches cookies automatically. Gate
+			// state-changing requests behind the cookie double-submit check
+			// BEFORE spending a JWKS verification on them.
+			if fromCookie && !safeMethods[r.Method] && !isCsrfValid(r) {
+				writeError(w, cfg, http.StatusForbidden, "csrf_validation_failed", "missing or invalid X-CSRF-Token for cookie-sourced credentials")
 				return
 			}
 
@@ -107,21 +151,45 @@ func Middleware(verifier jwksVerifier, configuredTenant string, opts ...Option) 
 }
 
 // extractToken reads the bearer token from the Authorization header,
-// falling back to the axiam_access session cookie (CONTRACT.md §10.1).
-func extractToken(r *http.Request) (string, error) {
+// falling back to the axiam_access session cookie (CONTRACT.md §10.1). The
+// returned bool reports whether the credential came from the cookie (as
+// opposed to the header) — callers use it to decide whether the CSRF
+// double-submit check applies (§3).
+func extractToken(r *http.Request) (string, bool, error) {
 	if header := r.Header.Get("Authorization"); header != "" {
 		scheme, credentials, found := strings.Cut(strings.TrimSpace(header), " ")
 		if !found || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(credentials) == "" {
-			return "", errMissingCredentials
+			return "", false, errMissingCredentials
 		}
-		return strings.TrimSpace(credentials), nil
+		return strings.TrimSpace(credentials), false, nil
 	}
 
 	if cookie, err := r.Cookie("axiam_access"); err == nil && cookie.Value != "" {
-		return cookie.Value, nil
+		return cookie.Value, true, nil
 	}
 
-	return "", errMissingCredentials
+	return "", false, errMissingCredentials
+}
+
+// isCsrfValid implements the cookie double-submit check (CONTRACT.md §3):
+// the X-CSRF-Token request header must be present and equal, constant-time,
+// to the axiam_csrf cookie value. Absence of either side fails closed.
+func isCsrfValid(r *http.Request) bool {
+	header := r.Header.Get(csrfHeaderName)
+	if header == "" {
+		return false
+	}
+	cookie, err := r.Cookie(csrfCookieName)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	// ConstantTimeCompare requires equal-length inputs to say anything about
+	// content; a length mismatch is itself decisive (and safe to short
+	// circuit on, since the lengths of a header/cookie pair aren't secret).
+	if len(header) != len(cookie.Value) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(header), []byte(cookie.Value)) == 1
 }
 
 var errMissingCredentials = missingCredentialsError{}

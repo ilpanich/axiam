@@ -161,4 +161,79 @@ final class LaravelMiddlewareTest extends TestCase
         self::assertTrue($gate->allows('documents', 'read'));
         self::assertNull($gate->authorize('documents', 'read'), 'an allowed check must return null (caller proceeds)');
     }
+
+    // --- CSRF (cookie double-submit, CONTRACT.md §3): cookie-auth state-changing request
+    // --- without X-CSRF-Token header -> 403, never reaches AxiamClient ---------------
+
+    public function testCookieAuthPostWithoutCsrfHeaderReturns403(): void
+    {
+        // Empty MockHandler queue: the CSRF check must reject BEFORE ever calling
+        // AxiamClient::verifyLocallyOrFallback() (no HTTP call attempted).
+        $client = $this->clientWith([]);
+        $middleware = new AxiamMiddleware($client, self::FIXTURE_TENANT);
+
+        $request = Request::create('/documents/1', 'POST');
+        $request->cookies->set('axiam_access', $this->fixtureJwt());
+        $request->cookies->set('axiam_csrf', 'csrf-secret-value');
+        $response = $middleware->handle($request, $this->passthroughNext());
+
+        self::assertInstanceOf(JsonResponse::class, $response);
+        self::assertSame(403, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('AuthzError', $body['error']);
+        self::assertNull($request->attributes->get('axiam_user'));
+    }
+
+    // --- CSRF: cookie-auth state-changing request with matching X-CSRF-Token header + --
+    // --- axiam_csrf cookie -> passes auth (reaches AxiamClient, then $next) ---------
+
+    public function testCookieAuthPostWithMatchingCsrfTokenPasses(): void
+    {
+        $client = $this->clientWith([$this->discoveryResponse(), $this->jwksResponse()]);
+        $middleware = new AxiamMiddleware($client, self::FIXTURE_TENANT);
+
+        $request = Request::create('/documents/1', 'POST');
+        $request->cookies->set('axiam_access', $this->fixtureJwt());
+        $request->cookies->set('axiam_csrf', 'csrf-secret-value');
+        $request->headers->set('X-CSRF-Token', 'csrf-secret-value');
+        $response = $middleware->handle($request, $this->passthroughNext());
+
+        self::assertInstanceOf(JsonResponse::class, $response);
+        self::assertSame(200, $response->getStatusCode(), 'a matching CSRF token must reach $next($request)');
+        self::assertSame(
+            ['user_id' => 'user-fixture-0001', 'tenant_id' => self::FIXTURE_TENANT, 'roles' => []],
+            $request->attributes->get('axiam_user'),
+        );
+    }
+
+    // --- CSRF: Bearer-auth state-changing request without CSRF -> passes (Bearer is ---
+    // --- immune by construction; a cross-site attacker cannot set custom headers) ---
+
+    public function testBearerAuthPostWithoutCsrfPasses(): void
+    {
+        $client = $this->clientWith([$this->discoveryResponse(), $this->jwksResponse()]);
+        $middleware = new AxiamMiddleware($client, self::FIXTURE_TENANT);
+
+        $request = Request::create('/documents/1', 'POST');
+        $request->headers->set('Authorization', 'Bearer ' . $this->fixtureJwt());
+        $response = $middleware->handle($request, $this->passthroughNext());
+
+        self::assertInstanceOf(JsonResponse::class, $response);
+        self::assertSame(200, $response->getStatusCode(), 'Bearer-sourced credentials never require CSRF validation');
+    }
+
+    // --- CSRF: cookie-auth safe-method (GET) request without CSRF -> passes ----------
+
+    public function testCookieAuthGetWithoutCsrfPasses(): void
+    {
+        $client = $this->clientWith([$this->discoveryResponse(), $this->jwksResponse()]);
+        $middleware = new AxiamMiddleware($client, self::FIXTURE_TENANT);
+
+        $request = Request::create('/documents/1', 'GET');
+        $request->cookies->set('axiam_access', $this->fixtureJwt());
+        $response = $middleware->handle($request, $this->passthroughNext());
+
+        self::assertInstanceOf(JsonResponse::class, $response);
+        self::assertSame(200, $response->getStatusCode(), 'a safe method never requires CSRF validation');
+    }
 }

@@ -3,7 +3,6 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::models::oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client};
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
-use axiam_db::SurrealOAuth2ClientRepository;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -12,6 +11,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Request / response DTOs
@@ -157,10 +157,10 @@ fn validate_grant_types(grant_types: &[String]) -> Result<(), AxiamApiError> {
     ),
     security(("bearer" = []))
 )]
-pub async fn create<C: Connection>(
+pub async fn create<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealOAuth2ClientRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<CreateOAuth2ClientRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("oauth2_clients:create", Uuid::nil())
@@ -180,7 +180,8 @@ pub async fn create<C: Connection>(
         validate_redirect_uris(&req.redirect_uris)?;
     }
 
-    let (client, raw_secret) = repo
+    let (client, raw_secret) = state
+        .oauth2_client_repo
         .create(CreateOAuth2Client {
             tenant_id: user.tenant_id,
             name: req.name,
@@ -216,16 +217,19 @@ pub async fn create<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn list<C: Connection>(
+pub async fn list<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
-    repo: web::Data<SurrealOAuth2ClientRepository<C>>,
+    state: web::Data<AppState<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("oauth2_clients:list", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
-    let result = repo.list(user.tenant_id, pagination.into_inner()).await?;
+    let result = state
+        .oauth2_client_repo
+        .list(user.tenant_id, pagination.into_inner())
+        .await?;
     let response = PaginatedResult {
         items: result
             .items
@@ -252,17 +256,20 @@ pub async fn list<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn get<C: Connection>(
+pub async fn get<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealOAuth2ClientRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("oauth2_clients:get", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    let client = repo.get_by_id(user.tenant_id, id).await?;
+    let client = state
+        .oauth2_client_repo
+        .get_by_id(user.tenant_id, id)
+        .await?;
     Ok(HttpResponse::Ok().json(OAuth2ClientResponse::from(client)))
 }
 
@@ -280,11 +287,11 @@ pub async fn get<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn update<C: Connection>(
+pub async fn update<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealOAuth2ClientRepository<C>>,
+    state: web::Data<AppState<C>>,
     body: web::Json<UpdateOAuth2ClientRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("oauth2_clients:update", Uuid::nil())
@@ -320,7 +327,10 @@ pub async fn update<C: Connection>(
         .as_ref()
         .is_some_and(|gts| gts.iter().any(|g| g == "authorization_code"));
     if adding_auth_code && req.redirect_uris.is_none() {
-        let existing = repo.get_by_id(user.tenant_id, id).await?;
+        let existing = state
+            .oauth2_client_repo
+            .get_by_id(user.tenant_id, id)
+            .await?;
         if existing.redirect_uris.is_empty() {
             return Err(validation_err(
                 "redirect_uris are required when enabling \
@@ -330,7 +340,8 @@ pub async fn update<C: Connection>(
         validate_redirect_uris(&existing.redirect_uris)?;
     }
 
-    let client = repo
+    let client = state
+        .oauth2_client_repo
         .update(
             user.tenant_id,
             id,
@@ -357,16 +368,16 @@ pub async fn update<C: Connection>(
     ),
     security(("bearer" = []))
 )]
-pub async fn delete<C: Connection>(
+pub async fn delete<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
-    repo: web::Data<SurrealOAuth2ClientRepository<C>>,
+    state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("oauth2_clients:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    repo.delete(user.tenant_id, id).await?;
+    state.oauth2_client_repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

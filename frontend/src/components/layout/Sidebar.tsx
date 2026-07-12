@@ -198,9 +198,9 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
       <div className="flex items-center justify-between px-5 py-4 border-b border-primary/10">
         <div className="flex items-center gap-3">
           <img
-            src="/axiam_logo.png"
+            src="/axiam_logo_mark.png"
             alt="AXIAM logo"
-            className="h-8 w-8 object-contain"
+            className="h-8 w-8 rounded-full object-cover"
           />
           <span className="text-foreground font-bold text-lg tracking-tight">
             AXIAM

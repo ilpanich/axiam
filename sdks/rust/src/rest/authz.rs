@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::client::AxiamClient;
+use crate::rest::auth::CsrfHeaderExt;
 use crate::AxiamError;
 
 const CHECK_PATH: &str = "/api/v1/authz/check";
@@ -18,15 +19,25 @@ const BATCH_CHECK_PATH: &str = "/api/v1/authz/check/batch";
 /// A single access check request (CONTRACT.md §1).
 #[derive(Debug, Clone, Serialize)]
 pub struct AccessCheckRequest {
+    /// Permission action to check (CONTRACT.md §1 method vocabulary, e.g.
+    /// `"read"`, `"write"`).
     pub action: String,
+    /// Resource the action is checked against.
     pub resource_id: Uuid,
+    /// Optional sub-resource scope narrowing the check. `None` means the
+    /// check applies to the whole resource.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Subject to check access for. `None` defers to the server, which uses
+    /// the authenticated caller from the JWT (§5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject_id: Option<Uuid>,
 }
 
 impl AccessCheckRequest {
+    /// Builds a request for `action` on `resource_id` with no scope and no
+    /// explicit subject (the server resolves the subject from the caller's
+    /// JWT).
     pub fn new(action: impl Into<String>, resource_id: Uuid) -> Self {
         Self {
             action: action.into(),
@@ -36,11 +47,14 @@ impl AccessCheckRequest {
         }
     }
 
+    /// Narrows the check to the given sub-resource `scope`.
     pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
         self.scope = Some(scope.into());
         self
     }
 
+    /// Checks access on behalf of `subject_id` instead of the authenticated
+    /// caller.
     pub fn with_subject(mut self, subject_id: Uuid) -> Self {
         self.subject_id = Some(subject_id);
         self
@@ -50,7 +64,10 @@ impl AccessCheckRequest {
 /// The result of a single access check (mirrors `CheckAccessResponse`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccessDecision {
+    /// Whether the checked action is permitted.
     pub allowed: bool,
+    /// Optional human-readable explanation for the decision (e.g. which
+    /// role/permission granted or denied it). Not guaranteed to be present.
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -146,6 +163,10 @@ impl AxiamClient {
             .http()
             .post(self.authz_url(path))
             .header("X-Tenant-ID", self.tenant_header_value())
+            // SDK-Q04: forward the captured `X-CSRF-Token` on this POST, the
+            // same way `refresh`/`logout` do (§3) — the server's CSRF
+            // protection covers state-changing verbs including authz POSTs.
+            .maybe_csrf_header(self)
             .json(body)
             .send()
             .await

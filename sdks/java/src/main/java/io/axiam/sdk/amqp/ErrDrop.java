@@ -12,6 +12,12 @@ package io.axiam.sdk.amqp;
  */
 public final class ErrDrop extends RuntimeException {
 
+    /**
+     * Creates an {@code ErrDrop} signaling that the current delivery is poison
+     * and must be nacked without requeue.
+     *
+     * @param message a human-readable description of why the message is being dropped
+     */
     public ErrDrop(String message) {
         super(message);
     }

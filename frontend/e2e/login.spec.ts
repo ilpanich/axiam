@@ -49,7 +49,7 @@ test.describe("Login flow", () => {
   }) => {
     await loginAsAdmin(page);
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("wrong credentials stay on /login with error message", async ({
@@ -64,8 +64,13 @@ test.describe("Login flow", () => {
     await page.getByLabel("Username or email").fill("wrong@example.com");
     await page.getByLabel("Password").fill("wrongpassword123");
     await page.getByRole("button", { name: "Sign in" }).click();
-    // Should remain on /login and show an error
+    // Should remain on /login and show an error. Allow extra time: a
+    // wrong-credentials attempt still runs a full Argon2id verification on the
+    // backend (constant-time by design), which under a loaded CI runner can
+    // take several seconds before the error renders.
     await expect(page).toHaveURL(/\/login/);
-    await expect(page.getByText(/Invalid credentials|error|incorrect/i)).toBeVisible();
+    await expect(
+      page.getByText(/Invalid credentials|error|incorrect/i),
+    ).toBeVisible({ timeout: 15_000 });
   });
 });

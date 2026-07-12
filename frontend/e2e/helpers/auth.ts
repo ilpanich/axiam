@@ -37,13 +37,23 @@ export async function loginAsAdmin(page: Page): Promise<void> {
 
   // Fast path: if a session already exists (shared storageState), navigating
   // home settles on an authenticated route rather than /login — nothing to do.
-  await page.goto("/");
-  await page
-    .waitForURL(/\/login|\/dashboard|\/$/, { timeout: 45_000 })
-    .catch(() => {});
-  if (!/\/login/.test(new URL(page.url()).pathname)) {
+  //
+  // The app's AuthGate renders ONLY a loading spinner (URL still "/") until
+  // GET /auth/me resolves, then routes: authenticated -> /dashboard,
+  // unauthenticated -> /dashboard -> /login. So we must wait for that init +
+  // client-side redirect to fully settle before reading the URL — a bare
+  // waitForURL matches the transient "/" during the spinner and would wrongly
+  // report "authenticated". `networkidle` waits for /auth/me (and any boot
+  // refresh) plus the settled route; the app does no background polling, so it
+  // reliably goes idle.
+  await page.goto("/", { waitUntil: "networkidle", timeout: 45_000 }).catch(() => {});
+  if (!new URL(page.url()).pathname.startsWith("/login")) {
     return;
   }
+  // Unauthenticated: make sure the login form has rendered before filling.
+  await page
+    .getByLabel("Organization slug")
+    .waitFor({ state: "visible", timeout: 15_000 });
 
   // Step 1: Enter org and tenant slugs
   await page.getByLabel("Organization slug").fill(orgSlug);

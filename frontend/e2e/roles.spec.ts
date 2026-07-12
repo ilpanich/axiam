@@ -125,10 +125,15 @@ test.describe("Resources page", () => {
   test("resources page renders tree view by default", async ({ page }) => {
     await page.goto("/resources");
     await expect(page).not.toHaveURL(/\/login/);
-    // Tree view is default — either tree or empty state should be present
-    const hasTree = await page.getByRole("tree").isVisible().catch(() => false);
-    const hasEmptyState = await page.getByText(/no resources/i).isVisible().catch(() => false);
-    expect(hasTree || hasEmptyState).toBe(true);
+    // Tree view is the default: ResourceTree renders a role="tree" when there
+    // are resources, or "No resources defined yet." on a fresh bootstrap.
+    // Use an OR-locator with a real toBeVisible expectation so it auto-retries
+    // through the async data load (the old one-shot isVisible() probes raced
+    // the fetch and both returned false). Not weakened — a redirect to /login
+    // or a crashed page matches neither branch.
+    await expect(
+      page.getByRole("tree").or(page.getByText(/no resources/i)),
+    ).toBeVisible();
   });
 
   test("list view toggle switches from tree to table", async ({ page }) => {

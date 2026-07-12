@@ -70,7 +70,7 @@ async function mockUserProfile(page: Page): Promise<void> {
         }),
       });
     } else {
-      route.continue();
+      route.fallback();
     }
   });
 }
@@ -106,7 +106,7 @@ test.describe("Auth endpoint contract", () => {
           capturedBody = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
-          route.continue();
+          route.fallback();
         }
       });
 
@@ -137,7 +137,7 @@ test.describe("Auth endpoint contract", () => {
           capturedBody = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
-          route.continue();
+          route.fallback();
         }
       });
 
@@ -168,7 +168,7 @@ test.describe("Auth endpoint contract", () => {
           capturedBody = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
-          route.continue();
+          route.fallback();
         }
       });
 
@@ -219,7 +219,7 @@ test.describe("Auth endpoint contract", () => {
           capturedBody = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
-          route.continue();
+          route.fallback();
         }
       });
 
@@ -263,7 +263,7 @@ test.describe("Auth endpoint contract", () => {
           capturedBody = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
-          route.continue();
+          route.fallback();
         }
       });
 
@@ -305,7 +305,7 @@ test.describe("Auth endpoint contract", () => {
           capturedUrl = route.request().url();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
-          route.continue();
+          route.fallback();
         }
       });
 
@@ -341,17 +341,19 @@ test.describe("Auth endpoint contract", () => {
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
           capturedEnrollUrl = route.request().url();
-          // Return a mock TOTP enroll response so the dialog opens
+          // Return a mock TOTP enroll response in the real MfaEnrollResponse
+          // shape ({secret_base32, totp_uri}); otherwise TotpSetupPanel throws
+          // on `totp_uri.startsWith(...)` when the dialog opens.
           route.fulfill({
             status: 200,
             contentType: "application/json",
             body: JSON.stringify({
-              secret: "CONTRACTTESTBASE32SECRET",
-              qr_code_uri: "otpauth://totp/test:contract@test.example?secret=CONTRACTTESTBASE32SECRET",
+              secret_base32: "CONTRACTTESTBASE32SECRET",
+              totp_uri: "otpauth://totp/test:contract@test.example?secret=CONTRACTTESTBASE32SECRET",
             }),
           });
         } else {
-          route.continue();
+          route.fallback();
         }
       });
 
@@ -404,7 +406,7 @@ test.describe("Auth endpoint contract", () => {
             route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
           }
         } else {
-          route.continue();
+          route.fallback();
         }
       });
 

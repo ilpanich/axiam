@@ -17,7 +17,7 @@ test.describe("Roles list page", () => {
   }) => {
     await page.goto("/roles");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows the seeded super-admin role from bootstrap fixture", async ({
@@ -98,7 +98,7 @@ test.describe("Permissions list page", () => {
   }) => {
     await page.goto("/permissions");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("permissions page shows seeded permissions from bootstrap", async ({
@@ -141,7 +141,7 @@ test.describe("Resources page", () => {
       await expect(page.getByRole("tree")).not.toBeVisible();
     } else {
       // Page rendered without tree — acceptable for empty DB
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 });

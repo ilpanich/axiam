@@ -49,7 +49,7 @@ test.describe("Login flow", () => {
   }) => {
     await loginAsAdmin(page);
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("wrong credentials stay on /login with error message", async ({

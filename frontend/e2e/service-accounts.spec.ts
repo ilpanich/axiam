@@ -64,6 +64,6 @@ test.describe("Service Accounts page", () => {
   }) => {
     await page.goto("/service-accounts");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 });

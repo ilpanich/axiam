@@ -17,7 +17,7 @@ test.describe("Users list page", () => {
   }) => {
     await page.goto("/users");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows the bootstrapped admin user in the list (RBAC-gated — T-07-13)", async ({
@@ -74,10 +74,10 @@ test.describe("User detail page", () => {
     if (await adminLink.isVisible()) {
       await adminLink.click();
       await expect(page).not.toHaveURL(/\/login/);
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     } else {
       // Fallback: user table is visible — that's enough
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 

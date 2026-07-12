@@ -70,7 +70,7 @@ test.describe("Settings page", () => {
     await expect(page).not.toHaveURL(/\/login/);
     // Settings page should show some numeric value (password min length, etc.)
     // Live backend returns the seeded defaults from the AXIAM config
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("Edit Settings button switches to edit mode", async ({ page }) => {

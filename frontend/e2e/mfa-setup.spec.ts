@@ -98,7 +98,7 @@ test.describe("Tenant context restore after hard reload (CORR-05a/b, D-14/D-15)"
     const tenantSlug = process.env["E2E_TENANT_SLUG"] ?? "default";
 
     await loginAsAdmin(page);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
 
     // Fresh login already shows the restored tenant label (ambient
     // login-form slugs) — confirm the baseline before reloading.

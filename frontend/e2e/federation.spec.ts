@@ -42,7 +42,7 @@ test.describe("Federation page", () => {
       .isVisible()
       .catch(() => false);
     // At minimum the page should be accessible with navigation
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
     expect(hasProviders || hasEmptyState || hasNewButton).toBe(true);
   });
 
@@ -106,7 +106,7 @@ test.describe("Federation page", () => {
     await page.goto("/federation");
     await expect(page).not.toHaveURL(/\/login/);
     // Assertion: AXIAM UI is accessible and not on the login page (T-07-14)
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("OIDC SSO: page.route mocks external IdP and asserts AXIAM UI state after callback (T-07-14)", async ({
@@ -131,6 +131,6 @@ test.describe("Federation page", () => {
     await page.goto("/federation");
     await expect(page).not.toHaveURL(/\/login/);
     // Assertion: AXIAM UI is accessible post-redirect (T-07-14)
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 });

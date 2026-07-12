@@ -74,7 +74,7 @@ test.describe("Tenants list page", () => {
       await searchBox.fill("E2E");
       await expect(page.getByText("E2E Default Tenant")).toBeVisible();
     } else {
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 
@@ -90,7 +90,7 @@ test.describe("Tenants list page", () => {
         page.getByRole("dialog", { name: /Delete Tenant/i })
       ).toBeVisible();
     } else {
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 });

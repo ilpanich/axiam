@@ -25,7 +25,7 @@ test.describe("Dashboard page", () => {
   }) => {
     await page.goto("/dashboard");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("dashboard shows recent activity section", async ({ page }) => {

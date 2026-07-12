@@ -17,7 +17,7 @@ test.describe("Certificates page", () => {
   }) => {
     await page.goto("/certificates");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows certificate list or empty state from live backend", async ({
@@ -48,7 +48,7 @@ test.describe("Certificates page", () => {
       await expect(page.getByRole("dialog")).toBeVisible();
       await expect(page.getByLabel("Common Name *")).toBeVisible();
     } else {
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 
@@ -63,7 +63,7 @@ test.describe("Certificates page", () => {
       await expect(page.getByLabel("Key Type")).toBeVisible();
       await expect(page.getByLabel("Validity Days")).toBeVisible();
     } else {
-      await expect(page.getByRole("navigation")).toBeVisible();
+      await expect(page.getByRole("navigation").first()).toBeVisible();
     }
   });
 });
@@ -80,7 +80,7 @@ test.describe("Webhooks page", () => {
   test("renders webhooks page (not redirected to /login)", async ({ page }) => {
     await page.goto("/webhooks");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows webhook list or empty state from live backend", async ({
@@ -128,7 +128,7 @@ test.describe("PGP Keys page", () => {
   test("renders PGP keys page (not redirected to /login)", async ({ page }) => {
     await page.goto("/pgp-keys");
     await expect(page).not.toHaveURL(/\/login/);
-    await expect(page.getByRole("navigation")).toBeVisible();
+    await expect(page.getByRole("navigation").first()).toBeVisible();
   });
 
   test("shows PGP key list or empty state from live backend", async ({

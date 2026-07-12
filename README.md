@@ -4,6 +4,8 @@
 
 # AXIAM
 
+[![Coverage Status](https://coveralls.io/repos/github/ilpanich/axiam/badge.svg?branch=main)](https://coveralls.io/github/ilpanich/axiam?branch=main)
+
 **Access eXtended Identity and Authorization Management**
 
 ---

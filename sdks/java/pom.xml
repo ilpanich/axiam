@@ -65,17 +65,17 @@
     <dependency>
       <groupId>io.grpc</groupId>
       <artifactId>grpc-netty-shaded</artifactId>
-      <version>1.82.0</version>
+      <version>1.82.2</version>
     </dependency>
     <dependency>
       <groupId>io.grpc</groupId>
       <artifactId>grpc-protobuf</artifactId>
-      <version>1.82.0</version>
+      <version>1.82.2</version>
     </dependency>
     <dependency>
       <groupId>io.grpc</groupId>
       <artifactId>grpc-stub</artifactId>
-      <version>1.82.0</version>
+      <version>1.82.2</version>
     </dependency>
     <dependency>
       <!-- Java 9+ needs this explicitly for generated gRPC stub annotations
@@ -88,17 +88,17 @@
     <dependency>
       <groupId>com.rabbitmq</groupId>
       <artifactId>amqp-client</artifactId>
-      <version>5.22.0</version>
+      <version>5.34.0</version>
     </dependency>
     <dependency>
       <groupId>com.nimbusds</groupId>
       <artifactId>nimbus-jose-jwt</artifactId>
-      <version>10.7</version>
+      <version>10.9.1</version>
     </dependency>
     <dependency>
       <groupId>com.google.crypto.tink</groupId>
       <artifactId>tink</artifactId>
-      <version>1.15.0</version>
+      <version>1.23.0</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
@@ -118,7 +118,7 @@
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
-      <version>2.0.17</version>
+      <version>2.0.18</version>
     </dependency>
     <!-- D-14: Spring Security deps are optional/provided so a non-Spring
          consumer never pulls Spring transitively. -->
@@ -155,7 +155,7 @@
     <dependency>
       <groupId>io.grpc</groupId>
       <artifactId>grpc-inprocess</artifactId>
-      <version>1.82.0</version>
+      <version>1.82.2</version>
       <scope>test</scope>
     </dependency>
     <!-- Test scope only: MockHttpServletRequest/MockHttpServletResponse/
@@ -209,7 +209,7 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
-        <version>3.4.2</version>
+        <version>3.5.0</version>
         <configuration>
           <archive>
             <manifestEntries>
@@ -223,7 +223,7 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-source-plugin</artifactId>
-        <version>3.3.1</version>
+        <version>3.4.0</version>
         <executions>
           <execution>
             <id>attach-sources</id>
@@ -246,7 +246,7 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-javadoc-plugin</artifactId>
-        <version>3.11.2</version>
+        <version>3.12.0</version>
         <configuration>
           <excludePackageNames>axiam.v1</excludePackageNames>
           <doclint>all</doclint>
@@ -287,7 +287,7 @@
       <plugin>
         <groupId>org.sonatype.central</groupId>
         <artifactId>central-publishing-maven-plugin</artifactId>
-        <version>0.9.0</version>
+        <version>0.11.0</version>
         <extensions>true</extensions>
         <configuration>
           <publishingServerId>central</publishingServerId>

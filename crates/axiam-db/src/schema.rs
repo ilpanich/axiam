@@ -157,6 +157,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "email_config_provider_kind_optional",
         sql: SCHEMA_V23,
     },
+    Migration {
+        version: 24,
+        name: "tenant_status_and_sa_description",
+        sql: SCHEMA_V24,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -1211,6 +1216,35 @@ const SCHEMA_V23: &str = "\
 -- provider) alongside the five real provider kinds (28-04).
 DEFINE FIELD OVERWRITE provider_kind ON TABLE email_config TYPE string
     ASSERT $value IN ['', 'smtp', 'send_grid', 'postmark', 'resend', 'brevo'];
+";
+
+// -----------------------------------------------------------------------
+// Schema v24 — tenant.status + service_account.description
+// -----------------------------------------------------------------------
+//
+// Two additive fields flagged as pre-MVP polish:
+//
+// - `tenant.status`: a lifecycle enum (Active/Suspended) mirroring the
+//   existing `service_account.status` string-enum pattern. `tenant` is
+//   SCHEMAFULL and this field is a required `string`, so any pre-existing
+//   tenant row (which physically lacks the column) would fail read-side
+//   deserialization; the backfill UPDATE sets every existing row to
+//   'Active' before it can be read. New rows created by the repository set
+//   status = 'Active' explicitly.
+// - `service_account.description`: an OPTIONAL free-text field
+//   (`option<string>`), so absent rows simply read back as NONE and need
+//   no backfill.
+//
+// `IF NOT EXISTS` keeps both DEFINE FIELDs idempotent.
+
+const SCHEMA_V24: &str = "\
+-- Tenant lifecycle status (new required field; backfill existing rows).
+DEFINE FIELD IF NOT EXISTS status ON TABLE tenant TYPE string
+    ASSERT $value IN ['Active', 'Suspended'] DEFAULT 'Active';
+UPDATE tenant SET status = 'Active' WHERE status = NONE;
+-- Service account optional description (no backfill: option<string> reads
+-- back as NONE when absent).
+DEFINE FIELD IF NOT EXISTS description ON TABLE service_account TYPE option<string>;
 ";
 
 // -----------------------------------------------------------------------

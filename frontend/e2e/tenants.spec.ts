@@ -58,16 +58,17 @@ test.describe("Tenants list page", () => {
     await expect(page.getByLabel(/Description/)).toBeVisible();
   });
 
-  test("shows the bootstrapped tenant row with its slug", async ({
+  test("shows the bootstrapped tenant row with its slug and Active status", async ({
     page,
   }) => {
     await page.goto("/tenants");
     await expect(page).not.toHaveURL(/\/login/);
-    // TenantsPage has no status column (the Tenant model has no status field),
-    // so verify the bootstrapped tenant renders as a real row: its name plus
-    // its slug ("default") shown in the table's slug cell.
+    // The bootstrapped tenant renders as a real row: its name, its slug
+    // ("default") in the slug cell, and an "Active" status badge (new
+    // TenantStatus field; tenants default to Active on creation).
     await expect(page.getByText("E2E Default Tenant")).toBeVisible();
     await expect(page.getByText("default", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Active", { exact: true }).first()).toBeVisible();
   });
 
   test("search filters tenants by name", async ({ page }) => {

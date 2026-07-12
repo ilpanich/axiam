@@ -1,7 +1,25 @@
 import { Page } from "@playwright/test";
 
 /**
- * loginAsAdmin — drives the real AXIAM login UI to authenticate as admin.
+ * Shared Playwright storageState file for the authenticated admin session.
+ *
+ * The `setup` project (e2e/auth.setup.ts) performs ONE real UI login and
+ * writes the resulting httpOnly session + CSRF cookies here; every other
+ * project loads it via `use.storageState`, so the suite pays the Argon2id
+ * login cost once instead of ~60 times. Path is relative to the Playwright
+ * cwd (the `frontend/` directory). Gitignored.
+ */
+export const STORAGE_STATE = "e2e/.auth/admin.json";
+
+/**
+ * loginAsAdmin — ensures the page has an authenticated admin session.
+ *
+ * With the shared storageState in place (the default for most projects), a
+ * session cookie is already loaded, so this becomes a fast no-op: it navigates
+ * home and returns as soon as it confirms we are not bounced to /login. Only
+ * when there is no session (the auth-flow specs opt out of storageState with an
+ * empty session, and the `setup` project itself starts clean) does it drive the
+ * full two-step login UI.
  *
  * Uses E2E_ORG_SLUG / E2E_TENANT_SLUG / E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD
  * env vars (with defaults matching scripts/e2e-bootstrap.sh).
@@ -17,7 +35,15 @@ export async function loginAsAdmin(page: Page): Promise<void> {
   const adminEmail = process.env["E2E_ADMIN_EMAIL"] ?? "admin@axiam.dev";
   const adminPassword = process.env["E2E_ADMIN_PASSWORD"] ?? "Test@Admin123!";
 
-  await page.goto("/login");
+  // Fast path: if a session already exists (shared storageState), navigating
+  // home settles on an authenticated route rather than /login — nothing to do.
+  await page.goto("/");
+  await page
+    .waitForURL(/\/login|\/dashboard|\/$/, { timeout: 45_000 })
+    .catch(() => {});
+  if (!/\/login/.test(new URL(page.url()).pathname)) {
+    return;
+  }
 
   // Step 1: Enter org and tenant slugs
   await page.getByLabel("Organization slug").fill(orgSlug);
@@ -30,7 +56,7 @@ export async function loginAsAdmin(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Sign in" }).click();
 
   // Wait for successful redirect off /login (httpOnly cookie is now set).
-  // 30s (not 15s): every login runs an Argon2id verification on the backend,
+  // 45s (not 15s): every login runs an Argon2id verification on the backend,
   // and under a loaded CI runner sharing CPU with the server container the
   // post-login redirect can occasionally take >15s, which showed up as
   // intermittent `waitForURL` timeouts across the suite.

@@ -34,7 +34,7 @@
          never published standalone; it exists to prove SC#3's "complete
          working application context"). -->
     <dependency>
-      <groupId>io.axiam</groupId>
+      <groupId>io.github.ilpanich</groupId>
       <artifactId>axiam-sdk</artifactId>
       <version>0.1.0</version>
     </dependency>

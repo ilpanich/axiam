@@ -789,7 +789,7 @@ Plans:
 **Requirements**: JAVA-01
 **Success Criteria** (what must be TRUE):
 
-  1. `io.axiam:axiam-sdk` added to a Maven POM; `tenantId` is a required builder parameter (compiler-enforced via no-arg builder absence); `login(email, password)` returns a typed `LoginResult`.
+  1. `io.github.ilpanich:axiam-sdk` added to a Maven POM; `tenantId` is a required builder parameter (compiler-enforced via no-arg builder absence); `login(email, password)` returns a typed `LoginResult`.
   2. `ReentrantLock` single-flight refresh: 5 concurrent threads on an expired token trigger exactly 1 refresh call (verified by JUnit 5 test).
   3. A Spring Security `Filter` using the SDK protects a sample endpoint and compiles against Spring Boot 3.x; the example includes a complete working application context.
   4. `OkHttpClient` uses `CookieManager` for cookie persistence; no `hostnameVerifier` or `sslSocketFactory` bypass is present anywhere in SDK source.

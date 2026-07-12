@@ -85,6 +85,7 @@ async fn mtls_authenticate_valid_cert_returns_device_identity() {
         .create(CreateServiceAccount {
             tenant_id,
             name: "mTLS Device SA".into(),
+            description: None,
         })
         .await
         .expect("service account creation must succeed");

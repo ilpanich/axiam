@@ -1,7 +1,7 @@
 //! SurrealDB implementation of [`TenantRepository`].
 
 use axiam_core::error::AxiamResult;
-use axiam_core::models::tenant::{CreateTenant, Tenant, UpdateTenant};
+use axiam_core::models::tenant::{CreateTenant, Tenant, TenantStatus, UpdateTenant};
 use axiam_core::repository::{PaginatedResult, Pagination, TenantRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::{Connection, Surreal};
@@ -11,12 +11,30 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
+fn parse_status(s: &str) -> Result<TenantStatus, DbError> {
+    match s {
+        "Active" => Ok(TenantStatus::Active),
+        "Suspended" => Ok(TenantStatus::Suspended),
+        other => Err(DbError::Migration(format!(
+            "unknown tenant status: {other}"
+        ))),
+    }
+}
+
+fn status_to_str(s: &TenantStatus) -> &'static str {
+    match s {
+        TenantStatus::Active => "Active",
+        TenantStatus::Suspended => "Suspended",
+    }
+}
+
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
 struct TenantRow {
     organization_id: String,
     name: String,
     slug: String,
+    status: String,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -31,6 +49,7 @@ impl TenantRow {
             organization_id: org_id,
             name: self.name,
             slug: self.slug,
+            status: parse_status(&self.status)?,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -45,6 +64,7 @@ struct TenantRowWithId {
     organization_id: String,
     name: String,
     slug: String,
+    status: String,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -61,6 +81,7 @@ impl TenantRowWithId {
             organization_id: org_id,
             name: self.name,
             slug: self.slug,
+            status: parse_status(&self.status)?,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -96,6 +117,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             "CREATE type::record('tenant', $id) SET \
              organization_id = $org_id, \
              name = $name, slug = $slug, \
+             status = 'Active', \
              metadata = $metadata; \
              RELATE organization:`{org_id_str}` \
              -> has_tenant -> tenant:`{id_str}`;"
@@ -175,6 +197,9 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         if input.slug.is_some() {
             sets.push("slug = $slug");
         }
+        if input.status.is_some() {
+            sets.push("status = $status");
+        }
         if input.metadata.is_some() {
             sets.push("metadata = $metadata");
         }
@@ -189,6 +214,9 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         }
         if let Some(slug) = input.slug {
             builder = builder.bind(("slug", slug));
+        }
+        if let Some(status) = input.status {
+            builder = builder.bind(("status", status_to_str(&status).to_string()));
         }
         if let Some(metadata) = input.metadata {
             builder = builder.bind(("metadata", metadata));

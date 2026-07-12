@@ -61,6 +61,7 @@ fn status_to_str(s: &UserStatus) -> &'static str {
 struct ServiceAccountRow {
     tenant_id: String,
     name: String,
+    description: Option<String>,
     client_id: String,
     client_secret_hash: String,
     status: String,
@@ -73,6 +74,7 @@ struct ServiceAccountRowWithId {
     record_id: String,
     tenant_id: String,
     name: String,
+    description: Option<String>,
     client_id: String,
     client_secret_hash: String,
     status: String,
@@ -90,6 +92,7 @@ impl ServiceAccountRowWithId {
             id,
             tenant_id,
             name: self.name,
+            description: self.description,
             client_id: self.client_id,
             client_secret_hash: self.client_secret_hash,
             status: parse_status(&self.status)?,
@@ -127,6 +130,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
                 "CREATE type::record('service_account', $id) SET \
                  tenant_id = $tenant_id, \
                  name = $name, \
+                 description = $description, \
                  client_id = $client_id, \
                  client_secret_hash = $secret_hash, \
                  status = 'Active'",
@@ -134,6 +138,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
             .bind(("name", input.name))
+            .bind(("description", input.description))
             .bind(("client_id", client_id))
             .bind(("secret_hash", secret_hash))
             .await
@@ -153,6 +158,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             id,
             tenant_id,
             name: row.name,
+            description: row.description,
             client_id: row.client_id,
             client_secret_hash: row.client_secret_hash,
             status: parse_status(&row.status)?,
@@ -187,6 +193,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             id,
             tenant_id,
             name: row.name,
+            description: row.description,
             client_id: row.client_id,
             client_secret_hash: row.client_secret_hash,
             status: parse_status(&row.status)?,
@@ -236,6 +243,9 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
         if input.name.is_some() {
             sets.push("name = $name");
         }
+        if input.description.is_some() {
+            sets.push("description = $description");
+        }
         if input.status.is_some() {
             sets.push("status = $status");
         }
@@ -256,6 +266,9 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
         if let Some(name) = input.name {
             builder = builder.bind(("name", name));
         }
+        if let Some(description) = input.description {
+            builder = builder.bind(("description", description));
+        }
         if let Some(status) = input.status {
             builder = builder.bind(("status", status_to_str(&status).to_string()));
         }
@@ -275,6 +288,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             id,
             tenant_id,
             name: row.name,
+            description: row.description,
             client_id: row.client_id,
             client_secret_hash: row.client_secret_hash,
             status: parse_status(&row.status)?,

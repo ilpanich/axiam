@@ -14,6 +14,8 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SearchInput } from "@/components/SearchInput";
+import { StatusBadge } from "@/components/StatusBadge";
+import { ToggleField } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -122,9 +124,11 @@ interface EditTenantFieldsProps {
   name: string;
   slug: string;
   description: string;
+  isActive: boolean;
   onNameChange: (v: string) => void;
   onSlugChange: (v: string) => void;
   onDescriptionChange: (v: string) => void;
+  onIsActiveChange: (v: boolean) => void;
   error?: string;
 }
 
@@ -132,9 +136,11 @@ function EditTenantFields({
   name,
   slug,
   description,
+  isActive,
   onNameChange,
   onSlugChange,
   onDescriptionChange,
+  onIsActiveChange,
   error,
 }: EditTenantFieldsProps) {
   return (
@@ -169,6 +175,12 @@ function EditTenantFields({
           rows={3}
         />
       </div>
+      <ToggleField
+        id="edit-tenant-active"
+        label="Active"
+        checked={isActive}
+        onChange={onIsActiveChange}
+      />
       {error && <p className="text-sm text-destructive">{error}</p>}
     </>
   );
@@ -286,6 +298,7 @@ export function TenantsPage() {
   const [editName, setEditName] = useState("");
   const [editSlug, setEditSlug] = useState("");
   const [editDescription, setEditDescription] = useState("");
+  const [editIsActive, setEditIsActive] = useState(true);
   const [editError, setEditError] = useState("");
 
   const editMutation = useMutation({
@@ -316,6 +329,7 @@ export function TenantsPage() {
     setEditDescription(
       (tenant.metadata?.description as string | undefined) ?? ""
     );
+    setEditIsActive(tenant.status === "Active");
     setEditError("");
   }
 
@@ -333,6 +347,7 @@ export function TenantsPage() {
       payload: {
         name: editName.trim(),
         slug: editSlug.trim(),
+        status: editIsActive ? "Active" : "Suspended",
         metadata: { ...editTenant.metadata, description },
       },
     });
@@ -375,6 +390,15 @@ export function TenantsPage() {
         <span className="text-muted-foreground text-sm">
           {row.org_name}
         </span>
+      ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      render: (row) => (
+        <StatusBadge
+          status={row.status === "Active" ? "active" : "suspended"}
+        />
       ),
     },
     {
@@ -497,9 +521,11 @@ export function TenantsPage() {
           name={editName}
           slug={editSlug}
           description={editDescription}
+          isActive={editIsActive}
           onNameChange={setEditName}
           onSlugChange={setEditSlug}
           onDescriptionChange={setEditDescription}
+          onIsActiveChange={setEditIsActive}
           error={editError}
         />
       </FormDialog>

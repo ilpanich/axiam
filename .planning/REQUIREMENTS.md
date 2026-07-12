@@ -500,7 +500,7 @@ Deliver `sdks/java/` with Spring Security integration.
 - [x] Full baseline; `ReentrantLock` single-flight refresh; OkHttp `CookieManager`
 - [x] OkHttp 4.12 + grpc-netty-shaded 1.82 + amqp-client 5.22; nimbus-jose-jwt 10.x + Tink for EdDSA
 - [x] Spring Security filter integration; builder requires `tenantId`
-- [x] Examples; **Maven Central publish** (`io.axiam:axiam-sdk` SDK jar **and** `io.axiam:axiam-bom` Bill-of-Materials — the BOM coordinate was added during Phase 20 discuss, D-23, to align consumer dependency versions) incl. **GPG signing setup** task — CI/publish pipeline structurally proven (ephemeral-key `mvn verify -Dgpg.skip=false`); live first Central publish is a maintainer action pending namespace verification + CI secrets
+- [x] Examples; **Maven Central publish** (`io.github.ilpanich:axiam-sdk` SDK jar **and** `io.github.ilpanich:axiam-bom` Bill-of-Materials — the BOM coordinate was added during Phase 20 discuss, D-23, to align consumer dependency versions) incl. **GPG signing setup** task — CI/publish pipeline structurally proven (ephemeral-key `mvn verify -Dgpg.skip=false`); live first Central publish is a maintainer action pending namespace verification + CI secrets
 
 ---
 

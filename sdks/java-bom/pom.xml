@@ -4,14 +4,14 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>io.axiam</groupId>
+  <groupId>io.github.ilpanich</groupId>
   <artifactId>axiam-bom</artifactId>
   <version>0.1.0</version>
   <packaging>pom</packaging>
 
   <name>axiam-bom</name>
   <description>Bill of Materials for AXIAM Java SDK artifacts. Import this
-    POM's dependencyManagement to keep io.axiam:axiam-sdk (and future
+    POM's dependencyManagement to keep io.github.ilpanich:axiam-sdk (and future
     companion modules) version-aligned across a consumer's own dependency
     tree (D-23).</description>
   <url>https://github.com/ilpanich/axiam</url>
@@ -47,11 +47,11 @@
     <gpg.skip>true</gpg.skip>
   </properties>
 
-  <!-- Pins io.axiam:axiam-sdk for consumers who import this BOM (D-23). -->
+  <!-- Pins io.github.ilpanich:axiam-sdk for consumers who import this BOM (D-23). -->
   <dependencyManagement>
     <dependencies>
       <dependency>
-        <groupId>io.axiam</groupId>
+        <groupId>io.github.ilpanich</groupId>
         <artifactId>axiam-sdk</artifactId>
         <version>0.1.0</version>
       </dependency>
@@ -86,8 +86,8 @@
       </plugin>
 
       <!-- D-22: Sonatype Central Portal publish — same plugin/config as
-           sdks/java/pom.xml, publishing io.axiam:axiam-bom under the same
-           verified io.axiam namespace. -->
+           sdks/java/pom.xml, publishing io.github.ilpanich:axiam-bom under the same
+           verified io.github.ilpanich namespace. -->
       <plugin>
         <groupId>org.sonatype.central</groupId>
         <artifactId>central-publishing-maven-plugin</artifactId>

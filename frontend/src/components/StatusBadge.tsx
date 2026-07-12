@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-type Status = "active" | "revoked" | "inactive";
+type Status = "active" | "revoked" | "inactive" | "suspended";
 
 interface StatusBadgeProps {
   status: Status;
@@ -14,6 +14,8 @@ const statusStyles: Record<Status, string> = {
     "bg-red-500/15 text-red-400 border border-red-500/30",
   inactive:
     "bg-muted/40 text-muted-foreground border border-border",
+  suspended:
+    "bg-amber-500/15 text-amber-400 border border-amber-500/30",
 };
 
 export function StatusBadge({ status, className }: StatusBadgeProps) {

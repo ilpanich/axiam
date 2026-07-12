@@ -291,10 +291,13 @@ jobs:
           commit_message: "docs(server): publish rustdoc for ${{ github.ref_name }}"
 
   # ---------------------------------------------------------------------------
-  # Landing page at the site root, linking every artifact's docs.
+  # Documentation landing page at /docs, linking every artifact's docs.
   # ---------------------------------------------------------------------------
-  # Runs on any release tag and only ever writes index.html at the root
-  # (keep_files preserves every /sdk/* and /server subtree).
+  # Published under /docs (NOT the site root): the site root is owned by the
+  # AXIAM project website (Phase 20 showcase site), so this job must never write
+  # a root index.html or it would clobber the website's homepage. keep_files
+  # preserves every /sdk/*, /server and root subtree; this job only ever writes
+  # its own /docs subtree.
   docs-index:
     name: Docs landing page
     needs: verify-tag-on-main
@@ -321,7 +324,7 @@ jobs:
           <p class="sub">Access eXtended Identity and Authorization Management — API documentation.</p>
           <h2>Server</h2>
           <ul>
-            <li><a href="./server/">Server &amp; workspace crates</a> (rustdoc)</li>
+            <li><a href="../server/">Server &amp; workspace crates</a> (rustdoc)</li>
             <li><a href="https://github.com/ilpanich/axiam/tree/main/docs">Guides</a> — deployment, admin, PKI, API contracts (REST / gRPC / AMQP)</li>
           </ul>
           <h2>SDKs</h2>
@@ -329,19 +332,20 @@ jobs:
             <tr><th>Language</th><th>API reference</th><th>Package</th></tr>
             <tr><td>Rust</td><td><a href="https://docs.rs/axiam-sdk">docs.rs</a></td><td><a href="https://crates.io/crates/axiam-sdk">crates.io</a></td></tr>
             <tr><td>Go</td><td><a href="https://pkg.go.dev/github.com/ilpanich/axiam/sdks/go">pkg.go.dev</a></td><td>Go modules</td></tr>
-            <tr><td>Java</td><td><a href="https://javadoc.io/doc/io.axiam/axiam-sdk">javadoc.io</a></td><td>Maven Central</td></tr>
-            <tr><td>Python</td><td><a href="./sdk/python/">API docs</a></td><td><a href="https://pypi.org/project/axiam-sdk/">PyPI</a></td></tr>
-            <tr><td>TypeScript</td><td><a href="./sdk/typescript/">API docs</a></td><td><a href="https://www.npmjs.com/package/axiam-sdk">npm</a></td></tr>
-            <tr><td>C#</td><td><a href="./sdk/csharp/">API docs</a></td><td><a href="https://www.nuget.org/packages/Axiam.Sdk">NuGet</a></td></tr>
-            <tr><td>PHP</td><td><a href="./sdk/php/">API docs</a></td><td><a href="https://packagist.org/packages/axiam/axiam-sdk">Packagist</a></td></tr>
+            <tr><td>Java</td><td><a href="https://javadoc.io/doc/io.github.ilpanich/axiam-sdk">javadoc.io</a></td><td>Maven Central</td></tr>
+            <tr><td>Python</td><td><a href="../sdk/python/">API docs</a></td><td><a href="https://pypi.org/project/axiam-sdk/">PyPI</a></td></tr>
+            <tr><td>TypeScript</td><td><a href="../sdk/typescript/">API docs</a></td><td><a href="https://www.npmjs.com/package/axiam-sdk">npm</a></td></tr>
+            <tr><td>C#</td><td><a href="../sdk/csharp/">API docs</a></td><td><a href="https://www.nuget.org/packages/Axiam.Sdk">NuGet</a></td></tr>
+            <tr><td>PHP</td><td><a href="../sdk/php/">API docs</a></td><td><a href="https://packagist.org/packages/axiam/axiam-sdk">Packagist</a></td></tr>
           </table>
           <p>Every SDK implements the same
             <a href="https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md">SDK contract</a>.</p>
           HTML
-      - name: Deploy landing page to GitHub Pages (root)
+      - name: Deploy landing page to GitHub Pages (/docs)
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./_index_out
+          destination_dir: docs
           keep_files: true
           commit_message: "docs: refresh documentation index for ${{ github.ref_name }}"

@@ -13,6 +13,10 @@
 
 import { test, expect } from "@playwright/test";
 
+// These contract tests mock /api/v1/auth/* and must not carry a real session
+// cookie from the shared setup project — run them unauthenticated.
+test.use({ storageState: { cookies: [], origins: [] } });
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ built-in token.
 | crates.io | `axiam-sdk` |
 | PyPI | `axiam-sdk` |
 | npm | `axiam-sdk` (unscoped) |
-| Maven Central | `io.axiam:axiam-sdk` |
+| Maven Central | `io.github.ilpanich:axiam-sdk` |
 | NuGet | `Axiam.Sdk`, `Axiam.Sdk.AspNetCore` |
 | Packagist | `axiam/axiam-sdk` |
 | Go | `github.com/ilpanich/axiam/sdks/go` |
@@ -70,7 +70,12 @@ gh secret list --repo ilpanich/axiam                            # verify
    Branch: **`gh-pages`** / **`/ (root)`** → Save.
    The branch is created automatically by the first `docs-publish.yml` run; if Pages
    refuses to save because the branch does not exist yet, push any docs tag first, then
-   set it. Docs then land at `https://ilpanich.github.io/axiam/`.
+   set it.
+   Site layout on `gh-pages` (all deploys use `keep_files: true`, so the subtrees never
+   clobber each other): the **root** (`https://ilpanich.github.io/axiam/`) is owned by the
+   AXIAM project **website** (Phase 20 showcase site); the generated **documentation index**
+   lands at `…/axiam/docs/`; per-artifact API docs stay under `…/axiam/server/` and
+   `…/axiam/sdk/<lang>/`.
 
 2. **Allow Actions to write packages/contents** — Settings → **Actions** → **General** →
    *Workflow permissions* → **Read and write permissions**. (GHCR pushes and the `gh-pages`
@@ -162,21 +167,20 @@ Sigstore using OIDC (no extra secret).
 The heaviest setup, because Central requires **namespace ownership** and **GPG-signed
 artifacts**.
 
-**Step A — claim the namespace.** The pom publishes under `io.axiam`, which Central treats
-as a domain you must prove you own.
+**Step A — claim the namespace.** The pom publishes under `io.github.ilpanich`, the
+GitHub-backed namespace Central verifies for free (the `axiam.io` domain is not owned, so the
+`io.axiam` groupId is not available). This decision is now locked in the poms.
 
 1. Register at <https://central.sonatype.com/> (sign in with GitHub).
-2. **View Namespaces** → **Add Namespace** → enter `io.axiam`.
-3. Central asks you to prove control of `axiam.io` by adding a **DNS TXT record**
-   containing the verification code it shows you.
+2. **View Namespaces** → **Add Namespace** → enter `io.github.ilpanich`.
+3. Central verifies GitHub-backed namespaces by having you create a temporary public repo it
+   names (no DNS TXT record needed — that path is only for domain-based namespaces).
 
-> **If you do not own the domain `axiam.io`, you cannot use the `io.axiam` groupId.**
-> The zero-cost alternative is the GitHub-backed namespace **`io.github.ilpanich`**, which
-> Central verifies just by having you create a temporary public repo it names. Choosing it
-> means changing `<groupId>` in `sdks/java/pom.xml` (and the coordinates in the docs and in
-> `benchmarks/sdk/java/TODO.md`) to `io.github.ilpanich`. **Decide this before the first
-> Java release — the groupId cannot be changed after publishing without shipping a new
-> artifact.**
+> **groupId is `io.github.ilpanich`** (set in `sdks/java/pom.xml`, `sdks/java-bom/pom.xml`,
+> the SDK README, the CI/publish workflow, and `benchmarks/sdk/java/TODO.md`). It was chosen
+> over `io.axiam` because that groupId would require proving ownership of the `axiam.io`
+> domain, which the project does not own. **The groupId cannot be changed after publishing
+> without shipping a new artifact — this is fixed before the first Java release.**
 
 **Step B — generate the publishing token** (this is a *portal token*, not your password):
 
@@ -369,8 +373,9 @@ prerequisite) for last.
 6. `NUGET_API_KEY` → tag `axiam-csharp-sdk/v1.0.0`.
 7. Mirror repo + `PHP_SDK_MIRROR_TOKEN`/`PHP_SDK_MIRROR_REPO` → tag `axiam-php-sdk/v1.0.0`.
 8. Tag `sdks/go/v1.0.0` (no secret).
-9. **Decide the Java groupId** (`io.axiam` needs the `axiam.io` domain; `io.github.ilpanich`
-   is free) → namespace verification → the 4 Central/GPG secrets → tag `axiam-java-sdk/v1.0.0`.
+9. **Java groupId is `io.github.ilpanich`** (GitHub-backed, free; `io.axiam` was dropped as it
+   needs the `axiam.io` domain) → namespace verification → the 4 Central/GPG secrets → tag
+   `axiam-java-sdk/v1.0.0`.
 
 ---
 

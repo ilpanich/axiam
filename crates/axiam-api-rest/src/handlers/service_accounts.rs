@@ -23,6 +23,9 @@ use crate::state::AppState;
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateServiceAccountRequest {
     pub name: String,
+    /// Optional human-readable description of the account's purpose.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 // -----------------------------------------------------------------------
@@ -35,6 +38,7 @@ pub struct ServiceAccountResponse {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
+    pub description: Option<String>,
     pub client_id: String,
     pub status: UserStatus,
     pub created_at: DateTime<Utc>,
@@ -47,6 +51,7 @@ impl From<ServiceAccount> for ServiceAccountResponse {
             id: sa.id,
             tenant_id: sa.tenant_id,
             name: sa.name,
+            description: sa.description,
             client_id: sa.client_id,
             status: sa.status,
             created_at: sa.created_at,
@@ -61,6 +66,7 @@ pub struct ServiceAccountCreatedResponse {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
+    pub description: Option<String>,
     pub client_id: String,
     pub client_secret: String,
     pub status: UserStatus,
@@ -98,15 +104,18 @@ pub async fn create<C: Connection + Clone>(
     RequirePermission::new("service_accounts:create", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    let req = body.into_inner();
     let input = CreateServiceAccount {
         tenant_id: user.tenant_id,
-        name: body.into_inner().name,
+        name: req.name,
+        description: req.description,
     };
     let (sa, raw_secret) = state.service_account_repo.create(input).await?;
     Ok(HttpResponse::Created().json(ServiceAccountCreatedResponse {
         id: sa.id,
         tenant_id: sa.tenant_id,
         name: sa.name,
+        description: sa.description,
         client_id: sa.client_id,
         client_secret: raw_secret,
         status: sa.status,

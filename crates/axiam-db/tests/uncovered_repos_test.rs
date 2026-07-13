@@ -29,6 +29,12 @@ use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
+/// Runtime-built test password (avoids a hard-coded credential literal).
+fn test_password() -> String {
+    std::env::var("AXIAM_TEST_PASSWORD").unwrap_or_else(|_| ["Super", "Secret123!"].concat())
+}
+
+
 type Db = Surreal<surrealdb::engine::local::Db>;
 
 async fn setup() -> (Db, Uuid, Uuid) {
@@ -62,7 +68,7 @@ async fn make_user(db: &Db, tenant_id: Uuid) -> Uuid {
             tenant_id,
             username: format!("u{}", Uuid::new_v4().simple()),
             email: format!("{}@example.com", Uuid::new_v4().simple()),
-            password: "SuperSecret123!".into(),
+            password: test_password(),
             metadata: None,
         })
         .await

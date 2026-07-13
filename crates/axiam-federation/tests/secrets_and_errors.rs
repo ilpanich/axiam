@@ -82,9 +82,11 @@ fn or_legacy_config_incomplete_when_nothing_present() {
 // FederationError → AxiamError mapping
 // ---------------------------------------------------------------------------
 
+type ErrorCase = (FederationError, fn(&AxiamError) -> bool);
+
 #[test]
 fn error_maps_to_expected_axiam_variants() {
-    let cases: Vec<(FederationError, fn(&AxiamError) -> bool)> = vec![
+    let cases: Vec<ErrorCase> = vec![
         (
             FederationError::ConfigNotFound("cfg".into()),
             (|e| matches!(e, AxiamError::NotFound { .. })) as fn(&AxiamError) -> bool,

@@ -184,8 +184,10 @@ fn settings_scope_from_str() {
 #[test]
 fn tenant_override_is_empty() {
     assert!(TenantSettingsOverride::default().is_empty());
-    let mut o = TenantSettingsOverride::default();
-    o.min_length = Some(20);
+    let o = TenantSettingsOverride {
+        min_length: Some(20),
+        ..Default::default()
+    };
     assert!(!o.is_empty());
 }
 

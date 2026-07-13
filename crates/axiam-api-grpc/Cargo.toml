@@ -39,6 +39,7 @@ surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio = { workspace = true }
 uuid = { workspace = true }
+serde_json = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

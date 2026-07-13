@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
 
@@ -111,5 +111,50 @@ describe("GroupsPage", () => {
     apiMock.get.mockResolvedValue(res([]));
     renderWithProviders(<GroupsPage />);
     expect(await screen.findByText(/No groups yet/)).toBeInTheDocument();
+  });
+
+  it("navigates to the group detail via the View action", async () => {
+    apiMock.get.mockResolvedValue(res(groups));
+    renderWithProviders(<GroupsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "View Engineering" }));
+    expect(navigate).toHaveBeenCalledWith("/groups/g1");
+  });
+
+  it("validates a blank name when editing", async () => {
+    apiMock.get.mockResolvedValue(res(groups));
+    renderWithProviders(<GroupsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Engineering" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.clear(within(dialog).getByLabelText("Name *"));
+    fireEvent.submit(dialog.querySelector("form")!);
+    expect(await screen.findByText("Name is required.")).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an edit error from the service", async () => {
+    apiMock.get.mockResolvedValue(res(groups));
+    apiMock.put.mockRejectedValue(new Error("Update failed"));
+    renderWithProviders(<GroupsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Engineering" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    expect(await screen.findByText("Update failed")).toBeInTheDocument();
+  });
+
+  it("closes the create, edit and delete dialogs on cancel", async () => {
+    apiMock.get.mockResolvedValue(res(groups));
+    renderWithProviders(<GroupsPage />);
+    // Create
+    await userEvent.click(await screen.findByRole("button", { name: /New Group/ }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Edit
+    await userEvent.click(screen.getByRole("button", { name: "Edit Engineering" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Delete
+    await userEvent.click(screen.getByRole("button", { name: "Delete Ops" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
 
@@ -220,6 +220,68 @@ describe("SettingsPage", () => {
     expect(screen.queryByLabelText("Password minimum length")).not.toBeInTheDocument();
     expect(screen.getByText("12 characters")).toBeInTheDocument();
     expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("edits every field in every section and saves the full converted override", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+
+    const numbers: [string, string][] = [
+      ["Password minimum length", "14"],
+      ["Password history count", "7"],
+      ["Max failed login attempts", "9"],
+      ["Account lockout duration (minutes)", "30"],
+      ["Access token lifetime (minutes)", "20"],
+      ["Refresh token lifetime (days)", "7"],
+      ["MFA challenge lifetime (minutes)", "10"],
+      ["Default certificate validity (days)", "180"],
+    ];
+    for (const [label, value] of numbers) {
+      const input = screen.getByLabelText(label);
+      fireEvent.change(input, { target: { value } });
+    }
+
+    const toggles = [
+      "Require uppercase letter",
+      "Require lowercase letter",
+      "Require digit",
+      "Require symbol",
+    ];
+    for (const label of toggles) {
+      await userEvent.click(screen.getByLabelText(label));
+    }
+    // These toggles include a description in their accessible name.
+    for (const label of [
+      "Check passwords against breach database (HIBP)",
+      "Require MFA for all users",
+      "Require email verification",
+      "Admin notifications",
+    ]) {
+      await userEvent.click(screen.getByLabelText(label, { exact: false }));
+    }
+
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const [, body] = apiMock.put.mock.calls[0];
+    expect(body).toMatchObject({
+      min_length: 14,
+      password_history_count: 7,
+      max_failed_login_attempts: 9,
+      lockout_duration_secs: 30 * 60,
+      access_token_lifetime_secs: 20 * 60,
+      refresh_token_lifetime_secs: 7 * 86_400,
+      mfa_challenge_lifetime_secs: 10 * 60,
+      default_cert_validity_days: 180,
+      // Flipped from their loaded values.
+      require_uppercase: false,
+      require_symbols: true,
+      hibp_check_enabled: false,
+      mfa_enforced: true,
+      email_verification_required: false,
+      admin_notifications_enabled: false,
+    });
   });
 
   it("clears a prior success feedback message when re-entering edit mode", async () => {

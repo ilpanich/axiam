@@ -299,7 +299,6 @@ export function ResourceTree({
     if (prevResourcesRef.current !== resources) {
       prevResourcesRef.current = resources;
       const allIds = collectAllIds(roots);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setExpandedIds((prev) => {
         const next = new Set(prev);
         let changed = false;

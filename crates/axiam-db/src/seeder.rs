@@ -175,7 +175,7 @@ pub async fn mint_bootstrap_setup_token_if_needed<C: Connection>(
     // Generate a cryptographically random 32-byte token, base64url-encoded
     // (same shape as `axiam_auth::token::generate_refresh_token`).
     let mut rng = rand::rng();
-    let bytes: [u8; 32] = rand::Rng::random(&mut rng);
+    let bytes: [u8; 32] = rand::RngExt::random(&mut rng);
     let token = URL_SAFE_NO_PAD.encode(bytes);
 
     let mut hasher = Sha256::new();

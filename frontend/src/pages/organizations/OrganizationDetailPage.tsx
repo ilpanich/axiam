@@ -697,7 +697,6 @@ function SettingsTab({
   useEffect(() => {
     if (shouldSeedForm(initializedRef.current, settings)) {
       const flattened = flattenOrgSettings(settings!);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setForm(flattened);
       snapshotRef.current = flattened;
       initializedRef.current = true;

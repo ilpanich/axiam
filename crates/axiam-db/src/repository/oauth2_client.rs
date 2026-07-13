@@ -4,7 +4,7 @@ use axiam_core::error::AxiamResult;
 use axiam_core::models::oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client};
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
-use rand::Rng;
+use rand::RngExt;
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;

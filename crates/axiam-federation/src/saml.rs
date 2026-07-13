@@ -623,9 +623,14 @@ where
             .ok_or(FederationError::ConfigIncomplete)?;
 
         let der = crate::cert::pem_cert_to_der(pem)?;
+        let cert = samael::crypto::CertificateDer::from(der);
 
-        samael::crypto::verify_signed_xml(xml_bytes, &der, Some("ID"))
-            .map_err(|e| FederationError::SamlSignatureInvalid(e.to_string()))
+        <samael::crypto::XmlSec as samael::crypto::CryptoProvider>::verify_signed_xml(
+            xml_bytes,
+            &cert,
+            Some("ID"),
+        )
+        .map_err(|e| FederationError::SamlSignatureInvalid(e.to_string()))
     }
 
     /// Provision a new user or link an existing one to the external

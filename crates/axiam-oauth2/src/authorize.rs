@@ -181,7 +181,7 @@ where
 /// Generate a cryptographically random authorization code (32 bytes, base64url).
 fn generate_auth_code() -> String {
     let mut rng = rand::rng();
-    let bytes: [u8; 32] = rand::Rng::random(&mut rng);
+    let bytes: [u8; 32] = rand::RngExt::random(&mut rng);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

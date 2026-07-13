@@ -94,7 +94,7 @@ pub fn sha256_hex(raw: &str) -> String {
 ///
 /// Replaces the previous `Uuid::new_v4().to_string()` (128-bit) token.
 fn generate_cancel_token() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let bytes: [u8; 32] = rand::rng().random();
     hex::encode(bytes)
 }

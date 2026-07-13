@@ -11,9 +11,7 @@ use actix_web::{App, HttpResponse, test, web};
 use axiam_audit::middleware::AuditMiddleware;
 use axiam_audit::service::AuditService;
 use axiam_core::error::{AxiamError, AxiamResult};
-use axiam_core::models::audit::{
-    ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry,
-};
+use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
 use chrono::Utc;
 use uuid::Uuid;
@@ -84,11 +82,7 @@ impl AuditLogRepository for RecordingRepo {
         unimplemented!()
     }
 
-    async fn get_by_ids(
-        &self,
-        _tenant_id: Uuid,
-        _ids: &[Uuid],
-    ) -> AxiamResult<Vec<AuditLogEntry>> {
+    async fn get_by_ids(&self, _tenant_id: Uuid, _ids: &[Uuid]) -> AxiamResult<Vec<AuditLogEntry>> {
         unimplemented!()
     }
 
@@ -171,11 +165,10 @@ async fn middleware_logs_unauthenticated_success() {
     let repo = RecordingRepo::new();
     let mw = AuditMiddleware::spawn(repo.clone());
 
-    let app = test::init_service(
-        App::new()
-            .wrap(mw)
-            .route("/api/thing", web::get().to(|| async { HttpResponse::Ok().finish() })),
-    )
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/thing",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
     .await;
 
     let req = test::TestRequest::get().uri("/api/thing").to_request();
@@ -241,8 +234,14 @@ async fn middleware_skips_health_and_ready() {
     let app = test::init_service(
         App::new()
             .wrap(mw)
-            .route("/health", web::get().to(|| async { HttpResponse::Ok().finish() }))
-            .route("/ready", web::get().to(|| async { HttpResponse::Ok().finish() })),
+            .route(
+                "/health",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/ready",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            ),
     )
     .await;
 
@@ -262,11 +261,10 @@ async fn middleware_records_client_ip() {
     let repo = RecordingRepo::new();
     let mw = AuditMiddleware::spawn(repo.clone());
 
-    let app = test::init_service(
-        App::new()
-            .wrap(mw)
-            .route("/api/ip", web::get().to(|| async { HttpResponse::Ok().finish() })),
-    )
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/ip",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
     .await;
 
     let req = test::TestRequest::get()

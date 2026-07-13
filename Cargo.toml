@@ -100,7 +100,7 @@ utoipa = { version = "5", features = ["actix_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 
 # PKI / X.509 / OpenPGP
-rcgen = "0.13"
+rcgen = "0.14"
 x509-parser = { version = "0.18", features = ["verify"] }
 pgp = "0.20"
 pem = "3"

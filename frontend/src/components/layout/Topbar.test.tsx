@@ -6,7 +6,11 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Topbar } from "@/components/layout/Topbar";
 import { useAuthStore, type AuthUser } from "@/stores/auth";
 import { makeClient } from "@/test/renderWithProviders";
-import { apiMock, res } from "@/test/apiMock";
+import { res } from "@/test/apiMock";
+
+const { apiMock } = vi.hoisted(() => ({
+  apiMock: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
+}));
 
 vi.mock("@/lib/api", () => ({ default: apiMock }));
 

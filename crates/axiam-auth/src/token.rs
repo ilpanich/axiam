@@ -392,8 +392,9 @@ pub fn validate_access_token(
 /// Generate a cryptographically random opaque refresh token
 /// (32 bytes → base64url-encoded, no padding).
 pub fn generate_refresh_token() -> String {
+    use rand::RngExt;
     let mut rng = rand::rng();
-    let bytes: [u8; 32] = rand::Rng::random(&mut rng);
+    let bytes: [u8; 32] = rng.random();
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

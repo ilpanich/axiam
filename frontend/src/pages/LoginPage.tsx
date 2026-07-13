@@ -43,11 +43,16 @@ export function LoginPage() {
   const navigate = useNavigate();
   const { setUser, setTenantContext } = useAuthStore();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [bootstrapNotice, setBootstrapNotice] = useState<string | null>(null);
+  // Derive the notice once from the initial URL so it survives stripping the
+  // query param below (lazy initializer — no setState in an effect).
+  const [bootstrapNotice] = useState<string | null>(() =>
+    searchParams.get("bootstrapped") === "1"
+      ? "Admin account created. Sign in to continue."
+      : null
+  );
 
   useEffect(() => {
     if (searchParams.get("bootstrapped") === "1") {
-      setBootstrapNotice("Admin account created. Sign in to continue.");
       // Strip the query param so a refresh doesn't re-show the notice.
       const next = new URLSearchParams(searchParams);
       next.delete("bootstrapped");

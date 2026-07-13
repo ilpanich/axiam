@@ -7,7 +7,7 @@ use axiam_core::models::service_account::{
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{PaginatedResult, Pagination, ServiceAccountRepository};
 use chrono::{DateTime, Utc};
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;

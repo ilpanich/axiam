@@ -60,7 +60,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 use surrealdb::Surreal;
 use surrealdb::engine::remote::http::{Client, Http};

@@ -1040,7 +1040,7 @@ pub struct SsoLoginSuccessResponse {
 
 /// Generate 32 random bytes encoded as base64url (no padding).
 fn random_base64url() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)

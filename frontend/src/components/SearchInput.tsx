@@ -20,12 +20,15 @@ export function SearchInput({
   className,
 }: SearchInputProps) {
   const [local, setLocal] = useState(value);
+  const [prevValue, setPrevValue] = useState(value);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Sync external value → local (e.g. on reset)
-  useEffect(() => {
+  // Sync external value → local (e.g. on reset) by adjusting state during
+  // render when the incoming prop changes, rather than in an effect.
+  if (value !== prevValue) {
+    setPrevValue(value);
     setLocal(value);
-  }, [value]);
+  }
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const next = e.target.value;

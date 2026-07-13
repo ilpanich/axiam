@@ -76,7 +76,7 @@ subtle = "2"
 base64 = "0.22"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 webauthn-rs-proto = "0.5"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 zeroize = "1"
 secrecy = { version = "0.10", features = ["serde"] }

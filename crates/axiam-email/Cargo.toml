@@ -21,3 +21,4 @@ lettre = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+wiremock = "0.6"

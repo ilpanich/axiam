@@ -980,6 +980,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

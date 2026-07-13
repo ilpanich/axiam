@@ -58,7 +58,7 @@ function PermissionFormFields({
           className={cn(
             "flex h-9 w-full rounded-md px-3 py-1 text-sm",
             "bg-white/5 border border-primary/20 text-foreground",
-            "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
+            "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
             "transition-colors duration-200"
           )}
         >

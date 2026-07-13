@@ -56,7 +56,7 @@ function CopyButton({ value }: { value: string }) {
       type="button"
       onClick={() => void handleCopy()}
       aria-label={copied ? "Copied!" : "Copy to clipboard"}
-      className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-primary/40"
+      className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border transition-all duration-150 focus:outline-hidden focus:ring-2 focus:ring-primary/40"
       style={
         copied
           ? {
@@ -117,7 +117,7 @@ export function SecretRevealModal({
     >
       {/* Backdrop — intentionally non-interactive (no onClick) to force acknowledgment */}
       <div
-        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+        className="absolute inset-0 bg-black/70 backdrop-blur-xs"
         aria-hidden="true"
       />
 

@@ -64,7 +64,7 @@ export function SearchInput({
           "h-9 w-full rounded-md pl-9 pr-3 text-sm",
           "bg-white/5 border border-primary/20 text-foreground",
           "placeholder:text-muted-foreground",
-          "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
+          "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
           "transition-colors duration-200"
         )}
       />

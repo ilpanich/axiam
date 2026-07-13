@@ -89,7 +89,7 @@ function ViewPublicKeyModal({ open, onClose, pgpKey }: ViewPublicKeyModalProps) 
       aria-labelledby="pubkey-modal-title"
     >
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        className="absolute inset-0 bg-black/60 backdrop-blur-xs"
         onClick={onClose}
         aria-hidden="true"
       />
@@ -103,7 +103,7 @@ function ViewPublicKeyModal({ open, onClose, pgpKey }: ViewPublicKeyModalProps) 
           </h2>
           <button
             onClick={onClose}
-            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-none focus:ring-2 focus:ring-primary/40"
+            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-hidden focus:ring-2 focus:ring-primary/40"
             aria-label="Close"
           >
             ✕
@@ -122,7 +122,7 @@ function ViewPublicKeyModal({ open, onClose, pgpKey }: ViewPublicKeyModalProps) 
             <button
               type="button"
               onClick={() => void handleCopy()}
-              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-white/12 text-white/55 hover:border-primary/40 hover:text-primary transition-all focus:outline-none focus:ring-2 focus:ring-primary/40"
+              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-white/12 text-white/55 hover:border-primary/40 hover:text-primary transition-all focus:outline-hidden focus:ring-2 focus:ring-primary/40"
             >
               {copied ? "Copied!" : "Copy"}
             </button>
@@ -283,7 +283,7 @@ function GenerateFields({
           id="pgp-purpose"
           value={purpose}
           onChange={(e) => onPurposeChange(e.target.value as PgpKeyPurpose)}
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
         >
           <option value="AuditSigning">Audit Signing</option>
           <option value="Export">Export (encryption)</option>
@@ -303,7 +303,7 @@ function GenerateFields({
           onChange={(e) =>
             onAlgorithmChange(e.target.value as PgpKeyAlgorithm)
           }
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
         >
           <option value="Rsa4096">RSA-4096 (signing + encryption)</option>
           <option value="Ed25519">Ed25519 (signing only)</option>

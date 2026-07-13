@@ -108,7 +108,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
     .map((m) => (m.handle as { crumb: string }).crumb);
 
   return (
-    <header className="h-14 flex items-center justify-between px-4 border-b border-primary/10 bg-[#0d0d2b]/60 backdrop-blur-sm shrink-0">
+    <header className="h-14 flex items-center justify-between px-4 border-b border-primary/10 bg-[#0d0d2b]/60 backdrop-blur-xs shrink-0">
       {/* Left: hamburger + breadcrumb */}
       <div className="flex items-center gap-3">
         <button

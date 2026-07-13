@@ -66,7 +66,7 @@ export function UserSearchDialog({
       aria-labelledby="user-search-dialog-title"
     >
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        className="absolute inset-0 bg-black/60 backdrop-blur-xs"
         onClick={handleClose}
         aria-hidden="true"
       />
@@ -80,7 +80,7 @@ export function UserSearchDialog({
           </h2>
           <button
             onClick={handleClose}
-            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-none focus:ring-2 focus:ring-primary/40"
+            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-hidden focus:ring-2 focus:ring-primary/40"
             aria-label="Close dialog"
           >
             ✕
@@ -104,7 +104,7 @@ export function UserSearchDialog({
                 "h-9 w-full rounded-md pl-9 pr-3 text-sm",
                 "bg-white/5 border border-primary/20 text-foreground",
                 "placeholder:text-muted-foreground",
-                "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
+                "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
                 "transition-colors duration-200",
               )}
             />

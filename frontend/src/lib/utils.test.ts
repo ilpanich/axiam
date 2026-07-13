@@ -4,7 +4,8 @@ import { cn, formatRelativeTime, formatDate, formatDateTime, slugify } from "./u
 describe("cn", () => {
   it("merges class names and dedupes conflicting tailwind utilities", () => {
     expect(cn("px-2", "px-4")).toBe("px-4");
-    expect(cn("a", false && "b", "c")).toBe("a c");
+    const off: boolean = false;
+    expect(cn("a", off && "b", "c")).toBe("a c");
     expect(cn(["a", "b"], { c: true, d: false })).toBe("a b c");
   });
 });

@@ -15,7 +15,7 @@ let toastSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   toastSpy = vi.fn();
-  setToastDispatch(toastSpy);
+  setToastDispatch(toastSpy as unknown as Parameters<typeof setToastDispatch>[0]);
 });
 
 describe("useCrudMutations", () => {

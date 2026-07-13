@@ -40,4 +40,26 @@ describe("getApiErrorMessage", () => {
     const err = makeAxiosError(undefined);
     expect(getApiErrorMessage(err)).toBe("Network Error");
   });
+
+  it("returns the generic fallback for a plain non-Error object", () => {
+    const result = getApiErrorMessage({ some: "shape" });
+    expect(result).toBe("An unexpected error occurred. Please try again.");
+  });
+
+  it("returns the generic fallback for a bare string", () => {
+    expect(getApiErrorMessage("boom")).toBe(
+      "An unexpected error occurred. Please try again."
+    );
+  });
+
+  it("ignores empty error/message fields and falls back to the network message", () => {
+    const err = makeAxiosError({ error: "", message: "" });
+    expect(getApiErrorMessage(err)).toBe("Network Error");
+  });
+
+  it("returns the generic fallback for an Error with an empty message", () => {
+    expect(getApiErrorMessage(new Error(""))).toBe(
+      "An unexpected error occurred. Please try again."
+    );
+  });
 });

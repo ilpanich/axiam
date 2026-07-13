@@ -529,4 +529,67 @@ mod mail_retry_backoff_tests {
         let delay = backoff_delay_secs(0);
         assert!(delay >= 0.0);
     }
+
+    #[test]
+    fn template_kind_maps_every_mail_type() {
+        assert_eq!(
+            template_kind_for(&MailType::PasswordReset),
+            TemplateKind::PasswordReset
+        );
+        assert_eq!(
+            template_kind_for(&MailType::EmailVerification),
+            TemplateKind::Activation
+        );
+        assert_eq!(
+            template_kind_for(&MailType::Notification),
+            TemplateKind::AdminNotification
+        );
+        assert_eq!(
+            template_kind_for(&MailType::DeletionCancel),
+            TemplateKind::DeletionScheduled
+        );
+        assert_eq!(
+            template_kind_for(&MailType::ExportReady),
+            TemplateKind::ExportReady
+        );
+    }
+
+    #[test]
+    fn build_template_context_handles_string_and_non_string_values() {
+        let ctx = serde_json::json!({
+            "name": "Alice",
+            "count": 5,
+            "flag": true,
+        });
+        let map = build_template_context(&ctx);
+        assert_eq!(map.get("name").map(String::as_str), Some("Alice"));
+        // Non-string values are stringified.
+        assert_eq!(map.get("count").map(String::as_str), Some("5"));
+        assert_eq!(map.get("flag").map(String::as_str), Some("true"));
+    }
+
+    #[test]
+    fn build_template_context_non_object_is_empty() {
+        let map = build_template_context(&serde_json::json!("not-an-object"));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn error_class_for_classifies_each_bucket() {
+        assert_eq!(error_class_for("Connection timed out"), "timeout");
+        assert_eq!(error_class_for("request TIMEOUT"), "timeout");
+        assert_eq!(error_class_for("invalid credentials"), "auth_failure");
+        assert_eq!(error_class_for("401 unauthorized"), "auth_failure");
+        assert_eq!(error_class_for("connection refused"), "connection_error");
+        assert_eq!(error_class_for("network unreachable"), "connection_error");
+        assert_eq!(error_class_for("rate limit exceeded"), "rate_limited");
+        assert_eq!(error_class_for("monthly quota reached"), "rate_limited");
+        assert_eq!(error_class_for("some other weird thing"), "provider_error");
+    }
+
+    #[test]
+    fn send_error_display_prefixes_message() {
+        let e = SendError("boom".into());
+        assert_eq!(e.to_string(), "mail send error: boom");
+    }
 }

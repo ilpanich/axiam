@@ -23,19 +23,30 @@ test.describe("Users list page", () => {
   test("shows the bootstrapped admin user in the list (RBAC-gated — T-07-13)", async ({
     page,
   }) => {
+    // Wait for the first /api/v1/users fetch to actually complete before
+    // asserting. On a heavily-loaded CI runner (the PR fires this E2E job
+    // alongside the full-workspace Rust build and every coverage job), that
+    // first cold /users query can exceed a blind 15s visibility timeout —
+    // waiting on the response first, then on the rendered row, removes the
+    // race deterministically instead of guessing a fixed delay.
+    const usersLoaded = page
+      .waitForResponse(
+        (r) =>
+          /\/api\/v1\/users(\?|$)/.test(r.url()) &&
+          r.request().method() === "GET",
+        { timeout: 30_000 }
+      )
+      .catch(() => undefined);
     await page.goto("/users");
     await expect(page).not.toHaveURL(/\/login/);
+    await usersLoaded;
     // The bootstrap fixture creates an admin user — it must appear in the
     // users table. Scope to the table and match the admin's unique email so
     // the assertion is unambiguous (the bare text "admin" also matches the
     // user-menu button, the username <code>, and the display-name cell).
-    // 15s (not the 5s default): with the shared session the page is reached
-    // immediately (no per-test login warm-up), so the first /users fetch is a
-    // cold query that can exceed 5s on a loaded runner — the sibling test that
-    // only checks the nav is unaffected because the shell renders instantly.
     await expect(
       page.getByRole("table").getByText("admin@axiam.dev")
-    ).toBeVisible({ timeout: 15_000 });
+    ).toBeVisible({ timeout: 30_000 });
   });
 
   test('"New User" button opens create modal with username/email/password fields', async ({

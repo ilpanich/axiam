@@ -31,3 +31,25 @@ pub(crate) fn validate_metadata_url(url: &str) -> Result<(), FederationError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_metadata_url_accepts_https() {
+        assert!(validate_metadata_url("https://idp.example.com/metadata").is_ok());
+    }
+
+    #[test]
+    fn validate_metadata_url_rejects_http() {
+        let err = validate_metadata_url("http://idp.example.com/metadata").unwrap_err();
+        assert!(matches!(err, FederationError::InvalidMetadataUrl(_)));
+    }
+
+    #[test]
+    fn validate_metadata_url_rejects_non_url() {
+        let err = validate_metadata_url("not a url").unwrap_err();
+        assert!(matches!(err, FederationError::InvalidMetadataUrl(_)));
+    }
+}

@@ -797,6 +797,7 @@ dependencies = [
  "prost",
  "secrecy",
  "serde",
+ "serde_json",
  "surrealdb",
  "tokio",
  "tokio-stream",
@@ -980,6 +981,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

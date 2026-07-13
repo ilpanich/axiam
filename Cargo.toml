@@ -102,7 +102,7 @@ utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 # PKI / X.509 / OpenPGP
 rcgen = "0.13"
 x509-parser = { version = "0.18", features = ["verify"] }
-pgp = "0.19"
+pgp = "0.20"
 pem = "3"
 
 # SAML

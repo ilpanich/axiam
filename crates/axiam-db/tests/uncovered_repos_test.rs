@@ -34,7 +34,6 @@ fn test_password() -> String {
     std::env::var("AXIAM_TEST_PASSWORD").unwrap_or_else(|_| ["Super", "Secret123!"].concat())
 }
 
-
 type Db = Surreal<surrealdb::engine::local::Db>;
 
 async fn setup() -> (Db, Uuid, Uuid) {

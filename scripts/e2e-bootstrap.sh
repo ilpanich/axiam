@@ -13,7 +13,7 @@
 # Environment variables (with E2E defaults):
 #   E2E_ORG_NAME      — organization name  (default: E2E Test Org)
 #   E2E_ORG_SLUG      — organization slug  (default: test-org)
-#   E2E_TENANT_NAME   — tenant name        (default: Default)
+#   E2E_TENANT_NAME   — tenant name        (default: E2E Default Tenant)
 #   E2E_TENANT_SLUG   — tenant slug        (default: default)
 #   E2E_ADMIN_EMAIL   — admin email        (default: admin@axiam.dev)
 #   E2E_ADMIN_PASSWORD — admin password    (default: Test@Admin123!)
@@ -23,7 +23,7 @@ set -euo pipefail
 
 ORG_NAME="${E2E_ORG_NAME:-E2E Test Org}"
 ORG_SLUG="${E2E_ORG_SLUG:-test-org}"
-TENANT_NAME="${E2E_TENANT_NAME:-Default}"
+TENANT_NAME="${E2E_TENANT_NAME:-E2E Default Tenant}"
 TENANT_SLUG="${E2E_TENANT_SLUG:-default}"
 ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
 ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-Test@Admin123!}"

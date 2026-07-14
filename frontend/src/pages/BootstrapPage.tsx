@@ -8,15 +8,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
 import { PublicLayout } from "@/components/layout/PublicLayout";
+import { slugify } from "@/lib/utils";
 import api from "@/lib/api";
 
 /**
- * BootstrapPage — first-run admin setup.
+ * BootstrapPage — first-run provisioning.
  *
- * Calls `POST /api/v1/admin/bootstrap` with the organization/tenant IDs
- * and the admin credentials. Renders inline error states for the three
- * documented failure modes (403 wrong email, 404 already initialized,
- * generic 4xx/5xx) and redirects to `/login?bootstrapped=1` on success.
+ * On a brand-new deployment nothing exists yet, so this page collects the
+ * organization, the default tenant and the admin credentials and posts them to
+ * `POST /api/v1/admin/bootstrap`, which creates all three in one call. When the
+ * `AXIAM_BOOTSTRAP_ADMIN_EMAIL` env gate is not set, the server mints a one-time
+ * setup token at first boot (logged once) — paste it into the Setup token field.
+ * On success it redirects to `/login` with the org/tenant slugs pre-filled.
  */
 interface BootstrapErrorResponse {
   message?: string;
@@ -26,11 +29,17 @@ interface BootstrapErrorResponse {
 export function BootstrapPage() {
   const navigate = useNavigate();
 
-  const [orgId, setOrgId] = useState("");
-  const [tenantId, setTenantId] = useState("");
+  const [orgName, setOrgName] = useState("");
+  const [orgSlug, setOrgSlug] = useState("");
+  const [tenantName, setTenantName] = useState("Default");
+  const [tenantSlug, setTenantSlug] = useState("default");
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [setupToken, setSetupToken] = useState("");
+
+  const [orgSlugTouched, setOrgSlugTouched] = useState(false);
+  const [tenantSlugTouched, setTenantSlugTouched] = useState(false);
 
   const [isLoading, setIsLoading] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
@@ -45,19 +54,32 @@ export function BootstrapPage() {
     };
   }, []);
 
+  const handleOrgNameChange = (v: string) => {
+    setOrgName(v);
+    if (!orgSlugTouched) setOrgSlug(slugify(v));
+  };
+
+  const handleTenantNameChange = (v: string) => {
+    setTenantName(v);
+    if (!tenantSlugTouched) setTenantSlug(slugify(v));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setEmailError(null);
     setFormError(null);
 
+    const effectiveOrgSlug = orgSlug.trim() || slugify(orgName);
+    const effectiveTenantSlug = tenantSlug.trim() || slugify(tenantName) || "default";
+
     if (
-      !orgId.trim() ||
-      !tenantId.trim() ||
+      !orgName.trim() ||
+      !effectiveOrgSlug ||
       !email.trim() ||
       !username.trim() ||
       !password.trim()
     ) {
-      setFormError("All fields are required.");
+      setFormError("Organization, email, username and password are required.");
       return;
     }
 
@@ -69,27 +91,35 @@ export function BootstrapPage() {
     setIsLoading(true);
     try {
       await api.post("/api/v1/admin/bootstrap", {
-        org_id: orgId.trim(),
-        tenant_id: tenantId.trim(),
+        organization_name: orgName.trim(),
+        organization_slug: effectiveOrgSlug,
+        tenant_name: tenantName.trim() || "Default",
+        tenant_slug: effectiveTenantSlug,
         email: email.trim(),
         username: username.trim(),
         password,
+        ...(setupToken.trim() ? { setup_token: setupToken.trim() } : {}),
       });
-      navigate("/login?bootstrapped=1");
+      const params = new URLSearchParams({
+        bootstrapped: "1",
+        org: effectiveOrgSlug,
+        tenant: effectiveTenantSlug,
+      });
+      navigate(`/login?${params.toString()}`);
     } catch (err) {
       const axiosErr = err as AxiosError<BootstrapErrorResponse>;
       const status = axiosErr.response?.status;
       if (status === 403) {
         setEmailError(
-          "This email address is not authorized for bootstrap.",
+          "Bootstrap is not authorized. Check the email gate or paste a valid setup token.",
         );
-      } else if (status === 404) {
+      } else if (status === 409) {
         setAlreadyInitialized(true);
       } else {
         const msg =
           axiosErr.response?.data?.message ??
           axiosErr.response?.data?.error ??
-          "Could not create admin account. Verify the server is running and check the server logs.";
+          "Could not initialize AXIAM. Verify the server is running and check the server logs.";
         setFormError(msg);
       }
     } finally {
@@ -125,7 +155,8 @@ export function BootstrapPage() {
           Initialize AXIAM
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          No admin users exist. Create the first administrator to get started.
+          Create your organization, its default tenant and the first
+          administrator to get started.
         </p>
       </div>
 
@@ -142,29 +173,66 @@ export function BootstrapPage() {
       <form onSubmit={handleSubmit} noValidate>
         <div className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="bootstrap-org-id">Organization ID</Label>
+            <Label htmlFor="bootstrap-org-name">Organization name</Label>
             <Input
-              id="bootstrap-org-id"
+              id="bootstrap-org-name"
               type="text"
-              placeholder="00000000-0000-0000-0000-000000000000"
-              value={orgId}
-              onChange={(e) => setOrgId(e.target.value)}
-              autoComplete="off"
+              placeholder="Acme Corporation"
+              value={orgName}
+              onChange={(e) => handleOrgNameChange(e.target.value)}
+              autoComplete="organization"
+              autoFocus
               required
             />
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="bootstrap-tenant-id">Tenant ID</Label>
+            <Label htmlFor="bootstrap-org-slug">Organization slug</Label>
             <Input
-              id="bootstrap-tenant-id"
+              id="bootstrap-org-slug"
               type="text"
-              placeholder="00000000-0000-0000-0000-000000000000"
-              value={tenantId}
-              onChange={(e) => setTenantId(e.target.value)}
+              placeholder="acme"
+              value={orgSlug}
+              onChange={(e) => {
+                setOrgSlugTouched(true);
+                setOrgSlug(slugify(e.target.value));
+              }}
               autoComplete="off"
               required
             />
+            <p className="text-xs text-muted-foreground">
+              Used to sign in. Lowercase letters, numbers and dashes.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label htmlFor="bootstrap-tenant-name">Tenant name</Label>
+              <Input
+                id="bootstrap-tenant-name"
+                type="text"
+                placeholder="Default"
+                value={tenantName}
+                onChange={(e) => handleTenantNameChange(e.target.value)}
+                autoComplete="off"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="bootstrap-tenant-slug">Tenant slug</Label>
+              <Input
+                id="bootstrap-tenant-slug"
+                type="text"
+                placeholder="default"
+                value={tenantSlug}
+                onChange={(e) => {
+                  setTenantSlugTouched(true);
+                  setTenantSlug(slugify(e.target.value));
+                }}
+                autoComplete="off"
+                required
+              />
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -221,6 +289,24 @@ export function BootstrapPage() {
               </div>
             )}
           </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="bootstrap-setup-token">
+              Setup token{" "}
+              <span className="text-muted-foreground">(if required)</span>
+            </Label>
+            <Input
+              id="bootstrap-setup-token"
+              type="text"
+              placeholder="From the server's first-boot logs"
+              value={setupToken}
+              onChange={(e) => setSetupToken(e.target.value)}
+              autoComplete="off"
+            />
+            <p className="text-xs text-muted-foreground">
+              Required unless the server sets AXIAM_BOOTSTRAP_ADMIN_EMAIL.
+            </p>
+          </div>
         </div>
 
         <Button
@@ -232,7 +318,7 @@ export function BootstrapPage() {
           {isLoading ? (
             <Loader2 size={14} className="animate-spin" aria-hidden="true" />
           ) : (
-            "Create Admin Account"
+            "Create Organization & Admin"
           )}
         </Button>
       </form>

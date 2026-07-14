@@ -1,13 +1,21 @@
 //! Admin bootstrap endpoint — first-run setup.
 //!
-//! Creates the initial admin user and seeds default roles when no admin
-//! exists. First-super-admin creation is atomic (SECHRD-04 / SEC-049 /
-//! D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same
-//! transaction that creates the admin user means two concurrent first-run
-//! requests can create AT MOST ONE super-admin — the loser gets
+//! On a brand-new deployment the database is empty: there are no organizations,
+//! tenants or users. This endpoint performs the entire first-run provisioning
+//! in one call — it creates the **organization**, the **default tenant**, seeds
+//! the permission set and default roles, and creates the initial **admin user**
+//! bound to the super-admin role. Org/tenant creation is get-or-create by slug
+//! so a retry after a transient failure reuses them.
+//!
+//! It is a one-shot operation. First-super-admin creation is atomic (SECHRD-04
+//! / SEC-049 / D-03c): a uniqueness-invariant `bootstrap_lock:global` CREATE
+//! inside the same transaction that creates the admin user means two concurrent
+//! first-run requests can create AT MOST ONE super-admin — the loser gets
 //! `AxiamError::AlreadyExists` (409) and its whole transaction rolls back.
-//! After the first admin is created, every subsequent call also hits the
-//! same `bootstrap_lock` uniqueness violation and is refused with 409.
+//! After the first admin is created, every subsequent call also hits the same
+//! `bootstrap_lock:global` uniqueness violation and is refused with 409.
+//! Additional organizations/tenants are created afterwards through the
+//! authenticated admin API.
 //!
 //! The endpoint is also gated (D-03a): a request is refused (fail-closed,
 //! no admin created) unless EITHER `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set and
@@ -18,6 +26,8 @@
 use actix_web::{HttpResponse, web};
 use axiam_auth::password;
 use axiam_core::error::AxiamError;
+use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::tenant::CreateTenant;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::{seed_default_roles, seed_permissions};
 use chrono::{DateTime, Utc};
@@ -37,15 +47,48 @@ use crate::state::AppState;
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BootstrapRequest {
-    pub org_id: Uuid,
-    pub tenant_id: Uuid,
+    /// Display name of the organization to create (required). On a fresh
+    /// deployment nothing exists yet, so bootstrap provisions the org and its
+    /// default tenant itself rather than requiring pre-existing IDs.
+    pub organization_name: String,
+    /// URL-safe slug for the organization. Derived from `organization_name`
+    /// when omitted or blank.
+    #[serde(default)]
+    pub organization_slug: Option<String>,
+    /// Display name of the default tenant. Defaults to `"Default"`.
+    #[serde(default)]
+    pub tenant_name: Option<String>,
+    /// URL-safe slug for the default tenant. Defaults to `"default"`.
+    #[serde(default)]
+    pub tenant_slug: Option<String>,
+    /// Admin email address.
     pub email: String,
+    /// Admin username.
     pub username: String,
+    /// Admin password (hashed with Argon2id before storage).
     pub password: String,
     /// One-time first-run setup token (D-03a/D-03b). Required when
     /// `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is not set; ignored otherwise.
     #[serde(default)]
     pub setup_token: Option<String>,
+}
+
+/// Convert an arbitrary display name into a URL-safe slug: ASCII alphanumerics
+/// are lower-cased, every other run of characters collapses to a single `-`,
+/// and leading/trailing dashes are trimmed.
+fn slugify(input: &str) -> String {
+    let mut slug = String::with_capacity(input.len());
+    for ch in input.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
 }
 
 // -----------------------------------------------------------------------
@@ -62,6 +105,12 @@ struct SetupTokenRow {
 struct ConsumedTokenRow {
     #[allow(dead_code)]
     consumed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, SurrealValue)]
+struct BootstrapLockRow {
+    #[allow(dead_code)]
+    locked_at: DateTime<Utc>,
 }
 
 /// sha256 hex hash of `token`.
@@ -106,6 +155,10 @@ async fn setup_token_is_valid<C: Connection + Clone>(
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BootstrapResponse {
     pub message: String,
+    pub organization_id: Uuid,
+    pub organization_slug: String,
+    pub tenant_id: Uuid,
+    pub tenant_slug: String,
     pub user_id: Uuid,
 }
 
@@ -132,10 +185,10 @@ pub struct BootstrapResponse {
     tag = "admin",
     request_body = BootstrapRequest,
     responses(
-        (status = 201, description = "Admin user created", body = BootstrapResponse),
+        (status = 201, description = "Organization, tenant and admin user created", body = BootstrapResponse),
+        (status = 400, description = "Invalid request (missing required fields)"),
         (status = 403, description = "Bootstrap gate not satisfied (email mismatch or invalid/missing setup token)"),
-        (status = 409, description = "Bootstrap already completed for this tenant"),
-        (status = 400, description = "Organization or tenant not found"),
+        (status = 409, description = "Bootstrap already completed"),
     )
 )]
 pub async fn bootstrap<C: Connection + Clone>(
@@ -189,29 +242,102 @@ pub async fn bootstrap<C: Connection + Clone>(
         }
     }
 
-    // 2. Verify org and tenant exist.
-    state.org_repo.get_by_id(req.org_id).await.map_err(|_| {
-        AxiamApiError(AxiamError::Validation {
-            message: "organization not found".into(),
-        })
-    })?;
-    state
-        .tenant_repo
-        .get_by_id(req.tenant_id)
-        .await
-        .map_err(|_| {
-            AxiamApiError(AxiamError::Validation {
-                message: "tenant not found".into(),
-            })
-        })?;
+    // 2. Validate required fields and derive slugs.
+    if req.organization_name.trim().is_empty()
+        || req.email.trim().is_empty()
+        || req.username.trim().is_empty()
+        || req.password.is_empty()
+    {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: "organization_name, email, username and password are required".into(),
+        }));
+    }
+    let org_slug = req
+        .organization_slug
+        .as_deref()
+        .map(slugify)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| slugify(&req.organization_name));
+    if org_slug.is_empty() {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: "organization_name must contain at least one alphanumeric character".into(),
+        }));
+    }
+    let tenant_name = req
+        .tenant_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Default")
+        .to_string();
+    let tenant_slug = req
+        .tenant_slug
+        .as_deref()
+        .map(slugify)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let s = slugify(&tenant_name);
+            if s.is_empty() { "default".into() } else { s }
+        });
 
-    // 3. Seed permissions (idempotent).
-    seed_permissions(&state.db, req.tenant_id, PERMISSION_REGISTRY)
+    // 3. Fast-fail one-shot gate: if the global bootstrap lock already exists
+    //    the system has been initialized. The authoritative guard is the
+    //    `bootstrap_lock:global` CREATE inside the atomic transaction below;
+    //    this pre-check just avoids creating a duplicate org on a call that is
+    //    going to be refused anyway.
+    let existing_lock: Vec<BootstrapLockRow> = state
+        .db
+        .query("SELECT locked_at FROM type::record('bootstrap_lock', 'global')")
+        .await
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?
+        .take(0)
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+    if !existing_lock.is_empty() {
+        return Err(AxiamApiError(AxiamError::AlreadyExists {
+            entity: "bootstrap".into(),
+        }));
+    }
+
+    // 4. Provision the organization and default tenant. Get-or-create by slug
+    //    so a retry after a transient mid-flight failure reuses the same
+    //    org/tenant instead of leaking duplicates (the `bootstrap_lock:global`
+    //    invariant below still guarantees exactly one successful bootstrap).
+    let org = match state.org_repo.get_by_slug(&org_slug).await {
+        Ok(o) => o,
+        Err(_) => state
+            .org_repo
+            .create(CreateOrganization {
+                name: req.organization_name.trim().to_string(),
+                slug: org_slug.clone(),
+                metadata: None,
+            })
+            .await
+            .map_err(|e| {
+                AxiamApiError(AxiamError::Internal(format!("create organization: {e}")))
+            })?,
+    };
+    let tenant = match state.tenant_repo.get_by_slug(org.id, &tenant_slug).await {
+        Ok(t) => t,
+        Err(_) => state
+            .tenant_repo
+            .create(CreateTenant {
+                organization_id: org.id,
+                name: tenant_name,
+                slug: tenant_slug.clone(),
+                metadata: None,
+            })
+            .await
+            .map_err(|e| AxiamApiError(AxiamError::Internal(format!("create tenant: {e}"))))?,
+    };
+    let tenant_id = tenant.id;
+
+    // 5. Seed permissions (idempotent).
+    seed_permissions(&state.db, tenant_id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
-    // 4. Seed default roles and get their IDs.
-    let seed_result = seed_default_roles(&state.db, req.tenant_id, PERMISSION_REGISTRY)
+    // 6. Seed default roles and get their IDs.
+    let seed_result = seed_default_roles(&state.db, tenant_id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
@@ -237,7 +363,7 @@ pub async fn bootstrap<C: Connection + Clone>(
     let user_id = Uuid::new_v4();
     let user_id_str = user_id.to_string();
     let role_id_str = seed_result.super_admin_role_id.to_string();
-    let tenant_id_str = req.tenant_id.to_string();
+    let tenant_id_str = tenant_id.to_string();
     let ph_id_str = Uuid::new_v4().to_string();
 
     let password_hash = password::hash_password(&req.password, None)
@@ -245,9 +371,13 @@ pub async fn bootstrap<C: Connection + Clone>(
 
     // The RELATE uses backtick record IDs (required when type::record() is not
     // supported inside RELATE per SurrealDB v3 quirk).
+    // The `bootstrap_lock:global` CREATE is the global one-shot invariant: a
+    // concurrent OR sequential second bootstrap hits a UNIQUE record-ID
+    // violation here and its whole transaction rolls back — no partial admin,
+    // no duplicate super-admin.
     let mut txn_stmts = vec![
         "BEGIN TRANSACTION".to_string(),
-        "CREATE type::record('bootstrap_lock', $tenant_id) SET locked_at = time::now()".to_string(),
+        "CREATE type::record('bootstrap_lock', 'global') SET locked_at = time::now()".to_string(),
         "CREATE type::record('user', $user_id) SET \
            tenant_id = $tenant_id, \
            username = $username, email = $email, \
@@ -317,7 +447,12 @@ pub async fn bootstrap<C: Connection + Clone>(
 
     // 7. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
     Ok(HttpResponse::Created().json(BootstrapResponse {
-        message: "Admin user created. Login via /api/v1/auth/login.".into(),
+        message: "Organization, tenant and admin user created. Login via /api/v1/auth/login."
+            .into(),
+        organization_id: org.id,
+        organization_slug: org_slug,
+        tenant_id,
+        tenant_slug,
         user_id,
     }))
 }

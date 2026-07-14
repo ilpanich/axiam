@@ -16,13 +16,24 @@ import { renderWithProviders } from "@/test/renderWithProviders";
 
 const STRONG_PASSWORD = "StrongPass1!";
 
+// Typing the organization name auto-derives the org slug ("Acme Corp" ->
+// "acme-corp"); the tenant name/slug default to "Default"/"default".
 async function fillValidForm() {
-  await userEvent.type(screen.getByLabelText("Organization ID"), "org-1");
-  await userEvent.type(screen.getByLabelText("Tenant ID"), "tenant-1");
+  await userEvent.type(screen.getByLabelText("Organization name"), "Acme Corp");
   await userEvent.type(screen.getByLabelText("Email address"), "admin@example.com");
   await userEvent.type(screen.getByLabelText("Username"), "admin");
   await userEvent.type(screen.getByLabelText("Password"), STRONG_PASSWORD);
 }
+
+const EXPECTED_PAYLOAD = {
+  organization_name: "Acme Corp",
+  organization_slug: "acme-corp",
+  tenant_name: "Default",
+  tenant_slug: "default",
+  email: "admin@example.com",
+  username: "admin",
+  password: STRONG_PASSWORD,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -35,16 +46,20 @@ describe("BootstrapPage", () => {
       screen.getByRole("heading", { name: "Initialize AXIAM" })
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Create Admin Account" })
+      screen.getByRole("button", { name: "Create Organization & Admin" })
     ).toBeInTheDocument();
   });
 
-  it("requires all fields before submitting", async () => {
+  it("requires the core fields before submitting", async () => {
     renderWithProviders(<BootstrapPage />);
     await userEvent.click(
-      screen.getByRole("button", { name: "Create Admin Account" })
+      screen.getByRole("button", { name: "Create Organization & Admin" })
     );
-    expect(await screen.findByText("All fields are required.")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "Organization, email, username and password are required."
+      )
+    ).toBeInTheDocument();
     expect(apiMock.post).not.toHaveBeenCalled();
   });
 
@@ -56,13 +71,12 @@ describe("BootstrapPage", () => {
 
   it("rejects a password that does not meet policy", async () => {
     renderWithProviders(<BootstrapPage />);
-    await userEvent.type(screen.getByLabelText("Organization ID"), "org-1");
-    await userEvent.type(screen.getByLabelText("Tenant ID"), "tenant-1");
+    await userEvent.type(screen.getByLabelText("Organization name"), "Acme Corp");
     await userEvent.type(screen.getByLabelText("Email address"), "admin@example.com");
     await userEvent.type(screen.getByLabelText("Username"), "admin");
     await userEvent.type(screen.getByLabelText("Password"), "weak");
     await userEvent.click(
-      screen.getByRole("button", { name: "Create Admin Account" })
+      screen.getByRole("button", { name: "Create Organization & Admin" })
     );
     expect(
       await screen.findByText("Password does not meet the requirements.")
@@ -71,22 +85,37 @@ describe("BootstrapPage", () => {
   });
 
   it("submits the bootstrap request and navigates on success", async () => {
-    apiMock.post.mockResolvedValue(res({ id: "admin-1" }));
+    apiMock.post.mockResolvedValue(res({ user_id: "admin-1" }));
     renderWithProviders(<BootstrapPage />);
     await fillValidForm();
     await userEvent.click(
-      screen.getByRole("button", { name: "Create Admin Account" })
+      screen.getByRole("button", { name: "Create Organization & Admin" })
+    );
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/admin/bootstrap",
+        EXPECTED_PAYLOAD
+      )
+    );
+    expect(navigate).toHaveBeenCalledWith(
+      "/login?bootstrapped=1&org=acme-corp&tenant=default"
+    );
+  });
+
+  it("includes the setup token when provided", async () => {
+    apiMock.post.mockResolvedValue(res({ user_id: "admin-1" }));
+    renderWithProviders(<BootstrapPage />);
+    await fillValidForm();
+    await userEvent.type(screen.getByLabelText(/Setup token/), "tok-123");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Create Organization & Admin" })
     );
     await waitFor(() =>
       expect(apiMock.post).toHaveBeenCalledWith("/api/v1/admin/bootstrap", {
-        org_id: "org-1",
-        tenant_id: "tenant-1",
-        email: "admin@example.com",
-        username: "admin",
-        password: STRONG_PASSWORD,
+        ...EXPECTED_PAYLOAD,
+        setup_token: "tok-123",
       })
     );
-    expect(navigate).toHaveBeenCalledWith("/login?bootstrapped=1");
   });
 
   it("shows a busy state while the request is in flight", async () => {
@@ -99,38 +128,38 @@ describe("BootstrapPage", () => {
     renderWithProviders(<BootstrapPage />);
     await fillValidForm();
     const submitButton = screen.getByRole("button", {
-      name: "Create Admin Account",
+      name: "Create Organization & Admin",
     });
     await userEvent.click(submitButton);
     await waitFor(() =>
       expect(submitButton).toHaveAttribute("aria-busy", "true")
     );
     expect(submitButton).toBeDisabled();
-    resolvePost(res({ id: "admin-1" }));
+    resolvePost(res({ user_id: "admin-1" }));
     await waitFor(() => expect(navigate).toHaveBeenCalled());
   });
 
-  it("shows an email-authorization error on 403", async () => {
+  it("shows an authorization error on 403", async () => {
     apiMock.post.mockRejectedValue({ response: { status: 403 } });
     renderWithProviders(<BootstrapPage />);
     await fillValidForm();
     await userEvent.click(
-      screen.getByRole("button", { name: "Create Admin Account" })
+      screen.getByRole("button", { name: "Create Organization & Admin" })
     );
     expect(
       await screen.findByText(
-        "This email address is not authorized for bootstrap."
+        "Bootstrap is not authorized. Check the email gate or paste a valid setup token."
       )
     ).toBeInTheDocument();
     expect(navigate).not.toHaveBeenCalled();
   });
 
-  it("shows the already-initialized view on 404 and links back to sign in", async () => {
-    apiMock.post.mockRejectedValue({ response: { status: 404 } });
+  it("shows the already-initialized view on 409 and links back to sign in", async () => {
+    apiMock.post.mockRejectedValue({ response: { status: 409 } });
     renderWithProviders(<BootstrapPage />);
     await fillValidForm();
     await userEvent.click(
-      screen.getByRole("button", { name: "Create Admin Account" })
+      screen.getByRole("button", { name: "Create Organization & Admin" })
     );
     expect(
       await screen.findByRole("heading", { name: "Already Initialized" })
@@ -147,7 +176,7 @@ describe("BootstrapPage", () => {
     renderWithProviders(<BootstrapPage />);
     await fillValidForm();
     await userEvent.click(
-      screen.getByRole("button", { name: "Create Admin Account" })
+      screen.getByRole("button", { name: "Create Organization & Admin" })
     );
     expect(await screen.findByText("Bootstrap failed")).toBeInTheDocument();
   });
@@ -159,7 +188,7 @@ describe("BootstrapPage", () => {
     const { unmount } = renderWithProviders(<BootstrapPage />);
     await fillValidForm();
     await userEvent.click(
-      screen.getByRole("button", { name: "Create Admin Account" })
+      screen.getByRole("button", { name: "Create Organization & Admin" })
     );
     expect(await screen.findByText("err-field")).toBeInTheDocument();
     unmount();
@@ -170,11 +199,11 @@ describe("BootstrapPage", () => {
     renderWithProviders(<BootstrapPage />);
     await fillValidForm();
     await userEvent.click(
-      screen.getByRole("button", { name: "Create Admin Account" })
+      screen.getByRole("button", { name: "Create Organization & Admin" })
     );
     expect(
       await screen.findByText(
-        "Could not create admin account. Verify the server is running and check the server logs."
+        "Could not initialize AXIAM. Verify the server is running and check the server logs."
       )
     ).toBeInTheDocument();
   });

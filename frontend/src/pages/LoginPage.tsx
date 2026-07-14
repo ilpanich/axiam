@@ -52,19 +52,33 @@ export function LoginPage() {
   );
 
   useEffect(() => {
-    if (searchParams.get("bootstrapped") === "1") {
-      // Strip the query param so a refresh doesn't re-show the notice.
+    if (
+      searchParams.get("bootstrapped") === "1" ||
+      searchParams.get("org") ||
+      searchParams.get("tenant")
+    ) {
+      // Strip the query params so a refresh doesn't re-show the notice or
+      // re-seed the workspace fields.
       const next = new URLSearchParams(searchParams);
       next.delete("bootstrapped");
+      next.delete("org");
+      next.delete("tenant");
       setSearchParams(next, { replace: true });
     }
   }, [searchParams, setSearchParams]);
 
-  const [step, setStep] = useState<LoginStep>("org-tenant");
-  const [orgTenantData, setOrgTenantData] = useState<OrgTenantData>({
-    orgSlug: "",
-    tenantSlug: "",
-  });
+  // After bootstrap, /login?bootstrapped=1&org=…&tenant=… pre-fills the
+  // workspace and jumps straight to the credentials step. Lazy initializers
+  // read the initial URL once (no setState in an effect).
+  const [step, setStep] = useState<LoginStep>(() =>
+    searchParams.get("org") || searchParams.get("tenant")
+      ? "credentials"
+      : "org-tenant"
+  );
+  const [orgTenantData, setOrgTenantData] = useState<OrgTenantData>(() => ({
+    orgSlug: searchParams.get("org") ?? "",
+    tenantSlug: searchParams.get("tenant") ?? "",
+  }));
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");

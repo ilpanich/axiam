@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "eslint .",
+    "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run",
     "test:e2e": "playwright test",
@@ -30,7 +30,6 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "^4.3.2",
     "@testing-library/dom": "^10.4.1",
@@ -42,17 +41,13 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "@vitest/coverage-v8": "^4.1.8",
-    "eslint": "^10.7.0",
-    "eslint-plugin-react-hooks": "7.1.1",
-    "eslint-plugin-react-refresh": "^0.5.3",
-    "globals": "^17.7.0",
     "jsdom": "^29.1.1",
     "postcss": "^8.5.19",
     "tailwindcss": "^4.3.2",
-    "typescript": "~5.9.3",
-    "typescript-eslint": "^8.64.0",
+    "typescript": "^7.0.2",
     "vite": "^8.1.4",
     "vite-plugin-sri3": "^2.0.0",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.8",
+    "oxlint": "^1.74.0"
   }
 }

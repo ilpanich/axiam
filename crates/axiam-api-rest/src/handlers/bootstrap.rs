@@ -447,7 +447,8 @@ pub async fn bootstrap<C: Connection + Clone>(
 
     // 7. Return 201 — no token (user must login via /api/v1/auth/login, per D-11).
     Ok(HttpResponse::Created().json(BootstrapResponse {
-        message: "Organization, tenant and admin user created. Login via /api/v1/auth/login.".into(),
+        message: "Organization, tenant and admin user created. Login via /api/v1/auth/login."
+            .into(),
         organization_id: org.id,
         organization_slug: org_slug,
         tenant_id,

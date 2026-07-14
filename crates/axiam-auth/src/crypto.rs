@@ -11,9 +11,8 @@
 //!
 //! Both variants use a fresh 12-byte nonce from `OsRng` and AES-256-GCM.
 
-use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::Aes256Gcm;
+use aes_gcm::aead::{Aead, Generate, KeyInit, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hmac::{Hmac, Mac};
@@ -29,7 +28,10 @@ type HmacSha256 = Hmac<Sha256>;
 // ---------------------------------------------------------------------------
 
 fn build_cipher(key: &[u8; 32]) -> Aes256Gcm {
-    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key))
+    // 32-byte key is guaranteed by the `[u8; 32]` type — `new_from_slice`
+    // cannot fail here. Behavior is identical to the previous
+    // `Aes256Gcm::new(Key::from_slice(key))` (same key schedule).
+    Aes256Gcm::new_from_slice(key).expect("AES-256-GCM key must be exactly 32 bytes")
 }
 
 // ---------------------------------------------------------------------------
@@ -44,15 +46,15 @@ fn build_cipher(key: &[u8; 32]) -> Aes256Gcm {
 /// TOTP secret storage — do **not** change the layout.
 pub fn aes256gcm_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<String, AuthError> {
     let cipher = build_cipher(key);
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    // Fresh 12-byte random nonce from the system CSPRNG (getrandom-backed),
+    // same source and layout as before.
+    let nonce = Nonce::<Aes256Gcm>::generate();
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| AuthError::Crypto(format!("AES-GCM encrypt: {e}")))?;
 
-    let mut combined = nonce_bytes.to_vec();
+    let mut combined = nonce.to_vec();
     combined.extend_from_slice(&ciphertext);
     Ok(STANDARD.encode(combined))
 }
@@ -71,10 +73,11 @@ pub fn aes256gcm_decrypt(key: &[u8; 32], encoded: &str) -> Result<Vec<u8>, AuthE
 
     let (nonce_bytes, ciphertext) = combined.split_at(12);
     let cipher = build_cipher(key);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = Nonce::<Aes256Gcm>::try_from(nonce_bytes)
+        .expect("split_at(12) yields exactly 12 nonce bytes");
 
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| AuthError::Crypto(format!("AES-GCM decrypt: {e}")))
 }
 
@@ -96,15 +99,13 @@ pub fn aes256gcm_decrypt(key: &[u8; 32], encoded: &str) -> Result<Vec<u8>, AuthE
 /// Always use matching encrypt/decrypt pairs.
 pub fn encrypt_separate(key: &[u8; 32], plaintext: &[u8]) -> Result<(String, String), AuthError> {
     let cipher = build_cipher(key);
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::<Aes256Gcm>::generate();
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| AuthError::Crypto(format!("AES-GCM encrypt: {e}")))?;
 
-    let nonce_b64 = STANDARD.encode(nonce_bytes);
+    let nonce_b64 = STANDARD.encode(&nonce[..]);
     let ct_b64 = STANDARD.encode(&ciphertext);
     Ok((nonce_b64, ct_b64))
 }
@@ -133,10 +134,11 @@ pub fn decrypt_separate(
     }
 
     let cipher = build_cipher(key);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::<Aes256Gcm>::try_from(nonce_bytes.as_slice())
+        .expect("nonce length validated to be 12 bytes above");
 
     cipher
-        .decrypt(nonce, ciphertext.as_slice())
+        .decrypt(&nonce, ciphertext.as_slice())
         .map_err(|e| AuthError::Crypto(format!("AES-GCM decrypt: {e}")))
 }
 
@@ -156,7 +158,8 @@ pub fn decrypt_separate(
 /// - **Per-tenant**: `tenant_id` is part of the HMAC input, so the same
 ///   `user_id` in two different tenants produces different pseudonyms.
 pub fn gdpr_pseudonym(pepper: &[u8; 32], tenant_id: Uuid, user_id: Uuid) -> String {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(pepper).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(pepper).expect("HMAC accepts any key length");
     mac.update(tenant_id.as_bytes());
     mac.update(user_id.as_bytes());
     let tag = mac.finalize().into_bytes();

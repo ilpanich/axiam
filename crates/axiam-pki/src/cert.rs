@@ -8,7 +8,7 @@ use axiam_core::repository::{
     CaCertificateRepository, CertificateRepository, PaginatedResult, Pagination,
 };
 use chrono::{Duration, Utc};
-use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
+use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -141,16 +141,15 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 // must not linger in the heap buffer (defense-in-depth).
                 ca_private_key_pem.zeroize();
 
-                // Reconstruct the signing CA from its real, stored certificate PEM —
-                // NOT from the (mutable) `subject` field — so the issuer DN embedded
-                // in every leaf cert can never drift from the CA's actual Subject DN
-                // (QUAL-05/D-08, T-29-11).
-                let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem).map_err(|e| {
+                // Reconstruct the signing CA issuer from its real, stored certificate
+                // PEM — NOT from the (mutable) `subject` field — so the issuer DN
+                // embedded in every leaf cert can never drift from the CA's actual
+                // Subject DN (QUAL-05/D-08, T-29-11). rcgen 0.14 folds the previous
+                // from_ca_cert_pem + self_signed reconstruction into a single
+                // `Issuer` that carries the CA's DN/key-id/key-usages plus its key.
+                let ca_issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, &ca_key_pair).map_err(|e| {
                     AxiamError::Certificate(format!("invalid CA certificate PEM: {e}"))
                 })?;
-                let ca_certificate = ca_params
-                    .self_signed(&ca_key_pair)
-                    .map_err(|e| AxiamError::Certificate(format!("CA self-sign failed: {e}")))?;
 
                 // Generate end-entity key pair.
                 let ee_key_pair = generate_keypair(&key_algorithm)?;
@@ -169,7 +168,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     .expect("valid timestamp");
 
                 let cert = ee_params
-                    .signed_by(&ee_key_pair, &ca_certificate, &ca_key_pair)
+                    .signed_by(&ee_key_pair, &ca_issuer)
                     .map_err(|e| {
                         AxiamError::Certificate(format!("certificate signing failed: {e}"))
                     })?;

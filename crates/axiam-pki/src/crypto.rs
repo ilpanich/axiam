@@ -7,8 +7,8 @@
 //! generation produces a distinct `PgpKeyAlgorithm` + `user_id` -> `SignedSecretKey`
 //! type that is not X.509/rcgen-based and must not be merged into this module.
 
-use aes_gcm::aead::{Aead, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
+use aes_gcm::Aes256Gcm;
+use aes_gcm::aead::{Aead, Generate, KeyInit, Nonce};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::KeyAlgorithm;
 use rcgen::KeyPair;
@@ -33,9 +33,11 @@ pub(crate) fn compute_fingerprint(der: &[u8]) -> String {
 /// Encrypt data with AES-256-GCM. The 12-byte nonce is prepended to the
 /// ciphertext so the caller doesn't need to store it separately.
 pub(crate) fn encrypt_secret(plaintext: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<Vec<u8>> {
-    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let cipher = Aes256Gcm::new_from_slice(key_bytes)
+        .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM key: {e}")))?;
+    // Fresh 12-byte random nonce from the system CSPRNG (getrandom-backed),
+    // same length and prepend layout as before.
+    let nonce = Nonce::<Aes256Gcm>::generate();
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM encryption failed: {e}")))?;
@@ -54,10 +56,11 @@ pub(crate) fn decrypt_secret(data: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<V
         ));
     }
     let (nonce_bytes, ciphertext) = data.split_at(12);
-    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = Aes256Gcm::new_from_slice(key_bytes)
+        .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM key: {e}")))?;
+    let nonce = Nonce::<Aes256Gcm>::try_from(nonce_bytes)
+        .map_err(|e| AxiamError::Crypto(format!("invalid nonce length: {e}")))?;
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM decryption failed: {e}")))
 }

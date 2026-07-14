@@ -10,6 +10,12 @@ rust-version.workspace = true
 [dependencies]
 axiam-core = { workspace = true }
 argon2 = { workspace = true }
+# argon2 re-exports `password-hash`; its `getrandom` feature provides
+# `password_hash::rand_core::OsRng` used by `SaltString::generate` in
+# password.rs. This feature was previously pulled in transitively by
+# aes-gcm 0.10's `aead` (rand_core/getrandom); aes-gcm 0.11 no longer does,
+# so it is requested explicitly here to keep salt generation unchanged.
+password-hash = { version = "0.5", features = ["getrandom"] }
 jsonwebtoken = { workspace = true }
 totp-rs = { workspace = true }
 rand = { workspace = true }

@@ -65,10 +65,10 @@ jsonwebtoken = "10"
 argon2 = "0.5"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 rand = "0.10"
-hmac = "0.12"
-hkdf = "0.12"
+hmac = "0.13"
+hkdf = "0.13"
 sha1 = "0.11"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"
@@ -76,7 +76,7 @@ subtle = "2"
 base64 = "0.22"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 webauthn-rs-proto = "0.5"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 zeroize = "1"
 secrecy = { version = "0.10", features = ["serde"] }
@@ -100,7 +100,7 @@ utoipa = { version = "5", features = ["actix_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 
 # PKI / X.509 / OpenPGP
-rcgen = "0.13"
+rcgen = "0.14"
 x509-parser = { version = "0.18", features = ["verify"] }
 pgp = "0.20"
 pem = "3"

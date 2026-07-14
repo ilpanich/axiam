@@ -15,7 +15,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
+use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use x509_parser::prelude::parse_x509_certificate;
 
 /// Generate a self-signed CA cert + one leaf cert signed by it, returning
@@ -30,6 +30,9 @@ fn build_fixtures() -> (Vec<u8>, Vec<u8>) {
     let ca_cert = ca_params
         .self_signed(&ca_key_pair)
         .expect("CA self-sign must succeed");
+    // rcgen 0.14: leaf signing takes an `Issuer` (CA params + signing key)
+    // instead of the previous (public_key, issuer_cert, issuer_key) triple.
+    let ca_issuer = Issuer::from_params(&ca_params, &ca_key_pair);
 
     let leaf_key_pair =
         KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("leaf keygen must succeed");
@@ -40,7 +43,7 @@ fn build_fixtures() -> (Vec<u8>, Vec<u8>) {
         .push(DnType::CommonName, "bench-test-device-001");
     leaf_params.is_ca = IsCa::NoCa;
     let leaf_cert = leaf_params
-        .signed_by(&leaf_key_pair, &ca_cert, &ca_key_pair)
+        .signed_by(&leaf_key_pair, &ca_issuer)
         .expect("leaf signing must succeed");
 
     (ca_cert.der().to_vec(), leaf_cert.der().to_vec())

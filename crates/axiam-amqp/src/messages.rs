@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
@@ -121,7 +121,8 @@ pub fn derive_tenant_key(master: &[u8], tenant_id: Uuid, key_version: u8) -> [u8
 /// that includes a placeholder signature, making verification impossible.
 /// Use [`sign_payload`] to produce the canonical JSON before signing.
 pub fn sign_payload(key: &[u8], payload_json: &[u8]) -> String {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(payload_json);
     hex::encode(mac.finalize().into_bytes())
 }
@@ -131,7 +132,8 @@ pub fn sign_payload(key: &[u8], payload_json: &[u8]) -> String {
 /// Returns `true` if the signature matches. Uses constant-time comparison
 /// internally (via the `hmac` crate's `verify_slice`).
 pub fn verify_payload(key: &[u8], payload_json: &[u8], signature_hex: &str) -> bool {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(payload_json);
     let expected = hex::decode(signature_hex).unwrap_or_default();
     mac.verify_slice(&expected).is_ok()

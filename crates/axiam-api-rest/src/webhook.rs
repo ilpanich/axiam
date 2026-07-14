@@ -37,7 +37,7 @@ use axiam_auth::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
 use axiam_core::repository::WebhookRepository;
 use axiam_federation::ssrf::{self, SsrfError};
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::StatusCode;
 use sha2::Sha256;
 use uuid::Uuid;

@@ -2,30 +2,34 @@
 # e2e-bootstrap.sh — Seed the E2E database with an org, tenant, and admin user.
 #
 # Called after `docker compose -f docker/docker-compose.e2e.yml up -d --wait`.
-# Creates the org + tenant directly via SurrealDB HTTP API (no AXIAM auth required),
-# then calls POST /api/v1/admin/bootstrap (public endpoint, D-09) to create the
-# admin user with the super-admin role.
+# Performs the entire first-run provisioning through the public
+# POST /api/v1/admin/bootstrap endpoint, which creates the organization, the
+# default tenant, the seeded permissions/roles, and the admin user with the
+# super-admin role — all in one call. No direct SurrealDB access is needed.
+#
+# The bootstrap gate is satisfied by AXIAM_BOOTSTRAP_ADMIN_EMAIL (set in
+# docker-compose.e2e.yml to E2E_ADMIN_EMAIL); no setup token is required.
 #
 # Environment variables (with E2E defaults):
-#   E2E_ORG_SLUG      — organization slug (default: test-org)
+#   E2E_ORG_NAME      — organization name  (default: E2E Test Org)
+#   E2E_ORG_SLUG      — organization slug  (default: test-org)
+#   E2E_TENANT_NAME   — tenant name        (default: Default)
 #   E2E_TENANT_SLUG   — tenant slug        (default: default)
 #   E2E_ADMIN_EMAIL   — admin email        (default: admin@axiam.dev)
 #   E2E_ADMIN_PASSWORD — admin password    (default: Test@Admin123!)
 #   AXIAM_URL         — backend base URL   (default: http://localhost:8090)
-#   SURREAL_URL       — SurrealDB HTTP URL (default: http://localhost:8000)
 
 set -euo pipefail
 
+ORG_NAME="${E2E_ORG_NAME:-E2E Test Org}"
 ORG_SLUG="${E2E_ORG_SLUG:-test-org}"
+TENANT_NAME="${E2E_TENANT_NAME:-Default}"
 TENANT_SLUG="${E2E_TENANT_SLUG:-default}"
 ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
 ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-Test@Admin123!}"
 AXIAM_URL="${AXIAM_URL:-http://localhost:8090}"
-SURREAL_URL="${SURREAL_URL:-http://localhost:8000}"
-# Must match the database name the server reads (DbConfig default: "main").
-AXIAM_DB="${AXIAM__DB__DATABASE:-main}"
 
-echo "[e2e-bootstrap] org=${ORG_SLUG} tenant=${TENANT_SLUG} email=${ADMIN_EMAIL} db=${AXIAM_DB}"
+echo "[e2e-bootstrap] org=${ORG_SLUG} tenant=${TENANT_SLUG} email=${ADMIN_EMAIL}"
 
 # ---------------------------------------------------------------------------
 # Step 1: Wait for AXIAM server to be ready
@@ -49,72 +53,20 @@ if [ "${STATUS}" != "200" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2: Create org + tenant directly via SurrealDB HTTP API.
+# Step 2: Call POST /api/v1/admin/bootstrap (public endpoint).
 #
-# The AXIAM API endpoints for org/tenant require authentication, but no admin
-# user exists yet (that's what we're bootstrapping). We use SurrealDB's built-in
-# HTTP SQL endpoint instead, which accepts root credentials.
-# ---------------------------------------------------------------------------
-echo "[e2e-bootstrap] Creating org '${ORG_SLUG}' and tenant '${TENANT_SLUG}' via SurrealDB..."
-
-# Generate fresh random UUIDs for the org and tenant so the bootstrap call
-# can reference them. Each run uses new IDs against a fresh (memory-mode) DB.
-ORG_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
-TENANT_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
-
-# NOTE: SurrealQL uses the double-colon `type::record(...)` function (single
-# colon `type:record(...)` is a syntax error). Critically, SurrealDB's /sql
-# endpoint returns HTTP 200 even when an individual statement fails, so
-# `curl -sf` alone does NOT catch SQL errors — we MUST inspect each
-# statement's "status" field in the JSON response (W8: no silent false-green).
-SURREAL_RESPONSE=$(curl -sf \
-  -X POST "${SURREAL_URL}/sql" \
-  -H "Accept: application/json" \
-  -H "Content-Type: text/plain" \
-  -H "surreal-ns: axiam" \
-  -H "surreal-db: ${AXIAM_DB}" \
-  -u "root:root" \
-  --data-binary "
-CREATE type::record('organization', '${ORG_ID}') SET
-  name = 'E2E Test Org',
-  slug = '${ORG_SLUG}',
-  metadata = {},
-  created_at = time::now(),
-  updated_at = time::now();
-
-CREATE type::record('tenant', '${TENANT_ID}') SET
-  organization_id = '${ORG_ID}',
-  name = 'E2E Default Tenant',
-  slug = '${TENANT_SLUG}',
-  metadata = {},
-  created_at = time::now(),
-  updated_at = time::now();
-" 2>&1) || {
-  echo "[e2e-bootstrap] ERROR: SurrealDB SQL request failed (HTTP/transport). Response: ${SURREAL_RESPONSE}"
-  exit 1
-}
-
-# Fail closed if ANY statement returned a non-OK status (HTTP 200 hides these).
-if printf '%s' "${SURREAL_RESPONSE}" | grep -q '"status":"ERR"' \
-   || ! printf '%s' "${SURREAL_RESPONSE}" | grep -q '"status":"OK"'; then
-  echo "[e2e-bootstrap] ERROR: SurrealDB statement-level failure during seed. Response: ${SURREAL_RESPONSE}"
-  exit 1
-fi
-
-echo "[e2e-bootstrap] Org and tenant created (both statements OK)."
-
-# ---------------------------------------------------------------------------
-# Step 3: Call POST /api/v1/admin/bootstrap (public endpoint).
-#
-# This creates the admin user with the super-admin role and seeds all
-# permissions for the tenant. Returns 201 on success, 404 if already done.
+# Creates the organization, the default tenant, all permissions/roles, and the
+# admin user with the super-admin role. Returns 201 on success, 409 if the
+# system has already been initialized.
 # ---------------------------------------------------------------------------
 echo "[e2e-bootstrap] Calling /api/v1/admin/bootstrap ..."
 
 BOOTSTRAP_BODY=$(cat <<EOF
 {
-  "org_id": "${ORG_ID}",
-  "tenant_id": "${TENANT_ID}",
+  "organization_name": "${ORG_NAME}",
+  "organization_slug": "${ORG_SLUG}",
+  "tenant_name": "${TENANT_NAME}",
+  "tenant_slug": "${TENANT_SLUG}",
   "email": "${ADMIN_EMAIL}",
   "username": "admin",
   "password": "${ADMIN_PASSWORD}"
@@ -130,10 +82,10 @@ for i in $(seq 1 5); do
     -d "${BOOTSTRAP_BODY}" 2>/dev/null || echo "000")
 
   if [ "${HTTP_STATUS}" = "201" ]; then
-    echo "[e2e-bootstrap] Bootstrap complete (201). Admin user created."
+    echo "[e2e-bootstrap] Bootstrap complete (201). Org, tenant and admin user created."
     break
-  elif [ "${HTTP_STATUS}" = "404" ]; then
-    echo "[e2e-bootstrap] Bootstrap already completed (404) — skipping."
+  elif [ "${HTTP_STATUS}" = "409" ]; then
+    echo "[e2e-bootstrap] Bootstrap already completed (409) — skipping."
     break
   else
     echo "[e2e-bootstrap] Attempt ${i}/5: bootstrap returned ${HTTP_STATUS}, retrying in 3s..."
@@ -143,7 +95,7 @@ for i in $(seq 1 5); do
 done
 
 # Final check
-if [ "${HTTP_STATUS}" != "201" ] && [ "${HTTP_STATUS}" != "404" ]; then
+if [ "${HTTP_STATUS}" != "201" ] && [ "${HTTP_STATUS}" != "409" ]; then
   echo "[e2e-bootstrap] ERROR: bootstrap endpoint returned unexpected status ${HTTP_STATUS}"
   cat /tmp/bootstrap_resp.json 2>/dev/null || true
   exit 1

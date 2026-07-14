@@ -1,12 +1,11 @@
 //! Integration tests for the admin bootstrap endpoint.
 //!
-//! Covers the first-run flow (D-09, D-10, D-11):
+//! Covers the first-run flow:
 //!
-//! - `POST /api/v1/admin/bootstrap` creates the first admin user when the
-//!   tenant has no users yet.
+//! - `POST /api/v1/admin/bootstrap` creates the organization, the default
+//!   tenant AND the first admin user in one call on a fresh, empty database.
 //! - After the first admin is created, the endpoint is disabled (returns 409
-//!   Conflict — SECHRD-04's `bootstrap_lock` uniqueness invariant, not the
-//!   old TOCTOU SELECT-then-branch check).
+//!   Conflict — the global `bootstrap_lock` uniqueness invariant).
 //! - When `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set, a mismatching email returns 403.
 //! - The mandatory gate refuses bootstrap when neither the env var nor a
 //!   valid setup token is presented (SECHRD-04 / D-03a).
@@ -106,35 +105,38 @@ fn make_authz(db: &Surreal<TestDb>) -> Arc<dyn AuthzChecker> {
     ))
 }
 
-/// Fresh in-memory DB with an org + tenant but NO users and NO seeded roles.
-/// The bootstrap handler is responsible for seeding permissions and default
-/// roles itself, so we deliberately leave the tenant empty.
-async fn setup_empty_tenant() -> (Surreal<TestDb>, Uuid, Uuid) {
+/// Fresh, empty in-memory DB: migrations only, NO organization, tenant, users
+/// or seeded roles. The bootstrap handler creates the organization, the default
+/// tenant, and seeds permissions/roles itself.
+async fn setup_empty_db() -> Surreal<TestDb> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
     axiam_db::run_migrations(&db).await.unwrap();
+    db
+}
 
-    let org_repo = SurrealOrganizationRepository::new(db.clone());
-    let org = org_repo
+/// Fresh DB pre-seeded with an org + default tenant (no users). Used by the
+/// concurrency test so bootstrap's get-or-create reuses them and the only
+/// contention under test is the global `bootstrap_lock`.
+async fn setup_with_org_tenant() -> (Surreal<TestDb>, Uuid, Uuid) {
+    let db = setup_empty_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
         .create(CreateOrganization {
-            name: "Bootstrap Org".into(),
-            slug: "bootstrap-org".into(),
+            name: "Race Org".into(),
+            slug: "race-org".into(),
             metadata: None,
         })
         .await
         .unwrap();
-
-    let tenant_repo = SurrealTenantRepository::new(db.clone());
-    let tenant = tenant_repo
+    let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org.id,
-            name: "Bootstrap Tenant".into(),
-            slug: "bootstrap-tenant".into(),
+            name: "Default".into(),
+            slug: "default".into(),
             metadata: None,
         })
         .await
         .unwrap();
-
     (db, org.id, tenant.id)
 }
 
@@ -184,9 +186,7 @@ async fn bootstrap_setup_token() {
         created_at: DateTime<Utc>,
     }
 
-    let db = Surreal::new::<Mem>(()).await.unwrap();
-    db.use_ns("test").use_db("test").await.unwrap();
-    axiam_db::run_migrations(&db).await.unwrap();
+    let db = setup_empty_db().await;
 
     // Fresh DB, no users: mint must produce a token.
     let minted = axiam_db::mint_bootstrap_setup_token_if_needed(&db)
@@ -234,21 +234,21 @@ async fn bootstrap_setup_token() {
     );
 }
 
-/// `bootstrap_creates_admin`
+/// `bootstrap_creates_org_tenant_admin`
 ///
-/// A fresh tenant with no users accepts the bootstrap request and creates the
-/// first admin with a 201 Created response containing the new user id.
+/// A fresh, empty database accepts the bootstrap request and creates the
+/// organization, the default tenant AND the first admin — 201 Created with the
+/// created ids/slugs in the body.
 #[actix_rt::test]
-async fn bootstrap_creates_admin() {
+async fn bootstrap_creates_org_tenant_admin() {
     let _guard = env_guard().await;
-    // SECHRD-04: the gate is now mandatory — set the env var to match the
-    // request email so the env-var gate path (D-10) is satisfied.
+    // The gate is mandatory — set the env var to match the request email.
     // SAFETY: serialized via env_lock; no other thread reads env in this binary.
     unsafe {
         std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "first-admin@example.com");
     }
 
-    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+    let db = setup_empty_db().await;
     let auth = test_auth_config();
     let authz = make_authz(&db);
     let app = test_app!(db, auth, authz);
@@ -258,8 +258,10 @@ async fn bootstrap_creates_admin() {
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
         .set_json(serde_json::json!({
-            "org_id": org_id,
-            "tenant_id": tenant_id,
+            "organization_name": "First Org",
+            "organization_slug": "first-org",
+            "tenant_name": "Default",
+            "tenant_slug": "default",
             "email": "first-admin@example.com",
             "username": "firstadmin",
             "password": TEST_PASSWORD,
@@ -278,7 +280,7 @@ async fn bootstrap_creates_admin() {
     assert_eq!(
         status,
         201,
-        "bootstrap should return 201 on a fresh tenant, got {status}. body = {}",
+        "bootstrap should return 201 on a fresh database, got {status}. body = {}",
         String::from_utf8_lossy(&body)
     );
 
@@ -287,28 +289,40 @@ async fn bootstrap_creates_admin() {
         body_json.get("user_id").is_some(),
         "response body must include user_id, got {body_json}"
     );
+    assert_eq!(
+        body_json.get("organization_slug").and_then(Value::as_str),
+        Some("first-org")
+    );
+    assert_eq!(
+        body_json.get("tenant_slug").and_then(Value::as_str),
+        Some("default")
+    );
+
+    // The org and tenant were actually created.
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .get_by_slug("first-org")
+        .await
+        .expect("bootstrap must create the organization");
+    SurrealTenantRepository::new(db.clone())
+        .get_by_slug(org.id, "default")
+        .await
+        .expect("bootstrap must create the default tenant");
 }
 
 /// `bootstrap_returns_409_after_admin`
 ///
-/// A second bootstrap call, against a tenant that already has an admin
-/// (with the gate satisfied both times), must be rejected with 409 Conflict
-/// — the `bootstrap_lock` uniqueness invariant (SECHRD-04 / D-03c), not the
-/// old TOCTOU SELECT-then-branch check. The endpoint is one-shot per tenant
-/// (D-09) — mismatched-email gate refusal is covered separately by
-/// `bootstrap_rejects_wrong_email`.
+/// A second bootstrap call, once the system has been initialized (with the
+/// gate satisfied both times), must be rejected with 409 Conflict — the global
+/// `bootstrap_lock` uniqueness invariant.
 #[actix_rt::test]
 async fn bootstrap_returns_409_after_admin() {
     let _guard = env_guard().await;
-    // SECHRD-04: the gate is now mandatory — both calls use the same
-    // matching email so the "already bootstrapped" check (not the gate) is
-    // what's under test here.
     // SAFETY: serialized via env_lock.
     unsafe {
         std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "first@example.com");
     }
 
-    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+    let db = setup_empty_db().await;
     let auth = test_auth_config();
     let authz = make_authz(&db);
     let app = test_app!(db, auth, authz);
@@ -320,8 +334,7 @@ async fn bootstrap_returns_409_after_admin() {
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
         .set_json(serde_json::json!({
-            "org_id": org_id,
-            "tenant_id": tenant_id,
+            "organization_name": "First Org",
             "email": "first@example.com",
             "username": "firstadmin",
             "password": TEST_PASSWORD,
@@ -335,8 +348,7 @@ async fn bootstrap_returns_409_after_admin() {
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
         .set_json(serde_json::json!({
-            "org_id": org_id,
-            "tenant_id": tenant_id,
+            "organization_name": "Second Org",
             "email": "first@example.com",
             "username": "secondadmin",
             "password": TEST_PASSWORD,
@@ -358,10 +370,10 @@ async fn bootstrap_returns_409_after_admin() {
 
 /// `bootstrap_concurrent_race_single_admin`
 ///
-/// SECHRD-04 (Task 3, D-03c): two concurrent first-run bootstrap requests
-/// against the SAME tenant must produce AT MOST ONE super-admin. The race
-/// loser gets `AxiamError::AlreadyExists` (409) and its whole transaction
-/// rolls back — no partial admin, no orphan role RELATE.
+/// SECHRD-04 (Task 3, D-03c): two concurrent first-run bootstrap requests must
+/// produce AT MOST ONE super-admin. The race loser gets 409 and its whole
+/// transaction rolls back. The org/tenant are pre-seeded (with the slugs both
+/// racers reference) so the only contention under test is the global lock.
 #[actix_rt::test]
 async fn bootstrap_concurrent_race_single_admin() {
     let _guard = env_guard().await;
@@ -370,16 +382,13 @@ async fn bootstrap_concurrent_race_single_admin() {
         std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
     }
 
-    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+    let (db, _org_id, tenant_id) = setup_with_org_tenant().await;
 
-    // Mint a single setup token both racers will present — proves the
-    // gate's fast-fail pre-check and the transaction's consumption-by-
-    // existence CREATE both tolerate/resolve the race correctly (the
-    // loser still loses on `bootstrap_lock`, independent of the token).
+    // Mint a single setup token both racers present.
     let token = axiam_db::mint_bootstrap_setup_token_if_needed(&db)
         .await
         .unwrap()
-        .expect("fresh tenant DB should mint a setup token");
+        .expect("fresh DB should mint a setup token");
 
     let auth = test_auth_config();
     let authz = make_authz(&db);
@@ -392,8 +401,10 @@ async fn bootstrap_concurrent_race_single_admin() {
             .uri("/api/v1/admin/bootstrap")
             .peer_addr(peer)
             .set_json(serde_json::json!({
-                "org_id": org_id,
-                "tenant_id": tenant_id,
+                "organization_name": "Race Org",
+                "organization_slug": "race-org",
+                "tenant_name": "Default",
+                "tenant_slug": "default",
                 "email": email,
                 "username": username,
                 "password": TEST_PASSWORD,
@@ -425,8 +436,7 @@ async fn bootstrap_concurrent_race_single_admin() {
 
     // Exactly one super-admin exists after the race.
     use axiam_core::repository::{Pagination, UserRepository};
-    let user_repo = SurrealUserRepository::new(db.clone());
-    let users = user_repo
+    let users = SurrealUserRepository::new(db.clone())
         .list(
             tenant_id,
             Pagination {
@@ -455,7 +465,7 @@ async fn bootstrap_rejects_wrong_email() {
         std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "only-me@example.com");
     }
 
-    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+    let db = setup_empty_db().await;
     let auth = test_auth_config();
     let authz = make_authz(&db);
     let app = test_app!(db, auth, authz);
@@ -465,8 +475,7 @@ async fn bootstrap_rejects_wrong_email() {
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
         .set_json(serde_json::json!({
-            "org_id": org_id,
-            "tenant_id": tenant_id,
+            "organization_name": "Gated Org",
             "email": "someone-else@example.com",
             "username": "impostor",
             "password": TEST_PASSWORD,
@@ -493,17 +502,23 @@ async fn bootstrap_rejects_wrong_email() {
 ///
 /// SECHRD-04 (Task 2, D-03a): when `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is unset
 /// AND no (valid) setup token is presented, bootstrap must fail closed —
-/// a non-2xx response and zero admins created. An unset gate must never
-/// allow arbitrary bootstrap.
+/// a non-2xx response and nothing created.
 #[actix_rt::test]
 async fn bootstrap_refused_when_gate_unset() {
+    use surrealdb::types::SurrealValue;
+
+    #[derive(Debug, SurrealValue)]
+    struct CountRow {
+        total: u64,
+    }
+
     let _guard = env_guard().await;
     // SAFETY: serialized via env_lock; ensure the email gate is OFF.
     unsafe {
         std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
     }
 
-    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+    let db = setup_empty_db().await;
     let auth = test_auth_config();
     let authz = make_authz(&db);
     let app = test_app!(db, auth, authz);
@@ -515,8 +530,7 @@ async fn bootstrap_refused_when_gate_unset() {
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
         .set_json(serde_json::json!({
-            "org_id": org_id,
-            "tenant_id": tenant_id,
+            "organization_name": "Nobody Org",
             "email": "nobody@example.com",
             "username": "nobody",
             "password": TEST_PASSWORD,
@@ -534,8 +548,7 @@ async fn bootstrap_refused_when_gate_unset() {
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
         .set_json(serde_json::json!({
-            "org_id": org_id,
-            "tenant_id": tenant_id,
+            "organization_name": "Nobody Org 2",
             "email": "nobody2@example.com",
             "username": "nobody2",
             "password": TEST_PASSWORD,
@@ -549,56 +562,58 @@ async fn bootstrap_refused_when_gate_unset() {
         "bootstrap with an invalid setup token must be refused (non-2xx), got {status}"
     );
 
-    // No admin was created by either attempt.
-    use axiam_core::repository::{Pagination, UserRepository};
-    let user_repo = SurrealUserRepository::new(db.clone());
-    let users = user_repo
-        .list(
-            tenant_id,
-            Pagination {
-                offset: 0,
-                limit: 10,
-            },
-        )
+    // Nothing was created by either attempt (no users, no organizations).
+    let mut result = db
+        .query("SELECT count() AS total FROM user GROUP ALL")
         .await
         .unwrap();
+    let users: Vec<CountRow> = result.take(0).unwrap();
     assert_eq!(
-        users.total, 0,
-        "no admin should be created when the gate is unset/invalid, got {} users",
-        users.total
+        users.first().map(|c| c.total).unwrap_or(0),
+        0,
+        "no admin should be created when the gate is unset/invalid"
+    );
+    let mut result = db
+        .query("SELECT count() AS total FROM organization GROUP ALL")
+        .await
+        .unwrap();
+    let orgs: Vec<CountRow> = result.take(0).unwrap();
+    assert_eq!(
+        orgs.first().map(|c| c.total).unwrap_or(0),
+        0,
+        "no organization should be created when the gate is unset/invalid"
     );
 }
 
 /// `bootstrap_admin_can_login`
 ///
 /// After a successful bootstrap, the new admin can log in via `/auth/login`
-/// with the bootstrap credentials. We don't assert the full response body
-/// (that's covered by auth_test.rs); we only assert the request is NOT
-/// rejected as invalid credentials.
+/// with the bootstrap credentials, resolving the workspace by the created
+/// org/tenant.
 #[actix_rt::test]
 async fn bootstrap_admin_can_login() {
     let _guard = env_guard().await;
-    // SECHRD-04: the gate is now mandatory — set the env var to match the
-    // request email so the env-var gate path (D-10) is satisfied.
     // SAFETY: serialized via env_lock.
     unsafe {
         std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "root@example.com");
     }
 
-    let (db, org_id, tenant_id) = setup_empty_tenant().await;
+    let db = setup_empty_db().await;
     let auth = test_auth_config();
     let authz = make_authz(&db);
     let app = test_app!(db, auth, authz);
 
     let peer: SocketAddr = TEST_PEER.parse().unwrap();
 
-    // 1. Bootstrap.
+    // 1. Bootstrap — creates org "login-org", tenant "default" and the admin.
     let req = test::TestRequest::post()
         .uri("/api/v1/admin/bootstrap")
         .peer_addr(peer)
         .set_json(serde_json::json!({
-            "org_id": org_id,
-            "tenant_id": tenant_id,
+            "organization_name": "Login Org",
+            "organization_slug": "login-org",
+            "tenant_name": "Default",
+            "tenant_slug": "default",
             "email": "root@example.com",
             "username": "rootadmin",
             "password": TEST_PASSWORD,
@@ -611,51 +626,24 @@ async fn bootstrap_admin_can_login() {
     }
     assert_eq!(resp.status().as_u16(), 201, "bootstrap must succeed");
 
-    // 2. Activate the user directly — bootstrap creates them in
-    //    PendingVerification status, but login requires Active. Production
-    //    flow assumes AXIAM_BOOTSTRAP_ADMIN_EMAIL is verified out-of-band;
-    //    in tests we activate via the repository.
-    {
-        use axiam_core::models::user::{UpdateUser, UserStatus};
-        use axiam_core::repository::{Pagination, UserRepository};
+    // 2. Resolve the created org/tenant ids to drive the login request. The
+    //    admin is created Active, so no extra activation step is needed.
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .get_by_slug("login-org")
+        .await
+        .unwrap();
+    let tenant = SurrealTenantRepository::new(db.clone())
+        .get_by_slug(org.id, "default")
+        .await
+        .unwrap();
 
-        let user_repo = SurrealUserRepository::new(db.clone());
-        let users = user_repo
-            .list(
-                tenant_id,
-                Pagination {
-                    offset: 0,
-                    limit: 10,
-                },
-            )
-            .await
-            .unwrap();
-        let admin = users
-            .items
-            .into_iter()
-            .find(|u| u.username == "rootadmin")
-            .expect("bootstrapped admin should be in the user list");
-        user_repo
-            .update(
-                tenant_id,
-                admin.id,
-                UpdateUser {
-                    status: Some(UserStatus::Active),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-    }
-
-    // 3. Login with the bootstrap credentials. LoginRequest expects the
-    //    tenant/org IDs and a username-or-email field.
+    // 3. Login with the bootstrap credentials.
     let req = test::TestRequest::post()
         .uri("/api/v1/auth/login")
         .peer_addr(peer)
         .set_json(serde_json::json!({
-            "tenant_id": tenant_id,
-            "org_id": org_id,
+            "tenant_id": tenant.id,
+            "org_id": org.id,
             "username_or_email": "rootadmin",
             "password": TEST_PASSWORD,
         }))

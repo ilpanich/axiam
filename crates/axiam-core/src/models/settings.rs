@@ -807,6 +807,84 @@ mod tests {
         assert!(d.max_cert_validity_days >= d.default_cert_validity_days);
     }
 
+    // --- validate_org_settings ---
+
+    #[test]
+    fn validate_org_settings_accepts_system_defaults() {
+        assert!(validate_org_settings(&system_defaults()).is_ok());
+    }
+
+    #[test]
+    fn validate_org_settings_rejects_each_invariant_violation() {
+        // max_lockout_duration_secs < lockout_duration_secs
+        let mut s = system_defaults();
+        s.max_lockout_duration_secs = 100;
+        s.lockout_duration_secs = 200;
+        assert!(validate_org_settings(&s).is_err());
+
+        // max_cert_validity_days < default_cert_validity_days
+        let mut s = system_defaults();
+        s.max_cert_validity_days = 10;
+        s.default_cert_validity_days = 100;
+        assert!(validate_org_settings(&s).is_err());
+
+        // lockout_backoff_multiplier < 1.0
+        let mut s = system_defaults();
+        s.lockout_backoff_multiplier = 0.5;
+        assert!(validate_org_settings(&s).is_err());
+
+        // zero token / challenge lifetimes
+        for mutate in [
+            (|s: &mut SetOrgSettings| s.access_token_lifetime_secs = 0) as fn(&mut SetOrgSettings),
+            |s: &mut SetOrgSettings| s.refresh_token_lifetime_secs = 0,
+            |s: &mut SetOrgSettings| s.mfa_challenge_lifetime_secs = 0,
+        ] {
+            let mut s = system_defaults();
+            mutate(&mut s);
+            assert!(validate_org_settings(&s).is_err());
+        }
+    }
+
+    #[test]
+    fn validate_org_settings_reports_all_violations_together() {
+        let mut s = system_defaults();
+        s.access_token_lifetime_secs = 0;
+        s.refresh_token_lifetime_secs = 0;
+        let err = validate_org_settings(&s).unwrap_err().to_string();
+        assert!(err.contains("access_token_lifetime_secs"));
+        assert!(err.contains("refresh_token_lifetime_secs"));
+    }
+
+    // --- diff_against_org ---
+
+    #[test]
+    fn diff_against_identical_settings_is_empty() {
+        let s = org_settings();
+        assert!(diff_against_org(&s, &s).is_empty());
+    }
+
+    #[test]
+    fn diff_against_org_detects_changed_fields() {
+        let org = org_settings();
+        let mut modified = system_defaults();
+        modified.min_length += 4;
+        modified.mfa_enforced = !modified.mfa_enforced;
+        modified.access_token_lifetime_secs += 100;
+        modified.admin_notifications_enabled = !modified.admin_notifications_enabled;
+        let tenant = settings_from_org_input(Uuid::new_v4(), Uuid::new_v4(), &modified);
+
+        let diff = diff_against_org(&org, &tenant);
+        assert!(!diff.is_empty());
+        assert_eq!(diff.min_length, Some(modified.min_length));
+        assert_eq!(
+            diff.access_token_lifetime_secs,
+            Some(modified.access_token_lifetime_secs)
+        );
+        assert_eq!(diff.mfa_enforced, Some(modified.mfa_enforced));
+        // Unchanged fields stay None.
+        assert_eq!(diff.require_uppercase, None);
+    }
+
     // --- validate_tenant_override: valid cases ---
 
     #[test]

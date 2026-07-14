@@ -34,7 +34,7 @@ export function AppLayout() {
         <>
           {/* Backdrop */}
           <div
-            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs lg:hidden"
             onClick={() => setSidebarOpen(false)}
             aria-hidden="true"
           />

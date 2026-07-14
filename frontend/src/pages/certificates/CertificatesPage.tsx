@@ -93,7 +93,7 @@ function GenerateFields({
           value={issuerCaId}
           onChange={(e) => onIssuerCaIdChange(e.target.value)}
           disabled={caLoading || noCas}
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
         >
           {caLoading && <option value="">Loading CAs…</option>}
           {noCas && <option value="">No active CA available</option>}
@@ -130,7 +130,7 @@ function GenerateFields({
           id="cert-type"
           value={certType}
           onChange={(e) => onCertTypeChange(e.target.value as CertificateType)}
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
         >
           <option value="User">User</option>
           <option value="Service">Service</option>
@@ -146,7 +146,7 @@ function GenerateFields({
           onChange={(e) =>
             onKeyAlgorithmChange(e.target.value as KeyAlgorithm)
           }
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
         >
           <option value="Rsa4096">RSA-4096</option>
           <option value="Ed25519">Ed25519</option>
@@ -349,7 +349,7 @@ export function CertificatesPage() {
           disabled={row.status !== "Active"}
           onClick={() => setRevokeTarget(row)}
           className={cn(
-            "px-2.5 py-1 rounded text-xs font-medium border transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40",
+            "px-2.5 py-1 rounded text-xs font-medium border transition-colors focus:outline-hidden focus:ring-2 focus:ring-primary/40",
             row.status !== "Active"
               ? "border-white/5 text-muted-foreground/40 cursor-not-allowed"
               : "border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"

@@ -53,7 +53,7 @@ function DetailsExpander({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 text-xs text-primary hover:text-primary/80 transition-colors focus:outline-none focus:ring-1 focus:ring-primary/40 rounded"
+        className="inline-flex items-center gap-1 text-xs text-primary hover:text-primary/80 transition-colors focus:outline-hidden focus:ring-1 focus:ring-primary/40 rounded"
         aria-expanded={open}
       >
         {open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
@@ -137,7 +137,7 @@ function FilterBar({
           onChange={(e) =>
             onOutcomeChange(e.target.value as "" | AuditOutcome)
           }
-          className="h-8 w-full text-sm rounded-md border border-input bg-background/50 px-2 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+          className="h-8 w-full text-sm rounded-md border border-input bg-background/50 px-2 text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
         >
           <option value="">All</option>
           <option value="Success">Success</option>

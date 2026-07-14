@@ -224,7 +224,7 @@ jobs:
           docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}" | grep -E "Name|MediaType|Platform"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a  # v3.8.1
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
       # D-06: sign the manifest-list digest (after push, after passing scan)
       - name: Sign image with cosign
@@ -260,7 +260,7 @@ jobs:
           toolchain: stable
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxml2-dev libxmlsec1-dev libxmlsec1-openssl
@@ -305,7 +305,7 @@ jobs:
           OUTPUT: CHANGELOG.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         with:
           body_path: CHANGELOG.md
           files: |

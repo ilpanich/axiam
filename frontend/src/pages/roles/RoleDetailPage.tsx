@@ -90,7 +90,7 @@ function GrantPermissionDialog({
       aria-labelledby="grant-permission-title"
     >
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        className="absolute inset-0 bg-black/60 backdrop-blur-xs"
         onClick={handleClose}
         aria-hidden="true"
       />
@@ -104,7 +104,7 @@ function GrantPermissionDialog({
           </h2>
           <button
             onClick={handleClose}
-            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-none focus:ring-2 focus:ring-primary/40"
+            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-hidden focus:ring-2 focus:ring-primary/40"
             aria-label="Close dialog"
           >
             ✕
@@ -128,7 +128,7 @@ function GrantPermissionDialog({
                 "h-9 w-full rounded-md pl-9 pr-3 text-sm",
                 "bg-white/5 border border-primary/20 text-foreground",
                 "placeholder:text-muted-foreground",
-                "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
+                "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
                 "transition-colors duration-200"
               )}
             />
@@ -273,7 +273,7 @@ function AssignGroupDialog({
             className={cn(
               "flex h-9 w-full rounded-md px-3 py-1 text-sm",
               "bg-white/5 border border-primary/20 text-foreground",
-              "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
+              "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
               "transition-colors duration-200"
             )}
           >

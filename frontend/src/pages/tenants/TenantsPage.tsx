@@ -65,7 +65,7 @@ function CreateTenantFields({
           value={orgId}
           onChange={(e) => onOrgIdChange(e.target.value)}
           required
-          className="flex w-full rounded-md px-3 py-2 text-sm bg-white/5 border border-primary/20 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-colors duration-200"
+          className="flex w-full rounded-md px-3 py-2 text-sm bg-white/5 border border-primary/20 text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary transition-colors duration-200"
         >
           <option value="" className="bg-background text-foreground">
             Select organization...

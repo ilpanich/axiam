@@ -180,7 +180,7 @@ export function GroupsPage() {
       header: "Name",
       render: (row) => (
         <button
-          className="font-medium text-primary hover:underline focus:outline-none focus:underline"
+          className="font-medium text-primary hover:underline focus:outline-hidden focus:underline"
           onClick={() => navigate(`/groups/${row.id}`)}
         >
           {row.name}

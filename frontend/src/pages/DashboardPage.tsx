@@ -153,7 +153,7 @@ function QuickAction({ icon, label, to, iconColor }: QuickActionProps) {
     <button
       type="button"
       onClick={() => navigate(to)}
-      className="flex flex-col items-center gap-2 p-4 rounded-xl border border-white/8 bg-white/[0.03] hover:bg-white/[0.07] hover:border-primary/25 transition-all duration-150 group focus:outline-none focus:ring-2 focus:ring-primary/40 w-full"
+      className="flex flex-col items-center gap-2 p-4 rounded-xl border border-white/8 bg-white/[0.03] hover:bg-white/[0.07] hover:border-primary/25 transition-all duration-150 group focus:outline-hidden focus:ring-2 focus:ring-primary/40 w-full"
       aria-label={label}
     >
       <span

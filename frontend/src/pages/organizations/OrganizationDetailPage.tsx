@@ -63,7 +63,7 @@ function TabBar({ active, onChange }: TabBarProps) {
           aria-controls={`tabpanel-${tab.id}`}
           onClick={() => onChange(tab.id)}
           className={cn(
-            "px-4 py-2.5 text-sm font-medium transition-all duration-200 border-b-2 -mb-px focus:outline-none focus:ring-2 focus:ring-primary/40 focus:ring-inset rounded-t",
+            "px-4 py-2.5 text-sm font-medium transition-all duration-200 border-b-2 -mb-px focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:ring-inset rounded-t",
             active === tab.id
               ? "border-primary text-primary"
               : "border-transparent text-muted-foreground hover:text-foreground hover:border-white/20"
@@ -253,7 +253,7 @@ function TenantsTab({ orgId }: { orgId: string }) {
       header: "Name",
       render: (row) => (
         <button
-          className="font-medium text-primary hover:underline focus:outline-none focus:underline"
+          className="font-medium text-primary hover:underline focus:outline-hidden focus:underline"
           onClick={() => navigate(`/organizations/${orgId}/tenants/${row.id}`)}
         >
           {row.name}
@@ -612,7 +612,7 @@ function CaCertificatesTab({ orgId }: { orgId: string }) {
             className={cn(
               "flex h-10 w-full rounded-md px-3 py-2 text-sm",
               "bg-white/5 border border-primary/20 text-foreground",
-              "focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary",
+              "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
               "transition-colors duration-200"
             )}
           >

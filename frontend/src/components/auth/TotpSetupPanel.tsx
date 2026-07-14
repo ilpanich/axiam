@@ -151,7 +151,7 @@ export function TotpSetupPanel({
             value={code}
             onChange={(e) => onCodeChange(e.target.value.replace(/\D/g, "").slice(0, 6))}
             autoComplete="one-time-code"
-            className="flex h-10 w-full rounded-md px-3 py-2 text-sm bg-white/5 border border-primary/20 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 transition-colors duration-200 text-center text-xl tracking-[0.4em] font-mono"
+            className="flex h-10 w-full rounded-md px-3 py-2 text-sm bg-white/5 border border-primary/20 text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 transition-colors duration-200 text-center text-xl tracking-[0.4em] font-mono"
             required
           />
         </div>

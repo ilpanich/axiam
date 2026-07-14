@@ -84,7 +84,7 @@ export function FormDialog({
     >
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        className="absolute inset-0 bg-black/60 backdrop-blur-xs"
         onClick={isLoading ? undefined : onClose}
         aria-hidden="true"
       />
@@ -102,7 +102,7 @@ export function FormDialog({
           <button
             ref={closeRef}
             onClick={isLoading ? undefined : onClose}
-            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-none focus:ring-2 focus:ring-primary/40"
+            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-hidden focus:ring-2 focus:ring-primary/40"
             aria-label="Close dialog"
             disabled={isLoading}
           >

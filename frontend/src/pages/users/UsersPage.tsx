@@ -591,7 +591,7 @@ export function UsersPage() {
           aria-describedby="unlock-dialog-description"
         >
           <div
-            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            className="absolute inset-0 bg-black/60 backdrop-blur-xs"
             onClick={
               unlockMutation.isPending
                 ? undefined
@@ -620,14 +620,14 @@ export function UsersPage() {
               <button
                 onClick={() => setUserToUnlock(null)}
                 disabled={unlockMutation.isPending}
-                className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-md text-muted-foreground hover:bg-white/5 hover:text-foreground transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
+                className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-md text-muted-foreground hover:bg-white/5 hover:text-foreground transition-colors focus:outline-hidden focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 onClick={() => unlockMutation.mutate(userToUnlock.id)}
                 disabled={unlockMutation.isPending}
-                className="inline-flex items-center justify-center min-w-[120px] px-4 py-2 text-sm font-medium rounded-md bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-400/40 disabled:opacity-50"
+                className="inline-flex items-center justify-center min-w-[120px] px-4 py-2 text-sm font-medium rounded-md bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 transition-colors focus:outline-hidden focus:ring-2 focus:ring-cyan-400/40 disabled:opacity-50"
               >
                 {unlockMutation.isPending ? (
                   <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-cyan-400 border-t-transparent rounded-full" />

@@ -41,6 +41,23 @@ fmt:
 # Run all checks (fmt + clippy + test)
 check: fmt-check lint test
 
+# Measure line coverage for the server workspace (mirrors coverage.yml).
+# Requires: `cargo install cargo-llvm-cov` + `rustup component add llvm-tools-preview`.
+# Integration tests that need a live SurrealDB/RabbitMQ expect `just dev-up`.
+# Writes an HTML report under target/llvm-cov/html and prints a summary.
+coverage:
+    cargo llvm-cov --workspace --no-report --no-fail-fast
+    cargo llvm-cov --no-report -p axiam-api-grpc --features client --test grpc_authz_test
+    cargo llvm-cov report --html
+    cargo llvm-cov report --summary-only
+
+# Same as `coverage` but fails if total line coverage drops below THRESHOLD.
+# Used to guard against regressions locally before pushing.
+coverage-gate THRESHOLD="80":
+    cargo llvm-cov --workspace --no-report --no-fail-fast
+    cargo llvm-cov --no-report -p axiam-api-grpc --features client --test grpc_authz_test
+    cargo llvm-cov report --fail-under-lines {{THRESHOLD}}
+
 # Run the AXIAM server (saml-on; needs a compatible system libxml2 — CI/Docker)
 run:
     RUST_LOG=axiam=debug cargo run --bin axiam-server

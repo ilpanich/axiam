@@ -82,6 +82,13 @@ jobs:
       - name: Generate lcov report
         run: cargo llvm-cov report --lcov --output-path lcov.info
 
+      # Regression gate: fail the build if workspace line coverage drops below
+      # the floor. Set conservatively below the current level so it never
+      # false-fails; ratchet it upward as coverage rises (target: >=90%).
+      # Reuses the profdata already collected above (no re-run).
+      - name: Enforce coverage floor
+        run: cargo llvm-cov report --fail-under-lines 80
+
       - name: Upload to Coveralls
         uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e  # v2.3.7
         with:

@@ -7,8 +7,9 @@
 //! generation produces a distinct `PgpKeyAlgorithm` + `user_id` -> `SignedSecretKey`
 //! type that is not X.509/rcgen-based and must not be merged into this module.
 
-use aes_gcm::aead::{Aead, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
+use aes_gcm::aead::consts::U12;
+use aes_gcm::aead::{Aead, Generate};
+use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::KeyAlgorithm;
 use rcgen::KeyPair;
@@ -33,9 +34,10 @@ pub(crate) fn compute_fingerprint(der: &[u8]) -> String {
 /// Encrypt data with AES-256-GCM. The 12-byte nonce is prepended to the
 /// ciphertext so the caller doesn't need to store it separately.
 pub(crate) fn encrypt_secret(plaintext: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<Vec<u8>> {
-    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let key = Key::<Aes256Gcm>::from(*key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+    let nonce_bytes: [u8; 12] = Generate::generate();
+    let nonce = Nonce::<U12>::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM encryption failed: {e}")))?;
@@ -54,10 +56,11 @@ pub(crate) fn decrypt_secret(data: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<V
         ));
     }
     let (nonce_bytes, ciphertext) = data.split_at(12);
-    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let key = Key::<Aes256Gcm>::from(*key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Nonce::<U12>::try_from(nonce_bytes)
+        .map_err(|_| AxiamError::Crypto("invalid nonce length".into()))?;
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM decryption failed: {e}")))
 }

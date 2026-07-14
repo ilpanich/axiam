@@ -6,8 +6,8 @@
 //! `secret_key_version` columns; plaintext is only present in the returned
 //! in-memory domain structs.
 
-use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::{Aead, KeyInit, OsRng as AeadOsRng};
+use aes_gcm::aead::consts::U12;
+use aes_gcm::aead::{Aead, Generate, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::email::{
@@ -31,12 +31,11 @@ use crate::helpers::{CountRow, take_first_or_not_found};
 // ---------------------------------------------------------------------------
 
 fn encrypt_field(key: &[u8; 32], plaintext: &[u8]) -> Result<(String, String), AxiamError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let mut nonce_bytes = [0u8; 12];
-    AeadOsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
+    let nonce_bytes: [u8; 12] = Generate::generate();
+    let nonce = Nonce::<U12>::from(nonce_bytes);
     let ct = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| AxiamError::Internal(format!("email secret encrypt: {e}")))?;
     Ok((STANDARD.encode(nonce_bytes), STANDARD.encode(ct)))
 }
@@ -51,10 +50,11 @@ fn decrypt_field(key: &[u8; 32], nonce_b64: &str, ct_b64: &str) -> Result<String
     if nonce_bytes.len() != 12 {
         return Err(AxiamError::Internal("nonce must be 12 bytes".into()));
     }
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
+    let nonce = Nonce::<U12>::try_from(nonce_bytes.as_slice())
+        .map_err(|_| AxiamError::Internal("nonce must be 12 bytes".into()))?;
     let plaintext = cipher
-        .decrypt(nonce, ct.as_slice())
+        .decrypt(&nonce, ct.as_slice())
         .map_err(|e| AxiamError::Internal(format!("email secret decrypt: {e}")))?;
     String::from_utf8(plaintext).map_err(|e| AxiamError::Internal(format!("utf8 decode: {e}")))
 }

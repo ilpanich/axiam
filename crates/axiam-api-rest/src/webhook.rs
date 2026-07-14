@@ -306,7 +306,8 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
 /// a valid timestamp (T-26-03-01).
 fn compute_signature_v2(secret: &str, timestamp: i64, body: &str) -> String {
     let signed_payload = format!("{timestamp}.{body}");
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key");
+    let mut mac =
+        <HmacSha256 as hmac::KeyInit>::new_from_slice(secret.as_bytes()).expect("HMAC key");
     mac.update(signed_payload.as_bytes());
     format!(
         "t={timestamp},v1={}",

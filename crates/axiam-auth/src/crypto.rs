@@ -11,8 +11,8 @@
 //!
 //! Both variants use a fresh 12-byte nonce from `OsRng` and AES-256-GCM.
 
-use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::aead::consts::U12;
+use aes_gcm::aead::{Aead, Generate, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -29,7 +29,7 @@ type HmacSha256 = Hmac<Sha256>;
 // ---------------------------------------------------------------------------
 
 fn build_cipher(key: &[u8; 32]) -> Aes256Gcm {
-    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key))
+    Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key))
 }
 
 // ---------------------------------------------------------------------------
@@ -44,12 +44,11 @@ fn build_cipher(key: &[u8; 32]) -> Aes256Gcm {
 /// TOTP secret storage — do **not** change the layout.
 pub fn aes256gcm_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<String, AuthError> {
     let cipher = build_cipher(key);
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce_bytes: [u8; 12] = Generate::generate();
+    let nonce = Nonce::<U12>::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| AuthError::Crypto(format!("AES-GCM encrypt: {e}")))?;
 
     let mut combined = nonce_bytes.to_vec();
@@ -71,10 +70,11 @@ pub fn aes256gcm_decrypt(key: &[u8; 32], encoded: &str) -> Result<Vec<u8>, AuthE
 
     let (nonce_bytes, ciphertext) = combined.split_at(12);
     let cipher = build_cipher(key);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = Nonce::<U12>::try_from(nonce_bytes)
+        .map_err(|_| AuthError::Crypto("invalid nonce length".into()))?;
 
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| AuthError::Crypto(format!("AES-GCM decrypt: {e}")))
 }
 
@@ -96,12 +96,11 @@ pub fn aes256gcm_decrypt(key: &[u8; 32], encoded: &str) -> Result<Vec<u8>, AuthE
 /// Always use matching encrypt/decrypt pairs.
 pub fn encrypt_separate(key: &[u8; 32], plaintext: &[u8]) -> Result<(String, String), AuthError> {
     let cipher = build_cipher(key);
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce_bytes: [u8; 12] = Generate::generate();
+    let nonce = Nonce::<U12>::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| AuthError::Crypto(format!("AES-GCM encrypt: {e}")))?;
 
     let nonce_b64 = STANDARD.encode(nonce_bytes);
@@ -133,10 +132,11 @@ pub fn decrypt_separate(
     }
 
     let cipher = build_cipher(key);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::<U12>::try_from(nonce_bytes.as_slice())
+        .map_err(|_| AuthError::Crypto("nonce must be 12 bytes".into()))?;
 
     cipher
-        .decrypt(nonce, ciphertext.as_slice())
+        .decrypt(&nonce, ciphertext.as_slice())
         .map_err(|e| AuthError::Crypto(format!("AES-GCM decrypt: {e}")))
 }
 
@@ -156,7 +156,8 @@ pub fn decrypt_separate(
 /// - **Per-tenant**: `tenant_id` is part of the HMAC input, so the same
 ///   `user_id` in two different tenants produces different pseudonyms.
 pub fn gdpr_pseudonym(pepper: &[u8; 32], tenant_id: Uuid, user_id: Uuid) -> String {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(pepper).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacSha256 as hmac::KeyInit>::new_from_slice(pepper).expect("HMAC accepts any key length");
     mac.update(tenant_id.as_bytes());
     mac.update(user_id.as_bytes());
     let tag = mac.finalize().into_bytes();

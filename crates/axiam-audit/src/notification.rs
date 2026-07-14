@@ -235,6 +235,18 @@ mod tests {
         }
     }
 
+    /// Mail publisher that always fails, to exercise the fire-and-forget
+    /// error branch in `dispatch`.
+    struct FailingPublisher;
+
+    impl MailPublisher for FailingPublisher {
+        async fn publish(&self, _msg: OutboundMailMessage) -> AxiamResult<()> {
+            Err(axiam_core::error::AxiamError::Internal(
+                "publish failed".into(),
+            ))
+        }
+    }
+
     fn make_rule(recipients: Vec<&str>) -> NotificationRule {
         NotificationRule {
             id: Uuid::new_v4(),
@@ -359,5 +371,71 @@ mod tests {
             .unwrap();
 
         assert_eq!(count, 0);
+    }
+
+    /// A rule returned by the repository whose events do not intersect the
+    /// event types derived from the audit action is skipped (the inner
+    /// `matched_event == None` branch).
+    #[tokio::test]
+    async fn notification_rule_without_matching_event_is_skipped() {
+        // Action/outcome maps to `LoginFailure`, but the rule only lists
+        // `PasswordChanged`, so no event matches and the recipient is skipped.
+        let rule = NotificationRule {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            name: "mismatch-rule".into(),
+            description: "rule whose events do not match the query".into(),
+            events: vec![NotificationEventType::PasswordChanged],
+            recipient_emails: vec!["nobody@example.com".into()],
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let repo = MockRuleRepo::new(vec![rule]);
+        let dispatcher = NotificationDispatcher::new(repo);
+        let publisher = RecordingPublisher::new();
+
+        let count = dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "POST /auth/login",
+                "Failure",
+                None,
+                "details",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0, "non-matching rule must enqueue nothing");
+        assert_eq!(publisher.count(), 0);
+    }
+
+    /// Publish errors are logged and swallowed (fire-and-forget, D-14): the
+    /// dispatcher still returns `Ok`, with a count that excludes the failed
+    /// enqueue attempts.
+    #[tokio::test]
+    async fn notification_publish_error_is_swallowed() {
+        let rule = make_rule(vec!["alice@example.com", "bob@example.com"]);
+        let repo = MockRuleRepo::new(vec![rule]);
+        let dispatcher = NotificationDispatcher::new(repo);
+        let publisher = FailingPublisher;
+
+        let count = dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "POST /auth/login",
+                "Failure",
+                Some(Uuid::new_v4()),
+                "too many attempts",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        // Both publishes failed, so nothing counted, but dispatch still succeeds.
+        assert_eq!(count, 0, "failed publishes must not be counted");
     }
 }

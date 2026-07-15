@@ -82,6 +82,15 @@ jobs:
       - name: Generate lcov report
         run: cargo llvm-cov report --lcov --output-path lcov.info
 
+      # Regression gate: fail the build if workspace line coverage drops below
+      # the floor. Current raw cargo-llvm-cov line coverage is ~78.7% (this is
+      # the whole default-feature workspace; note it differs from the Coveralls
+      # display number). The floor is set just below that so it never
+      # false-fails; ratchet it upward as coverage rises (target: >=90%).
+      # Reuses the profdata already collected above (no re-run).
+      - name: Enforce coverage floor
+        run: cargo llvm-cov report --fail-under-lines 77
+
       - name: Upload to Coveralls
         uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e  # v2.3.7
         with:

@@ -468,6 +468,200 @@ async fn validate_credentials_inactive_user_is_invalid() {
     assert!(!resp.valid);
 }
 
+/// User repository whose behaviour is scripted per-test to exercise the
+/// service's error branches (internal DB errors, failed-login accounting).
+#[derive(Clone, Default)]
+struct ScriptedUserRepo {
+    user: Option<User>,
+    fail_get_by_id: bool,
+    fail_increment: bool,
+}
+
+impl UserRepository for ScriptedUserRepo {
+    async fn create(&self, _i: CreateUser) -> AxiamResult<User> {
+        unimplemented!()
+    }
+    async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<User> {
+        if self.fail_get_by_id {
+            return Err(AxiamError::Internal("db unavailable".into()));
+        }
+        self.user.clone().ok_or(AxiamError::NotFound {
+            entity: "user".into(),
+            id: "x".into(),
+        })
+    }
+    async fn get_by_username(&self, _t: Uuid, _u: &str) -> AxiamResult<User> {
+        self.user.clone().ok_or(AxiamError::NotFound {
+            entity: "user".into(),
+            id: "x".into(),
+        })
+    }
+    async fn get_by_email(&self, _t: Uuid, _e: &str) -> AxiamResult<User> {
+        Err(AxiamError::NotFound {
+            entity: "user".into(),
+            id: "x".into(),
+        })
+    }
+    async fn update(&self, _t: Uuid, _i: Uuid, _u: UpdateUser) -> AxiamResult<User> {
+        unimplemented!()
+    }
+    async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> {
+        unimplemented!()
+    }
+    async fn update_totp_step(&self, _t: Uuid, _i: Uuid, _s: u64) -> AxiamResult<bool> {
+        unimplemented!()
+    }
+    async fn list(&self, _t: Uuid, _p: Pagination) -> AxiamResult<PaginatedResult<User>> {
+        unimplemented!()
+    }
+    async fn increment_failed_logins(
+        &self,
+        _t: Uuid,
+        _u: Uuid,
+        _lt: u32,
+        _b: i64,
+        _bm: f64,
+        _m: i64,
+    ) -> AxiamResult<()> {
+        if self.fail_increment {
+            return Err(AxiamError::Internal("increment failed".into()));
+        }
+        Ok(())
+    }
+    async fn anonymize_user(&self, _t: Uuid, _u: Uuid, _e: &str, _p: &str) -> AxiamResult<()> {
+        unimplemented!()
+    }
+}
+
+/// `get_user` maps a non-Active status to its wire string for every variant
+/// (covers each arm of `status_to_string`).
+#[tokio::test]
+async fn get_user_renders_all_status_variants() {
+    let tenant = Uuid::new_v4();
+    for (status, expected) in [
+        (UserStatus::Inactive, "inactive"),
+        (UserStatus::Locked, "locked"),
+        (UserStatus::PendingVerification, "pending_verification"),
+        (UserStatus::Anonymized, "anonymized"),
+    ] {
+        let mut user = active_user(tenant, "hash".into());
+        user.status = status;
+        let svc = UserServiceImpl::new(
+            MockUserRepo {
+                user: Some(user.clone()),
+            },
+            auth_config(),
+        );
+        let mut req = Request::new(GetUserRequest {
+            tenant_id: tenant.to_string(),
+            user_id: user.id.to_string(),
+        });
+        req.extensions_mut().insert(claims_for(tenant));
+        let resp = svc.get_user(req).await.unwrap().into_inner();
+        assert_eq!(resp.status, expected);
+    }
+}
+
+/// A non-`NotFound` repository error from `get_by_id` maps to `INTERNAL`.
+#[tokio::test]
+async fn get_user_internal_error_maps_to_internal() {
+    let tenant = Uuid::new_v4();
+    let svc = UserServiceImpl::new(
+        ScriptedUserRepo {
+            fail_get_by_id: true,
+            ..Default::default()
+        },
+        auth_config(),
+    );
+    let mut req = Request::new(GetUserRequest {
+        tenant_id: tenant.to_string(),
+        user_id: Uuid::new_v4().to_string(),
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+    let err = svc.get_user(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Internal);
+}
+
+#[tokio::test]
+async fn validate_credentials_missing_claims_is_unauthenticated() {
+    let svc = UserServiceImpl::new(MockUserRepo { user: None }, auth_config());
+    let req = Request::new(ValidateCredentialsRequest {
+        tenant_id: Uuid::new_v4().to_string(),
+        username_or_email: "alice".into(),
+        password: "x".into(),
+    });
+    let err = svc.validate_credentials(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+/// A configured pepper is threaded into password verification (exercises the
+/// `pepper.as_ref().map(...)` branch).
+#[tokio::test]
+async fn validate_credentials_with_pepper_succeeds() {
+    let tenant = Uuid::new_v4();
+    let mut cfg = auth_config();
+    cfg.pepper = Some(secrecy::SecretString::from("test-pepper-value".to_string()));
+    let hash =
+        axiam_auth::password::hash_password(&test_password(), Some("test-pepper-value")).unwrap();
+    let user = active_user(tenant, hash);
+    let svc = UserServiceImpl::new(
+        MockUserRepo {
+            user: Some(user.clone()),
+        },
+        cfg,
+    );
+    let mut req = Request::new(ValidateCredentialsRequest {
+        tenant_id: tenant.to_string(),
+        username_or_email: "alice".into(),
+        password: test_password(),
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+    let resp = svc.validate_credentials(req).await.unwrap().into_inner();
+    assert!(resp.valid);
+}
+
+/// A malformed stored password hash surfaces as an INTERNAL error from the
+/// verifier rather than a silent `valid: false`.
+#[tokio::test]
+async fn validate_credentials_bad_hash_maps_to_internal() {
+    let tenant = Uuid::new_v4();
+    let user = active_user(tenant, "not-a-valid-phc-hash".into());
+    let svc = UserServiceImpl::new(MockUserRepo { user: Some(user) }, auth_config());
+    let mut req = Request::new(ValidateCredentialsRequest {
+        tenant_id: tenant.to_string(),
+        username_or_email: "alice".into(),
+        password: test_password(),
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+    let err = svc.validate_credentials(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Internal);
+}
+
+/// If recording a failed login itself errors, the call surfaces INTERNAL
+/// (the lockout-accounting error branch).
+#[tokio::test]
+async fn validate_credentials_failed_login_record_error_maps_to_internal() {
+    let tenant = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let user = active_user(tenant, hash);
+    let svc = UserServiceImpl::new(
+        ScriptedUserRepo {
+            user: Some(user),
+            fail_increment: true,
+            ..Default::default()
+        },
+        auth_config(),
+    );
+    let mut req = Request::new(ValidateCredentialsRequest {
+        tenant_id: tenant.to_string(),
+        username_or_email: "alice".into(),
+        password: "wrong-password".into(),
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+    let err = svc.validate_credentials(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Internal);
+}
+
 #[tokio::test]
 async fn validate_credentials_locked_user_is_invalid() {
     let tenant = Uuid::new_v4();

@@ -19,15 +19,21 @@
     --accent-foreground: 210 40% 98%;
     --destructive: 0 84% 60%;
     --destructive-foreground: 210 40% 98%;
+    /* Decorative hairline (subtle). Structural boundaries (panels, tables)
+       should use the stronger --border-strong token below. */
     --border: 191 100% 50% / 0.15;
+    --border-strong: 191 100% 50% / 0.28;
     --input: 191 100% 50% / 0.15;
     --ring: 191 100% 50%;
     --radius: 0.75rem;
   }
 
-  * {
-    @apply border-border;
-  }
+  /* NOTE: the previous `* { border-color: … }` universal rule was dropped.
+     It forced the cyan hairline color onto every element, so anything that
+     later received a `border` width picked up an unintended cyan edge. Every
+     border/divide in the app already supplies its own color (via `border-…`,
+     `divide-…`, or the `border-border` token), so no universal default is
+     needed and borders are now predictable to reason about (#13). */
 
   html {
     color-scheme: dark;
@@ -35,18 +41,88 @@
 
   body {
     @apply bg-background text-foreground;
-    background: linear-gradient(135deg, #0d0d2b 0%, #1a0a3d 100%);
-    background-attachment: fixed;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
       Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* Dynamic viewport units so the last row of content is never hidden
+       behind the mobile browser chrome. Plain vh kept as a fallback. */
     min-height: 100vh;
+    min-height: 100dvh;
     margin: 0;
+  }
+
+  /* Paint the app gradient on a fixed layer instead of using
+     `background-attachment: fixed`, which janks / is ignored on iOS Safari.
+     A pinned pseudo-element renders identically across engines with no
+     per-scroll-frame repaint cost. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(135deg, #0d0d2b 0%, #1a0a3d 100%);
   }
 
   #root {
     min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  /* Respect the user's reduced-motion preference across the whole system:
+     hover lifts, glow pulses, ring spins, transitions and spinners are all
+     neutralized (WCAG 2.3.3). Loading spinners stay perceivable via the
+     opacity pulse defined below. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+
+    /* Keep spinners perceivable without rotation. */
+    .animate-spin {
+      animation: reduced-motion-pulse 1.2s ease-in-out infinite !important;
+    }
+  }
+
+  @keyframes reduced-motion-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.4;
+    }
+  }
+}
+
+@layer utilities {
+  /* Dynamic-viewport overrides so full-height measures account for the
+     retractable mobile browser chrome. dvh is supported in all current
+     Firefox/Chrome/Safari/Edge; the plain vh line is the fallback. */
+  .min-h-screen {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  .h-screen {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  .max-h-screen {
+    max-height: 100vh;
+    max-height: 100dvh;
+  }
+
+  /* Single, consistent keyboard-focus ring reused by inputs and hand-rolled
+     dialog buttons so focus behavior matches the Button component. */
+  .focus-ring {
+    @apply focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background;
   }
 }
 
@@ -55,9 +131,28 @@
     background: rgba(255, 255, 255, 0.05);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(0, 212, 255, 0.15);
+    border: 1px solid hsl(var(--border-strong));
     border-radius: 0.75rem;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+
+  /* Solid fallback where backdrop-filter is unsupported/disabled, so panels
+     never collapse to a near-transparent 5% white over the gradient. */
+  @supports not (
+    (backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))
+  ) {
+    .glass-card {
+      background: rgba(20, 20, 54, 0.92);
+    }
+  }
+
+  /* Lower the blur radius on small screens where stacking blurred surfaces
+     is GPU-heavy and janks scroll on mid/low-end phones. */
+  @media (max-width: 640px) {
+    .glass-card {
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+    }
   }
 
   .glow-cyan {
@@ -86,9 +181,18 @@
     transition: all 0.2s ease;
   }
 
-  .btn-primary:hover {
+  /* Hover lift only on devices that actually hover, so touch users don't get
+     a "stuck hover" and the glow isn't the sole affordance on tap. */
+  @media (hover: hover) and (pointer: fine) {
+    .btn-primary:hover {
+      box-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
+      transform: translateY(-1px);
+    }
+  }
+
+  /* Press feedback for touch (and mouse) since there's no hover on touch. */
+  .btn-primary:active {
     box-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
-    transform: translateY(-1px);
   }
 
   .input-axiam {

@@ -53,6 +53,14 @@ describe("Button", () => {
     expect(cls).toContain("bg-destructive");
     expect(cls).toContain("h-8");
   });
+  it("buttonVariants exposes a 44px touch icon size", () => {
+    const cls = buttonVariants({ size: "icon-touch" });
+    expect(cls).toContain("h-11");
+    expect(cls).toContain("w-11");
+  });
+  it("buttonVariants adds active-state press feedback for touch", () => {
+    expect(buttonVariants({ variant: "default" })).toContain("active:shadow-glow-cyan");
+  });
 });
 
 describe("Badge", () => {
@@ -102,6 +110,37 @@ describe("Input / Textarea / Label", () => {
     );
     expect(screen.getByText("Name")).toBeInTheDocument();
   });
+  it("Input renders an error message and wires aria-invalid/aria-describedby", () => {
+    render(<Input id="email" error="Email is required" />);
+    const el = screen.getByRole("textbox");
+    expect(el).toHaveAttribute("aria-invalid", "true");
+    expect(el).toHaveAttribute("aria-describedby", "email-error");
+    expect(screen.getByText("Email is required")).toHaveAttribute("id", "email-error");
+  });
+  it("Input marks invalid via the invalid prop without a message", () => {
+    render(<Input aria-label="Name" invalid />);
+    const el = screen.getByLabelText("Name");
+    expect(el).toHaveAttribute("aria-invalid", "true");
+    expect(el).not.toHaveAttribute("aria-describedby");
+  });
+  it("Input preserves a caller-provided aria-describedby alongside the error id", () => {
+    render(<Input id="pw" aria-describedby="hint" error="Too short" />);
+    expect(screen.getByRole("textbox")).toHaveAttribute(
+      "aria-describedby",
+      "hint pw-error"
+    );
+  });
+  it("Textarea renders an error message and wires aria-invalid/aria-describedby", () => {
+    render(<Textarea id="bio" error="Bio is required" />);
+    const el = screen.getByRole("textbox");
+    expect(el).toHaveAttribute("aria-invalid", "true");
+    expect(el).toHaveAttribute("aria-describedby", "bio-error");
+    expect(screen.getByText("Bio is required")).toHaveAttribute("id", "bio-error");
+  });
+  it("Input has no aria-invalid when valid", () => {
+    render(<Input aria-label="Clean" />);
+    expect(screen.getByLabelText("Clean")).not.toHaveAttribute("aria-invalid");
+  });
 });
 
 // ─── StatusBadge ──────────────────────────────────────────────────────────────
@@ -117,6 +156,17 @@ describe("StatusBadge", () => {
       expect(screen.getByText(s.charAt(0).toUpperCase() + s.slice(1))).toBeInTheDocument();
       unmount();
     }
+  });
+  it("renders a non-color icon marked aria-hidden alongside the text", () => {
+    const { container } = render(<StatusBadge status="active" />);
+    const icon = container.querySelector('svg[aria-hidden="true"]');
+    expect(icon).toBeInTheDocument();
+    // Text label is still present (meaning never conveyed by the icon alone).
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    // The icon is an SVG with no text content, so the badge's textContent is
+    // exactly the label — this keeps exact-text matchers (used by the E2E
+    // suite, e.g. tenants "Active") working.
+    expect(container.querySelector("span")?.textContent).toBe("Active");
   });
 });
 
@@ -152,6 +202,17 @@ describe("SearchInput", () => {
     const { rerender } = render(<SearchInput value="a" onChange={() => {}} />);
     rerender(<SearchInput value="reset" onChange={() => {}} />);
     expect(screen.getByDisplayValue("reset")).toBeInTheDocument();
+  });
+  it("prefers an explicit label over the placeholder for its accessible name", () => {
+    render(
+      <SearchInput
+        value=""
+        onChange={() => {}}
+        placeholder="Type to filter…"
+        label="Search users"
+      />
+    );
+    expect(screen.getByLabelText("Search users")).toBeInTheDocument();
   });
   it("clears the pending timer on a second keystroke", () => {
     vi.useFakeTimers();
@@ -195,6 +256,12 @@ describe("shared primitives", () => {
     expect(cb).not.toBeChecked();
     await userEvent.click(cb);
     expect(onChange).toHaveBeenCalledWith(true);
+  });
+  it("ToggleField control meets the minimum target size (>=20px)", () => {
+    render(<ToggleField id="t2" label="Enable" checked={false} onChange={() => {}} />);
+    // w-5/h-5 == 20px, up from the previous 16px (below the 24px WCAG minimum).
+    expect(screen.getByRole("checkbox").className).toMatch(/\bw-5\b/);
+    expect(screen.getByRole("checkbox").className).toMatch(/\bh-5\b/);
   });
   it("SectionCard renders title, action and children", () => {
     render(

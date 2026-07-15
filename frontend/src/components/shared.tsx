@@ -25,9 +25,11 @@ export function ToggleField({ id, label, checked, onChange }: ToggleFieldProps) 
         id={id}
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
-        className="w-4 h-4 accent-cyan-400 cursor-pointer"
+        className="focus-ring w-5 h-5 accent-cyan-400 cursor-pointer rounded-sm"
       />
-      <Label htmlFor={id} className="cursor-pointer">
+      {/* Extend the click/tap target: the whole label row is comfortably large
+          and the htmlFor association keeps the checkbox the control. */}
+      <Label htmlFor={id} className="cursor-pointer py-1.5 flex-1">
         {label}
       </Label>
     </div>
@@ -63,7 +65,7 @@ export interface InfoRowProps {
 
 export function InfoRow({ label, children }: InfoRowProps) {
   return (
-    <div className="flex flex-col sm:flex-row sm:items-start gap-1 sm:gap-4 py-2 border-b border-white/5 last:border-0">
+    <div className="flex flex-col sm:flex-row sm:items-start gap-1 sm:gap-4 py-2 border-b border-white/10 last:border-0">
       <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground sm:w-36 shrink-0 pt-0.5">
         {label}
       </span>

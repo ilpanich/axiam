@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, Copy } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
+import { useModalA11y } from "@/hooks/useModalA11y";
 
 export interface SecretEntry {
   label: string;
@@ -56,7 +57,7 @@ function CopyButton({ value }: { value: string }) {
       type="button"
       onClick={() => void handleCopy()}
       aria-label={copied ? "Copied!" : "Copy to clipboard"}
-      className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border transition-all duration-150 focus:outline-hidden focus:ring-2 focus:ring-primary/40"
+      className="focus-ring shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border transition-all duration-150"
       style={
         copied
           ? {
@@ -97,6 +98,9 @@ export function SecretRevealModal({
 }: SecretRevealModalProps) {
   const ackRef = useRef<HTMLButtonElement>(null);
 
+  // Restore focus to the trigger and lock background scroll while open.
+  useModalA11y(open);
+
   // Focus the acknowledge button when opened; no Escape to close (force acknowledgment)
   useEffect(() => {
     if (!open) return;
@@ -122,7 +126,7 @@ export function SecretRevealModal({
       />
 
       {/* Panel */}
-      <div className="relative z-10 w-full max-w-lg flex flex-col max-h-[90vh] rounded-xl border border-white/10 bg-[#0d0d2b]/95 shadow-2xl shadow-black/60 backdrop-blur-xl">
+      <div className="relative z-10 w-full max-w-lg flex flex-col max-h-[90dvh] rounded-xl border border-white/10 bg-[#0d0d2b]/95 shadow-2xl shadow-black/60 backdrop-blur-xl">
         {/* Warning banner */}
         <div className="flex items-start gap-3 px-5 py-4 rounded-t-xl bg-amber-500/10 border-b border-amber-500/25">
           <AlertTriangle

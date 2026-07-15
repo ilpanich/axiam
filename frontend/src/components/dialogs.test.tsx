@@ -85,6 +85,56 @@ describe("ConfirmDialog", () => {
   });
 });
 
+// ─── Shared modal a11y (scroll lock + focus restore) ────────────────────────────
+
+describe("modal a11y", () => {
+  it("locks background scroll while open and restores it on close", () => {
+    const { rerender } = render(
+      <ConfirmDialog open onClose={() => {}} onConfirm={() => {}} title="T" description="D" />
+    );
+    expect(document.body.style.overflow).toBe("hidden");
+    rerender(
+      <ConfirmDialog open={false} onClose={() => {}} onConfirm={() => {}} title="T" description="D" />
+    );
+    expect(document.body.style.overflow).toBe("");
+  });
+
+  it("restores focus to the triggering element on close", () => {
+    const trigger = document.createElement("button");
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    const { rerender } = render(
+      <ConfirmDialog open onClose={() => {}} onConfirm={() => {}} title="T" description="D" />
+    );
+    // Focus moved into the dialog on open.
+    expect(document.activeElement).not.toBe(trigger);
+
+    rerender(
+      <ConfirmDialog open={false} onClose={() => {}} onConfirm={() => {}} title="T" description="D" />
+    );
+    // Focus returned to the trigger on close.
+    expect(document.activeElement).toBe(trigger);
+    trigger.remove();
+  });
+
+  it("FormDialog also locks scroll while open", () => {
+    const { rerender } = render(
+      <FormDialog open onClose={() => {}} onSubmit={(e) => e.preventDefault()} title="T">
+        <input aria-label="F" />
+      </FormDialog>
+    );
+    expect(document.body.style.overflow).toBe("hidden");
+    rerender(
+      <FormDialog open={false} onClose={() => {}} onSubmit={(e) => e.preventDefault()} title="T">
+        <input aria-label="F" />
+      </FormDialog>
+    );
+    expect(document.body.style.overflow).toBe("");
+  });
+});
+
 // ─── FormDialog ────────────────────────────────────────────────────────────────
 
 describe("FormDialog", () => {
@@ -211,6 +261,55 @@ describe("DataTable", () => {
     render(<DataTable columns={cols} data={[{}]} />);
     // No id, no name → renders an empty cell without throwing.
     expect(screen.getByText("Name")).toBeInTheDocument();
+  });
+
+  it("marks every header cell with scope=col", () => {
+    render(<DataTable columns={columns} data={[]} />);
+    const headers = screen.getAllByRole("columnheader");
+    expect(headers).toHaveLength(columns.length);
+    headers.forEach((h) => expect(h).toHaveAttribute("scope", "col"));
+  });
+
+  it("renders an error state with a working retry button", async () => {
+    const onRetry = vi.fn();
+    render(
+      <DataTable columns={columns} data={[]} error="Failed to load" onRetry={onRetry} />
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Failed to load");
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+    expect(onRetry).toHaveBeenCalled();
+  });
+
+  it("shows error state (not empty message) even when data is empty", () => {
+    render(
+      <DataTable columns={columns} data={[]} error="Boom" emptyMessage="Nothing here" />
+    );
+    expect(screen.getByText("Boom")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing here")).not.toBeInTheDocument();
+  });
+
+  it("renders sortable headers with aria-sort and reports the next sort state", async () => {
+    const onSortChange = vi.fn();
+    const cols: Column<Row>[] = [
+      { key: "name", header: "Name", sortable: true },
+      { key: "role", header: "Role" },
+    ];
+    render(
+      <DataTable
+        columns={cols}
+        data={[{ id: "1", name: "Alice", role: "admin" }]}
+        sort={{ key: "name", direction: "asc" }}
+        onSortChange={onSortChange}
+      />
+    );
+    const nameHeader = screen.getByRole("columnheader", { name: /Name/ });
+    expect(nameHeader).toHaveAttribute("aria-sort", "ascending");
+    // Non-sortable column has no aria-sort.
+    expect(screen.getByRole("columnheader", { name: "Role" })).not.toHaveAttribute(
+      "aria-sort"
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Name/ }));
+    expect(onSortChange).toHaveBeenCalledWith({ key: "name", direction: "desc" });
   });
 });
 

@@ -7,6 +7,13 @@ interface SearchInputProps {
   onChange: (value: string) => void;
   placeholder?: string;
   className?: string;
+  /**
+   * Accessible name for the field. Falls back to `placeholder` for backwards
+   * compatibility, but prefer an explicit label so the control still has a
+   * name once the user types (a placeholder disappears) or if `placeholder`
+   * is empty.
+   */
+  label?: string;
 }
 
 /**
@@ -18,6 +25,7 @@ export function SearchInput({
   onChange,
   placeholder = "Search…",
   className,
+  label,
 }: SearchInputProps) {
   const [local, setLocal] = useState(value);
   const [prevValue, setPrevValue] = useState(value);
@@ -59,12 +67,12 @@ export function SearchInput({
         value={local}
         onChange={handleChange}
         placeholder={placeholder}
-        aria-label={placeholder}
+        aria-label={label ?? placeholder}
         className={cn(
-          "h-9 w-full rounded-md pl-9 pr-3 text-sm",
+          "focus-ring h-9 w-full rounded-md pl-9 pr-3 text-sm",
           "bg-white/5 border border-primary/20 text-foreground",
           "placeholder:text-muted-foreground",
-          "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
+          "focus:border-primary",
           "transition-colors duration-200"
         )}
       />

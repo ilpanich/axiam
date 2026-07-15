@@ -64,6 +64,15 @@ jobs:
       fail-fast: false
       matrix:
         image: [server, frontend]
+        # `platform` MUST be its own matrix dimension so the build fans out to
+        # the full cross product image × platform = 4 jobs (server/frontend ×
+        # amd64/arm64). If the platforms live only under `include:` (with no
+        # base `platform` key), GitHub treats arch/runner as *added* values and
+        # the second include entry overwrites the first on every image combo —
+        # collapsing the matrix to arm64-only and silently dropping amd64. The
+        # `include:` block below then just attaches arch+runner to each existing
+        # platform combo (matching by the original `platform` value).
+        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
             arch: amd64

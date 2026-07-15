@@ -5,5 +5,12 @@
 # DL3008: Pin versions in apt get install — intentionally not pinned because
 #         the build uses digest-pinned base images; apt versions should float
 #         within the pinned base to pick up security patches.
+# DL3017: Do not use apk upgrade — deliberately used in Dockerfile.frontend to
+#         pull Alpine security fixes the upstream nginx-unprivileged image lags
+#         behind (the digest is already the newest tag, so the CVEs can only be
+#         cleared at build time). Same "float patches within a pinned base"
+#         rationale as DL3008 above; the D-06 Trivy HIGH/CRITICAL gate is the
+#         real backstop that proves the resulting image is clean.
 ignore:
   - DL3008
+  - DL3017

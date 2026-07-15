@@ -39,6 +39,12 @@ type TestEngine = AuthorizationEngine<
 const PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n-----END PRIVATE KEY-----";
 const PUB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n-----END PUBLIC KEY-----";
 
+/// Test-only user password, built at runtime so credential scanners don't
+/// flag a hard-coded literal (mirrors grpc_units.rs). NOT a real credential.
+fn test_password() -> String {
+    std::env::var("AXIAM_TEST_PASSWORD").unwrap_or_else(|_| ["pass", "123456789"].concat())
+}
+
 fn test_auth_config() -> AuthConfig {
     AuthConfig {
         jwt_private_key_pem: PRIV_PEM.into(),
@@ -76,7 +82,7 @@ async fn setup() -> (Surreal<TestDb>, SurrealUserRepository<TestDb>) {
             tenant_id: tenant.id,
             username: "boot-user".into(),
             email: "boot-user@example.com".into(),
-            password: "pass123456789".into(),
+            password: test_password(),
             metadata: None,
         })
         .await

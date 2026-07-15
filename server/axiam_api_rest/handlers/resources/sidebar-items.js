@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create","delete","get","list","list_ancestors","list_children","update"],"struct":["CreateResourceRequest","UpdateResourceRequest"]};

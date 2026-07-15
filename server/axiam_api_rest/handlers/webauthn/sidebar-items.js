@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["finish_authentication","finish_registration","start_authentication","start_registration"],"struct":["CredentialResponse","FinishAuthenticationRequest","FinishRegistrationRequest","StartAuthenticationRequest","StartAuthenticationResponse","StartRegistrationResponse","WebauthnLoginResponse"]};

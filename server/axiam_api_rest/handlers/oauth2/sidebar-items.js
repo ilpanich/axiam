@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["authorize","discovery","introspect","jwks","revoke","token","userinfo"],"struct":["AuthorizeQuery","OAuth2ErrorResponse","TenantQuery"]};

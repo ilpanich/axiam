@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["EmailProviderKind","ProviderConfig"],"fn":["effective_email_config","email_config_from_org_input","validate_email_config"],"struct":["ApiProviderConfig","EmailConfig","EmailConfigOverride","SetOrgEmailConfig","SmtpConfig"],"type":["SetTenantEmailOverride"]};

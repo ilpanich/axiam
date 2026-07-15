@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AUD_M2M","AUD_USER"],"enum":["SubjectKind"],"fn":["decode_access_token","generate_refresh_token","hash_refresh_token","issue_access_token","issue_client_credentials_token","issue_id_token","issue_service_account_token","validate_access_token"],"struct":["AccessTokenClaims","CachedUserIdentity","IdTokenClaims","ValidatedClaims"]};

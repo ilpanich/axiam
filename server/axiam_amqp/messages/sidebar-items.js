@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CURRENT_KEY_VERSION","DEFAULT_FRESHNESS_SKEW_SECS","MIN_ACCEPTED_KEY_VERSION"],"enum":["MailType"],"fn":["derive_tenant_key","is_fresh","sign_payload","verify_payload","verify_tenant_signature"],"struct":["AuditEventMessage","AuthzRequest","AuthzResponse","NotificationEvent","OutboundMailMessage","WebhookMessage"]};

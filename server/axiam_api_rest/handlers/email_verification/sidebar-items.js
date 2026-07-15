@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["resend_verification","verify_email"],"struct":["ResendVerificationRequest","VerifyEmailRequest"]};

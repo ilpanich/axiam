@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PH_ACTION_URL","PH_EMAIL","PH_EXPIRY_TIME","PH_ORG_NAME","PH_TENANT_NAME","PH_USERNAME"],"fn":["builtin_template","render","render_email","render_html","resolve_template"],"type":["TemplateContext"]};

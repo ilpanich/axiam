@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["global","init_global"],"struct":["HibpBreaker"]};

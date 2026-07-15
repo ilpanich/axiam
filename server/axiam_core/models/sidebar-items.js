@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["audit","certificate","email","email_template","email_verification","federation","gdpr","group","mail","mfa_method","notification_rule","oauth2_client","organization","password_history","password_reset","permission","pgp_key","resource","role","scope","service_account","session","settings","tenant","user","webauthn_credential","webhook"]};

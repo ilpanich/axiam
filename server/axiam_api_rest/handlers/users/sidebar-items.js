@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create","delete","get","list","unlock","update"],"struct":["CreateUserRequest","UpdateUserRequest","UserResponse"]};

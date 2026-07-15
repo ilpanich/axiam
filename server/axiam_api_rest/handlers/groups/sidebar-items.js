@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_member","create","delete","get","list","list_members","remove_member","update"],"struct":["AddMemberRequest","CreateGroupRequest","MemberPath"]};

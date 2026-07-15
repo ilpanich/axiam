@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["AuthorizationCode","CreateAuthorizationCode","CreateOAuth2Client","CreateRefreshToken","OAuth2Client","RefreshToken","UpdateOAuth2Client"]};

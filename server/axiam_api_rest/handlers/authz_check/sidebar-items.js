@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["batch_check_access","check_access"],"struct":["BatchCheckAccessBody","BatchCheckAccessResponse","CheckAccessBody","CheckAccessResponse"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["current_key_version","decrypt_client_secret","decrypt_client_secret_or_legacy","encrypt_client_secret","migrate_plaintext_federation_secrets"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COOKIE_ACCESS","COOKIE_CSRF","COOKIE_REFRESH","HEADER_CSRF"],"fn":["access_cookie","clear_access_cookie","clear_csrf_cookie","clear_refresh_cookie","csrf_cookie","generate_csrf_token","refresh_cookie"],"struct":["CsrfMiddleware","CsrfMiddlewareService"]};

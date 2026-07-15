@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["IntrospectRequest","IntrospectionResponse","RevokeRequest","TokenRequest","TokenResponse","TokenService"]};

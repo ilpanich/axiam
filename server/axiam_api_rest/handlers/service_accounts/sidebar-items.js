@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create","delete","get","list","rotate_secret","update"],"struct":["CreateServiceAccountRequest","RotateSecretResponse","ServiceAccountCreatedResponse","ServiceAccountResponse"]};

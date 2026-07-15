@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["STALE_WINDOW","TTL"],"struct":["DiscoveryCache","DiscoveryCacheEntry"],"type":["DiscoveryCacheMap"]};

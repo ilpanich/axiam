@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TemplateKind"],"fn":["validate_email_template"],"struct":["EmailTemplate","SetEmailTemplate"]};

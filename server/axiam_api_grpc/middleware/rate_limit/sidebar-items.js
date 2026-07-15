@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_grpc_governor_layer"],"struct":["GrpcSharedRateLimitLayer","GrpcSharedRateLimitService","GrpcTrustedHopsKeyExtractor"],"type":["GrpcGovernorLayer"]};

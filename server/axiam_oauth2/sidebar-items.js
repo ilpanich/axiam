@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["authorize","error","oidc","pkce","token"]};

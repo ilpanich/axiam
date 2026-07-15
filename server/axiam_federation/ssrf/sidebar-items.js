@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SsrfError"],"fn":["guarded_fetch","is_disallowed_ip","pinned_client","read_capped_body","resolve_and_pick"]};

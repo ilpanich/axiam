@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create","delete","get","list","update"],"struct":["CreateOAuth2ClientRequest","OAuth2ClientCreatedResponse","OAuth2ClientResponse","UpdateOAuth2ClientRequest"]};

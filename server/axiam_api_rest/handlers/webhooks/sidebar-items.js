@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create","delete","get","list","update"],"struct":["CreateWebhookRequest","UpdateWebhookRequest","WebhookResponse"]};

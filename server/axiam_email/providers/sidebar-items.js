@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_provider","provider_name"],"mod":["brevo","mock","postmark","resend","sendgrid","smtp"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["generate","get","list","revoke"],"struct":["CreateCaCertificateRequest"]};

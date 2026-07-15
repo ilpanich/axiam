@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_org_settings","get_tenant_settings","set_org_settings","set_tenant_settings"]};

@@ -1,0 +1,42 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Shared SSRF guard — resolve-once-and-pin outbound fetch helper."><title>axiam_federation::ssrf - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_federation" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module ssrf</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_federation/index.html">axiam_<wbr>federation</a><span class="version">1.0.0-alpha</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module ssrf</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-allow_private-test-seam-only-applies-to-the-first-hop" title="The `allow_private` test seam only applies to the first hop">The <code>allow_private</code> test seam only applies to the first hop</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>federation</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_federation</a></div><h1>Module <span>ssrf</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_federation/ssrf.rs.html#1-447">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Shared SSRF guard — resolve-once-and-pin outbound fetch helper.</p>
+<p>Generalizes the byte-identical guard logic previously duplicated in
+<code>jwks_cache::is_private_jwks_ip</code>/<code>validate_jwks_url</code> and
+<code>axiam-api-rest::webhook::is_private_ip</code>/<code>resolve_and_validate_host</code>
+(SECHRD-02 / D-01a DRY) into one reusable module, and — critically —
+adds IP <strong>pinning</strong>, which neither prior guard did: both validated the
+resolved <code>IpAddr</code> and then let <code>reqwest</code> re-resolve DNS independently at
+send time, leaving a DNS-rebind TOCTOU window open between validation and
+connect (D-01c closes this).</p>
+<p>Use <a href="fn.guarded_fetch.html" title="fn axiam_federation::ssrf::guarded_fetch"><code>guarded_fetch</code></a> for every outbound fetch to an admin/IdP-supplied
+URL (JWKS, OIDC discovery, OIDC token exchange, SAML metadata, webhook
+delivery). It:</p>
+<ol>
+<li>Resolves the host (A + AAAA) fresh — no cross-request DNS caching
+(D-01c).</li>
+<li>Rejects the fetch if ANY resolved address is
+loopback/private/link-local/ULA/unspecified (D-01a) — unless the
+caller opted into the <code>allow_private</code> test seam (see below).</li>
+<li>Pins the exact validated <code>IpAddr</code> into a fresh, single-use
+<code>reqwest::Client</code> via <code>ClientBuilder::resolve()</code>, so the socket that
+is actually opened is the one that was validated — not a second,
+independently-resolved address (D-01c).</li>
+<li>Disables <code>reqwest</code>’s automatic redirect following and instead
+manually re-runs the FULL guard (resolve → validate → pin → send)
+against the <code>Location</code> target, bounded to [<code>MAX_HOPS</code>] hops (D-01b).</li>
+</ol>
+<h3 id="the-allow_private-test-seam-only-applies-to-the-first-hop"><a class="doc-anchor" href="#the-allow_private-test-seam-only-applies-to-the-first-hop">§</a>The <code>allow_private</code> test seam only applies to the first hop</h3>
+<p><code>allow_private</code> exists solely so integration tests can point a guarded
+fetch at a loopback mock server (mirrors the pre-existing
+<code>JwksCache::new_allow_private_networks</code> seam). It is honored <strong>only for
+the very first hop</strong> of <a href="fn.guarded_fetch.html" title="fn axiam_federation::ssrf::guarded_fetch"><code>guarded_fetch</code></a> — every redirect hop after that
+is always validated with the strict (production) check, regardless of
+<code>allow_private</code>. A <code>Location</code> header is attacker-influenced response
+data, not the admin-configured URL the caller opted to trust; holding it
+to the same relaxed standard as the test seam would silently defeat the
+redirect-bypass defense this module exists to provide (D-01b: “re-run
+the full SSRF guard against the redirect target”).</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SsrfError.html" title="enum axiam_federation::ssrf::SsrfError">Ssrf<wbr>Error</a></dt><dd>Errors produced by the shared SSRF guard.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.guarded_fetch.html" title="fn axiam_federation::ssrf::guarded_fetch">guarded_<wbr>fetch</a></dt><dd>Orchestrates resolve + pin + fetch + bounded manual redirect
+re-validation (D-01b).</dd><dt><a class="fn" href="fn.is_disallowed_ip.html" title="fn axiam_federation::ssrf::is_disallowed_ip">is_<wbr>disallowed_<wbr>ip</a></dt><dd>Returns <code>true</code> for IP addresses that must never be contacted from a
+server-side outbound fetch to an admin/IdP-supplied URL.</dd><dt><a class="fn" href="fn.pinned_client.html" title="fn axiam_federation::ssrf::pinned_client">pinned_<wbr>client</a></dt><dd>Build a fresh, single-use client pinned to <code>ip</code> for <code>host</code>.</dd><dt><a class="fn" href="fn.read_capped_body.html" title="fn axiam_federation::ssrf::read_capped_body">read_<wbr>capped_<wbr>body</a></dt><dd>Read a response body with a hard streaming cap, aborting as soon as <code>cap</code>
+is exceeded — WITHOUT buffering the rest of the body first (CQ-B23).</dd><dt><a class="fn" href="fn.resolve_and_pick.html" title="fn axiam_federation::ssrf::resolve_and_pick">resolve_<wbr>and_<wbr>pick</a></dt><dd>Resolve <code>host:port</code> (A + AAAA), reject if ANY resolved address is
+disallowed, and return ONE validated address to pin into the connection.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["delete_mfa_method","list_mfa_methods"],"struct":["MfaMethodResponse"]};

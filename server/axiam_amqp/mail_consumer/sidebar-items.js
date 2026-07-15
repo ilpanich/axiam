@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_RETRIES"],"enum":["SendOutcome"],"fn":["send_with_retry_and_audit","start_mail_consumer"],"struct":["SendError"]};

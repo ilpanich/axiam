@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ActorType","AuditOutcome"],"struct":["AuditLogEntry","CreateAuditLogEntry"]};

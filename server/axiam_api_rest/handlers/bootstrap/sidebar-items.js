@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["bootstrap"],"struct":["BootstrapRequest","BootstrapResponse"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["assign_to_group","assign_to_user","create","delete","get","list","list_groups","list_users","unassign_from_group","unassign_from_user","update"],"struct":["AssignRoleToGroupRequest","AssignRoleToUserRequest","CreateRoleRequest","RoleGroupPath","RoleUserPath","UnassignQuery"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["CreateRole","Role","RoleAssignment","UpdateRole"]};

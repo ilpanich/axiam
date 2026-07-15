@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["mint_bootstrap_setup_token_if_needed","reconcile_default_role_grants","seed_default_roles","seed_permissions"],"struct":["SeedRolesResult","SeederStateRow"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["delete_org_email_config","delete_tenant_email_config","get_org_email_config","get_tenant_email_config","set_org_email_config","set_tenant_email_config"]};

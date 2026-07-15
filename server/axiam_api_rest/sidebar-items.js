@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["authz","config","error","extractors","handlers","health","middleware","openapi","permissions","server","state","webhook","webhook_consumer"]};

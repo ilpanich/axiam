@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["health","ready"],"struct":["AlwaysHealthy","HealthResponse","ReadyResponse"],"trait":["HealthChecker"]};

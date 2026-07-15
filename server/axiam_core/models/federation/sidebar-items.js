@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FederationProtocol"],"struct":["CreateFederationConfig","CreateFederationLink","FederationConfig","FederationLink","UpdateFederationConfig"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["api_v1_routes","build_cors","health_routes","openapi_routes","register_api_v1_routes"]};

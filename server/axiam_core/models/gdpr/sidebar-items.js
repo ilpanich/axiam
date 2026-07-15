@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AccountDeletionStatus","ExportJobStatus"],"struct":["AccountDeletion","Consent","CreateAccountDeletion","CreateConsent","CreateErasureProof","CreateExportJob","ErasureProof","ExportJob"]};

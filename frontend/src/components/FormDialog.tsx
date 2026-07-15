@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, X } from "lucide-react";
+import { useModalA11y } from "@/hooks/useModalA11y";
 
 interface FormDialogProps {
   open: boolean;
@@ -23,6 +24,9 @@ export function FormDialog({
 }: FormDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+
+  // Restore focus to the trigger and lock background scroll while open.
+  useModalA11y(open);
 
   // Keep Tab cycling within the dialog and close on Escape
   const handleKeyDown = useCallback(
@@ -90,7 +94,7 @@ export function FormDialog({
       />
 
       {/* Panel */}
-      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[90vh] p-6">
+      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[90dvh] p-6">
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-primary/10">
           <h2
@@ -102,7 +106,7 @@ export function FormDialog({
           <button
             ref={closeRef}
             onClick={isLoading ? undefined : onClose}
-            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-hidden focus:ring-2 focus:ring-primary/40"
+            className="focus-ring text-muted-foreground hover:text-foreground transition-colors rounded p-1"
             aria-label="Close dialog"
             disabled={isLoading}
           >

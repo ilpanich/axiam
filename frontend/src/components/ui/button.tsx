@@ -8,24 +8,30 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
+        // `active:` states give touch users press feedback since `hover:`
+        // variants only fire on hover-capable pointers (Tailwind gates the
+        // hover variant behind `@media (hover: hover)`).
         default:
-          "bg-primary text-primary-foreground hover:shadow-glow-cyan hover:-translate-y-0.5",
+          "bg-primary text-primary-foreground hover:shadow-glow-cyan hover:-translate-y-0.5 active:shadow-glow-cyan",
         destructive:
-          "bg-destructive text-destructive-foreground hover:opacity-90",
+          "bg-destructive text-destructive-foreground hover:opacity-90 active:opacity-90",
         outline:
-          "border border-primary/30 bg-transparent text-primary hover:bg-primary/10 hover:border-primary hover:shadow-glow-cyan",
+          "border border-primary/30 bg-transparent text-primary hover:bg-primary/10 hover:border-primary hover:shadow-glow-cyan active:bg-primary/10",
         secondary:
-          "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-        ghost: "text-muted-foreground hover:bg-white/5 hover:text-foreground",
-        link: "text-primary underline-offset-4 hover:underline",
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80 active:bg-secondary/80",
+        ghost:
+          "text-muted-foreground hover:bg-white/5 hover:text-foreground active:bg-white/5",
+        link: "text-primary underline-offset-4 hover:underline active:underline",
         accent:
-          "bg-accent text-accent-foreground hover:shadow-glow-purple hover:-translate-y-0.5",
+          "bg-accent text-accent-foreground hover:shadow-glow-purple hover:-translate-y-0.5 active:shadow-glow-purple",
       },
       size: {
         default: "h-10 px-4 py-2",
         sm: "h-8 rounded-md px-3 text-xs",
         lg: "h-11 rounded-md px-8",
         icon: "h-10 w-10",
+        // 44px — comfortable touch target for tablet/touch contexts.
+        "icon-touch": "h-11 w-11",
       },
     },
     defaultVariants: {

@@ -4,6 +4,7 @@ import { userService, type User } from "@/services/users";
 import { Button } from "@/components/ui/button";
 import { Loader2, Plus, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useModalA11y } from "@/hooks/useModalA11y";
 
 export interface UserSearchDialogProps {
   open: boolean;
@@ -30,6 +31,9 @@ export function UserSearchDialog({
 }: UserSearchDialogProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [actingId, setActingId] = useState<string | null>(null);
+
+  // Restore focus to the trigger and lock background scroll while open.
+  useModalA11y(open);
 
   const { data, isFetching } = useQuery({
     queryKey: ["user-search", searchTerm],
@@ -70,7 +74,7 @@ export function UserSearchDialog({
         onClick={handleClose}
         aria-hidden="true"
       />
-      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[80vh]">
+      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[80dvh]">
         <div className="flex items-center justify-between pb-4 border-b border-primary/10">
           <h2
             id="user-search-dialog-title"
@@ -80,7 +84,7 @@ export function UserSearchDialog({
           </h2>
           <button
             onClick={handleClose}
-            className="text-muted-foreground hover:text-foreground transition-colors rounded p-1 focus:outline-hidden focus:ring-2 focus:ring-primary/40"
+            className="focus-ring text-muted-foreground hover:text-foreground transition-colors rounded p-1"
             aria-label="Close dialog"
           >
             ✕
@@ -101,10 +105,10 @@ export function UserSearchDialog({
               placeholder="Search users…"
               aria-label="Search users"
               className={cn(
-                "h-9 w-full rounded-md pl-9 pr-3 text-sm",
+                "focus-ring h-9 w-full rounded-md pl-9 pr-3 text-sm",
                 "bg-white/5 border border-primary/20 text-foreground",
                 "placeholder:text-muted-foreground",
-                "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
+                "focus:border-primary",
                 "transition-colors duration-200",
               )}
             />
@@ -148,7 +152,7 @@ export function UserSearchDialog({
                         <button
                           onClick={() => void handleAction(user)}
                           disabled={actingId === user.id}
-                          className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-primary/20 text-primary hover:bg-primary/30 transition-colors disabled:opacity-50"
+                          className="focus-ring flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-primary/20 text-primary hover:bg-primary/30 transition-colors disabled:opacity-50"
                         >
                           {actingId === user.id ? (
                             <Loader2 size={12} className="animate-spin" />

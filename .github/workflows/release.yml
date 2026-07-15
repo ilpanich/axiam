@@ -185,6 +185,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Classify the release: a prerelease tag (e.g. axiam-server/v1.0.0-alpha)
+      # carries a version with a SemVer pre-release segment. We strip the
+      # namespaced `axiam-server/v` prefix FIRST, so the only `-` that can
+      # remain is the pre-release separator (the "axiam-server" prefix itself
+      # contains hyphens and must not be mistaken for one).
+      - name: Classify release (stable vs pre-release)
+        id: rel
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#axiam-server/v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [[ "${version}" == *-* ]]; then
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            echo "Pre-release ${version}: image gets the exact version tag only (no moving tags)."
+          else
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+            echo "Stable ${version}: image gets version, major.minor and latest tags."
+          fi
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
@@ -192,13 +211,23 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
           # `type=semver` CANNOT be used here: it parses the git tag as a bare
           # semver, and our release tag is namespaced (axiam-server/v1.0.0), so
-          # it would fail to match and emit no version tag at all. `type=match`
-          # takes the version out of the prefixed tag explicitly.
-          # axiam-server/v1.2.3 -> image tags "1.2.3" and "1.2" (+ the sha tag).
+          # it would fail to match and emit no version tag at all. We take the
+          # version out of the prefixed tag explicitly (computed in the step
+          # above) and publish it verbatim — so a pre-release like
+          # axiam-server/v1.0.0-alpha ships as the image tag "1.0.0-alpha"
+          # rather than silently collapsing to "1.0.0".
+          #
+          # The moving convenience tags (major.minor + latest) are applied ONLY
+          # to stable releases: a pre-release must never claim the "1.0",
+          # "1.0.0" or "latest" tag it is not.
+          # Stable  axiam-server/v1.2.3      -> "1.2.3", "1.2", "latest" (+ sha)
+          # Prerel. axiam-server/v1.0.0-alpha -> "1.0.0-alpha" (+ sha)
           tags: |
-            type=match,pattern=axiam-server/v(\d+\.\d+\.\d+),group=1
-            type=match,pattern=axiam-server/v(\d+\.\d+),group=1
+            type=raw,value=${{ steps.rel.outputs.version }}
+            type=match,pattern=axiam-server/v(\d+\.\d+),group=1,enable=${{ steps.rel.outputs.stable == 'true' }}
             type=sha
+          flavor: |
+            latest=${{ steps.rel.outputs.stable == 'true' }}
 
       - name: Create multi-arch manifest list
         working-directory: /tmp/digests

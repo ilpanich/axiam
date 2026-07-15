@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>AXIAM — Documentation</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 46rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.6; }
+  h1 { margin-bottom: 0 } p.sub { color: #666; margin-top: .25rem }
+  td, th { text-align: left; padding: .4rem .9rem .4rem 0; border-bottom: 1px solid #eee; }
+  code { background: #f5f5f5; padding: .1rem .3rem; border-radius: 3px; }
+</style>
+<h1>AXIAM</h1>
+<p class="sub">Access eXtended Identity and Authorization Management — API documentation.</p>
+<h2>Server</h2>
+<ul>
+  <li><a href="../server/">Server &amp; workspace crates</a> (rustdoc)</li>
+  <li><a href="https://github.com/ilpanich/axiam/tree/main/docs">Guides</a> — deployment, admin, PKI, API contracts (REST / gRPC / AMQP)</li>
+</ul>
+<h2>SDKs</h2>
+<p>Each SDK lives in its own repository and publishes its own documentation.</p>
+<table>
+  <tr><th>Language</th><th>Repository</th><th>API reference</th><th>Package</th></tr>
+  <tr><td>Rust</td><td><a href="https://github.com/ilpanich/axiam-rust-sdk">axiam-rust-sdk</a></td><td><a href="https://docs.rs/axiam-sdk">docs.rs</a></td><td><a href="https://crates.io/crates/axiam-sdk">crates.io</a></td></tr>
+  <tr><td>Go</td><td><a href="https://github.com/ilpanich/axiam-go-sdk">axiam-go-sdk</a></td><td><a href="https://pkg.go.dev/github.com/ilpanich/axiam-go-sdk">pkg.go.dev</a></td><td>Go modules</td></tr>
+  <tr><td>Java</td><td><a href="https://github.com/ilpanich/axiam-java-sdk">axiam-java-sdk</a></td><td><a href="https://javadoc.io/doc/io.github.ilpanich/axiam-sdk">javadoc.io</a></td><td>Maven Central</td></tr>
+  <tr><td>Python</td><td><a href="https://github.com/ilpanich/axiam-python-sdk">axiam-python-sdk</a></td><td><a href="https://ilpanich.github.io/axiam-python-sdk/">API docs</a></td><td><a href="https://pypi.org/project/axiam-sdk/">PyPI</a></td></tr>
+  <tr><td>TypeScript</td><td><a href="https://github.com/ilpanich/axiam-typescript-sdk">axiam-typescript-sdk</a></td><td><a href="https://ilpanich.github.io/axiam-typescript-sdk/">API docs</a></td><td><a href="https://www.npmjs.com/package/axiam-sdk">npm</a></td></tr>
+  <tr><td>C#</td><td><a href="https://github.com/ilpanich/axiam-csharp-sdk">axiam-csharp-sdk</a></td><td><a href="https://ilpanich.github.io/axiam-csharp-sdk/">API docs</a></td><td><a href="https://www.nuget.org/packages/Axiam.Sdk">NuGet</a></td></tr>
+  <tr><td>PHP</td><td><a href="https://github.com/ilpanich/axiam-php-sdk">axiam-php-sdk</a></td><td><a href="https://ilpanich.github.io/axiam-php-sdk/">API docs</a></td><td><a href="https://packagist.org/packages/axiam/axiam-sdk">Packagist</a></td></tr>
+</table>
+<p>Every SDK implements the same
+  <a href="https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md">SDK contract</a>,
+  which is maintained here and mirrored into each SDK repository.</p>

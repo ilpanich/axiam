@@ -1,0 +1,74 @@
+name: Website Publish
+
+# Builds the AXIAM public website (in `website/`) and publishes it to the ROOT
+# of the gh-pages branch, so it is served at https://ilpanich.github.io/axiam/.
+#
+# The gh-pages branch is shared with the API documentation:
+#
+#   | Path      | Owner                      | Workflow           |
+#   |-----------|----------------------------|--------------------|
+#   | / (root)  | this public website        | website-publish.yml|
+#   | /server   | rustdoc for the server     | docs-publish.yml   |
+#   | /docs     | documentation landing page | docs-publish.yml   |
+#
+# This job deploys with `keep_files: true`, so publishing the website root NEVER
+# clobbers the /server and /docs subtrees (and vice-versa — docs-publish already
+# writes only its own subdirectories).
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "website/**"
+      - ".github/workflows/website-publish.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# gh-pages is a single branch: serialize deploys so a website publish and a docs
+# publish cannot race each other's commit on the branch.
+concurrency:
+  group: gh-pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    name: Build & deploy website
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Lint & type-check
+        working-directory: website
+        run: npm run lint && npx tsc -b
+
+      - name: Build
+        working-directory: website
+        run: npm run build
+
+      - name: SPA fallback
+        # The site has no server-side routes, but a 404.html mirroring index.html
+        # lets any stray deep link still load the app instead of a bare 404.
+        run: cp website/dist/index.html website/dist/404.html
+
+      - name: Deploy to GitHub Pages (root)
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./website/dist
+          keep_files: true
+          commit_message: "chore(website): publish ${{ github.sha }}"

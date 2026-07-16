@@ -9,7 +9,11 @@ use crate::handlers;
     info(
         title = "AXIAM API",
         description = "Access eXtended Identity and Authorization Management — REST API",
-        version = "1.0.0-beta",
+        // Track the crate/workspace version automatically so the OpenAPI
+        // `info.version` never drifts from Cargo.toml (axiam-api-rest inherits
+        // `version.workspace = true`). Previously a hardcoded literal, which
+        // silently drifted from the committed sdks/openapi.json on a version bump.
+        version = env!("CARGO_PKG_VERSION"),
         license(name = "Apache-2.0"),
     ),
     paths(

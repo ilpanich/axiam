@@ -410,6 +410,76 @@ Per-framework expectations:
 
 ---
 
+## §11 Declarative Authorization Helpers
+
+**Requirement level: SHOULD (v1.0).** The helpers in this section are an *additive*
+per-endpoint authorization layer built strictly on top of the §10 middleware/route-guard.
+An SDK that ships §1–§10 without these helpers remains conformant; an SDK that ships them
+states conformance to §1–§11. The helpers MUST NOT duplicate, bypass, or re-implement any
+part of the §10 verification path (JWKS, tenant check, §3a CSRF) — they run strictly
+*after* it and consume the identity it injected.
+
+### §11.1 Canonical helper vocabulary
+
+Three helpers (two mandatory where an SDK ships §11, one optional), following the §1-style
+naming discipline:
+
+| Canonical operation | Requirement | Semantics |
+|---------------------|-------------|-----------|
+| `require_auth` | SHOULD | Endpoint requires an authenticated AXIAM identity. Pure sugar over the §10 guard for frameworks where the guard is opt-in per route rather than global. 401 on failure. |
+| `require_access(action, resource[, scope])` | SHOULD | Endpoint requires the **authenticated caller** to pass an AXIAM authorization check for `action` on a resource resolved from the request. 401 if unauthenticated, 403 if denied. Argument order follows §1: action before resource, always. |
+| `require_role(role...)` | MAY | Local check that the verified token's `roles` contain at least one of the given roles. No server round-trip. Cheaper but coarser than `require_access`; documented as NOT a substitute for resource-level checks. 403 on failure. |
+
+Per-language naming map (follows each language's §1 casing convention):
+
+| Canonical | Rust | TypeScript | Python | Java | C# | PHP | Go |
+|-----------|------|------------|--------|------|----|----|----|
+| require_auth | `#[require_auth]` | `requireAuth(...)` | `require_authenticated_user` (FastAPI, existing) / `@require_auth` (Django) | `@AxiamRequireAuth` | `[Authorize]` (framework-native, documented) | `#[RequireAuth]` | `middleware.RequireAuth(...)` |
+| require_access | `#[require_access(...)]` | `requireAccess(...)` / `@RequireAccess()` (NestJS) | `require_access(...)` (FastAPI dep) / `@require_access` (Django) | `@AxiamRequireAccess(...)` | `[AxiamAccess(...)]` | `#[RequireAccess(...)]` | `middleware.RequireAccess(...)` |
+| require_role | `#[require_role(...)]` | `requireRole(...)` | `require_role(...)` / `@require_role` | `@AxiamRequireRole(...)` | `[Authorize(Roles = ...)]` (framework-native, documented) | `#[RequireRole(...)]` | `middleware.RequireRole(...)` |
+
+### §11.2 Semantics (normative, identical in all SDKs)
+
+1. **Composition with the §10 guard.** `require_access` runs strictly *after*
+   authentication. If no verified identity is present in the request context, the helper
+   returns 401 (`authentication_failed`) — it never attempts its own token extraction, so
+   the §10 verification path (JWKS, tenant check, CSRF) is never duplicated or bypassed.
+2. **Subject propagation.** The check is made for the *request's* authenticated user, not
+   for the application's own SDK session: the helper passes
+   `subject_id = <authenticated user_id>` to `check_access`/`batch_check`. This matters
+   because the app's client typically holds a service-account session; omitting
+   `subject_id` would check the service account's permissions instead of the end user's.
+3. **Resource resolution.** The resource id is a UUID resolved from the request, in order
+   of precedence:
+   a. explicit static `resource_id` argument (UUID literal) — for singleton resources;
+   b. `resource_param` — the name of a path/route parameter whose value is the UUID;
+   c. a language-idiomatic resolver callback (`fn(request) -> Uuid` or equivalent) for
+      anything else (body fields, headers, composite lookups).
+   A missing or unparseable resource value is a **programming error** surfaced as the
+   framework's bad-request response (400), never a silent allow and never a nil/empty-UUID
+   fallback.
+4. **Scope.** Optional `scope` argument, passed through to `check_access` verbatim.
+5. **Error mapping** (extends the §2 taxonomy; same JSON body shape as §10:
+   `{ "error": ..., "message": ... }`):
+   - unauthenticated → 401 `authentication_failed`
+   - check returns `allowed = false`, or server 403 → 403 `authorization_denied`
+   - unresolvable resource id → 400 `invalid_request`
+   - `NetworkError` while calling the authz endpoint → **fail closed** with 503
+     `authz_unavailable` (deny; never allow on transport failure; never retry beyond the
+     SDK's existing bounded read-only retry policy)
+6. **No decision caching.** Helpers MUST NOT cache allow/deny decisions (consistent with
+   §10's TTL rule). Batch/page-level optimization stays the application's job via
+   `batch_check`.
+7. **Transport.** Helpers call the SDK's existing `check_access` surface (REST by default;
+   gRPC where the SDK's dispatcher already prefers it, e.g. PHP). No new transport code.
+8. **Redaction.** Deny/error paths MUST NOT log or echo the token, and SHOULD log the
+   denied `action` + `resource_id` at debug level only (consistent with §2 rules).
+9. **`require_role` is local.** It reads the verified claims already in the request
+   context; it never calls the server. Docs in every SDK must state that role names are
+   tenant-defined and that `require_access` is the authoritative check.
+
+---
+
 ## Closing Notes
 
 ### Conformance Statement
@@ -418,7 +488,13 @@ Each downstream SDK README (Phases 16–22) MUST include the following statement
 
 > "This SDK conforms to CONTRACT.md §1–§10."
 
-Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conformance verified."
+An SDK that additionally ships the §11 declarative authorization helpers updates its
+statement to:
+
+> "This SDK conforms to CONTRACT.md §1–§11."
+
+Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conformance
+verified." (and §1–§11 where the §11 helpers are shipped).
 
 ### C# `Grpc.Tools` Exception
 
@@ -439,6 +515,14 @@ recorded here until one exists.
     methods instead (§1 "Async method naming" table above).
   - Java `*Async` companion methods and C# `*Async`-only (TAP) methods are unaffected —
     formally documented as accepted per-language async conventions (§1).
+- **2026-07 (§11 declarative authorization helpers)** — **non-breaking / additive.** Added
+  §11 "Declarative Authorization Helpers" (SHOULD-level for v1.0): the `require_auth` /
+  `require_access(action, resource[, scope])` / `require_role` vocabulary layered on top of
+  the §10 guard. Purely additive API — SDKs remain conformant to §1–§10 without it; those
+  that ship it state §1–§11 conformance. No existing signature changes; the only new
+  client-surface additions are subject-aware check overloads where a language's existing
+  `check_access` could not already carry `subject_id` (Java `checkAccess` subjectId
+  overload, Go `CheckAccessAs`), both additive alongside the unchanged existing signatures.
 
 ### OpenAPI Export Feature Flag
 
@@ -446,6 +530,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.0 — Phase 15 (sdk-foundation)*
+*Contract version: 1.1 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

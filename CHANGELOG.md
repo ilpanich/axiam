@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha2] - 2026-07-16
+
+Second alpha. Adds the SDK declarative-authorization contract and release-prep
+polish; no server runtime/API behavior changes.
+
+### Added
+
+- **CONTRACT.md §11 — Declarative Authorization Helpers**: the canonical
+  `require_auth` / `require_access(action, resource[, scope])` / `require_role`
+  vocabulary layered on the §10 guard, with the per-language naming map and
+  normative semantics (subject propagation, 401/403/400/503 error mapping,
+  fail-closed on transport error, no decision caching). Marked SHOULD-level and
+  recorded as non-breaking/additive; contract version bumped to 1.1.
+- README build/coverage/license badges.
+
+### Changed
+
+- Roadmap "Development Progress": Phase 17 (SDKs) and Phase 18 (security audit)
+  marked Done.
+
+### Fixed / CI
+
+- Added a free-disk-space step to the heavy Rust `test` and `cargo-llvm-cov`
+  jobs to prevent the RabbitMQ disk-space alarm that intermittently failed CI.
+
 ## [1.0.0-alpha1] - 2026-07-16
 
 Patch release over `1.0.0-alpha` that fixes the release pipeline so the

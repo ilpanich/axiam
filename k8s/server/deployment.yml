@@ -29,7 +29,7 @@ spec:
       containers:
         - name: axiam-server
           # Pin a concrete tag, not :latest (KSV-0013). Update per release.
-          image: ghcr.io/OWNER/server:1.0.0-alpha
+          image: ghcr.io/OWNER/server:1.0.0-alpha1
           ports:
             - name: http
               containerPort: 8090

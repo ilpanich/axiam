@@ -301,7 +301,34 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxml2-dev libxmlsec1-dev libxmlsec1-openssl
+        shell: bash
+        # The aarch64 leg runs on the native `ubuntu-24.04-arm` runner, whose
+        # apt sources point at ports.ubuntu.com — that mirror is intermittently
+        # unreachable from the runner (IPv6 "network unreachable", IPv4
+        # timeouts), which fails the release build at `apt-get install`. Make it
+        # resilient without changing the installed package set:
+        #   1. Force IPv4 (the IPv6 endpoints are consistently unreachable).
+        #   2. Prefer Azure's in-network ports mirror when the sources use the
+        #      canonical one (no-op on amd64, which uses archive.ubuntu.com).
+        #   3. Retry apt update+install with backoff so a transient mirror hiccup
+        #      does not fail the tag build.
+        run: |
+          set -euo pipefail
+          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
+          sudo sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://azure.ports.ubuntu.com/ubuntu-ports|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          for attempt in 1 2 3 4 5; do
+            if sudo apt-get update && sudo apt-get install -y \
+              protobuf-compiler libxml2-dev libxmlsec1-dev libxmlsec1-openssl; then
+              echo "apt install succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "::warning::apt install attempt ${attempt} failed; retrying in $((attempt * 15))s"
+            sudo apt-get clean || true
+            sleep "$((attempt * 15))"
+          done
+          echo "::error::apt-get failed to install build dependencies after 5 attempts"
+          exit 1
 
       - name: Build release binary
         run: cargo build --release -p axiam-server

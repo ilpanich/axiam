@@ -29,7 +29,7 @@ spec:
       containers:
         - name: axiam-frontend
           # Pin a concrete tag, not :latest (KSV-0013). Update per release.
-          image: ghcr.io/OWNER/frontend:1.0.0-alpha2
+          image: ghcr.io/OWNER/frontend:1.0.0-alpha3
           ports:
             - name: http
               containerPort: 8080

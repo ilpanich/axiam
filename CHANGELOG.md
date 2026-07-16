@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha3] - 2026-07-16
+
+Third alpha. Build/release tuning and project-infrastructure changes only. No
+server runtime or API behavior changes — the OpenAPI specification is
+byte-for-byte identical apart from its `info.version` string.
+
+### Added
+
+- **Public marketing & documentation website**, deployed to GitHub Pages.
+
+### Changed
+
+- **Release build profile** — added `[profile.release]` to the workspace-root
+  `Cargo.toml`, tuned for execution speed first and footprint second:
+  `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`.
+  Cargo only honors profiles at the workspace root, so this single section
+  covers `axiam-server` and every crate it links. `panic = "abort"` is
+  intentionally omitted to preserve per-request panic isolation on the
+  long-running REST/gRPC/AMQP server. Release builds are slower in exchange for
+  faster runtime.
+
 ## [1.0.0-alpha2] - 2026-07-16
 
 Second alpha. Adds the SDK declarative-authorization contract and release-prep

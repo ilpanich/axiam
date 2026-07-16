@@ -4,7 +4,9 @@
 
 # AXIAM
 
+[![CI](https://github.com/ilpanich/axiam/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ilpanich/axiam/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/ilpanich/axiam/badge.svg?branch=main)](https://coveralls.io/github/ilpanich/axiam?branch=main)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **Access eXtended Identity and Authorization Management**
 
@@ -86,7 +88,7 @@ AXIAM targets compliance with:
 
 ## Development Progress
 
-The project follows a structured roadmap of **64 tasks across 16 phases**:
+The project follows a structured roadmap of **64 tasks across 19 phases**:
 
 | Phase | Focus | Status |
 |-------|-------|--------|
@@ -107,8 +109,8 @@ The project follows a structured roadmap of **64 tasks across 16 phases**:
 | Phase 14 | Advanced MFA | Done |
 | Phase 15 | Admin frontend | Done |
 | Phase 16 | Docker & Kubernetes | Done |
-| Phase 17 | SDKs (Rust, TS, Python, Java, C#, PHP, Go) | Planned |
-| Phase 18 | Security audit, compliance, docs | Planned |
+| Phase 17 | SDKs (Rust, TS, Python, Java, C#, PHP, Go) | Done |
+| Phase 18 | Security audit, compliance, docs | Done |
 
 ## Quick Start
 

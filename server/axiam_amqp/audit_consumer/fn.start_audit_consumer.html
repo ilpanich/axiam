@@ -5,8 +5,8 @@
     nonce_repo: N,
     replay_skew: <a class="type" href="https://docs.rs/chrono/latest/chrono/type.Duration.html" title="type chrono::Duration">Duration</a>,
 )<div class="where">where
-    A: AuditLogRepository + 'static,
-    N: AmqpNonceRepository + 'static,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Start consuming audit events from <code>axiam.audit.events</code> and persisting them.</p>
+    A: <a class="trait" href="../../axiam_core/repository/trait.AuditLogRepository.html" title="trait axiam_core::repository::AuditLogRepository">AuditLogRepository</a> + 'static,
+    N: <a class="trait" href="../../axiam_core/repository/trait.AmqpNonceRepository.html" title="trait axiam_core::repository::AmqpNonceRepository">AmqpNonceRepository</a> + 'static,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Start consuming audit events from <code>axiam.audit.events</code> and persisting them.</p>
 <p>SEC-022/055/SECHRD-08: Every <code>AuditEventMessage</code> is verified before
 processing — the per-tenant subkey is derived from <code>master_signing_key</code> +
 the message’s <code>tenant_id</code> + <code>key_version</code>, then the <code>hmac_signature</code> is

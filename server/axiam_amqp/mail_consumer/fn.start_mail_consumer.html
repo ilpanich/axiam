@@ -5,10 +5,10 @@
     user_repo: U,
     template_repo: T,
 )<div class="where">where
-    E: EmailConfigRepository + 'static,
-    A: AuditLogRepository + 'static,
-    U: UserRepository + 'static,
-    T: EmailTemplateRepository + 'static,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Start consuming outbound mail from <code>axiam.mail.outbound</code>.</p>
+    E: <a class="trait" href="../../axiam_core/repository/trait.EmailConfigRepository.html" title="trait axiam_core::repository::EmailConfigRepository">EmailConfigRepository</a> + 'static,
+    A: <a class="trait" href="../../axiam_core/repository/trait.AuditLogRepository.html" title="trait axiam_core::repository::AuditLogRepository">AuditLogRepository</a> + 'static,
+    U: <a class="trait" href="../../axiam_core/repository/trait.UserRepository.html" title="trait axiam_core::repository::UserRepository">UserRepository</a> + 'static,
+    T: <a class="trait" href="../../axiam_core/repository/trait.EmailTemplateRepository.html" title="trait axiam_core::repository::EmailTemplateRepository">EmailTemplateRepository</a> + 'static,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Start consuming outbound mail from <code>axiam.mail.outbound</code>.</p>
 <p>Mirrors the <code>start_audit_consumer</code> loop pattern. On valid message delivery
 failure, re-publishes with incremented <code>attempt_count</code> for backoff retry
 (D-14). On exhaustion, nacks (→ DLQ) and writes <code>email.delivery_failed</code>

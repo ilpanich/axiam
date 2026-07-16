@@ -5,10 +5,10 @@
     user_repo: <a class="primitive" href="https://doc.rust-lang.org/1.97.0/std/primitive.reference.html">&amp;U</a>,
     template_repo: <a class="primitive" href="https://doc.rust-lang.org/1.97.0/std/primitive.reference.html">&amp;T</a>,
 ) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.97.0/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="enum" href="enum.SendOutcome.html" title="enum axiam_amqp::mail_consumer::SendOutcome">SendOutcome</a>, <a class="struct" href="struct.SendError.html" title="struct axiam_amqp::mail_consumer::SendError">SendError</a>&gt;<div class="where">where
-    E: EmailConfigRepository,
-    A: AuditLogRepository,
-    U: UserRepository,
-    T: EmailTemplateRepository,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Attempt to send one outbound mail message.</p>
+    E: <a class="trait" href="../../axiam_core/repository/trait.EmailConfigRepository.html" title="trait axiam_core::repository::EmailConfigRepository">EmailConfigRepository</a>,
+    A: <a class="trait" href="../../axiam_core/repository/trait.AuditLogRepository.html" title="trait axiam_core::repository::AuditLogRepository">AuditLogRepository</a>,
+    U: <a class="trait" href="../../axiam_core/repository/trait.UserRepository.html" title="trait axiam_core::repository::UserRepository">UserRepository</a>,
+    T: <a class="trait" href="../../axiam_core/repository/trait.EmailTemplateRepository.html" title="trait axiam_core::repository::EmailTemplateRepository">EmailTemplateRepository</a>,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Attempt to send one outbound mail message.</p>
 <p>Returns <code>Ok(true)</code> on successful delivery, <code>Ok(false)</code> when the attempt
 failed but more retries remain (caller should re-publish), and
 <code>Ok(false)</code> with audit written when retries are exhausted.</p>

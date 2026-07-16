@@ -345,13 +345,67 @@ name, composing with the existing middleware:
   `RequireAccess`-protected `/docs/{id}` route.
 - **Commit:** `feat(middleware): add RequireAuth/RequireAccess/RequireRole route wrappers (CONTRACT §11)`
 
-## 5. Execution order for the follow-up run(s)
+## 5. Tests, docs & examples — quality gates per SDK (verified in CI configs, 2026-07-16)
+
+Every per-SDK task in §4 already includes tests, an example update, and README/CHANGELOG
+work. This section pins the **exact gates the new code must pass** and the doc-toolchain
+files that need touching, so executors don't discover them by CI failure.
+
+### 5.1 Test-coverage gates (hard CI floors — new helper code must not sink them)
+
+| SDK | Gate | Where enforced | Implication for this work |
+|-----|------|----------------|---------------------------|
+| Rust | **89% lines** (`cargo llvm-cov report --fail-under-lines 89`, `--all-features`) | `.github/workflows/coverage.yml` | The new `macros` feature is inside `--all-features`, so macro *expansion output* is measured. Keep the macro thin (expand to calls into the programmatic `RequireAccess` guard, per §4.1) so the logic is coverable by ordinary actix tests; `trybuild` compile-fail cases cover misuse paths. |
+| TypeScript | **lines 93 / statements 92 / functions 95 / branches 84** (vitest v8 thresholds) | `vitest.config.ts` | Guard factories must test every branch (401/403/400/503, param vs literal vs resolver). If Tier 2 `./nestjs` ships, its guard counts toward the same global thresholds — do not ship it undertested or the whole suite fails. |
+| Python | **96% (`fail_under = 96`)**, plus **interrogate docstring coverage `fail-under = 100`** and `mypy --strict` | `pyproject.toml`, `sdk-ci-python.yml` | Both new modules (`fastapi.require_access`, `django/decorators.py`) need full branch tests *and* a docstring on every public function/class/param-carrying object — 100% docstring coverage is a hard gate, not a style suggestion. |
+| Java | **JaCoCo 0.92 line ratio** | `pom.xml` | `AxiamAuthorizationInterceptor` + annotation parsing must be MockMvc-tested across the full §11 matrix; annotation `@interface` types themselves carry no executable lines. |
+| C# | **92% merged line floor** (coverlet → gate in workflow) | `.github/workflows/coverage.yml` | Attribute + provider/handler changes are in `Axiam.Sdk.AspNetCore`, which is part of the merged floor — extend `AspNetCoreMiddlewareTests` with the full matrix including the new 400 path. |
+| PHP | **No enforced floor** — pcov → Coveralls reporting only | `.github/workflows/coverage.yml` | Do not treat this as license to undertest: match the repo's existing one-test-class-per-concern convention (`AccessEnforcerTest`, `SymfonyAccessAttributeListenerTest`, `LaravelAccessMiddlewareTest`) and keep the Coveralls trendline from dropping. |
+| Go | **93% floor** | `.github/workflows/coverage.yml` | `middleware/require.go` needs the repo's usual `require_test.go` + `require_more_test.go` pairing; table-driven tests over the §11 matrix reach the floor cheaply. |
+
+Shared test matrix (restated from §7, applies to every SDK): allow / deny→403 /
+unauthenticated→401 / unresolvable-resource→400 / transport-failure→503 fail-closed /
+`subject_id` asserted on the wire / scope passthrough / no token material in output.
+
+### 5.2 Documentation gates and doc-site plumbing
+
+Several repos enforce *documentation* in CI as strictly as coverage; new public API
+must land fully documented or the build fails:
+
+| SDK | Doc gate (hard) | Doc site / plumbing to touch |
+|-----|------------------|------------------------------|
+| Rust | `cargo doc --all-features` with `RUSTDOCFLAGS: -D warnings` + `#![warn(missing_docs)]` — every public item in **both** crates (incl. the new `axiam-sdk-macros`) needs rustdoc, with doctest-friendly examples | docs.rs builds automatically per release; the new crate needs its own `[package.metadata.docs.rs]` (all-features) and README section |
+| TypeScript | none hard, but TypeDoc publishes from the entry points | `docs-publish.yml` (TypeDoc), `typedoc.json` entry points, `package.json` exports map + `tsup.config.ts` entries — a new `./nestjs` subpath must be added to **all three** or it silently vanishes from docs and dist |
+| Python | **interrogate `fail-under = 100`** (docstrings, see 5.1) | `docs-publish.yml` runs pdoc with an **explicit module list** — if any new importable submodule is added (e.g. `axiam_sdk.django.decorators` is auto-covered under `axiam_sdk.django`, but a hypothetical new subpackage is not), append it to the pdoc command |
+| Java | **javadoc gate**: `mvn compile javadoc:javadoc` with `doclint=all`, `failOnWarnings=true` — every new public annotation/class/method needs complete javadoc incl. `@param`/`@return` | javadoc.io serves the released `-javadoc.jar` automatically (D-22) |
+| C# | **CS1591 in `WarningsAsErrors`** — XML doc comment on every public member is a compile gate in both projects | `docs-publish.yml` (docfx) picks up projects via `docfx.json` metadata; new types in existing projects need no config change, but check `toc.yml` if a new docs page is warranted |
+| PHP | none hard (phpstan level gate applies to code, not docs) | `docs-publish.yml` (phpDocumentor phar) scans `src/` per `phpdoc.dist.xml` — new `src/Attributes/` is auto-included; write full docblocks anyway (repo convention) |
+| Go | none hard | pkg.go.dev re-indexes on release (CI pokes proxy.golang.org); godoc conventions: package-level doc comment for any new file-level concepts, examples as `ExampleRequireAccess` test functions so they render on pkg.go.dev |
+
+### 5.3 README / CHANGELOG / examples checklist (identical for all seven repos)
+
+Per SDK, in the same PR as the implementation:
+
+1. **README**: new "Declarative authorization helpers" section with a copy-pasteable
+   snippet per supported framework; conformance statement updated to
+   "conforms to CONTRACT.md §1–§11".
+2. **CHANGELOG.md**: `Added` entry under the unreleased version (all repos ship a
+   CHANGELOG; the CONTRACT's "no SDK currently ships a dedicated CHANGELOG" note is
+   stale — they all have one now).
+3. **Examples**: extend the existing example app (listed per SDK in §4) rather than
+   adding a new one, so example CI stays cheap. Examples must build in CI where the
+   repo already builds them (Go builds examples with tests; Java's spring-boot-app has
+   a Failsafe IT; C#'s examples compile via solution).
+4. **Vendored contract**: re-synced `CONTRACT.md` (with §11) as the task's first
+   commit (per §3.3).
+
+## 6. Execution order for the follow-up run(s)
 
 | Step | Repo(s) | Task | Depends on |
 |------|---------|------|------------|
 | 1 | `axiam` | CONTRACT.md §11 + breaking-changes-log entry (this plan's §3) | — |
 | 2a–2g | each SDK repo | §4.1–§4.7, each starting with a vendored-CONTRACT re-sync commit | 1 |
-| 3 | each SDK repo | README conformance statement → "§1–§11", CHANGELOG entry, docs pages (docfx/typedoc/phpdoc already wired) | its 2x |
+| 3 | each SDK repo | README conformance statement → "§1–§11", CHANGELOG entry, doc-site plumbing per §5.2/§5.3 | its 2x |
 | 4 | `axiam` | Cross-SDK verification sweep: naming-map audit vs §11 table, error-code matrix spot-check per SDK test suite | all 2x |
 
 Steps 2a–2g are mutually independent — they can be seven parallel executor tasks.
@@ -361,7 +415,7 @@ crate + release wiring for `axiam-sdk-macros` on crates.io must be added to the
 publish workflow, mirroring the existing publishing setup documented in
 `claude_dev/publishing-and-secrets.md`).
 
-## 6. Decisions taken in this plan (flag disagreement before the second run)
+## 7. Decisions taken in this plan (flag disagreement before the second run)
 
 1. **Fail-closed on transport failure = 503, not 403** — distinguishes "denied" from
    "couldn't decide" for operators while still denying.
@@ -382,7 +436,7 @@ publish workflow, mirroring the existing publishing setup documented in
 8. **No decision caching anywhere** (matches §10 TTL rule); page-level batching stays
    on `batch_check`.
 
-## 7. Acceptance criteria (per SDK)
+## 8. Acceptance criteria (per SDK)
 
 - Helper names/casing match the §11 naming map exactly; `(action, resource[, scope])`
   order everywhere.
@@ -391,6 +445,12 @@ publish workflow, mirroring the existing publishing setup documented in
   asserted on the wire / scope passthrough.
 - No token material in any error/log output (reuse each repo's existing redaction
   tests as the pattern).
-- Coverage gates stay green (Python ≥96, TS thresholds, Java JaCoCo 0.92, etc.).
-- Example app updated and buildable; README states §1–§11 conformance; CHANGELOG
-  entry added.
+- Coverage gates stay green at their exact CI floors (§5.1): Rust ≥89 lines,
+  TypeScript 93/92/95/84, Python ≥96 + interrogate 100, Java JaCoCo ≥0.92,
+  C# ≥92, Go ≥93; PHP has no floor but the Coveralls trendline must not drop.
+- Documentation gates pass (§5.2): rustdoc `-D warnings` (both crates),
+  Java doclint/failOnWarnings, C# CS1591; doc-site plumbing updated where required
+  (TypeDoc entry points + exports map for any new TS subpath, pdoc module list for
+  any new Python subpackage).
+- Example app updated and buildable in CI; README states §1–§11 conformance;
+  CHANGELOG `Added` entry present; vendored CONTRACT.md re-synced.

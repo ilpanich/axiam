@@ -133,7 +133,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # nonroot = UID 65532 (username "nonroot") — no shell, no package manager.
 # cc variant includes: glibc, libgcc1, libssl3, libstdc++6, ca-certificates.
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:bd2899c12b335c827750ccf2359879eab09c09b206023dcebea408947d54127c
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa
 
 LABEL org.opencontainers.image.title="axiam-server" \
       org.opencontainers.image.description="AXIAM — Access eXtended Identity and Authorization Management" \

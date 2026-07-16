@@ -28,6 +28,20 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 FROM nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
 
+# ---------------------------------------------------------------------------
+# Patch OS packages before finalizing (D-06 Trivy HIGH/CRITICAL gate).
+# ---------------------------------------------------------------------------
+# The upstream nginx-unprivileged image lags Alpine security releases, so its
+# bundled curl/libcurl, libcrypto3/libssl3, libexpat and libxml2 ship fixable
+# HIGH/CRITICAL CVEs (e.g. CVE-2026-45447 openssl UAF, CVE-2026-6732 libxml2 DoS,
+# the libexpat CVE-2026-5640x set) that the digest pin cannot avoid — it is
+# already the newest 1.29-alpine tag. `apk upgrade` pulls the patched packages
+# from the pinned Alpine 3.23 branch at build time so the scanned image is clean
+# on BOTH architectures. Must run as root (the base image's default user is the
+# unprivileged 101); the final `USER 101` below restores the non-root guarantee.
+USER root
+RUN apk upgrade --no-cache
+
 # Copy built assets from builder
 COPY --from=builder /app/dist /usr/share/nginx/html
 

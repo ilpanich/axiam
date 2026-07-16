@@ -141,3 +141,30 @@ axiam-federation = { path = "crates/axiam-federation", default-features = false 
 axiam-audit = { path = "crates/axiam-audit" }
 axiam-email = { path = "crates/axiam-email" }
 axiam-pki = { path = "crates/axiam-pki" }
+
+# Release build profile.
+#
+# Cargo only reads `[profile.*]` from the *workspace root* manifest — profile
+# tables in member crates are ignored (with a warning). So this single section
+# governs `cargo build --release` for axiam-server and every crate it links.
+#
+# Tuned for execution speed first, binary/resource footprint second. This makes
+# release builds noticeably slower (fat LTO + a single codegen unit serialize
+# most of the optimizer), which is an accepted trade for the runtime win.
+[profile.release]
+opt-level = 3         # Maximum optimization for speed.
+lto = "fat"           # Whole-program LTO across all crates (== `true`); best
+                      # runtime throughput, slowest link.
+codegen-units = 1     # One codegen unit per crate — lets the optimizer see the
+                      # whole crate at the cost of parallelism during compile.
+strip = "symbols"     # Drop the symbol table to shrink the shipped binary. No
+                      # runtime cost (release already builds with debug = 0).
+
+# NOTE: `panic = "abort"` is deliberately NOT set. Its speed/size gain is
+# marginal, and on a long-running REST/gRPC/AMQP server it is a net negative:
+# with unwinding (the default), a panic inside a single request handler unwinds
+# just that task — actix-web/tonic/tokio isolate it and the process keeps
+# serving every other tenant. With `panic = "abort"` that same panic aborts the
+# entire process, turning any panic-reachable code path into a whole-server
+# outage (and a potential DoS lever). For an availability- and security-
+# critical IAM service, request isolation outweighs the marginal optimization.

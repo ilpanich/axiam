@@ -141,8 +141,8 @@ V13 (API), V15 (Build).
 | Control ID | Control Text | Status | Evidence | Note |
 |-----------|--------------|--------|----------|------|
 | V9.1.1 | TLS used for all connections | Pass | `crates/axiam-server/src/main.rs:661` — OIDC issuer MUST use HTTPS; Docker production images expose HTTPS; `docker/Dockerfile.server` — port 8080 behind TLS terminating proxy | TLS at load balancer (D-06 accepted pattern) |
-| V9.1.2 | TLS version: TLS 1.2+ minimum, TLS 1.3 recommended | Deferred (see FINDINGS.md #F-04) | Actix-Web/rustls default supports TLS 1.2+; explicit TLS 1.3 minimum not enforced in config | Low severity; configurable at proxy layer |
-| V9.1.3 | Only approved cipher suites used | Deferred (see FINDINGS.md #F-04) | Cipher suite selection delegated to rustls defaults (TLS 1.3 cipher suites only when TLS 1.3 is negotiated) | Low severity; acceptable via proxy |
+| V9.1.2 | TLS version: TLS 1.2+ minimum, TLS 1.3 recommended | Pass | Opt-in direct TLS binds rustls restricted to TLS 1.3 only — `axiam_server::tls::build_rustls_server_config` (`with_protocol_versions(&[&TLS13])`), wired via `bind_rustls_0_23` in `crates/axiam-server/src/main.rs`; proxy pattern documented with `ssl_protocols TLSv1.3;` in `docs/deployment/README.md` | TLS 1.3 minimum in both patterns |
+| V9.1.3 | Only approved cipher suites used | Pass | TLS 1.3-only negotiation ⇒ only TLS 1.3 cipher suites (all ASVS-approved); no manual filtering needed | Guaranteed by the TLS 1.3 restriction |
 | V9.2.1 | Connections to external systems use trusted TLS certificates | Pass | `crates/axiam-server/src/main.rs:371` — OIDC issuer URL HTTPS enforced; no redirect following to prevent SSRF | |
 | V9.2.2 | TLS connections verified (hostname + cert chain) | Pass | `crates/axiam-server/src/main.rs` — reqwest client with TLS verification; no `danger_accept_invalid_certs` | |
 | V9.3.1 | All API requests authenticated | Pass | `crates/axiam-api-rest/src/middleware/authz.rs` — AuthzMiddleware; `rbac_test.rs:306` — `unauthenticated_returns_401` | |
@@ -177,7 +177,7 @@ V13 (API), V15 (Build).
 | V14.3.1 | Web/app server error handling does not expose stack traces or component details | Pass | `crates/axiam-api-rest/src/errors.rs` — internal errors mapped to generic 500 body | |
 | V14.3.2 | Default framework features / sample endpoints removed | Pass | No demo/sample routes in any handler file; only explicitly registered routes | |
 | V14.4.1 | HTTP security headers present on all responses | Pass | `crates/axiam-api-rest/src/middleware/security_headers.rs` — `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`; `crates/axiam-api-rest/tests/security_headers_test.rs` | Phase 2 |
-| V14.4.4 | Content-Security-Policy header present | Deferred (see FINDINGS.md #F-05) | CSP header not set by `SecurityHeadersMiddleware`; frontend served as static SPA | Medium severity; no XSS surface in REST API |
+| V14.4.4 | Content-Security-Policy header present | Pass | `SecurityHeadersMiddleware` sets a strict `Content-Security-Policy` on every response (`crates/axiam-api-rest/src/middleware/security_headers.rs`); asserted in `tests/security_headers_test.rs`; frontend SPA also sets CSP in `docker/nginx.conf` | Applies to JSON API + Swagger UI |
 | V14.4.5 | X-Content-Type-Options: nosniff present | Pass | `crates/axiam-api-rest/src/middleware/security_headers.rs:62` | |
 | V14.4.6 | X-Frame-Options: DENY/SAMEORIGIN present | Pass | `crates/axiam-api-rest/src/middleware/security_headers.rs:66` | |
 | V14.4.7 | Referrer-Policy header present | Pass | `crates/axiam-api-rest/src/middleware/security_headers.rs:70` | |
@@ -197,12 +197,13 @@ V13 (API), V15 (Build).
 | V6 (Stored Cryptography) | 14 | 14 | 0 | 0 | 0 |
 | V7 (Error Handling / Logging) | 7 | 7 | 0 | 0 | 0 |
 | V8 (Data Protection) | 8 | 8 | 0 | 0 | 0 |
-| V9 (Communications) | 6 | 4 | 0 | 2 | 0 |
+| V9 (Communications) | 6 | 6 | 0 | 0 | 0 |
 | V10 (Malicious Code) | 8 | 7 | 1 | 0 | 0 |
-| V14 (Configuration) | 13 | 11 | 0 | 2 | 0 |
-| **Total** | **103** | **94** | **4** | **5** | **0** |
+| V14 (Configuration) | 14 | 14 | 0 | 0 | 0 |
+| **Total** | **104** | **99** | **4** | **1** | **0** |
 
-**Deferred findings:** F-03 (V2.1.7 HIBP breach check — Low), F-04 (V9.1.2 TLS 1.3 explicit min — Low, V9.1.3 cipher suite — Low), F-05 (V14.4.4 CSP header — Medium).
+**Deferred findings:** F-03 (V2.1.7 HIBP breach check — Low). F-04 (V9.1.2/V9.1.3
+TLS 1.3 minimum) and F-05 (V14.4.4 CSP header) are now resolved — see FINDINGS.md.
 **No Deferred row has High or Critical severity.** Beta compliance gate: SATISFIED.
 
 ---

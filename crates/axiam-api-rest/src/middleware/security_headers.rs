@@ -5,6 +5,12 @@
 //! - `X-Content-Type-Options: nosniff` — prevent MIME-type sniffing
 //! - `X-Frame-Options: DENY` — prevent clickjacking
 //! - `Referrer-Policy: strict-origin-when-cross-origin` — limit referrer leakage
+//! - `Content-Security-Policy` — restrict resource origins (ASVS V14.4.4). The
+//!   policy mirrors the frontend Nginx policy (`docker/nginx.conf`) so the one
+//!   middleware covers both the JSON API responses and the same-origin Swagger UI
+//!   served at `/api/docs/` (swagger-ui 5.x is CSP-friendly: scripts load from
+//!   `'self'`; `style-src` allows `'unsafe-inline'` for its runtime-injected
+//!   styles and `img-src` allows `data:` for its inline icons).
 
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
@@ -69,6 +75,18 @@ where
             headers.insert(
                 HeaderName::from_static("referrer-policy"),
                 HeaderValue::from_static("strict-origin-when-cross-origin"),
+            );
+            headers.insert(
+                HeaderName::from_static("content-security-policy"),
+                HeaderValue::from_static(
+                    "default-src 'self'; \
+                     script-src 'self'; \
+                     style-src 'self' 'unsafe-inline'; \
+                     img-src 'self' data:; \
+                     frame-ancestors 'none'; \
+                     form-action 'self'; \
+                     base-uri 'self'",
+                ),
             );
             Ok(res)
         })

@@ -130,6 +130,48 @@ from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see
 `AXIAM__AMQP__URL` at the deployment layer (see how
 `docker-compose.prod.yml` does this for the Compose path).
 
+## TLS termination
+
+AXIAM supports two TLS patterns (ASVS V9.1.2/V9.1.3). Both enforce TLS 1.3 as
+the minimum negotiated version; TLS 1.3 cipher suites are all ASVS-approved, so
+no manual cipher-suite list is required.
+
+**1. Proxy-terminated TLS (recommended, default).** The server binds plaintext
+on `:8090` and an ingress controller / load balancer / reverse proxy terminates
+TLS in front of it (this is how the Kubernetes manifests and
+`docker-compose.prod.yml` are wired — see the ingress `TLS secretName` at the
+top of this document). Configure the proxy to require TLS 1.3, e.g. for Nginx:
+
+```nginx
+ssl_protocols TLSv1.3;
+```
+
+or Caddy (`tls` is TLS 1.3-capable by default; pin the minimum explicitly):
+
+```caddy
+tls {
+    protocols tls1.3
+}
+```
+
+The server needs no TLS configuration in this mode.
+
+**2. Direct TLS in the server process (opt-in).** For deployments that terminate
+TLS in the server itself, set the following and the listener binds with rustls
+restricted to **TLS 1.3 only**:
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__SERVER__TLS__ENABLED` | `true` to enable in-process TLS (default `false`). |
+| `AXIAM__SERVER__TLS__CERT_PATH` | Path to the PEM certificate chain (leaf first). |
+| `AXIAM__SERVER__TLS__KEY_PATH` | Path to the PEM private key (PKCS#8, PKCS#1, or SEC1). |
+
+When `ENABLED` is `true`, both paths are mandatory and must point at readable,
+well-formed PEM files — the server **fails fast at startup** (it never falls back
+to plaintext) on a missing path, an unreadable/malformed file, an empty
+certificate chain, or a certificate/key mismatch. Mount the cert and key as
+secret volumes; never commit key material to git.
+
 ## Network policies
 
 [`k8s/network-policy/`](../../k8s/network-policy/) implements a **default-deny**

@@ -14,6 +14,15 @@ name: bench-axiam
 
 services:
   axiam-server:
+    # Prefer the published multi-arch image so a benchmark run needs no local
+    # source build — bumping BENCH_CPUS/BENCH_MEM then just restarts the same
+    # image, which makes scaling the resource envelope up/down fast. The release
+    # pipeline publishes ghcr.io/<owner>/<repo>/server:<version> (prereleases get
+    # the exact version tag). Override the tag with BENCH_AXIAM_IMAGE, or force a
+    # local build with `just bench-up ... build=1` (see justfile). The `build`
+    # block below is kept as an automatic fallback when the image can't be pulled.
+    image: ${BENCH_AXIAM_IMAGE:-ghcr.io/ilpanich/axiam/server:1.0.0-alpha3}
+    pull_policy: ${BENCH_AXIAM_PULL_POLICY:-missing}
     build:
       context: ../../..
       dockerfile: docker/Dockerfile.server
@@ -28,10 +37,15 @@ services:
       AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?run via runner/run-benchmark.sh which sources docker/.secrets}"
       AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?run via runner/run-benchmark.sh which sources docker/.secrets}"
       AXIAM__DB__NAMESPACE: "axiam"
-      AXIAM__DB__DATABASE: "${AXIAM__DB__DATABASE:-main}"
+      # Aligned with docker/docker-compose.prod.yml (was "main").
+      AXIAM__DB__DATABASE: "${AXIAM__DB__DATABASE:-axiam}"
       AXIAM__AMQP__URL: "amqp://${RABBITMQ_DEFAULT_USER:?required}:${RABBITMQ_DEFAULT_PASS:?required}@rabbitmq:5672"
       AXIAM__SERVER__HOST: "0.0.0.0"
       AXIAM__GRPC__HOST: "0.0.0.0"
+      # First-run bootstrap gate (D-03a): satisfies the fail-closed admin gate so
+      # runner/seed.sh can POST /api/v1/admin/bootstrap without a setup_token.
+      # Bench-only; the production compose deliberately does not preset this.
+      AXIAM_BOOTSTRAP_ADMIN_EMAIL: "${BENCH_ADMIN_EMAIL:-admin@bench.dev}"
       AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?required}"
       AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?required}"
       RUST_LOG: "${RUST_LOG:-axiam=warn}"

@@ -1,0 +1,29 @@
+# Optional richer resource telemetry for benchmark runs.
+#
+# The default sampler (resource/sampler.sh) reads `docker stats`, which is
+# sufficient for the CPU/memory efficiency numbers the report needs. cAdvisor
+# adds finer-grained, higher-frequency per-container metrics (per-cgroup CPU,
+# memory working set, network, filesystem) at http://localhost:8080 and a
+# Prometheus-scrapable /metrics endpoint, for deeper investigation of a run.
+#
+# NOT required for a normal benchmark. Bring it up alongside a target only when
+# you want the extra detail:
+#   docker compose -f resource/cadvisor-compose.yml up -d
+#   # ... run the benchmark ...
+#   docker compose -f resource/cadvisor-compose.yml down
+name: bench-cadvisor
+
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: bench-cadvisor
+    privileged: true
+    ports:
+      - "${CADVISOR_PORT:-8080}:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    restart: "no"

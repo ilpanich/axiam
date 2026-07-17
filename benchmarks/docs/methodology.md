@@ -49,12 +49,17 @@ Each cell produces one **result record** (JSON) under `results/`.
 | `token_refresh.js`              | Refresh-token rotation                          | HTTP/OAuth2   | Yes          |
 | `jwks_fetch.js`                 | Fetch signing keys (RFC 7517)                  | HTTP          | Yes          |
 | `userinfo.js`                   | OIDC `/userinfo`                                | HTTP/OIDC     | Yes          |
+| `authz_check_rest.js`           | Authorization decision (REST)                  | HTTP/REST     | AXIAM-only*  |
+| `authz_batch_rest.js`           | Batch authorization decision (REST)            | HTTP/REST     | AXIAM-only*  |
 | `authz_check_grpc.js`           | Low-latency authorization decision             | gRPC          | AXIAM-only*  |
 | `authz_batch_grpc.js`           | Batch authorization decision                    | gRPC          | AXIAM-only*  |
 
-\* Most competitors do not expose a directly equivalent low-latency gRPC authz
-decision (single or batch); these scenarios are reported separately as AXIAM
-capability metrics, not head-to-head numbers.
+\* Most competitors do not expose a directly equivalent authorization-decision
+endpoint (REST or gRPC, single or batch); these scenarios are reported separately
+as AXIAM capability metrics, not head-to-head numbers. The REST authz scenarios
+also serve as the wire baseline for SDK `check_access`/`batch_check` overhead
+(see `sdk/HARNESS-SPEC.md`). All four require a seeded resource + role grant and a
+logged-in user token; the authz scenarios log in as the bench user in `setup()`.
 
 ## 4. Load model
 

@@ -62,10 +62,20 @@ def build_ops():
     """
     client = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"])
     client.login(CFG["username"], CFG["password"])
+    # Every check reuses the one seeded resource UUID: the server rejects
+    # non-UUID resource_ids, so the old `${resource}-${i}` suffixing would 400.
     checks = [
-        AccessCheck(action=CFG["action"], resource_id=f"{CFG['resource_id']}-{i}")
-        for i in range(3)
+        AccessCheck(action=CFG["action"], resource_id=CFG["resource_id"])
+        for _ in range(3)
     ]
+    # Fail fast if the grant is missing — otherwise we'd silently benchmark the
+    # deny fast-path instead of a real allow decision.
+    warm = client.check_access(CFG["action"], CFG["resource_id"])
+    if not getattr(warm, "allowed", False):
+        raise RuntimeError(
+            f"warm-up check_access denied for action={CFG['action']} "
+            f"resource_id={CFG['resource_id']} — seed the resource/role/grant "
+            "(see runner/seed.sh)")
 
     def do_login():
         fresh = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"])
@@ -117,7 +127,7 @@ def zero_ops():
 def emit(status, ops, iterations, concurrency, notes):
     print(json.dumps({
         "schema": "axiam.sdk-bench/v1", "sdk": "python",
-        "sdk_version": "unreleased",
+        "sdk_version": "1.0.0a2",
         "language_runtime": f"python {platform.python_version()}",
         "target": os.environ.get("BENCH_TARGET", "axiam"),
         "profile": os.environ.get("BENCH_PROFILE", "p0-plaintext"),

@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Run the Go SDK bench. The Go SDK (ilpanich/axiam-go-sdk) is implemented; the bench glue
-# in this directory is not yet wired, so this emits a 'pending' record.
-# Replace the body below with: go run .
+# Run the Go SDK bench. The bench glue in this directory is wired to the SDK
+# (ilpanich/axiam-go-sdk); it emits an axiam.sdk-bench/v1 record to stdout.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Once wired, implement bench in this directory and exec it here, e.g.:
-#   exec go run .
-# shellcheck disable=SC1091
-source "$HERE/../_pending.sh"; emit_pending go
+cd "$HERE"
+command -v go >/dev/null || { source "$HERE/../_pending.sh"; emit_pending go; exit 0; }
+exec go run .

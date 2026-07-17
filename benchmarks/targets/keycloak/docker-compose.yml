@@ -10,7 +10,7 @@ name: bench-keycloak
 
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:26.4
+    image: quay.io/keycloak/keycloak:26.7.0
     container_name: bench-keycloak
     cpus: ${BENCH_CPUS:-2}
     mem_limit: ${BENCH_MEM:-1024m}

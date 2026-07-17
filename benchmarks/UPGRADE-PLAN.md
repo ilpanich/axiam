@@ -1,5 +1,13 @@
 # Benchmark Suite — Verification Report & Upgrade Plan
 
+> **Status: IMPLEMENTED on this branch (2026-07-17).** P0–P2 below are done; P3 remains an
+> optional backlog. Two things surfaced during implementation that this plan had not called out:
+> (a) `/api/v1/auth/login` delivers tokens **only via Set-Cookie** and every non-GET under
+> `/api/v1` needs a **CSRF double-submit** (`axiam_csrf` cookie + `X-CSRF-Token` header) — the
+> seed script and the authz scenarios now handle both (the k6 authz scenarios read the token back
+> from the cookie jar); (b) the AXIAM bench target now defaults to the **published ghcr image**
+> (`BENCH_AXIAM_IMAGE`, local build via `build=1`) so scaling resource caps needs no rebuild.
+
 **Verified:** 2026-07-17, against server `1.0.0-alpha3` (workspace `Cargo.toml`) and all seven
 SDK repos (`ilpanich/axiam-<lang>-sdk`).
 **Benchmarks last touched:** commit `94b3a4a` (2026-07-12, SDK extraction).

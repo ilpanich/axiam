@@ -4,15 +4,18 @@ Measures the **client-side** overhead each official AXIAM SDK adds on top of the
 raw protocol calls, so users can choose an SDK with eyes open.
 
 - The contract every SDK bench emits is defined in [`HARNESS-SPEC.md`](HARNESS-SPEC.md).
-- `typescript/` and `python/` are wired to the real SDKs (`axiam-sdk` npm package,
-  `axiam-sdk` PyPI package) and emit `status: "ok"` records.
-- `rust/`, `go/`, `java/`, `csharp/`, `php/` are pending stubs with a per-language
-  `TODO.md`; each currently emits a valid `pending` record.
+- **All 7 benches are wired** to their real SDK: `python/` and `typescript/` against
+  the `axiam-sdk` PyPI/npm packages, and `rust/`, `go/`, `java/`, `csharp/`, `php/`
+  against their sibling `ilpanich/axiam-<lang>-sdk` checkout via a local
+  path/replace/project reference (so they build before the alpha package is on the
+  public registry — swap to the published package when available, per each
+  `TODO.md`).
+- Each emits `status: "ok"` when its toolchain + SDK are installed and a seeded
+  target is reachable; otherwise a `pending` (toolchain/package missing) or `error`
+  (server unreachable / missing grant) record.
 
 All 7 SDKs (`ilpanich/axiam-{rust,typescript,python,java,csharp,php,go}-sdk`) are
-implemented and conform to `sdks/CONTRACT.md`. The five stubs above are missing only their
-bench glue, not the SDK itself — wire each per its `TODO.md` and flip its status
-to `ok`.
+implemented and conform to `sdks/CONTRACT.md`.
 
 ## Run
 

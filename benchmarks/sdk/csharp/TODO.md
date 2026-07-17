@@ -1,20 +1,15 @@
-# Csharp SDK benchmark — wiring TODO
+# Csharp SDK benchmark — now wired
 
-The C# SDK is implemented (`ilpanich/axiam-csharp-sdk`). This directory is the bench-glue
-scaffold: it currently emits a `pending` record conforming to
-`../HARNESS-SPEC.md` because the bench entrypoint has not been wired to the
-SDK yet.
+The C# SDK bench glue is wired to `Axiam.Sdk` (`ilpanich/axiam-csharp-sdk`,
+1.0.0-alpha2). `Program.cs` times the four canonical ops (`login`, `refresh`,
+`check_access`, `batch_check`) and emits one `axiam.sdk-bench/v1` JSON record to
+stdout; `run.sh` runs it with `dotnet run -c Release`.
 
-## To wire it up
-1. Add the SDK dependency: ***.csproj (dotnet add package Axiam.Sdk)**.
-2. Implement a bench entrypoint in this directory that:
-   - reads the `BENCH_*` / `SDK_BENCH_*` env (see HARNESS-SPEC.md),
-   - times the four ops (`login`, `refresh`, `check_access`, `batch_check`)
-     with a warm-up + measured loop,
-   - prints exactly one `axiam.sdk-bench/v1` JSON object to stdout with
-     `status: "ok"`.
-3. Point `run.sh` at it (replace the `emit_pending` fallback with `dotnet run -c Release`).
-4. Verify: `cd benchmarks && just sdk-bench sdk=csharp` prints a valid record.
+## SDK dependency
+`axiam-sdk-bench.csproj` uses a `ProjectReference` to the sibling checkout at
+`../../../../axiam-csharp-sdk/Axiam.Sdk/Axiam.Sdk.csproj` (the alpha may not be on
+NuGet yet). Once `Axiam.Sdk` 1.0.0-alpha2 is published, swap that for the
+commented-out `<PackageReference Include="Axiam.Sdk" Version="1.0.0-alpha2" />`.
 
-See `../typescript/bench.mjs` and `../python/bench.py` for complete reference
-harnesses (timing loop, percentile math, JSON contract) to mirror.
+## Run
+`cd benchmarks && just sdk-bench sdk=csharp`

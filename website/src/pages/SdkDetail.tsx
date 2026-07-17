@@ -5,6 +5,60 @@ interface SdkDetailProps {
   go: (page: Page) => void;
 }
 
+const dot = (background: string) => (
+  <span style={{ width: 11, height: 11, borderRadius: "50%", background }} />
+);
+
+/** A macOS-style "terminal" card with a labelled title bar and a code body. */
+function TerminalCard({ label, code }: { label: string; code: string }) {
+  return (
+    <div
+      className="glass-card"
+      style={{
+        borderRadius: 14,
+        overflow: "hidden",
+        border: "1px solid rgba(0,212,255,.2)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "13px 18px",
+          borderBottom: "1px solid rgba(0,212,255,.12)",
+          background: "rgba(255,255,255,.03)",
+        }}
+      >
+        {dot("#ff5f56")}
+        {dot("#ffbd2e")}
+        {dot("#27c93f")}
+        <span
+          style={{
+            marginLeft: 8,
+            font: "12px ui-monospace,Menlo,monospace",
+            color: "#94a3b8",
+          }}
+        >
+          {label}
+        </span>
+      </div>
+      <pre
+        style={{
+          margin: 0,
+          padding: 22,
+          fontSize: 13.5,
+          lineHeight: 1.75,
+          color: "#cbd5e1",
+          overflow: "auto",
+        }}
+      >
+        {code}
+      </pre>
+    </div>
+  );
+}
+
 export default function SdkDetail({ sdk, go }: SdkDetailProps) {
   return (
     <div style={{ maxWidth: 1000, margin: "0 auto", padding: "40px 40px 90px" }}>
@@ -174,70 +228,12 @@ export default function SdkDetail({ sdk, go }: SdkDetailProps) {
         </div>
       </div>
 
-      <div
-        className="glass-card"
-        style={{
-          borderRadius: 14,
-          overflow: "hidden",
-          border: "1px solid rgba(0,212,255,.2)",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "13px 18px",
-            borderBottom: "1px solid rgba(0,212,255,.12)",
-            background: "rgba(255,255,255,.03)",
-          }}
-        >
-          <span
-            style={{
-              width: 11,
-              height: 11,
-              borderRadius: "50%",
-              background: "#ff5f56",
-            }}
-          />
-          <span
-            style={{
-              width: 11,
-              height: 11,
-              borderRadius: "50%",
-              background: "#ffbd2e",
-            }}
-          />
-          <span
-            style={{
-              width: 11,
-              height: 11,
-              borderRadius: "50%",
-              background: "#27c93f",
-            }}
-          />
-          <span
-            style={{
-              marginLeft: 8,
-              font: "12px ui-monospace,Menlo,monospace",
-              color: "#94a3b8",
-            }}
-          >
-            quickstart · {sdk.name}
-          </span>
-        </div>
-        <pre
-          style={{
-            margin: 0,
-            padding: 22,
-            fontSize: 13.5,
-            lineHeight: 1.75,
-            color: "#cbd5e1",
-            overflow: "auto",
-          }}
-        >
-          {sdk.quickstart}
-        </pre>
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <TerminalCard label={`quickstart · ${sdk.name}`} code={sdk.quickstart} />
+        <TerminalCard
+          label={`${sdk.guardLabel} · ${sdk.name}`}
+          code={sdk.guardExample}
+        />
       </div>
     </div>
   );

@@ -33,6 +33,15 @@ let axiam = AxiamClient::builder()
 
 axiam.login(&email, &password).await?;
 let ok = axiam.can("read", "doc:1").await?;`,
+    guardLabel: "Guard by macro",
+    guardExample: `use axiam_sdk::require;
+
+// The attribute macro runs the authorization check before the
+// handler body — a 403 short-circuits automatically.
+#[require("read", "doc:{id}")]
+async fn get_doc(path: web::Path<String>) -> impl Responder {
+    HttpResponse::Ok().body("secret document")
+}`,
   },
   {
     id: "typescript",
@@ -61,6 +70,18 @@ const axiam = new AxiamClient({
 
 await axiam.login(email, password);
 const ok = await axiam.can('read', 'doc:1');`,
+    guardLabel: "Guard by decorator (NestJS)",
+    guardExample: `import { RequirePermission } from 'axiam-sdk/nest';
+
+@Controller('docs')
+export class DocsController {
+  // The decorator guards the route — the check runs before the method.
+  @Get(':id')
+  @RequirePermission('read', 'doc:{id}')
+  findOne(@Param('id') id: string) {
+    return this.docs.find(id);
+  }
+}`,
   },
   {
     id: "python",
@@ -86,6 +107,17 @@ with AxiamClient(base_url="https://iam.acme.dev",
                  tenant_slug="acme") as axiam:
     axiam.login(email, password)
     ok = axiam.can("resource:read", "doc:1")`,
+    guardLabel: "Guard by dependency (FastAPI)",
+    guardExample: `from fastapi import Depends, FastAPI
+from axiam_sdk.fastapi import requires
+
+app = FastAPI()
+
+# The dependency enforces the check before the handler runs.
+@app.get("/docs/{doc_id}")
+def read_doc(doc_id: str,
+             _=Depends(requires("read", "doc:{doc_id}"))):
+    return {"id": doc_id}`,
   },
   {
     id: "java",
@@ -113,6 +145,18 @@ with AxiamClient(base_url="https://iam.acme.dev",
 
 axiam.login(email, password);
 boolean ok = axiam.can("read", "doc:1");`,
+    guardLabel: "Guard by annotation",
+    guardExample: `import io.github.ilpanich.axiam.RequirePermission;
+
+@RestController
+class DocController {
+    // The annotation guards the endpoint before it is invoked.
+    @GetMapping("/docs/{id}")
+    @RequirePermission(action = "read", resource = "doc:{id}")
+    Doc getDoc(@PathVariable String id) {
+        return service.find(id);
+    }
+}`,
   },
   {
     id: "csharp",
@@ -139,6 +183,16 @@ boolean ok = axiam.can("read", "doc:1");`,
 
 await axiam.LoginAsync(email, password);
 bool ok = await axiam.CanAsync("read", "doc:1");`,
+    guardLabel: "Guard by attribute",
+    guardExample: `[ApiController]
+[Route("docs")]
+public class DocsController : ControllerBase
+{
+    // The attribute guards the action before it executes.
+    [HttpGet("{id}")]
+    [AxiamAuthorize("read", "doc:{id}")]
+    public IActionResult Get(string id) => Ok(_docs.Find(id));
+}`,
   },
   {
     id: "php",
@@ -164,6 +218,18 @@ $axiam = new AxiamClient([
 
 $axiam->login($email, $password);
 $ok = $axiam->can('read', 'doc:1');`,
+    guardLabel: "Guard by attribute",
+    guardExample: `use Axiam\\Attributes\\RequirePermission;
+
+class DocController
+{
+    // The PHP 8 attribute guards the action before it runs.
+    #[RequirePermission('read', 'doc:{id}')]
+    public function show(string $id): Response
+    {
+        return response()->json(Doc::find($id));
+    }
+}`,
   },
   {
     id: "go",
@@ -190,6 +256,13 @@ $ok = $axiam->can('read', 'doc:1');`,
 
 client.Login(ctx, email, password)
 ok, _ := client.Can(ctx, "read", "doc:1")`,
+    guardLabel: "Guard by middleware",
+    guardExample: `mux := http.NewServeMux()
+
+// Require wraps the handler with an authorization check that
+// runs before it — a denied request never reaches getDoc.
+mux.Handle("GET /docs/{id}",
+    axiam.Require("read", "doc:{id}")(http.HandlerFunc(getDoc)))`,
   },
 ];
 

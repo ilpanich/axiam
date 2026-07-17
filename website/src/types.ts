@@ -27,6 +27,13 @@ export interface Sdk {
   blurb: string;
   highlights: string[];
   quickstart: string;
+  /**
+   * A second example showing the declarative framework-guard style idiomatic
+   * to the language — a macro (Rust), annotation (Java), attribute (C#/PHP),
+   * decorator/dependency (TypeScript/Python) or middleware (Go).
+   */
+  guardLabel: string;
+  guardExample: string;
 }
 
 export type PostBlockType = "p" | "h" | "quote";

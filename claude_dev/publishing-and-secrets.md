@@ -16,6 +16,10 @@ exactly how to create them. All destinations are **free for open-source projects
 > | C# | `ilpanich/axiam-csharp-sdk` | |
 > | PHP | `ilpanich/axiam-php-sdk` | |
 > | Go | `ilpanich/axiam-go-sdk` | |
+> | Kotlin | `ilpanich/axiam-kotlin-sdk` | |
+> | Swift | `ilpanich/axiam-swift-sdk` | |
+> | C | `ilpanich/axiam-c-sdk` | |
+> | C++ | `ilpanich/axiam-cplusplus-sdk` | |
 >
 > Those three inputs are **maintained here and vendored (copied) into each SDK repo**. When
 > one of them changes, the copies downstream must be re-synced — nothing enforces this
@@ -50,13 +54,21 @@ reference.
 | C# SDK | `axiam-csharp-sdk` | **NuGet.org** | Yes | **None** — Trusted Publishing (OIDC) via the `production` environment |
 | PHP SDK | `axiam-php-sdk` | **Packagist** | Yes | **None** — Packagist's own GitHub webhook |
 | Go SDK | `axiam-go-sdk` | **pkg.go.dev** | Yes | **None** — the module proxy pulls it from the git tag |
+| Kotlin SDK | `axiam-kotlin-sdk` | **Maven Central** | Yes | `CENTRAL_TOKEN_USERNAME`, `CENTRAL_TOKEN_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` |
+| Swift SDK | `axiam-swift-sdk` | **Swift Package Index** (+ CocoaPods trunk) | Yes | **None** for SwiftPM (git-tag) — `COCOAPODS_TRUNK_TOKEN` only if also pushing the podspec to CocoaPods trunk |
+| C SDK | `axiam-c-sdk` | **GitHub Releases** (+ vcpkg / Conan recipes in-repo) | Yes | **None** — `GITHUB_TOKEN` attaches the release artifacts |
+| C++ SDK | `axiam-cplusplus-sdk` | **GitHub Releases** (+ vcpkg / Conan recipes in-repo) | Yes | **None** — `GITHUB_TOKEN` attaches the release artifacts |
 | Rust SDK docs | — | **docs.rs** | Yes | **None** — built from the crates.io release |
 | Java SDK docs | — | **javadoc.io** | Yes | **None** — served from the `-javadoc.jar` on Central |
 | Go SDK docs | — | **pkg.go.dev** | Yes | **None** — automatic |
 | Python/TS/C#/PHP SDK docs | each SDK repo | **that repo's GitHub Pages** | Yes | **None** — but Pages must be enabled per repo |
 | Test coverage (all 7 SDKs) | each SDK repo | **Coveralls** | Yes | **None** if the repo is public (`GITHUB_TOKEN`); otherwise `COVERALLS_REPO_TOKEN` |
 
-**Six secrets in total, spread across three repos.** Everything else is OIDC, a webhook, or
+**A handful of secrets, spread across a few repos.** The original six (Rust `CRATES_IO_TOKEN`,
+npm `NPM_TOKEN`, and the four Java Maven-Central/GPG secrets) are now joined by the **Kotlin
+SDK's four Central/GPG secrets** (which may reuse the same dedicated CI GPG key as Java, §4.10)
+and, only if you opt into CocoaPods, one `COCOAPODS_TRUNK_TOKEN` for Swift (§4.11). The C, C++
+and Swift-via-SwiftPM SDKs need **no** publishing secret. Everything else is OIDC, a webhook, or
 the built-in token. **No secret is a long-lived push credential for another repository** —
 the old PHP mirror PAT is gone (§4.7).
 
@@ -71,6 +83,10 @@ the old PHP mirror PAT is gone (§4.7).
 | NuGet | `Axiam.Sdk`, `Axiam.Sdk.AspNetCore` |
 | Packagist | `axiam/axiam-sdk` |
 | Go | **`github.com/ilpanich/axiam-go-sdk`** — changed, see §4.8 |
+| Maven Central (Kotlin) | `io.github.ilpanich:axiam-sdk-kotlin` |
+| CocoaPods | `AxiamSDK` (Swift; SwiftPM uses the git URL directly) |
+| vcpkg / Conan (C) | `axiam-c-sdk` (port/recipe name; consumed via overlay/remote) |
+| vcpkg / Conan (C++) | `axiam-cpp-sdk` (port/recipe name; consumed via overlay/remote) |
 | GHCR | `ghcr.io/ilpanich/axiam/server`, `.../frontend` |
 
 ---
@@ -121,6 +137,7 @@ gh secret list --repo ilpanich/axiam-rust-sdk                          # verify
    | `axiam-python-sdk` | `pypi` | PyPI Trusted Publishing binds to it |
    | `axiam-csharp-sdk` | `production` | NuGet Trusted Publishing binds to it |
    | `axiam-java-sdk` | `maven-central` | Gates the Central deploy (not OIDC, but the job declares it) |
+   | `axiam-kotlin-sdk` | `maven-central` | Gates the Central deploy (same as Java; reuses the `io.github.ilpanich` namespace) |
 
    Optionally add yourself as a required reviewer on these, so a release needs an explicit
    approval click.
@@ -305,9 +322,69 @@ coverage-delta comment).
 | C# | coverlet (`--collect:"XPlat Code Coverage"`) | lcov |
 | PHP | PHPUnit + pcov | clover |
 | Go | `go test -coverprofile` | golang |
+| Kotlin | Kover (`koverXmlReport`) | jacoco/cobertura xml |
+| Swift | `swift test --enable-code-coverage` + `llvm-cov export -format=lcov` | lcov |
+| C | `gcov` + `lcov` (or `llvm-cov`) | lcov |
+| C++ | `llvm-cov`/`gcov` + `lcov` | lcov |
 
 Setup: add each repo at <https://coveralls.io/repos/new>. Public repos authenticate with the
 built-in `GITHUB_TOKEN` — no secret. Private repos need `COVERALLS_REPO_TOKEN` (§3.2).
+
+### 4.10 Maven Central — Kotlin SDK → 4 secrets in `axiam-kotlin-sdk`
+
+Identical mechanics to the Java SDK (§4.5): the Kotlin SDK publishes `io.github.ilpanich:axiam-sdk-kotlin`
+under the same `io.github.ilpanich` namespace (already claimed for Java — **no second namespace
+verification is needed**). The Gradle build (`maven-publish` + `signing` plugins, or the
+`central-publishing` Gradle plugin) signs artifacts with GPG and deploys to the Sonatype Central
+Portal.
+
+```bash
+gh secret set CENTRAL_TOKEN_USERNAME --repo ilpanich/axiam-kotlin-sdk
+gh secret set CENTRAL_TOKEN_PASSWORD --repo ilpanich/axiam-kotlin-sdk
+gh secret set GPG_PRIVATE_KEY        --repo ilpanich/axiam-kotlin-sdk < key.asc
+gh secret set GPG_PASSPHRASE         --repo ilpanich/axiam-kotlin-sdk
+```
+
+You can reuse the **same dedicated CI GPG key** created for Java (§4.5 Step C) — it is already on
+the keyserver — or generate a second one. Create the `maven-central` GitHub environment in the repo
+(§3.2). Docs are served automatically by **javadoc.io** from the released `-javadoc.jar` (Dokka emits
+a Javadoc-format jar).
+
+### 4.11 Swift Package Index + CocoaPods — Swift SDK → 0–1 secret in `axiam-swift-sdk`
+
+SwiftPM has **no registry upload** — like Go, the git tag *is* the release; consumers add the
+package by its GitHub URL and pin `from: "1.0.0"`. To list it on the Swift Package Index, submit the
+repo once at <https://swiftpackageindex.com/add-a-package> (no secret, no token).
+
+CocoaPods is optional and only needed if you want `pod 'AxiamSDK'` support. To push the podspec to the
+CocoaPods trunk on each tag:
+
+1. Register once locally: `pod trunk register you@example.com 'Your Name'` (confirm via email).
+2. `pod trunk me --verbose` prints the session token; store it:
+   `gh secret set COCOAPODS_TRUNK_TOKEN --repo ilpanich/axiam-swift-sdk`
+3. The release workflow runs `pod trunk push AxiamSDK.podspec` with
+   `COCOAPODS_TRUNK_TOKEN` in the environment.
+
+If you skip CocoaPods, **no secret at all** is required for the Swift SDK. DocC HTML is published to
+that repo's GitHub Pages (§3.2).
+
+### 4.12 / 4.13 C and C++ SDKs → no publishing secret (`axiam-c-sdk`, `axiam-cplusplus-sdk`)
+
+C and C++ have no single canonical package registry. Both repos ship:
+
+- a **CMake** build with `install()` + `CPack` producing a `.tar.gz` (headers + static/shared lib +
+  CMake package-config) attached to the **GitHub Release** with the built-in `GITHUB_TOKEN`
+  (`softprops/action-gh-release`) — **no secret**;
+- an in-repo **vcpkg port** (`ports/axiam-*-sdk/{portfile.cmake,vcpkg.json}`) and **Conan recipe**
+  (`conanfile.py`) that CI validates by building the package from source, so consumers can install via
+  a vcpkg overlay-port or a Conan remote pointing at the repo.
+
+Pushing the port/recipe to the **upstream** `microsoft/vcpkg` (`ports/`) or `conan-io/conan-center-index`
+registries is a separate, manual pull-request to those third-party repositories — it is deliberately
+**not** wired into tag-push CI (those registries gate on human review and cannot be published to with a
+repo secret). The in-repo recipes make that upstream PR mechanical when you choose to do it.
+
+Doxygen HTML for both is published to each repo's GitHub Pages (§3.2).
 
 ---
 
@@ -331,6 +408,10 @@ Every component is versioned and released **independently** — and now from its
 | `axiam-csharp-sdk` | `v1.0.0` | NuGet (Trusted Publishing) + API docs → that repo's Pages |
 | `axiam-php-sdk` | `v1.0.0` | Packagist picks up the tag via its webhook + API docs → that repo's Pages |
 | `axiam-go-sdk` | `v1.0.0` | proxy.golang.org nudge → pkg.go.dev |
+| `axiam-kotlin-sdk` | `v1.0.0` | Maven Central (GPG-signed, Dokka javadoc jar) → javadoc.io picks it up automatically |
+| `axiam-swift-sdk` | `v1.0.0` | SwiftPM tag is the release (Swift Package Index re-indexes); optional `pod trunk push` to CocoaPods + DocC → that repo's Pages |
+| `axiam-c-sdk` | `v1.0.0` | CPack tarball + vcpkg/Conan recipe validation → GitHub Release; Doxygen → that repo's Pages |
+| `axiam-cplusplus-sdk` | `v1.0.0` | CPack tarball + vcpkg/Conan recipe validation → GitHub Release; Doxygen → that repo's Pages |
 
 The `axiam` release ships the **admin-UI (frontend) image too**: the two are deployed as a
 pair (`docker-compose.prod.yml` runs both), so they share a version. Split them only if you

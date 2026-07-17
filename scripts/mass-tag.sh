@@ -44,6 +44,11 @@
 #   axiam-csharp-sdk   the <Version> in both .csproj files.
 #   axiam-php-sdk,     nothing to edit — Composer/Go derive the release version
 #   axiam-go-sdk       from the git tag, so these are tagged as-is.
+#   axiam-kotlin-sdk   gradle.properties version and the README install coords.
+#   axiam-swift-sdk    the CocoaPods AxiamSDK.podspec s.version and README (SwiftPM
+#                      itself is tag-derived, like Go).
+#   axiam-c-sdk,       the CMake project() version, vcpkg.json version, conanfile.py
+#   axiam-cplusplus-sdk version, and the README install coords — kept in lockstep.
 # Each SDK's release workflow asserts the pushed tag equals the manifest
 # version; the bump above is what makes that assertion pass.
 #
@@ -111,6 +116,10 @@ SDK_REPOS=(
   axiam-csharp-sdk
   axiam-php-sdk
   axiam-go-sdk
+  axiam-kotlin-sdk
+  axiam-swift-sdk
+  axiam-c-sdk
+  axiam-cplusplus-sdk
 )
 ALL_REPOS=("$PLATFORM_REPO" "${SDK_REPOS[@]}")
 
@@ -274,6 +283,17 @@ current_version() {
     axiam-php-sdk|axiam-go-sdk)
       printf ''   # version comes from the git tag; nothing declared in-repo
       ;;
+    axiam-kotlin-sdk)
+      grep -m1 -oP '^version[[:space:]]*=[[:space:]]*\K.*' gradle.properties
+      ;;
+    axiam-swift-sdk)
+      # SwiftPM derives its version from the git tag; the CocoaPods podspec is the
+      # one in-repo declaration, so bump/discover from there.
+      grep -m1 -oP "s\.version\s*=\s*['\"]\K[^'\"]+" AxiamSDK.podspec
+      ;;
+    axiam-c-sdk|axiam-cplusplus-sdk)
+      grep -m1 -oP '"version"[[:space:]]*:[[:space:]]*"\K[^"]+' vcpkg.json
+      ;;
   esac ; } || true
 }
 
@@ -376,6 +396,24 @@ bump_versions() {
       ;;
     axiam-php-sdk|axiam-go-sdk)
       : # version is derived from the git tag; nothing to rewrite
+      ;;
+    axiam-kotlin-sdk)
+      # Gradle project version lives in gradle.properties; README shows install coords.
+      sub_literal gradle.properties  "$old" "$version"
+      sub_literal README.md          "$old" "$version"
+      ;;
+    axiam-swift-sdk)
+      # SwiftPM is tag-derived; the CocoaPods podspec carries the only in-repo version.
+      sub_literal AxiamSDK.podspec   "$old" "$version"
+      sub_literal README.md          "$old" "$version"
+      ;;
+    axiam-c-sdk|axiam-cplusplus-sdk)
+      # C/C++ declare the version in the CMake project(), the vcpkg manifest and the
+      # Conan recipe; keep all three (and the README install coords) in lockstep.
+      sub_literal vcpkg.json         "$old" "$version"
+      sub_literal CMakeLists.txt     "$old" "$version"
+      sub_literal conanfile.py       "$old" "$version"
+      sub_literal README.md          "$old" "$version"
       ;;
   esac
 }

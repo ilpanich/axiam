@@ -8,11 +8,11 @@
 # fire. Doing that by hand, across eight repos and their many manifests, is
 # tedious and error-prone — this script does it in one pass.
 #
-# THE VERSION IS TAKEN FROM THE TAG. `--tag axiam-server/v1.4.0` and
-# `--tag v1.4.0` both mean "release 1.4.0": the script strips an optional
-# `prefix/` and a leading `v`, then writes 1.4.0 into every version-bearing
-# file of each selected repo before committing and tagging. So preparing a
-# release is just running this script — no manual version edits first.
+# THE VERSION IS TAKEN FROM THE TAG. `--tag v1.4.0` means "release 1.4.0":
+# the script strips a leading `v` (and, defensively, any `prefix/` segment),
+# then writes 1.4.0 into every version-bearing file of each selected repo
+# before committing and tagging. So preparing a release is just running this
+# script — no manual version edits first.
 #
 # For each selected repo it will, in order:
 #   1. check out the requested branch,
@@ -58,13 +58,14 @@
 # configured, tag/commit creation fails and the script stops; it never pushes
 # an unsigned tag.
 #
-# NOTE ON TAG NAMES: the platform repo's release workflow triggers on the
-# namespaced tag `axiam-server/v*`, while every SDK triggers on `v*`. Because
-# a single run applies ONE tag name to its selected repos, cut a release in
-# two runs, e.g.:
-#     scripts/mass-tag.sh -r axiam    -b main -t axiam-server/v1.0.0-alpha -m "first alpha release" -p
-#     scripts/mass-tag.sh -r all-sdks -b main -t v1.0.0-alpha              -m "first alpha release" -p
-# Both runs derive the same version (1.0.0-alpha) from their tag.
+# TAG NAMES: every repo — the platform included — now releases on a plain
+# `v*` tag (the platform's release workflow was reconciled from the old
+# namespaced `axiam-server/v*` to `v*`). Tags are per-repo, so the same
+# `v1.0.0-alpha` in each repo is unambiguous. A single run can therefore cut
+# the whole fleet:
+#     scripts/mass-tag.sh -r all -b main -t v1.0.0-alpha -m "first alpha release" -p
+# (Use --repos to release a subset — e.g. -r axiam or -r all-sdks — when the
+# platform and SDKs are versioned on different cadences.)
 #
 # Usage:
 #   scripts/mass-tag.sh --repos <all|all-sdks|name[,name...]> \
@@ -145,8 +146,8 @@ Usage:
 
   -r, --repos    (required) 'all', 'all-sdks', or a comma-separated subset.
   -b, --branch   (required) branch to tag; must exist in every selected repo.
-  -t, --tag      (required) tag name to create; the release version is derived
-                 from it (axiam-server/v1.4.0 and v1.4.0 both mean 1.4.0).
+  -t, --tag      (required) tag name to create (plain v* for every repo); the
+                 release version is derived from it (v1.4.0 means 1.4.0).
   -m, --message  (required) tag message; each tag's annotation is
                  "<repo-name> - <message>".
   -p, --pull     (optional) fast-forward pull each branch before releasing.
@@ -158,8 +159,8 @@ Usage:
   -h, --help     show this help and exit.
 
 Known repos: axiam (platform) + the seven axiam-<lang>-sdk repos.
-The platform repo's release tag is namespaced (axiam-server/v*); the SDKs use
-v* — so cut a release in two runs (one per tag name) using --repos.
+Every repo releases on a plain v* tag, so one run (e.g. -r all -t v1.0.0) can
+cut the whole fleet; use --repos to release a subset on its own cadence.
 EOF
 }
 
@@ -193,8 +194,9 @@ done
 [[ -d "$ROOT"      ]] || die "--root '$ROOT' is not a directory"
 
 # ---------------------------------------------------------------------------
-# Derive the release version from the tag: drop an optional "prefix/" segment
-# and a leading "v".   axiam-server/v1.4.0 -> 1.4.0 ;  v1.4.0 -> 1.4.0
+# Derive the release version from the tag: drop a leading "v" (and, defensively,
+# any legacy "prefix/" segment such as the old axiam-server/ namespace).
+#   v1.4.0 -> 1.4.0 ;  axiam-server/v1.4.0 -> 1.4.0
 # ---------------------------------------------------------------------------
 version_from_tag() {
   local t="${1##*/}"    # drop everything up to and including the last '/'

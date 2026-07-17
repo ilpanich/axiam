@@ -22,9 +22,11 @@ exactly how to create them. All destinations are **free for open-source projects
 > automatically yet (see §8).
 >
 > Consequences you must internalise before releasing anything:
-> - **Tags are now per-repo and plain.** An SDK release is `v1.0.0` **in its own repo** — no
->   more `axiam-rust-sdk/v1.0.0` namespacing, which only existed to disambiguate components
->   inside one repository. The **server** keeps `axiam-server/v1.0.0` in *this* repo.
+> - **Tags are now per-repo and plain — everywhere, including the server.** A release is
+>   `v1.0.0` **in its own repo**; no more `axiam-rust-sdk/v1.0.0` namespacing, and the
+>   server's release workflow was reconciled from the old `axiam-server/v1.0.0` prefix to a
+>   plain `v1.0.0` too (`.github/workflows/release.yml` triggers on `v*`, which does not
+>   match a `axiam-server/…` ref). Tags are per-repo, so `v1.0.0` is unambiguous everywhere.
 > - **Secrets live in the SDK repos**, not here. This repo now needs **zero** publishing
 >   secrets.
 > - **Two flows changed shape**, not just location — C# (§4.6) and PHP (§4.7). Read them.
@@ -321,7 +323,7 @@ Every component is versioned and released **independently** — and now from its
 
 | Repo | Tag you push | What happens |
 |---|---|---|
-| `axiam` | `axiam-server/v1.0.0` | Server **and** frontend images (amd64 + arm64) → GHCR, Trivy-scanned, cosign-signed; `x86_64` + `aarch64` binary tarballs → GitHub Release; server rustdoc + docs index → Pages |
+| `axiam` | `v1.0.0` | Server **and** frontend images (amd64 + arm64) → GHCR, Trivy-scanned, cosign-signed; `x86_64` + `aarch64` binary tarballs → GitHub Release; server rustdoc + docs index → Pages |
 | `axiam-rust-sdk` | `v1.0.0` | crates.io → docs.rs picks it up automatically |
 | `axiam-python-sdk` | `v1.0.0` | PyPI (Trusted Publishing) + API docs → that repo's Pages |
 | `axiam-typescript-sdk` | `v1.0.0` | npm (with provenance) + API docs → that repo's Pages |
@@ -330,28 +332,28 @@ Every component is versioned and released **independently** — and now from its
 | `axiam-php-sdk` | `v1.0.0` | Packagist picks up the tag via its webhook + API docs → that repo's Pages |
 | `axiam-go-sdk` | `v1.0.0` | proxy.golang.org nudge → pkg.go.dev |
 
-`axiam-server/…` ships the **admin-UI (frontend) image too**: the two are deployed as a pair
-(`docker-compose.prod.yml` runs both), so they share a version. Split them only if you ever
-want to ship a UI-only patch.
+The `axiam` release ships the **admin-UI (frontend) image too**: the two are deployed as a
+pair (`docker-compose.prod.yml` runs both), so they share a version. Split them only if you
+ever want to ship a UI-only patch.
 
-The server tag keeps its `axiam-server/` prefix because *this* repo still holds more than one
-releasable thing (server images, binaries, docs). The SDK repos hold exactly one artifact
-each, so a bare `v1.0.0` is unambiguous.
+The server tag is a plain `v1.0.0` (its workflow triggers on `v*`). Tags are per-repo, so
+even though *this* repo holds more than one releasable thing (server images, binaries, docs),
+a single `v1.0.0` tag drives them all — no prefix is needed to disambiguate.
 
 ### Colons are not legal in git tags
 
 A tag like `axiamserver:1.0.0` cannot exist — git's `check-ref-format` rejects `:` (along
 with space, `~`, `^`, `?`, `*`, `[`, `\`). The colon in `ghcr.io/ilpanich/axiam/server:1.0.0`
 belongs to the **Docker image reference**, not the git tag; the release workflow derives it
-from the namespaced git tag automatically (`docker/metadata-action` with `type=match`).
+from the `v1.0.0` git tag automatically (`docker/metadata-action`, stripping the leading `v`).
 
 Example:
 
 ```bash
 # Server (+ admin UI) release — in the axiam repo
 git checkout main && git pull
-git tag -s axiam-server/v1.0.0 -m "AXIAM server v1.0.0"
-git push origin axiam-server/v1.0.0
+git tag -s v1.0.0 -m "AXIAM server v1.0.0"
+git push origin v1.0.0
 
 # Rust SDK release — in the axiam-rust-sdk repo, independently
 cd ../axiam-rust-sdk && git checkout main && git pull
@@ -383,7 +385,7 @@ for last.
 
 1. Repo settings (§3) — Pages, workflow permissions, and the three GitHub environments
    (`pypi`, `production`, `maven-central`).
-2. `axiam`: tag `axiam-server/v1.0.0` → images on GHCR; make the packages public.
+2. `axiam`: tag `v1.0.0` → images on GHCR; make the packages public.
    **This needs no secrets at all.**
 3. `axiam-go-sdk`: tag `v1.0.0` (no secret).
 4. `axiam-php-sdk`: submit to Packagist, tag `v1.0.0` (no secret).

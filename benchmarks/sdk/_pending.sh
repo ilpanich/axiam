@@ -4,11 +4,19 @@
 # has no bench glue wired up yet. Sourced or called as: _pending.sh <sdk-name>
 emit_pending() {
   local sdk="${1:?sdk name}"
+  # Every SDK is released; report its real version even in the pending fallback
+  # (this path is now only hit when a package/tooling isn't installed locally).
+  local ver
+  case "$sdk" in
+    rust) ver="1.0.0-alpha7" ;;
+    python) ver="1.0.0a2" ;;
+    *) ver="1.0.0-alpha2" ;;
+  esac
   cat <<EOF
 {
   "schema": "axiam.sdk-bench/v1",
   "sdk": "$sdk",
-  "sdk_version": "unreleased",
+  "sdk_version": "$ver",
   "language_runtime": "n/a",
   "target": "${BENCH_TARGET:-axiam}",
   "profile": "${BENCH_PROFILE:-p0-plaintext}",
@@ -23,7 +31,7 @@ emit_pending() {
   },
   "client_cpu_ms_total": 0,
   "client_rss_mib_peak": 0,
-  "notes": "SDK bench glue not yet wired — see sdk/$sdk/TODO.md (the $sdk SDK itself is implemented)."
+  "notes": "$sdk bench is wired but its toolchain/SDK package is not installed here — see sdk/$sdk/TODO.md to run it."
 }
 EOF
 }

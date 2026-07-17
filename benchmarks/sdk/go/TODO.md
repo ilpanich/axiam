@@ -1,20 +1,21 @@
-# Go SDK benchmark — wiring TODO
+# Go SDK benchmark — now wired
 
-The Go SDK is implemented (`ilpanich/axiam-go-sdk`, module `github.com/ilpanich/axiam-go-sdk`).
-This directory is the bench-glue scaffold: it currently emits a `pending`
-record conforming to `../HARNESS-SPEC.md` because the bench entrypoint has
-not been wired to the SDK yet.
+The Go SDK bench glue is wired to the real SDK
+(`ilpanich/axiam-go-sdk`, module `github.com/ilpanich/axiam-go-sdk`). It times
+the four canonical CONTRACT.md §1 ops (`login`, `refresh`, `check_access`,
+`batch_check`) and emits one `axiam.sdk-bench/v1` JSON object to stdout
+(see `../HARNESS-SPEC.md`).
 
-## To wire it up
-1. Add the SDK dependency: **go.mod (go get github.com/ilpanich/axiam-go-sdk)**.
-2. Implement a bench entrypoint in this directory that:
-   - reads the `BENCH_*` / `SDK_BENCH_*` env (see HARNESS-SPEC.md),
-   - times the four ops (`login`, `refresh`, `check_access`, `batch_check`)
-     with a warm-up + measured loop,
-   - prints exactly one `axiam.sdk-bench/v1` JSON object to stdout with
-     `status: "ok"`.
-3. Point `run.sh` at it (replace the `emit_pending` fallback with `go run .`).
-4. Verify: `cd benchmarks && just sdk-bench sdk=go` prints a valid record.
+## Layout
+- `go.mod` depends on the SDK via a `replace` directive pointing at the sibling
+  checkout (`../../../../axiam-go-sdk`), because the tagged release
+  (`v1.0.0-alpha2`) may not be on the module proxy.
+- `main.go` is the entrypoint (`package main`, run with `go run .`).
+- `run.sh` `exec`s `go run .`.
 
-See `../typescript/bench.mjs` and `../python/bench.py` for complete reference
-harnesses (timing loop, percentile math, JSON contract) to mirror.
+## Running
+- `cd benchmarks && just sdk-bench sdk=go`
+
+## Before running for real
+- No `go.sum` is committed (this environment can't fetch the SDK's transitive
+  deps). Run `go mod tidy` once, with network access, to generate it.

@@ -7,3 +7,13 @@ profiles/certs/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# SDK bench build artifacts (each bench builds against its sibling SDK checkout)
+sdk/rust/target/
+sdk/rust/Cargo.lock
+sdk/go/go.sum
+sdk/java/target/
+sdk/csharp/bin/
+sdk/csharp/obj/
+sdk/php/vendor/
+sdk/php/composer.lock

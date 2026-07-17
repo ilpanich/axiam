@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.axiam.bench</groupId>
+  <artifactId>axiam-sdk-bench</artifactId>
+  <version>0.0.0</version>
+  <packaging>jar</packaging>
+
+  <name>axiam-sdk-bench</name>
+  <description>AXIAM Java SDK client benchmark (axiam.sdk-bench/v1 harness)</description>
+
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <exec.mainClass>io.axiam.bench.Bench</exec.mainClass>
+  </properties>
+
+  <dependencies>
+    <!--
+      The AXIAM Java SDK. If it is not yet published to Maven Central, install
+      it into your local ~/.m2 first by running `mvn install` in the SDK repo:
+
+          mvn -f ../../../../axiam-java-sdk/pom.xml install
+
+      (that path is relative to this directory: benchmarks/sdk/java ->
+      repo-root/axiam-java-sdk, a sibling of the axiam repo).
+    -->
+    <dependency>
+      <groupId>io.github.ilpanich</groupId>
+      <artifactId>axiam-sdk</artifactId>
+      <version>1.0.0-alpha2</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!--
+        `mvn -q exec:java` runs the bench entrypoint (see run.sh). The
+        mainClass is bound here so no CLI -Dexec.mainClass is required.
+      -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <configuration>
+          <mainClass>io.axiam.bench.Bench</mainClass>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

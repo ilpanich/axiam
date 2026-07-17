@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Run the Java SDK bench. The Java SDK (ilpanich/axiam-java-sdk) is implemented; the bench
-# glue in this directory is not yet wired, so this emits a 'pending' record.
-# Replace the body below with: mvn -q exec:java
+# Run the Java SDK bench. The Java SDK (ilpanich/axiam-java-sdk) is implemented and
+# this bench glue is now wired: exec:java runs io.axiam.bench.Bench, which prints one
+# axiam.sdk-bench/v1 JSON record to stdout. If the SDK is not yet on Maven Central,
+# run `mvn install` in ../../../../axiam-java-sdk first to populate the local ~/.m2.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Once wired, implement bench in this directory and exec it here, e.g.:
-#   exec mvn -q exec:java
-# shellcheck disable=SC1091
-source "$HERE/../_pending.sh"; emit_pending java
+cd "$HERE"
+command -v mvn >/dev/null || { source "$HERE/../_pending.sh"; emit_pending java; exit 0; }
+exec mvn -q -e exec:java

@@ -1,0 +1,32 @@
+# Standalone, self-contained workspace for the Rust SDK bench.
+#
+# The empty `[workspace]` table below makes this crate its OWN workspace root so
+# it is never absorbed by the parent `axiam/` Cargo workspace when the bench is
+# built in place (`cargo run` from this directory). It depends on the real SDK
+# via a path dependency on the sibling `axiam-rust-sdk` checkout.
+#
+# For a reproducible, published build, pin the SDK to the crates.io release
+# instead of the path dep, e.g.:
+#   axiam-sdk = { version = "=1.0.0-alpha7", default-features = false, features = ["rest"] }
+# (earlier alphas fail under edition 2024; `=1.0.0-alpha7` is the first that builds).
+[workspace]
+
+[package]
+name = "axiam-sdk-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The bench only exercises the REST transport (login/refresh/check_access/
+# batch_check), so default features (grpc/amqp — which need protoc + vendored
+# protos at build time) are disabled and only `rest` is enabled. This keeps the
+# bench build self-contained and matches exactly the four CONTRACT.md §1 ops
+# measured here.
+axiam-sdk = { path = "../../../../axiam-rust-sdk", default-features = false, features = ["rest"] }
+tokio = { version = "1", features = ["full"] }
+uuid = "1"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

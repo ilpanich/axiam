@@ -1,0 +1,23 @@
+{
+  "name": "axiam/axiam-sdk-bench",
+  "description": "AXIAM PHP SDK client-overhead benchmark harness (axiam.sdk-bench/v1).",
+  "type": "project",
+  "license": "Apache-2.0",
+  "require": {
+    "php": ">=8.1",
+    "axiam/axiam-sdk": "*"
+  },
+  "_comment": "The axiam/axiam-sdk Packagist tag may not exist yet, so we resolve it from the sibling axiam-php-sdk checkout via a path repository (../../../../axiam-php-sdk relative to this dir). Run `composer install` here when wiring for real — vendor/ is NOT committed; bench.php emits a status:\"pending\" record until it is present.",
+  "repositories": [
+    {
+      "type": "path",
+      "url": "../../../../axiam-php-sdk",
+      "options": {
+        "symlink": false
+      }
+    }
+  ],
+  "config": {
+    "sort-packages": true
+  }
+}

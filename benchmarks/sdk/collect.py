@@ -15,14 +15,14 @@ import sys
 # both sides. `refresh` has no exact counterpart (the SDK's refresh() calls
 # /api/v1/auth/refresh; token_refresh.js exercises the OAuth2 refresh_token
 # grant instead) so it is intentionally left unmapped. `check_access`/
-# `batch_check` are REST in every SDK, while the closest k6 scenarios
-# (authz_check_grpc/authz_batch_grpc) measure gRPC — those scenarios already
-# flag themselves NON-COMPARATIVE, so any overhead shown for these two is
-# approximate until a REST-based k6 authz scenario exists.
+# `batch_check` are REST calls (POST /api/v1/authz/check[/batch]) in every SDK,
+# now mapped to the matching REST k6 scenarios (authz_check_rest/authz_batch_rest)
+# which hit the identical wire path — so the overhead delta is genuinely
+# comparable. (The gRPC authz scenarios remain a separate AXIAM capability metric.)
 OP_TO_SCENARIO = {
     "login": "oauth2_password_login",
-    "check_access": "authz_check_grpc",
-    "batch_check": "authz_batch_grpc",
+    "check_access": "authz_check_rest",
+    "batch_check": "authz_batch_rest",
 }
 
 

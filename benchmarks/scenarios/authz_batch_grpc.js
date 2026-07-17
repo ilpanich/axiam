@@ -5,8 +5,9 @@
 // batch authz) in isolation and is reported separately, never as a head-to-head number.
 import grpc from 'k6/net/grpc';
 import { check } from 'k6';
-import { cfg, loadStages, thresholds } from './lib/config.js';
+import { cfg, loadStages, thresholds, requireSeed } from './lib/config.js';
 import { m } from './lib/metrics.js';
+import { loginSession, jwtClaims } from './lib/auth.js';
 
 const client = new grpc.Client();
 // Proto is loaded relative to the repo root; run k6 from benchmarks/ or pass
@@ -21,30 +22,48 @@ export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
-// A seeded subject/resource pair is required for a meaningful (allowed=true) check.
-const SUBJECT = __ENV.BENCH_SUBJECT_ID || cfg.username;
 const RESOURCE = __ENV.BENCH_RESOURCE_ID || 'bench-resource';
 const BATCH_SIZE = Number(__ENV.BENCH_BATCH_SIZE || 5);
 
-function batchRequest() {
+// Every request in the batch must carry the SAME (real, UUID) resource_id: the
+// server rejects non-UUID resource_ids, and the batch handler cross-validates
+// each entry's tenant_id/subject_id against the token claims (T-27-12) — a single
+// mismatch rejects the whole batch. So we reuse the seeded RESOURCE and the
+// token's own subject/tenant for every entry (no per-index resource suffixing).
+function batchRequest(data) {
   const requests = [];
   for (let i = 0; i < BATCH_SIZE; i++) {
     requests.push({
-      tenant_id: cfg.tenantId,
-      subject_id: SUBJECT,
+      tenant_id: data.tenant_id,
+      subject_id: data.subject_id,
       action: 'read',
-      resource_id: `${RESOURCE}-${i}`,
+      resource_id: RESOURCE,
     });
   }
   return { requests };
 }
 
-export default function () {
+export function setup() {
+  requireSeed();
+  const s = loginSession();
+  const claims = jwtClaims(s.access_token);
+  return {
+    access_token: s.access_token,
+    subject_id: claims.sub || __ENV.BENCH_SUBJECT_ID || cfg.username,
+    tenant_id: claims.tenant_id || cfg.tenantId,
+  };
+}
+
+export default function (data) {
   if (__ITER === 0) {
     client.connect(cfg.grpcAddr, { plaintext: cfg.scheme === 'http' });
   }
   const start = Date.now();
-  const res = client.invoke('axiam.v1.AuthorizationService/BatchCheckAccess', batchRequest());
+  const res = client.invoke(
+    'axiam.v1.AuthorizationService/BatchCheckAccess',
+    batchRequest(data),
+    { metadata: { authorization: `Bearer ${data.access_token}` } },
+  );
   const ok = check(res, {
     'grpc status OK': (r) => r && r.status === grpc.StatusOK,
     'results length matches batch size': (r) =>

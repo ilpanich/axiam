@@ -15,6 +15,10 @@ scenario := "all"
 sdk := "python"
 targets := "axiam keycloak"
 profiles := "p0-plaintext p2-tls13"
+# build=1 forces a local source build of the AXIAM image; default (0) uses the
+# published ghcr image (BENCH_AXIAM_IMAGE), falling back to a build if it can't
+# be pulled. Competitors are always prebuilt images.
+build := "0"
 
 # Generate throwaway TLS/mTLS certs for the security profiles (idempotent).
 bench-certs:
@@ -37,7 +41,17 @@ bench-up:
       esac
       PROFILE_ARG="--profile tls"
     fi
-    docker compose -f "$COMPOSE" $PROFILE_ARG up -d --wait
+    BUILD_ARG=""
+    if [ "{{build}}" = "1" ] && [ "{{target}}" = "axiam" ]; then
+      BUILD_ARG="--build"          # force a local source build of the AXIAM image
+    elif [ "{{target}}" = "axiam" ]; then
+      # Default: fetch the prebuilt server image so no source build is needed.
+      # If it can't be pulled (offline / private registry), compose's `build`
+      # fallback in the target file builds it locally on `up`.
+      docker compose -f "$COMPOSE" pull axiam-server 2>/dev/null || \
+        echo "[bench-up] could not pull the AXIAM image; compose will build it locally"
+    fi
+    docker compose -f "$COMPOSE" $PROFILE_ARG up -d --wait $BUILD_ARG
 
 # Provision org/tenant/user/client for a target; writes results/<target>.seed.env.
 bench-seed:

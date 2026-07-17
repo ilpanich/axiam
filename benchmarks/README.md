@@ -14,9 +14,10 @@ dimensions:
 It also includes **per-SDK client-side benchmarks**, so the client overhead of each
 official AXIAM SDK (Rust, TypeScript, Python, Java, C#, PHP, Go — each published from
 its own `ilpanich/axiam-<lang>-sdk` repository) can be measured against the raw
-protocol baseline. All 7 SDKs are implemented; the Python and TypeScript bench
-harnesses are wired to their SDKs, the rest have bench glue pending (see
-`sdk/README.md`).
+protocol baseline. All 7 SDKs are implemented and **all 7 bench harnesses are wired
+to their SDKs** (see `sdk/README.md`); each builds against the sibling SDK checkout
+via a local path/replace/project reference until the alpha package lands on the
+public registry.
 
 ## Why a custom framework?
 
@@ -66,6 +67,8 @@ benchmarks/
 │   ├── token_refresh.js
 │   ├── jwks_fetch.js
 │   ├── userinfo.js
+│   ├── authz_check_rest.js     # AXIAM-only; SDK check_access wire baseline
+│   ├── authz_batch_rest.js     # AXIAM-only; SDK batch_check wire baseline
 │   ├── authz_check_grpc.js
 │   └── authz_batch_grpc.js
 ├── resource/                 # resource-consumption sampling
@@ -89,7 +92,10 @@ benchmarks/
 cd benchmarks
 
 # 1. Bring up a target under a chosen security profile and seed it.
-just bench-up    target=axiam    profile=p2-tls13
+#    AXIAM uses the published ghcr image by default (no source build); pin a
+#    different tag with BENCH_AXIAM_IMAGE, or force a local build with build=1.
+just bench-up    target=axiam    profile=p2-tls13          # prebuilt image
+# just bench-up  target=axiam    profile=p2-tls13 build=1  # local source build
 just bench-seed  target=axiam
 
 # 2. Run the full scenario suite (load + resource sampling) for that target/profile.
@@ -122,18 +128,18 @@ profile definitions.
 
 | Component                         | State                                                        |
 |-----------------------------------|--------------------------------------------------------------|
-| k6 protocol scenarios             | Implemented (HTTP); gRPC authz check + batch scenarios implemented |
-| AXIAM target + seeding            | Implemented (wraps `docker-compose.prod.yml`)                 |
-| Keycloak / Zitadel targets        | Implemented (reference configs)                               |
-| Security profile matrix           | Implemented (p0–p3); mTLS requires per-target cert wiring     |
+| k6 protocol scenarios             | Implemented (HTTP); authz check + batch scenarios over both REST and gRPC |
+| AXIAM target + seeding            | Implemented (prebuilt ghcr image by default, local build fallback); seeds org/tenant/admin via the gated bootstrap flow plus a resource/role/grant for authz checks |
+| Keycloak / Zitadel targets        | Implemented (Keycloak 26.7.0, Zitadel v4.15.2)               |
+| Security profile matrix           | Implemented (p0–p3); mTLS requires per-target cert wiring; SDK benches cover p0–p2 (no SDK client-cert option yet) |
 | Resource sampler + report         | Implemented (stdlib python, no external deps)                 |
-| SDK client benchmarks             | Python/TypeScript wired to their SDKs; Rust/Go/Java/C#/PHP bench glue pending (SDKs themselves are implemented — see `sdk/README.md`) |
+| SDK client benchmarks             | All 7 wired to their SDKs (see `sdk/README.md`)              |
 | AMQP async-authz benchmarking     | Out of scope for v1.0-beta (see below)                        |
 
-> The five unwired SDK bench directories are scaffolds: the corresponding SDK is
-> already implemented (in `ilpanich/axiam-<lang>-sdk`), only the bench entrypoint is pending — see
-> each language's `sdk/<lang>/TODO.md`. `sdk/HARNESS-SPEC.md` documents the shared
-> result contract every bench (wired or pending) emits.
+> Every SDK bench builds against its sibling `ilpanich/axiam-<lang>-sdk` checkout
+> via a local path/replace/project reference until the alpha package is published —
+> see each language's `sdk/<lang>/TODO.md`. `sdk/HARNESS-SPEC.md` documents the
+> shared result contract every bench emits.
 
 ## Out of scope (v1.0-beta)
 

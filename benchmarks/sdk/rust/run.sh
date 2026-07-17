@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Run the Rust SDK bench. The Rust SDK (ilpanich/axiam-rust-sdk) is implemented; the bench
-# glue in this directory is not yet wired, so this emits a 'pending' record.
-# Replace the body below with: cargo run --release
+# Run the Rust SDK bench (wired to axiam-sdk via a path dep on the sibling
+# axiam-rust-sdk checkout). Builds and runs the bench entrypoint in this
+# directory, which prints exactly one axiam.sdk-bench/v1 JSON record to stdout.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Once wired, implement bench in this directory and exec it here, e.g.:
-#   exec cargo run --release
-# shellcheck disable=SC1091
-source "$HERE/../_pending.sh"; emit_pending rust
+cd "$HERE"
+# If the toolchain isn't installed, emit a valid 'pending' record (the collector
+# still gets a well-formed row) instead of failing the whole run.
+command -v cargo >/dev/null || { source "$HERE/../_pending.sh"; emit_pending rust; exit 0; }
+exec cargo run --release --quiet

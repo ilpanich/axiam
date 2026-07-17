@@ -45,7 +45,7 @@ function zeroOps() {
 function emit(status, ops, iterations, concurrency, notes) {
   console.log(JSON.stringify({
     schema: "axiam.sdk-bench/v1", sdk: "typescript",
-    sdk_version: "unreleased", language_runtime: `node ${process.version}`,
+    sdk_version: "1.0.0-alpha2", language_runtime: `node ${process.version}`,
     target: env("BENCH_TARGET", "axiam"), profile: env("BENCH_PROFILE", "p0-plaintext"),
     status, iterations, concurrency,
     ops, client_cpu_ms_total: 0, client_rss_mib_peak: 0, notes,
@@ -68,10 +68,21 @@ async function buildOps() {
   const client = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug });
   await client.login(cfg.username, cfg.password);
 
-  const checks = [0, 1, 2].map((i) => ({
+  // Every check reuses the one seeded resource UUID: the server rejects
+  // non-UUID resource_ids, so the old `${resource}-${i}` suffixing would 400.
+  const checks = [0, 1, 2].map(() => ({
     action: cfg.action,
-    resourceId: `${cfg.resourceId}-${i}`,
+    resourceId: cfg.resourceId,
   }));
+
+  // Fail fast if the grant is missing — otherwise we'd silently benchmark the
+  // deny fast-path instead of a real allow decision.
+  const warm = await client.checkAccess({ action: cfg.action, resourceId: cfg.resourceId });
+  if (!warm || !warm.allowed) {
+    throw new Error(
+      `warm-up checkAccess denied for action=${cfg.action} resourceId=${cfg.resourceId}`
+      + ` — seed the resource/role/grant (see runner/seed.sh)`);
+  }
 
   return {
     login: async () => {

@@ -4,11 +4,18 @@
 # resource-owner-password grant by default, so the comparative "login" scenario
 # falls back to client_credentials (handled in scenarios/lib/targets.js). TLS mode
 # is controlled by ZITADEL_TLS_* set by the runner from the security profile.
+#
+# Pinned to Zitadel v4 (GA). The OIDC endpoints the adapter uses
+# (/oauth/v2/token, /oauth/v2/introspect, /oauth/v2/keys, /oidc/v1/userinfo) are
+# standard discovery paths unchanged from v2; `start-from-init`, the masterkey
+# flag, and the ZITADEL_DATABASE_*/EXTERNAL* env are all still valid in v4. v4
+# does default to the new (v2) login UI, which does not affect these API flows —
+# but validate a live v4 container before publishing any head-to-head numbers.
 name: bench-zitadel
 
 services:
   zitadel:
-    image: ghcr.io/zitadel/zitadel:v2.65.0
+    image: ghcr.io/zitadel/zitadel:v4.15.2
     container_name: bench-zitadel
     cpus: ${BENCH_CPUS:-2}
     mem_limit: ${BENCH_MEM:-1024m}

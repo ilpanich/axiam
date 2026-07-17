@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Run the Csharp SDK bench. The C# SDK (ilpanich/axiam-csharp-sdk) is implemented; the
-# bench glue in this directory is not yet wired, so this emits a 'pending'
-# record. Replace the body below with: dotnet run -c Release
+# Run the Csharp SDK bench. Wired to Axiam.Sdk (ilpanich/axiam-csharp-sdk) via a
+# ProjectReference in axiam-sdk-bench.csproj; the bench entrypoint (Program.cs)
+# emits an axiam.sdk-bench/v1 record to stdout.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Once wired, implement bench in this directory and exec it here, e.g.:
-#   exec dotnet run -c Release
-# shellcheck disable=SC1091
-source "$HERE/../_pending.sh"; emit_pending csharp
+command -v dotnet >/dev/null || { source "$HERE/../_pending.sh"; emit_pending csharp; exit 0; }
+exec dotnet run -c Release --project "$HERE"

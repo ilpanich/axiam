@@ -34,50 +34,128 @@ export BENCH_USERNAME=$BENCH_USERNAME
 export BENCH_PASSWORD='$BENCH_PASSWORD'
 export BENCH_CLIENT_ID=${CLIENT_ID:-bench-client}
 export BENCH_CLIENT_SECRET='${CLIENT_SECRET:-}'
+export BENCH_SUBJECT_ID=${BENCH_SUBJECT_ID:-}
+export BENCH_RESOURCE_ID=${BENCH_RESOURCE_ID:-}
 EOF
   echo "[seed] wrote $SEED_ENV"
 }
 
 # ---------------------------------------------------------------------------
+# AXIAM seeding notes (post-1.0.0-alpha):
+#   * Bootstrap (POST /api/v1/admin/bootstrap) now creates the org + default
+#     tenant + admin itself — it no longer accepts pre-made org_id/tenant_id.
+#     It is fail-closed: the bench compose sets AXIAM_BOOTSTRAP_ADMIN_EMAIL to
+#     admin@bench.dev so the gate is satisfied without a setup_token, and it is
+#     one-shot (a second call returns 409, which we handle).
+#   * Login delivers tokens ONLY via Set-Cookie (axiam_access/axiam_csrf/…), so
+#     we drive the admin session through a curl cookie jar rather than a Bearer
+#     header, and every non-GET under /api/v1 must echo the axiam_csrf cookie in
+#     an X-CSRF-Token header (double-submit).
+#   * The gRPC/REST authz scenarios need a real (allowed=true) decision, so we
+#     seed a resource + a role holding a "read" permission grant, assigned to the
+#     bench user scoped to that resource, and export BENCH_RESOURCE_ID /
+#     BENCH_SUBJECT_ID for the scenarios and SDK benches.
 seed_axiam() {
-  local SURREAL="${SURREAL_URL:-http://localhost:8000}"
-  local DB="${AXIAM__DB__DATABASE:-main}"
-  ORG_ID=$(cat /proc/sys/kernel/random/uuid)
-  TENANT_ID=$(cat /proc/sys/kernel/random/uuid)
+  command -v jq >/dev/null || { echo "[seed/axiam] jq is required (see README prerequisites)"; exit 1; }
+  JAR="$(mktemp)"; trap 'rm -f "$JAR"' RETURN
+  local ADMIN_EMAIL="${BENCH_ADMIN_EMAIL:-admin@bench.dev}"
+  local ADMIN_PW="${BENCH_ADMIN_PASSWORD:-Bench@Admin123!}"
   TENANT_SLUG=default
 
-  echo "[seed/axiam] creating org+tenant via SurrealDB HTTP"
-  resp=$(curl -sf -X POST "$SURREAL/sql" -H "Accept: application/json" \
-    -H "Content-Type: text/plain" -H "surreal-ns: axiam" -H "surreal-db: $DB" \
-    -u "${AXIAM__DB__USERNAME:-root}:${AXIAM__DB__PASSWORD:-root}" \
-    --data-binary "
-CREATE type::record('organization', '$ORG_ID') SET name='Bench Org', slug='bench-org', metadata={}, created_at=time::now(), updated_at=time::now();
-CREATE type::record('tenant', '$TENANT_ID') SET organization_id='$ORG_ID', name='Bench Tenant', slug='$TENANT_SLUG', metadata={}, created_at=time::now(), updated_at=time::now();")
-  echo "$resp" | grep -q '"status":"ERR"' && { echo "[seed/axiam] surreal seed failed: $resp"; exit 1; }
+  # Authenticated JSON call against /api/v1 with the admin cookie jar + CSRF
+  # double-submit. Usage: api METHOD PATH [JSON-BODY].
+  api() {
+    local method="$1" path="$2" data="${3:-}" csrf
+    csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$JAR")"
+    if [ -n "$data" ]; then
+      curl -sS -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" \
+        -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" -d "$data"
+    else
+      curl -sS -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" -H "X-CSRF-Token: $csrf"
+    fi
+  }
+  # Create an entity, or find the existing one on re-seed. `.. | objects` walks
+  # any response wrapper (bare array, {data:[…]}, {items:[…]}) to find the row
+  # whose FIELD == VALUE and return its id.
+  create_or_find() {  # PATH CREATE_JSON MATCH_FIELD MATCH_VALUE
+    local path="$1" cjson="$2" field="$3" val="$4" id
+    id=$(api POST "$path" "$cjson" | jq -r '.id // empty' 2>/dev/null || true)
+    if [ -z "$id" ]; then
+      id=$(api GET "$path" | jq -r --arg f "$field" --arg v "$val" \
+        '[.. | objects | select(.[$f]==$v) | .id] | first // empty' 2>/dev/null || true)
+    fi
+    echo "$id"
+  }
 
-  echo "[seed/axiam] bootstrapping admin"
-  curl -sf -X POST "$BASE/api/v1/admin/bootstrap" -H "Content-Type: application/json" \
-    -d "{\"org_id\":\"$ORG_ID\",\"tenant_id\":\"$TENANT_ID\",\"email\":\"admin@bench.dev\",\"username\":\"admin\",\"password\":\"Bench@Admin123!\"}" \
-    >/dev/null || true
+  echo "[seed/axiam] bootstrapping org + default tenant + admin (gated by AXIAM_BOOTSTRAP_ADMIN_EMAIL)"
+  local boot code body
+  boot=$(curl -sS -o - -w $'\n%{http_code}' -c "$JAR" -X POST "$BASE/api/v1/admin/bootstrap" \
+    -H "Content-Type: application/json" \
+    -d "{\"organization_name\":\"Bench Org\",\"tenant_name\":\"Bench Tenant\",\"tenant_slug\":\"$TENANT_SLUG\",\"email\":\"$ADMIN_EMAIL\",\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}")
+  code="${boot##*$'\n'}"; body="${boot%$'\n'*}"
+  case "$code" in
+    201)
+      ORG_ID=$(echo "$body" | jq -r '.organization_id // empty')
+      TENANT_ID=$(echo "$body" | jq -r '.tenant_id // empty')
+      TENANT_SLUG=$(echo "$body" | jq -r '.tenant_slug // "default"')
+      ;;
+    409) echo "[seed/axiam] already bootstrapped — recovering tenant via admin login" ;;
+    *)
+      echo "[seed/axiam] bootstrap failed (HTTP $code): $body"
+      echo "  hint: the server must have AXIAM_BOOTSTRAP_ADMIN_EMAIL=$ADMIN_EMAIL set"
+      echo "        (the bench compose does this) OR you must pass a valid setup_token."
+      exit 1 ;;
+  esac
 
-  echo "[seed/axiam] logging in as admin"
-  TOKEN=$(curl -sf -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
-    -d "{\"tenant_id\":\"$TENANT_ID\",\"username_or_email\":\"admin\",\"password\":\"Bench@Admin123!\"}" \
-    | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
-  [ -z "$TOKEN" ] && { echo "[seed/axiam] admin login failed"; exit 1; }
+  echo "[seed/axiam] logging in as admin (cookie session)"
+  local login_body
+  login_body=$(curl -sS -c "$JAR" -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
+    -d "{\"tenant_slug\":\"$TENANT_SLUG\",\"username_or_email\":\"admin\",\"password\":\"$ADMIN_PW\"}")
+  if ! awk -F'\t' '$6=="axiam_access"{f=1} END{exit !f}' "$JAR"; then
+    echo "[seed/axiam] admin login failed (no session cookie): $login_body"; exit 1
+  fi
+  [ -z "${TENANT_ID:-}" ] && TENANT_ID=$(echo "$login_body" | jq -r '.user.tenant_id // empty')
+  [ -z "${TENANT_ID:-}" ] && TENANT_ID=$(api GET /api/v1/auth/me | jq -r '.tenant_id // empty')
+  [ -z "${TENANT_ID:-}" ] && { echo "[seed/axiam] could not determine tenant_id"; exit 1; }
 
   echo "[seed/axiam] creating benchmark user"
-  curl -s -X POST "$BASE/api/v1/users" -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\"username\":\"$BENCH_USERNAME\",\"email\":\"bench@bench.dev\",\"password\":\"$BENCH_PASSWORD\"}" >/dev/null || true
+  USER_ID=$(create_or_find /api/v1/users \
+    "{\"username\":\"$BENCH_USERNAME\",\"email\":\"bench@bench.dev\",\"password\":\"$BENCH_PASSWORD\"}" \
+    username "$BENCH_USERNAME")
+  [ -z "$USER_ID" ] && echo "[seed/axiam] WARN: could not create/find bench user"
+
+  echo "[seed/axiam] creating benchmark resource"
+  RESOURCE_ID=$(create_or_find /api/v1/resources \
+    '{"name":"bench-resource","resource_type":"bench"}' name "bench-resource")
+  [ -z "$RESOURCE_ID" ] && echo "[seed/axiam] WARN: could not create/find bench resource"
+
+  echo "[seed/axiam] creating role + read permission"
+  ROLE_ID=$(create_or_find /api/v1/roles \
+    '{"name":"bench-reader","description":"Bench read role","is_global":false}' name "bench-reader")
+  PERM_ID=$(create_or_find /api/v1/permissions \
+    '{"action":"read","description":"Bench read permission"}' action "read")
+
+  if [ -n "$ROLE_ID" ] && [ -n "$PERM_ID" ]; then
+    echo "[seed/axiam] granting read permission to role (idempotent)"
+    api POST "/api/v1/roles/$ROLE_ID/permissions" "{\"permission_id\":\"$PERM_ID\"}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$ROLE_ID" ] && [ -n "$USER_ID" ] && [ -n "$RESOURCE_ID" ]; then
+    echo "[seed/axiam] assigning role to bench user (scoped to resource)"
+    api POST "/api/v1/roles/$ROLE_ID/users" \
+      "{\"user_id\":\"$USER_ID\",\"resource_id\":\"$RESOURCE_ID\"}" >/dev/null 2>&1 || true
+  fi
 
   echo "[seed/axiam] creating confidential oauth2 client (client_credentials+refresh)"
-  CLIENT_RESP=$(curl -s -X POST "$BASE/api/v1/oauth2-clients" -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"name":"bench-client","redirect_uris":["http://localhost/cb"],"grant_types":["client_credentials","refresh_token","authorization_code"],"scopes":["openid"]}')
-  CLIENT_ID=$(echo "$CLIENT_RESP" | sed -n 's/.*"client_id":"\([^"]*\)".*/\1/p')
-  CLIENT_SECRET=$(echo "$CLIENT_RESP" | sed -n 's/.*"client_secret":"\([^"]*\)".*/\1/p')
+  local CLIENT_RESP
+  CLIENT_RESP=$(api POST /api/v1/oauth2-clients \
+    '{"name":"bench-client","redirect_uris":["http://localhost/cb"],"grant_types":["client_credentials","refresh_token","authorization_code"],"scopes":["openid"]}')
+  CLIENT_ID=$(echo "$CLIENT_RESP" | jq -r '.client_id // empty')
+  CLIENT_SECRET=$(echo "$CLIENT_RESP" | jq -r '.client_secret // empty')
   [ -z "$CLIENT_ID" ] && echo "[seed/axiam] WARN: client creation response: $CLIENT_RESP"
+
+  # Export the authz fixtures the scenarios/SDK benches need.
+  BENCH_SUBJECT_ID="$USER_ID"
+  BENCH_RESOURCE_ID="$RESOURCE_ID"
   write_seed
 }
 

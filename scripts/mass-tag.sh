@@ -21,9 +21,22 @@
 #      --no-bump), and commit the change (signed) — skipped when nothing
 #      changed (e.g. Go/PHP derive their version from the tag alone, or the
 #      repo is already at this version),
-#   4. create a SIGNED annotated tag on the resulting HEAD, whose message is
+#   4. (with --changelog) summarize the commits since the previous tag into a
+#      new CHANGELOG.md section and commit it — folded into the version-bump
+#      commit from step 3 when there is one, otherwise a dedicated commit,
+#   5. create a SIGNED annotated tag on the resulting HEAD, whose message is
 #      the repo name prepended to your message ("<repo> - <message>"),
-#   5. push the branch and then the tag to origin.
+#   6. push the branch and then the tag to origin.
+#
+# THE CHANGELOG SUMMARY (--changelog) is derived mechanically from git history:
+# the commits between the previous v* tag reachable from HEAD and HEAD (all
+# commits when the repo has no tags yet) are grouped by their Conventional-
+# Commit type into Keep-a-Changelog sections — `feat` -> Added, `fix` -> Fixed,
+# everything else -> Changed — and prepended as a new `## [<version>] - <date>`
+# section. The script's own `chore(release):`/`docs(changelog):` commits are
+# filtered out so re-runs don't echo themselves. A repo with no CHANGELOG.md
+# gets a fresh Keep-a-Changelog file; an existing `[<version>]` section is left
+# untouched (idempotent).
 #
 # What "everywhere the version is declared" means, per repo (see bump_versions):
 #   axiam (platform)   Cargo.toml [workspace.package] version; all axiam-*
@@ -138,6 +151,7 @@ MESSAGE=""
 PULL=false
 DRY_RUN=false
 BUMP=true
+CHANGELOG=false
 ROOT="$DEFAULT_ROOT"
 
 usage() {
@@ -161,6 +175,10 @@ Usage:
                  "<repo-name> - <message>".
   -p, --pull     (optional) fast-forward pull each branch before releasing.
       --no-bump  (optional) skip version edits/commit; tag HEAD as-is.
+  -c, --changelog (optional) summarize the commits since the previous tag into
+                 each repo's CHANGELOG.md and commit it (folded into the version
+                 -bump commit when there is one, else a dedicated commit) before
+                 tagging.
       --root DIR (optional) directory containing the repo clones as siblings
                  (default: the parent of this repository).
   -n, --dry-run  (optional) print the mutating actions instead of running them.
@@ -186,6 +204,7 @@ while [[ $# -gt 0 ]]; do
     -m|--message) MESSAGE="${2:-}";   shift 2 ;;
     -p|--pull)    PULL=true;          shift ;;
     --no-bump)    BUMP=false;         shift ;;
+    -c|--changelog) CHANGELOG=true;   shift ;;
     --root)       ROOT="${2:-}";      shift 2 ;;
     -n|--dry-run) DRY_RUN=true;       shift ;;
     -h|--help)    usage; exit 0 ;;
@@ -438,6 +457,133 @@ bump_versions() {
   esac
 }
 
+# ---------------------------------------------------------------------------
+# CHANGELOG generation (opt-in via --changelog)
+# ---------------------------------------------------------------------------
+# Header written verbatim when a repo has no CHANGELOG.md yet (Keep a Changelog).
+CHANGELOG_HEADER='# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).'
+
+# Echo the previous release tag reachable from HEAD (its closest ancestor tag),
+# preferring plain v* tags and falling back to any tag. Empty when the repo has
+# no tags yet (first release). Run from inside the repo dir; always returns 0.
+previous_release_tag() {
+  local t=""
+  t="$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null)" || t=""
+  [[ -n "$t" ]] || { t="$(git describe --tags --abbrev=0 HEAD 2>/dev/null)" || t=""; }
+  printf '%s' "$t"
+}
+
+# Uppercase the first character of $1, leaving the rest untouched.
+capitalize() {
+  local s="$1"
+  [[ -n "$s" ]] || return 0
+  printf '%s%s' "$(printf '%s' "${s:0:1}" | tr '[:lower:]' '[:upper:]')" "${s:1}"
+}
+
+# Build the new CHANGELOG section for version $1 from the commits since the
+# previous tag and leave it in the global CHANGELOG_ENTRY. Run from inside the
+# repo dir. Conventional-Commit types map to Keep-a-Changelog sections; the
+# script's own release/changelog commits are skipped so re-runs stay clean.
+CHANGELOG_ENTRY=""
+build_changelog_entry() {
+  local version="$1" prev date range subject prefix base desc
+  prev="$(previous_release_tag)"
+  date="$(date +%Y-%m-%d)"
+  if [[ -n "$prev" ]]; then range="${prev}..HEAD"; else range="HEAD"; fi
+
+  local -a added changed fixed
+  added=(); changed=(); fixed=()
+  while IFS= read -r subject; do
+    [[ -n "$subject" ]] || continue
+    case "$subject" in
+      "chore(release)"*|"docs(changelog)"*) continue ;;
+    esac
+    # Parse a Conventional-Commit prefix ("type(scope)!: desc"), if present.
+    if [[ "$subject" == *:* ]]; then
+      prefix="${subject%%:*}"   # "type(scope)!"
+      base="${prefix%%(*}"      # drop "(scope)"
+      base="${base%!}"          # drop breaking-change "!"
+    else
+      base=""
+    fi
+    if [[ "$base" =~ ^[a-z]+$ ]]; then
+      desc="${subject#*: }"     # strip the "type...: " prefix
+    else
+      base=""
+      desc="$subject"
+    fi
+    desc="$(capitalize "$desc")"
+    case "$base" in
+      feat|feature) added+=("$desc") ;;
+      fix)          fixed+=("$desc") ;;
+      *)            changed+=("$desc") ;;
+    esac
+  done < <(git log --no-merges --pretty=tformat:'%s' "$range" 2>/dev/null)
+
+  if [[ ${#added[@]} -eq 0 && ${#changed[@]} -eq 0 && ${#fixed[@]} -eq 0 ]]; then
+    changed+=("Maintenance release — no notable changes since ${prev:-the initial commit}.")
+  fi
+
+  local entry="## [${version}] - ${date}" line
+  if [[ ${#added[@]} -gt 0 ]]; then
+    entry+=$'\n\n### Added\n'
+    for line in "${added[@]}";   do entry+=$'\n'"- ${line}"; done
+  fi
+  if [[ ${#changed[@]} -gt 0 ]]; then
+    entry+=$'\n\n### Changed\n'
+    for line in "${changed[@]}"; do entry+=$'\n'"- ${line}"; done
+  fi
+  if [[ ${#fixed[@]} -gt 0 ]]; then
+    entry+=$'\n\n### Fixed\n'
+    for line in "${fixed[@]}";   do entry+=$'\n'"- ${line}"; done
+  fi
+  CHANGELOG_ENTRY="$entry"
+}
+
+# Prepend a new section for version $1 to CHANGELOG.md (creating the file with a
+# standard header if absent). Sets CHANGELOG_TOUCHED=true when the file was
+# written. Idempotent: an existing [<version>] section is left alone. Honours
+# --dry-run. Run from inside the repo dir.
+CHANGELOG_TOUCHED=false
+write_changelog() {
+  local version="$1" file="CHANGELOG.md"
+  CHANGELOG_TOUCHED=false
+  build_changelog_entry "$version"
+
+  if [[ -f "$file" ]] && grep -qF "## [${version}]" "$file"; then
+    printf '      [skip] CHANGELOG.md already has a [%s] section\n' "$version"
+    return 0
+  fi
+
+  if $DRY_RUN; then
+    printf '      [dry-run] prepend new section to CHANGELOG.md:\n'
+    printf '%s\n' "$CHANGELOG_ENTRY" | sed 's/^/        | /'
+    return 0
+  fi
+
+  if [[ -f "$file" ]]; then
+    if grep -q '^## \[' "$file"; then
+      # Insert before the first existing version section, keeping newest-first.
+      ENTRY="$CHANGELOG_ENTRY" perl -0pi -e '
+        BEGIN { $e = $ENV{ENTRY} }
+        s/^(## \[)/$e\n\n$1/m unless $done++;
+      ' "$file"
+    else
+      # Header-only changelog: append the first entry after the header.
+      printf '\n%s\n' "$CHANGELOG_ENTRY" >> "$file"
+    fi
+  else
+    printf '%s\n\n%s\n' "$CHANGELOG_HEADER" "$CHANGELOG_ENTRY" > "$file"
+  fi
+  printf '      CHANGELOG.md: added [%s] section\n' "$version"
+  CHANGELOG_TOUCHED=true
+}
+
 # Helper: run a mutating git command, honouring --dry-run. In dry-run mode the
 # command is printed with shell quoting so it is unambiguous and copy-pasteable.
 run() {
@@ -457,6 +603,7 @@ echo "    version: $RELEASE_VERSION"
 echo "    message: <repo> - $MESSAGE"
 echo "    pull:    $PULL"
 echo "    bump:    $BUMP"
+echo "    changelog: $CHANGELOG"
 echo "    dry-run: $DRY_RUN"
 echo ""
 
@@ -520,21 +667,52 @@ for repo in "${REPOS[@]}"; do
       run git pull --ff-only origin "$BRANCH"
     fi
 
+    # Rewrite the version-bearing files (populates BUMP_FILES) unless --no-bump.
     if $BUMP; then
       echo "    bump version -> $RELEASE_VERSION"
       bump_versions "$repo" "$RELEASE_VERSION"
-      if $DRY_RUN; then
+    fi
+
+    # Summarize the changes into CHANGELOG.md (opt-in). Done before committing so
+    # the changelog can ride in the SAME commit as the version bump.
+    if $CHANGELOG; then
+      echo "    summarize CHANGELOG for $RELEASE_VERSION"
+      write_changelog "$RELEASE_VERSION"
+    fi
+
+    # Commit the version bump and/or the changelog. The changelog is folded into
+    # the version-bump commit when there is one; otherwise it gets its own commit.
+    if $DRY_RUN; then
+      if $CHANGELOG; then
+        echo "    [dry-run] git add <bumped files + CHANGELOG.md> && git commit -S (if anything changed)"
+      elif $BUMP; then
         echo "    [dry-run] git add <bumped files> && git commit -S (if anything changed)"
-      elif [[ ${#BUMP_FILES[@]} -gt 0 ]]; then
+      fi
+    else
+      version_changed=false
+      if $BUMP && [[ ${#BUMP_FILES[@]} -gt 0 ]]; then
         git add -- "${BUMP_FILES[@]}"
-        if git diff --cached --quiet; then
-          echo "    already at $RELEASE_VERSION — no version commit needed"
+        git diff --cached --quiet || version_changed=true
+      fi
+      changelog_changed=false
+      if $CHANGELOG && $CHANGELOG_TOUCHED; then
+        git add -- CHANGELOG.md
+        git diff --cached --quiet -- CHANGELOG.md || changelog_changed=true
+      fi
+      if $version_changed; then
+        if $changelog_changed; then
+          echo "    commit version bump + changelog"
         else
           echo "    commit version bump"
-          git commit -S -m "chore(release): prepare $repo $RELEASE_VERSION"
         fi
-      else
+        git commit -S -m "chore(release): prepare $repo $RELEASE_VERSION"
+      elif $changelog_changed; then
+        echo "    commit changelog"
+        git commit -S -m "docs(changelog): update $repo CHANGELOG for $RELEASE_VERSION"
+      elif $BUMP && [[ ${#BUMP_FILES[@]} -eq 0 ]] && ! $CHANGELOG; then
         echo "    no in-repo version to bump (tag-derived) — tagging HEAD as-is"
+      else
+        echo "    nothing new to commit — tagging HEAD as-is"
       fi
     fi
 

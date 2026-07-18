@@ -5,7 +5,7 @@
 // in isolation and is reported separately, never as a head-to-head number.
 import grpc from 'k6/net/grpc';
 import { check } from 'k6';
-import { cfg, loadStages, thresholds, requireSeed } from './lib/config.js';
+import { cfg, loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
 import { m } from './lib/metrics.js';
 import { loginSession, jwtClaims } from './lib/auth.js';
 
@@ -14,13 +14,18 @@ const client = new grpc.Client();
 // --include-system-env-vars with BENCH_PROTO_ROOT.
 client.load([__ENV.BENCH_PROTO_ROOT || '../proto'], 'axiam/v1/authorization.proto');
 
-export const options = {
-  scenarios: {
-    authz: { executor: 'ramping-vus', startVUs: 0, stages: loadStages(), gracefulRampDown: '5s' },
+// tlsOptions() supplies insecureSkipTLSVerify (private-CA edge) + tlsAuth (mTLS);
+// merged in so the setup() HTTPS login — and the gRPC TLS dial — honor the profile.
+export const options = Object.assign(
+  {
+    scenarios: {
+      authz: { executor: 'ramping-vus', startVUs: 0, stages: loadStages(), gracefulRampDown: '5s' },
+    },
+    thresholds: thresholds('bench_op_latency_ms'),
+    summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
   },
-  thresholds: thresholds('bench_op_latency_ms'),
-  summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
-};
+  tlsOptions(),
+);
 
 const RESOURCE = __ENV.BENCH_RESOURCE_ID || 'bench-resource';
 

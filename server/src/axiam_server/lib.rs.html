@@ -4,12 +4,14 @@
 <a href=#4 id=4 data-nosnippet>4</a>//! internal modules need to be reachable from integration tests under
 <a href=#5 id=5 data-nosnippet>5</a>//! `tests/` — Rust integration test binaries can only link against a
 <a href=#6 id=6 data-nosnippet>6</a>//! package's *library* crate, not its `main.rs` binary. This crate exists
-<a href=#7 id=7 data-nosnippet>7</a>//! solely to expose those modules (currently `cleanup`, whose
-<a href=#8 id=8 data-nosnippet>8</a>//! `run_erasure_pipeline` free function is a test seam for the GDPR erasure
-<a href=#9 id=9 data-nosnippet>9</a>//! durability negative test — SECHRD-06).
-<a href=#10 id=10 data-nosnippet>10</a>//!
-<a href=#11 id=11 data-nosnippet>11</a>//! `main.rs` depends on this crate automatically (a package's binary target
-<a href=#12 id=12 data-nosnippet>12</a>//! always links its own library target when both are present).
-<a href=#13 id=13 data-nosnippet>13</a>
-<a href=#14 id=14 data-nosnippet>14</a></span><span class="kw">pub mod </span>cleanup;
+<a href=#7 id=7 data-nosnippet>7</a>//! solely to expose those modules: `cleanup`, whose `run_erasure_pipeline`
+<a href=#8 id=8 data-nosnippet>8</a>//! free function is a test seam for the GDPR erasure durability negative test
+<a href=#9 id=9 data-nosnippet>9</a>//! (SECHRD-06), and `tls`, whose `build_rustls_server_config` is unit-tested
+<a href=#10 id=10 data-nosnippet>10</a>//! for its fail-fast validation of the optional direct-TLS config (F-04).
+<a href=#11 id=11 data-nosnippet>11</a>//!
+<a href=#12 id=12 data-nosnippet>12</a>//! `main.rs` depends on this crate automatically (a package's binary target
+<a href=#13 id=13 data-nosnippet>13</a>//! always links its own library target when both are present).
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="kw">pub mod </span>cleanup;
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">pub mod </span>tls;
 </code></pre></div></section></main></body></html>

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["rate_limit"],"struct":["ServerConfig"]};
+window.SIDEBAR_ITEMS = {"mod":["rate_limit"],"struct":["ServerConfig","TlsConfig"]};

@@ -22,8 +22,13 @@ end=$(( $(date +%s) + DURATION ))
 while [ "$(date +%s)" -lt "$end" ]; do
   ts=$(($(date +%s%N)/1000000))
   # --no-stream gives one snapshot; format CPU% and MemUsage for matching containers.
+  # NOTE: `grep … || true` MUST be grouped with braces. Written as
+  # `stats | grep || true | while` bash parses it as `(stats|grep) || (true|while)`,
+  # so the row-writing `while` only runs when grep finds NOTHING — i.e. no samples
+  # are ever written on the happy path. The braces keep it one 3-stage pipeline
+  # while still tolerating grep's exit 1 on a momentary no-match.
   docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' 2>/dev/null \
-    | grep -E "$FILTER" || true \
+    | { grep -E "$FILTER" || true; } \
     | while IFS=$'\t' read -r name cpu mem; do
         [ -z "${name:-}" ] && continue
         # "12.34%" -> cores (12.34/100)
@@ -39,7 +44,7 @@ while [ "$(date +%s)" -lt "$end" ]; do
           /B/   {sub(/B/,"");   printf "%.4f", $1/1048576; next}
           {print "0"}')
         echo "${ts},${name},${cpu_cores},${mib}" >> "$OUT"
-      done
+      done || true
   sleep "$INTERVAL"
 done
 

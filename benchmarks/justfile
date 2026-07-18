@@ -55,11 +55,22 @@ bench-up:
       fi
       export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:-$(cat "$PRIV")}"
       export AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:-$(cat "$PUB")}"
+      # Stable local hex-secret helper: generate once, reuse across runs so a
+      # persisted DB volume and previously-encrypted data stay decryptable.
+      genhex() { local f="$SECRETS_DIR/$1"; [ -f "$f" ] || { openssl rand -hex 32 > "$f"; chmod 600 "$f"; }; cat "$f"; }
       # AMQP master signing key (SECHRD-08 / D-05c) — mandatory at startup in the
-      # release image (there is no unsigned code path). Stable hex key (32 bytes).
-      AMQP_KEY="$SECRETS_DIR/amqp_signing.hex"
-      [ -f "$AMQP_KEY" ] || { openssl rand -hex 32 > "$AMQP_KEY"; chmod 600 "$AMQP_KEY"; }
-      export AXIAM__AMQP__SIGNING_KEY="${AXIAM__AMQP__SIGNING_KEY:-$(cat "$AMQP_KEY")}"
+      # release image (there is no unsigned code path).
+      export AXIAM__AMQP__SIGNING_KEY="${AXIAM__AMQP__SIGNING_KEY:-$(genhex amqp_signing.hex)}"
+      # Optional subsystem secrets — set so MFA, GDPR pseudonymization, email/GDPR
+      # export, the password pepper, and OIDC discovery are all functional rather
+      # than degraded-off (D-02 / REQ-14). The encryption keys/pepper are 64-hex
+      # (32-byte AES-256-GCM / HMAC); AXIAM__AUTH__PEPPER is a plain string; the
+      # OIDC issuer must be https or localhost.
+      export AXIAM__AUTH__MFA_ENCRYPTION_KEY="${AXIAM__AUTH__MFA_ENCRYPTION_KEY:-$(genhex mfa_enc.hex)}"
+      export AXIAM__EMAIL_ENCRYPTION_KEY="${AXIAM__EMAIL_ENCRYPTION_KEY:-$(genhex email_enc.hex)}"
+      export AXIAM__GDPR_PSEUDONYM_PEPPER="${AXIAM__GDPR_PSEUDONYM_PEPPER:-$(genhex gdpr_pepper.hex)}"
+      export AXIAM__AUTH__PEPPER="${AXIAM__AUTH__PEPPER:-$(genhex auth_pepper.hex)}"
+      export AXIAM__AUTH__OAUTH2_ISSUER_URL="${AXIAM__AUTH__OAUTH2_ISSUER_URL:-${BENCH_ISSUER_URL:-http://localhost:${BENCH_APP_PORT:-8090}}}"
       export AXIAM__DB__USERNAME="${AXIAM__DB__USERNAME:-bench}"
       export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-bench-local-only-pw}"
       export RABBITMQ_DEFAULT_USER="${RABBITMQ_DEFAULT_USER:-bench}"
@@ -119,7 +130,8 @@ bench-down:
     export AXIAM__DB__USERNAME=x AXIAM__DB__PASSWORD=x \
            RABBITMQ_DEFAULT_USER=x RABBITMQ_DEFAULT_PASS=x \
            AXIAM__AUTH__JWT_PRIVATE_KEY_PEM=x AXIAM__AUTH__JWT_PUBLIC_KEY_PEM=x \
-           AXIAM__AMQP__SIGNING_KEY=x
+           AXIAM__AMQP__SIGNING_KEY=x AXIAM__AUTH__MFA_ENCRYPTION_KEY=x \
+           AXIAM__EMAIL_ENCRYPTION_KEY=x AXIAM__GDPR_PSEUDONYM_PEPPER=x
     COMPOSE="targets/{{target}}/docker-compose.yml"
     docker compose -f "$COMPOSE" --profile tls down -v || \
       docker compose -f "$COMPOSE" down -v

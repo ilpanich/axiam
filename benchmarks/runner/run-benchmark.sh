@@ -57,11 +57,28 @@ fi
 
 # The authz scenarios (gRPC and REST) are AXIAM-only; drop them for other targets.
 AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js"
+
+# OAuth2 client-flow scenarios need a seeded confidential client (and, ideally, a
+# configured OIDC issuer). Skip them when OAuth2 isn't set up so a missing OAuth2
+# config doesn't fail the run — either the operator opts out (BENCH_SKIP_OAUTH2=1)
+# or the axiam client wasn't seeded (empty BENCH_CLIENT_SECRET). `just bench-up`
+# now configures OAuth2 and seed.sh provisions the client, so by default none are
+# skipped. jwks_fetch is intentionally excluded — it needs no client.
+OAUTH2_SCENARIOS="oauth2_client_credentials.js token_introspection.js token_refresh.js userinfo.js"
+skip_oauth2() {
+  [ "${BENCH_SKIP_OAUTH2:-0}" = "1" ] && return 0
+  [ "$TARGET" = "axiam" ] && [ -z "${BENCH_CLIENT_SECRET:-}" ] && return 0
+  return 1
+}
+
 filter_scenarios() {
   local out=()
   for s in "${SCENARIOS[@]}"; do
     if [ "$TARGET" != "axiam" ] && [[ " $AXIAM_ONLY_SCENARIOS " == *" $s "* ]]; then
       echo "[run] skipping $s (AXIAM-only) for target $TARGET"; continue
+    fi
+    if [[ " $OAUTH2_SCENARIOS " == *" $s "* ]] && skip_oauth2; then
+      echo "[run] skipping $s (OAuth2 not configured — seed a client or unset BENCH_SKIP_OAUTH2)"; continue
     fi
     out+=("$s")
   done

@@ -109,7 +109,7 @@ The project follows a structured roadmap of **64 tasks across 19 phases**:
 | Phase 14 | Advanced MFA | Done |
 | Phase 15 | Admin frontend | Done |
 | Phase 16 | Docker & Kubernetes | Done |
-| Phase 17 | SDKs (Rust, TS, Python, Java, C#, PHP, Go) | Done |
+| Phase 17 | SDKs (Rust, TS, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++) | Done |
 | Phase 18 | Security audit, compliance, docs | Done |
 
 ## Quick Start
@@ -160,7 +160,7 @@ axiam/
 
 ## Client SDKs
 
-The seven client SDKs live in their own repositories. Each one vendors a copy of
+The eleven client SDKs live in their own repositories. Each one vendors a copy of
 [`sdks/CONTRACT.md`](sdks/CONTRACT.md) (the binding cross-language behavioral contract),
 [`sdks/openapi.json`](sdks/openapi.json) and [`proto/`](proto/), which are maintained here:
 
@@ -170,9 +170,13 @@ The seven client SDKs live in their own repositories. Each one vendors a copy of
 | TypeScript | [axiam-typescript-sdk](https://github.com/ilpanich/axiam-typescript-sdk) | [npm](https://www.npmjs.com/package/axiam-sdk) |
 | Python | [axiam-python-sdk](https://github.com/ilpanich/axiam-python-sdk) | [PyPI](https://pypi.org/project/axiam-sdk/) |
 | Java | [axiam-java-sdk](https://github.com/ilpanich/axiam-java-sdk) | Maven Central (`io.github.ilpanich:axiam-sdk`) |
+| Kotlin | [axiam-kotlin-sdk](https://github.com/ilpanich/axiam-kotlin-sdk) | Maven Central (`io.github.ilpanich:axiam-sdk-kotlin`) |
 | C# | [axiam-csharp-sdk](https://github.com/ilpanich/axiam-csharp-sdk) | [NuGet](https://www.nuget.org/packages/Axiam.Sdk) |
 | PHP | [axiam-php-sdk](https://github.com/ilpanich/axiam-php-sdk) | [Packagist](https://packagist.org/packages/axiam/axiam-sdk) |
 | Go | [axiam-go-sdk](https://github.com/ilpanich/axiam-go-sdk) | [pkg.go.dev](https://pkg.go.dev/github.com/ilpanich/axiam-go-sdk) |
+| Swift | [axiam-swift-sdk](https://github.com/ilpanich/axiam-swift-sdk) | Swift Package Manager (`github.com/ilpanich/axiam-swift-sdk`) |
+| C | [axiam-c-sdk](https://github.com/ilpanich/axiam-c-sdk) | CMake (FetchContent / `find_package`) |
+| C++ | [axiam-cplusplus-sdk](https://github.com/ilpanich/axiam-cplusplus-sdk) | CMake (FetchContent / vcpkg) |
 
 ## Benchmarking
 

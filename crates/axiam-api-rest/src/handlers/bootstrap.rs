@@ -31,6 +31,7 @@ use axiam_core::models::tenant::CreateTenant;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::{seed_default_roles, seed_permissions};
 use chrono::{DateTime, Utc};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use surrealdb::types::SurrealValue;
@@ -366,7 +367,13 @@ pub async fn bootstrap<C: Connection + Clone>(
     let tenant_id_str = tenant_id.to_string();
     let ph_id_str = Uuid::new_v4().to_string();
 
-    let password_hash = password::hash_password(&req.password, None)
+    // Apply the server-configured password pepper (REQ-14 AC-1) — the same
+    // pepper the user repository uses at login-time verification. Previously
+    // this hashed with `None`, so a deployment that set AXIAM__AUTH__PEPPER
+    // could never authenticate the bootstrap admin (login verifies WITH the
+    // pepper, but this stored a hash computed WITHOUT it → "invalid credentials").
+    let pepper = state.auth_config.pepper.as_ref().map(|p| p.expose_secret());
+    let password_hash = password::hash_password(&req.password, pepper)
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
     // The RELATE uses backtick record IDs (required when type::record() is not

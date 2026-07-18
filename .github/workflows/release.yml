@@ -175,7 +175,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [server, frontend]
+        include:
+          - image: server
+            description: "AXIAM — Access eXtended Identity and Authorization Management"
+          - image: frontend
+            description: "AXIAM IAM admin dashboard"
     steps:
       - name: Download digests
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -214,8 +218,24 @@ jobs:
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        env:
+          # GHCR reads a multi-arch package's title/description/source from the
+          # OCI annotations on the manifest INDEX, not from the per-arch image
+          # config LABELs. Emit the annotations at index level so the merge step
+          # below can stamp them onto the manifest list — otherwise the package
+          # page shows "No description provided" and is not linked to the repo.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          # Curated OCI annotations for the manifest index. `source` MUST point at
+          # this repository so GHCR auto-links the package to it (and inherits the
+          # README); `github.repository` resolves to "ilpanich/axiam".
+          annotations: |
+            org.opencontainers.image.title=axiam-${{ matrix.image }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.vendor=AXIAM Contributors
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
           # We publish the version computed in the step above verbatim, so a
           # pre-release like v1.0.0-alpha ships as the image tag "1.0.0-alpha"
           # rather than collapsing to "1.0.0" the way a bare `type=semver` would.
@@ -238,10 +258,14 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
         run: |
           set -euo pipefail
-          # One -t per tag from metadata-action, one source ref per arch digest.
+          # One -t per tag and one --annotation per index annotation from
+          # metadata-action, one source ref per arch digest. The annotations land
+          # on the manifest LIST (index) so GHCR surfaces the description and
+          # links the package to its repository.
           # shellcheck disable=SC2046
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(jq -cr '(.annotations // []) | map("--annotation " + (. | @sh)) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "${IMAGE}@sha256:%s " *)
 
       - name: Resolve manifest-list digest

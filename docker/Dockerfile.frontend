@@ -58,7 +58,7 @@ EXPOSE 8080
 LABEL org.opencontainers.image.title="axiam-frontend" \
       org.opencontainers.image.description="AXIAM IAM admin dashboard" \
       org.opencontainers.image.vendor="AXIAM Contributors" \
-      org.opencontainers.image.source="https://github.com/emanuele/axiam" \
+      org.opencontainers.image.source="https://github.com/ilpanich/axiam" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 CMD ["nginx", "-g", "daemon off;"]

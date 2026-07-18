@@ -138,7 +138,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd
 LABEL org.opencontainers.image.title="axiam-server" \
       org.opencontainers.image.description="AXIAM — Access eXtended Identity and Authorization Management" \
       org.opencontainers.image.vendor="AXIAM Contributors" \
-      org.opencontainers.image.source="https://github.com/emanuele/axiam" \
+      org.opencontainers.image.source="https://github.com/ilpanich/axiam" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 # ---------------------------------------------------------------------------

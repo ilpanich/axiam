@@ -262,11 +262,24 @@ jobs:
           # metadata-action, one source ref per arch digest. The annotations land
           # on the manifest LIST (index) so GHCR surfaces the description and
           # links the package to its repository.
-          # shellcheck disable=SC2046
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(jq -cr '(.annotations // []) | map("--annotation " + (. | @sh)) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf "${IMAGE}@sha256:%s " *)
+          #
+          # Build the argument list in a bash array so annotation values that
+          # contain spaces (e.g. "AXIAM IAM admin dashboard") survive as single
+          # arguments. Command substitution + jq @sh does NOT work here: the
+          # shell word-splits the substituted text and never re-applies the
+          # embedded quotes, so a spaced annotation splinters into stray
+          # positional args ("IAM" -> "failed to parse source").
+          args=()
+          while IFS= read -r tag; do
+            args+=(-t "$tag")
+          done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          while IFS= read -r ann; do
+            args+=(--annotation "$ann")
+          done < <(jq -r '(.annotations // [])[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          for digest in *; do
+            args+=("${IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${args[@]}"
 
       - name: Resolve manifest-list digest
         id: index

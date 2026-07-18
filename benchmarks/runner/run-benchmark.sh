@@ -99,6 +99,26 @@ K6_VER="$(k6 version 2>/dev/null | head -1)"
 HOST_CPUS="$(nproc 2>/dev/null || echo unknown)"
 HOST_MEM_MIB="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo unknown)"
 
+# Rate-limit posture, read from the RUNNING server container so meta.json records
+# what actually ran (not what someone intended). Prefer the AXIAM_BENCH_RL_POSTURE
+# marker the compose sets; fall back to inferring from the effective login limit;
+# competitors have no AXIAM per-IP limiter, so they are "n/a". report.py refuses
+# to compare cells whose postures aren't mutually comparable.
+detect_rl_posture() {
+  [ "$TARGET" = "axiam" ] || { echo "n/a"; return; }
+  command -v docker >/dev/null 2>&1 || { echo "unknown"; return; }
+  local env_dump marker limit
+  env_dump="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-${TARGET}-server" 2>/dev/null)" || { echo "unknown"; return; }
+  marker="$(printf '%s\n' "$env_dump" | sed -n 's/^AXIAM_BENCH_RL_POSTURE=//p' | head -1)"
+  if [ -n "$marker" ]; then echo "$marker"; return; fi
+  limit="$(printf '%s\n' "$env_dump" | sed -n 's/^AXIAM__RATE_LIMIT__LOGIN_PER_MIN=//p' | head -1)"
+  if [ -n "$limit" ] && [ "$limit" -ge 100000 ] 2>/dev/null; then echo "neutralized"
+  elif [ -n "$limit" ]; then echo "prod"
+  else echo "unknown"; fi
+}
+RL_POSTURE="$(detect_rl_posture)"
+echo "[run] rate-limit posture: $RL_POSTURE"
+
 run_one() {
   local scenario="$1"
   local name="${scenario%.js}"
@@ -136,6 +156,7 @@ run_one() {
   "scheme": "${BENCH_SCHEME:-http}",
   "tls_min": "${BENCH_TLS_MIN:-}",
   "client_auth": "$([ -n "${BENCH_CLIENT_CERT:-}" ] && echo x509 || echo none)",
+  "rate_limits": "$RL_POSTURE",
   "caps": { "cpus": "${BENCH_CPUS:-2}", "mem": "${BENCH_MEM:-1024m}" },
   "host": { "cpus": "$HOST_CPUS", "mem_mib": "$HOST_MEM_MIB" },
   "k6_summary_file": "$name.k6.json",

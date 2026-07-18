@@ -67,6 +67,34 @@ services:
       AXIAM_BOOTSTRAP_ADMIN_EMAIL: "${BENCH_ADMIN_EMAIL:-admin@bench.dev}"
       AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?required}"
       AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?required}"
+      # --- Rate limits: NEUTRALIZED by default for benchmarking ------------------
+      # k6 drives all load from a SINGLE source IP. AXIAM's per-IP rate limiter
+      # (crates/axiam-api-rest/src/config/rate_limit.rs — login 10/min, token
+      # 20/min, introspect 10/min, authz 300/min; gRPC 100/s in
+      # crates/axiam-api-grpc/src/config.rs) would therefore throttle every
+      # scenario except the unlimited JWKS endpoint to a trickle of 200s and a
+      # flood of 429s — the benchmark would measure the 429 path, not endpoint
+      # capacity. Competitors (Keycloak/Zitadel) ship no per-IP limit by default,
+      # so an active limiter also makes head-to-head numbers apples-to-oranges.
+      #
+      # Each var is pass-through-or-neutralize: if the operator exported the real
+      # AXIAM__… name (e.g. via `just rl=prod … bench-up`) that value wins;
+      # otherwise it defaults to 1,000,000 (effectively unlimited; well within
+      # u32 and RateLimitConfig::validate's >=1 floor). A raw `docker compose up`
+      # is therefore neutralized too. AXIAM_BENCH_RL_POSTURE is a non-functional
+      # label the server ignores — runner/run-benchmark.sh reads it back via
+      # `docker inspect` to stamp each meta.json so report.py can refuse to
+      # compare mixed postures.
+      AXIAM_BENCH_RL_POSTURE: "${AXIAM_BENCH_RL_POSTURE:-neutralized}"
+      AXIAM__RATE_LIMIT__LOGIN_PER_MIN: "${AXIAM__RATE_LIMIT__LOGIN_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__REGISTER_PER_MIN: "${AXIAM__RATE_LIMIT__REGISTER_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__TOKEN_PER_MIN: "${AXIAM__RATE_LIMIT__TOKEN_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN: "${AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__MFA_PER_MIN: "${AXIAM__RATE_LIMIT__MFA_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN: "${AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__REVOKE_PER_MIN: "${AXIAM__RATE_LIMIT__REVOKE_PER_MIN:-1000000}"
+      AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN: "${AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN:-1000000}"
+      AXIAM__GRPC__GRPC_AUTHZ_PER_SEC: "${AXIAM__GRPC__GRPC_AUTHZ_PER_SEC:-1000000}"
       RUST_LOG: "${RUST_LOG:-axiam=warn}"
     depends_on:
       surrealdb: { condition: service_healthy }

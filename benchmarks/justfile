@@ -24,6 +24,13 @@ profiles := "p0-plaintext p2-tls13"
 # published ghcr image (BENCH_AXIAM_IMAGE), falling back to a build if it can't
 # be pulled. Competitors are always prebuilt images.
 build := "0"
+# rl selects the AXIAM rate-limit posture for the run:
+#   neutralized (default) — limits raised to ~unlimited so k6's single source IP
+#                           measures endpoint capacity, not the per-IP limiter.
+#   prod                  — the server's production defaults (per-IP limiter
+#                           ACTIVE). Head-to-head numbers taken this way are NOT
+#                           comparable to competitors and report.py will flag them.
+rl := "neutralized"
 
 # Generate throwaway TLS/mTLS certs for the security profiles (idempotent).
 bench-certs:
@@ -79,6 +86,27 @@ bench-up:
       export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-bench-local-only-pw}"
       export RABBITMQ_DEFAULT_USER="${RABBITMQ_DEFAULT_USER:-bench}"
       export RABBITMQ_DEFAULT_PASS="${RABBITMQ_DEFAULT_PASS:-bench-local-only-pw}"
+      # Rate-limit posture (see `rl` at the top of this file). Neutralized is the
+      # default so a single-IP k6 run measures endpoint capacity. The prod values
+      # mirror the server defaults in crates/axiam-api-rest/src/config/rate_limit.rs
+      # and crates/axiam-api-grpc/src/config.rs — keep them in sync if those change.
+      export AXIAM_BENCH_RL_POSTURE="{{rl}}"
+      if [ "{{rl}}" = "prod" ]; then
+        echo "[bench-up] rate limits: PRODUCTION posture — per-IP limiter ACTIVE (head-to-head numbers will be throttled and flagged by report.py)"
+        export AXIAM__RATE_LIMIT__LOGIN_PER_MIN=10
+        export AXIAM__RATE_LIMIT__REGISTER_PER_MIN=5
+        export AXIAM__RATE_LIMIT__TOKEN_PER_MIN=20
+        export AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN=3
+        export AXIAM__RATE_LIMIT__MFA_PER_MIN=5
+        export AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN=10
+        export AXIAM__RATE_LIMIT__REVOKE_PER_MIN=10
+        export AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN=300
+        export AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100
+      elif [ "{{rl}}" != "neutralized" ]; then
+        echo "[bench-up] unknown rl='{{rl}}' (use rl=neutralized or rl=prod)" >&2; exit 1
+      else
+        echo "[bench-up] rate limits: NEUTRALIZED (compose defaults ~unlimited)"
+      fi
       # Default the prebuilt image tag to the workspace version so it tracks
       # releases automatically (override with BENCH_AXIAM_IMAGE).
       if [ -z "${BENCH_AXIAM_IMAGE:-}" ]; then

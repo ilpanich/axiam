@@ -29,6 +29,7 @@ export const SDKS: Sdk[] = [
 let axiam = AxiamClient::builder()
     .base_url("https://iam.acme.dev")
     .tenant_slug("acme")
+    .org_slug("acme")
     .build()?;
 
 axiam.login(&email, &password).await?;
@@ -66,6 +67,7 @@ async fn get_doc(path: web::Path<String>) -> impl Responder {
 const axiam = new AxiamClient({
   baseUrl: 'https://iam.acme.dev',
   tenantSlug: 'acme',
+  orgSlug: 'acme',
 });
 
 await axiam.login(email, password);
@@ -104,7 +106,8 @@ export class DocsController {
     quickstart: `from axiam_sdk import AxiamClient
 
 with AxiamClient(base_url="https://iam.acme.dev",
-                 tenant_slug="acme") as axiam:
+                 tenant_slug="acme",
+                 org_slug="acme") as axiam:
     axiam.login(email, password)
     ok = axiam.can("resource:read", "doc:1")`,
     guardLabel: "Guard by dependency (FastAPI)",
@@ -141,6 +144,7 @@ def read_doc(doc_id: str,
     quickstart: `AxiamClient axiam = AxiamClient.builder()
     .baseUrl("https://iam.acme.dev")
     .tenantSlug("acme")
+    .orgSlug("acme")
     .build();
 
 axiam.login(email, password);
@@ -179,6 +183,7 @@ class DocController {
     quickstart: `var axiam = new AxiamClient(new AxiamOptions {
     BaseUrl = "https://iam.acme.dev",
     TenantSlug = "acme",
+    OrgSlug = "acme",
 });
 
 await axiam.LoginAsync(email, password);
@@ -214,6 +219,7 @@ public class DocsController : ControllerBase
 $axiam = new AxiamClient([
     'baseUrl' => 'https://iam.acme.dev',
     'tenantSlug' => 'acme',
+    'orgSlug' => 'acme',
 ]);
 
 $axiam->login($email, $password);
@@ -252,6 +258,7 @@ class DocController
     quickstart: `client, _ := axiam.New(axiam.Config{
     BaseURL:    "https://iam.acme.dev",
     TenantSlug: "acme",
+    OrgSlug:    "acme",
 })
 
 client.Login(ctx, email, password)

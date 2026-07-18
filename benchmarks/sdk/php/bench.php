@@ -36,6 +36,7 @@ $cfg = [
         $env('BENCH_PORT', '8090'),
     ),
     'tenant_slug' => $env('BENCH_TENANT_SLUG', 'default'),
+    'org_slug' => $env('BENCH_ORG_SLUG', 'bench-org'),
     'username' => $env('BENCH_USERNAME', 'benchuser'),
     'password' => $env('BENCH_PASSWORD', 'Bench@User123!'),
     'action' => $env('BENCH_ACTION', 'read'),
@@ -120,7 +121,7 @@ function emit(string $status, array $ops, int $iterations, int $concurrency, str
  */
 function build_ops(array $cfg): array
 {
-    $client = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug']);
+    $client = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug'], $cfg['org_slug']);
     $client->login($cfg['username'], $cfg['password']);
 
     // 3 checks, all using the SAME resource id (batch preserves input order).
@@ -132,7 +133,7 @@ function build_ops(array $cfg): array
 
     return [
         'login' => static function () use ($cfg): void {
-            $fresh = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug']);
+            $fresh = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug'], $cfg['org_slug']);
             $fresh->login($cfg['username'], $cfg['password']);
         },
         'refresh' => static fn (): mixed => $client->refresh(),

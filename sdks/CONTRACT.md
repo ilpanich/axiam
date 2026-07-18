@@ -220,7 +220,7 @@ Per-language guidance:
 
 ---
 
-## §5 Tenant Context Contract
+## §5 Tenant & Organization Context Contract
 
 **`tenant_slug` or `tenant_id` is a non-optional constructor parameter.**
 
@@ -237,6 +237,48 @@ AxiamClient::new(base_url, tenant_id: uuid)        // tenant_id UUID form
 ```
 
 **Why this matters:** AXIAM is a multi-tenant system. Omitting the tenant identifier causes every authenticated API call to fail with 400 or 403. Enforcing it at construction time gives a clear, early error.
+
+### §5.1 Organization Context (required for login and refresh)
+
+**A tenant slug is only unique *within* an organization, so the login and
+refresh endpoints require organization context in addition to tenant context.**
+
+All SDKs MUST expose an optional organization identifier alongside the tenant
+identifier — `org_slug` (human-readable) or `org_id` (UUID) — settable at client
+construction time (mirroring `tenant_slug`/`tenant_id`), and MUST forward it as
+follows:
+
+1. **`POST /api/v1/auth/login`** — the request body MUST carry organization
+   context: either `org_slug` (paired with `tenant_slug`) or `org_id` (paired
+   with `tenant_id`). A login body without any organization identifier is
+   rejected by the server with `400 Bad Request` — *"must provide org_id or
+   org_slug"*. `LoginRequest` fields: `tenant_id?`, `org_id?`, `tenant_slug?`,
+   `org_slug?` (each optional individually; one tenant form **and** one org form
+   are required together).
+2. **`POST /api/v1/auth/refresh`** — `RefreshRequest` requires **both**
+   `tenant_id` and `org_id` as non-optional UUIDs. An SDK constructed with slugs
+   MUST resolve the authoritative `tenant_id`/`org_id` UUIDs from the
+   access-token claims returned by login (the `tenant_id`/`org_id` JWT claims are
+   read best-effort/unverified purely to populate the refresh body, which the
+   server re-validates) and emit them on refresh.
+
+```
+// Slug form — org + tenant slugs supplied up front
+AxiamClient::new(base_url, tenant_slug: "acme", org_slug: "acme")
+// UUID form
+AxiamClient::new(base_url, tenant_id: uuid, org_id: uuid)
+```
+
+Because the organization identifier is only consumed by the login/refresh flow,
+it is an **optional** constructor parameter (unlike the tenant identifier):
+resource-server / token-verification-only usage (middleware, route guards) that
+never calls `login`/`refresh` does not require it. Any SDK example or benchmark
+that calls `login` MUST supply organization context; omitting it makes login
+fail at runtime.
+
+**Why this matters:** without organization context every `login` call fails with
+`400 "must provide org_id or org_slug"` and every `refresh` fails request
+deserialization. All AXIAM SDKs expose this field uniformly.
 
 ---
 

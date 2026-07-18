@@ -14,7 +14,13 @@ services:
     container_name: bench-keycloak
     cpus: ${BENCH_CPUS:-2}
     mem_limit: ${BENCH_MEM:-1024m}
-    command: start --optimized --http-enabled=${BENCH_KC_HTTP_ENABLED:-true}
+    # `start` (production mode), NOT `start --optimized`: the stock image has never
+    # had `kc.sh build` run, so `--optimized` fails on first start ("Please don't
+    # use this flag for the first startup"). Plain `start` auto-builds from the
+    # build-time env (KC_DB=postgres) on boot, then serves. The build only affects
+    # startup, not the request hot path, so steady-state benchmark numbers are
+    # identical to an optimized image — and competitors stay stock (no local build).
+    command: start --http-enabled=${BENCH_KC_HTTP_ENABLED:-true}
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: "${KC_ADMIN:-admin}"
       KC_BOOTSTRAP_ADMIN_PASSWORD: "${KC_ADMIN_PASSWORD:-admin}"
@@ -46,7 +52,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 15
-      start_period: 40s
+      # Generous: first-ever `start` runs the one-time auto-build before serving,
+      # which is slower under the 2-CPU cap.
+      start_period: 90s
     restart: "no"
     networks: [bench]
 

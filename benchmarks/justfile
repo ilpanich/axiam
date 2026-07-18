@@ -116,8 +116,13 @@ bench-up:
     fi
 
     PROFILE_ARG=""
-    if [ "{{profile}}" != "p0-plaintext" ] && [ "{{target}}" = "axiam" ]; then
+    if [ "{{profile}}" != "p0-plaintext" ]; then
+      # Both targets need the throwaway server/CA certs for TLS profiles: AXIAM
+      # fronts them with an nginx edge, Keycloak terminates TLS in-process from
+      # the same /certs mount. (mkcert-style material; profiles/certs is gitignored.)
       just bench-certs
+    fi
+    if [ "{{profile}}" != "p0-plaintext" ] && [ "{{target}}" = "axiam" ]; then
       case "{{profile}}" in
         p1-tls12) export BENCH_NGINX_CONF=tls12.conf ;;
         p2-tls13) export BENCH_NGINX_CONF=tls13.conf ;;

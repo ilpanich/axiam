@@ -20,6 +20,7 @@ const cfg = {
   host: env("BENCH_HOST", "localhost"),
   port: env("BENCH_PORT", "8090"),
   tenantSlug: env("BENCH_TENANT_SLUG", "default"),
+  orgSlug: env("BENCH_ORG_SLUG", "bench-org"),
   username: env("BENCH_USERNAME", "benchuser"),
   password: env("BENCH_PASSWORD", "Bench@User123!"),
   action: env("BENCH_ACTION", "read"),
@@ -65,7 +66,7 @@ async function buildOps() {
   const { createNodeClient } = await import("axiam-sdk/node");
   const baseUrl = `${cfg.scheme}://${cfg.host}:${cfg.port}`;
 
-  const client = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug });
+  const client = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug });
   await client.login(cfg.username, cfg.password);
 
   // Every check reuses the one seeded resource UUID: the server rejects
@@ -86,7 +87,7 @@ async function buildOps() {
 
   return {
     login: async () => {
-      const fresh = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug });
+      const fresh = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug });
       await fresh.login(cfg.username, cfg.password);
     },
     refresh: () => client.refresh(),

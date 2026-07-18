@@ -153,7 +153,7 @@ try
 {
     resourceId = Guid.Parse(resourceIdRaw); // FormatException -> status "error"
 
-    client = new AxiamClient(new Uri(baseUrl), tenantSlug, new AxiamClientOptions { OrgSlug = orgSlug });
+    client = new AxiamClient(new Uri(baseUrl), tenantSlug, new AxiamClientOptions { BaseUrl = new Uri(baseUrl), TenantId = tenantSlug, OrgSlug = orgSlug });
     await client.LoginAsync(username, password);
 
     // Batch of 3 checks, all against the SAME resource (no per-item suffixing —
@@ -181,7 +181,7 @@ var opsFns = new Dictionary<string, (Func<Task> Fn, int Concurrency)>
 {
     ["login"] = (async () =>
     {
-        var fresh = new AxiamClient(new Uri(baseUrl), tenantSlug, new AxiamClientOptions { OrgSlug = orgSlug });
+        var fresh = new AxiamClient(new Uri(baseUrl), tenantSlug, new AxiamClientOptions { BaseUrl = new Uri(baseUrl), TenantId = tenantSlug, OrgSlug = orgSlug });
         try { await fresh.LoginAsync(username, password); }
         finally { fresh.Dispose(); }
     }, CONC),

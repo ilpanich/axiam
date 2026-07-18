@@ -120,7 +120,6 @@ lettre = { version = "0.11", default-features = false, features = ["tokio1-rustl
 
 # TLS
 rustls = "0.23"
-rustls-pemfile = "2"
 
 # Testing
 tokio-test = "0.4"

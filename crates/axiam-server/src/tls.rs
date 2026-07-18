@@ -12,11 +12,12 @@
 //! and deterministic regardless of what other crates in the tree pull in.
 
 use std::fs::File;
-use std::io::{self, BufReader};
+use std::io;
 use std::sync::Arc;
 
 use axiam_api_rest::config::TlsConfig;
 use rustls::ServerConfig;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Build a TLS 1.3-only rustls [`ServerConfig`] from the configured PEM files.
@@ -38,24 +39,28 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
         )
     })?;
 
+    // Open the files explicitly so a missing/unreadable path yields a clean
+    // io::Error (NotFound / PermissionDenied) before any PEM parsing. Cert and
+    // key are parsed via rustls-pki-types' `PemObject` trait directly —
+    // rustls-pemfile is unmaintained (RUSTSEC-2025-0134) and is a thin wrapper
+    // over this same code.
     let cert_file = File::open(cert_path).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("failed to open TLS cert file {}: {e}", cert_path.display()),
         )
     })?;
-    let cert_chain: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut BufReader::new(cert_file))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "failed to parse TLS certificates from {}: {e}",
-                        cert_path.display()
-                    ),
-                )
-            })?;
+    let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(cert_file)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "failed to parse TLS certificates from {}: {e}",
+                    cert_path.display()
+                ),
+            )
+        })?;
     if cert_chain.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -69,22 +74,15 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
             format!("failed to open TLS key file {}: {e}", key_path.display()),
         )
     })?;
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut BufReader::new(key_file))
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "failed to parse TLS private key from {}: {e}",
-                    key_path.display()
-                ),
-            )
-        })?
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("no private key found in {}", key_path.display()),
-            )
-        })?;
+    let key = PrivateKeyDer::from_pem_reader(key_file).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to read a TLS private key from {}: {e}",
+                key_path.display()
+            ),
+        )
+    })?;
 
     // TLS 1.3 only (ASVS V9.1.2). ring provider selected explicitly.
     let provider = Arc::new(rustls::crypto::ring::default_provider());

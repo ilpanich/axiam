@@ -88,8 +88,15 @@ benchmarks/
 ## Quick start
 
 ```bash
-# 0. Prerequisites: docker, docker compose, k6, python3, jq, bash.
+# 0. Prerequisites: docker, docker compose, k6, python3, jq, openssl, bash.
 cd benchmarks
+
+# The AXIAM target needs a JWT keypair + DB/RabbitMQ creds. `bench-up` bootstraps
+# throwaway local-only ones under docker/.secrets/ automatically (or reuses
+# docker/.secrets/env if you provide real ones). By default it pulls the prebuilt
+# server image ghcr.io/ilpanich/axiam/server:<version>; GHCR packages are private
+# by default, so run `docker login ghcr.io` first (PAT with read:packages), set
+# BENCH_AXIAM_IMAGE to an image you can pull, or build from source with build=1.
 
 # NOTE: `just` variable overrides (target=…, profile=…) must come BEFORE the
 # recipe name — placed after, `just` reads them as another recipe and errors

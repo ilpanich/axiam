@@ -18,10 +18,13 @@ services:
     # source build — bumping BENCH_CPUS/BENCH_MEM then just restarts the same
     # image, which makes scaling the resource envelope up/down fast. The release
     # pipeline publishes ghcr.io/<owner>/<repo>/server:<version> (prereleases get
-    # the exact version tag). Override the tag with BENCH_AXIAM_IMAGE, or force a
-    # local build with `just bench-up ... build=1` (see justfile). The `build`
-    # block below is kept as an automatic fallback when the image can't be pulled.
-    image: ${BENCH_AXIAM_IMAGE:-ghcr.io/ilpanich/axiam/server:1.0.0-alpha3}
+    # the exact version tag). `just bench-up` sets BENCH_AXIAM_IMAGE to the current
+    # workspace version automatically; the literal below is only a fallback for a
+    # raw `docker compose` invocation. Note GHCR packages are private by default —
+    # `docker login ghcr.io` (or make the package public) to pull. Force a local
+    # build instead with `just target=axiam build=1 bench-up`; the `build` block
+    # below is also an automatic fallback when the image can't be pulled.
+    image: ${BENCH_AXIAM_IMAGE:-ghcr.io/ilpanich/axiam/server:1.0.0-alpha9}
     pull_policy: ${BENCH_AXIAM_PULL_POLICY:-missing}
     build:
       context: ../../..

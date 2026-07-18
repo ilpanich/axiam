@@ -34,8 +34,39 @@ bench-up:
     #!/usr/bin/env bash
     set -euo pipefail
     source profiles/{{profile}}.env
-    [ "{{target}}" = "axiam" ] && [ -f ../docker/.secrets/env ] && source ../docker/.secrets/env || true
     COMPOSE="targets/{{target}}/docker-compose.yml"
+
+    # --- AXIAM target: secrets + image selection (competitors need neither) ---
+    if [ "{{target}}" = "axiam" ]; then
+      # User-provided secrets win if present (real deployment creds/keys).
+      [ -f ../docker/.secrets/env ] && source ../docker/.secrets/env || true
+      # Otherwise bootstrap STABLE, throwaway, local-only bench secrets so the
+      # compose file's required vars resolve — mirrors `just prod-up`'s JWT keygen.
+      # Stable (not random) so a persisted DB volume still authenticates on re-run.
+      SECRETS_DIR="../docker/.secrets"
+      PRIV="$SECRETS_DIR/jwt_ed25519.pem"; PUB="$SECRETS_DIR/jwt_ed25519.pub.pem"
+      if [ ! -f "$PRIV" ] || [ ! -f "$PUB" ]; then
+        command -v openssl >/dev/null || { echo "[bench-up] openssl is required to generate the JWT keypair"; exit 1; }
+        echo "[bench-up] generating throwaway Ed25519 JWT keypair under docker/.secrets/ (first run)"
+        mkdir -p "$SECRETS_DIR"
+        openssl genpkey -algorithm ed25519 -out "$PRIV"
+        openssl pkey -in "$PRIV" -pubout -out "$PUB"
+        chmod 600 "$PRIV"
+      fi
+      export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:-$(cat "$PRIV")}"
+      export AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:-$(cat "$PUB")}"
+      export AXIAM__DB__USERNAME="${AXIAM__DB__USERNAME:-bench}"
+      export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-bench-local-only-pw}"
+      export RABBITMQ_DEFAULT_USER="${RABBITMQ_DEFAULT_USER:-bench}"
+      export RABBITMQ_DEFAULT_PASS="${RABBITMQ_DEFAULT_PASS:-bench-local-only-pw}"
+      # Default the prebuilt image tag to the workspace version so it tracks
+      # releases automatically (override with BENCH_AXIAM_IMAGE).
+      if [ -z "${BENCH_AXIAM_IMAGE:-}" ]; then
+        VER="$(grep -m1 '^version' ../Cargo.toml | cut -d'"' -f2)"
+        export BENCH_AXIAM_IMAGE="ghcr.io/ilpanich/axiam/server:${VER}"
+      fi
+    fi
+
     PROFILE_ARG=""
     if [ "{{profile}}" != "p0-plaintext" ] && [ "{{target}}" = "axiam" ]; then
       just bench-certs
@@ -46,15 +77,21 @@ bench-up:
       esac
       PROFILE_ARG="--profile tls"
     fi
+
     BUILD_ARG=""
     if [ "{{build}}" = "1" ] && [ "{{target}}" = "axiam" ]; then
       BUILD_ARG="--build"          # force a local source build of the AXIAM image
     elif [ "{{target}}" = "axiam" ]; then
       # Default: fetch the prebuilt server image so no source build is needed.
-      # If it can't be pulled (offline / private registry), compose's `build`
-      # fallback in the target file builds it locally on `up`.
-      docker compose -f "$COMPOSE" pull axiam-server 2>/dev/null || \
-        echo "[bench-up] could not pull the AXIAM image; compose will build it locally"
+      if ! docker compose -f "$COMPOSE" pull axiam-server 2>/dev/null; then
+        echo "[bench-up] could not pull $BENCH_AXIAM_IMAGE."
+        echo "           GHCR packages are private by default and per-tag images may not"
+        echo "           be published, so an unauthenticated pull is denied. To use the"
+        echo "           prebuilt image: 'docker login ghcr.io' with a PAT that can read"
+        echo "           the package, or set BENCH_AXIAM_IMAGE to an image you can pull."
+        echo "           Falling back to a local source build now (same as build=1)."
+        BUILD_ARG="--build"
+      fi
     fi
     docker compose -f "$COMPOSE" $PROFILE_ARG up -d --wait $BUILD_ARG
 

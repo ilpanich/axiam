@@ -8,7 +8,7 @@
 // harness uses the Node client (tough-cookie jar), not `axiam-sdk`/`/rest`.
 // The stdout JSON contract (axiam.sdk-bench/v1) must stay intact.
 //
-// Run: node bench.mjs   (or: just sdk-bench sdk=typescript)
+// Run: node bench.mjs   (or: just sdk=typescript sdk-bench)
 
 const env = (k, d) => process.env[k] ?? d;
 const ITER = Number(env("SDK_BENCH_ITERATIONS", "2000"));

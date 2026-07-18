@@ -91,33 +91,37 @@ benchmarks/
 # 0. Prerequisites: docker, docker compose, k6, python3, jq, bash.
 cd benchmarks
 
+# NOTE: `just` variable overrides (target=…, profile=…) must come BEFORE the
+# recipe name — placed after, `just` reads them as another recipe and errors
+# with "justfile does not contain recipe `target=…`".
+
 # 1. Bring up a target under a chosen security profile and seed it.
 #    AXIAM uses the published ghcr image by default (no source build); pin a
 #    different tag with BENCH_AXIAM_IMAGE, or force a local build with build=1.
-just bench-up    target=axiam    profile=p2-tls13          # prebuilt image
-# just bench-up  target=axiam    profile=p2-tls13 build=1  # local source build
-just bench-seed  target=axiam
+just target=axiam profile=p2-tls13 bench-up            # prebuilt image
+# just target=axiam profile=p2-tls13 build=1 bench-up  # local source build
+just target=axiam bench-seed
 
 # 2. Run the full scenario suite (load + resource sampling) for that target/profile.
-just bench-run   target=axiam    profile=p2-tls13
+just target=axiam profile=p2-tls13 bench-run
 
 # 3. Repeat for a competitor.
-just bench-up    target=keycloak profile=p2-tls13
-just bench-seed  target=keycloak
-just bench-run   target=keycloak profile=p2-tls13
+just target=keycloak profile=p2-tls13 bench-up
+just target=keycloak bench-seed
+just target=keycloak profile=p2-tls13 bench-run
 
 # 4. Generate a comparative report across everything in results/.
 just bench-report
 
 # 5. Tear down.
-just bench-down  target=axiam
-just bench-down  target=keycloak
+just target=axiam bench-down
+just target=keycloak bench-down
 ```
 
 Or run the entire matrix (all targets × all profiles × all scenarios) unattended:
 
 ```bash
-just bench-matrix targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls"
+just targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls" bench-matrix
 ```
 
 See [`docs/methodology.md`](docs/methodology.md) for the rules that make a run

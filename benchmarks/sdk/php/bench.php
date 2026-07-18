@@ -16,7 +16,7 @@ declare(strict_types=1);
  *
  * Keep the stdout JSON contract (axiam.sdk-bench/v1) intact.
  *
- * Run: php bench.php   (or: just sdk-bench sdk=php)
+ * Run: php bench.php   (or: just sdk=php sdk-bench)
  */
 
 $env = static fn (string $k, string $d): string => ($v = getenv($k)) !== false && $v !== '' ? $v : $d;

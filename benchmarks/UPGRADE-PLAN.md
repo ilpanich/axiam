@@ -71,9 +71,9 @@ bootstrap 400s (masked by `|| true`), admin login then fails, seeding aborts.
 5. Drop the now-dead `SURREAL_URL` / `surreal-ns` plumbing and remove the `|| true` on the
    bootstrap curl (it must fail loudly on 400/403 now that the gate exists).
 
-**Acceptance:** `just bench-up target=axiam profile=p0-plaintext && just bench-seed target=axiam`
+**Acceptance:** `just target=axiam profile=p0-plaintext bench-up && just target=axiam bench-seed`
 writes a `results/axiam.seed.env` containing a real (server-issued) `BENCH_TENANT_ID`, and
-`just bench-run target=axiam profile=p0-plaintext scenario=oauth2_password_login.js` passes with
+`just target=axiam profile=p0-plaintext scenario=oauth2_password_login.js bench-run` passes with
 error rate < 1%. Running `bench-seed` twice in a row succeeds (idempotent).
 
 ### P0.2 gRPC authz scenarios send no authentication (every call UNAUTHENTICATED)
@@ -98,8 +98,8 @@ with no metadata at all, so under the current server 100% of iterations fail.
 4. Since identity comes from the JWT, set `subject_id` in the request to the seeded user's UUID
    (see P0.3) — the value must be consistent with the token's subject, not the username string.
 
-**Acceptance:** with a seeded target, `just bench-run target=axiam profile=p0-plaintext
-scenario=authz_check_grpc.js` completes with `grpc status OK` check-rate ≥ 99%.
+**Acceptance:** with a seeded target, `just target=axiam profile=p0-plaintext
+scenario=authz_check_grpc.js bench-run` completes with `grpc status OK` check-rate ≥ 99%.
 
 ### P0.3 Authz fixtures: non-UUID resource ids, no grants, missing seed exports
 
@@ -132,7 +132,7 @@ Three related problems:
 4. Add an assertion to the wired SDK benches that `allowed === true` on a warm-up check, so a
    misconfigured grant fails fast instead of silently benchmarking denials.
 
-**Acceptance:** `just sdk-bench sdk=python` emits `status: "ok"` with `errors: 0` for
+**Acceptance:** `just sdk=python sdk-bench` emits `status: "ok"` with `errors: 0` for
 `check_access` and `batch_check` against a freshly seeded target.
 
 ---

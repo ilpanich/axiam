@@ -8,7 +8,7 @@
 // (timing loop, percentile math, JSON contract). The stdout JSON contract
 // (axiam.sdk-bench/v1) must stay intact.
 //
-// Run: go run .   (or: cd benchmarks && just sdk-bench sdk=go)
+// Run: go run .   (or: cd benchmarks && just sdk=go sdk-bench)
 package main
 
 import (

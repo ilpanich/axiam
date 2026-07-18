@@ -7,7 +7,7 @@ seeded AXIAM target. ``oauth2_token``/``introspect``/``userinfo`` are
 protocol-level ops with no SDK wrapper (see ../HARNESS-SPEC.md) and are not
 measured here. Keep the stdout JSON contract (axiam.sdk-bench/v1) intact.
 
-Run: python3 bench.py   (or: just sdk-bench sdk=python)
+Run: python3 bench.py   (or: just sdk=python sdk-bench)
 """
 import concurrent.futures as cf
 import json

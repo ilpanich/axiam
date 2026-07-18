@@ -14,7 +14,7 @@ the four canonical CONTRACT.md §1 ops (`login`, `refresh`, `check_access`,
 - `run.sh` `exec`s `go run .`.
 
 ## Running
-- `cd benchmarks && just sdk-bench sdk=go`
+- `cd benchmarks && just sdk=go sdk-bench`
 
 ## Before running for real
 - No `go.sum` is committed (this environment can't fetch the SDK's transitive

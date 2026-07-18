@@ -9,8 +9,8 @@
 #   5. writes a k6 summary JSON, a resource CSV, and a run-metadata JSON
 #      under results/<target>/<profile>/<scenario>.*
 #
-# Bring the target up first (just bench-up target=… profile=…) and seed it
-# (just bench-seed target=…). This script does NOT manage container lifecycle —
+# Bring the target up first (just target=… profile=… bench-up) and seed it
+# (just target=… bench-seed). This script does NOT manage container lifecycle —
 # that separation lets you re-run scenarios against a warm target.
 #
 # Usage:

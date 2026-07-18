@@ -23,7 +23,7 @@ canonical CONTRACT.md §1 ops — `login`, `refresh`, `check_access`,
 
 ## Run
 ```
-cd benchmarks && just sdk-bench sdk=rust
+cd benchmarks && just sdk=rust sdk-bench
 ```
 `BENCH_RESOURCE_ID` must be a valid UUID (the AXIAM authz endpoints reject
 non-UUID resource ids).

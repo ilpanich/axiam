@@ -12,7 +12,7 @@
 //! `../typescript/bench.mjs` (timing loop, percentile math, warm-up, graceful
 //! pending/error handling, JSON shape).
 //!
-//! Run: cargo run --release   (or: cd benchmarks && just sdk-bench sdk=rust)
+//! Run: cargo run --release   (or: cd benchmarks && just sdk=rust sdk-bench)
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

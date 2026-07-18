@@ -15,7 +15,7 @@ because the bench entrypoint has not been wired to the SDK yet.
    - prints exactly one `axiam.sdk-bench/v1` JSON object to stdout with
      `status: "ok"`.
 3. Point `run.sh` at it (replace the `emit_pending` fallback with `./gradlew -q --console=plain run`).
-4. Verify: `cd benchmarks && just sdk-bench sdk=kotlin` prints a valid record.
+4. Verify: `cd benchmarks && just sdk=kotlin sdk-bench` prints a valid record.
 
 See `../typescript/bench.mjs` and `../python/bench.py` for complete reference
 harnesses (timing loop, percentile math, JSON contract) to mirror.

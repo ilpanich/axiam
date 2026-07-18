@@ -13,7 +13,7 @@
 // "batch_check") per the contract, even though the C# SDK methods are
 // PascalCase (CheckAccessAsync, BatchCheckAsync).
 //
-// Run: dotnet run -c Release   (or: just sdk-bench sdk=csharp)
+// Run: dotnet run -c Release   (or: just sdk=csharp sdk-bench)
 
 using System.Diagnostics;
 using System.Text.Json;

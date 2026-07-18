@@ -1,11 +1,16 @@
 # AXIAM benchmark commands. Run from the benchmarks/ directory: `just -f justfile <cmd>`
 # or add `mod benchmarks` to the root justfile. Most commands take target= and profile=.
 #
-#   just bench-up      target=axiam    profile=p2-tls13
-#   just bench-seed    target=axiam
-#   just bench-run     target=axiam    profile=p2-tls13
+# NOTE: `just` only treats `name=value` as a variable override when it comes
+# BEFORE the recipe name — placed after, it is parsed as another recipe to run
+# (failing with "justfile does not contain recipe `target=…`"). So put the
+# assignments first:
+#
+#   just target=axiam profile=p2-tls13 bench-up
+#   just target=axiam bench-seed
+#   just target=axiam profile=p2-tls13 bench-run
 #   just bench-report
-#   just bench-matrix  targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls"
+#   just targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls" bench-matrix
 
 set shell := ["bash", "-uc"]
 
@@ -77,10 +82,10 @@ bench-matrix:
     for t in {{targets}}; do
       for p in {{profiles}}; do
         echo "=== $t / $p ==="
-        just bench-up target=$t profile=$p
-        just bench-seed target=$t
-        just bench-run target=$t profile=$p
-        just bench-down target=$t
+        just target=$t profile=$p bench-up
+        just target=$t bench-seed
+        just target=$t profile=$p bench-run
+        just target=$t bench-down
       done
     done
     just bench-report

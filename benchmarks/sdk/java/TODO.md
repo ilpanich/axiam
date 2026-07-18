@@ -10,7 +10,7 @@ The Java bench glue is wired to the real SDK
   stdout. `refresh` runs serially (single-flight-guarded); the others run at
   `SDK_BENCH_CONCURRENCY`.
 - **Run:** `mvn -q exec:java` (this is what `run.sh` execs), or from the
-  benchmarks root: `just sdk-bench sdk=java`.
+  benchmarks root: `just sdk=java sdk-bench`.
 - **Local .m2:** if `io.github.ilpanich:axiam-sdk` is not yet on Maven Central,
   install it locally first by running `mvn install` in the SDK repo:
   `mvn -f ../../../../axiam-java-sdk/pom.xml install`.

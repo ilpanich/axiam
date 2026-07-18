@@ -11,7 +11,7 @@ ops (`login`, `refresh`, `check_access`, `batch_check`) and prints one
    `path` repository (the Packagist tag may not exist yet); `vendor/` is not
    committed. Until `composer install` is run, `bench.php` degrades gracefully and
    emits a `status: "pending"` record.
-2. `cd benchmarks && just sdk-bench sdk=php` prints the record against a running,
+2. `cd benchmarks && just sdk=php sdk-bench` prints the record against a running,
    seeded target.
 
 ## Notes

@@ -150,7 +150,7 @@ package resolvable:
    project reference to the sibling `axiam-<lang>-sdk` checkout, so it builds even
    before the alpha package is published to the public registry. Swap that for the
    published package reference once available (see each `sdk/<lang>/TODO.md`).
-2. `cd benchmarks && just sdk-bench sdk=<lang>` prints one `axiam.sdk-bench/v1`
+2. `cd benchmarks && just sdk=<lang> sdk-bench` prints one `axiam.sdk-bench/v1`
    record. `just sdk-bench-all` runs every language and folds the results in.
 3. The stdout JSON contract is fixed — do not add or rename fields the aggregator
    depends on (`schema`, `sdk`, `status`, `ops.*`). Op keys stay snake_case

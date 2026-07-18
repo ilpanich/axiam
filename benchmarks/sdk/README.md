@@ -21,7 +21,9 @@ implemented and conform to `sdks/CONTRACT.md`.
 
 ```bash
 cd benchmarks
-just sdk-bench      sdk=python      # one SDK
+# `just` overrides (sdk=…) must precede the recipe name, else `just` reads them
+# as another recipe ("does not contain recipe `sdk=python`").
+just sdk=python sdk-bench           # one SDK
 just sdk-bench-all                  # every SDK with a run.sh
 # then fold into the report:
 python3 sdk/collect.py --results results

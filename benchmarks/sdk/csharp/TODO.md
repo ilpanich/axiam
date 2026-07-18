@@ -12,4 +12,4 @@ NuGet yet). Once `Axiam.Sdk` 1.0.0-alpha2 is published, swap that for the
 commented-out `<PackageReference Include="Axiam.Sdk" Version="1.0.0-alpha2" />`.
 
 ## Run
-`cd benchmarks && just sdk-bench sdk=csharp`
+`cd benchmarks && just sdk=csharp sdk-bench`

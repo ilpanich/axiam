@@ -12,7 +12,7 @@
 // No JSON library is used — the record is assembled by hand so the contract
 // keys are exact.
 //
-// Run: mvn -q exec:java   (or: just sdk-bench sdk=java)
+// Run: mvn -q exec:java   (or: just sdk=java sdk-bench)
 package io.axiam.bench;
 
 import io.axiam.sdk.AxiamClient;

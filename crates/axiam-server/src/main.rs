@@ -593,6 +593,10 @@ async fn main() -> std::io::Result<()> {
 
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
+    // Direct-TLS is opt-in (default: terminate at the proxy layer). Cloned out
+    // of `config.server` before `server_config` is moved into the App factory
+    // closure below so the bind decision can still read it (F-04).
+    let tls_config = config.server.tls.clone();
     let rate_limit_cfg = config.rate_limit.clone();
     let auth_config = config.auth.clone();
     let health_checker: Arc<dyn HealthChecker> = Arc::new(db);
@@ -916,7 +920,7 @@ async fn main() -> std::io::Result<()> {
         saml_federation_service: saml_federation_service.clone(),
     };
 
-    HttpServer::new(move || {
+    let http_server = HttpServer::new(move || {
         let rl = rate_limit_cfg.clone();
         App::new()
             .wrap(SecurityHeadersMiddleware)
@@ -947,10 +951,20 @@ async fn main() -> std::io::Result<()> {
             .configure(health_routes::<axiam_db::DbClient>)
             .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
             .configure(openapi_routes)
-    })
-    .bind(&bind_addr)?
-    .run()
-    .await?;
+    });
+
+    // Bind plaintext (proxy-terminated TLS, the default) or, when
+    // `server.tls.enabled`, bind with rustls restricted to TLS 1.3 (F-04 /
+    // ASVS V9.1.2). `build_rustls_server_config` fails fast on any cert/key
+    // misconfiguration, so a misconfigured TLS server never starts insecurely.
+    let http_server = if tls_config.enabled {
+        let rustls_config = axiam_server::tls::build_rustls_server_config(&tls_config)?;
+        tracing::info!(bind = %bind_addr, "Direct TLS enabled — negotiating TLS 1.3 only");
+        http_server.bind_rustls_0_23(&bind_addr, rustls_config)?
+    } else {
+        http_server.bind(&bind_addr)?
+    };
+    http_server.run().await?;
 
     // Signal the cleanup task to shut down and wait for it to finish.
     let _ = cleanup_shutdown_tx.send(true);

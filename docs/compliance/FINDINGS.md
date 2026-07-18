@@ -13,10 +13,10 @@ found during Phase 7 verification, its disposition, and remediation outcome.
 | # | Finding | Severity | ASVS / RFC Ref | Status | Disposition |
 |---|---------|----------|---------------|--------|-------------|
 | F-01 | WWW-Authenticate header absent on 401 invalid_client responses from /oauth2/token | Low | RFC 6749 §5.2 | **Fixed** | Inline fix (D-04) in `build_oauth2_error_response` — added `WWW-Authenticate: Bearer realm="axiam"` on all 401 responses. Phase 7 Plan 02 commit 20c8174. |
-| F-02 | Playwright e2e/ files not covered by any tsconfig include | Info | N/A (IDE-only) | **Deferred** | `frontend/e2e/*.ts` and `playwright.config.ts` use `process.env` but are not in `tsconfig.app.json` or `tsconfig.node.json`. `@types/node` IS installed. Runtime unaffected (Playwright uses esbuild; `process` exists under Node). CI unaffected. IDE shows "Cannot find name 'process'". Suggested fix: add `frontend/e2e/tsconfig.json` extending root with `"types": ["node"]`. Non-blocking. Issue: https://github.com/ilpanich/axiam/issues/98 |
+| F-02 | Playwright e2e/ files not covered by any tsconfig include | Info | N/A (IDE-only) | **Fixed** | Added `frontend/e2e/tsconfig.json` (`"types": ["node"]`, DOM lib) covering `e2e/**/*.ts` and `../playwright.config.ts`, so the IDE resolves `process` and Playwright/DOM types. It is not referenced by the root `tsconfig.json`, so `tsc -b`/CI behavior is unchanged. Issue: https://github.com/ilpanich/axiam/issues/98 |
 | F-03 | Breach-password check (HIBP) not implemented | Low | ASVS V2.1.7 | **Deferred** | `crates/axiam-auth/src/policy.rs:289` — comment notes HIBP as deferred. Argon2id verification is the primary defense; HIBP is defense-in-depth for known-breached passwords. To be implemented in a future security hardening phase. Issue: https://github.com/ilpanich/axiam/issues/99 |
-| F-04 | TLS 1.3 minimum not explicitly enforced in Actix-Web / rustls config | Low | ASVS V9.1.2, V9.1.3 | **Deferred** | TLS termination is handled at the proxy layer (load balancer / Nginx/Caddy in production). Actix-Web with rustls supports TLS 1.3 by default. Enforcing TLS 1.3 minimum in code requires explicit rustls `ServerConfig` with `versions` filter. Low-priority for beta; acceptable to enforce at proxy. Issue: https://github.com/ilpanich/axiam/issues/100 |
-| F-05 | Content-Security-Policy (CSP) header not set | Medium | ASVS V14.4.4 | **Deferred** | `SecurityHeadersMiddleware` in `crates/axiam-api-rest/src/middleware/security_headers.rs` sets `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy` but not `Content-Security-Policy`. The REST API serves JSON only (no HTML from Rust); the frontend React SPA is served separately. XSS risk is limited because the admin UI does not render untrusted user content. Medium severity: should be added in a future phase. Issue: https://github.com/ilpanich/axiam/issues/101 |
+| F-04 | TLS 1.3 minimum not explicitly enforced in Actix-Web / rustls config | Low | ASVS V9.1.2, V9.1.3 | **Fixed** | Proxy-terminated TLS remains the recommended pattern, now documented with a TLS 1.3-minimum proxy snippet (`docs/deployment/README.md`). Added an opt-in direct-TLS path: `server.tls.{enabled,cert_path,key_path}` (`crates/axiam-api-rest/src/config/mod.rs`) drives `axiam_server::tls::build_rustls_server_config`, which builds a rustls `ServerConfig` restricted to `TLS13` only (V9.1.3 satisfied — all TLS 1.3 suites are approved) and is bound via `bind_rustls_0_23`. Fails fast on cert/key misconfiguration (no insecure fallback). Issue: https://github.com/ilpanich/axiam/issues/100 |
+| F-05 | Content-Security-Policy (CSP) header not set | Medium | ASVS V14.4.4 | **Fixed** | `SecurityHeadersMiddleware` (`crates/axiam-api-rest/src/middleware/security_headers.rs`) now sets `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; form-action 'self'; base-uri 'self'`, mirroring the frontend Nginx policy and covering both JSON responses and the same-origin Swagger UI (CSP-friendly in swagger-ui 5.x). Asserted in `crates/axiam-api-rest/tests/security_headers_test.rs`. Issue: https://github.com/ilpanich/axiam/issues/101 |
 
 ---
 
@@ -24,10 +24,10 @@ found during Phase 7 verification, its disposition, and remediation outcome.
 
 | # | Severity | Blocker for Beta? | Note |
 |---|----------|-------------------|------|
-| F-02 | Info | No | IDE cosmetic only |
 | F-03 | Low | No | Defense-in-depth; Argon2id is primary defense |
-| F-04 | Low | No | Proxy-layer enforcement acceptable |
-| F-05 | Medium | No | No untrusted HTML rendering in admin UI scope |
+
+F-02, F-04, and F-05 were resolved (see the Findings table above); F-03 (HIBP
+breach-password check, issue #99) remains the only open deferred finding.
 
 **No High or Critical deferred finding. Beta ships with no known High security holes (D-04).**
 

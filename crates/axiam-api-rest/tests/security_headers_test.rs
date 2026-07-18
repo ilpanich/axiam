@@ -66,7 +66,40 @@ async fn security_header_referrer_policy_strict_origin() {
 }
 
 #[actix_web::test]
-async fn all_three_security_headers_present_simultaneously() {
+async fn security_header_content_security_policy() {
+    let app = test::init_service(
+        App::new()
+            .wrap(SecurityHeadersMiddleware)
+            .route("/test", web::get().to(ok_handler)),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/test").to_request();
+    let resp = test::call_service(&app, req).await;
+
+    // ASVS V14.4.4: a Content-Security-Policy must be present. Assert the exact
+    // policy so an accidental weakening (e.g. dropping `frame-ancestors 'none'`
+    // or adding `'unsafe-inline'` to `script-src`) is caught in review.
+    let value = resp
+        .headers()
+        .get("content-security-policy")
+        .expect("content-security-policy header missing")
+        .to_str()
+        .expect("content-security-policy header is valid ASCII");
+    assert_eq!(
+        value,
+        "default-src 'self'; \
+         script-src 'self'; \
+         style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data:; \
+         frame-ancestors 'none'; \
+         form-action 'self'; \
+         base-uri 'self'"
+    );
+}
+
+#[actix_web::test]
+async fn all_security_headers_present_simultaneously() {
     let app = test::init_service(
         App::new()
             .wrap(SecurityHeadersMiddleware)
@@ -88,6 +121,10 @@ async fn all_three_security_headers_present_simultaneously() {
     assert!(
         resp.headers().contains_key("referrer-policy"),
         "referrer-policy missing"
+    );
+    assert!(
+        resp.headers().contains_key("content-security-policy"),
+        "content-security-policy missing"
     );
     assert_eq!(resp.status().as_u16(), 200);
 }

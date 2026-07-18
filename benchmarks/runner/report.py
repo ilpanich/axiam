@@ -139,10 +139,28 @@ def collect(results_dir, max_error, min_samples):
                 cells.append({
                     "target": meta["target"], "profile": meta["profile"],
                     "scenario": meta["scenario"], "meta": meta,
+                    "rate_limits": meta.get("rate_limits", "unknown"),
                     "perf": perf, "res": res, "der": der,
                     "valid": not reasons, "reasons": reasons,
                 })
     return cells
+
+
+def posture_bucket(posture):
+    """Collapse a rate-limit posture into a comparability class.
+
+    A head-to-head is only meaningful when every target in the group is
+    effectively unthrottled: AXIAM run with `neutralized` limits vs competitors
+    (`n/a` — they ship no per-IP limiter). AXIAM in `prod` posture is throttled
+    and cannot be compared to an unthrottled competitor; a missing/`unknown`
+    marker (e.g. results from before posture stamping) is treated as unknown so
+    it is flagged rather than silently mixed in.
+    """
+    if posture in ("neutralized", "n/a", "none", ""):
+        return "unthrottled"
+    if posture == "prod":
+        return "throttled"
+    return "unknown"
 
 
 def md_table(headers, rows):
@@ -181,7 +199,7 @@ def build_report(cells):
     for c in sorted(cells, key=lambda c: (c["scenario"], c["profile"], c["target"])):
         p, r, d = c["perf"], c["res"], c["der"]
         rows.append([
-            c["scenario"], c["profile"], c["target"],
+            c["scenario"], c["profile"], c["target"], c["rate_limits"],
             f"{p['throughput']:.0f}", f"{p['p95']:.1f}", f"{p['p99']:.1f}",
             f"{p['error_rate']*100:.2f}%",
             f"{r['cpu_cores_avg']:.2f}", f"{r['mem_mib_avg']:.0f}",
@@ -189,8 +207,9 @@ def build_report(cells):
             "✓" if c["valid"] else "✗",
         ])
     lines += [md_table(
-        ["scenario", "profile", "target", "thr(req/s)", "p95(ms)", "p99(ms)",
-         "err", "cpu(cores)", "mem(MiB)", "thr/core", "cpu_ms/req", "valid"],
+        ["scenario", "profile", "target", "rate_limits", "thr(req/s)", "p95(ms)",
+         "p99(ms)", "err", "cpu(cores)", "mem(MiB)", "thr/core", "cpu_ms/req",
+         "valid"],
         rows), ""]
 
     # 2. Efficiency comparison per (scenario, profile) across targets
@@ -202,6 +221,23 @@ def build_report(cells):
             if len(group) < 2:
                 continue
             lines += [f"### {sc} @ {pr}", ""]
+            # Refuse to render a head-to-head across incomparable rate-limit
+            # postures (e.g. AXIAM throttled vs an unthrottled competitor, or a
+            # cell with an unknown posture). This is the guard that stops the
+            # p0-plaintext limiter incident from silently recurring.
+            buckets = {posture_bucket(c["rate_limits"]) for c in group}
+            if len(buckets) > 1 or "unknown" in buckets:
+                postures = ", ".join(sorted(
+                    f"{c['target']}={c['rate_limits']}" for c in group))
+                lines += [
+                    "> ⚠️ **Not comparable — mixed or unknown rate-limit posture** "
+                    f"({postures}). A head-to-head is only meaningful when every "
+                    "target is unthrottled (AXIAM `neutralized` vs competitors, "
+                    "which have no per-IP limiter). Re-run AXIAM with "
+                    "`just rl=neutralized … bench-up`; results run in `prod` "
+                    "posture measure the limiter, not endpoint capacity.", "",
+                ]
+                continue
             rows = []
             best = max(group, key=lambda c: c["der"]["throughput_per_core"])
             for c in sorted(group, key=lambda c: -c["der"]["throughput_per_core"]):

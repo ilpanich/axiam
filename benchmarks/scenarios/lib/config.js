@@ -21,6 +21,14 @@ export const cfg = {
   host: str('BENCH_HOST', 'localhost'),
   port: num('BENCH_PORT', 8090),
   grpcAddr: str('BENCH_GRPC_ADDR', 'localhost:50051'),
+  // gRPC transport security is INDEPENDENT of the HTTP edge's TLS profile. The
+  // bench never TLS-terminates gRPC: the nginx edge (targets/axiam/tls/*.conf)
+  // proxies HTTP only, and the axiam-server gRPC port is published plaintext on
+  // :50051 for every profile (p0-p3). So the connect plaintext flag must NOT be
+  // derived from BENCH_SCHEME (https there is only the REST edge). Default
+  // plaintext; set BENCH_GRPC_PLAINTEXT=false only if you front gRPC with a TLS
+  // terminator.
+  grpcPlaintext: str('BENCH_GRPC_PLAINTEXT', 'true') === 'true',
 
   // --- tenancy / credentials provisioned by runner/seed.sh ---
   orgId: str('BENCH_ORG_ID', ''),
@@ -34,7 +42,13 @@ export const cfg = {
   clientSecret: str('BENCH_CLIENT_SECRET', 'bench-secret'),
 
   // --- TLS (from the security profile) ---
-  verifyTls: str('BENCH_VERIFY_TLS', 'true') === 'true',
+  // Default OFF: the bench TLS edge uses a throwaway private-CA cert
+  // (runner/gen-certs.sh) that k6's OS trust store can't verify, and k6 has no
+  // option to trust a custom CA. Set BENCH_VERIFY_TLS=true only when pointing the
+  // harness at a target with a publicly-trusted certificate.
+  verifyTls: str('BENCH_VERIFY_TLS', 'false') === 'true',
+  // Informational only: k6 exposes no CA-trust option, so caCert is NOT wired into
+  // tlsOptions(). Kept for non-k6 tooling / documentation of the trust chain.
   caCert: str('BENCH_CA_CERT', ''),
   clientCert: str('BENCH_CLIENT_CERT', ''),
   clientKey: str('BENCH_CLIENT_KEY', ''),
@@ -55,6 +69,10 @@ export function baseUrl() {
 }
 
 // k6 `options.tlsAuth` / `insecureSkipTLSVerify` derived from the profile.
+// Note: k6 has no "trust this CA" option, so a private-CA edge (the bench
+// default) REQUIRES insecureSkipTLSVerify — otherwise every request fails with
+// "x509: certificate signed by unknown authority". tlsAuth (client cert for
+// mTLS) is independent of server-cert verification.
 export function tlsOptions() {
   const o = {};
   if (!cfg.verifyTls) o.insecureSkipTLSVerify = true;

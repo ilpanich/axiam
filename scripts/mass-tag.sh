@@ -254,6 +254,17 @@ esac
 # Set by bump_versions and read by the action loop; declared here for clarity.
 BUMP_FILES=()
 
+# Resolve a repo's vcpkg manifest path, run from inside the repo's dir. The C /
+# C++ SDKs ship it as an overlay port at ports/<repo>/vcpkg.json, but a repo may
+# instead keep it at the root; echo whichever exists (empty if neither).
+vcpkg_manifest_path() {
+  if [[ -f vcpkg.json ]]; then
+    printf 'vcpkg.json'
+  elif [[ -f "ports/$1/vcpkg.json" ]]; then
+    printf 'ports/%s/vcpkg.json' "$1"
+  fi
+}
+
 # Echo a repo's CURRENT declared version, run from inside the repo's dir.
 # Empty when the repo derives its version purely from the git tag (php, go) or
 # when it cannot be found (so callers can report a clean failure). Always
@@ -292,7 +303,10 @@ current_version() {
       grep -m1 -oP "s\.version\s*=\s*['\"]\K[^'\"]+" AxiamSDK.podspec
       ;;
     axiam-c-sdk|axiam-cplusplus-sdk)
-      grep -m1 -oP '"version"[[:space:]]*:[[:space:]]*"\K[^"]+' vcpkg.json
+      # The vcpkg manifest is an overlay port at ports/<repo>/vcpkg.json (some
+      # repos keep it at the root); resolve whichever exists before reading it.
+      local mf; mf="$(vcpkg_manifest_path "$1")"
+      [[ -n "$mf" ]] && grep -m1 -oP '"version"[[:space:]]*:[[:space:]]*"\K[^"]+' "$mf"
       ;;
   esac ; } || true
 }
@@ -408,12 +422,18 @@ bump_versions() {
       sub_literal README.md          "$old" "$version"
       ;;
     axiam-c-sdk|axiam-cplusplus-sdk)
-      # C/C++ declare the version in the CMake project(), the vcpkg manifest and the
-      # Conan recipe; keep all three (and the README install coords) in lockstep.
-      sub_literal vcpkg.json         "$old" "$version"
-      sub_literal CMakeLists.txt     "$old" "$version"
-      sub_literal conanfile.py       "$old" "$version"
-      sub_literal README.md          "$old" "$version"
+      # C/C++ declare the release version in the vcpkg manifest (an overlay port
+      # under ports/<repo>/, or the repo root), the Conan recipe, the AXIAM_VERSION
+      # macro header, the CPack version in CMakeLists, and the README install
+      # coords — kept in lockstep. (project() carries the plain MAJOR.MINOR.PATCH
+      # triple by design, since CMake rejects pre-release suffixes, so a
+      # prerelease bump only rewrites the full-version literals below.)
+      local mf; mf="$(vcpkg_manifest_path "$repo")"
+      [[ -n "$mf" ]] && sub_literal "$mf"  "$old" "$version"
+      sub_literal include/axiam/axiam.h    "$old" "$version"
+      sub_literal CMakeLists.txt           "$old" "$version"
+      sub_literal conanfile.py             "$old" "$version"
+      sub_literal README.md                "$old" "$version"
       ;;
   esac
 }

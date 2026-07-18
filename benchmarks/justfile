@@ -55,6 +55,11 @@ bench-up:
       fi
       export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:-$(cat "$PRIV")}"
       export AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:-$(cat "$PUB")}"
+      # AMQP master signing key (SECHRD-08 / D-05c) — mandatory at startup in the
+      # release image (there is no unsigned code path). Stable hex key (32 bytes).
+      AMQP_KEY="$SECRETS_DIR/amqp_signing.hex"
+      [ -f "$AMQP_KEY" ] || { openssl rand -hex 32 > "$AMQP_KEY"; chmod 600 "$AMQP_KEY"; }
+      export AXIAM__AMQP__SIGNING_KEY="${AXIAM__AMQP__SIGNING_KEY:-$(cat "$AMQP_KEY")}"
       export AXIAM__DB__USERNAME="${AXIAM__DB__USERNAME:-bench}"
       export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-bench-local-only-pw}"
       export RABBITMQ_DEFAULT_USER="${RABBITMQ_DEFAULT_USER:-bench}"

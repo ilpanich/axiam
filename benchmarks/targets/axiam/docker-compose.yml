@@ -37,12 +37,16 @@ services:
       - "${BENCH_GRPC_PORT:-50051}:50051"
     environment:
       AXIAM__DB__URL: "surrealdb:8000"
-      AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?run via runner/run-benchmark.sh which sources docker/.secrets}"
-      AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?run via runner/run-benchmark.sh which sources docker/.secrets}"
+      AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?run via 'just bench-up' which bootstraps bench secrets}"
+      AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?run via 'just bench-up' which bootstraps bench secrets}"
       AXIAM__DB__NAMESPACE: "axiam"
       # Aligned with docker/docker-compose.prod.yml (was "main").
       AXIAM__DB__DATABASE: "${AXIAM__DB__DATABASE:-axiam}"
       AXIAM__AMQP__URL: "amqp://${RABBITMQ_DEFAULT_USER:?required}:${RABBITMQ_DEFAULT_PASS:?required}@rabbitmq:5672"
+      # AMQP master signing key (SECHRD-08 / D-05c): the release image mandates it
+      # at startup (no unsigned code path), so this fails closed if unset. `just
+      # bench-up` generates a stable hex key under docker/.secrets/ automatically.
+      AXIAM__AMQP__SIGNING_KEY: "${AXIAM__AMQP__SIGNING_KEY:?run via 'just bench-up' which generates it under docker/.secrets/}"
       AXIAM__SERVER__HOST: "0.0.0.0"
       AXIAM__GRPC__HOST: "0.0.0.0"
       # First-run bootstrap gate (D-03a): satisfies the fail-closed admin gate so

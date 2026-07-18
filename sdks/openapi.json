@@ -9,7 +9,7 @@
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "1.0.0-alpha9"
+    "version": "1.0.0-alpha10"
   },
   "paths": {
     "/.well-known/openid-configuration": {

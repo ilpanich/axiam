@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha10] - 2026-07-18
+
+### Added
+
+- Add --changelog to summarize commits into CHANGELOG.md
+
+### Changed
+
+- Wire org context into the TypeScript bench; list all 11 SDKs in README (#199)
+
+### Fixed
+
+- Wire Keycloak TLS via entrypoint; stop passing empty KC_HTTPS_*
+- Correct image labeling metadata for GHCR
+- Drop --optimized from Keycloak first start
+- Dial gRPC plaintext regardless of HTTP TLS profile
+- Merge tlsOptions() into gRPC scenarios so cert-skip applies
+- Skip k6 server-cert verify for private-CA TLS profiles
+- Neutralize rate limits so p0 measures endpoint capacity
+- Apply the configured password pepper when hashing the admin (#200)
+- Don't set AXIAM__AUTH__PEPPER (breaks bootstrap-admin login)
+- Write resource CSV rows; configure OAuth2/optional secrets; skip OAuth2 when unset
+- Supply org context on login; make bench-down work without secrets
+- Provide mandatory AMQP signing key for the AXIAM target
+- Bootstrap AXIAM secrets in bench-up; auto-track image tag
+- Correct just variable-override ordering so bench-matrix works
+
 ## [1.0.0-alpha3] - 2026-07-16
 
 Third alpha. Build/release tuning and project-infrastructure changes only. No

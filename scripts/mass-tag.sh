@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mass-tag.sh — Cut and push a signed release across many AXIAM repos.
 #
-# AXIAM ships as one platform repo plus seven per-language SDK repos, each in
+# AXIAM ships as one platform repo plus eleven per-language SDK repos, each in
 # its own clone. Cutting a release means, in every selected repo: writing the
 # release version into every file that must carry it, committing that bump, and
 # putting the SAME signed tag on that commit so the per-repo release pipelines
@@ -92,7 +92,7 @@
 #                       --message <message> \
 #                       [--pull] [--no-bump] [--root <dir>] [--dry-run]
 #
-#   -r, --repos    (required) 'all' (platform + 7 SDKs), 'all-sdks' (the 7
+#   -r, --repos    (required) 'all' (platform + 11 SDKs), 'all-sdks' (the 11
 #                  SDKs only), or a comma-separated subset of the known repo
 #                  names below.
 #   -b, --branch   (required) branch to tag; must exist in every selected repo.
@@ -118,7 +118,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Known repos. `all` = the platform repo first, then the seven SDKs.
+# Known repos. `all` = the platform repo first, then the eleven SDKs.
 # ---------------------------------------------------------------------------
 PLATFORM_REPO="axiam"
 SDK_REPOS=(
@@ -185,7 +185,7 @@ Usage:
                  Pre-flight validation still runs.
   -h, --help     show this help and exit.
 
-Known repos: axiam (platform) + the seven axiam-<lang>-sdk repos.
+Known repos: axiam (platform) + the eleven axiam-<lang>-sdk repos.
 Every repo releases on a plain v* tag, so one run (e.g. -r all -t v1.0.0) can
 cut the whole fleet; use --repos to release a subset on its own cadence.
 EOF

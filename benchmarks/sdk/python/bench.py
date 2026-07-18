@@ -23,6 +23,7 @@ CFG = {
     "base_url": f"{os.environ.get('BENCH_SCHEME','http')}://"
                 f"{os.environ.get('BENCH_HOST','localhost')}:{os.environ.get('BENCH_PORT','8090')}",
     "tenant_slug": os.environ.get("BENCH_TENANT_SLUG", "default"),
+    "org_slug": os.environ.get("BENCH_ORG_SLUG", "bench-org"),
     "username": os.environ.get("BENCH_USERNAME", "benchuser"),
     "password": os.environ.get("BENCH_PASSWORD", "Bench@User123!"),
     "action": os.environ.get("BENCH_ACTION", "read"),
@@ -60,7 +61,7 @@ def build_ops():
     already-authenticated client — refresh is routed through the SDK's
     single-flight guard, so concurrent callers are safe.
     """
-    client = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"])
+    client = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"], org_slug=CFG["org_slug"])
     client.login(CFG["username"], CFG["password"])
     # Every check reuses the one seeded resource UUID: the server rejects
     # non-UUID resource_ids, so the old `${resource}-${i}` suffixing would 400.
@@ -78,7 +79,7 @@ def build_ops():
             "(see runner/seed.sh)")
 
     def do_login():
-        fresh = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"])
+        fresh = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"], org_slug=CFG["org_slug"])
         try:
             fresh.login(CFG["username"], CFG["password"])
         finally:

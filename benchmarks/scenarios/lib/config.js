@@ -24,6 +24,7 @@ export const cfg = {
 
   // --- tenancy / credentials provisioned by runner/seed.sh ---
   orgId: str('BENCH_ORG_ID', ''),
+  orgSlug: str('BENCH_ORG_SLUG', ''),
   tenantId: str('BENCH_TENANT_ID', ''),
   tenantSlug: str('BENCH_TENANT_SLUG', 'default'),
   realm: str('BENCH_REALM', 'bench'), // keycloak/zitadel realm name

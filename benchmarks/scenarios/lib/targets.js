@@ -23,15 +23,19 @@ const JSONH = { headers: { 'Content-Type': 'application/json' } };
 // is carried in the request body / query (?tenant_id=) per the REST handlers.
 const axiam = {
   // Resource-owner login (AXIAM's first-party session/login endpoint).
+  // Login requires BOTH org and tenant context (a tenant slug is only unique
+  // within an org). Prefer the seeded UUIDs, falling back to slugs, and omit
+  // any empty selector so the server doesn't reject a blank id.
   login() {
+    const body = { username_or_email: cfg.username, password: cfg.password };
+    if (cfg.orgId) body.org_id = cfg.orgId;
+    else if (cfg.orgSlug) body.org_slug = cfg.orgSlug;
+    if (cfg.tenantId) body.tenant_id = cfg.tenantId;
+    else if (cfg.tenantSlug) body.tenant_slug = cfg.tenantSlug;
     return {
       method: 'POST',
       url: `${baseUrl()}/api/v1/auth/login`,
-      body: JSON.stringify({
-        tenant_id: cfg.tenantId,
-        username_or_email: cfg.username,
-        password: cfg.password,
-      }),
+      body: JSON.stringify(body),
       params: JSONH,
       expect: 200,
     };

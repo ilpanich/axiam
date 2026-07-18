@@ -110,8 +110,19 @@ bench-run:
 
 # Tear a target down (and its volumes).
 bench-down:
-    docker compose -f targets/{{target}}/docker-compose.yml --profile tls down -v || \
-      docker compose -f targets/{{target}}/docker-compose.yml down -v
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `docker compose down` interpolates the ENTIRE compose file, so the AXIAM
+    # target's required (:?) secret vars must still resolve — even though teardown
+    # never uses them. Provide harmless placeholders so down never needs the real
+    # secrets (competitors ignore these).
+    export AXIAM__DB__USERNAME=x AXIAM__DB__PASSWORD=x \
+           RABBITMQ_DEFAULT_USER=x RABBITMQ_DEFAULT_PASS=x \
+           AXIAM__AUTH__JWT_PRIVATE_KEY_PEM=x AXIAM__AUTH__JWT_PUBLIC_KEY_PEM=x \
+           AXIAM__AMQP__SIGNING_KEY=x
+    COMPOSE="targets/{{target}}/docker-compose.yml"
+    docker compose -f "$COMPOSE" --profile tls down -v || \
+      docker compose -f "$COMPOSE" down -v
 
 # Aggregate everything under results/ into results/report.md.
 bench-report:

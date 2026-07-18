@@ -22,6 +22,10 @@ Each SDK is its own repository — the AXIAM repository keeps only this contract
 | C# | [`ilpanich/axiam-csharp-sdk`](https://github.com/ilpanich/axiam-csharp-sdk) |
 | PHP | [`ilpanich/axiam-php-sdk`](https://github.com/ilpanich/axiam-php-sdk) |
 | Go | [`ilpanich/axiam-go-sdk`](https://github.com/ilpanich/axiam-go-sdk) |
+| Kotlin | [`ilpanich/axiam-kotlin-sdk`](https://github.com/ilpanich/axiam-kotlin-sdk) |
+| Swift | [`ilpanich/axiam-swift-sdk`](https://github.com/ilpanich/axiam-swift-sdk) |
+| C | [`ilpanich/axiam-c-sdk`](https://github.com/ilpanich/axiam-c-sdk) |
+| C++ | [`ilpanich/axiam-cplusplus-sdk`](https://github.com/ilpanich/axiam-cplusplus-sdk) |
 
 **This file is the source of truth.** A copy is vendored at the root of every SDK repository
 (alongside a copy of `openapi.json` and of `proto/`); when this file changes, the copies must
@@ -44,6 +48,15 @@ each language uses its own idiomatic naming convention as shown below.
 | single access check | `check_access`    | `checkAccess`             | `check_access`      | `checkAccess`    | `CheckAccess`   | `checkAccess`   | `CheckAccess`   |
 | browser access alias| `can`             | `can`                     | `can`               | `can`            | `Can`           | `can`           | `Can`           |
 | batch access check  | `batch_check`     | `batchCheck`              | `batch_check`       | `batchCheck`     | `BatchCheck`    | `batchCheck`    | `BatchCheck`    |
+
+**Additional languages (Kotlin, Swift, C, C++ — added 2026-07):** these expose the same
+canonical operations with the same `(action, resource[, scope])` argument order. Casing:
+**Kotlin** and **Swift** use camelCase (`login`, `verifyMfa`, `refresh`, `logout`,
+`checkAccess`, `can`, `batchCheck`); **C++** uses snake_case (`login`, `verify_mfa`,
+`refresh`, `logout`, `check_access`, `can`, `batch_check`); **C** uses snake_case with an
+`axiam_` prefix on every symbol (`axiam_login`, `axiam_verify_mfa`, `axiam_refresh`,
+`axiam_logout`, `axiam_check_access`, `axiam_can`, `axiam_batch_check`). No new
+login/auth/authz method names beyond this map are permitted in these SDKs either.
 
 **Argument order:** every operation above takes the acted-upon subject before the object it
 acts on — concretely, `check_access`/`can` take `(action, resource[, scope])` in every SDK,
@@ -70,6 +83,10 @@ convention:
 | Java       | The sync method PLUS a same-named class with an **`*Async` suffix companion method** (e.g. `checkAccess`/`checkAccessAsync`) on the same client object. | **Accepted exception** to the "no additional diverging names" rule above — Java idiom favors suffix-async twins on one object (mirrors `CompletableFuture`-returning sibling methods in the broader Java ecosystem, e.g. `java.util.concurrent` conventions). |
 | C#         | **`*Async`-only** methods (e.g. `CheckAccessAsync`), per the .NET Task-based Asynchronous Pattern (TAP) — no separate non-`Async` sync method is required to exist alongside it. | **Accepted exception**: TAP is the idiomatic .NET convention; C# is not required to also offer a blocking `CheckAccess`. |
 | Rust, TypeScript/JS, Go, PHP | No separate async naming convention — the canonical name IS the (only, or primarily-used) call form for that language's ecosystem (`async fn`/`Promise`-returning function/goroutine-friendly call/Fiber-safe call, respectively, under the same canonical name). | N/A |
+| Kotlin     | The canonical name IS a `suspend` function (coroutines). No `*Async` twin; a caller that needs a blocking form uses `runBlocking`. Optional `Deferred`-returning twins are NOT added. | N/A |
+| Swift      | The canonical name IS an `async` method (`async`/`await`). No `*Async` twin. | N/A |
+| C++        | The canonical name is the (blocking) call form; a language-idiomatic `std::future`-returning twin MAY be offered under a `_async` suffix (`check_access_async`) — accepted per-language exception, mirroring C#/Java suffix-async idiom. | N/A |
+| C          | Synchronous canonical calls only (`axiam_*`); no async surface (an optional non-blocking variant, if ever added, takes a completion callback and is out of scope for v1.0). | N/A |
 
 ---
 
@@ -196,6 +213,10 @@ Per-language guidance:
 | C#       | `HttpClient` with `HttpClientHandler { UseCookies = true, CookieContainer = new() }` |
 | PHP      | Guzzle `CookieJar` with `cookies: true` handler option |
 | Go       | `http.CookieJar` (e.g. `cookiejar.New(nil)`) assigned to `http.Client.Jar` |
+| Kotlin   | OkHttp `CookieJar` backed by a per-client `JavaNetCookieJar(CookieManager(...))` |
+| Swift    | `URLSession` with a per-instance `HTTPCookieStorage` on its `URLSessionConfiguration` |
+| C        | libcurl per-handle in-memory cookie engine (`CURLOPT_COOKIEFILE ""` to enable, share handle per client) |
+| C++      | libcurl per-handle cookie engine (as C), or the HTTP library's per-client cookie store |
 
 ---
 
@@ -247,6 +268,58 @@ AxiamClient(base_url, tenant_slug, custom_ca=pem_bytes)
 
 The `with_custom_ca` parameter accepts PEM-encoded certificate bytes/string for the issuing CA. It does NOT accept raw DER bytes, PKCS#12, or JKS. If a non-PEM format is passed, the SDK MUST return a clear error at construction time.
 
+### §6.1 Client Certificate Authentication (mTLS)
+
+**Additive to §6; strict server verification stays ON.** AXIAM authenticates IoT devices
+and service accounts by **mutual TLS**: the client presents an X.509 identity certificate
+(signed by the tenant's organization CA) that the server binds to a service account
+(`POST /api/v1/auth/device` — "Authenticate a device via its client certificate (mTLS)").
+Every SDK MUST expose an optional way to configure that client identity, and MUST apply it
+to **both** the REST and gRPC transports of the same client instance.
+
+Per-language builder/config API (PEM cert chain + PEM private key is the mandatory baseline):
+
+| Language   | Client-certificate API |
+|------------|-------------------------|
+| Rust       | `AxiamClient::builder().with_client_cert(cert_pem: &[u8], key_pem: &[u8])` |
+| TypeScript | `new AxiamClient({ …, clientCert, clientKey })` (PEM strings; Node only, ignored in browser) |
+| Python     | `AxiamClient(…, client_cert=cert_pem, client_key=key_pem)` |
+| Java       | `AxiamClient.builder(…).clientCertificate(byte[] certPem, byte[] keyPem)` |
+| Kotlin     | `AxiamClient.builder(…).clientCertificate(certPem, keyPem)` |
+| C#         | `AxiamClientOptions { ClientCertificatePem = …, ClientKeyPem = … }` |
+| PHP        | `new AxiamClient(…, clientCert: $certPem, clientKey: $keyPem)` |
+| Go         | `axiam.WithClientCertificate(certPEM, keyPEM []byte)` |
+| Swift      | `AxiamClient(config: .init(…, clientCertificate: .pem(certificate:privateKey:)))` |
+| C          | `axiam_client_config_set_client_cert(cfg, cert_pem, key_pem)` |
+| C++        | `AxiamClient::builder().with_client_cert(cert_pem, key_pem)` |
+
+Rules (normative):
+
+1. **Format.** The mandatory input is a PEM certificate chain plus a PEM private key
+   (PKCS#8 or PKCS#1). A non-PEM value MUST produce a clear error at construction time,
+   consistent with §6's PEM-only rule. A language whose platform TLS stack is natively
+   keystore-based (Java/Kotlin `KeyStore`, C#/Swift PKCS#12) MAY *additionally* accept a
+   PKCS#12 identity via a clearly-named secondary overload
+   (`with_client_identity_pkcs12` / `clientIdentityPkcs12` / `.pkcs12(...)`), but PEM
+   cert+key MUST always be accepted.
+2. **Strict TLS preserved.** Presenting a client certificate NEVER relaxes server
+   verification. The §6 absolute prohibition on any TLS-bypass surface is unchanged; the
+   client-cert code path MUST be kept separate from server-verification code so CI
+   TLS-bypass lint gates are not tripped.
+3. **Key secrecy (§7).** The private key is secret material: it MUST NOT appear in any
+   debug/log/display/serialized output and MUST NOT be exposed via a public getter. Where
+   the SDK retains it in memory it SHOULD be held behind the language's `Sensitive<T>`
+   equivalent (§7).
+4. **Both transports.** The configured identity applies to the REST client and to any
+   gRPC channel the same `AxiamClient` builds (`reqwest::Identity` / `ClientTlsConfig::identity`,
+   `tls.Config.Certificates`, `handler.ClientCertificates` / `SslClientAuthenticationOptions`,
+   OkHttp `KeyManager` + `GrpcSslContexts.keyManager`, Guzzle `cert`/`ssl_key`,
+   `grpc.ssl_channel_credentials(private_key=, certificate_chain=)`, `URLSession`
+   `urlSession(_:didReceive:)` identity challenge, libcurl `CURLOPT_SSLCERT`/`CURLOPT_SSLKEY`).
+5. **Optional.** mTLS is opt-in; omitting the client certificate leaves the SDK's default
+   bearer-cookie behavior unchanged. An SDK that ships §6.1 states conformance to
+   "§1–§10 (including §6.1 mTLS)".
+
 ---
 
 ## §7 `Sensitive<T>` Requirement
@@ -268,6 +341,10 @@ Per-language implementation guidance:
 | C#         | Struct with `ToString()` override returning `"[SENSITIVE]"`      |
 | PHP        | `__toString()` returns `"[SENSITIVE]"`                           |
 | Go         | String type with `String()` method returning `"[SENSITIVE]"`     |
+| Kotlin     | `value class Sensitive<T>` (or final class); `toString()` returns `"[SENSITIVE]"`, no `data class` auto-`toString` leak |
+| Swift      | `struct Sensitive<T>: CustomStringConvertible` whose `description` returns `"[SENSITIVE]"`; not `Encodable` in a way that emits the value |
+| C          | Opaque `axiam_sensitive_t` handle; there is no public accessor returning the raw string, and it is never written to logs/`printf` output |
+| C++        | `class Sensitive<T>` with `operator<<`/`to_string` returning `"[SENSITIVE]"`; raw value only via a private/friend accessor |
 
 **The token MUST NOT appear in:**
 - Log files (structured or unstructured)
@@ -376,6 +453,10 @@ Per-language implementation guidance:
 | C#         | `SemaphoreSlim(1,1)` + `Task<TokenPair>` stored in field        |
 | PHP        | Fiber-safe `Mutex` from `revolt/event-loop` or equivalent        |
 | Go         | `sync.Mutex` + single goroutine holding `chan TokenPair`         |
+| Kotlin     | `Mutex` (kotlinx.coroutines) guarding a shared `Deferred<TokenPair>`   |
+| Swift      | An `actor` serializing refresh, sharing one in-flight `Task<TokenPair, Error>` |
+| C          | `pthread_mutex_t` guarding an in-flight flag + condition variable; waiters block until the single refresh completes |
+| C++        | `std::mutex` + `std::shared_future<TokenPair>` held under the lock   |
 
 **Test requirement:** Each SDK MUST include a test that fires N (≥5) concurrent requests against an expired token and asserts exactly 1 refresh call is made. (See Phase 18 success criterion #2 for Go reference.)
 
@@ -401,6 +482,10 @@ Per-framework expectations:
 | ASP.NET Core                     | C#         | `app.UseMiddleware<AxiamAuthMiddleware>()` in `Program.cs`         |
 | `net/http`                       | Go         | Handler wrapping: `axiamMiddleware(next http.Handler) http.Handler` |
 | Laravel / Symfony                | PHP        | `Middleware` (Laravel) / `EventSubscriber` (Symfony)               |
+| Ktor / Spring Boot               | Kotlin     | Ktor `Plugin` intercepting `ApplicationCallPipeline` injecting `AxiamUser`; Spring Boot reuses the Java `OncePerRequestFilter` |
+| Vapor                            | Swift      | `AsyncMiddleware` (`respond(to:chainingTo:)`) storing `AxiamUser` on `Request.auth` / `Request.storage` |
+| Framework-agnostic guard         | C          | `axiam_middleware_authenticate(client, headers, cookies) -> axiam_user_t*`; adapters documented for embedded HTTP servers (CivetWeb) |
+| Framework-agnostic guard         | C++        | `AxiamGuard` callable `AxiamUser guard(const Request&)`; adapters documented for Crow / Pistache handlers |
 
 **Interface contract:**
 - The middleware/extractor MUST read the `X-Tenant-ID` header (or use the client's configured tenant) to scope the session verification.
@@ -437,6 +522,16 @@ Per-language naming map (follows each language's §1 casing convention):
 | require_auth | `#[require_auth]` | `requireAuth(...)` | `require_authenticated_user` (FastAPI, existing) / `@require_auth` (Django) | `@AxiamRequireAuth` | `[Authorize]` (framework-native, documented) | `#[RequireAuth]` | `middleware.RequireAuth(...)` |
 | require_access | `#[require_access(...)]` | `requireAccess(...)` / `@RequireAccess()` (NestJS) | `require_access(...)` (FastAPI dep) / `@require_access` (Django) | `@AxiamRequireAccess(...)` | `[AxiamAccess(...)]` | `#[RequireAccess(...)]` | `middleware.RequireAccess(...)` |
 | require_role | `#[require_role(...)]` | `requireRole(...)` | `require_role(...)` / `@require_role` | `@AxiamRequireRole(...)` | `[Authorize(Roles = ...)]` (framework-native, documented) | `#[RequireRole(...)]` | `middleware.RequireRole(...)` |
+
+**Additional languages (Kotlin, Swift, C, C++).** Where these SDKs ship the §11 helpers
+(SHOULD-level), they follow the same canonical vocabulary and `(action, resource[, scope])`
+order: **Kotlin** `@AxiamRequireAuth` / `@AxiamRequireAccess(...)` / `@AxiamRequireRole(...)`
+annotations (Spring interceptor / Ktor plugin enforcement); **Swift** `requireAuth` /
+`requireAccess(_:resource:)` / `requireRole(_:)` route-middleware factories (Vapor), and
+optionally a `@RequireAccess` property-wrapper form; **C++** `AXIAM_REQUIRE_ACCESS(...)`
+macro plus a `require_access(action, resolver)` guard functor; **C** `AXIAM_REQUIRE_ACCESS`
+macro over an `axiam_require_access(...)` guard function. All compose strictly on top of the
+§10 guard exactly as specified in §11.2.
 
 ### §11.2 Semantics (normative, identical in all SDKs)
 
@@ -515,6 +610,18 @@ recorded here until one exists.
     methods instead (§1 "Async method naming" table above).
   - Java `*Async` companion methods and C# `*Async`-only (TAP) methods are unaffected —
     formally documented as accepted per-language async conventions (§1).
+- **2026-07 (§6.1 client-certificate / mTLS)** — **non-breaking / additive.** Added §6.1
+  defining an optional client-identity-certificate API (`with_client_cert(cert_pem, key_pem)`
+  and per-language equivalents) applied to both REST and gRPC transports, PEM cert+key as the
+  mandatory baseline (PKCS#12 optional where keystore-native). Strict server verification and
+  the §6 TLS-bypass prohibition are unchanged; this only lets a client *present* an identity
+  for mutual TLS (IoT/service-account auth, `POST /api/v1/auth/device`). SDKs shipping it state
+  "§1–§10 (including §6.1 mTLS)".
+- **2026-07 (Kotlin, Swift, C, C++ SDKs)** — **non-breaking / additive.** Extended the
+  per-language tables (§1 casing + async, §4 cookie-jar, §6.1 mTLS, §7 `Sensitive`, §9
+  single-flight, §10 middleware, §11 helpers) to cover four new SDK languages
+  (`axiam-kotlin-sdk`, `axiam-swift-sdk`, `axiam-c-sdk`, `axiam-cplusplus-sdk`). No change to
+  existing languages' surfaces.
 - **2026-07 (§11 declarative authorization helpers)** — **non-breaking / additive.** Added
   §11 "Declarative Authorization Helpers" (SHOULD-level for v1.0): the `require_auth` /
   `require_access(action, resource[, scope])` / `require_role` vocabulary layered on top of
@@ -530,6 +637,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.1 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07*
+*Contract version: 1.2 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

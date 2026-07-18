@@ -69,7 +69,11 @@ bench-up:
       export AXIAM__AUTH__MFA_ENCRYPTION_KEY="${AXIAM__AUTH__MFA_ENCRYPTION_KEY:-$(genhex mfa_enc.hex)}"
       export AXIAM__EMAIL_ENCRYPTION_KEY="${AXIAM__EMAIL_ENCRYPTION_KEY:-$(genhex email_enc.hex)}"
       export AXIAM__GDPR_PSEUDONYM_PEPPER="${AXIAM__GDPR_PSEUDONYM_PEPPER:-$(genhex gdpr_pepper.hex)}"
-      export AXIAM__AUTH__PEPPER="${AXIAM__AUTH__PEPPER:-$(genhex auth_pepper.hex)}"
+      # NOTE: AXIAM__AUTH__PEPPER is deliberately NOT set. The bootstrap handler
+      # hashes the admin password WITHOUT the pepper (bootstrap.rs: hash_password(
+      # …, None)) while login verifies WITH it, so a configured pepper makes the
+      # bootstrap admin un-loggable ("invalid credentials") and breaks seeding.
+      # This is a server bug; leave the pepper off until it's fixed upstream.
       export AXIAM__AUTH__OAUTH2_ISSUER_URL="${AXIAM__AUTH__OAUTH2_ISSUER_URL:-${BENCH_ISSUER_URL:-http://localhost:${BENCH_APP_PORT:-8090}}}"
       export AXIAM__DB__USERNAME="${AXIAM__DB__USERNAME:-bench}"
       export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-bench-local-only-pw}"

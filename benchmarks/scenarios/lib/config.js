@@ -21,6 +21,14 @@ export const cfg = {
   host: str('BENCH_HOST', 'localhost'),
   port: num('BENCH_PORT', 8090),
   grpcAddr: str('BENCH_GRPC_ADDR', 'localhost:50051'),
+  // gRPC transport security is INDEPENDENT of the HTTP edge's TLS profile. The
+  // bench never TLS-terminates gRPC: the nginx edge (targets/axiam/tls/*.conf)
+  // proxies HTTP only, and the axiam-server gRPC port is published plaintext on
+  // :50051 for every profile (p0-p3). So the connect plaintext flag must NOT be
+  // derived from BENCH_SCHEME (https there is only the REST edge). Default
+  // plaintext; set BENCH_GRPC_PLAINTEXT=false only if you front gRPC with a TLS
+  // terminator.
+  grpcPlaintext: str('BENCH_GRPC_PLAINTEXT', 'true') === 'true',
 
   // --- tenancy / credentials provisioned by runner/seed.sh ---
   orgId: str('BENCH_ORG_ID', ''),

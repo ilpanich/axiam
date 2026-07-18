@@ -48,7 +48,7 @@ export function setup() {
 
 export default function (data) {
   if (__ITER === 0) {
-    client.connect(cfg.grpcAddr, { plaintext: cfg.scheme === 'http' });
+    client.connect(cfg.grpcAddr, { plaintext: cfg.grpcPlaintext });
   }
   const start = Date.now();
   const res = client.invoke(

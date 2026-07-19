@@ -73,12 +73,14 @@ fn build_client_aware_app(
     db: Surreal<TestDb>,
     key_mode: RateLimitKeyMode,
     endpoint: &'static str,
-) -> impl actix_web::dev::ServiceFactory<
-    actix_web::dev::ServiceRequest,
-    Config = (),
-    Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>,
-    Error = actix_web::Error,
-    InitError = (),
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>,
+        Error = actix_web::Error,
+        InitError = (),
+    >,
 > {
     App::new()
         .app_data(web::Data::new(AppState::for_test(
@@ -102,12 +104,14 @@ fn build_client_aware_app(
 fn build_login_like_app(
     db: Surreal<TestDb>,
     endpoint: &'static str,
-) -> impl actix_web::dev::ServiceFactory<
-    actix_web::dev::ServiceRequest,
-    Config = (),
-    Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>,
-    Error = actix_web::Error,
-    InitError = (),
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>,
+        Error = actix_web::Error,
+        InitError = (),
+    >,
 > {
     App::new()
         .app_data(web::Data::new(AppState::for_test(

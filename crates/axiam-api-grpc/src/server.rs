@@ -6,6 +6,28 @@
 //! `AXIAM__GRPC_TLS_KEY_PATH` env vars are set, the server is configured with
 //! `ServerTlsConfig`; otherwise plaintext mode is used (suitable for in-mesh
 //! mutual-TLS handled at the sidecar/service-mesh layer).
+//!
+//! D2 (benchmark plan — native gRPC TLS termination): this is the same
+//! mechanism the p2-tls13 native-TLS bench overlay
+//! (`benchmarks/targets/axiam/docker-compose.native-tls.yml`) turns on,
+//! pointed at the SAME server cert/key files the REST listener uses
+//! (`crates/axiam-server/src/tls.rs` / `AXIAM__SERVER__TLS__CERT_PATH`+
+//! `KEY_PATH`) so the two protocols present identical PKI material. No new
+//! `TlsConfig`-style struct was introduced here — the existing flat
+//! `AXIAM__GRPC_TLS_CERT_PATH`/`KEY_PATH` env-var pair (already shipped in
+//! phase 11) is reused as-is per D2's "least invasive" guidance, rather than
+//! adding a parallel `AXIAM__GRPC__TLS__*` nested config surface.
+//!
+//! Caveat vs. the REST listener: `crates/axiam-server/src/tls.rs` builds a
+//! custom rustls `ServerConfig` restricted to TLS 1.3 only
+//! (`with_protocol_versions(&[&rustls::version::TLS13])`). Tonic 0.14's
+//! `ServerTlsConfig` (see `tonic::transport::server::tls`) does not expose a
+//! protocol-version knob — it always builds `rustls::ServerConfig::builder()`
+//! with the crate's default versions (TLS 1.2 negotiable in addition to 1.3).
+//! There is no way to force TLS-1.3-only through tonic's public API without
+//! hand-rolling the accept loop, which is out of scope here; the gRPC
+//! listener is TLS 1.3-*capable* (matching REST posture) but not TLS
+//! 1.3-*exclusive*.
 
 use std::net::SocketAddr;
 use std::time::Duration;

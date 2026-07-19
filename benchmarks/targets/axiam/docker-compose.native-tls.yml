@@ -11,6 +11,17 @@
 #
 # Because the rustls listener is TLS-only (no plaintext side port), seeding also
 # goes over https — `just bench-seed` handles that (curl -k).
+#
+# D2 (native gRPC TLS): the tonic gRPC server (crates/axiam-api-grpc/src/server.rs)
+# independently supports in-process TLS via ServerTlsConfig, env-gated on
+# AXIAM__GRPC_TLS_CERT_PATH/AXIAM__GRPC_TLS_KEY_PATH (REQ-15 AC-1 / CQ-B20;
+# unrelated to this file's REST AXIAM__SERVER__TLS__* keys — separate listener,
+# separate config surface). Reuses the SAME throwaway server cert/key already
+# mounted at /certs for the REST listener, so p2 exercises AXIAM's real TLS
+# stack on both protocols instead of leaving gRPC an internally-inconsistent
+# plaintext outlier. profiles/p2-tls13.env sets BENCH_GRPC_PLAINTEXT=false so
+# the k6 gRPC scenarios (authz_check_grpc.js / authz_batch_grpc.js) dial with
+# TLS to match. Default (this var unset) stays plaintext for every other profile.
 services:
   axiam-server:
     environment:
@@ -27,6 +38,9 @@ services:
       # cell uses the nginx tls13-h1.conf edge instead (see that file). The
       # newer published image reads this key; older images ignore it harmlessly.
       AXIAM__SERVER__TLS__HTTP2: "${BENCH_AXIAM_TLS_HTTP2:-true}"
+      # D2: native gRPC TLS termination on :50051, same cert/key as REST above.
+      AXIAM__GRPC_TLS_CERT_PATH: /certs/server.crt
+      AXIAM__GRPC_TLS_KEY_PATH: /certs/server.key
     volumes:
       - ../../profiles/certs:/certs:ro
     # Publish the server's now-TLS port as the TLS host port (default 8443). The

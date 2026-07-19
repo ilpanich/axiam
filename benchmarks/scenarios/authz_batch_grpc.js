@@ -5,7 +5,7 @@
 // batch authz) in isolation and is reported separately, never as a head-to-head number.
 import grpc from 'k6/net/grpc';
 import { check } from 'k6';
-import { cfg, loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
+import { cfg, loadStages, thresholds, tlsOptions, grpcConnectParams, requireSeed } from './lib/config.js';
 import { m } from './lib/metrics.js';
 import { loginSession, jwtClaims } from './lib/auth.js';
 
@@ -14,8 +14,9 @@ const client = new grpc.Client();
 // --include-system-env-vars with BENCH_PROTO_ROOT.
 client.load([__ENV.BENCH_PROTO_ROOT || '../proto'], 'axiam/v1/authorization.proto');
 
-// tlsOptions() supplies insecureSkipTLSVerify (private-CA edge) + tlsAuth (mTLS);
-// merged in so the setup() HTTPS login — and the gRPC TLS dial — honor the profile.
+// tlsOptions() supplies insecureSkipTLSVerify (private-CA edge) + tlsAuth (mTLS)
+// for the setup() HTTPS login. The gRPC dial itself is separately TLS-gated via
+// grpcConnectParams() (D2) — see cfg.grpcPlaintext in lib/config.js.
 export const options = Object.assign(
   {
     scenarios: {
@@ -61,7 +62,7 @@ export function setup() {
 
 export default function (data) {
   if (__ITER === 0) {
-    client.connect(cfg.grpcAddr, { plaintext: cfg.grpcPlaintext });
+    client.connect(cfg.grpcAddr, grpcConnectParams());
   }
   const start = Date.now();
   const res = client.invoke(

@@ -968,7 +968,26 @@ async fn main() -> std::io::Result<()> {
     // misconfiguration, so a misconfigured TLS server never starts insecurely.
     let http_server = if tls_config.enabled {
         let rustls_config = axiam_server::tls::build_rustls_server_config(&tls_config)?;
-        tracing::info!(bind = %bind_addr, "Direct TLS enabled — negotiating TLS 1.3 only");
+        tracing::info!(
+            bind = %bind_addr,
+            http2_offered = tls_config.http2,
+            resumption = "tls1.3-tickets",
+            early_data = false,
+            "Direct TLS enabled — negotiating TLS 1.3 only"
+        );
+        // B2 honesty: the http2=false knob narrows the rustls config's ALPN to
+        // http/1.1, but actix-web's rustls HttpService re-adds h2 to ALPN, so
+        // h2 still wins negotiation on this bind. Warn so an operator expecting
+        // a true http/1.1-only listener is not misled.
+        if !tls_config.http2 {
+            tracing::warn!(
+                "server.tls.http2=false requested: the rustls config advertises http/1.1 only, \
+                 but the actix-web rustls HttpServer bind unconditionally re-adds h2 to ALPN, so \
+                 h2 remains offered and preferred. For a genuine http/1.1-only TLS listener (e.g. \
+                 the p2 h2-isolation benchmark cell) front the server with the tls13-h1 nginx edge. \
+                 See docs/security-profiles.md."
+            );
+        }
         http_server.bind_rustls_0_23(&bind_addr, rustls_config)?
     } else {
         http_server.bind(&bind_addr)?

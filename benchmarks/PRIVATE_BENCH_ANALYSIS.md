@@ -240,6 +240,89 @@ enable rustls session tickets + verify keep-alive; do NOT enable 0-RTT (replay
 risk on POST token endpoints — explicitly document that decision). Whatever
 the cause, it's worth ~2× on our two most marketable numbers.
 
+#### 4.3.1 B2 root-cause analysis (code landed; measurement pending laptop re-run)
+
+**Status:** durable fixes + instrumentation implemented in the server and bench
+harness; the *measured* confirmation is **pending a laptop re-run** (this
+working environment has no k6, no live stack, and an empty `results/` tree — the
+raw 2026-07-19 k6 JSON with the sub-metrics named below lives on the
+maintainer's laptop). Nothing below claims a measured result yet.
+
+**Ranked hypotheses**
+
+1. **[LEADING] ALPN/protocol asymmetry — h2 (p2) vs http/1.1 (p0).** Over TLS,
+   k6 (Go `net/http`, `ForceAttemptHTTP2=true`) negotiates **h2** whenever the
+   server offers it; the plaintext p0 listener is **http/1.1**. So p2 and p0 are
+   not the same protocol. Confirmed from source that AXIAM's TLS bind *does*
+   offer h2: actix-web's `HttpServer::bind_rustls_0_23` →
+   `actix_http::HttpService::rustls_0_23_with_config` unconditionally sets
+   `config.alpn_protocols = ["h2","http/1.1", …]` (actix-http 3.13.1,
+   `src/service.rs`), h2 first, so it wins. Under h2, k6 funnels all 50 VUs'
+   requests through a **single multiplexed TCP/h2 connection** with default
+   flow-control windows, where http/1.1 uses a per-VU connection pool — a
+   plausible ~2× serialization ceiling with no CPU wall, exactly matching the
+   observed p50-doubling-without-saturation signature. Why introspection
+   (−0.3%) and jwks (−13.9%) barely move: introspection/jwks are GETs that are
+   cheaper/cacheable and less sensitive to the single-conn ceiling than the POST
+   token grants.
+   *Confirm/refute on the laptop with ZERO new runs:* read the **`http_version`**
+   tag already present in the 2026-07-19 k6 JSON — p2 token cells should show
+   `2`, p0 `1.1`. If p2 is already `1.1`, this hypothesis is refuted.
+
+2. **[SECONDARY] No TLS session resumption — full handshake per connection.**
+   The old `tls.rs` set neither a ticketer nor a session store, so rustls did a
+   **full ECDHE handshake on every connection**. k6 opens many short-lived
+   connections, making the handshake a per-request fixed cost — the same
+   "fixed cost, not record crypto" signature. This is additive to (1).
+   *Confirm/refute with ZERO new runs:* inspect **`http_req_tls_handshaking`**
+   (and `http_req_connecting`) in the existing p2 JSON — if handshaking time is
+   a large, roughly-constant slice of `http_req_duration` on the degraded cells,
+   resumption is a real contributor; if it's near-zero (connections reused),
+   it's not the dominant term and (1) dominates.
+
+3. **Keep-alive parity — checked, not a factor.** The plaintext and rustls
+   binds are the **same** `HttpServer` builder in `main.rs` (only the bind
+   method differs); actix keep-alive/`client_request_timeout` are therefore
+   identical across p0/p2. Corroborate on the laptop via `http_req_connecting`
+   being ~0 on warm iterations (connection reuse) in both profiles.
+
+4. **TCP_NODELAY — checked, not a factor.** actix-server sets `TCP_NODELAY` by
+   default on accepted sockets, and both binds share that accept path, so Nagle
+   is off equally in p0 and p2.
+
+**What changed (code)**
+
+- `crates/axiam-server/src/tls.rs`: (a) new `AXIAM__SERVER__TLS__HTTP2` knob
+  (default `true`) driving `config.alpn_protocols` (h2+h1.1 vs h1.1-only), via a
+  unit-tested `alpn_protocols()` helper; (b) **TLS 1.3 ticket resumption**
+  enabled — `config.ticketer = rustls::crypto::ring::Ticketer::new()?` plus a
+  bounded `ServerSessionMemoryCache::new(512)` (rustls 0.23.42). 0-RTT/early
+  data left **off** (default `max_early_data_size=0`).
+- `crates/axiam-api-rest/src/config/mod.rs`: `TlsConfig.http2: bool` (custom
+  `Default` → `true`).
+- `crates/axiam-server/src/main.rs`: TLS-bind logging of `http2_offered` /
+  `resumption` / `early_data`, plus a startup **warning** when `http2=false`
+  that actix re-adds h2 (so the knob is not silently misleading).
+- Bench: `benchmarks/targets/axiam/tls/tls13-h1.conf` (an http/1.1-only TLS 1.3
+  nginx edge) + `AXIAM__SERVER__TLS__HTTP2` pass-through on the native-tls
+  overlay, so p2 can be run **both ways** to isolate the h2 effect in one
+  sitting.
+
+**Important honesty caveat on the knob:** because actix-web's rustls bind
+re-adds h2 to ALPN, `http2=false` on the *native* listener does not by itself
+produce an http/1.1-only server. The genuine apples-to-apples h1 cell is run via
+the `tls13-h1.conf` nginx edge (or, later, a native H1-only actix service — not
+built here to avoid an untestable hand-rolled `actix_server` path). Session
+resumption, by contrast, is a real unconditional server-side improvement that
+landed.
+
+**Acceptance (pending laptop):** re-run only the p2 vs p0 cells for
+`oauth2_client_credentials` and `token_refresh`; success = p2 within ~15% of p0
+throughput with introspection/jwks not regressed. Expected path: the
+`http_version`/`http_req_tls_handshaking` reads above first attribute the split
+between h2 (1) and handshakes (2); resumption is already in; if h2 is confirmed
+dominant, run the `tls13-h1.conf` cell to show p2-h1 ≈ p0.
+
 ### 4.4 [MEDIUM] Native mTLS (and the TLS 1.2 decision)
 
 Discovered during bench tuning: AXIAM's native rustls listener is TLS 1.3

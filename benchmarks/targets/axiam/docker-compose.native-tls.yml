@@ -20,6 +20,13 @@ services:
       AXIAM__SERVER__TLS__ENABLED: "true"
       AXIAM__SERVER__TLS__CERT_PATH: /certs/server.crt
       AXIAM__SERVER__TLS__KEY_PATH: /certs/server.key
+      # B2: ALPN h2 toggle. Default "true" keeps the backward-compatible
+      # h2+http/1.1 offer. Set "false" to build the rustls config advertising
+      # http/1.1 only. NOTE: on the actix-web rustls bind this is an intent
+      # signal only — actix re-adds h2 to ALPN, so a *true* http/1.1-only p2
+      # cell uses the nginx tls13-h1.conf edge instead (see that file). The
+      # newer published image reads this key; older images ignore it harmlessly.
+      AXIAM__SERVER__TLS__HTTP2: "${BENCH_AXIAM_TLS_HTTP2:-true}"
     volumes:
       - ../../profiles/certs:/certs:ro
     # Publish the server's now-TLS port as the TLS host port (default 8443). The

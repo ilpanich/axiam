@@ -6,7 +6,6 @@ use axiam_authz::types::{AccessDecision, AccessRequest};
 use axiam_core::repository::{
     GroupRepository, PermissionRepository, ResourceRepository, RoleRepository, ScopeRepository,
 };
-use futures::stream::{self, StreamExt};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -24,9 +23,12 @@ where
     G: GroupRepository,
 {
     engine: AuthorizationEngine<R, P, Res, S, G>,
-    /// Bound on concurrent `check_access` evaluations within a single
-    /// `BatchCheckAccess` call (D-06/D-07). Sourced from
-    /// `AuthzConfig::batch_max_concurrency` (default 16).
+    /// Retained from the pre-D1 concurrent-fan-out design and still accepted by
+    /// [`Self::new`] for call-site/config compatibility (`AuthzConfig::
+    /// batch_max_concurrency`, default 16). The D1 coalesced batch path issues
+    /// a small fixed number of DB round-trips per batch rather than one
+    /// per-item future, so the concurrency bound is no longer applied here.
+    #[allow(dead_code)]
     batch_max_concurrency: usize,
 }
 
@@ -168,34 +170,17 @@ where
             });
         }
 
-        // T-27-10/T-27-11: evaluate concurrently, bounded by
-        // batch_max_concurrency (D-07), preserving input order via
-        // sort_by_key after collection (D-06). `&self`-borrowing futures
-        // need no 'static/Clone bound for buffer_unordered.
-        let mut indexed: Vec<(usize, AccessDecision)> =
-            stream::iter(access_requests.into_iter().enumerate())
-                .map(|(i, access_req)| {
-                    let engine = &self.engine;
-                    async move {
-                        let decision = engine
-                            .check_access(&access_req)
-                            .await
-                            .map_err(|e| Status::internal(e.to_string()))?;
-                        Ok::<_, Status>((i, decision))
-                    }
-                })
-                .buffer_unordered(self.batch_max_concurrency)
-                .collect::<Vec<Result<_, Status>>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, Status>>()?;
+        // D1: route the whole batch through the engine's coalesced path. Items
+        // sharing a subject/resource (every item in the bench's batch shares
+        // both) resolve their role-assignment + ancestor + grant lookups ONCE
+        // instead of once per item, and input order is preserved by the engine.
+        let decisions = self
+            .engine
+            .check_access_batch(&access_requests)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
-        indexed.sort_by_key(|&(i, _)| i);
-
-        let results = indexed
-            .into_iter()
-            .map(|(_, decision)| to_check_response(decision))
-            .collect();
+        let results = decisions.into_iter().map(to_check_response).collect();
 
         Ok(Response::new(BatchCheckAccessResponse { results }))
     }

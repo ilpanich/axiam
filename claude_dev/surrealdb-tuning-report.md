@@ -117,6 +117,137 @@ criterion:
 
 ---
 
-*Prepared from static analysis of `axiam-db` and `axiam-authz` at branch
-`claude/benchmark-improvement-plan-9yxx7g`. Runtime sections to be completed
-after the laptop re-run with D1 tracing in place.*
+## 7. D1 findings — batch-path coalescing landed (code complete; live cells pending)
+
+This section records the D1 work that consumes §2/§3-H2. It covers the code
+changes made to `axiam-authz`, `axiam-api-rest`, and `axiam-api-grpc`; the
+tracing added so the maintainer can read a single batch run on the laptop; and
+the round-trip reduction proven by a deterministic mock-repo test. The live
+"re-run the four authz cells" acceptance remains **pending a laptop re-run**
+(no live SurrealDB in the CI sandbox).
+
+### 7.1 Serialization point (confirmed from source; magnitude pending trace)
+
+The wall is the **single shared SurrealDB HTTP client handle** (§1): every
+concurrent authz check in the process funnels through one connection, so the
+pre-D1 batch handlers' `buffer_unordered` fan-out could not turn item-level
+concurrency into concurrent DB work — it only multiplied the number of
+serialized round-trips contending for that one handle. Fixing the connection
+serialization itself (H1) is D6/CP-1 (a real pool) and is deliberately out of
+D1 scope. D1 attacks the other half — H2, the **redundant per-item queries** —
+which is a pure round-trip-count reduction and needs no pool.
+
+### 7.2 What was coalesced (H2 fix)
+
+The bench's batch is 5 checks that all share one subject and (usually) one
+resource. Per the §2 query pattern, the pre-D1 path issued, per item:
+`get_user_role_assignments` (RT1), `get_ancestors` (RT2), optional
+`list_by_resource` (RT3), and the batched `get_role_permission_grants_for_roles`
+(RT4). For the 5-item same-subject/same-resource shape (no scope) that is
+**5 × 3 = 15 round-trips**, of which RT1 and RT2 were byte-for-byte identical
+across all five items.
+
+New `AuthorizationEngine::check_access_batch(&[AccessRequest])` groups the batch:
+
+- **RT1** resolved **once per `(tenant_id, subject_id)`** group.
+- **RT2** resolved **once per `(tenant_id, resource_id)`** group (only for
+  items whose subject actually has role assignments — so an early "no roles
+  assigned" deny walks no ancestors, exactly as single-check does).
+- **RT3** (scope list) resolved once per `(tenant_id, resource_id)` targeted by
+  a scoped, role-bearing item.
+- **RT4** the applicable role IDs across the *whole batch* are unioned and
+  de-duplicated, and grants are fetched in **one** batched query (per tenant).
+
+**Round-trip reduction for the bench shape (batch of 5, one subject, one
+resource, no scope): 15 → 3** — one `get_user_role_assignments`, one
+`get_ancestors`, one `get_role_permission_grants_for_roles`. That is the same
+3 round-trips a *single* check issues, so a batch of N same-subject/resource
+items costs the same DB round-trips as one check (the intended point of
+batching, which the bench showed was previously inverted).
+
+Exact input order, the `authz:check_as` subject-override gate + per-item audit
+(kept in the REST handler), the four deny reasons, and scope/wildcard handling
+are all preserved. The single-check and batch paths share two pure helpers
+(`applicable_role_ids`, `grants_allow`) plus `resolve_scope`, so their
+decision/deny-reason semantics cannot diverge.
+
+### 7.3 New engine method + how REST and gRPC share it
+
+- `axiam-authz::engine::AuthorizationEngine::check_access_batch` is the coalesced
+  path.
+- `axiam-api-rest`: the `AuthzChecker` trait gained a `check_access_batch`
+  method (default impl loops `check_access`; `AuthorizationEngine`'s impl
+  delegates to the coalesced method). `batch_check_access` now builds the
+  ordered `Vec<AccessRequest>` (running the check_as gate + per-item audit) and
+  issues **one** `checker.check_access_batch(&reqs)` call instead of a
+  `buffer_unordered` fan-out of per-item `check_access`.
+- `axiam-api-grpc`: `AuthorizationServiceImpl::batch_check_access` builds its
+  validated `access_requests` (unchanged identity cross-checks) and calls
+  `engine.check_access_batch(&access_requests)`. The old `buffer_unordered`
+  block and its `batch_max_concurrency` application are removed; the field is
+  retained on the struct (and in `new`) for config/call-site compatibility.
+
+Both API surfaces therefore share the exact same fast path.
+
+### 7.4 Single-check p99 tail
+
+No accidental extra round-trips exist on the single-check hot path: `check_access`
+issues RT1, RT2, optional RT3, RT4 and nothing else, and the refactor into
+shared helpers did not add any query. The p99 tail described in the plan
+(gRPC single-check p99 850 ms vs p95 173 ms) is therefore expected to be a
+property of the **shared-connection contention / SurrealKV compaction** (H1),
+not of the evaluation code — consistent with "server idle, DB waiting". The D1
+tracing (below) is what lets the maintainer confirm this on the laptop; the
+structural fix for H1 is D6/CP-1.
+
+### 7.5 Tracing added (read one batch on the laptop)
+
+`tracing` spans, matching the repo's macro style, now cover the authz path:
+
+- `authz.check_access` span (fields: tenant/subject/resource/action/scope) on the
+  single check, with a child `debug_span` per DB query
+  (`db.get_user_role_assignments`, `db.get_ancestors`, `db.list_by_resource`,
+  `db.get_role_permission_grants_for_roles`), attached via `tracing::Instrument`.
+- `authz.check_access_batch` span (field: `batch_size`) with the same per-query
+  child spans (carrying tenant/subject/resource fields), plus a per-item
+  `authz.batch.item` span (fields: `index`, `resource_id`, `action`).
+
+Running one bench batch with `RUST_LOG=axiam_authz=debug` (and
+`surrealdb=debug` per §4.1) will now show exactly how many DB spans a batch
+opens — the direct confirmation that a same-subject batch-of-5 emits 3 query
+spans, not 15 — and their timing/overlap.
+
+### 7.6 Test — round-trip count over wall-clock (and why)
+
+`crates/axiam-authz/tests/batch_coalescing_test.rs` uses **counting mock
+repositories** (each seam increments an `AtomicUsize`) rather than the real
+in-memory SurrealDB repos, so it can assert the *number* of round-trips
+directly:
+
+- `same_subject_batch_of_5_coalesces_round_trips`: the sequential per-item
+  baseline issues 5 role-assignment + 5 ancestor + 5 grant lookups; the batch
+  issues **1 + 1 + 1**, and the decisions are byte-identical and in order.
+- `distinct_groups_coalesce_per_group_and_preserve_order`: 2 subjects × 2
+  resources across 4 items → 2 role-assignment + 2 ancestor + 1 grant lookups
+  (not 4/4/4), order preserved with a deny in the middle, decisions match
+  per-item `check_access`.
+- `empty_subject_denies_without_extra_round_trips`: a no-roles subject denies
+  with the identical reason and walks **no** ancestors/grants.
+
+**Why round-trip counts, not a wall-clock ratio:** the plan's "batch < 3×
+single" is a latency target, but a timing assertion against sub-microsecond
+in-memory mocks is dominated by scheduler/allocator noise — it would flake or
+need a bound so loose it proves nothing. The round-trip *count* is the
+mechanism that produces the latency win and is exact and deterministic. Since
+each round-trip is one serialized call over the single shared connection on the
+real stack, 3 round-trips for a batch of 5 vs 3 for a single check is
+inherently sub-3×; the end-to-end ratio is confirmed on the laptop (pending).
+No timing assertion was added, on purpose.
+
+### 7.7 Acceptance status
+
+- Code + tests: complete, run against mock/in-memory repos in the sandbox.
+- **Pending laptop re-run:** the four authz cells (authz_check_rest/grpc,
+  authz_batch_rest/grpc) before/after, and reading the new trace to confirm
+  the 15→3 round-trip drop and to chase the single-check p99 tail toward the
+  H1/D6 connection fix.

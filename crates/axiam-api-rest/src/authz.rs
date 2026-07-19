@@ -29,6 +29,27 @@ pub trait AuthzChecker: Send + Sync {
         &'a self,
         request: &'a AccessRequest,
     ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>>;
+
+    /// Evaluate an ordered batch of checks, returning decisions in input order
+    /// (result `i` ↔ `requests[i]`).
+    ///
+    /// The default implementation simply calls [`Self::check_access`] per item;
+    /// the real [`AuthorizationEngine`] overrides it with a **coalesced** path
+    /// that resolves the shared role-assignment / ancestor / scope lookups once
+    /// per `(tenant, subject)` / `(tenant, resource)` group instead of once per
+    /// item (D1). Both the REST and gRPC batch handlers route through this.
+    fn check_access_batch<'a>(
+        &'a self,
+        requests: &'a [AccessRequest],
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<Vec<AccessDecision>>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(requests.len());
+            for req in requests {
+                out.push(self.check_access(req).await?);
+            }
+            Ok(out)
+        })
+    }
 }
 
 impl<R, P, Res, S, G> AuthzChecker for AuthorizationEngine<R, P, Res, S, G>
@@ -44,6 +65,13 @@ where
         request: &'a AccessRequest,
     ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
         Box::pin(AuthorizationEngine::check_access(self, request))
+    }
+
+    fn check_access_batch<'a>(
+        &'a self,
+        requests: &'a [AccessRequest],
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<Vec<AccessDecision>>> + Send + 'a>> {
+        Box::pin(AuthorizationEngine::check_access_batch(self, requests))
     }
 }
 

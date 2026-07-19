@@ -25,6 +25,9 @@ tokio-test = "0.4"
 serde_json = { workspace = true }
 criterion = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
 futures = "0.3.32"
+# chrono: build model timestamps in the counting-mock repositories used by the
+# D1 batch-coalescing round-trip-count test; verified by cargo test.
+chrono = { workspace = true }
 
 [[bench]]
 name = "authz_bench"

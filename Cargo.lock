@@ -974,6 +974,7 @@ version = "1.0.0-alpha12"
 dependencies = [
  "axiam-core",
  "axiam-db",
+ "chrono",
  "criterion",
  "futures",
  "serde",

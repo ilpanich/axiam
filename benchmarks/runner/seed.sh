@@ -254,7 +254,8 @@ seed_zitadel() {
   # read until the API is actually live before provisioning.
   echo "[seed/zitadel] waiting for the management API to accept requests"
   local api_deadline=$(( $(date +%s) + 90 ))
-  until [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $PAT" "$BASE/auth/v1/users/me")" = "200" ]; do
+  # -k: TLS profiles serve the throwaway private-CA cert (BASE may be https).
+  until [ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $PAT" "$BASE/auth/v1/users/me")" = "200" ]; do
     if [ "$(date +%s)" -ge "$api_deadline" ]; then
       echo "[seed/zitadel] TIMEOUT: management API did not become ready at $BASE" >&2
       exit 1
@@ -265,7 +266,7 @@ seed_zitadel() {
   # Management-API helper: JSON call with the PAT; fail closed on any non-2xx.
   zapi() {
     local method="$1" path="$2" body="${3:-}" resp code
-    resp=$(curl -sS -H "Authorization: Bearer $PAT" -H "Content-Type: application/json" \
+    resp=$(curl -sSk -H "Authorization: Bearer $PAT" -H "Content-Type: application/json" \
       -X "$method" "$BASE$path" ${body:+--data "$body"} -w $'\n%{http_code}') || return 1
     code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
     if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then

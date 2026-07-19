@@ -69,7 +69,14 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nhost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200 OK'"]
+      # TCP-open probe on the management port. It can NOT be an HTTP GET: with an
+      # https profile Keycloak 26 serves the management interface over TLS too
+      # ("Management interface listening on https://…:9000"), and the image has no
+      # curl to do a TLS handshake — the old plaintext /dev/tcp GET then never sees
+      # "200 OK" and the container false-fails as unhealthy. A bare TCP connect is
+      # scheme-agnostic; real HTTP readiness is gated host-side by `just bench-up`
+      # (curl -k …/realms/master until 200).
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000"]
       interval: 10s
       timeout: 5s
       retries: 15

@@ -242,8 +242,10 @@ mod client_aware_tests {
 
     #[test]
     fn ip_mode_ignores_client_id_and_matches_plain_ip_extractor() {
-        let extractor =
-            ClientAwareKeyExtractor::new(XForwardedForKeyExtractor::default(), RateLimitKeyMode::Ip);
+        let extractor = ClientAwareKeyExtractor::new(
+            XForwardedForKeyExtractor::default(),
+            RateLimitKeyMode::Ip,
+        );
         let req = req_with_client_id(PEER_A, Some("client-a"));
 
         let key = extractor.extract(&req).unwrap();
@@ -301,8 +303,14 @@ mod client_aware_tests {
         let key2 = extractor.extract(&same_client_diff_ip_b).unwrap();
         let key3 = extractor.extract(&diff_client_same_ip).unwrap();
 
-        assert_ne!(key1, key2, "same client_id from different IPs must differ in ip_client_id mode");
-        assert_ne!(key1, key3, "different client_id from same IP must differ in ip_client_id mode");
+        assert_ne!(
+            key1, key2,
+            "same client_id from different IPs must differ in ip_client_id mode"
+        );
+        assert_ne!(
+            key1, key3,
+            "different client_id from same IP must differ in ip_client_id mode"
+        );
     }
 
     #[test]
@@ -339,7 +347,9 @@ mod client_aware_tests {
     #[test]
     fn extract_form_client_id_parses_and_rejects_empty() {
         assert_eq!(
-            extract_form_client_id(b"grant_type=client_credentials&client_id=abc123&client_secret=s"),
+            extract_form_client_id(
+                b"grant_type=client_credentials&client_id=abc123&client_secret=s"
+            ),
             Some("abc123".to_string())
         );
         assert_eq!(extract_form_client_id(b"client_id=&grant_type=x"), None);

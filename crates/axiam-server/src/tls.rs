@@ -258,7 +258,10 @@ mod tests {
 
     #[test]
     fn alpn_list_reflects_http2_knob() {
-        assert_eq!(alpn_protocols(true), vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert_eq!(
+            alpn_protocols(true),
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
         assert_eq!(alpn_protocols(false), vec![b"http/1.1".to_vec()]);
     }
 
@@ -517,7 +520,8 @@ mod tests {
             .with_root_certificates(roots);
 
         let config = if present_cert {
-            let chain = vec![CertificateDer::from_pem_slice(pki.client_cert_pem.as_bytes()).unwrap()];
+            let chain =
+                vec![CertificateDer::from_pem_slice(pki.client_cert_pem.as_bytes()).unwrap()];
             let key = PrivateKeyDer::from_pem_slice(pki.client_key_pem.as_bytes()).unwrap();
             builder.with_client_auth_cert(chain, key).unwrap()
         } else {
@@ -569,6 +573,10 @@ mod tests {
             "expected the client URI SAN to be extracted, got {:?}",
             verified.sans
         );
-        assert_eq!(verified.spki_sha256.len(), 64, "SPKI fingerprint is hex-SHA256");
+        assert_eq!(
+            verified.spki_sha256.len(),
+            64,
+            "SPKI fingerprint is hex-SHA256"
+        );
     }
 }

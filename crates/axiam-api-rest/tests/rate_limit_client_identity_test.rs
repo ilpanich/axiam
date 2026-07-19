@@ -159,7 +159,10 @@ async fn client_id_mode_gives_independent_buckets_per_client_under_one_ip() {
             "bob request {i} must succeed independently of alice's exhausted bucket"
         );
         let body = test::read_body(resp).await;
-        assert_eq!(body, "bob", "handler must still see the correct client_id after body restore");
+        assert_eq!(
+            body, "bob",
+            "handler must still see the correct client_id after body restore"
+        );
     }
 }
 

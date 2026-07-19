@@ -171,11 +171,7 @@ impl JwksCache {
     /// a comma-separated list of (optionally `W/`-prefixed) entity-tags
     /// matches if any entry equals the current strong ETag once its `W/`
     /// prefix (if any) is stripped.
-    pub fn get(
-        &self,
-        pem: &str,
-        if_none_match: Option<&str>,
-    ) -> Result<JwksCacheResponse, String> {
+    pub fn get(&self, pem: &str, if_none_match: Option<&str>) -> Result<JwksCacheResponse, String> {
         let pem_hash = sha256(pem.as_bytes());
 
         // Fast path: an existing entry built from the same PEM.
@@ -274,9 +270,7 @@ MCowBQYDK2VwAyEAAGCxCNpcTHjOYiJ3r54SLgtpqvhkRvAcFNq0MrqpoMU=
 
     #[test]
     fn custom_max_age_renders_header() {
-        let cfg = JwksCacheConfig {
-            max_age_secs: 60,
-        };
+        let cfg = JwksCacheConfig { max_age_secs: 60 };
         assert_eq!(cfg.cache_control_header(), "public, max-age=60");
     }
 
@@ -359,7 +353,10 @@ MCowBQYDK2VwAyEAAGCxCNpcTHjOYiJ3r54SLgtpqvhkRvAcFNq0MrqpoMU=
             _ => unreachable!(),
         };
 
-        assert_ne!(etag_a, etag_b, "ETag must change when the key material changes");
+        assert_ne!(
+            etag_a, etag_b,
+            "ETag must change when the key material changes"
+        );
 
         // The pre-rotation ETag must no longer produce a 304 against the
         // now-current (post-rotation) cache state.
@@ -391,12 +388,7 @@ MCowBQYDK2VwAyEAAGCxCNpcTHjOYiJ3r54SLgtpqvhkRvAcFNq0MrqpoMU=
 
         // And conditional requests against the rebuilt entry still work.
         let resp = cache.get(PEM_A, Some(&etag_after)).unwrap();
-        assert_eq!(
-            resp,
-            JwksCacheResponse::NotModified {
-                etag: etag_after
-            }
-        );
+        assert_eq!(resp, JwksCacheResponse::NotModified { etag: etag_after });
     }
 
     #[test]
@@ -416,11 +408,6 @@ MCowBQYDK2VwAyEAAGCxCNpcTHjOYiJ3r54SLgtpqvhkRvAcFNq0MrqpoMU=
         // ...and must NOT have evicted the previously-good entry: the same
         // good PEM still round-trips through the cache correctly afterward.
         let resp = cache.get(PEM_A, Some(&good_etag)).unwrap();
-        assert_eq!(
-            resp,
-            JwksCacheResponse::NotModified {
-                etag: good_etag
-            }
-        );
+        assert_eq!(resp, JwksCacheResponse::NotModified { etag: good_etag });
     }
 }

@@ -549,7 +549,10 @@ mod jwks_handler_tests {
             .to_http_request();
         let second_resp = jwks(second_req, state).await;
 
-        assert_eq!(second_resp.status(), actix_web::http::StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            second_resp.status(),
+            actix_web::http::StatusCode::NOT_MODIFIED
+        );
         assert_eq!(second_resp.headers().get(ETAG).unwrap(), etag.as_str());
         assert_eq!(
             second_resp.headers().get(CACHE_CONTROL).unwrap(),

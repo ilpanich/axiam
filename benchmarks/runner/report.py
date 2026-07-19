@@ -227,6 +227,37 @@ SERVER_CONTAINER = {
 }
 
 
+# D4: scenarios with no genuine cross-vendor equivalent — either an AXIAM-only
+# capability (gRPC authz) or a vendor-specific native-API scenario (Zitadel's
+# gRPC identity RPC). Each of these is wired into exactly one target's
+# scenario list in runner/run-benchmark.sh (AXIAM_ONLY_SCENARIOS /
+# ZITADEL_ONLY_SCENARIOS), so a same-name cell from a second target never
+# actually exists — the "Efficiency comparison (across targets)" loop below
+# would already skip them via its `len(group_all) < 2` guard. This set makes
+# that exclusion explicit/defensive (self-documenting, and robust to a future
+# scenario coincidentally sharing a name across targets) rather than relying
+# only on that structural accident. See docs/methodology.md §5 "Comparability:
+# protocol-efficiency (gRPC vs REST, same vendor)".
+NON_COMPARATIVE_SCENARIOS = {
+    "authz_check_grpc", "authz_batch_grpc", "authz_check_rest", "authz_batch_rest",
+    "zitadel_userinfo_grpc",
+}
+
+# Within-vendor REST-vs-gRPC pairs for the same logical operation — the
+# "protocol-efficiency" comparison docs/methodology.md describes, distinct
+# from (and never merged into) the cross-vendor tables. Keyed by target;
+# value is (rest_scenario, grpc_scenario, logical_op_label).
+PROTOCOL_EFFICIENCY_PAIRS = {
+    "axiam": [
+        ("authz_check_rest", "authz_check_grpc", "authorization decision"),
+        ("authz_batch_rest", "authz_batch_grpc", "batch authorization decision"),
+    ],
+    "zitadel": [
+        ("userinfo", "zitadel_userinfo_grpc", "identity read (userinfo)"),
+    ],
+}
+
+
 def derive(perf, res):
     thr = perf["throughput"]
     cpu = res["cpu_cores_avg"]
@@ -612,6 +643,13 @@ def build_report(cells, multi_run=False):
               "AXIAM's RabbitMQ+SurrealDB inclusion in the whole-stack numbers "
               "is visible rather than silently folded in (A5.5).", ""]
     for sc in scenarios:
+        # D4: never render AXIAM-only/vendor-only scenarios here, even if a
+        # future scenario file name collision would otherwise let >=2 cells
+        # slip into group_all below — these are protocol-efficiency-only
+        # (see the dedicated section below) or single-vendor capability
+        # metrics, not cross-vendor numbers (docs/methodology.md §5).
+        if sc in NON_COMPARATIVE_SCENARIOS:
+            continue
         for pr in profiles:
             group_all = [c for c in valid if c["scenario"] == sc and c["profile"] == pr]
             if len(group_all) < 2:
@@ -659,6 +697,52 @@ def build_report(cells, multi_run=False):
                 ["target", "thr(req/s)", "p50(ms)", "p95(ms)", "thr/core", "thr/GiB",
                  "cpu_ms/req", "server-only thr/core", "server-only cpu_ms/req"],
                 rows), ""]
+
+    # 2b. Protocol efficiency: REST vs gRPC for the same logical op, WITHIN a
+    # single vendor (D4). Distinct from — and deliberately never merged into —
+    # section 2's cross-vendor tables: this answers "does gRPC cost less than
+    # REST for the same operation on the same server?", not "is target A
+    # faster than target B?" (docs/methodology.md §5, "Comparability:
+    # protocol-efficiency (gRPC vs REST, same vendor)").
+    lines += ["## Protocol efficiency (gRPC vs REST, within a vendor)", "",
+              "Same logical operation, two wire protocols, same target — NOT a "
+              "cross-vendor comparison (see docs/methodology.md §5). "
+              "`Δ-throughput` and `Δ-cpu_ms/req` are gRPC relative to REST "
+              "(negative Δ-cpu_ms/req = gRPC cheaper per request).", ""]
+    any_pair_rendered = False
+    for tg, pairs in PROTOCOL_EFFICIENCY_PAIRS.items():
+        for rest_sc, grpc_sc, op_label in pairs:
+            for pr in profiles:
+                rest_c = next((c for c in valid
+                               if c["target"] == tg and c["scenario"] == rest_sc and c["profile"] == pr), None)
+                grpc_c = next((c for c in valid
+                               if c["target"] == tg and c["scenario"] == grpc_sc and c["profile"] == pr), None)
+                if not rest_c or not grpc_c:
+                    continue
+                if rest_c["is_fallback"] or grpc_c["is_fallback"]:
+                    continue  # A3: a fallback-op cell measures a different operation — skip the pair.
+                any_pair_rendered = True
+                lines += [f"### {tg}: {op_label} @ {pr}", ""]
+                rp, gp = rest_c["perf"], grpc_c["perf"]
+                rd, gd = rest_c["der"], grpc_c["der"]
+                d_thr = ((gp["throughput"] - rp["throughput"]) / rp["throughput"] * 100.0
+                         if rp["throughput"] else 0.0)
+                d_cpu_ms = gd["cpu_ms_per_request"] - rd["cpu_ms_per_request"]
+                rows = [
+                    ["REST (" + rest_sc + ")", f"{rp['throughput']:.0f}", f"{rp['p50']:.1f}",
+                     f"{rp['p95']:.1f}", f"{rd['throughput_per_core']:.0f}",
+                     f"{rd['cpu_ms_per_request']:.3f}", "baseline"],
+                    ["gRPC (" + grpc_sc + ")", f"{gp['throughput']:.0f}", f"{gp['p50']:.1f}",
+                     f"{gp['p95']:.1f}", f"{gd['throughput_per_core']:.0f}",
+                     f"{gd['cpu_ms_per_request']:.3f}", f"{d_thr:+.1f}% thr, {d_cpu_ms:+.3f} cpu_ms/req"],
+                ]
+                lines += [md_table(
+                    ["protocol (scenario)", "thr(req/s)", "p50(ms)", "p95(ms)",
+                     "thr/core", "cpu_ms/req", "Δ vs REST"],
+                    rows), ""]
+    if not any_pair_rendered:
+        lines += ["_No matching (REST, gRPC) pair had both cells valid and "
+                  "non-fallback for the same (target, profile) yet._", ""]
 
     # 3. Security-cost matrix per (target, scenario)
     lines += ["## Security cost (relative to p0-plaintext)", "",

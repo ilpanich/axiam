@@ -84,6 +84,13 @@ fi
 # The authz scenarios (gRPC and REST) are AXIAM-only; drop them for other targets.
 AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js"
 
+# D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
+# counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and
+# scenarios/proto/zitadel/README.md) dials Zitadel's own vendored proto and
+# has no equivalent on AXIAM or Keycloak; drop it for other targets, mirroring
+# how AXIAM_ONLY_SCENARIOS is handled above.
+ZITADEL_ONLY_SCENARIOS="zitadel_userinfo_grpc.js"
+
 # OAuth2 client-flow scenarios need a seeded confidential client (and, ideally, a
 # configured OIDC issuer). Skip them when OAuth2 isn't set up so a missing OAuth2
 # config doesn't fail the run — either the operator opts out (BENCH_SKIP_OAUTH2=1)
@@ -102,6 +109,9 @@ filter_scenarios() {
   for s in "${SCENARIOS[@]}"; do
     if [ "$TARGET" != "axiam" ] && [[ " $AXIAM_ONLY_SCENARIOS " == *" $s "* ]]; then
       echo "[run] skipping $s (AXIAM-only) for target $TARGET"; continue
+    fi
+    if [ "$TARGET" != "zitadel" ] && [[ " $ZITADEL_ONLY_SCENARIOS " == *" $s "* ]]; then
+      echo "[run] skipping $s (Zitadel-only) for target $TARGET"; continue
     fi
     if [[ " $OAUTH2_SCENARIOS " == *" $s "* ]] && skip_oauth2; then
       echo "[run] skipping $s (OAuth2 not configured — seed a client or unset BENCH_SKIP_OAUTH2)"; continue
@@ -300,6 +310,7 @@ run_one() {
   # Run k6. summary-export gives end-of-test aggregated metrics as JSON.
   set +e
   ( cd "$BENCH/scenarios" && BENCH_PROTO_ROOT="$BENCH/../proto" \
+      BENCH_ZITADEL_PROTO_ROOT="$BENCH/scenarios/proto/zitadel" \
       k6 run --quiet --summary-export "$k6sum" "$scenario" )
   local k6rc=$?
   set -e

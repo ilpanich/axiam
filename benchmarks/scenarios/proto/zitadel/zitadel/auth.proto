@@ -1,0 +1,43 @@
+// Trimmed vendor copy — see ../README.md for provenance and what was cut.
+//
+// Source: https://github.com/zitadel/zitadel/blob/v4.15.2/proto/zitadel/auth.proto
+// (1653 lines upstream, ~90 RPCs covering the full "operations on the
+// currently authenticated user" surface: profile/email/phone management,
+// OTP/U2F/passwordless factors, refresh-token listing/revocation, policies,
+// metadata, org/grant listings, etc.) This file keeps ONLY the
+// `AuthService.GetMyUser` RPC and its request/response messages, copied
+// verbatim (including field numbers) from upstream. Every `rpc` other than
+// GetMyUser, and every `google.api.http` / `zitadel.v1.auth_option` /
+// `protoc-gen-openapiv2` swagger option, was dropped — those options select
+// REST-gateway routing and generated docs, not the gRPC wire format, and
+// keeping them would have pulled in `google/api/annotations.proto`,
+// `zitadel/options.proto`, and `protoc-gen-openapiv2/options/annotations.proto`
+// as further transitive imports for a benchmark harness that only calls this
+// one RPC directly over gRPC (never through the REST/JSON gateway).
+syntax = "proto3";
+
+package zitadel.auth.v1;
+
+option go_package = "github.com/zitadel/zitadel/pkg/grpc/auth";
+
+import "zitadel/user.proto";
+import "google/protobuf/timestamp.proto";
+
+// AuthService is used for operations on the currently authenticated user.
+// Base path upstream: /auth/v1. This vendor copy exposes only GetMyUser.
+service AuthService {
+  // GetMyUser returns the full user object of the authenticated user
+  // (profile/email/phone/etc. in the upstream response — trimmed here to the
+  // identity envelope, see user.proto). Identity is derived entirely from
+  // the request's bearer token; the request message is empty upstream.
+  rpc GetMyUser(GetMyUserRequest) returns (GetMyUserResponse);
+}
+
+// This is an empty request — upstream reads all parameters from the
+// authorization bearer token, not from request fields.
+message GetMyUserRequest {}
+
+message GetMyUserResponse {
+  zitadel.user.v1.User user = 1;
+  google.protobuf.Timestamp last_login = 2;
+}

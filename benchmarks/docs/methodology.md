@@ -53,6 +53,7 @@ Each cell produces one **result record** (JSON) under `results/`.
 | `authz_batch_rest.js`           | Batch authorization decision (REST)            | HTTP/REST     | AXIAM-only*  |
 | `authz_check_grpc.js`           | Low-latency authorization decision             | gRPC          | AXIAM-only*  |
 | `authz_batch_grpc.js`           | Batch authorization decision                    | gRPC          | AXIAM-only*  |
+| `zitadel_userinfo_grpc.js`      | Identity read (`AuthService/GetMyUser`)        | gRPC          | Zitadel-only†|
 
 \* Most competitors do not expose a directly equivalent authorization-decision
 endpoint (REST or gRPC, single or batch); these scenarios are reported separately
@@ -60,6 +61,36 @@ as AXIAM capability metrics, not head-to-head numbers. The REST authz scenarios
 also serve as the wire baseline for SDK `check_access`/`batch_check` overhead
 (see `sdk/HARNESS-SPEC.md`). All four require a seeded resource + role grant and a
 logged-in user token; the authz scenarios log in as the bench user in `setup()`.
+
+† Zitadel's primary API surface is gRPC (maintainer requirement to benchmark
+it — see `claude_dev/benchmark-improvement-plan.md` D4), so
+`zitadel_userinfo_grpc.js` calls `zitadel.auth.v1.AuthService/GetMyUser`
+against the minimal vendored proto in `scenarios/proto/zitadel/` (see that
+directory's `README.md` for exactly what was vendored/trimmed and why —
+short version: the real upstream `.proto` files at the pinned `v4.15.2` tag
+were fetched, then hand-trimmed to just the one RPC and the message fields
+this benchmark decodes, to avoid pulling in Zitadel's full transitive proto
+graph for options/docs annotations that don't affect the wire format).
+Neither AXIAM nor Keycloak expose an equivalent gRPC identity RPC, so this
+scenario is wired into `runner/run-benchmark.sh`'s Zitadel-only scenario list
+(`ZITADEL_ONLY_SCENARIOS`) and never appears for the other two targets. It
+pairs with Zitadel's own `userinfo.js` cell as a **protocol-efficiency**
+comparison (REST vs gRPC, same logical operation, same vendor) — see
+"Comparability: protocol-efficiency (gRPC vs REST, same vendor)" below. It is
+**not** a cross-vendor head-to-head number, and `runner/report.py` excludes
+it from the cross-vendor "Efficiency comparison" tables the same way it
+excludes the AXIAM-only authz scenarios above (both are listed in
+`report.py`'s `NON_COMPARATIVE_SCENARIOS`).
+
+A comparable gRPC "introspect" scenario was considered and deliberately
+**not** added: Zitadel's `session.v2.SessionService` (`GetSession`,
+`CreateSession`, …) operates on Zitadel's own session-ID/session-token
+identity model, not on an OAuth2 access/refresh token, so `GetSession` is not
+a genuine equivalent to `token_introspection.js`'s RFC 7662 "is this token
+active" check — forcing that equivalence would benchmark a different logical
+operation under a misleading label, which §1's "identical logical workload"
+principle rules out. `SessionService.CreateSession` (the gRPC login
+counterpart) is task D5's concern, not D4's.
 
 ## 4. Load model
 
@@ -160,6 +191,31 @@ Zitadel don't; the whole-stack numbers above fold that cost in silently, while
 the server-only variant isolates it so it stays visible rather than
 understating AXIAM's per-request server cost relative to a single-process
 competitor.
+
+### Comparability: protocol-efficiency (gRPC vs REST, same vendor)
+A second, distinct comparability class alongside the fallback flag below:
+some scenarios exist specifically to compare **two wire protocols against
+the same logical operation on the same vendor**, not to compare vendors
+against each other. Today that's:
+
+* AXIAM: `authz_check_rest.js`/`authz_batch_rest.js` (REST) vs
+  `authz_check_grpc.js`/`authz_batch_grpc.js` (gRPC) — the authorization
+  decision, over both wire protocols AXIAM exposes it on.
+* Zitadel: `userinfo.js` (REST `/oidc/v1/userinfo`) vs
+  `zitadel_userinfo_grpc.js` (gRPC `AuthService/GetMyUser`) — the identity
+  read, over both wire protocols Zitadel exposes it on.
+
+These are **within-vendor** pairs: "does gRPC cost less than REST for the
+same operation on the same server?" is a meaningful, fair comparison because
+nothing about the target, resource caps, or logical workload differs between
+the two rows — only the wire encoding does. They answer a materially
+different question than the cross-vendor "Efficiency comparison" tables
+(*"is target A faster than target B?"*), so `report.py` keeps them out of
+those tables entirely (`NON_COMPARATIVE_SCENARIOS`) rather than trying to
+average a gRPC cell into a REST-only cross-vendor group. To read a
+protocol-efficiency pair, compare the two scenarios' rows directly in the
+"All results" table for the same `(target, profile)` — e.g.
+`zitadel_userinfo_grpc` vs `userinfo` at `zitadel / p0-plaintext`.
 
 ### Comparability flags (fallback operations)
 Some logical ops can't always be measured for real on every target — e.g.

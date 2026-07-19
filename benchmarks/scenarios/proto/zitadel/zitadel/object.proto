@@ -1,0 +1,27 @@
+// Trimmed vendor copy — see ../README.md for provenance and what was cut.
+//
+// Source: https://github.com/zitadel/zitadel/blob/v4.15.2/proto/zitadel/object.proto
+// Only `ObjectDetails` is kept (the one message `User` embeds); field numbers
+// are copied verbatim from the upstream file. All `protoc-gen-openapiv2`
+// field-option annotations were stripped — they only affect generated Swagger
+// docs, never the wire format, and stripping them avoids vendoring the
+// `protoc-gen-openapiv2/options/annotations.proto` dependency for a benchmark
+// harness that only needs to encode/decode the gRPC wire bytes.
+syntax = "proto3";
+
+package zitadel.v1;
+
+option go_package = "github.com/zitadel/zitadel/pkg/grpc/object";
+
+import "google/protobuf/timestamp.proto";
+
+message ObjectDetails {
+  // sequence represents the order of events (last-event sequence on read).
+  uint64 sequence = 1;
+  // creation_date is the timestamp of the object's first event.
+  google.protobuf.Timestamp creation_date = 2;
+  // change_date is the timestamp of the object's last event.
+  google.protobuf.Timestamp change_date = 3;
+  // resource_owner is the organization the object belongs to.
+  string resource_owner = 4;
+}

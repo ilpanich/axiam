@@ -1,0 +1,35 @@
+# Overlay for AXIAM native (in-process) TLS termination — used ONLY for the
+# p2-tls13 profile via `just target=axiam profile=p2-tls13 bench-up`, which
+# composes this on top of docker-compose.yml and does NOT start the nginx edge.
+#
+# Why native for p2: Keycloak and Zitadel terminate TLS 1.3 in-process, inside
+# their CPU cap. Fronting AXIAM with nginx instead would measure nginx's TLS +
+# an extra proxy hop (crypto outside AXIAM's cap) — apples-to-oranges. AXIAM's
+# rustls listener is TLS 1.3, server-auth only (crates/axiam-server/src/tls.rs),
+# which exactly matches what p2 requires. (p1-tls12 and p3-mtls still need nginx:
+# the native stack can't do TLS 1.2 or client-cert auth.)
+#
+# Because the rustls listener is TLS-only (no plaintext side port), seeding also
+# goes over https — `just bench-seed` handles that (curl -k).
+services:
+  axiam-server:
+    environment:
+      # rustls direct TLS on the server's own port (server.tls.*). The published
+      # image already supports this — the tls module and actix `rustls-0_23` bind
+      # are unconditional (not behind a cargo feature), so no local build needed.
+      AXIAM__SERVER__TLS__ENABLED: "true"
+      AXIAM__SERVER__TLS__CERT_PATH: /certs/server.crt
+      AXIAM__SERVER__TLS__KEY_PATH: /certs/server.key
+    volumes:
+      - ../../profiles/certs:/certs:ro
+    # Publish the server's now-TLS port as the TLS host port (default 8443). The
+    # `!override` replaces the base ports list (compose would otherwise append,
+    # leaving the plaintext 8090 mapping pointed at a port that now speaks TLS).
+    ports: !override
+      - "${BENCH_TLS_PORT:-8443}:8090"
+      - "${BENCH_GRPC_PORT:-50051}:50051"
+    # The container healthcheck self-probes /health with reqwest, which verifies
+    # certs and would reject the throwaway self-signed cert over https. Disable it
+    # here; `just bench-up` gates real readiness host-side (curl -k …/health).
+    healthcheck:
+      test: ["NONE"]

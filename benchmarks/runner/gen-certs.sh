@@ -42,4 +42,9 @@ openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 
 rm -f server.csr client.csr
 chmod 600 ./*.key
+# The server key is mounted into every target's TLS process. AXIAM's distroless
+# image runs as non-root UID 65532 and can't read a 0600 key owned by the host
+# user (Keycloak/Zitadel happen to run as UID 1000 and can). These are throwaway,
+# gitignored, test-only keys, so world-readable is acceptable here.
+chmod 644 server.key
 echo "[gen-certs] done. CA=$DIR/ca.crt server=$DIR/server.crt client=$DIR/client.crt"

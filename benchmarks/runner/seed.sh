@@ -78,10 +78,10 @@ seed_axiam() {
     local method="$1" path="$2" data="${3:-}" csrf
     csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$JAR")"
     if [ -n "$data" ]; then
-      curl -sS -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" \
+      curl -sSk -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" \
         -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" -d "$data"
     else
-      curl -sS -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" -H "X-CSRF-Token: $csrf"
+      curl -sSk -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" -H "X-CSRF-Token: $csrf"
     fi
   }
   # Create an entity, or find the existing one on re-seed. `.. | objects` walks
@@ -99,7 +99,7 @@ seed_axiam() {
 
   echo "[seed/axiam] bootstrapping org + default tenant + admin (gated by AXIAM_BOOTSTRAP_ADMIN_EMAIL)"
   local boot code body
-  boot=$(curl -sS -o - -w $'\n%{http_code}' -c "$JAR" -X POST "$BASE/api/v1/admin/bootstrap" \
+  boot=$(curl -sSk -o - -w $'\n%{http_code}' -c "$JAR" -X POST "$BASE/api/v1/admin/bootstrap" \
     -H "Content-Type: application/json" \
     -d "{\"organization_name\":\"Bench Org\",\"organization_slug\":\"$ORG_SLUG\",\"tenant_name\":\"Bench Tenant\",\"tenant_slug\":\"$TENANT_SLUG\",\"email\":\"$ADMIN_EMAIL\",\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}")
   code="${boot##*$'\n'}"; body="${boot%$'\n'*}"
@@ -120,7 +120,7 @@ seed_axiam() {
 
   echo "[seed/axiam] logging in as admin (cookie session)"
   local login_body
-  login_body=$(curl -sS -c "$JAR" -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
+  login_body=$(curl -sSk -c "$JAR" -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
     -d "{\"org_slug\":\"$ORG_SLUG\",\"tenant_slug\":\"$TENANT_SLUG\",\"username_or_email\":\"admin\",\"password\":\"$ADMIN_PW\"}")
   if ! awk -F'\t' '$6=="axiam_access"{f=1} END{exit !f}' "$JAR"; then
     echo "[seed/axiam] admin login failed (no session cookie): $login_body"; exit 1

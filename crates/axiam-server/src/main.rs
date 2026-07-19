@@ -1043,19 +1043,19 @@ async fn main() -> std::io::Result<()> {
         use actix_web::rt::net::TcpStream;
         if let Some(tls) = conn.downcast_ref::<TlsStream<TcpStream>>() {
             let (_io, session) = tls.get_ref();
-            if let Some(certs) = session.peer_certificates() {
-                if let Some(leaf) = certs.first() {
-                    match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref()) {
-                        Ok(vc) => {
-                            ext.insert(vc);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "failed to parse verified client certificate; \
-                                 cert-mapped identity will be unavailable for this connection"
-                            );
-                        }
+            if let Some(certs) = session.peer_certificates()
+                && let Some(leaf) = certs.first()
+            {
+                match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref()) {
+                    Ok(vc) => {
+                        ext.insert(vc);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to parse verified client certificate; \
+                             cert-mapped identity will be unavailable for this connection"
+                        );
                     }
                 }
             }

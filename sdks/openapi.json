@@ -7306,7 +7306,7 @@
           "oidc"
         ],
         "summary": "`GET /oauth2/jwks` -- JSON Web Key Set.",
-        "description": "Returns the public signing keys used by the authorization server\nso that relying parties can verify JWTs without sharing a secret.",
+        "description": "Returns the public signing keys used by the authorization server\nso that relying parties can verify JWTs without sharing a secret.\n\nB3: served from an in-process cache (`state.oauth2_jwks_cache`) keyed by\na hash of the source PEM, with a `Cache-Control: public, max-age=<n>`\nheader (configurable, default 300s) and a strong `ETag`. Clients that\nsend a matching `If-None-Match` get `304 Not Modified` with no body;\nclients that ignore caching headers entirely still get the identical\n`200 OK` + JWKS body they always did -- this is a pure additive change.\nSee `axiam_oauth2::jwks_cache` module docs for the cache design and the\ndocumented limitations (no key-rotation mechanism exists yet; the\nendpoint serves one global, not per-tenant, key set).",
         "operationId": "jwks",
         "responses": {
           "200": {
@@ -7318,6 +7318,9 @@
                 }
               }
             }
+          },
+          "304": {
+            "description": "Not Modified -- ETag matches If-None-Match"
           },
           "500": {
             "description": "Key parsing error"

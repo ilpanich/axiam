@@ -177,10 +177,10 @@ impl JwksCache {
         // Fast path: an existing entry built from the same PEM.
         {
             let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = guard.as_ref() {
-                if entry.pem_hash == pem_hash {
-                    return Ok(respond(entry, if_none_match));
-                }
+            if let Some(entry) = guard.as_ref()
+                && entry.pem_hash == pem_hash
+            {
+                return Ok(respond(entry, if_none_match));
             }
         }
 
@@ -205,12 +205,12 @@ impl JwksCache {
 }
 
 fn respond(entry: &CacheEntry, if_none_match: Option<&str>) -> JwksCacheResponse {
-    if let Some(header) = if_none_match {
-        if if_none_match_matches(header, &entry.etag) {
-            return JwksCacheResponse::NotModified {
-                etag: entry.etag.clone(),
-            };
-        }
+    if let Some(header) = if_none_match
+        && if_none_match_matches(header, &entry.etag)
+    {
+        return JwksCacheResponse::NotModified {
+            etag: entry.etag.clone(),
+        };
     }
     JwksCacheResponse::Fresh {
         body: entry.body.clone(),

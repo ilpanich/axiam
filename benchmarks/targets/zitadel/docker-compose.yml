@@ -33,10 +33,38 @@ services:
       ZITADEL_EXTERNALSECURE: "${BENCH_ZITADEL_EXTERNAL_SECURE:-false}"
       ZITADEL_EXTERNALPORT: "${BENCH_APP_PORT:-8090}"
       ZITADEL_EXTERNALDOMAIN: localhost
+      # First-init bootstrap of an admin service account + PAT so runner/seed.sh
+      # can provision the benchmark client_credentials machine user unattended
+      # (Zitadel has no scriptable password grant). These FIRSTINSTANCE_* vars
+      # ONLY take effect on the very first init against an empty DB — `bench-down
+      # -v` (volume wipe) is required for a re-provision. The PAT is written into
+      # the `machinekey` volume; seed.sh reads it via `docker cp` (the distroless
+      # image has no shell for `docker exec cat`).
+      ZITADEL_FIRSTINSTANCE_PATPATH: /machinekey/pat.txt
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: bench-admin-sa
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: Bench Admin SA
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "9999-12-31T23:59:59Z"
+    volumes:
+      - machinekey:/machinekey
     ports:
       - "${BENCH_APP_PORT:-8090}:8080"
     depends_on:
       postgres: { condition: service_healthy }
+      # A freshly-created named volume is root:root 0755, but the Zitadel image
+      # runs non-root and must write the PAT into it — so open the perms first.
+      machinekey-init: { condition: service_completed_successfully }
+    restart: "no"
+    networks: [bench]
+
+  # One-shot: make the machinekey volume writable by Zitadel's non-root user
+  # (UID-agnostic 0777) before it runs `start-from-init`. Exits 0 immediately;
+  # `up -d --wait` gates on its successful completion.
+  machinekey-init:
+    image: busybox:1.37
+    container_name: bench-zitadel-machinekey-init
+    command: ["sh", "-c", "chmod 0777 /machinekey"]
+    volumes:
+      - machinekey:/machinekey
     restart: "no"
     networks: [bench]
 
@@ -55,6 +83,9 @@ services:
       retries: 10
     restart: "no"
     networks: [bench]
+
+volumes:
+  machinekey:
 
 networks:
   bench:

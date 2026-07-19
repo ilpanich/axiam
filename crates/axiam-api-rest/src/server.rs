@@ -10,7 +10,8 @@ use axiam_db::DbClient;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::RateLimitConfig;
-use crate::extractors::rate_limit::XForwardedForKeyExtractor;
+use crate::config::rate_limit::RateLimitKeyMode;
+use crate::extractors::rate_limit::{ClientAwareKeyExtractor, XForwardedForKeyExtractor};
 use crate::handlers;
 use crate::middleware::authz::AuthzMiddleware;
 use crate::middleware::csrf::CsrfMiddleware;
@@ -33,6 +34,41 @@ fn build_governor(requests_per_min: u32) -> Governor<XForwardedForKeyExtractor, 
         .requests_per_minute(requests_per_min as u64)
         .burst_size(requests_per_min)
         .key_extractor(XForwardedForKeyExtractor::with_trusted_hops(trusted_hops))
+        .finish()
+        .expect("valid governor config");
+    Governor::new(&config)
+}
+
+/// D8: build a per-endpoint Governor middleware instance for the three
+/// endpoints where an OAuth2 client identity (`client_id`) is available —
+/// `/oauth2/token`, `/oauth2/revoke`, `/oauth2/introspect` ONLY.
+///
+/// `key_mode` (`AXIAM__RATE_LIMIT__KEY`, from [`RateLimitConfig::key`])
+/// controls whether the bucket key is IP alone (default, unchanged
+/// behavior), the OAuth2 `client_id` alone, or the `(ip, client_id)` pair —
+/// see [`crate::config::rate_limit::RateLimitKeyMode`] for the full
+/// NAT'd-fleet rationale. The `client_id` itself is read from request
+/// extensions populated by `middleware::rate_limit_shared::RateLimitShared`
+/// (wired as the OUTER `.wrap()` on the same resource, so it always runs
+/// first — see that middleware's docs).
+///
+/// **Never call this for `/auth/login`** (or any other endpoint without a
+/// client identity) — use [`build_governor`] there instead, unconditionally.
+fn build_client_aware_governor(
+    requests_per_min: u32,
+    key_mode: RateLimitKeyMode,
+) -> Governor<ClientAwareKeyExtractor, NoOpMiddleware> {
+    let trusted_hops: usize = std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let config = GovernorConfigBuilder::default()
+        .requests_per_minute(requests_per_min as u64)
+        .burst_size(requests_per_min)
+        .key_extractor(ClientAwareKeyExtractor::new(
+            XForwardedForKeyExtractor::with_trusted_hops(trusted_hops),
+            key_mode,
+        ))
         .finish()
         .expect("valid governor config");
     Governor::new(&config)
@@ -70,6 +106,14 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .wrap(CsrfMiddleware)
             .app_data(web::JsonConfig::default().limit(65_536))
             .service(
+                // D8: `/auth/login` ALWAYS keys per-IP, regardless of
+                // `AXIAM__RATE_LIMIT__KEY`. Login authenticates a *user* via
+                // username/password — there is no OAuth2 `client_id` (or any
+                // other client identity) anywhere in this request to key
+                // on, so `build_governor`/`RateLimitShared::new` (the
+                // IP-only constructors) are used unconditionally here, never
+                // the client-identity-aware variants. See
+                // `crate::config::rate_limit::RateLimitKeyMode` docs.
                 web::resource("/login")
                     .wrap(build_governor(rate_limit_cfg.login_per_min))
                     .wrap(RateLimitShared::<C>::new("login", rate_limit_cfg.login_per_min))
@@ -237,12 +281,24 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 "/authorize",
                 web::get().to(handlers::oauth2::authorize::<C>),
             )
+            // D8: `/token`, `/revoke`, `/introspect` are the ONLY three
+            // endpoints with a form-encoded OAuth2 `client_id`
+            // (`client_secret_post`, RFC 6749 §2.3.1) — the client-aware
+            // governor/`RateLimitShared` constructors honor
+            // `rate_limit_cfg.key` (`AXIAM__RATE_LIMIT__KEY`) here so a
+            // NAT'd fleet of distinct OAuth2 clients no longer collides into
+            // one shared per-IP bucket. `key` defaults to `ip`, which is
+            // byte-for-byte the pre-D8 behavior.
             .service(
                 web::resource("/token")
-                    .wrap(build_governor(rate_limit_cfg.token_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(build_client_aware_governor(
+                        rate_limit_cfg.token_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
                         "oauth2_token",
                         rate_limit_cfg.token_per_min,
+                        rate_limit_cfg.key,
                     ))
                     .route(web::post().to(handlers::oauth2::token::<C>)),
             )
@@ -250,19 +306,27 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             // and token probing attacks.
             .service(
                 web::resource("/revoke")
-                    .wrap(build_governor(rate_limit_cfg.revoke_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(build_client_aware_governor(
+                        rate_limit_cfg.revoke_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
                         "oauth2_revoke",
                         rate_limit_cfg.revoke_per_min,
+                        rate_limit_cfg.key,
                     ))
                     .route(web::post().to(handlers::oauth2::revoke::<C>)),
             )
             .service(
                 web::resource("/introspect")
-                    .wrap(build_governor(rate_limit_cfg.introspect_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(build_client_aware_governor(
+                        rate_limit_cfg.introspect_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
                         "oauth2_introspect",
                         rate_limit_cfg.introspect_per_min,
+                        rate_limit_cfg.key,
                     ))
                     .route(web::post().to(handlers::oauth2::introspect::<C>)),
             )

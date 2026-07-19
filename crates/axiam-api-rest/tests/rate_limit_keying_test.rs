@@ -8,8 +8,12 @@
 //! completely evading brute-force protection.
 
 use actix_governor::KeyExtractor;
+use actix_web::HttpMessage;
 use actix_web::test::TestRequest;
-use axiam_api_rest::extractors::rate_limit::XForwardedForKeyExtractor;
+use axiam_api_rest::config::rate_limit::RateLimitKeyMode;
+use axiam_api_rest::extractors::rate_limit::{
+    ClientAwareKeyExtractor, RateLimitClientId, XForwardedForKeyExtractor,
+};
 use std::net::{IpAddr, SocketAddr};
 
 /// Fixed loopback peer address representing the real (trusted) TCP peer —
@@ -116,4 +120,103 @@ async fn sufficient_hops_still_selects_right_indexed_hop() {
         "203.0.113.51".parse::<IpAddr>().unwrap(),
         "sufficient-hops path must still select the rightmost-untrusted hop"
     );
+}
+
+// ---------------------------------------------------------------------------
+// D8 — client-identity-aware keying (`ClientAwareKeyExtractor`)
+//
+// `ClientAwareKeyExtractor` is what the in-memory `Governor` uses on
+// `/oauth2/token`, `/oauth2/revoke`, and `/oauth2/introspect` (see
+// `server.rs::build_client_aware_governor`). It reads the `client_id`
+// stashed into request extensions by
+// `middleware::rate_limit_shared::RateLimitShared::new_client_identity_aware`
+// (which always runs first — it is wired as the OUTER `.wrap()`). These
+// tests exercise the extractor directly via that same extension contract.
+// End-to-end (real middleware + real 429 responses) coverage lives in
+// `rate_limit_client_identity_test.rs`.
+// ---------------------------------------------------------------------------
+
+fn req_with_stashed_client_id(
+    peer: &str,
+    client_id: Option<&str>,
+) -> actix_web::dev::ServiceRequest {
+    let req = TestRequest::get()
+        .peer_addr(peer.parse::<SocketAddr>().unwrap())
+        .to_srv_request();
+    req.extensions_mut()
+        .insert(RateLimitClientId(client_id.map(str::to_owned)));
+    req
+}
+
+#[test]
+fn client_aware_extractor_ip_mode_matches_plain_ip_extractor() {
+    // D8 acceptance: `ip` mode (the default) must be indistinguishable from
+    // the plain `XForwardedForKeyExtractor` used everywhere else.
+    let plain = XForwardedForKeyExtractor::default();
+    let client_aware = ClientAwareKeyExtractor::new(plain.clone(), RateLimitKeyMode::Ip);
+
+    let req = req_with_stashed_client_id(TEST_PEER, Some("some-client"));
+
+    let plain_key = plain.extract(&req).unwrap().to_string();
+    let aware_key = client_aware.extract(&req).unwrap();
+
+    assert_eq!(
+        aware_key, plain_key,
+        "ip mode must ignore any stashed client_id and match plain IP keying exactly"
+    );
+}
+
+#[test]
+fn client_aware_extractor_distinguishes_clients_under_one_ip_in_client_id_mode() {
+    let extractor = ClientAwareKeyExtractor::new(
+        XForwardedForKeyExtractor::default(),
+        RateLimitKeyMode::ClientId,
+    );
+
+    let req_a = req_with_stashed_client_id(TEST_PEER, Some("client-a"));
+    let req_b = req_with_stashed_client_id(TEST_PEER, Some("client-b"));
+
+    let key_a = extractor.extract(&req_a).unwrap();
+    let key_b = extractor.extract(&req_b).unwrap();
+
+    assert_ne!(
+        key_a, key_b,
+        "distinct client_ids behind the SAME peer IP must get distinct buckets"
+    );
+}
+
+#[test]
+fn client_aware_extractor_ip_client_id_mode_distinguishes_both() {
+    let extractor = ClientAwareKeyExtractor::new(
+        XForwardedForKeyExtractor::default(),
+        RateLimitKeyMode::IpClientId,
+    );
+
+    const OTHER_PEER: &str = "198.51.100.20:1";
+
+    let same_client_diff_ip_1 = req_with_stashed_client_id(TEST_PEER, Some("client-a"));
+    let same_client_diff_ip_2 = req_with_stashed_client_id(OTHER_PEER, Some("client-a"));
+    let diff_client_same_ip = req_with_stashed_client_id(TEST_PEER, Some("client-b"));
+
+    let k1 = extractor.extract(&same_client_diff_ip_1).unwrap();
+    let k2 = extractor.extract(&same_client_diff_ip_2).unwrap();
+    let k3 = extractor.extract(&diff_client_same_ip).unwrap();
+
+    assert_ne!(k1, k2, "same client_id from a different IP must differ");
+    assert_ne!(k1, k3, "different client_id from the same IP must differ");
+}
+
+#[test]
+fn client_aware_extractor_falls_back_to_ip_when_no_client_id_present() {
+    // Fail-SAFE: `client_id` mode with no resolvable client_id (malformed
+    // body, or the extension was never stashed) must still rate-limit — by
+    // falling back to the IP key, not by disabling the limiter.
+    let extractor = ClientAwareKeyExtractor::new(
+        XForwardedForKeyExtractor::default(),
+        RateLimitKeyMode::ClientId,
+    );
+
+    let with_no_client_id = req_with_stashed_client_id(TEST_PEER, None);
+    let key = extractor.extract(&with_no_client_id).unwrap();
+    assert_eq!(key, peer_ip().to_string());
 }

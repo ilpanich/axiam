@@ -157,6 +157,66 @@ The 503 path preserves the SEC-026 username-enumeration defence: the login
 as the real password-verify branch, so the two remain timing- and
 status-indistinguishable under both normal and saturated load.
 
+## Rate limiting
+
+Every authentication/OAuth2 endpoint is rate-limited (see
+`crates/axiam-api-rest/src/config/rate_limit.rs`) by two cooperating layers:
+a per-replica in-memory `Governor` and a `SurrealDB`-backed shared counter
+that closes the multi-replica gap (`middleware::rate_limit_shared`). Both
+layers derive their bucket key the same way.
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` | Max `/auth/login` requests per minute per key (default `10`). |
+| `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` | Max register requests per minute per key (default `5`). |
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `20`). |
+| `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | Max password-reset requests per minute per key (default `3`). |
+| `AXIAM__RATE_LIMIT__MFA_PER_MIN` | Max MFA enroll/confirm/verify requests per minute per key (default `5`). |
+| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | Max `/oauth2/introspect` requests per minute per key (default `10`). |
+| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | Max `/oauth2/revoke` requests per minute per key (default `10`). |
+| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | Max authz-check requests per minute per key (default `300`). |
+| `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy hops to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0` — set to `1` behind a single ingress/nginx). |
+| `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
+
+### `AXIAM__RATE_LIMIT__KEY` — NAT'd-fleet key configurability (D8)
+
+By default (`ip`) every rate-limit bucket keys on the caller's source IP —
+this is the original, unchanged behavior for every endpoint.
+
+For `/oauth2/token`, `/oauth2/revoke`, and `/oauth2/introspect` **only**,
+`AXIAM__RATE_LIMIT__KEY` can instead key on the authenticating OAuth2
+`client_id` (parsed from the form-encoded `client_secret_post` body, RFC 6749
+§2.3.1):
+
+- **`ip`** (default) — key on source IP alone, exactly as before. Many
+  distinct OAuth2 clients egressing through one NAT gateway / corporate
+  proxy / load balancer share a single bucket, so one noisy or
+  misconfigured client can exhaust the token/introspect/revoke quota for
+  every other client behind the same IP.
+- **`client_id`** — key on the OAuth2 `client_id` alone. Each client gets an
+  independent bucket regardless of source IP, which fixes the NAT collision
+  above but means a client rotating IPs is still tracked as one bucket
+  (intentional — the identity that matters here is the client, not the
+  network path).
+- **`ip_client_id`** — key on the `(ip, client_id)` pair. Each client gets an
+  independent bucket **per IP it connects from**, so a compromised/leaked
+  client credential being hammered from one attacker IP doesn't throttle the
+  same client operating legitimately from its normal IP.
+
+**`/auth/login` (and every other rate-limited endpoint) always keys per-IP,
+regardless of this setting.** Login authenticates a *user* via
+username/password — there is no OAuth2 client identity anywhere in that
+request to key on. This is enforced in code (`server.rs` wires `/auth/login`
+with the plain, IP-only `build_governor`/`RateLimitShared::new`
+constructors, which never read `AXIAM__RATE_LIMIT__KEY`) and is not
+configurable — see `RateLimitKeyMode`'s doc comment in
+`crates/axiam-api-rest/src/config/rate_limit.rs` for the full rationale.
+
+When a `client_id`/`ip_client_id`-mode request has no parseable `client_id`
+(malformed body, wrong content type, etc.), the rate limiter fails **safe**
+by falling back to the IP key for that request — it never disables rate
+limiting outright.
+
 ## TLS termination
 
 AXIAM supports two TLS patterns (ASVS V9.1.2/V9.1.3). Both enforce TLS 1.3 as

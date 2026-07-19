@@ -1,12 +1,13 @@
 //! OAuth2 authorization and token endpoints.
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_core::repository::UserRepository;
 use axiam_oauth2::authorize::AuthorizeRequest;
 use axiam_oauth2::error::OAuth2Error;
+use axiam_oauth2::jwks_cache::JwksCacheResponse;
 use axiam_oauth2::oidc::{
-    JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document, build_jwks,
+    JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document,
 };
 use axiam_oauth2::token::{
     IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenResponse,
@@ -286,18 +287,50 @@ pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
 ///
 /// Returns the public signing keys used by the authorization server
 /// so that relying parties can verify JWTs without sharing a secret.
+///
+/// B3: served from an in-process cache (`state.oauth2_jwks_cache`) keyed by
+/// a hash of the source PEM, with a `Cache-Control: public, max-age=<n>`
+/// header (configurable, default 300s) and a strong `ETag`. Clients that
+/// send a matching `If-None-Match` get `304 Not Modified` with no body;
+/// clients that ignore caching headers entirely still get the identical
+/// `200 OK` + JWKS body they always did -- this is a pure additive change.
+/// See `axiam_oauth2::jwks_cache` module docs for the cache design and the
+/// documented limitations (no key-rotation mechanism exists yet; the
+/// endpoint serves one global, not per-tenant, key set).
 #[utoipa::path(
     get,
     path = "/oauth2/jwks",
     tag = "oidc",
     responses(
         (status = 200, description = "JWKS document", body = JwksDocument),
+        (status = 304, description = "Not Modified -- ETag matches If-None-Match"),
         (status = 500, description = "Key parsing error"),
     ),
 )]
-pub async fn jwks(auth_config: web::Data<AuthConfig>) -> HttpResponse {
-    match build_jwks(&auth_config.jwt_public_key_pem) {
-        Ok(doc) => HttpResponse::Ok().json(doc),
+pub async fn jwks<C: Connection + Clone>(
+    req: HttpRequest,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let if_none_match = req
+        .headers()
+        .get(actix_web::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+
+    let cache_control = state.oauth2_jwks_cache_config.cache_control_header();
+
+    match state
+        .oauth2_jwks_cache
+        .get(&state.auth_config.jwt_public_key_pem, if_none_match)
+    {
+        Ok(JwksCacheResponse::Fresh { body, etag }) => HttpResponse::Ok()
+            .content_type("application/json")
+            .insert_header(("Cache-Control", cache_control))
+            .insert_header(("ETag", etag))
+            .body(body),
+        Ok(JwksCacheResponse::NotModified { etag }) => HttpResponse::NotModified()
+            .insert_header(("Cache-Control", cache_control))
+            .insert_header(("ETag", etag))
+            .finish(),
         Err(e) => HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
             error: "server_error".into(),
             error_description: e,
@@ -439,4 +472,100 @@ fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
         error: e.error_code().to_string(),
         error_description: e.error_description(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Tests (B3: JWKS caching headers wired through the actix handler)
+// ---------------------------------------------------------------------------
+//
+// The full RFC-conformance/e2e coverage for `/oauth2/jwks` lives in
+// `tests/oauth2_*.rs`. These handler-level tests are deliberately narrow:
+// they call `jwks::<C>` directly against `AppState::for_test` (no DB
+// migrations, no running `App`/router) since the handler does not touch the
+// database at all -- just enough actix machinery (`HttpRequest`,
+// `web::Data`) to prove the `If-None-Match` -> 304 wiring and the
+// `Cache-Control`/`ETag` headers actually reach the HTTP response. The
+// cache/ETag/304 *logic itself* (RFC 7232 comparison, rotation, malformed
+// keys, etc.) is exhaustively covered by `axiam_oauth2::jwks_cache`'s own
+// unit tests -- this module does not re-test that logic, only the plumbing.
+#[cfg(test)]
+mod jwks_handler_tests {
+    use actix_web::http::header::{CACHE_CONTROL, ETAG, IF_NONE_MATCH};
+    use actix_web::test::TestRequest;
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::Mem;
+
+    use super::*;
+
+    // Test-only Ed25519 keypair with no real-world value. nosemgrep
+    const TEST_PUBLIC_KEY_PEM: &str = concat!(
+        "-----BEGIN PUBLIC KEY-----\n",
+        "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
+        "-----END PUBLIC KEY-----"
+    );
+
+    async fn test_state() -> AppState<surrealdb::engine::local::Db> {
+        let db = Surreal::new::<Mem>(()).await.expect("in-memory db");
+        let auth_config = AuthConfig {
+            jwt_public_key_pem: TEST_PUBLIC_KEY_PEM.into(),
+            ..AuthConfig::default()
+        };
+        AppState::for_test(db, auth_config)
+    }
+
+    #[actix_web::test]
+    async fn jwks_returns_200_with_cache_control_and_etag_when_no_if_none_match() {
+        let state = web::Data::new(test_state().await);
+        let req = TestRequest::default().to_http_request();
+
+        let resp = jwks(req, state).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(CACHE_CONTROL).unwrap(),
+            "public, max-age=300"
+        );
+        assert!(resp.headers().get(ETAG).is_some());
+    }
+
+    #[actix_web::test]
+    async fn jwks_returns_304_when_if_none_match_echoes_current_etag() {
+        let state = web::Data::new(test_state().await);
+
+        // First request: discover the current ETag.
+        let first_req = TestRequest::default().to_http_request();
+        let first_resp = jwks(first_req, state.clone()).await;
+        let etag = first_resp
+            .headers()
+            .get(ETAG)
+            .expect("etag present")
+            .to_str()
+            .expect("etag is ascii")
+            .to_string();
+
+        // Second request: echo it back via If-None-Match.
+        let second_req = TestRequest::default()
+            .insert_header((IF_NONE_MATCH, etag.as_str()))
+            .to_http_request();
+        let second_resp = jwks(second_req, state).await;
+
+        assert_eq!(second_resp.status(), actix_web::http::StatusCode::NOT_MODIFIED);
+        assert_eq!(second_resp.headers().get(ETAG).unwrap(), etag.as_str());
+        assert_eq!(
+            second_resp.headers().get(CACHE_CONTROL).unwrap(),
+            "public, max-age=300"
+        );
+    }
+
+    #[actix_web::test]
+    async fn jwks_returns_200_when_if_none_match_does_not_match() {
+        let state = web::Data::new(test_state().await);
+        let req = TestRequest::default()
+            .insert_header((IF_NONE_MATCH, "\"stale-etag-from-before-rotation\""))
+            .to_http_request();
+
+        let resp = jwks(req, state).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    }
 }

@@ -42,6 +42,7 @@ use axiam_federation::oidc::OidcFederationService;
 #[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::jwks_cache::JwksCache as Oauth2JwksCache;
 use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use secrecy::ExposeSecret;
@@ -91,6 +92,11 @@ struct AppConfig {
     grpc: GrpcConfig,
     #[serde(default)]
     authz: axiam_authz::AuthzConfig,
+    /// B3: `GET /oauth2/jwks` HTTP caching config (currently just the
+    /// `Cache-Control` max-age). Configured via `AXIAM__OAUTH2__*` env vars,
+    /// e.g. `AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS`.
+    #[serde(default)]
+    oauth2: axiam_oauth2::jwks_cache::JwksCacheConfig,
     #[serde(default)]
     amqp: AmqpConfig,
     #[serde(default)]
@@ -510,6 +516,10 @@ async fn main() -> std::io::Result<()> {
         SurrealFederationLoginStateRepository::new(db.client_cloned().await);
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
+    // B3: process-wide in-process cache for AXIAM's OWN `GET /oauth2/jwks`
+    // response (distinct from the federation JWKS cache above -- see
+    // `axiam_oauth2::jwks_cache` module docs).
+    let oauth2_jwks_cache = Arc::new(Oauth2JwksCache::new());
     // Disable automatic redirects to prevent SSRF bypass (an HTTPS URL
     // could redirect to http:// or an internal host). Apply a global
     // timeout for consistent outbound HTTP behaviour.
@@ -920,6 +930,8 @@ async fn main() -> std::io::Result<()> {
         federation_login_state_repo: federation_login_state_repo.clone(),
         http_client: http_client.clone(),
         jwks_cache: jwks_cache.clone(),
+        oauth2_jwks_cache: oauth2_jwks_cache.clone(),
+        oauth2_jwks_cache_config: config.oauth2.clone(),
         crypto_semaphore: Arc::clone(&crypto_semaphore),
         email_config_repo: email_config_repo.clone(),
         password_reset_service: password_reset_service.clone(),

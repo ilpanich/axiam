@@ -266,7 +266,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::post().to(handlers::oauth2::introspect::<C>)),
             )
-            .route("/jwks", web::get().to(handlers::oauth2::jwks))
+            .route("/jwks", web::get().to(handlers::oauth2::jwks::<C>))
             .route("/userinfo", web::get().to(handlers::oauth2::userinfo::<C>)),
     );
     let api_scope = web::scope("/api/v1")

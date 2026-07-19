@@ -1,6 +1,7 @@
 //! Core authorization engine implementing RBAC with resource hierarchy.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axiam_core::error::AxiamResult;
 use axiam_core::models::permission::PermissionGrant;
@@ -11,6 +12,7 @@ use axiam_core::repository::{
 use tracing::Instrument;
 use uuid::Uuid;
 
+use crate::decision_cache::DecisionCache;
 use crate::types::{AccessDecision, AccessRequest};
 
 /// Permission evaluation engine.
@@ -36,6 +38,11 @@ where
     scope_repo: S,
     #[allow(dead_code)]
     group_repo: G,
+    /// Optional per-tenant decision cache (D7). `None` unless
+    /// `with_decision_cache` was called (feature-flagged in `axiam-server`).
+    /// When `None`, `check_access` / `check_access_batch` behave exactly as a
+    /// build without the cache.
+    decision_cache: Option<Arc<DecisionCache>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +130,39 @@ where
             resource_repo,
             scope_repo,
             group_repo,
+            decision_cache: None,
+        }
+    }
+
+    /// Attach a shared [`DecisionCache`] to this engine (D7). Consumed builder
+    /// style so existing `new(..)` call sites are unaffected. `axiam-server`
+    /// calls this only when `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true`, and
+    /// passes the **same** `Arc<DecisionCache>` to every engine (REST, gRPC,
+    /// AMQP) so a REST-triggered invalidation is seen by all read paths.
+    #[must_use]
+    pub fn with_decision_cache(mut self, cache: Arc<DecisionCache>) -> Self {
+        self.decision_cache = Some(cache);
+        self
+    }
+
+    /// Immediately drop every cached decision for `tenant_id`. No-op when no
+    /// cache is attached. Called by the REST mutation handlers for coarse,
+    /// access-narrowing changes whose affected-subject set isn't known without
+    /// a query (grant revoke, role/permission delete or update, group-role
+    /// unassignment, resource reparent/delete).
+    pub fn invalidate_tenant(&self, tenant_id: Uuid) {
+        if let Some(cache) = self.decision_cache.as_ref() {
+            cache.invalidate_tenant(tenant_id);
+        }
+    }
+
+    /// Immediately drop every cached decision for a single `subject_id` within
+    /// `tenant_id`. No-op when no cache is attached. Called by the REST mutation
+    /// handlers when exactly one subject's effective permissions change (user
+    /// role unassign/assign, group membership add/remove).
+    pub fn invalidate_subject(&self, tenant_id: Uuid, subject_id: Uuid) {
+        if let Some(cache) = self.decision_cache.as_ref() {
+            cache.invalidate_subject(tenant_id, subject_id);
         }
     }
 
@@ -144,6 +184,29 @@ where
         )
     )]
     pub async fn check_access(&self, request: &AccessRequest) -> AxiamResult<AccessDecision> {
+        // D7 fast path: when a decision cache is attached (feature-flagged),
+        // a fresh cached decision skips the DB round-trips entirely. When no
+        // cache is attached this whole block is absent and the call is
+        // identical to a build without the cache.
+        if let Some(cache) = self.decision_cache.as_ref()
+            && let Some(decision) = cache.get(request)
+        {
+            return Ok(decision);
+        }
+        let decision = self.evaluate(request).await?;
+        if let Some(cache) = self.decision_cache.as_ref() {
+            // Cache the FULL decision (allow *or* deny-with-reason), so a hit
+            // is byte-identical to a miss.
+            cache.insert(request, decision.clone());
+        }
+        Ok(decision)
+    }
+
+    /// Uncached RBAC evaluation — the actual algorithm (3–4 sequential DB
+    /// round-trips). Kept as a separate method so the [`Self::check_access`]
+    /// cache wrapper can never alter decision or deny-reason semantics: a cache
+    /// hit returns exactly what this would have produced.
+    async fn evaluate(&self, request: &AccessRequest) -> AxiamResult<AccessDecision> {
         // 1. Fetch all role assignments (direct + group) with resource scope.
         let assignments = self
             .role_repo
@@ -185,7 +248,9 @@ where
         let grants_by_role = self
             .permission_repo
             .get_role_permission_grants_for_roles(request.tenant_id, &unique_role_ids)
-            .instrument(tracing::debug_span!("db.get_role_permission_grants_for_roles"))
+            .instrument(tracing::debug_span!(
+                "db.get_role_permission_grants_for_roles"
+            ))
             .await?;
 
         if grants_allow(
@@ -236,15 +301,52 @@ where
     /// `get_user_role_assignments`, one `get_ancestors`, and one batched
     /// `get_role_permission_grants_for_roles` across every applicable role in
     /// the batch.
+    pub async fn check_access_batch(
+        &self,
+        requests: &[AccessRequest],
+    ) -> AxiamResult<Vec<AccessDecision>> {
+        // D7: with no cache attached, this is exactly the D1 coalesced path —
+        // zero behaviour change.
+        let Some(cache) = self.decision_cache.as_ref() else {
+            return self.evaluate_batch(requests).await;
+        };
+
+        // Cache-enabled path: serve hits from the cache, evaluate only the
+        // misses (still via the coalesced batch path so shared lookups are
+        // resolved once), then backfill the cache. Input order is preserved.
+        let mut results: Vec<Option<AccessDecision>> =
+            requests.iter().map(|r| cache.get(r)).collect();
+
+        let miss_indices: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.is_none().then_some(i))
+            .collect();
+
+        if !miss_indices.is_empty() {
+            let miss_requests: Vec<AccessRequest> =
+                miss_indices.iter().map(|&i| requests[i].clone()).collect();
+            let miss_decisions = self.evaluate_batch(&miss_requests).await?;
+            for (slot, &i) in miss_indices.iter().enumerate() {
+                let decision = miss_decisions[slot].clone();
+                cache.insert(&requests[i], decision.clone());
+                results[i] = Some(decision);
+            }
+        }
+
+        // Every slot is now filled (hit or freshly evaluated).
+        Ok(results.into_iter().map(|d| d.expect("filled")).collect())
+    }
+
+    /// Uncached coalesced batch evaluation (the D1 fast path). Separated from
+    /// [`Self::check_access_batch`] so the D7 cache wrapper cannot alter
+    /// decision/deny-reason semantics.
     #[tracing::instrument(
         name = "authz.check_access_batch",
         skip(self, requests),
         fields(batch_size = requests.len())
     )]
-    pub async fn check_access_batch(
-        &self,
-        requests: &[AccessRequest],
-    ) -> AxiamResult<Vec<AccessDecision>> {
+    async fn evaluate_batch(&self, requests: &[AccessRequest]) -> AxiamResult<Vec<AccessDecision>> {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
@@ -305,7 +407,10 @@ where
         //     that any scoped, role-bearing item targets.
         let mut scopes_by_resource: HashMap<(Uuid, Uuid), Vec<axiam_core::models::scope::Scope>> =
             HashMap::new();
-        for req in requests.iter().filter(|r| r.scope.is_some() && has_roles(r)) {
+        for req in requests
+            .iter()
+            .filter(|r| r.scope.is_some() && has_roles(r))
+        {
             let key = (req.tenant_id, req.resource_id);
             if let std::collections::hash_map::Entry::Vacant(slot) = scopes_by_resource.entry(key) {
                 let scopes = self
@@ -328,7 +433,6 @@ where
         enum PreDecision {
             Decided(AccessDecision),
             NeedsGrants {
-                tenant_id: Uuid,
                 unique_role_ids: Vec<Uuid>,
                 requested_scope_id: Option<Uuid>,
             },
@@ -399,7 +503,6 @@ where
             }
 
             pre.push(PreDecision::NeedsGrants {
-                tenant_id: req.tenant_id,
                 unique_role_ids,
                 requested_scope_id,
             });
@@ -428,7 +531,6 @@ where
             match item {
                 PreDecision::Decided(d) => decisions.push(d),
                 PreDecision::NeedsGrants {
-                    tenant_id: _,
                     unique_role_ids,
                     requested_scope_id,
                 } => {

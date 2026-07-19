@@ -157,6 +157,26 @@ The 503 path preserves the SEC-026 username-enumeration defence: the login
 as the real password-verify branch, so the two remain timing- and
 status-indistinguishable under both normal and saturated load.
 
+## Authorization decision cache (optional, D7)
+
+An optional per-tenant cache of authorization decisions that skips the 3–4
+SurrealDB round-trips per check. **Off by default**; enabling it changes
+performance only, never the decision an endpoint returns.
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | Master switch. Default `false` — the authorization path is then byte-for-byte identical to a build without the cache. Set `true` to enable. |
+| `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | Cached-decision TTL in seconds (default `5`). Also the upper bound on revocation latency if an invalidation event is ever missed — keep it short. |
+| `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | Max cached decisions **per tenant** before FIFO eviction (default `10000`). Memory bound. |
+
+**Security posture (safe under AXIAM's additive allow-wins / default-deny
+model):** every access-*narrowing* mutation (role/grant/group/resource change)
+invalidates the affected cache entries immediately, wired into the mutation
+handlers — so **no revocation can leave a stale allow**. The TTL is only a
+bounded-staleness backstop: even a missed invalidation self-heals within
+`AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Full rationale and the per-mutation
+invalidation table are in the [Admin Guide](../admin/README.md#authorization-decision-cache-optional-d7).
+
 ## Rate limiting
 
 Every authentication/OAuth2 endpoint is rate-limited (see

@@ -50,6 +50,25 @@ pub trait AuthzChecker: Send + Sync {
             Ok(out)
         })
     }
+
+    /// Invalidate **all** cached authorization decisions for a tenant (D7).
+    ///
+    /// The default implementation is a no-op — checkers without a decision
+    /// cache (the test doubles, and the engine when the cache feature flag is
+    /// off) simply ignore it. The real [`AuthorizationEngine`] forwards to its
+    /// cache. Mutation handlers call this after an access-*narrowing* change
+    /// whose affected-subject set isn't cheaply known (grant revoke,
+    /// role/permission delete or update, group-role unassignment, resource
+    /// reparent/delete) so that **no revocation can leave a stale allow**.
+    fn invalidate_tenant(&self, _tenant_id: Uuid) {}
+
+    /// Invalidate cached decisions for a single subject within a tenant (D7).
+    ///
+    /// Default no-op (see [`Self::invalidate_tenant`]). Mutation handlers call
+    /// this when exactly one subject's effective permissions change (user role
+    /// unassign/assign, group membership add/remove) — the targeted, cheaper
+    /// alternative to a full tenant flush.
+    fn invalidate_subject(&self, _tenant_id: Uuid, _subject_id: Uuid) {}
 }
 
 impl<R, P, Res, S, G> AuthzChecker for AuthorizationEngine<R, P, Res, S, G>
@@ -72,6 +91,14 @@ where
         requests: &'a [AccessRequest],
     ) -> Pin<Box<dyn Future<Output = AxiamResult<Vec<AccessDecision>>> + Send + 'a>> {
         Box::pin(AuthorizationEngine::check_access_batch(self, requests))
+    }
+
+    fn invalidate_tenant(&self, tenant_id: Uuid) {
+        AuthorizationEngine::invalidate_tenant(self, tenant_id);
+    }
+
+    fn invalidate_subject(&self, tenant_id: Uuid, subject_id: Uuid) {
+        AuthorizationEngine::invalidate_subject(self, tenant_id, subject_id);
     }
 }
 

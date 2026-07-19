@@ -169,3 +169,55 @@ Groups themselves are created via `POST /api/v1/groups` and populated via
 `POST /api/v1/groups/{group_id}/members`. Assigning a role to a group is the
 recommended pattern for managing access for a team rather than granting
 roles to individual users one at a time.
+
+## Authorization decision cache (optional, D7)
+
+AXIAM can cache effective-permission decisions per tenant to cut the 3–4
+SurrealDB round-trips each authorization check would otherwise make. It is
+**off by default** and controlled entirely by configuration — enabling it
+changes performance, never the decision an endpoint returns.
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | `false` | Master switch. When `false`, the authorization path is byte-for-byte identical to a build without the cache. |
+| `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | `5` | Time-to-live for a cached decision, in seconds. Also the **bound on worst-case revocation latency** if an invalidation event is ever missed (see below). Keep it short. |
+| `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | `10000` | Maximum cached decisions retained **per tenant** before FIFO eviction (memory bound). |
+
+The cache key is `(tenant, subject, resource, action, scope)` and it stores the
+**full** decision — an allow, or a deny *with its exact reason* — so a cache
+hit is indistinguishable from a fresh evaluation.
+
+### Why it is safe: immediate invalidation on revocation
+
+AXIAM's RBAC is **additive, allow-wins, default-deny** (no deny-override). That
+makes the two staleness directions asymmetric:
+
+- A **stale deny** is harmless — it only forces a redundant re-check; the
+  subject is briefly under-privileged, never over-privileged.
+- A **stale allow after a revocation** is the *only* dangerous case — a subject
+  keeping access they no longer have.
+
+So the cache is not left to expire on its own for security. Every mutation that
+can narrow access **invalidates the affected cache entries immediately**, wired
+directly into the mutation handlers:
+
+| Mutation | Invalidation |
+| --- | --- |
+| Unassign role from user; remove user from group | Targeted — that one subject |
+| Assign role to user; add user to group (widening) | Targeted — that one subject |
+| Unassign role from group; revoke grant from role; delete/update role or permission; assign role to group or grant to role; create/update/delete resource; rename/delete scope; delete group | Per-tenant flush (affected-subject set not known without a query) |
+
+A per-tenant flush is the conservative fallback for coarse mutations; it can
+never leave a stale allow. **The security guarantee is: no revocation leaves a
+stale allow** — the cache entry is dropped in the same request that performs
+the revocation, before the response returns.
+
+### Bounded-staleness backstop
+
+The TTL is a second line of defence, not the primary one. Even if an
+invalidation were somehow missed (a bug, an out-of-band write straight to the
+database), a stale allow can persist for **at most
+`AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`** before it is force-evicted and
+re-evaluated. The short default (5 s) keeps that worst case small. Operators who
+want a tighter bound can lower the TTL; those who never mutate roles out-of-band
+can safely raise it.

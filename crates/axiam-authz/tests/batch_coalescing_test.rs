@@ -26,8 +26,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use axiam_authz::types::{AccessDecision, AccessRequest};
 use axiam_authz::AuthorizationEngine;
+use axiam_authz::types::{AccessDecision, AccessRequest};
 use axiam_core::error::AxiamResult;
 use axiam_core::models::group::{CreateGroup, Group, UpdateGroup};
 use axiam_core::models::permission::{
@@ -306,7 +306,11 @@ impl ScopeRepository for MockScopeRepo {
         resource_id: Uuid,
     ) -> AxiamResult<Vec<Scope>> {
         self.counter.fetch_add(1, Ordering::SeqCst);
-        Ok(self.by_resource.get(&resource_id).cloned().unwrap_or_default())
+        Ok(self
+            .by_resource
+            .get(&resource_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     // --- unused ---
@@ -363,8 +367,13 @@ impl GroupRepository for MockGroupRepo {
     }
 }
 
-type MockEngine =
-    AuthorizationEngine<MockRoleRepo, MockPermissionRepo, MockResourceRepo, MockScopeRepo, MockGroupRepo>;
+type MockEngine = AuthorizationEngine<
+    MockRoleRepo,
+    MockPermissionRepo,
+    MockResourceRepo,
+    MockScopeRepo,
+    MockGroupRepo,
+>;
 
 /// Build an engine where `subject` has a role granting `action` on `resource`.
 fn build_engine(
@@ -636,8 +645,5 @@ async fn empty_subject_denies_without_extra_round_trips() {
     // No applicable subject -> engine must not walk ancestors or fetch grants.
     assert_eq!(Counters::get(&counters.ancestors), 0);
     assert_eq!(Counters::get(&counters.grants), 0);
-    assert_eq!(
-        batched[0],
-        AccessDecision::Deny("no roles assigned".into())
-    );
+    assert_eq!(batched[0], AccessDecision::Deny("no roles assigned".into()));
 }

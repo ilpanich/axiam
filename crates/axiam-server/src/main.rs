@@ -630,15 +630,36 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
+    // D7: build the shared authorization decision cache. `None` unless
+    // `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true` — when `None`, every engine
+    // below is constructed exactly as before (no cache, zero behaviour
+    // change). The SAME `Arc<DecisionCache>` is cloned into the REST, gRPC and
+    // AMQP engines so an invalidation triggered from a REST mutation handler is
+    // observed on every read path (all role/permission/resource mutations are
+    // REST endpoints).
+    let decision_cache = config.authz.build_decision_cache();
+    if decision_cache.is_some() {
+        tracing::info!(
+            ttl_secs = config.authz.decision_cache_ttl_secs,
+            max_entries = config.authz.decision_cache_max_entries,
+            "AuthZ decision cache ENABLED (D7)"
+        );
+    }
+
     // Build REST-facing authorization checker (D-01, D-02).
-    let rest_authz: Arc<dyn axiam_api_rest::authz::AuthzChecker> =
-        Arc::new(axiam_authz::AuthorizationEngine::new(
+    let rest_authz: Arc<dyn axiam_api_rest::authz::AuthzChecker> = {
+        let engine = axiam_authz::AuthorizationEngine::new(
             role_repo.clone(),
             permission_repo.clone(),
             resource_repo.clone(),
             scope_repo.clone(),
             group_repo.clone(),
-        ));
+        );
+        Arc::new(match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        })
+    };
 
     // Spawn AMQP authorization consumer on a background task.
     // Uses a publisher channel because the consumer also publishes responses.
@@ -646,13 +667,19 @@ async fn main() -> std::io::Result<()> {
         .create_publisher_channel()
         .await
         .expect("Failed to create AMQP authz publisher channel");
-    let amqp_engine = axiam_authz::AuthorizationEngine::new(
-        role_repo.clone(),
-        permission_repo.clone(),
-        resource_repo.clone(),
-        scope_repo.clone(),
-        group_repo.clone(),
-    );
+    let amqp_engine = {
+        let engine = axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        );
+        match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        }
+    };
     // SEC-022/SECHRD-08: Resolve the mandatory AMQP master signing key. In a
     // debug build this falls back to a documented dev-only default when
     // unset; in a release build (the production container image) an unset
@@ -802,13 +829,19 @@ async fn main() -> std::io::Result<()> {
 
     // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();
-    let grpc_engine = axiam_authz::AuthorizationEngine::new(
-        role_repo.clone(),
-        permission_repo.clone(),
-        resource_repo.clone(),
-        scope_repo.clone(),
-        group_repo.clone(),
-    );
+    let grpc_engine = {
+        let engine = axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        );
+        match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        }
+    };
     let grpc_user_repo = user_repo.clone();
     let grpc_auth_config = config.auth.clone();
     let grpc_config = config.grpc.clone();

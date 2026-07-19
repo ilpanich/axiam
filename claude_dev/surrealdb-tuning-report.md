@@ -251,3 +251,132 @@ No timing assertion was added, on purpose.
   authz_batch_rest/grpc) before/after, and reading the new trace to confirm
   the 15→3 round-trip drop and to chase the single-check p99 tail toward the
   H1/D6 connection fix.
+
+---
+
+## 8. D7 — Authorization decision cache (design + implemented behind a flag)
+
+D7 builds *on top of* D1 (round-trip coalescing) and D6 (this report): D1
+removed the redundant per-item queries in a batch, and this report established
+that the authz wall is the shared-connection serialization, not CPU. The
+decision cache attacks the remaining cost — the DB round-trips themselves — by
+memoizing decisions so a repeated check does **zero** DB work. It is
+feature-flagged and **defaults off**, so it changes nothing until an operator
+opts in.
+
+### 8.1 What is cached and where
+
+- **Module:** `crates/axiam-authz/src/decision_cache.rs` (`DecisionCache`,
+  `DecisionCacheConfig`).
+- **Key:** `(tenant_id, subject, resource, action, scope)`. Organised as
+  per-tenant shards under one mutex, so a per-tenant flush is O(1) (drop the
+  shard) and one tenant's churn can't evict another's entries.
+- **Value:** the **full** `AccessDecision` — `Allow`, or `Deny(reason)` with the
+  exact deny string — plus an `Instant` stamp. A hit is therefore byte-identical
+  to a miss (allow and deny alike; deny reasons preserved verbatim).
+- **Eviction:** TTL on read (expired entry is dropped and treated as a miss) +
+  a per-tenant FIFO size cap (`max_entries_per_tenant`).
+
+### 8.2 Engine integration (zero-cost when off)
+
+`AuthorizationEngine` gained an `Option<Arc<DecisionCache>>` field, `None` by
+default. `new(..)` is unchanged (all existing call sites, tests, benches
+untouched); a builder `with_decision_cache(Arc<DecisionCache>)` attaches one.
+
+- `check_access`: consult cache → on hit return; on miss run the *unchanged*
+  `evaluate` body, then insert. The evaluation logic was moved verbatim into a
+  private `evaluate`, so a hit returns exactly what a miss would.
+- `check_access_batch`: when no cache is attached it calls the D1 coalesced
+  `evaluate_batch` directly — **byte-for-byte the current behaviour**. When a
+  cache is attached, it serves per-item hits from the cache and evaluates only
+  the misses through the same coalesced path, preserving input order.
+
+`axiam-server` builds **one** shared `Arc<DecisionCache>` (via
+`AuthzConfig::build_decision_cache`, `None` unless enabled) and clones it into
+the REST, gRPC and AMQP engines, so an invalidation triggered by a REST mutation
+is observed on every read path.
+
+### 8.3 Invalidation — the security-critical half
+
+AXIAM's RBAC is additive allow-wins / default-deny, so the only dangerous
+staleness is a **stale allow surviving a revocation**. Invalidation is wired
+into the REST mutation handlers through two new `AuthzChecker` trait methods
+(`invalidate_tenant`, `invalidate_subject`; default no-ops, forwarded to the
+cache by the engine impl). Granularity, and why no revocation can leave a stale
+allow:
+
+| Mutation path (REST handler) | Invalidation | Why it's safe |
+| --- | --- | --- |
+| `roles::unassign_from_user` | `invalidate_subject(t, user)` | Only that subject's roles change. |
+| `groups::remove_member` | `invalidate_subject(t, user)` | Only that subject's inherited roles change. |
+| `roles::assign_to_user`, `groups::add_member` | `invalidate_subject(t, user)` | Widening (safe direction); flushed for prompt visibility. |
+| `roles::unassign_from_group` | `invalidate_tenant(t)` | Affects every group member — set unknown without a query → flush. |
+| `permissions::revoke_from_role` | `invalidate_tenant(t)` | Affects every subject holding the role → flush. |
+| `roles::delete`, `roles::update` | `invalidate_tenant(t)` | Role removal / `is_global` change can narrow access for an unknown subject set → flush. |
+| `permissions::delete`, `permissions::update` | `invalidate_tenant(t)` | Permission removal / `action` change narrows access → flush. |
+| `permissions::grant_to_role`, `roles::assign_to_group` | `invalidate_tenant(t)` | Widening; flushed for prompt visibility. |
+| `resources::update`, `resources::delete` | `invalidate_tenant(t)` | Re-parent/delete changes which ancestor-scoped roles cascade → can narrow → flush. |
+| `scopes::update`, `scopes::delete` | `invalidate_tenant(t)` | Decisions are cached by scope *name*; rename/delete narrows scoped access → flush. |
+| `groups::delete` | `invalidate_tenant(t)` | Drops inherited roles for all members → flush. |
+
+Targeted subject invalidation is used only where exactly one subject is
+provably affected; every other (coarse) mutation uses a per-tenant flush. A
+flush is always sound — it cannot leave *any* stale entry for the tenant. The
+invalidation happens **in the same request that performs the mutation, before
+its response returns.**
+
+### 8.4 Bounded-staleness trade-off (documented explicitly)
+
+The TTL (default 5 s) is a *backstop*, not the primary safety mechanism. Even if
+an invalidation event were missed (a bug, or an out-of-band write straight to
+SurrealDB that bypasses the handlers), a stale allow self-heals within
+`AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` when the entry expires and is
+re-evaluated. So worst-case revocation latency ≤ TTL, always.
+
+### 8.5 Config keys (all default to the no-op / off state)
+
+- `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` — default **`false`**.
+- `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` — default `5`.
+- `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` — default `10000` (per tenant).
+
+Documented for operators in `docs/admin/README.md` and
+`docs/deployment/README.md`.
+
+### 8.6 Tests (sandbox — logic + invalidation correctness)
+
+- `src/decision_cache.rs` unit tests: hit==insert, deny-reason preserved
+  verbatim, action/scope key distinctness, TTL expiry, targeted-subject vs
+  whole-tenant invalidation, per-tenant FIFO cap, re-insert doesn't double-grow.
+- `src/config.rs`: defaults are off/conservative; `build_decision_cache`
+  returns `None` when disabled / `Some` when enabled; overrides deserialize.
+- `tests/decision_cache_integration_test.rs` (8 engine-level tests via mutable
+  counting mock repos):
+  - cache hit == miss for allow **and** deny, and the hit issues **no** DB
+    round-trips (counter proof);
+  - TTL expiry forces re-evaluation (DB queried again);
+  - **`revocation_invalidation_denies_immediately`** — grant → check (allow,
+    cached) → revoke via the mutation path (store change +
+    `invalidate_subject`, exactly what `unassign_from_user`/`remove_member`
+    call) → next check denies **immediately**, under a 60 s TTL, proving
+    event-driven (not TTL-driven) enforcement;
+  - a control (`without_invalidation_stale_allow_persists_until_ttl`) that
+    isolates invalidation as the mechanism — with the store changed but the
+    hook skipped, the cache does serve a stale allow within the TTL;
+  - `tenant_flush_enforces_revocation_immediately` (the coarse path);
+  - **feature-flag-off** path: every check hits the DB, decisions unchanged,
+    invalidation calls are harmless no-ops;
+  - the batch path caches and invalidates identically.
+
+### 8.7 Acceptance status
+
+- Code + unit/integration tests: **complete** in the sandbox.
+  `cargo test -p axiam-authz --lib` (config + cache unit tests) and
+  `--test decision_cache_integration_test` pass; `axiam-authz` and
+  `axiam-api-rest` (lib) build clean; `cargo fmt`/`clippy` clean for
+  `axiam-authz`.
+- **Pending laptop re-run (throughput acceptance):** "authz_check_rest/grpc
+  throughput materially increases with SurrealDB no longer pegged" requires the
+  benchmark laptop and is out of scope for the CI sandbox (no live SurrealDB).
+  The security-critical half — immediate revocation enforcement via
+  invalidation — **is** proven here by the integration tests above. Enable with
+  `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true` for the before/after cells.

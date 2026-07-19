@@ -184,6 +184,9 @@ pub async fn delete<C: Connection + Clone>(
         .group_repo
         .delete(user.tenant_id, path.into_inner())
         .await?;
+    // D7 (REVOCATION — security critical): deleting a group removes its
+    // inherited roles from every member. Member set unknown here — flush tenant.
+    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -213,10 +216,17 @@ pub async fn add_member<C: Connection + Clone>(
     RequirePermission::new("groups:add_member", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    let new_member = body.user_id;
     state
         .group_repo
         .add_member(user.tenant_id, body.user_id, path.into_inner())
         .await?;
+    // D7: adding a member widens that one subject's inherited access (safe
+    // direction) — targeted flush so it takes effect immediately.
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_subject(user.tenant_id, new_member);
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -285,5 +295,11 @@ pub async fn remove_member<C: Connection + Clone>(
         .group_repo
         .remove_member(user.tenant_id, p.user_id, p.group_id)
         .await?;
+    // D7 (REVOCATION — security critical): removing a member drops the group's
+    // inherited roles for exactly this subject — targeted flush, immediate.
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_subject(user.tenant_id, p.user_id);
     Ok(HttpResponse::NoContent().finish())
 }

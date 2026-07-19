@@ -172,15 +172,73 @@ const keycloak = {
 
 // --- Zitadel --------------------------------------------------------------
 // OIDC endpoints at well-known paths; ROPC is generally disabled, so `login`
-// falls back to client_credentials for the comparative token-issuance number.
+// used to fall back to client_credentials for the comparative token-issuance
+// number. D5 replaces that with a real password check via Zitadel's session
+// API v2 (`POST /v2/sessions`, `checks.password`) so oauth2_password_login
+// measures an actual Argon2/bcrypt-class password verification on Zitadel,
+// same as axiam/keycloak.
 const zitadel = {
-  // ROPC is generally disabled on Zitadel, so "login" falls back to
-  // client_credentials for the comparative token-issuance number — this is NOT
-  // a password verification, so tag the built request `fallback: true` and
-  // doOp()/report.py surface it (bench_fallback counter, "fallback-op"
-  // annotation, excluded from head-to-head winner tables).
+  // Real password verification via the session API v2: create a session with
+  // a `password` check factor over the seeded human bench user. This is NOT
+  // client_credentials — it drives Zitadel's actual password-hash comparison
+  // — so the built request is tagged `fallback: true` ONLY in the degraded
+  // path below (no seeded human user / session credential available); the
+  // normal-path request is untagged, so doOp()/report.py stop flagging this
+  // cell as a fallback op (D5 acceptance criterion).
+  //
+  // Session-create is an admin/management-style call (not a user-facing OIDC
+  // endpoint), so it needs its own bearer credential — seed.sh mints/derives
+  // one (the Zitadel instance PAT — see seed_zitadel()) and exports it as
+  // BENCH_ZITADEL_SESSION_PAT, alongside the seeded human user's id as
+  // BENCH_ZITADEL_USER_ID. Read directly via `__ENV` (a k6 global available
+  // to every module, same mechanism config.js's str()/num() use) rather than
+  // adding fields to `cfg` — config.js is out of scope for this change.
+  //
+  // IMPORTANT interaction with auth.js `mintUserToken()` (used by the
+  // userinfo scenario): a session-create response returns a `sessionToken`,
+  // NOT an OIDC access token — it is useless as a `/userinfo` bearer.
+  // `mintUserToken()` only accepts login()'s response as a real user token
+  // when `readAccessFromLogin()` finds an `access_token`/`token` JSON field
+  // or an `axiam_access` cookie (see auth.js). The v2 CreateSession body has
+  // neither (its field is literally named `sessionToken`, which does not
+  // match `access_token`/`token`), so `mintUserToken()` naturally falls
+  // through to its own `clientCredentials()` fallback for userinfo — exactly
+  // the previous behavior — WITHOUT needing this function to tag its result
+  // `fallback: true`. That tag is reserved for the "session API unavailable"
+  // guard below, per the D5 spec. No change to auth.js was required or made;
+  // this is a deliberate design choice, not an oversight.
   login() {
-    return Object.assign({}, zitadel.clientCredentials(), { fallback: true });
+    const userId = __ENV.BENCH_ZITADEL_USER_ID;
+    const sessionPat = __ENV.BENCH_ZITADEL_SESSION_PAT;
+    if (!userId || !sessionPat) {
+      // No seeded human user / session-creation credential (e.g. manual
+      // client-only seeding via BENCH_CLIENT_ID/SECRET, or the
+      // BENCH_ZITADEL_ALLOW_UNSEEDED jwks-only mode — see seed.sh) — the
+      // session API can't be exercised, so fall back to the old comparative
+      // token-issuance number and tag it accordingly (A3 fallback).
+      return Object.assign({}, zitadel.clientCredentials(), { fallback: true });
+    }
+    return {
+      method: 'POST',
+      url: `${baseUrl()}/v2/sessions`,
+      body: JSON.stringify({
+        checks: {
+          user: { userId },
+          password: { password: cfg.password },
+        },
+      }),
+      params: {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionPat}`,
+        },
+      },
+      // Zitadel's v2 resource-creation endpoints return 201 in the docs/
+      // examples this was modeled on; unconfirmed against a live instance
+      // (no Zitadel available in this sandbox — see D5 report). If a live
+      // run shows 200 instead, this is the only line to change.
+      expect: 201,
+    };
   },
   clientCredentials() {
     // Add the bench project's reserved audience scope so the issued token is

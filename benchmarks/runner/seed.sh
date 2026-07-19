@@ -63,6 +63,15 @@ export BENCH_RESOURCE_ID=${BENCH_RESOURCE_ID:-}
 export BENCH_PROJECT_ID=${PROJECT_ID:-}
 export BENCH_INTROSPECT_CLIENT_ID=${INTROSPECT_CLIENT_ID:-}
 export BENCH_INTROSPECT_CLIENT_SECRET='${INTROSPECT_CLIENT_SECRET:-}'
+# Zitadel-only (D5): the seeded human user's id + a bearer credential for the
+# session API v2 (POST /v2/sessions), used by zitadel.login() in targets.js to
+# perform a REAL password check instead of the old client_credentials
+# fallback. Empty for axiam/keycloak, and empty for zitadel configurations
+# that couldn't provision a human user (manual client-only seeding, or
+# BENCH_ZITADEL_ALLOW_UNSEEDED) — targets.js falls back to client_credentials
+# (tagged fallback: true) whenever either is empty.
+export BENCH_ZITADEL_USER_ID=${ZITADEL_USER_ID:-}
+export BENCH_ZITADEL_SESSION_PAT='${ZITADEL_SESSION_PAT:-}'
 EOF
   chmod 600 "$SEED_ENV"
   echo "[seed] wrote $SEED_ENV"
@@ -408,6 +417,48 @@ seed_zitadel() {
     && [ -n "$INTROSPECT_CLIENT_ID" ] && [ -n "$INTROSPECT_CLIENT_SECRET" ] \
     || { echo "[seed/zitadel] provisioning returned an empty id/secret" >&2; exit 1; }
   echo "[seed/zitadel] provisioned client_id=$CLIENT_ID project=$PROJECT_ID"
+
+  # --- D5: human bench user + password, for a REAL password check via the
+  # session API v2 (see targets.js zitadel.login()). Deliberately soft-fail
+  # here (warn + continue with the machine-user-only fixture) rather than
+  # exit 1 like the rest of this function: the D5 spec calls for a graceful
+  # A3-style fallback to client_credentials when the session flow can't be
+  # provisioned/exercised, not a hard seed failure over what is otherwise a
+  # perfectly usable fixture for every other scenario. If a human user IS
+  # reported created, the smoke check below (smoke_zitadel) verifies the
+  # session-create flow end-to-end and DOES fail closed (A2) — a seed that
+  # looks complete but can't actually log in must not pass silently.
+  #
+  # Uses management v1 (POST /management/v1/users/human), the human-user
+  # counterpart of the /management/v1/users/machine call above, for
+  # consistency with the rest of this function. Like the machine
+  # user/project/app above, this assumes a fresh instance per seed run (the
+  # FIRSTINSTANCE PAT comment above already documents that re-seeding without
+  # wiping the volume is unsupported for zitadel), so no create-or-find
+  # idempotency handling is attempted — a 409 here is treated the same as any
+  # other failure: warn and fall back.
+  echo "[seed/zitadel] creating benchmark human user (password login, D5)"
+  local hu_resp hu_code hu_body
+  hu_resp=$(curl -sSk -H "Authorization: Bearer $PAT" -H "Content-Type: application/json" \
+    -X POST "$BASE/management/v1/users/human" \
+    --data "{\"userName\":\"$BENCH_USERNAME\",\"profile\":{\"firstName\":\"Bench\",\"lastName\":\"User\"},\"email\":{\"email\":\"bench@bench.dev\",\"isEmailVerified\":true},\"password\":\"$BENCH_PASSWORD\",\"passwordChangeRequired\":false}" \
+    -w $'\n%{http_code}') || hu_resp=$'\n000'
+  hu_code="${hu_resp##*$'\n'}"; hu_body="${hu_resp%$'\n'*}"
+  if [ "$hu_code" -ge 200 ] 2>/dev/null && [ "$hu_code" -lt 300 ] 2>/dev/null; then
+    ZITADEL_USER_ID=$(echo "$hu_body" | jq -r '.userId // empty' 2>/dev/null || true)
+  fi
+  if [ -n "${ZITADEL_USER_ID:-}" ]; then
+    # Session-create is an admin/management-style call, so it needs its own
+    # bearer credential at k6-request time — reuse the instance PAT read
+    # above (already proven against the management API by every zapi() call
+    # in this function) rather than minting a separate one.
+    ZITADEL_SESSION_PAT="$PAT"
+    echo "[seed/zitadel] provisioned human user id=$ZITADEL_USER_ID (session-login enabled)"
+  else
+    echo "[seed/zitadel] WARNING: human user creation failed (HTTP $hu_code): $hu_body" >&2
+    echo "[seed/zitadel] WARNING: zitadel.login() will fall back to client_credentials (tagged fallback: true — see D5 guard in targets.js)" >&2
+  fi
+
   write_seed
 }
 
@@ -568,6 +619,39 @@ smoke_zitadel() {
 
   echo "[seed/smoke/zitadel] userinfo"
   smoke_get zitadel-userinfo "$BASE/oidc/v1/userinfo" "Authorization: Bearer $cc_token" >/dev/null
+
+  # D5: real password login via the session API v2. Only exercised when
+  # seed_zitadel() reports a provisioned human user + session PAT; when it
+  # doesn't (see the soft-fail there), zitadel.login() falls back to
+  # client_credentials (A3) and there is nothing session-specific to smoke
+  # here — that fallback path is already covered by the client_credentials
+  # check above. When a human user WAS reported provisioned, this check is
+  # fail-closed (A2): a seed that claims a working session-login fixture but
+  # can't actually create a session must not pass silently.
+  if [ -n "${ZITADEL_USER_ID:-}" ] && [ -n "${ZITADEL_SESSION_PAT:-}" ]; then
+    echo "[seed/smoke/zitadel] session create (password check) — real password verification"
+    local sess_resp sess_code sess_body sess_token
+    sess_resp=$(curl -sSk -X POST "$BASE/v2/sessions" \
+      -H "Authorization: Bearer $ZITADEL_SESSION_PAT" -H "Content-Type: application/json" \
+      -d "{\"checks\":{\"user\":{\"userId\":\"$ZITADEL_USER_ID\"},\"password\":{\"password\":\"$BENCH_PASSWORD\"}}}" \
+      -w $'\n%{http_code}') || smoke_fail zitadel-session-create "curl request failed"
+    sess_code="${sess_resp##*$'\n'}"; sess_body="${sess_resp%$'\n'*}"
+    # Accept 200 or 201: Zitadel v2 create-endpoints are documented/observed
+    # returning 201 (what targets.js expects — see the comment there), but
+    # this has not been confirmed against a live instance in this sandbox, so
+    # the smoke check tolerates either rather than false-failing a seed that
+    # actually works. If 200 turns out to be correct, update targets.js's
+    # `expect: 201` to match — the acceptance criterion is a real password
+    # check happening at all, not the exact status code.
+    case "$sess_code" in
+      200|201) : ;;
+      *) smoke_fail "zitadel-session-create (HTTP $sess_code)" "$sess_body" ;;
+    esac
+    sess_token=$(echo "$sess_body" | jq -r '.sessionToken // empty')
+    [ -n "$sess_token" ] || smoke_fail zitadel-session-create-no-token "$sess_body"
+  else
+    echo "[seed/smoke/zitadel] no human user/session-PAT provisioned — password-login scenario will use the A3 client_credentials fallback (see D5 guard in targets.js)"
+  fi
 
   echo "[seed/smoke/zitadel] all smoke checks passed"
 }

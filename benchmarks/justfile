@@ -148,6 +148,38 @@ bench-up:
     fi
     docker compose -f "$COMPOSE" $PROFILE_ARG up -d --wait $BUILD_ARG
 
+    # --- Readiness gate --------------------------------------------------------
+    # `up -d --wait` only blocks until each container is *running* (or, if it has
+    # one, healthcheck-healthy). The zitadel/keycloak services declare no app-level
+    # healthcheck, so --wait returns while the server is still running migrations /
+    # `start-from-init`. The published port is already bound by docker-proxy, so a
+    # too-early request is ACCEPTED and then RST — surfacing to k6 as
+    # "connection reset by peer" on e.g. GET /oauth/v2/keys a couple of seconds in.
+    # Gate on the target's real HTTP readiness at the EXACT scheme/host/port k6 will
+    # hit (BENCH_SCHEME/BENCH_PORT come from the profile env sourced above), so
+    # neither seeding nor the k6 run can start against a not-yet-serving target.
+    READY_HOST="${BENCH_HOST:-localhost}"
+    READY_PORT="${BENCH_PORT:-${BENCH_APP_PORT:-8090}}"
+    READY_BASE="${BENCH_SCHEME:-http}://${READY_HOST}:${READY_PORT}"
+    case "{{target}}" in
+      zitadel)  READY_URL="$READY_BASE/debug/ready" ;;    # 200 only when fully initialized
+      keycloak) READY_URL="$READY_BASE/realms/master" ;;  # 200 once the server serves
+      *)        READY_URL="$READY_BASE/health" ;;         # axiam liveness/readiness
+    esac
+    echo "[bench-up] waiting for {{target}} to serve at $READY_URL (timeout 180s)"
+    ready_deadline=$(( $(date +%s) + 180 ))
+    # -k: the TLS profiles front a throwaway private CA k6 also can't verify.
+    until curl -skf -o /dev/null "$READY_URL"; do
+      if [ "$(date +%s)" -ge "$ready_deadline" ]; then
+        echo "[bench-up] TIMEOUT: {{target}} did not become ready at $READY_URL" >&2
+        docker compose -f "$COMPOSE" $PROFILE_ARG ps >&2 || true
+        docker compose -f "$COMPOSE" $PROFILE_ARG logs --tail 40 >&2 || true
+        exit 1
+      fi
+      sleep 2
+    done
+    echo "[bench-up] {{target}} is ready."
+
 # Provision org/tenant/user/client for a target; writes results/<target>.seed.env.
 bench-seed:
     bash runner/seed.sh {{target}}

@@ -203,13 +203,32 @@ seed_keycloak() {
 seed_zitadel() {
   # Zitadel provisioning is done through its management API with a service-user
   # PAT, which requires an initial console/login step that cannot be fully
-  # scripted without a bootstrapped machine key. Provide the values manually:
-  echo "[seed/zitadel] Zitadel requires a machine key / PAT to provision via the"
-  echo "               management API. Set BENCH_CLIENT_ID / BENCH_CLIENT_SECRET"
-  echo "               from a created service user, then re-run with those exported."
+  # scripted without a bootstrapped machine key. So the client credentials are
+  # supplied manually — but fail loudly if they're missing, otherwise we'd write
+  # an empty BENCH_CLIENT_SECRET and every token scenario would 401 at k6 time
+  # (a confusing failure far from its cause). Only the unauthenticated jwks_fetch
+  # scenario would pass — set BENCH_ZITADEL_ALLOW_UNSEEDED=1 to proceed anyway.
   REALM="zitadel"
   CLIENT_ID="${BENCH_CLIENT_ID:-}"
   CLIENT_SECRET="${BENCH_CLIENT_SECRET:-}"
+  if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+    echo "[seed/zitadel] Zitadel can't be auto-provisioned (management API needs a" >&2
+    echo "               bootstrapped machine key). Create client credentials once:" >&2
+    echo "                 1. Open the console:  ${BASE}/ui/console" >&2
+    echo "                    default admin: zitadel-admin@zitadel.localhost / Password1!" >&2
+    echo "                 2. Create a Project, then an Application of type 'API' with" >&2
+    echo "                    auth method 'Basic' (client_credentials). Copy its" >&2
+    echo "                    ClientId + ClientSecret." >&2
+    echo "                 3. Re-run seeding with them exported:" >&2
+    echo "                       BENCH_CLIENT_ID=<id> BENCH_CLIENT_SECRET=<secret> \\" >&2
+    echo "                         just target=zitadel bench-seed" >&2
+    if [ "${BENCH_ZITADEL_ALLOW_UNSEEDED:-0}" != "1" ]; then
+      echo "[seed/zitadel] refusing to write an unusable seed env (set" >&2
+      echo "               BENCH_ZITADEL_ALLOW_UNSEEDED=1 to seed jwks-only anyway)." >&2
+      exit 1
+    fi
+    echo "[seed/zitadel] BENCH_ZITADEL_ALLOW_UNSEEDED=1 — writing jwks-only seed." >&2
+  fi
   write_seed
 }
 

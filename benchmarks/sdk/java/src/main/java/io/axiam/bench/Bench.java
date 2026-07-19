@@ -36,6 +36,7 @@ public final class Bench {
     private static final String PORT = env("BENCH_PORT", "8090");
     private static final String BASE_URL = SCHEME + "://" + HOST + ":" + PORT;
     private static final String TENANT_SLUG = env("BENCH_TENANT_SLUG", "default");
+    private static final String ORG_SLUG = env("BENCH_ORG_SLUG", "bench-org");
     private static final String USERNAME = env("BENCH_USERNAME", "benchuser");
     private static final String PASSWORD = env("BENCH_PASSWORD", "Bench@User123!");
     private static final String ACTION = env("BENCH_ACTION", "read");
@@ -66,7 +67,7 @@ public final class Bench {
         AxiamClient client;
         List<AxiamClient.AccessCheck> checks;
         try {
-            client = AxiamClient.builder(BASE_URL, TENANT_SLUG).build();
+            client = AxiamClient.builder(BASE_URL, TENANT_SLUG).orgSlug(ORG_SLUG).build();
             client.login(USERNAME, PASSWORD);
             // Batch of 3 checks, all against the SAME resource id (no suffix).
             checks = new ArrayList<>();
@@ -85,7 +86,7 @@ public final class Bench {
         final List<AxiamClient.AccessCheck> sharedChecks = checks;
 
         Op login = () -> {
-            try (AxiamClient fresh = AxiamClient.builder(BASE_URL, TENANT_SLUG).build()) {
+            try (AxiamClient fresh = AxiamClient.builder(BASE_URL, TENANT_SLUG).orgSlug(ORG_SLUG).build()) {
                 fresh.login(USERNAME, PASSWORD);
             }
         };

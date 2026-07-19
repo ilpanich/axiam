@@ -18,6 +18,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Axiam.Sdk;
+using Axiam.Sdk.Options;
 using AccessCheck = Axiam.Sdk.Rest.AuthzRestClient.AccessCheck;
 
 // ---------------------------------------------------------------------------
@@ -35,6 +36,7 @@ string host = Env("BENCH_HOST", "localhost");
 string port = Env("BENCH_PORT", "8090");
 string baseUrl = $"{scheme}://{host}:{port}";
 string tenantSlug = Env("BENCH_TENANT_SLUG", "default");
+string orgSlug = Env("BENCH_ORG_SLUG", "bench-org");
 string username = Env("BENCH_USERNAME", "benchuser");
 string password = Env("BENCH_PASSWORD", "Bench@User123!");
 string action = Env("BENCH_ACTION", "read");
@@ -151,7 +153,7 @@ try
 {
     resourceId = Guid.Parse(resourceIdRaw); // FormatException -> status "error"
 
-    client = new AxiamClient(new Uri(baseUrl), tenantSlug);
+    client = new AxiamClient(new Uri(baseUrl), tenantSlug, new AxiamClientOptions { BaseUrl = new Uri(baseUrl), TenantId = tenantSlug, OrgSlug = orgSlug });
     await client.LoginAsync(username, password);
 
     // Batch of 3 checks, all against the SAME resource (no per-item suffixing —
@@ -179,7 +181,7 @@ var opsFns = new Dictionary<string, (Func<Task> Fn, int Concurrency)>
 {
     ["login"] = (async () =>
     {
-        var fresh = new AxiamClient(new Uri(baseUrl), tenantSlug);
+        var fresh = new AxiamClient(new Uri(baseUrl), tenantSlug, new AxiamClientOptions { BaseUrl = new Uri(baseUrl), TenantId = tenantSlug, OrgSlug = orgSlug });
         try { await fresh.LoginAsync(username, password); }
         finally { fresh.Dispose(); }
     }, CONC),

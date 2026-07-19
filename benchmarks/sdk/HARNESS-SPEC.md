@@ -54,7 +54,7 @@ The same env the server harness uses, so `runner/*.sh` can drive both:
 
 ```
 BENCH_TARGET, BENCH_SCHEME, BENCH_HOST, BENCH_PORT, BENCH_GRPC_ADDR
-BENCH_TENANT_ID, BENCH_TENANT_SLUG, BENCH_CLIENT_ID, BENCH_CLIENT_SECRET, BENCH_USERNAME, BENCH_PASSWORD
+BENCH_TENANT_ID, BENCH_TENANT_SLUG, BENCH_ORG_ID, BENCH_ORG_SLUG, BENCH_CLIENT_ID, BENCH_CLIENT_SECRET, BENCH_USERNAME, BENCH_PASSWORD
 BENCH_ACTION          (default "read")      # action for check_access/batch_check
 BENCH_RESOURCE_ID     (seeded resource UUID) # subject of the authz checks
 BENCH_SUBJECT_ID      (seeded user UUID)      # the bench user's id
@@ -66,7 +66,10 @@ SDK_BENCH_CONCURRENCY (default 16)
 
 SDK clients authenticate with `tenant_slug` (`BENCH_TENANT_SLUG`, default
 `"default"`), not the tenant UUID — the tenant UUID (`BENCH_TENANT_ID`) is still
-needed for scenarios/adapters that address the tenant by id.
+needed for scenarios/adapters that address the tenant by id. Login/refresh also
+require organization context (CONTRACT.md §5.1): SDK benches send `org_slug`
+(`BENCH_ORG_SLUG`, default `"bench-org"`); `BENCH_ORG_ID` carries the org UUID
+for id-form addressing. Both are written by `runner/seed.sh`.
 
 `BENCH_RESOURCE_ID` and `BENCH_SUBJECT_ID` are written by `runner/seed.sh`, which
 provisions a resource plus a role holding a `read` permission grant assigned to

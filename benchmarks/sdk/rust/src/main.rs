@@ -35,6 +35,7 @@ fn env(key: &str, default: &str) -> String {
 struct Cfg {
     base_url: String,
     tenant_slug: String,
+    org_slug: String,
     username: String,
     password: String,
     action: String,
@@ -76,6 +77,7 @@ impl Cfg {
         Ok(Cfg {
             base_url,
             tenant_slug: env("BENCH_TENANT_SLUG", "default"),
+            org_slug: env("BENCH_ORG_SLUG", "bench-org"),
             username: env("BENCH_USERNAME", "benchuser"),
             password: env("BENCH_PASSWORD", "Bench@User123!"),
             action: env("BENCH_ACTION", "read"),
@@ -102,11 +104,13 @@ enum Op {
 }
 
 /// Build a tenant-scoped client. `base_url()` validates the scheme (https, or
-/// http on loopback) and returns a `Result`; the tenant slug is required.
+/// http on loopback) and returns a `Result`; the tenant slug is required, and
+/// the org slug is required for login/refresh (CONTRACT.md §5.1).
 fn build_client(cfg: &Cfg) -> Result<AxiamClient, AxiamError> {
     AxiamClient::builder()
         .base_url(cfg.base_url.as_str())?
         .tenant_slug(cfg.tenant_slug.as_str())
+        .org_slug(cfg.org_slug.as_str())
         .build()
 }
 

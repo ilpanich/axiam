@@ -75,7 +75,7 @@ export const DOC_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "quickstart · TypeScript",
-        code: "import { AxiamClient } from 'axiam-sdk';\n\nconst axiam = new AxiamClient({\n  baseUrl: 'https://iam.acme.dev',\n  tenantSlug: 'acme',\n});\n\nawait axiam.login(email, password);\nconst ok = await axiam.can('read', 'doc:1');",
+        code: "import { AxiamClient } from 'axiam-sdk';\n\nconst axiam = new AxiamClient({\n  baseUrl: 'https://iam.acme.dev',\n  tenantSlug: 'acme',\n  orgSlug: 'acme',\n});\n\nawait axiam.login(email, password);\nconst ok = await axiam.can('read', 'doc:1');",
       },
       {
         type: "note",

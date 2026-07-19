@@ -174,6 +174,13 @@ const zitadel = {
     return zitadel.clientCredentials();
   },
   clientCredentials() {
+    // Add the bench project's reserved audience scope so the issued token is
+    // introspectable by the resource server: Zitadel only marks a token `active`
+    // to an API app whose project is in the token's aud. Falls back to plain
+    // openid when no project was seeded (e.g. manual/jwks-only setups).
+    const scope = cfg.projectId
+      ? `openid urn:zitadel:iam:org:project:id:${cfg.projectId}:aud`
+      : 'openid';
     return {
       method: 'POST',
       url: `${baseUrl()}/oauth/v2/token`,
@@ -181,17 +188,22 @@ const zitadel = {
         grant_type: 'client_credentials',
         client_id: cfg.clientId,
         client_secret: cfg.clientSecret,
-        scope: 'openid',
+        scope,
       }),
       params: FORM,
       expect: 200,
     };
   },
   introspect(token) {
+    // Zitadel requires the *resource server* (an API application), not the
+    // machine user, to introspect. Use the dedicated introspection client when
+    // seeded; fall back to the machine-user creds otherwise.
+    const clientId = cfg.introspectClientId || cfg.clientId;
+    const clientSecret = cfg.introspectClientSecret || cfg.clientSecret;
     return {
       method: 'POST',
       url: `${baseUrl()}/oauth/v2/introspect`,
-      body: formBody({ token, client_id: cfg.clientId, client_secret: cfg.clientSecret }),
+      body: formBody({ token, client_id: clientId, client_secret: clientSecret }),
       params: FORM,
       expect: 200,
     };

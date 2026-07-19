@@ -31,12 +31,56 @@ services:
       ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: postgres
       ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
       ZITADEL_EXTERNALSECURE: "${BENCH_ZITADEL_EXTERNAL_SECURE:-false}"
-      ZITADEL_EXTERNALPORT: "${BENCH_APP_PORT:-8090}"
+      # External port + published port follow the profile: 8090 plaintext, the TLS
+      # port (8443) for https profiles. BENCH_PORT is set by the TLS profile env;
+      # empty for p0 so it falls back to BENCH_APP_PORT.
+      ZITADEL_EXTERNALPORT: "${BENCH_PORT:-${BENCH_APP_PORT:-8090}}"
       ZITADEL_EXTERNALDOMAIN: localhost
+      # Built-in TLS for the https security profiles (tlsMode=enabled). Zitadel
+      # then serves HTTPS+h2 directly on its port using the shared throwaway cert
+      # (runner/gen-certs.sh, mounted at /certs). Empty/false for p0-plaintext.
+      # Unlike AXIAM/Keycloak, Zitadel serves TLS-only when enabled (no plaintext
+      # side port), so seeding also goes over https — handled by `just bench-seed`.
+      ZITADEL_TLS_ENABLED: "${BENCH_ZITADEL_TLS_ENABLED:-false}"
+      ZITADEL_TLS_CERTPATH: "${BENCH_ZITADEL_TLS_CERTPATH:-}"
+      ZITADEL_TLS_KEYPATH: "${BENCH_ZITADEL_TLS_KEYPATH:-}"
+      # First-init bootstrap of an admin service account + PAT so runner/seed.sh
+      # can provision the benchmark client_credentials machine user unattended
+      # (Zitadel has no scriptable password grant). These FIRSTINSTANCE_* vars
+      # ONLY take effect on the very first init against an empty DB — `bench-down
+      # -v` (volume wipe) is required for a re-provision. The PAT is written into
+      # the `machinekey` volume; seed.sh reads it via `docker cp` (the distroless
+      # image has no shell for `docker exec cat`).
+      ZITADEL_FIRSTINSTANCE_PATPATH: /machinekey/pat.txt
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: bench-admin-sa
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: Bench Admin SA
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "9999-12-31T23:59:59Z"
+    volumes:
+      - machinekey:/machinekey
+      # Throwaway TLS certs (shared with the other targets). Read-only; ignored
+      # by Zitadel unless ZITADEL_TLS_ENABLED=true (https profiles).
+      - ../../profiles/certs:/certs:ro
     ports:
-      - "${BENCH_APP_PORT:-8090}:8080"
+      # 8090 plaintext (p0) or the TLS port 8443 (https profiles) — same container
+      # port 8080, whose scheme is decided by tlsMode.
+      - "${BENCH_PORT:-${BENCH_APP_PORT:-8090}}:8080"
     depends_on:
       postgres: { condition: service_healthy }
+      # A freshly-created named volume is root:root 0755, but the Zitadel image
+      # runs non-root and must write the PAT into it — so open the perms first.
+      machinekey-init: { condition: service_completed_successfully }
+    restart: "no"
+    networks: [bench]
+
+  # One-shot: make the machinekey volume writable by Zitadel's non-root user
+  # (UID-agnostic 0777) before it runs `start-from-init`. Exits 0 immediately;
+  # `up -d --wait` gates on its successful completion.
+  machinekey-init:
+    image: busybox:1.37
+    container_name: bench-zitadel-machinekey-init
+    command: ["sh", "-c", "chmod 0777 /machinekey"]
+    volumes:
+      - machinekey:/machinekey
     restart: "no"
     networks: [bench]
 
@@ -55,6 +99,9 @@ services:
       retries: 10
     restart: "no"
     networks: [bench]
+
+volumes:
+  machinekey:
 
 networks:
   bench:

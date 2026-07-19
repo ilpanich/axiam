@@ -37,6 +37,11 @@ export BENCH_CLIENT_ID=${CLIENT_ID:-bench-client}
 export BENCH_CLIENT_SECRET='${CLIENT_SECRET:-}'
 export BENCH_SUBJECT_ID=${BENCH_SUBJECT_ID:-}
 export BENCH_RESOURCE_ID=${BENCH_RESOURCE_ID:-}
+# Zitadel-only: token audience (project id) + a separate resource-server (API
+# app) client used for token introspection. Empty for axiam/keycloak.
+export BENCH_PROJECT_ID=${PROJECT_ID:-}
+export BENCH_INTROSPECT_CLIENT_ID=${INTROSPECT_CLIENT_ID:-}
+export BENCH_INTROSPECT_CLIENT_SECRET='${INTROSPECT_CLIENT_SECRET:-}'
 EOF
   echo "[seed] wrote $SEED_ENV"
 }
@@ -73,10 +78,10 @@ seed_axiam() {
     local method="$1" path="$2" data="${3:-}" csrf
     csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$JAR")"
     if [ -n "$data" ]; then
-      curl -sS -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" \
+      curl -sSk -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" \
         -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" -d "$data"
     else
-      curl -sS -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" -H "X-CSRF-Token: $csrf"
+      curl -sSk -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" -H "X-CSRF-Token: $csrf"
     fi
   }
   # Create an entity, or find the existing one on re-seed. `.. | objects` walks
@@ -94,7 +99,7 @@ seed_axiam() {
 
   echo "[seed/axiam] bootstrapping org + default tenant + admin (gated by AXIAM_BOOTSTRAP_ADMIN_EMAIL)"
   local boot code body
-  boot=$(curl -sS -o - -w $'\n%{http_code}' -c "$JAR" -X POST "$BASE/api/v1/admin/bootstrap" \
+  boot=$(curl -sSk -o - -w $'\n%{http_code}' -c "$JAR" -X POST "$BASE/api/v1/admin/bootstrap" \
     -H "Content-Type: application/json" \
     -d "{\"organization_name\":\"Bench Org\",\"organization_slug\":\"$ORG_SLUG\",\"tenant_name\":\"Bench Tenant\",\"tenant_slug\":\"$TENANT_SLUG\",\"email\":\"$ADMIN_EMAIL\",\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}")
   code="${boot##*$'\n'}"; body="${boot%$'\n'*}"
@@ -115,7 +120,7 @@ seed_axiam() {
 
   echo "[seed/axiam] logging in as admin (cookie session)"
   local login_body
-  login_body=$(curl -sS -c "$JAR" -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
+  login_body=$(curl -sSk -c "$JAR" -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
     -d "{\"org_slug\":\"$ORG_SLUG\",\"tenant_slug\":\"$TENANT_SLUG\",\"username_or_email\":\"admin\",\"password\":\"$ADMIN_PW\"}")
   if ! awk -F'\t' '$6=="axiam_access"{f=1} END{exit !f}' "$JAR"; then
     echo "[seed/axiam] admin login failed (no session cookie): $login_body"; exit 1
@@ -201,15 +206,101 @@ seed_keycloak() {
 
 # ---------------------------------------------------------------------------
 seed_zitadel() {
-  # Zitadel provisioning is done through its management API with a service-user
-  # PAT, which requires an initial console/login step that cannot be fully
-  # scripted without a bootstrapped machine key. Provide the values manually:
-  echo "[seed/zitadel] Zitadel requires a machine key / PAT to provision via the"
-  echo "               management API. Set BENCH_CLIENT_ID / BENCH_CLIENT_SECRET"
-  echo "               from a created service user, then re-run with those exported."
+  # Zitadel has no scriptable password grant, so provisioning goes through its
+  # management API authenticated with the admin PAT that the compose mints on
+  # first-init (ZITADEL_FIRSTINSTANCE_PATPATH -> /machinekey/pat.txt). We read
+  # that PAT and create:
+  #   * a machine (service) user + generated secret  -> the client_credentials
+  #     client the token/refresh scenarios use (BENCH_CLIENT_ID/SECRET);
+  #   * a project + an API application (BASIC auth)   -> the resource-server the
+  #     introspection scenario authenticates as (BENCH_INTROSPECT_CLIENT_ID/SECRET),
+  #     because Zitadel introspects with an API app's creds, NOT the machine
+  #     user's. The machine-user token is minted with the project in its audience
+  #     (see the adapter) so introspection reports it active.
+  # Manual override: export BENCH_CLIENT_ID/BENCH_CLIENT_SECRET to skip the API.
   REALM="zitadel"
-  CLIENT_ID="${BENCH_CLIENT_ID:-}"
-  CLIENT_SECRET="${BENCH_CLIENT_SECRET:-}"
+  local container="${BENCH_ZITADEL_CONTAINER:-bench-zitadel}"
+
+  if [ -n "${BENCH_CLIENT_ID:-}" ] && [ -n "${BENCH_CLIENT_SECRET:-}" ]; then
+    echo "[seed/zitadel] using pre-supplied BENCH_CLIENT_ID/SECRET (manual mode)"
+    CLIENT_ID="$BENCH_CLIENT_ID"; CLIENT_SECRET="$BENCH_CLIENT_SECRET"
+    PROJECT_ID="${BENCH_PROJECT_ID:-}"
+    INTROSPECT_CLIENT_ID="${BENCH_INTROSPECT_CLIENT_ID:-}"
+    INTROSPECT_CLIENT_SECRET="${BENCH_INTROSPECT_CLIENT_SECRET:-}"
+    write_seed; return
+  fi
+
+  # Read the first-init PAT out of the container (docker cp works on the
+  # distroless image, which has no shell for `docker exec cat`).
+  local patfile; patfile=$(mktemp)
+  if ! docker cp "${container}:/machinekey/pat.txt" "$patfile" 2>/dev/null || ! [ -s "$patfile" ]; then
+    rm -f "$patfile"
+    echo "[seed/zitadel] could not read the admin PAT from ${container}:/machinekey/pat.txt." >&2
+    echo "               The FIRSTINSTANCE PAT is only minted on a FRESH init, so a DB" >&2
+    echo "               volume created before this feature won't have one. Re-provision:" >&2
+    echo "                   just target=zitadel bench-down    # wipes the volume (-v)" >&2
+    echo "                   just target=zitadel profile=${BENCH_PROFILE:-p0-plaintext} bench-up" >&2
+    echo "                   just target=zitadel bench-seed" >&2
+    if [ "${BENCH_ZITADEL_ALLOW_UNSEEDED:-0}" != "1" ]; then exit 1; fi
+    echo "[seed/zitadel] BENCH_ZITADEL_ALLOW_UNSEEDED=1 — writing jwks-only seed." >&2
+    CLIENT_ID=""; CLIENT_SECRET=""; write_seed; return
+  fi
+  local PAT; PAT=$(cat "$patfile"); rm -f "$patfile"
+
+  # The management API is gRPC-backed and proxied through the REST gateway; it
+  # accepts requests slightly LATER than the OIDC endpoints that /debug/ready
+  # (the bench-up gate) tracks — a create fired immediately 503s with
+  # "dial tcp [::1]:8080: connection refused". Pre-flight on an authenticated
+  # read until the API is actually live before provisioning.
+  echo "[seed/zitadel] waiting for the management API to accept requests"
+  local api_deadline=$(( $(date +%s) + 90 ))
+  # -k: TLS profiles serve the throwaway private-CA cert (BASE may be https).
+  until [ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $PAT" "$BASE/auth/v1/users/me")" = "200" ]; do
+    if [ "$(date +%s)" -ge "$api_deadline" ]; then
+      echo "[seed/zitadel] TIMEOUT: management API did not become ready at $BASE" >&2
+      exit 1
+    fi
+    sleep 2
+  done
+
+  # Management-API helper: JSON call with the PAT; fail closed on any non-2xx.
+  zapi() {
+    local method="$1" path="$2" body="${3:-}" resp code
+    resp=$(curl -sSk -H "Authorization: Bearer $PAT" -H "Content-Type: application/json" \
+      -X "$method" "$BASE$path" ${body:+--data "$body"} -w $'\n%{http_code}') || return 1
+    code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
+    if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+      echo "[seed/zitadel] $method $path -> HTTP $code: $resp" >&2; return 1
+    fi
+    printf '%s' "$resp"
+  }
+
+  echo "[seed/zitadel] creating machine (service) user for client_credentials"
+  local mu
+  mu=$(zapi POST /management/v1/users/machine \
+    '{"userName":"bench-client","name":"bench-client","description":"AXIAM benchmark client_credentials user","accessTokenType":"ACCESS_TOKEN_TYPE_BEARER"}') || exit 1
+  local mu_id; mu_id=$(echo "$mu" | jq -r '.userId')
+
+  echo "[seed/zitadel] generating machine-user secret"
+  local sec
+  sec=$(zapi PUT "/management/v1/users/$mu_id/secret" '{}') || exit 1
+  CLIENT_ID=$(echo "$sec" | jq -r '.clientId')
+  CLIENT_SECRET=$(echo "$sec" | jq -r '.clientSecret')
+
+  echo "[seed/zitadel] creating project + API application (introspection client)"
+  local proj
+  proj=$(zapi POST /management/v1/projects '{"name":"bench-project"}') || exit 1
+  PROJECT_ID=$(echo "$proj" | jq -r '.id')
+  local apiapp
+  apiapp=$(zapi POST "/management/v1/projects/$PROJECT_ID/apps/api" \
+    '{"name":"bench-introspect","authMethodType":"API_AUTH_METHOD_TYPE_BASIC"}') || exit 1
+  INTROSPECT_CLIENT_ID=$(echo "$apiapp" | jq -r '.clientId')
+  INTROSPECT_CLIENT_SECRET=$(echo "$apiapp" | jq -r '.clientSecret')
+
+  [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ] && [ -n "$PROJECT_ID" ] \
+    && [ -n "$INTROSPECT_CLIENT_ID" ] && [ -n "$INTROSPECT_CLIENT_SECRET" ] \
+    || { echo "[seed/zitadel] provisioning returned an empty id/secret" >&2; exit 1; }
+  echo "[seed/zitadel] provisioned client_id=$CLIENT_ID project=$PROJECT_ID"
   write_seed
 }
 

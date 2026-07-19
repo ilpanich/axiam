@@ -24,7 +24,7 @@ services:
     # `docker login ghcr.io` (or make the package public) to pull. Force a local
     # build instead with `just target=axiam build=1 bench-up`; the `build` block
     # below is also an automatic fallback when the image can't be pulled.
-    image: ${BENCH_AXIAM_IMAGE:-ghcr.io/ilpanich/axiam/server:1.0.0-alpha9}
+    image: ${BENCH_AXIAM_IMAGE:-ghcr.io/ilpanich/axiam/server:latest}
     pull_policy: ${BENCH_AXIAM_PULL_POLICY:-missing}
     build:
       context: ../../..
@@ -54,10 +54,7 @@ services:
       AXIAM__AUTH__MFA_ENCRYPTION_KEY: "${AXIAM__AUTH__MFA_ENCRYPTION_KEY:?run via 'just bench-up'}"
       AXIAM__EMAIL_ENCRYPTION_KEY: "${AXIAM__EMAIL_ENCRYPTION_KEY:?run via 'just bench-up'}"
       AXIAM__GDPR_PSEUDONYM_PEPPER: "${AXIAM__GDPR_PSEUDONYM_PEPPER:?run via 'just bench-up'}"
-      # AXIAM__AUTH__PEPPER intentionally omitted: bootstrap hashes the admin
-      # password without the pepper but login verifies with it, so a set pepper
-      # locks out the bootstrap admin. Re-add once the server bootstrap applies
-      # the configured pepper.
+      AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:-}"
       AXIAM__AUTH__OAUTH2_ISSUER_URL: "${AXIAM__AUTH__OAUTH2_ISSUER_URL:-}"
       AXIAM__SERVER__HOST: "0.0.0.0"
       AXIAM__GRPC__HOST: "0.0.0.0"

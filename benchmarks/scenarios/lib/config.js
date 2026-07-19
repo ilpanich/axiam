@@ -40,6 +40,13 @@ export const cfg = {
   password: str('BENCH_PASSWORD', 'Bench@User123!'),
   clientId: str('BENCH_CLIENT_ID', 'bench-client'),
   clientSecret: str('BENCH_CLIENT_SECRET', 'bench-secret'),
+  // Zitadel-only: the machine-user token is minted with this project in its
+  // audience so it can be introspected, and introspection authenticates as a
+  // dedicated resource-server (API app) rather than the machine user (Zitadel
+  // rejects machine-user creds at /oauth/v2/introspect). Empty for axiam/keycloak.
+  projectId: str('BENCH_PROJECT_ID', ''),
+  introspectClientId: str('BENCH_INTROSPECT_CLIENT_ID', ''),
+  introspectClientSecret: str('BENCH_INTROSPECT_CLIENT_SECRET', ''),
 
   // --- TLS (from the security profile) ---
   // Default OFF: the bench TLS edge uses a throwaway private-CA cert

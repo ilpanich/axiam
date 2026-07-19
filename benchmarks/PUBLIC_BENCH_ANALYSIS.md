@@ -231,9 +231,16 @@ the penalty, AXIAM's TLS numbers remain the best of the three.
 **Other comparability caveats, stated plainly:**
 
 - Single run per cell; the methodology's median-of-≥3 rule was not yet applied.
-- 8-year-old laptop: thermal throttling and turbo-frequency variance are
-  uncontrolled; absolute numbers will differ on server hardware. Relative
-  ordering across sequential runs on the same host is more trustworthy.
+- 8-year-old laptop: CPU clock frequency and temperature were not recorded in
+  this run. The data argues *against* throttling having distorted the
+  comparison — host load stayed moderate (≤ ~4 of 12 threads busy) and
+  CPU-bound cells repeated across the 2-hour session agree closely (AXIAM
+  introspection p0 vs p2: 2199 vs 2192 req/s ~27 min apart; fully CPU-pegged
+  Keycloak client-credentials: 143 vs 138 req/s ~17 min apart) — but
+  utilization data cannot distinguish a core at full clock from a throttled
+  one, so a *constant* sustained-clock reduction depressing all absolute
+  numbers uniformly cannot be excluded. Frequency/temperature telemetry will
+  be recorded and published with the next run.
 - The resource footprint of AXIAM includes RabbitMQ (~0.1–0.3 cores,
   ~130 MiB) which the competitor stacks don't run — AXIAM's efficiency
   figures are slightly *penalized* by this, not helped.

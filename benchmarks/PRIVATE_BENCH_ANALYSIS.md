@@ -117,13 +117,19 @@ say precisely which alpha build produced these numbers.
    longer warm-up than 30 s (JIT); consider per-target warm-up override and a
    time-series sanity plot per cell (the res.csv already has 1 s resolution —
    plot it) to confirm steady state before trusting a 120 s window.
-9. **Run on non-thermally-limited hardware.** The XPS 15 9570 (i7-8750H) is
-   notorious for thermal throttling under sustained all-core load; sequential
-   ordering means later scenarios may run at lower clocks. Add CPU frequency +
-   temperature columns to `resource/sampler.sh` (host-side), pin the CPU
-   governor to `performance`, consider disabling turbo for run-to-run
-   stability, and repeat the matrix on a desktop/server before the site
-   graduates from "draft".
+9. **Measure (don't just fear) thermal throttling.** The XPS 15 9570
+   (i7-8750H) throttles under sustained all-core load — but this run's data
+   shows no sign that *variable* throttling skewed comparisons: load was
+   moderate (≤ ~4/12 threads) and CPU-bound cells repeated far apart in the
+   2-hour session agree within noise (AXIAM introspection 2199 vs 2192 req/s
+   ~27 min apart; CPU-pegged Keycloak CC 143 vs 138 ~17 min apart). What the
+   data *cannot* exclude is a constant reduced sustained clock deflating all
+   absolute numbers equally, because `docker stats` utilization is
+   clock-blind. So: add CPU frequency + temperature columns to
+   `resource/sampler.sh` (host-side) and publish them in the report, pin the
+   CPU governor to `performance`, consider a no-turbo stability mode, and
+   note that a desktop/server re-run is deferred until hardware is available
+   (no VM budget at present) — the laptop remains the reference host for now.
 
 ## 3. Database bottleneck: findings + tuning plan
 

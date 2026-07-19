@@ -50,6 +50,13 @@ chrono = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 secrecy = { workspace = true }
+# D9 (memory-retention experiment): optional jemalloc global allocator, gated
+# behind the `jemalloc` feature below. NOT a default dependency — omitted
+# entirely from a default build's dependency graph. See
+# claude_dev/memory-retention-experiment.md for the A/B procedure and
+# rationale; measurement is pending laptop hardware, so this stays opt-in
+# until data justifies flipping the default.
+tikv-jemallocator = { version = "0.7", optional = true }
 
 [features]
 # SAML SP support, forwarded to the api-rest and federation crates (→ samael).
@@ -57,6 +64,14 @@ secrecy = { workspace = true }
 # so it compiles on hosts with an incompatible system libxml2 (e.g. Arch 2.15.x).
 default = ["saml"]
 saml = ["axiam-api-rest/saml", "axiam-federation/saml"]
+# D9: swap the process global allocator from the platform default (glibc
+# malloc in the release container image) to jemalloc via tikv-jemallocator.
+# Default-OFF — enabling this changes nothing else about the build; it exists
+# so the maintainer can A/B retained RSS after a login burst on real hardware
+# (`cargo build --release -p axiam-server --features jemalloc`). See
+# claude_dev/memory-retention-experiment.md for the full procedure and the
+# decay-tuning env vars (`MALLOC_CONF`/`_RJEM_MALLOC_CONF`).
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dev-dependencies]
 axiam-core = { workspace = true }

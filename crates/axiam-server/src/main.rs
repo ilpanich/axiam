@@ -2,6 +2,32 @@
 
 use axiam_server::cleanup;
 
+// D9 (memory-retention experiment): opt-in jemalloc global allocator.
+//
+// Default build uses the platform allocator (glibc malloc in the release
+// container image) — unchanged. Enabling the `jemalloc` cargo feature
+// (`cargo build --release -p axiam-server --features jemalloc`) swaps the
+// process-wide allocator to jemalloc, which is a candidate fix for the
+// observed RSS-retention issue: server RSS never returns to baseline after a
+// login burst (~93 -> ~646 MiB permanently, see
+// claude_dev/memory-retention-experiment.md). B1 already bounds the
+// concurrency *peak* via the Argon2 semaphore; this experiment targets the
+// *retention* — glibc malloc is known to keep freed arenas mapped rather
+// than returning pages to the OS, while jemalloc's decay-based purging
+// actively `madvise`s freed dirty/muzzy pages back to the kernel.
+//
+// Decay tuning is deliberately NOT hardcoded here: jemalloc's dirty/muzzy
+// page decay times are configured at process startup via the `MALLOC_CONF`
+// (or tikv-jemallocator's `_RJEM_MALLOC_CONF`) environment variable, e.g.
+//   MALLOC_CONF=dirty_decay_ms:1000,muzzy_decay_ms:0
+// which returns freed pages to the OS within ~1s of a burst subsiding
+// instead of jemalloc's default ~10s decay. See the experiment note for the
+// full rationale and the A/B measurement procedure (pending laptop
+// hardware — this feature is default-off so it ships safely un-measured).
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::sync::Arc;
 use std::time::Duration;
 

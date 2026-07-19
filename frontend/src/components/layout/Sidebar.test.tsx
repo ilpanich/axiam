@@ -50,7 +50,7 @@ describe("Sidebar", () => {
     expect(screen.getByRole("link", { name: /Dashboard/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Users/ })).toBeInTheDocument();
     expect(screen.getByText("AXIAM")).toBeInTheDocument();
-    expect(screen.getByText("AXIAM v1.0.0-alpha11")).toBeInTheDocument();
+    expect(screen.getByText("AXIAM v1.0.0-alpha12")).toBeInTheDocument();
   });
 
   it("marks the current route's link as active with aria-current", () => {

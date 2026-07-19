@@ -395,6 +395,7 @@ async fn batch_check_access_matches_sequential_per_item_check_access() {
     let mut batch_state_inner = AppState::for_test(batch_db, AuthConfig::default());
     batch_state_inner.authz_config = axiam_authz::AuthzConfig {
         batch_max_concurrency: 2,
+        ..Default::default()
     };
     let batch_state = web::Data::new(batch_state_inner);
     let batch_authz = make_authz(PerResourceAuthzChecker { allowed });

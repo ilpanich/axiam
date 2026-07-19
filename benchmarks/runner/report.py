@@ -16,6 +16,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -31,6 +32,11 @@ def pct(values, p):
     lo = int(k)
     hi = min(lo + 1, len(s) - 1)
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+
+def median(values):
+    """statistics.median with an empty-list guard (C1: median-of-N)."""
+    return statistics.median(values) if values else 0.0
 
 
 def dash(value, fmt):
@@ -178,6 +184,18 @@ def default_cpu_cap(container_name):
     return 2.0  # BENCH_CPUS (the main server/app container)
 
 
+# Same fallback, for mem (MiB) — used by the C2 DB-sensitivity appendix column
+# below when a meta.json predates the "mem_cap_mib" field.
+def default_mem_cap(container_name):
+    if container_name.endswith("-surrealdb") or container_name.endswith("-postgres"):
+        return 1024.0  # BENCH_DB_MEM
+    if container_name.endswith("-rabbitmq"):
+        return 512.0  # BENCH_MQ_MEM
+    if container_name.endswith("-tls"):
+        return 128.0  # BENCH_EDGE_MEM
+    return 1024.0  # BENCH_MEM (the main server/app container)
+
+
 def bottleneck(meta, res):
     """The container(s) whose average CPU >= 0.95x their configured cap, or
     'none'. Caps come from meta.json's "containers" (A4); fall back to the
@@ -261,7 +279,12 @@ def host_flags(meta, host):
     return flags
 
 
-def collect(results_dir, max_error, min_samples):
+def collect_dir(results_dir, max_error, min_samples):
+    """Walk ONE flat results tree (results/<target>/<profile>/<scenario>.*) and
+    return its raw (unaggregated) cells. This is the entire single-run
+    collection logic from before C1 — unchanged — reused both for the classic
+    single-run layout and, once per `results/run-<i>/` directory, by the C1
+    median-of-N aggregator below."""
     cells = []
     for target in sorted(os.listdir(results_dir)):
         tdir = os.path.join(results_dir, target)
@@ -308,6 +331,122 @@ def collect(results_dir, max_error, min_samples):
     return cells
 
 
+# --- C1: median-of-N run aggregation ----------------------------------------
+# `bench-matrix` (justfile) now runs the whole target×profile×scenario matrix
+# `repeat` times (default 3), each pass writing into its own
+# `results/run-<i>/<target>/<profile>/...` tree using the exact same flat
+# per-cell layout `collect_dir` already understands. When one or more
+# `results/run-*/` directories are present, aggregate each (target, profile,
+# scenario) cell by taking the MEDIAN independently per metric across the
+# valid runs, rather than reporting a single run's numbers. Results trees that
+# predate this (no `run-*/` dirs — e.g. the existing 2026-07-19 tree) fall
+# through to the old single-run behavior completely unchanged.
+RUN_DIR_RE = re.compile(r"run-\d+")
+
+# Fields medianed independently per the C1 spec ("throughput, p50/p95/p99,
+# cpu, mem"), plus the other numeric perf/res/host fields for consistency.
+PERF_MEDIAN_FIELDS = [
+    "throughput", "ok_count", "failed_count", "error_rate",
+    "p50", "p95", "p99", "avg", "fallback_count",
+]
+RES_MEDIAN_FIELDS = ["cpu_cores_avg", "cpu_cores_p95", "mem_mib_avg", "mem_mib_p95", "samples"]
+HOST_MEDIAN_FIELDS = ["mhz_avg", "mhz_min", "mhz_max", "temp_max", "host_cpu_util_avg", "k6_cores_avg", "samples"]
+
+
+def _median_of(dicts, fields):
+    return {f: median([d.get(f, 0.0) for d in dicts]) for f in fields}
+
+
+def _median_res(res_list):
+    """Median the whole-stack res fields AND, per container, cpu_avg/mem_avg —
+    so bottleneck() and the per-container appendix still work on aggregated
+    cells exactly as they do on single-run ones."""
+    agg = _median_of(res_list, RES_MEDIAN_FIELDS)
+    names = set()
+    for r in res_list:
+        names.update((r.get("containers") or {}).keys())
+    containers = {}
+    for name in names:
+        cpu_vals = [(r.get("containers") or {}).get(name, {}).get("cpu_avg", 0.0)
+                    for r in res_list if name in (r.get("containers") or {})]
+        mem_vals = [(r.get("containers") or {}).get(name, {}).get("mem_avg", 0.0)
+                    for r in res_list if name in (r.get("containers") or {})]
+        containers[name] = {"cpu_avg": median(cpu_vals), "mem_avg": median(mem_vals)}
+    agg["containers"] = containers
+    return agg
+
+
+def aggregate_cell(runs):
+    """Median-aggregate one (target, profile, scenario)'s per-run raw cells
+    (as produced by collect_dir, one per results/run-<i>/) into a single cell
+    with the same shape build_report expects, plus n_valid_runs/n_runs and the
+    throughput min-max spread. A cell is only marked `valid` when >=2 of its
+    runs were individually valid (C1) — with 0 or 1 valid runs there is no
+    meaningful median, so it's reported (for visibility) but excluded from
+    headline comparisons, same as any other invalid cell."""
+    target, profile, scenario = runs[0]["target"], runs[0]["profile"], runs[0]["scenario"]
+    valid_runs = [r for r in runs if r["valid"]]
+    n_valid, n_total = len(valid_runs), len(runs)
+    basis = valid_runs if valid_runs else runs
+
+    perf = _median_of([r["perf"] for r in basis], PERF_MEDIAN_FIELDS)
+    res = _median_res([r["res"] for r in basis])
+    host = _median_of([r["host"] for r in basis], HOST_MEDIAN_FIELDS)
+
+    thr_vals = [r["perf"]["throughput"] for r in basis]
+    thr_median = perf["throughput"]
+    thr_spread_pct = (((max(thr_vals) - min(thr_vals)) / 2.0) / thr_median * 100.0
+                       if thr_vals and thr_median else 0.0)
+
+    meta = basis[0]["meta"]  # containers/caps/scenario_sha etc. are stable across runs
+    der = derive(perf, res)
+    der_server = derive_server_only(perf, res, target)
+
+    reasons = []
+    if n_valid < 2:
+        reasons.append(f"only {n_valid}/{n_total} valid run(s) (need >=2 for a median)")
+
+    return {
+        "target": target, "profile": profile, "scenario": scenario, "meta": meta,
+        "rate_limits": basis[0]["rate_limits"],
+        "perf": perf, "res": res, "der": der, "der_server": der_server,
+        "host": host, "host_flags": host_flags(meta, host),
+        "bottleneck": bottleneck(meta, res),
+        "is_fallback": any(r["is_fallback"] for r in runs),
+        "valid": n_valid >= 2 and not reasons,
+        "reasons": reasons,
+        "n_valid_runs": n_valid, "n_runs": n_total, "thr_spread_pct": thr_spread_pct,
+    }
+
+
+def collect(results_dir, max_error, min_samples):
+    """Top-level entry point: detect whether `results_dir` holds a
+    `results/run-*/` median-of-N layout or the classic flat single-run layout,
+    and branch (C1). Returns (cells, multi_run)."""
+    try:
+        entries = sorted(os.listdir(results_dir))
+    except OSError:
+        entries = []
+    run_dirs = [os.path.join(results_dir, e) for e in entries
+                if RUN_DIR_RE.fullmatch(e) and os.path.isdir(os.path.join(results_dir, e))]
+
+    if not run_dirs:
+        # Classic single-run layout — completely unchanged behavior.
+        cells = collect_dir(results_dir, max_error, min_samples)
+        for c in cells:
+            c["n_valid_runs"] = 1 if c["valid"] else 0
+            c["n_runs"] = 1
+            c["thr_spread_pct"] = 0.0
+        return cells, False
+
+    grouped = defaultdict(list)
+    for run_dir in run_dirs:
+        for c in collect_dir(run_dir, max_error, min_samples):
+            grouped[(c["target"], c["profile"], c["scenario"])].append(c)
+    cells = [aggregate_cell(runs) for runs in grouped.values()]
+    return cells, True
+
+
 def posture_bucket(posture):
     """Collapse a rate-limit posture into a comparability class.
 
@@ -336,7 +475,7 @@ def md_table(headers, rows):
 PROFILE_RANK = {"p0-plaintext": 0, "p1-tls12": 1, "p2-tls13": 2, "p3-mtls": 3}
 
 
-def build_report(cells):
+def build_report(cells, multi_run=False):
     lines = ["# AXIAM Benchmark Report", ""]
     valid = [c for c in cells if c["valid"]]
     invalid = [c for c in cells if not c["valid"]]
@@ -369,6 +508,20 @@ def build_report(cells):
         "operation being measured.",
         "",
     ]
+    if multi_run:
+        max_n = max((c.get("n_runs", 1) for c in cells), default=1)
+        lines += [
+            f"> **Median-of-N aggregation (C1):** this report was generated from "
+            f"`results/run-*/` (up to N={max_n} repeats per cell). Every metric "
+            "below (throughput, p50/p95/p99, cpu, mem, host telemetry) is the "
+            "MEDIAN taken independently across that cell's valid runs — not a "
+            "single run. `runs(valid/n)` shows how many of the N repeats were "
+            "individually valid; a cell needs **≥2 valid runs** to be marked "
+            "`valid` itself (fewer than that, there's no meaningful median — see "
+            "docs/methodology.md). `±thr%` is the throughput spread across valid "
+            "runs, `(max−min)/2` as a percentage of the median.",
+            "",
+        ]
 
     # 1. Full results table
     lines += ["## All results", ""]
@@ -386,7 +539,7 @@ def build_report(cells):
         flags = list(c["host_flags"])
         if c["is_fallback"]:
             flags.append("fallback-op")
-        rows.append([
+        row = [
             c["scenario"], c["profile"], c["target"], c["rate_limits"],
             dash(thr, ".0f"), dash(p50, ".1f"), dash(p95, ".1f"), dash(p99, ".1f"),
             f"{p['error_rate']*100:.2f}%",
@@ -398,13 +551,58 @@ def build_report(cells):
             f"{h['k6_cores_avg']:.2f}",
             ";".join(flags) or "-",
             "✓" if c["valid"] else "✗",
-        ])
-    lines += [md_table(
-        ["scenario", "profile", "target", "rate_limits", "thr(req/s)", "p50(ms)",
-         "p95(ms)", "p99(ms)", "err", "cpu(cores)", "mem(MiB)", "thr/core",
-         "cpu_ms/req", "bottleneck", "fallback", "mhz_avg", "mhz_min/max",
-         "temp_max(C)", "k6_cores", "host_flags", "valid"],
-        rows), ""]
+        ]
+        if multi_run:
+            row += [f"{c.get('n_valid_runs', 0)}/{c.get('n_runs', 1)}",
+                    f"±{c.get('thr_spread_pct', 0.0):.1f}%"]
+        rows.append(row)
+    headers = ["scenario", "profile", "target", "rate_limits", "thr(req/s)", "p50(ms)",
+               "p95(ms)", "p99(ms)", "err", "cpu(cores)", "mem(MiB)", "thr/core",
+               "cpu_ms/req", "bottleneck", "fallback", "mhz_avg", "mhz_min/max",
+               "temp_max(C)", "k6_cores", "host_flags", "valid"]
+    if multi_run:
+        headers += ["runs(valid/n)", "±thr%"]
+    lines += [md_table(headers, rows), ""]
+
+    # 1b. C4: AXIAM production rate-limit-posture cells, called out separately
+    # so they never get lost among (or silently averaged into) the neutralized
+    # comparison numbers above. posture_bucket()/the efficiency-comparison loop
+    # below already refuse to place a `prod`-posture cell head-to-head against
+    # an unthrottled competitor; this section is the human-readable label for
+    # the same rule, and the one place a `prod` run is summarized on its own.
+    prod_cells = [c for c in cells if c["rate_limits"] == "prod"]
+    if prod_cells:
+        lines += [
+            "## AXIAM production rate-limit posture — NOT comparable to competitors",
+            "",
+            "> These cells were run with `rl=prod` (`just target=axiam rl=prod …`): "
+            "AXIAM's shipped-default per-IP rate limits ACTIVE (see the `rl` "
+            "variable at the top of `justfile`). They measure the limiter's "
+            "throttling behavior, not raw endpoint capacity, and are excluded "
+            "from every head-to-head table above/below (`posture_bucket()` "
+            "buckets `prod` separately from `neutralized`/`n/a`, so a mixed or "
+            "unknown-posture comparison group is refused rather than silently "
+            "rendered). The intended framing: *AXIAM ships per-IP rate limits by "
+            "default; Keycloak and Zitadel don't* — compare a `prod` row only "
+            "against AXIAM's own `neutralized` row for the same "
+            "(scenario, profile), never against another target.",
+            "",
+        ]
+        rows = []
+        for c in sorted(prod_cells, key=lambda c: (c["scenario"], c["profile"])):
+            p = c["perf"]
+            full_outage = p["error_rate"] >= 1.0
+            rows.append([
+                c["scenario"], c["profile"],
+                dash(None if full_outage else p["throughput"], ".0f"),
+                dash(None if full_outage else p["p50"], ".1f"),
+                dash(None if full_outage else p["p95"], ".1f"),
+                f"{p['error_rate'] * 100:.2f}%",
+                "posture: prod — NOT comparable to competitors",
+            ])
+        lines += [md_table(
+            ["scenario", "profile", "thr(req/s)", "p50(ms)", "p95(ms)", "err", "label"],
+            rows), ""]
 
     # 2. Efficiency comparison per (scenario, profile) across targets
     lines += ["## Efficiency comparison (across targets)", "",
@@ -490,9 +688,12 @@ def build_report(cells):
     # 4. Appendix: per-container resource breakdown (A5.3)
     lines += ["## Appendix: per-container resource breakdown", "",
               "Per-cell, per-container average CPU/mem from the resource sampler, "
-              "the cap it was measured against (from meta.json, falling back to "
-              "the compose default), and whether it hit the bottleneck threshold "
-              "(cpu_avg ≥ 95% of cap).", ""]
+              "the caps it was measured against (from meta.json's `cpu_cap`/"
+              "`mem_cap_mib` — C2 — falling back to the compose default when "
+              "absent), and whether it hit the CPU bottleneck threshold "
+              "(cpu_avg ≥ 95% of cpu_cap). `mem_cap(MiB)` is what a "
+              "`dbcaps=uncapped` (C2) run shows raised for the `-surrealdb`/"
+              "`-postgres` container.", ""]
     rows = []
     for c in sorted(valid, key=lambda c: (c["scenario"], c["profile"], c["target"])):
         containers_meta = {cm.get("name"): cm for cm in (c["meta"].get("containers") or [])}
@@ -505,14 +706,21 @@ def build_report(cells):
                     cap = default_cpu_cap(cname)
             else:
                 cap = default_cpu_cap(cname)
+            if cm is not None and cm.get("mem_cap_mib") not in (None, ""):
+                try:
+                    mem_cap = float(cm["mem_cap_mib"])
+                except (TypeError, ValueError):
+                    mem_cap = default_mem_cap(cname)
+            else:
+                mem_cap = default_mem_cap(cname)
             hot = "✓" if stats.get("cpu_avg", 0.0) >= 0.95 * cap else "·"
             rows.append([c["scenario"], c["profile"], c["target"], cname,
                          f"{stats.get('cpu_avg', 0.0):.2f}", f"{cap:.2f}",
-                         f"{stats.get('mem_avg', 0.0):.0f}", hot])
+                         f"{stats.get('mem_avg', 0.0):.0f}", f"{mem_cap:.0f}", hot])
     if rows:
         lines += [md_table(
             ["scenario", "profile", "target", "container", "cpu_avg(cores)",
-             "cpu_cap", "mem_avg(MiB)", "hot"],
+             "cpu_cap", "mem_avg(MiB)", "mem_cap(MiB)", "hot"],
             rows), ""]
     else:
         lines += ["_No per-container samples available (no res.csv rows)._", ""]
@@ -540,11 +748,13 @@ def main():
     if not os.path.isdir(args.results):
         print(f"no results dir: {args.results}", file=sys.stderr)
         sys.exit(1)
-    cells = collect(args.results, args.max_error, args.min_samples)
+    cells, multi_run = collect(args.results, args.max_error, args.min_samples)
     if not cells:
         print("no result cells found — run a benchmark first", file=sys.stderr)
         sys.exit(1)
-    report = build_report(cells)
+    if multi_run:
+        print(f"[report] median-of-N layout detected ({len(cells)} aggregated cells)")
+    report = build_report(cells, multi_run=multi_run)
     out = args.out or os.path.join(args.results, "report.md")
     with open(out, "w") as f:
         f.write(report)

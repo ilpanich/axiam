@@ -125,15 +125,35 @@ just target=axiam bench-down
 just target=keycloak bench-down
 ```
 
-Or run the entire matrix (all targets × all profiles × all scenarios) unattended:
+Or run the entire matrix (all targets × all profiles × all scenarios) unattended.
+By default this repeats the whole matrix 3× (`repeat := "3"`) into
+`results/run-1/`, `results/run-2/`, `results/run-3/`, and `report.py` medians
+each cell across the valid runs (see
+[methodology §8](docs/methodology.md#8-multiple-runs--median-of-n-c1)); pass
+`repeat=1` for a single quick pass instead:
 
 ```bash
 just targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls" bench-matrix
+# just repeat=1 targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls" bench-matrix
 ```
 
 See [`docs/methodology.md`](docs/methodology.md) for the rules that make a run
 comparable, and [`docs/security-profiles.md`](docs/security-profiles.md) for the
 profile definitions.
+
+Running the matrix on a laptop rather than dedicated hardware? See
+[**"Running on a laptop"**](docs/methodology.md#10-running-on-a-laptop-c3) in
+the methodology doc for the variance-control runbook (AC power, CPU governor,
+turbo-boost mode, cooldown pauses between cells) before trusting absolute
+numbers.
+
+For a repeatable, noise-resistant run, use `repeat=N` (default 3) so
+`bench-matrix` runs the whole matrix N times and `report.py` medians each
+cell — see [§8 "Multiple runs — median-of-N"](docs/methodology.md#8-multiple-runs--median-of-n-c1):
+
+```bash
+just repeat=3 targets="axiam keycloak" profiles="p0-plaintext p2-tls13" bench-matrix
+```
 
 ## Status of components
 

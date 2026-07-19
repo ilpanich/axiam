@@ -154,6 +154,20 @@ CPU_MODEL="$(awk -F: '/model name/ {gsub(/^ +/,"",$2); print $2; exit}' /proc/cp
 CPU_GOVERNOR="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
 BATCH_SIZE="${BENCH_BATCH_SIZE:-5}"
 
+# C3: warn (never fail) when the governor isn't 'performance' — on laptop
+# hardware, 'powersave'/'ondemand'/'schedutil' let the CPU idle down between
+# k6 iterations and ramp back up mid-measurement, adding run-to-run variance
+# that the A6 host telemetry (mhz_avg / clock_variance) can catch after the
+# fact but can't prevent. See "Running on a laptop" in docs/methodology.md.
+if [ "$CPU_GOVERNOR" != "performance" ] && [ "$CPU_GOVERNOR" != "unknown" ]; then
+  echo "[run] WARN: CPU governor is '$CPU_GOVERNOR', not 'performance' — this can add clock-scaling variance to the run. Fix: sudo cpupower frequency-set -g performance (see docs/methodology.md 'Running on a laptop')." >&2
+fi
+
+# C3: idle gap between cells (default 60s) so heat dissipates and the
+# previous cell's allocations/caches settle before the next measurement
+# starts — set BENCH_CELL_PAUSE=0 to disable.
+CELL_PAUSE="${BENCH_CELL_PAUSE:-60}"
+
 # Naive JSON string escaping (backslash + double-quote only — sufficient for
 # the plain ASCII strings embedded here: image names, kernel/cpu strings).
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -201,17 +215,36 @@ role_default_cpu_cap() {
   esac
 }
 
+# Default mem cap per role (MiB), matching each target's docker-compose.yml
+# default. C2: this is how a `dbcaps=uncapped` DB mem cap (or any other
+# non-default BENCH_*_MEM) ends up recorded in meta.json alongside the CPU
+# cap — same fallback role as role_default_cpu_cap() above.
+role_default_mem_mib() {
+  local raw
+  case "$1" in
+    server) raw="${BENCH_MEM:-1024m}" ;;
+    db)     raw="${BENCH_DB_MEM:-1024m}" ;;
+    mq)     raw="${BENCH_MQ_MEM:-512m}" ;;
+    edge)   raw="${BENCH_EDGE_MEM:-128m}" ;;
+    *)      raw="1024m" ;;
+  esac
+  echo "${raw%[mM]}"
+}
+
 # Emits the JSON array for meta.json's "containers" field: one entry per
 # running container in this target's stack, with image, image_digest (from
-# `docker inspect`), role, and its CPU cap. The cap is read straight off the
-# running container (`HostConfig.NanoCpus`, what `--cpus`/compose `cpus:`
-# actually sets) rather than trusted from this shell's env — BENCH_DB_CPUS/
-# BENCH_MQ_CPUS/BENCH_EDGE_CPUS are only exported inside `just bench-up`'s own
-# subshell, so a separate `bench-run` invocation would otherwise silently miss
-# a non-default cap the operator set at bench-up time. Falls back to the
-# compose-file default only if NanoCpus is unset (no `--cpus` was applied).
+# `docker inspect`), role, and its CPU + mem cap. Both caps are read straight
+# off the running container (`HostConfig.NanoCpus`/`HostConfig.Memory`, what
+# `--cpus`/`--memory` (compose `cpus:`/`mem_limit:`) actually set) rather than
+# trusted from this shell's env — BENCH_DB_CPUS/BENCH_DB_MEM/BENCH_MQ_CPUS/
+# BENCH_EDGE_CPUS are only exported inside `just bench-up`'s own subshell, so
+# a separate `bench-run` invocation would otherwise silently miss a
+# non-default cap the operator set at bench-up time (this is how a C2
+# `dbcaps=uncapped` run ends up correctly recorded even though `bench-run` is
+# a separate process from `bench-up`). Falls back to the compose-file default
+# only if the inspected value is unset (no `--cpus`/`--memory` was applied).
 containers_json() {
-  local first=1 line cname role img dig cap nanocpus
+  local first=1 line cname role img dig cap nanocpus mem_bytes mem_mib
   echo -n "["
   while read -r line; do
     [ -z "$line" ] && continue
@@ -226,10 +259,16 @@ containers_json() {
     else
       cap="$(role_default_cpu_cap "$role")"
     fi
+    mem_bytes="$(docker inspect --format '{{.HostConfig.Memory}}' "$cname" 2>/dev/null || echo 0)"
+    if [ -n "$mem_bytes" ] && [ "$mem_bytes" != "0" ]; then
+      mem_mib="$(awk -v b="$mem_bytes" 'BEGIN{printf "%.0f", b/1048576}')"
+    else
+      mem_mib="$(role_default_mem_mib "$role")"
+    fi
     [ "$first" -eq 1 ] || echo -n ","
     first=0
-    printf '{"name":"%s","role":"%s","image":"%s","image_digest":"%s","cpu_cap":%s}' \
-      "$(json_escape "$cname")" "$role" "$(json_escape "$img")" "$(json_escape "$dig")" "$cap"
+    printf '{"name":"%s","role":"%s","image":"%s","image_digest":"%s","cpu_cap":%s,"mem_cap_mib":%s}' \
+      "$(json_escape "$cname")" "$role" "$(json_escape "$img")" "$(json_escape "$dig")" "$cap" "$mem_mib"
   done < <(container_specs_for_target)
   echo -n "]"
 }
@@ -308,8 +347,17 @@ EOF
   echo "[run] wrote $k6sum, $rescsv, $hostcsv, $meta"
 }
 
+SCENARIO_COUNT=${#SCENARIOS[@]}
+scenario_idx=0
 for s in "${SCENARIOS[@]}"; do
+  scenario_idx=$((scenario_idx + 1))
   run_one "$s"
+  # C3: pause between cells (not after the last one) so heat dissipates and
+  # allocations/caches from this cell settle before the next measurement.
+  if [ "$scenario_idx" -lt "$SCENARIO_COUNT" ] && [ "$CELL_PAUSE" -gt 0 ] 2>/dev/null; then
+    echo "[run] pausing ${CELL_PAUSE}s between cells (BENCH_CELL_PAUSE=0 to disable)"
+    sleep "$CELL_PAUSE"
+  fi
 done
 
 echo "[run] done. Aggregate with: python3 $HERE/report.py --results $RESULTS"

@@ -31,6 +31,24 @@ build := "0"
 #                           ACTIVE). Head-to-head numbers taken this way are NOT
 #                           comparable to competitors and report.py will flag them.
 rl := "neutralized"
+# dbcaps selects the datastore's CPU/mem envelope (C2):
+#   capped (default) — the standard envelope, same as every other container
+#                       (BENCH_DB_CPUS/BENCH_DB_MEM defaults in each target's
+#                       docker-compose.yml, normally 2 CPUs / 1024 MiB).
+#   uncapped          — raises the datastore to 4 CPUs / 2048 MiB so a run can
+#                       show whether the datastore — not the server — is the
+#                       ceiling. BENCH_DB_CPUS/BENCH_DB_MEM are already
+#                       env-driven in every target's compose file; this just
+#                       wires the two values through. An operator-supplied
+#                       BENCH_DB_CPUS/BENCH_DB_MEM still wins over either mode.
+dbcaps := "capped"
+# repeat controls how many times `bench-matrix` runs the whole target×profile
+# ×scenario matrix (C1: median-of-N). Each pass writes into its own
+# results/run-<i>/ subtree (same flat per-cell layout underneath), and
+# `bench-report`/`report.py` auto-detect the results/run-*/ layout and median
+# every metric per cell across the valid runs. Set repeat=1 for a quick single
+# pass (still lands under results/run-1/).
+repeat := "3"
 
 # Generate throwaway TLS/mTLS certs for the security profiles (idempotent).
 bench-certs:
@@ -109,6 +127,24 @@ bench-up:
         VER="$(grep -m1 '^version' ../Cargo.toml | cut -d'"' -f2)"
         export BENCH_AXIAM_IMAGE="ghcr.io/ilpanich/axiam/server:${VER}"
       fi
+    fi
+
+    # DB CPU/mem envelope (C2, all targets — see `dbcaps` at the top of this
+    # file). BENCH_DB_CPUS/BENCH_DB_MEM are already read directly by every
+    # target's docker-compose.yml (surrealdb/postgres `cpus:`/`mem_limit:`),
+    # so this only needs to set the two env vars before `docker compose up`;
+    # an operator-supplied BENCH_DB_CPUS/BENCH_DB_MEM still wins. The chosen
+    # values are recorded in meta.json automatically — run-benchmark.sh reads
+    # each container's actual cpu/mem cap straight off `docker inspect`
+    # (HostConfig.NanoCpus/Memory) rather than trusting this shell's env, so a
+    # separate `bench-run` invocation still captures whatever cap the running
+    # DB container was actually started with.
+    if [ "{{dbcaps}}" = "uncapped" ]; then
+      export BENCH_DB_CPUS="${BENCH_DB_CPUS:-4}"
+      export BENCH_DB_MEM="${BENCH_DB_MEM:-2048m}"
+      echo "[bench-up] DB caps: UNCAPPED (${BENCH_DB_CPUS} CPUs / ${BENCH_DB_MEM}) — measuring the server ceiling, not the datastore's"
+    elif [ "{{dbcaps}}" != "capped" ]; then
+      echo "[bench-up] unknown dbcaps='{{dbcaps}}' (use dbcaps=capped or dbcaps=uncapped)" >&2; exit 1
     fi
 
     PROFILE_ARG=""
@@ -277,18 +313,33 @@ bench-report:
     python3 runner/report.py --results results
 
 # Full unattended matrix: every target × profile × scenario, with up/seed/run/down.
+# repeat=N (default 3, see `repeat` above): runs the whole matrix N times,
+# each pass writing into its own results/run-<i>/ subtree using the SAME flat
+# target/profile/scenario layout underneath, so the existing per-cell code
+# (seed marker, run-benchmark.sh) is reused unchanged. report.py auto-detects
+# the results/run-*/ layout and medians each cell across the valid runs (C1).
+# `rl` and `dbcaps` are forwarded to every bench-up so
+# `just target=axiam rl=prod bench-matrix` / `just dbcaps=uncapped bench-matrix`
+# work end-to-end (not just for a single manual bench-up).
 bench-matrix:
     #!/usr/bin/env bash
     set -euo pipefail
-    for t in {{targets}}; do
-      for p in {{profiles}}; do
-        echo "=== $t / $p ==="
-        just target=$t profile=$p bench-up
-        just target=$t profile=$p bench-seed
-        just target=$t profile=$p bench-run
-        just target=$t bench-down
+    for i in $(seq 1 {{repeat}}); do
+      RUN_DIR="results/run-$i"
+      echo "### repeat $i/{{repeat}} -> $RUN_DIR ###"
+      mkdir -p "$RUN_DIR"
+      export BENCH_RESULTS_DIR="$PWD/$RUN_DIR"
+      for t in {{targets}}; do
+        for p in {{profiles}}; do
+          echo "=== run $i: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
+          just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up
+          just target=$t profile=$p bench-seed
+          just target=$t profile=$p bench-run
+          just target=$t bench-down
+        done
       done
     done
+    unset BENCH_RESULTS_DIR
     just bench-report
 
 # --- SDK client benchmarks --- (pass the language as sdk=, e.g. sdk=python)

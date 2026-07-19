@@ -530,9 +530,56 @@ documented "not worth it".
 
 ## Phase E — Deferred (tracked, not scheduled)
 
-- **E1. SDK client-side bench execution** (all 7 languages; harnesses already
-  wired) — **Sonnet** per language, using `sdk/HARNESS-SPEC.md`; publish the
-  overhead-vs-wire-baseline table. Requires the sibling SDK checkouts.
+- **E1. SDK client-side benches: implement, validate, and run** — despite the
+  README's "all 7 wired" wording, the maintainer confirms `benchmarks/sdk/` is
+  effectively stubs today: none of the benches has ever produced a validated
+  `status: "ok"` record against a live target, and four languages are pure
+  `emit_pending` scaffolds. Treat every bench as unimplemented until it emits
+  a spec-conformant OK record. Sub-tasks:
+
+  **E1.1 Validate & repair the 7 code-bearing benches — Sonnet, one task per
+  language** (`rust/`, `python/`, `typescript/`, `go/`, `java/`, `csharp/`,
+  `php/` — bench sources exist but are unexecuted). For each language:
+  1. Check out the sibling `ilpanich/axiam-<lang>-sdk` repo next to the
+     workspace (each bench builds against it via local path/replace/project
+     reference per its `TODO.md`).
+  2. Bring up + seed the AXIAM target (`just target=axiam bench-up bench-seed`),
+     source the seed env, then `just sdk=<lang> sdk-bench`.
+  3. Fix whatever breaks — build errors, SDK API drift vs `sdks/CONTRACT.md`,
+     env handling — until the bench runs its warm-up + measured loop for all
+     four ops (`login`, `refresh`, `check_access`, `batch_check`) and prints
+     exactly one `axiam.sdk-bench/v1` JSON record (see `sdk/HARNESS-SPEC.md`)
+     with `status: "ok"`, real latency percentiles, and client-side
+     CPU/RSS figures.
+  4. Validate the record against the spec (`sdk/collect.py` must ingest it
+     without warnings) and update the language's `TODO.md` to reflect reality.
+  *Acceptance per language:* `just sdk=<lang> sdk-bench` emits a valid OK
+  record twice in a row against a seeded p0 target; `collect.py` folds it in.
+
+  **E1.2 Implement the 4 stub benches — Sonnet, one task per language**
+  (`kotlin/`, `swift/`, `c/`, `cpp/` — currently `run.sh` → `emit_pending`
+  only). Precondition: the corresponding `ilpanich/axiam-<lang>-sdk` repo
+  must exist and be buildable — verify first; if the SDK isn't usable yet,
+  stop and report instead of writing bench glue against nothing. Then follow
+  the language's `TODO.md` recipe exactly: add the SDK dependency, implement
+  the bench entrypoint (mirror `python/bench.py` / `typescript/bench.mjs` —
+  the reference implementations: same env contract incl. the
+  `BENCH_CLIENT_CERT/KEY/CA_CERT` triple for p3-mtls, warm-up + measured
+  loop, four ops, one JSON record on stdout), and switch `run.sh` from
+  `emit_pending` to executing it. Same acceptance as E1.1.
+
+  **E1.3 Cross-SDK run + report integration — Sonnet.** Once ≥ the 7 primary
+  benches pass E1.1: run `just sdk-bench-all` against a seeded p0 and p2
+  target, extend `runner/report.py` (or `sdk/collect.py`) to emit the
+  **overhead-vs-wire-baseline table** — each SDK's `check_access`/
+  `batch_check` p50/p95 and throughput next to the raw
+  `authz_check_rest`/`authz_batch_rest` k6 wire baseline from the same
+  target/profile, plus `login`/`refresh` against their scenario baselines —
+  and add the table to the published report. Fix the `sdk/README.md`
+  status claims to match measured reality.
+  *Acceptance:* report renders the SDK overhead table from real records;
+  every SDK row links to a `status: "ok"` result file; remaining `pending`
+  languages are listed as pending, not claimed as wired.
 - **E2. AMQP async-authz load harness** — **Opus** (new tool: publisher/
   consumer pair measuring end-to-end decision latency + consumer throughput,
   per `benchmarks/README.md` "out of scope" note; design doc first).

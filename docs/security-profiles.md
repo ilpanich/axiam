@@ -17,10 +17,49 @@ When `AXIAM__SERVER__TLS__ENABLED=true`, the server builds a rustls
   offered natively — every TLS 1.3 cipher suite is ASVS-approved, so no manual
   cipher filtering is needed (V9.1.3). Legacy TLS 1.2 clients must use an edge
   proxy; native AXIAM is **TLS 1.3-only by policy** (see p1 below).
-- **Server-auth only** (`with_no_client_auth`). Client-certificate / mTLS
-  verification is not yet native (tracked as roadmap D3); p3-mtls uses an nginx
-  edge today.
+- **Client-certificate / mTLS verification is native (D3).** See
+  [Native client-certificate auth](#native-client-certificate-auth-mtls) below.
+  Default is server-auth only (`with_no_client_auth`), backward compatible.
 - **`ring` crypto provider**, selected explicitly for determinism.
+
+### Native client-certificate auth (mTLS)
+
+Client-certificate authentication is terminated **in-process** — no nginx edge
+and, critically, **no proxy-header identity assertion** (`X-Client-Certificate`
+et al.) in the trusted path. Two new config keys control it:
+
+| Env var | Values | Default | Meaning |
+|---------|--------|---------|---------|
+| `AXIAM__SERVER__TLS__CLIENT_AUTH` | `off` \| `optional` \| `required` | `off` | client-cert policy |
+| `AXIAM__SERVER__TLS__CLIENT_CA_PATH` | PEM bundle path | — | trust anchors for client certs |
+
+- **`off`** — server-auth only (unchanged behaviour; the config is built with
+  `with_no_client_auth()`).
+- **`optional`** — a client certificate is requested and, if presented,
+  **verified** against the CA bundle, but anonymous clients are still accepted
+  (`WebPkiClientVerifier::builder(..).allow_unauthenticated().build()`).
+- **`required`** — the TLS handshake is **rejected** unless the client presents
+  a certificate that verifies against the CA bundle
+  (`WebPkiClientVerifier::builder(..).build()`).
+
+The verifier is a `rustls::server::WebPkiClientVerifier` (rustls 0.23) built from
+a `RootCertStore` loaded from `CLIENT_CA_PATH`, using the same explicit `ring`
+provider as the server config. Startup **fails fast** (an `io::Error` aborting
+the process) when client-auth is enabled but the CA path is unset,
+missing/unreadable, empty, or malformed — a misconfigured mTLS server never
+starts serving.
+
+**Identity comes from the verified certificate, not a header.** When a client
+cert verifies during the handshake, the server's `HttpServer::on_connect` hook
+lifts the rustls-verified leaf certificate (via the connection's
+`peer_certificates()`) into the per-connection extensions as a
+`VerifiedClientCert` (DER + parsed SAN + SPKI SHA-256). Certificate-auth
+handlers read it back with `HttpRequest::conn_data::<VerifiedClientCert>()` and
+feed the **verified DER** into `DeviceAuthService::authenticate_der`. The legacy
+`X-Client-Certificate` proxy header is consulted **only** as a fallback when no
+verified peer certificate is present on the connection (i.e. TLS was terminated
+upstream) — so with native mTLS enabled a spoofed header can never assert an
+identity.
 
 ### ALPN / HTTP-version (`AXIAM__SERVER__TLS__HTTP2`, default `true`)
 
@@ -79,6 +118,18 @@ override is applied.
 | Profile   | Transport                    | Native AXIAM? | Notes |
 |-----------|------------------------------|---------------|-------|
 | p0        | plaintext HTTP/1.1           | yes           | baseline |
-| p1-tls12  | TLS 1.2                      | **no**        | N/A-by-policy natively (TLS 1.3-only); nginx edge if run |
+| p1-tls12  | TLS 1.2                      | **no — N/A-by-policy** | AXIAM is **TLS 1.3-only natively** (per the security standards; ASVS V9.1.2). TLS 1.2 is never offered in-process; a legacy TLS 1.2 endpoint, if ever needed, is an nginx-edge concern outside AXIAM. This profile stays nginx-fronted when run. |
 | p2-tls13  | TLS 1.3 (h2 by default)      | yes (native overlay) | h1-isolation via `tls13-h1.conf` edge |
-| p3-mtls   | TLS 1.3 + client cert        | **no** (today)| nginx edge; native mTLS tracked as D3 |
+| p3-mtls   | TLS 1.3 + client cert        | **yes (native overlay, D3)** | native mTLS: `docker-compose.native-mtls.yml` sets `CLIENT_AUTH=required` + `CLIENT_CA_PATH=/certs/ca.crt`; no nginx edge. Identity from the verified cert, not a header. |
+
+### Why p1-tls12 is N/A-by-policy (not "not yet implemented")
+
+TLS 1.2 support is a **deliberate non-goal** for the native listener, not a
+missing feature. AXIAM's security standards mandate **TLS 1.3 minimum for all
+external communication**, and restricting to TLS 1.3 is also what lets the
+native config skip manual cipher-suite filtering (every TLS 1.3 suite is
+ASVS-approved, V9.1.3). Adding TLS 1.2 would regress that posture. Deployments
+that must terminate legacy TLS 1.2 for old clients do so at an edge proxy, which
+is that proxy's policy surface — AXIAM itself never negotiates below TLS 1.3.
+The p1-tls12 benchmark profile therefore stays nginx-fronted; there is no native
+overlay for it by design.

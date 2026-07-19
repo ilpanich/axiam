@@ -43,12 +43,26 @@ impl<CR: CertificateRepository, CCR: CaCertificateRepository> DeviceAuthService<
     /// Returns a [`DeviceIdentity`] with the service account and tenant.
     /// The caller is responsible for resolving `org_id` from the tenant.
     pub async fn authenticate(&self, pem: &str) -> AxiamResult<DeviceIdentity> {
-        // Parse PEM
+        // Parse PEM, then delegate to the DER path so the PEM (proxy header) and
+        // native-mTLS (verified peer cert, D3) flows share one validation chain.
         let (_, pem_obj) = parse_x509_pem(pem.as_bytes())
             .map_err(|e| AxiamError::Certificate(format!("invalid client certificate PEM: {e}")))?;
+        self.authenticate_der(&pem_obj.contents).await
+    }
 
+    /// Authenticate a device from a DER-encoded client certificate.
+    ///
+    /// This is the shared core of [`Self::authenticate`]: it is called directly
+    /// by the REST layer with the certificate rustls **verified** during the
+    /// native-mTLS handshake (D3), so the verified peer certificate — not a
+    /// proxy header — drives certificate-based identity.
+    ///
+    /// Steps mirror [`Self::authenticate`]: fingerprint lookup, status/expiry
+    /// checks, chain verification to the tenant/org CA (SEC-024/SECHRD-05), and
+    /// service-account resolution.
+    pub async fn authenticate_der(&self, der: &[u8]) -> AxiamResult<DeviceIdentity> {
         // Compute SHA-256 fingerprint from DER
-        let fingerprint = hex::encode(Sha256::digest(&pem_obj.contents));
+        let fingerprint = hex::encode(Sha256::digest(der));
 
         // Look up by fingerprint globally
         let cert = self
@@ -102,8 +116,8 @@ impl<CR: CertificateRepository, CCR: CaCertificateRepository> DeviceAuthService<
         let (_, ca_x509) = parse_x509_certificate(&ca_pem_obj.contents)
             .map_err(|e| AxiamError::Certificate(format!("failed to parse CA certificate: {e}")))?;
 
-        // Parse the client cert DER (already extracted from PEM above).
-        let (_, client_x509) = parse_x509_certificate(&pem_obj.contents).map_err(|e| {
+        // Parse the client cert DER.
+        let (_, client_x509) = parse_x509_certificate(der).map_err(|e| {
             AxiamError::Certificate(format!("failed to parse client certificate: {e}"))
         })?;
 

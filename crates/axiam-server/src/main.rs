@@ -972,6 +972,35 @@ async fn main() -> std::io::Result<()> {
             .configure(health_routes::<axiam_db::DbClient>)
             .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
             .configure(openapi_routes)
+    })
+    // D3 native mTLS: lift the rustls-VERIFIED client certificate off the TLS
+    // connection into the per-connection extensions so cert-auth handlers read
+    // the verified peer cert (via `HttpRequest::conn_data`) instead of a
+    // spoofable proxy header. Only fires on the rustls bind with client-auth
+    // enabled; on plaintext / server-auth-only connections there is no peer cert
+    // and nothing is inserted (backward compatible).
+    .on_connect(|conn, ext| {
+        use actix_tls::accept::rustls_0_23::TlsStream;
+        use actix_web::rt::net::TcpStream;
+        if let Some(tls) = conn.downcast_ref::<TlsStream<TcpStream>>() {
+            let (_io, session) = tls.get_ref();
+            if let Some(certs) = session.peer_certificates() {
+                if let Some(leaf) = certs.first() {
+                    match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref()) {
+                        Ok(vc) => {
+                            ext.insert(vc);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to parse verified client certificate; \
+                                 cert-mapped identity will be unavailable for this connection"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     });
 
     // Bind plaintext (proxy-terminated TLS, the default) or, when

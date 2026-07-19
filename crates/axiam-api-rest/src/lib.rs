@@ -19,7 +19,7 @@ pub use authz::{AuthzChecker, AuthzData, RequirePermission};
 pub use config::{RateLimitConfig, ServerConfig};
 pub use error::AxiamApiError;
 pub use extractors::auth::{AuthenticatedUser, SessionValidator};
-pub use extractors::cert_auth::CertificateAuthenticated;
+pub use extractors::cert_auth::{CertificateAuthenticated, VerifiedClientCert};
 pub use extractors::tenant::TenantContext;
 pub use health::HealthChecker;
 pub use openapi::ApiDoc;

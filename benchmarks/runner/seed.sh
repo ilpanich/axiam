@@ -39,6 +39,21 @@ BENCH_PASSWORD="${BENCH_PASSWORD:-Bench@User123!}"
 # exercised during the measured run, not during provisioning.
 BASE="${2:-http://localhost:${BENCH_APP_PORT:-8090}}"
 
+# D3 native mTLS: under p3-mtls, AXIAM terminates client-cert auth in-process and
+# REQUIRES a verified client certificate on EVERY TLS connection — including the
+# ones this script makes to bootstrap/seed/smoke-check the target. When the p3
+# profile env is sourced (bench-seed does this for the native mTLS target), it
+# exports BENCH_CLIENT_CERT/KEY (the same cert k6 presents via tlsAuth). Wrap
+# curl transparently to present them so seeding succeeds against the mTLS
+# listener. Unset otherwise (server-auth profiles) → the wrapper is not defined
+# and curl behaves normally. seed.sh seeds one target per invocation, so this
+# only affects the native mTLS run.
+if [ -n "${BENCH_CLIENT_CERT:-}" ] && [ -n "${BENCH_CLIENT_KEY:-}" ]; then
+  _CURL_MTLS=(--cert "$BENCH_CLIENT_CERT" --key "$BENCH_CLIENT_KEY")
+  echo "[seed] native mTLS: presenting client cert on all requests ($BENCH_CLIENT_CERT)"
+  curl() { command curl "${_CURL_MTLS[@]}" "$@"; }
+fi
+
 # A fresh seed invalidates any prior "this target is known-good" marker until
 # the smoke checks pass again below.
 rm -f "$SEED_OK_MARKER"

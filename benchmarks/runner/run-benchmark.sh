@@ -185,8 +185,9 @@ json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 # Container names that make up each target's stack, with a role used to look
 # up its CPU cap default (mirrors targets/<name>/docker-compose.yml — see A4/A5
 # in claude_dev/benchmark-improvement-plan.md). The tls-edge container only
-# exists for AXIAM under a non-native TLS profile (p1/p3); docker inspect
-# simply finds nothing for containers that aren't running and is skipped.
+# exists for AXIAM under the nginx-fronted p1-tls12 profile now (p2/p3 terminate
+# TLS/mTLS in-process natively — D3); docker inspect simply finds nothing for
+# containers that aren't running and is skipped.
 container_specs_for_target() {
   case "$TARGET" in
     axiam)

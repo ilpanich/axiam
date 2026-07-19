@@ -162,12 +162,19 @@ bench-up:
         # stack inside its CPU cap — comparable to keycloak/zitadel native TLS.
         # See targets/axiam/docker-compose.native-tls.yml.
         OVERRIDE_ARG="-f targets/axiam/docker-compose.native-tls.yml"
+      elif [ "{{profile}}" = "p3-mtls" ]; then
+        # p3 = TLS 1.3 + X.509 client-cert auth. AXIAM now verifies client certs
+        # in-process (D3: rustls WebPkiClientVerifier over profiles/certs/ca.crt),
+        # so terminate mTLS natively — no nginx edge — making the VERIFIED peer
+        # cert the identity source (not a proxy header) and keeping the crypto
+        # inside AXIAM's cap. Layers the mTLS overlay on top of the native-TLS
+        # one (same pattern p2 used in 649798e).
+        OVERRIDE_ARG="-f targets/axiam/docker-compose.native-tls.yml -f targets/axiam/docker-compose.native-mtls.yml"
       else
-        # p1-tls12 / p3-mtls: the native stack can't do TLS 1.2 or client-cert
-        # auth, so keep the nginx edge for those.
+        # p1-tls12: the native stack is TLS 1.3-only by policy and can't do
+        # TLS 1.2, so keep the nginx edge for that profile (see docs/security-profiles.md).
         case "{{profile}}" in
           p1-tls12) export BENCH_NGINX_CONF=tls12.conf ;;
-          p3-mtls)  export BENCH_NGINX_CONF=mtls.conf ;;
         esac
         PROFILE_ARG="--profile tls"
       fi
@@ -219,8 +226,9 @@ bench-up:
       fi
     }
     port_conflict=0
-    if [ "{{target}}" = "axiam" ] && [ "{{profile}}" = "p2-tls13" ]; then
-      # Native TLS: the server publishes the TLS port (+ grpc); no plaintext 8090.
+    if [ "{{target}}" = "axiam" ] && [ -n "$OVERRIDE_ARG" ]; then
+      # Native TLS/mTLS (p2-tls13, p3-mtls): the server publishes the TLS port
+      # (+ grpc); no plaintext 8090. Detected via the native compose override.
       check_port "${BENCH_TLS_PORT:-8443}" "TLS / BENCH_TLS_PORT" || port_conflict=1
     else
       check_port "${BENCH_APP_PORT:-8090}" "app / BENCH_APP_PORT" || port_conflict=1
@@ -253,8 +261,16 @@ bench-up:
     esac
     echo "[bench-up] waiting for {{target}} to serve at $READY_URL (timeout 180s)"
     ready_deadline=$(( $(date +%s) + 180 ))
+    # Native mTLS (axiam p3-mtls, client_auth=required): the listener rejects any
+    # connection without a verified client cert, so the readiness probe must
+    # present one too. BENCH_CLIENT_CERT/KEY come from the sourced profile env.
+    READY_MTLS=""
+    if [ "{{target}}" = "axiam" ] && [ "{{profile}}" = "p3-mtls" ] \
+       && [ -n "${BENCH_CLIENT_CERT:-}" ] && [ -n "${BENCH_CLIENT_KEY:-}" ]; then
+      READY_MTLS="--cert ${BENCH_CLIENT_CERT} --key ${BENCH_CLIENT_KEY}"
+    fi
     # -k: the TLS profiles front a throwaway private CA k6 also can't verify.
-    until curl -skf -o /dev/null "$READY_URL"; do
+    until curl -skf $READY_MTLS -o /dev/null "$READY_URL"; do
       if [ "$(date +%s)" -ge "$ready_deadline" ]; then
         echo "[bench-up] TIMEOUT: {{target}} did not become ready at $READY_URL" >&2
         docker compose -f "$COMPOSE" $PROFILE_ARG ps >&2 || true
@@ -277,9 +293,12 @@ bench-seed:
     #!/usr/bin/env bash
     set -euo pipefail
     if { [ "{{target}}" = "zitadel" ] && [ "{{profile}}" != "p0-plaintext" ]; } \
-       || { [ "{{target}}" = "axiam" ] && [ "{{profile}}" = "p2-tls13" ]; }; then
+       || { [ "{{target}}" = "axiam" ] && { [ "{{profile}}" = "p2-tls13" ] || [ "{{profile}}" = "p3-mtls" ]; }; }; then
       # TLS-only listeners (zitadel built-in TLS; axiam native rustls) have no
       # plaintext side port, so seed over https at the TLS port (seed.sh uses -k).
+      # For axiam p3-mtls the native listener also REQUIRES a client cert, so
+      # sourcing the profile env exports BENCH_CLIENT_CERT/KEY, which seed.sh
+      # presents transparently on every request (see its curl wrapper).
       source profiles/{{profile}}.env
       BASE="${BENCH_SCHEME:-https}://${BENCH_HOST:-localhost}:${BENCH_PORT:-8443}"
       bash runner/seed.sh {{target}} "$BASE"

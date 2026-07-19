@@ -36,6 +36,31 @@ impl Default for ServerConfig {
     }
 }
 
+/// Native client-certificate (mTLS) authentication policy for the direct-TLS
+/// listener (D3).
+///
+/// When client auth is enabled, rustls verifies the presented client
+/// certificate against the CA bundle at [`TlsConfig::client_ca_path`] during
+/// the TLS handshake, and the *verified* leaf certificate is exposed to request
+/// handlers via the connection extensions — the certificate-auth flow then
+/// consumes that verified cert rather than a spoofable proxy header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientAuth {
+    /// No client certificate requested (server-auth only). Backward-compatible
+    /// default — the rustls config is built with `with_no_client_auth()`.
+    #[default]
+    Off,
+    /// Request a client certificate but allow anonymous clients. A presented
+    /// certificate is still verified against the CA bundle; connections without
+    /// one are accepted (`WebPkiClientVerifier::builder(..).allow_unauthenticated()`).
+    Optional,
+    /// Require a client certificate verified against the CA bundle. The TLS
+    /// handshake is rejected if the client presents no certificate or an
+    /// unverifiable one (`WebPkiClientVerifier::builder(..).build()`).
+    Required,
+}
+
 /// Direct-TLS configuration for the REST API listener.
 ///
 /// TLS is **opt-in**: the default (`enabled = false`) preserves the plaintext
@@ -61,6 +86,14 @@ pub struct TlsConfig {
     /// (B2). See `axiam-server`'s `tls` module for the important caveat that the
     /// actix-web `HttpServer` bind re-adds `h2` to ALPN regardless.
     pub http2: bool,
+    /// Native client-certificate (mTLS) policy (D3). Default `off` keeps the
+    /// server-auth-only behaviour. `optional`/`required` build the rustls config
+    /// with a `WebPkiClientVerifier` over [`Self::client_ca_path`].
+    pub client_auth: ClientAuth,
+    /// Path to the PEM CA bundle used to verify client certificates. Required
+    /// (and must be readable) when `client_auth` is `optional` or `required`;
+    /// ignored when `off`.
+    pub client_ca_path: Option<PathBuf>,
 }
 
 impl Default for TlsConfig {
@@ -70,6 +103,8 @@ impl Default for TlsConfig {
             cert_path: None,
             key_path: None,
             http2: true,
+            client_auth: ClientAuth::Off,
+            client_ca_path: None,
         }
     }
 }
@@ -78,5 +113,53 @@ impl ServerConfig {
     /// Returns the socket bind address as "host:port".
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_auth_defaults_to_off() {
+        assert_eq!(ClientAuth::default(), ClientAuth::Off);
+        assert_eq!(TlsConfig::default().client_auth, ClientAuth::Off);
+        assert!(TlsConfig::default().client_ca_path.is_none());
+    }
+
+    #[test]
+    fn client_auth_parses_all_three_values() {
+        for (raw, expected) in [
+            ("\"off\"", ClientAuth::Off),
+            ("\"optional\"", ClientAuth::Optional),
+            ("\"required\"", ClientAuth::Required),
+        ] {
+            let parsed: ClientAuth =
+                serde_json::from_str(raw).unwrap_or_else(|e| panic!("{raw} must parse: {e}"));
+            assert_eq!(parsed, expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn client_auth_rejects_invalid_value() {
+        let err = serde_json::from_str::<ClientAuth>("\"enabled\"");
+        assert!(err.is_err(), "unknown client_auth value must be rejected");
+    }
+
+    #[test]
+    fn tls_config_deserializes_client_auth_fields() {
+        let cfg: TlsConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "cert_path": "/etc/axiam/server.crt",
+            "key_path": "/etc/axiam/server.key",
+            "client_auth": "required",
+            "client_ca_path": "/etc/axiam/ca.crt",
+        }))
+        .expect("TlsConfig with client-auth fields must deserialize");
+        assert_eq!(cfg.client_auth, ClientAuth::Required);
+        assert_eq!(
+            cfg.client_ca_path.as_deref(),
+            Some(std::path::Path::new("/etc/axiam/ca.crt"))
+        );
     }
 }

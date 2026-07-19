@@ -917,6 +917,7 @@ dependencies = [
  "uuid",
  "webauthn-rs-proto",
  "wiremock",
+ "x509-parser 0.18.1",
 ]
 
 [[package]]
@@ -1127,6 +1128,7 @@ version = "1.0.0-alpha12"
 dependencies = [
  "actix-http",
  "actix-rt",
+ "actix-tls",
  "actix-web",
  "axiam-amqp",
  "axiam-api-grpc",
@@ -1145,6 +1147,7 @@ dependencies = [
  "hex",
  "jsonwebtoken",
  "rand_core 0.6.4",
+ "rcgen",
  "reqwest 0.12.28",
  "rsa",
  "rustls",

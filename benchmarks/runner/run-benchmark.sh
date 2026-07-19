@@ -20,6 +20,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BENCH="$(cd "$HERE/.." && pwd)"
 RESULTS="${BENCH_RESULTS_DIR:-$BENCH/results}"
+SEED_DIR="${BENCH_SEED_DIR:-$BENCH/.seed}"
 
 TARGET=axiam
 PROFILE=p0-plaintext
@@ -39,9 +40,34 @@ PROFILE_ENV="$BENCH/profiles/${PROFILE}.env"
 # shellcheck disable=SC1090
 source "$PROFILE_ENV"
 
-SEED_ENV="$RESULTS/${TARGET}.seed.env"
-if [ -f "$SEED_ENV" ]; then source "$SEED_ENV"; else
+# Seed env (client secrets/passwords) lives under .seed/, NOT results/ — see A7
+# in claude_dev/benchmark-improvement-plan.md and docs/methodology.md. Fall back
+# to the old results/ location for one release cycle so a stale seed from before
+# this change still works without a re-seed.
+SEED_ENV="$SEED_DIR/${TARGET}.seed.env"
+LEGACY_SEED_ENV="$RESULTS/${TARGET}.seed.env"
+if [ -f "$SEED_ENV" ]; then
+  source "$SEED_ENV"
+elif [ -f "$LEGACY_SEED_ENV" ]; then
+  echo "[run] WARN: using legacy seed env at $LEGACY_SEED_ENV — re-run 'just target=$TARGET bench-seed' to move it under .seed/"
+  source "$LEGACY_SEED_ENV"
+else
   echo "[run] WARN: no seed env ($SEED_ENV) — scenarios needing a tenant/client may fail"
+fi
+
+# Refuse to start the k6 matrix without a passing post-seed smoke check for this
+# target (runner/seed.sh writes results/<target>.seed.ok only after every
+# scenario-critical flow — ROPC/login, client_credentials, introspect, refresh,
+# userinfo, and for AXIAM a REST authz check — returned the expected status).
+# This is what makes "deliberately break the seeded Keycloak client" refuse to
+# run instead of burning a full k6 matrix on a wall of failed checks.
+SEED_OK_MARKER="$RESULTS/${TARGET}.seed.ok"
+if [ "${BENCH_SKIP_SEED_CHECK:-0}" != "1" ] && [ ! -f "$SEED_OK_MARKER" ]; then
+  echo "[run] REFUSING to start: no seed-ok marker for target '$TARGET' ($SEED_OK_MARKER)." >&2
+  echo "      Run 'just target=$TARGET bench-seed' first — it seeds the target AND" >&2
+  echo "      smoke-checks every scenario-critical flow before writing this marker." >&2
+  echo "      (Override only for debugging: BENCH_SKIP_SEED_CHECK=1.)" >&2
+  exit 1
 fi
 
 export BENCH_TARGET="$TARGET"
@@ -119,6 +145,95 @@ detect_rl_posture() {
 RL_POSTURE="$(detect_rl_posture)"
 echo "[run] rate-limit posture: $RL_POSTURE"
 
+# --- Reproducibility metadata (methodology.md §7 / A4) ----------------------
+# Host facts that don't change across scenarios in this run — gathered once.
+HOST_KERNEL="$(uname -r 2>/dev/null || echo unknown)"
+DOCKER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+CPU_MODEL="$(awk -F: '/model name/ {gsub(/^ +/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+[ -n "$CPU_MODEL" ] || CPU_MODEL="unknown"
+CPU_GOVERNOR="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+BATCH_SIZE="${BENCH_BATCH_SIZE:-5}"
+
+# Naive JSON string escaping (backslash + double-quote only — sufficient for
+# the plain ASCII strings embedded here: image names, kernel/cpu strings).
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# Container names that make up each target's stack, with a role used to look
+# up its CPU cap default (mirrors targets/<name>/docker-compose.yml — see A4/A5
+# in claude_dev/benchmark-improvement-plan.md). The tls-edge container only
+# exists for AXIAM under a non-native TLS profile (p1/p3); docker inspect
+# simply finds nothing for containers that aren't running and is skipped.
+container_specs_for_target() {
+  case "$TARGET" in
+    axiam)
+      cat <<EOF
+bench-axiam-server server
+bench-axiam-tls edge
+bench-axiam-surrealdb db
+bench-axiam-rabbitmq mq
+EOF
+      ;;
+    keycloak)
+      cat <<EOF
+bench-keycloak server
+bench-keycloak-postgres db
+EOF
+      ;;
+    zitadel)
+      cat <<EOF
+bench-zitadel server
+bench-zitadel-postgres db
+EOF
+      ;;
+  esac
+}
+
+# Default CPU cap per role, matching each target's docker-compose.yml default
+# (report.py's bottleneck attribution falls back to these when a container's
+# actual cap env var wasn't exported into this shell).
+role_default_cpu_cap() {
+  case "$1" in
+    server) echo "${BENCH_CPUS:-2}" ;;
+    db)     echo "${BENCH_DB_CPUS:-2}" ;;
+    mq)     echo "${BENCH_MQ_CPUS:-1}" ;;
+    edge)   echo "${BENCH_EDGE_CPUS:-1}" ;;
+    *)      echo "2" ;;
+  esac
+}
+
+# Emits the JSON array for meta.json's "containers" field: one entry per
+# running container in this target's stack, with image, image_digest (from
+# `docker inspect`), role, and its CPU cap. The cap is read straight off the
+# running container (`HostConfig.NanoCpus`, what `--cpus`/compose `cpus:`
+# actually sets) rather than trusted from this shell's env — BENCH_DB_CPUS/
+# BENCH_MQ_CPUS/BENCH_EDGE_CPUS are only exported inside `just bench-up`'s own
+# subshell, so a separate `bench-run` invocation would otherwise silently miss
+# a non-default cap the operator set at bench-up time. Falls back to the
+# compose-file default only if NanoCpus is unset (no `--cpus` was applied).
+containers_json() {
+  local first=1 line cname role img dig cap nanocpus
+  echo -n "["
+  while read -r line; do
+    [ -z "$line" ] && continue
+    cname="${line%% *}"; role="${line#* }"
+    docker inspect "$cname" >/dev/null 2>&1 || continue
+    img="$(docker inspect --format '{{.Config.Image}}' "$cname" 2>/dev/null || echo unknown)"
+    dig="$(docker inspect --format '{{index .RepoDigests 0}}' "$cname" 2>/dev/null || echo '')"
+    [ -z "$dig" ] && dig="unknown"
+    nanocpus="$(docker inspect --format '{{.HostConfig.NanoCpus}}' "$cname" 2>/dev/null || echo 0)"
+    if [ -n "$nanocpus" ] && [ "$nanocpus" != "0" ]; then
+      cap="$(awk -v n="$nanocpus" 'BEGIN{printf "%.3f", n/1000000000}')"
+    else
+      cap="$(role_default_cpu_cap "$role")"
+    fi
+    [ "$first" -eq 1 ] || echo -n ","
+    first=0
+    printf '{"name":"%s","role":"%s","image":"%s","image_digest":"%s","cpu_cap":%s}' \
+      "$(json_escape "$cname")" "$role" "$(json_escape "$img")" "$(json_escape "$dig")" "$cap"
+  done < <(container_specs_for_target)
+  echo -n "]"
+}
+
 run_one() {
   local scenario="$1"
   local name="${scenario%.js}"
@@ -126,13 +241,22 @@ run_one() {
   mkdir -p "$outdir"
   local k6sum="$outdir/$name.k6.json"
   local rescsv="$outdir/$name.res.csv"
+  local hostcsv="$outdir/$name.host.csv"
   local meta="$outdir/$name.meta.json"
 
   echo "[run] === $TARGET / $PROFILE / $name ==="
 
-  # Start the resource sampler for the measure window (skip the warm-up first).
+  local scenario_sha256
+  scenario_sha256="$(sha256sum "$BENCH/scenarios/$scenario" 2>/dev/null | awk '{print $1}')"
+  [ -n "$scenario_sha256" ] || scenario_sha256="unknown"
+
+  # Start the resource + host-telemetry samplers for the measure window (skip
+  # the warm-up first) — both write CSVs the report joins against the k6
+  # summary (docs/methodology.md §5/§7, A6).
   ( sleep "$WARM_S"; bash "$BENCH/resource/sampler.sh" "$RES_FILTER" "$rescsv" "$SAMPLE_INTERVAL" "$DUR_S" ) &
   local sampler_pid=$!
+  ( sleep "$WARM_S"; bash "$BENCH/resource/host-sampler.sh" "$hostcsv" "$SAMPLE_INTERVAL" "$DUR_S" ) &
+  local host_sampler_pid=$!
 
   # Run k6. summary-export gives end-of-test aggregated metrics as JSON.
   set +e
@@ -141,6 +265,15 @@ run_one() {
   local k6rc=$?
   set -e
   wait "$sampler_pid" 2>/dev/null || true
+  wait "$host_sampler_pid" 2>/dev/null || true
+
+  # k6_cpu_cores_avg over the measure window, straight from the host.csv this
+  # run just wrote (methodology §7 / A4). Skip the header line; tolerate a
+  # missing/empty file (e.g. host-sampler.sh not executable on this host).
+  local k6_cpu_cores_avg="0"
+  if [ -f "$hostcsv" ]; then
+    k6_cpu_cores_avg="$(awk -F, 'NR>1 && $6!="" {s+=$6; n++} END{if(n>0) printf "%.3f", s/n; else print 0}' "$hostcsv")"
+  fi
 
   # Write run metadata (joined by report.py).
   cat > "$meta" <<EOF
@@ -160,10 +293,19 @@ run_one() {
   "caps": { "cpus": "${BENCH_CPUS:-2}", "mem": "${BENCH_MEM:-1024m}" },
   "host": { "cpus": "$HOST_CPUS", "mem_mib": "$HOST_MEM_MIB" },
   "k6_summary_file": "$name.k6.json",
-  "resource_csv": "$name.res.csv"
+  "resource_csv": "$name.res.csv",
+  "host_csv": "$name.host.csv",
+  "scenario_sha256": "$scenario_sha256",
+  "batch_size": $BATCH_SIZE,
+  "host_kernel": "$(json_escape "$HOST_KERNEL")",
+  "docker_version": "$(json_escape "$DOCKER_VERSION")",
+  "cpu_model": "$(json_escape "$CPU_MODEL")",
+  "cpu_governor": "$(json_escape "$CPU_GOVERNOR")",
+  "k6_cpu_cores_avg": $k6_cpu_cores_avg,
+  "containers": $(containers_json)
 }
 EOF
-  echo "[run] wrote $k6sum, $rescsv, $meta"
+  echo "[run] wrote $k6sum, $rescsv, $hostcsv, $meta"
 }
 
 for s in "${SCENARIOS[@]}"; do

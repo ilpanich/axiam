@@ -3,8 +3,21 @@
 # confidential client able to do client_credentials + refresh) for one target,
 # then write a seed env file the runner sources:
 #
-#   results/<target>.seed.env   (BENCH_ORG_ID, BENCH_TENANT_ID, BENCH_CLIENT_ID,
-#                                BENCH_CLIENT_SECRET, BENCH_USERNAME, BENCH_PASSWORD)
+#   .seed/<target>.seed.env   (BENCH_ORG_ID, BENCH_TENANT_ID, BENCH_CLIENT_ID,
+#                              BENCH_CLIENT_SECRET, BENCH_USERNAME, BENCH_PASSWORD)
+#
+# `.seed/` (NOT `results/`) holds this file because it contains client secrets
+# and the bench user's password — `results/` is the tree we publish/share, and
+# `.seed/` is gitignored (see docs/methodology.md + `just bench-pack`).
+#
+# After seeding, this script runs a smoke-check section: one real request per
+# scenario-critical flow, against the objects it just provisioned/verified.
+# Any unexpected status prints the response body, saves it under
+# results/<target>/seed-failure/, and exits non-zero — so a broken seed (e.g. a
+# Keycloak client with directAccessGrantsEnabled=false) is caught here, not
+# discovered as a wall of "status is 200" failures 2 hours into a k6 matrix.
+# On success it touches results/<target>.seed.ok, which run-benchmark.sh
+# requires before it will start the k6 matrix for that target.
 #
 # Usage: seed.sh <target> [base_url]
 set -euo pipefail
@@ -13,7 +26,11 @@ TARGET="${1:?target (axiam|keycloak|zitadel)}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RESULTS="${BENCH_RESULTS_DIR:-$HERE/../results}"
 mkdir -p "$RESULTS"
-SEED_ENV="$RESULTS/${TARGET}.seed.env"
+SEED_DIR="${BENCH_SEED_DIR:-$HERE/../.seed}"
+mkdir -p "$SEED_DIR"
+SEED_ENV="$SEED_DIR/${TARGET}.seed.env"
+SEED_OK_MARKER="$RESULTS/${TARGET}.seed.ok"
+SMOKE_FAIL_DIR="$RESULTS/${TARGET}/seed-failure"
 
 BENCH_USERNAME="${BENCH_USERNAME:-benchuser}"
 BENCH_PASSWORD="${BENCH_PASSWORD:-Bench@User123!}"
@@ -21,6 +38,10 @@ BENCH_PASSWORD="${BENCH_PASSWORD:-Bench@User123!}"
 # Seeding always talks plaintext to the app port; TLS is a transport concern
 # exercised during the measured run, not during provisioning.
 BASE="${2:-http://localhost:${BENCH_APP_PORT:-8090}}"
+
+# A fresh seed invalidates any prior "this target is known-good" marker until
+# the smoke checks pass again below.
+rm -f "$SEED_OK_MARKER"
 
 write_seed() {
   cat > "$SEED_ENV" <<EOF
@@ -43,6 +64,7 @@ export BENCH_PROJECT_ID=${PROJECT_ID:-}
 export BENCH_INTROSPECT_CLIENT_ID=${INTROSPECT_CLIENT_ID:-}
 export BENCH_INTROSPECT_CLIENT_SECRET='${INTROSPECT_CLIENT_SECRET:-}'
 EOF
+  chmod 600 "$SEED_ENV"
   echo "[seed] wrote $SEED_ENV"
 }
 
@@ -73,7 +95,9 @@ seed_axiam() {
   ORG_SLUG=bench-org
 
   # Authenticated JSON call against /api/v1 with the admin cookie jar + CSRF
-  # double-submit. Usage: api METHOD PATH [JSON-BODY].
+  # double-submit. Usage: api METHOD PATH [JSON-BODY]. Prints the response body
+  # (caller decides whether/how to check it — used where the caller already
+  # tolerates an empty/absent result via create_or_find's own status handling).
   api() {
     local method="$1" path="$2" data="${3:-}" csrf
     csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$JAR")"
@@ -83,6 +107,23 @@ seed_axiam() {
     else
       curl -sSk -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" -H "X-CSRF-Token: $csrf"
     fi
+  }
+  # Like api(), but asserts the HTTP status is 2xx or 409 (already-exists,
+  # idempotent), printing the body and exiting non-zero on anything else. Used
+  # for provisioning calls with no create-or-find fallback (grants), where a
+  # silently swallowed failure (the old `|| true`) would seed a fixture that
+  # LOOKS complete but has no actual grant.
+  api_checked() {  # METHOD PATH JSON
+    local method="$1" path="$2" data="$3" resp code body csrf
+    csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$JAR")"
+    resp=$(curl -sSk -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" \
+      -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" -d "$data" \
+      -w $'\n%{http_code}')
+    code="${resp##*$'\n'}"; body="${resp%$'\n'*}"
+    case "$code" in
+      2??|409) printf '%s' "$body" ;;
+      *) echo "[seed/axiam] $method $path -> HTTP $code: $body" >&2; exit 1 ;;
+    esac
   }
   # Create an entity, or find the existing one on re-seed. `.. | objects` walks
   # any response wrapper (bare array, {data:[…]}, {items:[…]}) to find the row
@@ -135,28 +176,27 @@ seed_axiam() {
   USER_ID=$(create_or_find /api/v1/users \
     "{\"username\":\"$BENCH_USERNAME\",\"email\":\"bench@bench.dev\",\"password\":\"$BENCH_PASSWORD\"}" \
     username "$BENCH_USERNAME")
-  [ -z "$USER_ID" ] && echo "[seed/axiam] WARN: could not create/find bench user"
+  [ -n "$USER_ID" ] || { echo "[seed/axiam] could not create/find bench user"; exit 1; }
 
   echo "[seed/axiam] creating benchmark resource"
   RESOURCE_ID=$(create_or_find /api/v1/resources \
     '{"name":"bench-resource","resource_type":"bench"}' name "bench-resource")
-  [ -z "$RESOURCE_ID" ] && echo "[seed/axiam] WARN: could not create/find bench resource"
+  [ -n "$RESOURCE_ID" ] || { echo "[seed/axiam] could not create/find bench resource"; exit 1; }
 
   echo "[seed/axiam] creating role + read permission"
   ROLE_ID=$(create_or_find /api/v1/roles \
     '{"name":"bench-reader","description":"Bench read role","is_global":false}' name "bench-reader")
+  [ -n "$ROLE_ID" ] || { echo "[seed/axiam] could not create/find bench role"; exit 1; }
   PERM_ID=$(create_or_find /api/v1/permissions \
     '{"action":"read","description":"Bench read permission"}' action "read")
+  [ -n "$PERM_ID" ] || { echo "[seed/axiam] could not create/find bench permission"; exit 1; }
 
-  if [ -n "$ROLE_ID" ] && [ -n "$PERM_ID" ]; then
-    echo "[seed/axiam] granting read permission to role (idempotent)"
-    api POST "/api/v1/roles/$ROLE_ID/permissions" "{\"permission_id\":\"$PERM_ID\"}" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$ROLE_ID" ] && [ -n "$USER_ID" ] && [ -n "$RESOURCE_ID" ]; then
-    echo "[seed/axiam] assigning role to bench user (scoped to resource)"
-    api POST "/api/v1/roles/$ROLE_ID/users" \
-      "{\"user_id\":\"$USER_ID\",\"resource_id\":\"$RESOURCE_ID\"}" >/dev/null 2>&1 || true
-  fi
+  echo "[seed/axiam] granting read permission to role (idempotent)"
+  api_checked POST "/api/v1/roles/$ROLE_ID/permissions" "{\"permission_id\":\"$PERM_ID\"}" >/dev/null
+
+  echo "[seed/axiam] assigning role to bench user (scoped to resource)"
+  api_checked POST "/api/v1/roles/$ROLE_ID/users" \
+    "{\"user_id\":\"$USER_ID\",\"resource_id\":\"$RESOURCE_ID\"}" >/dev/null
 
   echo "[seed/axiam] creating confidential oauth2 client (client_credentials+refresh)"
   local CLIENT_RESP
@@ -164,7 +204,9 @@ seed_axiam() {
     '{"name":"bench-client","redirect_uris":["http://localhost/cb"],"grant_types":["client_credentials","refresh_token","authorization_code"],"scopes":["openid"]}')
   CLIENT_ID=$(echo "$CLIENT_RESP" | jq -r '.client_id // empty')
   CLIENT_SECRET=$(echo "$CLIENT_RESP" | jq -r '.client_secret // empty')
-  [ -z "$CLIENT_ID" ] && echo "[seed/axiam] WARN: client creation response: $CLIENT_RESP"
+  if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+    echo "[seed/axiam] client creation failed: $CLIENT_RESP"; exit 1
+  fi
 
   # Export the authz fixtures the scenarios/SDK benches need.
   BENCH_SUBJECT_ID="$USER_ID"
@@ -174,6 +216,7 @@ seed_axiam() {
 
 # ---------------------------------------------------------------------------
 seed_keycloak() {
+  command -v jq >/dev/null || { echo "[seed/keycloak] jq is required (see README prerequisites)"; exit 1; }
   REALM="${REALM:-bench}"
   local ADMIN="${KC_ADMIN:-admin}" PW="${KC_ADMIN_PASSWORD:-admin}"
   echo "[seed/keycloak] obtaining admin token"
@@ -184,23 +227,87 @@ seed_keycloak() {
   [ -z "$AT" ] && { echo "[seed/keycloak] admin token failed"; exit 1; }
   local H="Authorization: Bearer $AT"
 
+  # POST helper: check status, treat 409 (already exists) as OK, otherwise
+  # print the response body and fail closed. Usage: kc_post PATH JSON
+  kc_post() {
+    local path="$1" data="$2" resp code body
+    resp=$(curl -sS -X POST "$BASE$path" -H "$H" -H "Content-Type: application/json" \
+      -d "$data" -w $'\n%{http_code}')
+    code="${resp##*$'\n'}"; body="${resp%$'\n'*}"
+    case "$code" in
+      201|204|409) return 0 ;;
+      *) echo "[seed/keycloak] POST $path -> HTTP $code: $body" >&2; exit 1 ;;
+    esac
+  }
+  # GET helper: prints the body, fails closed on non-200.
+  kc_get() {
+    local path="$1" resp code body
+    resp=$(curl -sS "$BASE$path" -H "$H" -w $'\n%{http_code}')
+    code="${resp##*$'\n'}"; body="${resp%$'\n'*}"
+    if [ "$code" != "200" ]; then
+      echo "[seed/keycloak] GET $path -> HTTP $code: $body" >&2
+      exit 1
+    fi
+    printf '%s' "$body"
+  }
+
   echo "[seed/keycloak] creating realm $REALM"
-  curl -s -X POST "$BASE/admin/realms" -H "$H" -H "Content-Type: application/json" \
-    -d "{\"realm\":\"$REALM\",\"enabled\":true}" >/dev/null || true
+  kc_post "/admin/realms" "{\"realm\":\"$REALM\",\"enabled\":true}"
 
   echo "[seed/keycloak] creating confidential client"
   CLIENT_ID="bench-client"
-  curl -s -X POST "$BASE/admin/realms/$REALM/clients" -H "$H" -H "Content-Type: application/json" \
-    -d "{\"clientId\":\"$CLIENT_ID\",\"enabled\":true,\"publicClient\":false,\"serviceAccountsEnabled\":true,\"directAccessGrantsEnabled\":true,\"standardFlowEnabled\":true,\"redirectUris\":[\"http://localhost/cb\"]}" >/dev/null || true
+  kc_post "/admin/realms/$REALM/clients" \
+    "{\"clientId\":\"$CLIENT_ID\",\"enabled\":true,\"publicClient\":false,\"serviceAccountsEnabled\":true,\"directAccessGrantsEnabled\":true,\"standardFlowEnabled\":true,\"redirectUris\":[\"http://localhost/cb\"]}"
+
   local CID
-  CID=$(curl -sf "$BASE/admin/realms/$REALM/clients?clientId=$CLIENT_ID" -H "$H" \
-    | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)
-  CLIENT_SECRET=$(curl -sf "$BASE/admin/realms/$REALM/clients/$CID/client-secret" -H "$H" \
-    | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
+  CID=$(kc_get "/admin/realms/$REALM/clients?clientId=$CLIENT_ID" | jq -r '.[0].id // empty')
+  [ -n "$CID" ] || { echo "[seed/keycloak] could not find created client '$CLIENT_ID'"; exit 1; }
+
+  # VERIFY the client actually has the attributes ROPC/service-account benches
+  # depend on — an object *existing* (409 on re-seed) is not proof it is
+  # *configured* correctly. This is the presumed cause of the 100% ROPC
+  # failures: a stale client from a previous seed with direct-access grants off.
+  local client_json direct_grants svc_accounts
+  client_json=$(kc_get "/admin/realms/$REALM/clients/$CID")
+  direct_grants=$(echo "$client_json" | jq -r '.directAccessGrantsEnabled')
+  svc_accounts=$(echo "$client_json" | jq -r '.serviceAccountsEnabled')
+  if [ "$direct_grants" != "true" ]; then
+    echo "[seed/keycloak] client '$CLIENT_ID' has directAccessGrantsEnabled=$direct_grants (must be true for ROPC/login) — fix it in the admin console or delete the client and re-seed" >&2
+    exit 1
+  fi
+  if [ "$svc_accounts" != "true" ]; then
+    echo "[seed/keycloak] client '$CLIENT_ID' has serviceAccountsEnabled=$svc_accounts (must be true for client_credentials) — fix it in the admin console or delete the client and re-seed" >&2
+    exit 1
+  fi
+
+  CLIENT_SECRET=$(kc_get "/admin/realms/$REALM/clients/$CID/client-secret" | jq -r '.value // empty')
+  [ -n "$CLIENT_SECRET" ] || { echo "[seed/keycloak] could not read client secret for '$CLIENT_ID'"; exit 1; }
 
   echo "[seed/keycloak] creating benchmark user"
-  curl -s -X POST "$BASE/admin/realms/$REALM/users" -H "$H" -H "Content-Type: application/json" \
-    -d "{\"username\":\"$BENCH_USERNAME\",\"enabled\":true,\"email\":\"bench@bench.dev\",\"emailVerified\":true,\"credentials\":[{\"type\":\"password\",\"value\":\"$BENCH_PASSWORD\",\"temporary\":false}]}" >/dev/null || true
+  kc_post "/admin/realms/$REALM/users" \
+    "{\"username\":\"$BENCH_USERNAME\",\"enabled\":true,\"email\":\"bench@bench.dev\",\"emailVerified\":true,\"credentials\":[{\"type\":\"password\",\"value\":\"$BENCH_PASSWORD\",\"temporary\":false}]}"
+
+  local KC_USER_ID
+  KC_USER_ID=$(kc_get "/admin/realms/$REALM/users?username=$BENCH_USERNAME&exact=true" | jq -r '.[0].id // empty')
+  [ -n "$KC_USER_ID" ] || { echo "[seed/keycloak] could not find created user '$BENCH_USERNAME'"; exit 1; }
+
+  # VERIFY the user is enabled and actually has a password credential set — a
+  # re-seed (409) with a pre-existing disabled user or a wiped credential is
+  # the other presumed cause of the 100% ROPC failures.
+  local user_json enabled has_pw_cred
+  user_json=$(kc_get "/admin/realms/$REALM/users/$KC_USER_ID")
+  enabled=$(echo "$user_json" | jq -r '.enabled')
+  if [ "$enabled" != "true" ]; then
+    echo "[seed/keycloak] bench user '$BENCH_USERNAME' is disabled (enabled=$enabled) — fix it or delete+re-seed" >&2
+    exit 1
+  fi
+  has_pw_cred=$(kc_get "/admin/realms/$REALM/users/$KC_USER_ID/credentials" \
+    | jq -r '[.[] | select(.type=="password")] | length')
+  if [ "${has_pw_cred:-0}" -lt 1 ]; then
+    echo "[seed/keycloak] bench user '$BENCH_USERNAME' has no password credential set — fix it or delete+re-seed" >&2
+    exit 1
+  fi
+
   write_seed
 }
 
@@ -304,9 +411,173 @@ seed_zitadel() {
   write_seed
 }
 
+# ---------------------------------------------------------------------------
+# Post-seed smoke checks: exercise one real request per scenario-critical flow
+# per target against the objects just seeded/verified above. A seed step that
+# LOOKS complete (objects exist, attributes verified) can still fail at request
+# time (wrong grant type, wrong scope, misconfigured issuer, …) — this section
+# catches that before the k6 matrix does, and run-benchmark.sh refuses to start
+# without the resulting results/<target>.seed.ok marker (see A2.3).
+smoke_fail() {  # LABEL BODY
+  mkdir -p "$SMOKE_FAIL_DIR"
+  local label="$1" body="$2" f
+  f="$SMOKE_FAIL_DIR/${label}.txt"
+  printf '%s\n' "$body" > "$f"
+  echo "[seed/smoke] FAIL: $label — response saved to $f" >&2
+  echo "$body" >&2
+  exit 1
+}
+
+# Form-encoded POST; asserts status; prints body. Usage:
+#   smoke_form LABEL URL "k=v&k2=v2" [expected_status=200]
+smoke_form() {
+  local label="$1" url="$2" data="$3" expect="${4:-200}" resp code body
+  resp=$(curl -sSk -X POST "$url" -H 'Content-Type: application/x-www-form-urlencoded' \
+    -d "$data" -w $'\n%{http_code}') || smoke_fail "$label" "curl request failed"
+  code="${resp##*$'\n'}"; body="${resp%$'\n'*}"
+  [ "$code" = "$expect" ] || smoke_fail "${label} (HTTP $code, expected $expect)" "$body"
+  printf '%s' "$body"
+}
+
+# Bearer-authenticated GET; asserts status; prints body.
+# Usage: smoke_get LABEL URL "Authorization: Bearer <token>" [expect=200]
+smoke_get() {
+  local label="$1" url="$2" auth="$3" expect="${4:-200}" resp code body
+  resp=$(curl -sSk -H "$auth" "$url" -w $'\n%{http_code}') || smoke_fail "$label" "curl request failed"
+  code="${resp##*$'\n'}"; body="${resp%$'\n'*}"
+  [ "$code" = "$expect" ] || smoke_fail "${label} (HTTP $code, expected $expect)" "$body"
+  printf '%s' "$body"
+}
+
+smoke_axiam() {
+  echo "[seed/smoke/axiam] client_credentials"
+  local cc_body cc_token cc_refresh
+  cc_body=$(smoke_form axiam-client-credentials \
+    "$BASE/oauth2/token?tenant_id=$TENANT_ID" \
+    "grant_type=client_credentials&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET&scope=openid")
+  cc_token=$(echo "$cc_body" | jq -r '.access_token // empty')
+  [ -n "$cc_token" ] || smoke_fail axiam-client-credentials-no-token "$cc_body"
+
+  echo "[seed/smoke/axiam] introspect (of the just-minted token)"
+  smoke_form axiam-introspect "$BASE/oauth2/introspect?tenant_id=$TENANT_ID" \
+    "token=$cc_token&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET" >/dev/null
+
+  cc_refresh=$(echo "$cc_body" | jq -r '.refresh_token // empty')
+  if [ -n "$cc_refresh" ]; then
+    echo "[seed/smoke/axiam] refresh"
+    smoke_form axiam-refresh "$BASE/oauth2/token?tenant_id=$TENANT_ID" \
+      "grant_type=refresh_token&refresh_token=$cc_refresh&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET" >/dev/null
+  else
+    echo "[seed/smoke/axiam] no refresh_token in the client_credentials response — skipping refresh smoke check (token_refresh.js tags this comparability: fallback-op)"
+  fi
+
+  echo "[seed/smoke/axiam] user login (ROPC-equivalent, /api/v1/auth/login)"
+  local LJAR; LJAR="$(mktemp)"
+  local login_resp login_code login_body user_access user_csrf
+  login_resp=$(curl -sSk -c "$LJAR" -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
+    -d "{\"org_slug\":\"$ORG_SLUG\",\"tenant_slug\":\"$TENANT_SLUG\",\"username_or_email\":\"$BENCH_USERNAME\",\"password\":\"$BENCH_PASSWORD\"}" \
+    -w $'\n%{http_code}')
+  login_code="${login_resp##*$'\n'}"; login_body="${login_resp%$'\n'*}"
+  if [ "$login_code" != "200" ]; then rm -f "$LJAR"; smoke_fail axiam-user-login "$login_body"; fi
+  user_access="$(awk -F'\t' '$6=="axiam_access"{v=$7} END{print v}' "$LJAR")"
+  user_csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$LJAR")"
+  if [ -z "$user_access" ]; then rm -f "$LJAR"; smoke_fail axiam-user-login-no-cookie "$login_body"; fi
+
+  echo "[seed/smoke/axiam] userinfo (with the user token)"
+  local ui_resp ui_code ui_body
+  ui_resp=$(curl -sSk -H "Authorization: Bearer $user_access" "$BASE/oauth2/userinfo" -w $'\n%{http_code}')
+  ui_code="${ui_resp##*$'\n'}"; ui_body="${ui_resp%$'\n'*}"
+  if [ "$ui_code" != "200" ]; then rm -f "$LJAR"; smoke_fail axiam-userinfo "$ui_body"; fi
+
+  echo "[seed/smoke/axiam] REST authz check"
+  local az_resp az_code az_body allowed
+  az_resp=$(curl -sSk -b "$LJAR" -X POST "$BASE/api/v1/authz/check" -H "Content-Type: application/json" \
+    -H "X-CSRF-Token: $user_csrf" -d "{\"action\":\"read\",\"resource_id\":\"$RESOURCE_ID\"}" -w $'\n%{http_code}')
+  az_code="${az_resp##*$'\n'}"; az_body="${az_resp%$'\n'*}"
+  rm -f "$LJAR"
+  [ "$az_code" = "200" ] || smoke_fail axiam-authz-check "$az_body"
+  allowed=$(echo "$az_body" | jq -r '.allowed // empty')
+  [ "$allowed" = "true" ] || smoke_fail axiam-authz-check-not-allowed "$az_body"
+
+  echo "[seed/smoke/axiam] all smoke checks passed"
+}
+
+smoke_keycloak() {
+  echo "[seed/smoke/keycloak] ROPC login"
+  local ropc_body ropc_token ropc_refresh
+  ropc_body=$(smoke_form keycloak-ropc-login "$BASE/realms/$REALM/protocol/openid-connect/token" \
+    "grant_type=password&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET&username=$BENCH_USERNAME&password=$BENCH_PASSWORD&scope=openid")
+  ropc_token=$(echo "$ropc_body" | jq -r '.access_token // empty')
+  ropc_refresh=$(echo "$ropc_body" | jq -r '.refresh_token // empty')
+  [ -n "$ropc_token" ] || smoke_fail keycloak-ropc-login-no-token "$ropc_body"
+
+  echo "[seed/smoke/keycloak] client_credentials"
+  smoke_form keycloak-client-credentials "$BASE/realms/$REALM/protocol/openid-connect/token" \
+    "grant_type=client_credentials&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET&scope=openid" >/dev/null
+
+  echo "[seed/smoke/keycloak] introspect (of the just-minted ROPC token)"
+  smoke_form keycloak-introspect "$BASE/realms/$REALM/protocol/openid-connect/token/introspect" \
+    "token=$ropc_token&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET" >/dev/null
+
+  if [ -n "$ropc_refresh" ]; then
+    echo "[seed/smoke/keycloak] refresh"
+    smoke_form keycloak-refresh "$BASE/realms/$REALM/protocol/openid-connect/token" \
+      "grant_type=refresh_token&refresh_token=$ropc_refresh&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET" >/dev/null
+  else
+    echo "[seed/smoke/keycloak] no refresh_token issued by ROPC — skipping refresh smoke check"
+  fi
+
+  echo "[seed/smoke/keycloak] userinfo (with the user token)"
+  smoke_get keycloak-userinfo "$BASE/realms/$REALM/protocol/openid-connect/userinfo" \
+    "Authorization: Bearer $ropc_token" >/dev/null
+
+  echo "[seed/smoke/keycloak] all smoke checks passed"
+}
+
+smoke_zitadel() {
+  if [ -z "${CLIENT_ID:-}" ] || [ -z "${CLIENT_SECRET:-}" ]; then
+    echo "[seed/smoke/zitadel] skip: no client provisioned (BENCH_ZITADEL_ALLOW_UNSEEDED jwks-only mode)"
+    return
+  fi
+  local scope="openid"
+  [ -n "${PROJECT_ID:-}" ] && scope="openid urn:zitadel:iam:org:project:id:${PROJECT_ID}:aud"
+
+  echo "[seed/smoke/zitadel] client_credentials (login is a fallback op for zitadel — see A3)"
+  local cc_body cc_token cc_refresh
+  cc_body=$(smoke_form zitadel-client-credentials "$BASE/oauth/v2/token" \
+    "grant_type=client_credentials&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET&scope=$scope")
+  cc_token=$(echo "$cc_body" | jq -r '.access_token // empty')
+  [ -n "$cc_token" ] || smoke_fail zitadel-client-credentials-no-token "$cc_body"
+
+  if [ -n "${INTROSPECT_CLIENT_ID:-}" ] && [ -n "${INTROSPECT_CLIENT_SECRET:-}" ]; then
+    echo "[seed/smoke/zitadel] introspect (of the just-minted token, via the resource-server app)"
+    smoke_form zitadel-introspect "$BASE/oauth/v2/introspect" \
+      "token=$cc_token&client_id=$INTROSPECT_CLIENT_ID&client_secret=$INTROSPECT_CLIENT_SECRET" >/dev/null
+  else
+    echo "[seed/smoke/zitadel] no introspection client provisioned — skipping introspect smoke check"
+  fi
+
+  cc_refresh=$(echo "$cc_body" | jq -r '.refresh_token // empty')
+  if [ -n "$cc_refresh" ]; then
+    echo "[seed/smoke/zitadel] refresh"
+    smoke_form zitadel-refresh "$BASE/oauth/v2/token" \
+      "grant_type=refresh_token&refresh_token=$cc_refresh&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET" >/dev/null
+  else
+    echo "[seed/smoke/zitadel] no refresh_token issued — skipping refresh smoke check (token_refresh.js tags this comparability: fallback-op)"
+  fi
+
+  echo "[seed/smoke/zitadel] userinfo"
+  smoke_get zitadel-userinfo "$BASE/oidc/v1/userinfo" "Authorization: Bearer $cc_token" >/dev/null
+
+  echo "[seed/smoke/zitadel] all smoke checks passed"
+}
+
 case "$TARGET" in
-  axiam)    seed_axiam ;;
-  keycloak) seed_keycloak ;;
-  zitadel)  seed_zitadel ;;
+  axiam)    seed_axiam;    smoke_axiam ;;
+  keycloak) seed_keycloak; smoke_keycloak ;;
+  zitadel)  seed_zitadel;  smoke_zitadel ;;
   *) echo "unknown target: $TARGET" >&2; exit 1 ;;
 esac
+
+touch "$SEED_OK_MARKER"
+echo "[seed] target=$TARGET seeded and smoke-checked OK ($SEED_OK_MARKER)"

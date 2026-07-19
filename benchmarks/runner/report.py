@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Aggregate raw benchmark outputs into a comparative Markdown report.
 
-Walks results/<target>/<profile>/<scenario>.{meta.json,k6.json,res.csv}, joins
-them, computes performance + resource + efficiency metrics, the security-cost
-matrix, and validity gates (see docs/methodology.md), then writes a report.
+Walks results/<target>/<profile>/<scenario>.{meta.json,k6.json,res.csv,host.csv},
+joins them, computes performance + resource + efficiency metrics, the
+security-cost matrix, host-telemetry honesty flags, and validity gates (see
+docs/methodology.md), then writes a report.
 
 Stdlib only — no external dependencies.
 
@@ -30,6 +31,12 @@ def pct(values, p):
     lo = int(k)
     hi = min(lo + 1, len(s) - 1)
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+
+def dash(value, fmt):
+    """Format `value` with `fmt`, or an em dash when `value` is None (used to
+    blank throughput/latency columns on a 100%-error cell — A5.2)."""
+    return "—" if value is None else format(value, fmt)
 
 
 def load_k6_summary(path):
@@ -69,33 +76,137 @@ def load_k6_summary(path):
         "p95": trend("bench_op_latency_ms", "p(95)"),
         "p99": trend("bench_op_latency_ms", "p(99)"),
         "avg": trend("bench_op_latency_ms", "avg"),
+        # A3: iterations that measured a fallback op (e.g. Zitadel login() ->
+        # client_credentials, or a userinfo setup() that fell back) rather than
+        # the labelled logical op.
+        "fallback_count": counter_count("bench_fallback"),
     }
 
 
 def load_resource_csv(path):
-    """Sum per-timestamp across containers, then aggregate cpu/mem over time."""
-    if not os.path.exists(path):
-        return {"cpu_cores_avg": 0.0, "cpu_cores_p95": 0.0,
-                "mem_mib_avg": 0.0, "mem_mib_p95": 0.0, "samples": 0}
+    """Sum per-timestamp across containers for the whole-stack aggregate, and
+    keep per-container time-averages for bottleneck attribution (A5.3) and the
+    server-container-only efficiency variant (A5.5)."""
+    empty = {
+        "cpu_cores_avg": 0.0, "cpu_cores_p95": 0.0,
+        "mem_mib_avg": 0.0, "mem_mib_p95": 0.0, "samples": 0,
+        "containers": {},
+    }
+    if not path or not os.path.exists(path):
+        return empty
     by_ts_cpu = defaultdict(float)
     by_ts_mem = defaultdict(float)
+    by_container_cpu = defaultdict(list)
+    by_container_mem = defaultdict(list)
     with open(path) as f:
         for row in csv.DictReader(f):
             try:
                 ts = row["epoch_ms"]
-                by_ts_cpu[ts] += float(row["cpu_cores"])
-                by_ts_mem[ts] += float(row["mem_mib"])
+                cname = row["container"]
+                cpu = float(row["cpu_cores"])
+                mem = float(row["mem_mib"])
             except (ValueError, KeyError):
                 continue
+            by_ts_cpu[ts] += cpu
+            by_ts_mem[ts] += mem
+            by_container_cpu[cname].append(cpu)
+            by_container_mem[cname].append(mem)
     cpu = list(by_ts_cpu.values())
     mem = list(by_ts_mem.values())
+    containers = {}
+    for cname, vals in by_container_cpu.items():
+        mvals = by_container_mem.get(cname, [])
+        containers[cname] = {
+            "cpu_avg": statistics.fmean(vals) if vals else 0.0,
+            "mem_avg": statistics.fmean(mvals) if mvals else 0.0,
+        }
     return {
         "cpu_cores_avg": statistics.fmean(cpu) if cpu else 0.0,
         "cpu_cores_p95": pct(cpu, 95),
         "mem_mib_avg": statistics.fmean(mem) if mem else 0.0,
         "mem_mib_p95": pct(mem, 95),
         "samples": len(cpu),
+        "containers": containers,
     }
+
+
+def load_host_csv(path):
+    """A6 host telemetry: CPU frequency, thermal, host utilization, k6 CPU
+    headroom over the measure window. Missing/old cells (no host.csv) degrade
+    to all-zero rather than crashing report generation (A4 tolerance)."""
+    empty = {
+        "mhz_avg": 0.0, "mhz_min": 0.0, "mhz_max": 0.0, "temp_max": 0.0,
+        "host_cpu_util_avg": 0.0, "k6_cores_avg": 0.0, "samples": 0,
+    }
+    if not path or not os.path.exists(path):
+        return empty
+    mhz_avgs, mhz_mins, temps, utils, k6cores = [], [], [], [], []
+    with open(path) as f:
+        for row in csv.DictReader(f):
+            try:
+                mhz_avgs.append(float(row["cpu_mhz_avg"]))
+                mhz_mins.append(float(row["cpu_mhz_min"]))
+                temps.append(float(row["temp_c_max"]))
+                utils.append(float(row["host_cpu_util_pct"]))
+                k6cores.append(float(row["k6_cpu_cores"]))
+            except (ValueError, KeyError):
+                continue
+    return {
+        "mhz_avg": statistics.fmean(mhz_avgs) if mhz_avgs else 0.0,
+        "mhz_min": min(mhz_mins) if mhz_mins else 0.0,
+        # "the window's max" for the clock_variance rule is the max of the
+        # per-sample mean-MHz-across-cores series (mirrors mhz_avg's series).
+        "mhz_max": max(mhz_avgs) if mhz_avgs else 0.0,
+        "temp_max": max(temps) if temps else 0.0,
+        "host_cpu_util_avg": statistics.fmean(utils) if utils else 0.0,
+        "k6_cores_avg": statistics.fmean(k6cores) if k6cores else 0.0,
+        "samples": len(mhz_avgs),
+    }
+
+
+# Compose-file CPU cap defaults (targets/*/docker-compose.yml), used as a
+# fallback when a container isn't listed in meta.json["containers"] (old
+# results predating A4, or a container the sampler saw but run-benchmark.sh's
+# containers_json() didn't — e.g. it exited between sampling and inspection).
+def default_cpu_cap(container_name):
+    if container_name.endswith("-surrealdb") or container_name.endswith("-postgres"):
+        return 2.0  # BENCH_DB_CPUS
+    if container_name.endswith("-rabbitmq"):
+        return 1.0  # BENCH_MQ_CPUS
+    if container_name.endswith("-tls"):
+        return 1.0  # BENCH_EDGE_CPUS
+    return 2.0  # BENCH_CPUS (the main server/app container)
+
+
+def bottleneck(meta, res):
+    """The container(s) whose average CPU >= 0.95x their configured cap, or
+    'none'. Caps come from meta.json's "containers" (A4); fall back to the
+    compose defaults above when meta predates that field or omits a
+    container. (A5.3)"""
+    containers_meta = {c.get("name"): c for c in (meta.get("containers") or [])}
+    hot = []
+    for cname, stats in (res.get("containers") or {}).items():
+        cap = None
+        cm = containers_meta.get(cname)
+        if cm is not None and cm.get("cpu_cap") not in (None, ""):
+            try:
+                cap = float(cm["cpu_cap"])
+            except (TypeError, ValueError):
+                cap = None
+        if cap is None:
+            cap = default_cpu_cap(cname)
+        if cap and stats.get("cpu_avg", 0.0) >= 0.95 * cap:
+            hot.append(cname)
+    return ",".join(sorted(hot)) if hot else "none"
+
+
+# Primary app/server container per target (excludes db/mq/edge), used for the
+# server-container-only efficiency variant (A5.5).
+SERVER_CONTAINER = {
+    "axiam": "bench-axiam-server",
+    "keycloak": "bench-keycloak",
+    "zitadel": "bench-zitadel",
+}
 
 
 def derive(perf, res):
@@ -107,6 +218,47 @@ def derive(perf, res):
         "throughput_per_gib": (thr / mem_gib) if mem_gib > 0 else 0.0,
         "cpu_ms_per_request": (cpu * 1000.0 / thr) if thr > 0 else 0.0,
     }
+
+
+def derive_server_only(perf, res, target):
+    """Same derived numbers as derive(), but scoped to just the server
+    container's CPU/mem — so AXIAM's broker (RabbitMQ) + DB inclusion in the
+    whole-stack numbers doesn't silently understate its per-request cost
+    relative to a single-process competitor (A5.5)."""
+    cname = SERVER_CONTAINER.get(target)
+    stats = (res.get("containers") or {}).get(cname) if cname else None
+    if not stats:
+        return {"throughput_per_core": 0.0, "throughput_per_gib": 0.0, "cpu_ms_per_request": 0.0}
+    server_res = {"cpu_cores_avg": stats.get("cpu_avg", 0.0), "mem_mib_avg": stats.get("mem_avg", 0.0)}
+    return derive(perf, server_res)
+
+
+def host_flags(meta, host):
+    """A6: clock_variance (window mean MHz sagged >15% below the window max —
+    i.e. the run was not at a flat sustained clock) and generator_saturated
+    (k6 itself was eating too much of the host's non-stack CPU headroom to
+    trust it as a clean load generator)."""
+    flags = []
+    mhz_avg, mhz_max = host.get("mhz_avg", 0.0), host.get("mhz_max", 0.0)
+    if mhz_max > 0 and mhz_avg < 0.85 * mhz_max:
+        flags.append("clock_variance")
+
+    containers = meta.get("containers") or []
+    if containers:
+        stack_cap_cpus = sum(float(c.get("cpu_cap", 0) or 0) for c in containers)
+    else:
+        try:
+            stack_cap_cpus = float((meta.get("caps") or {}).get("cpus", 2))
+        except (TypeError, ValueError):
+            stack_cap_cpus = 2.0
+    try:
+        host_cpus = float((meta.get("host") or {}).get("cpus"))
+    except (TypeError, ValueError):
+        host_cpus = 0.0
+    headroom = host_cpus - stack_cap_cpus
+    if headroom > 0 and host.get("k6_cores_avg", 0.0) > 0.8 * headroom:
+        flags.append("generator_saturated")
+    return flags
 
 
 def collect(results_dir, max_error, min_samples):
@@ -123,12 +275,19 @@ def collect(results_dir, max_error, min_samples):
                 if not fn.endswith(".meta.json"):
                     continue
                 meta = json.load(open(os.path.join(pdir, fn)))
-                k6file = os.path.join(pdir, meta.get("k6_summary_file", ""))
+                k6_name = meta.get("k6_summary_file")
+                if not k6_name:
+                    continue
+                k6file = os.path.join(pdir, k6_name)
                 if not os.path.exists(k6file):
                     continue
                 perf = load_k6_summary(k6file)
-                res = load_resource_csv(os.path.join(pdir, meta.get("resource_csv", "")))
+                res_name = meta.get("resource_csv")
+                res = load_resource_csv(os.path.join(pdir, res_name) if res_name else None)
+                host_name = meta.get("host_csv")  # A6/A4: absent on pre-A6 meta
+                host = load_host_csv(os.path.join(pdir, host_name) if host_name else None)
                 der = derive(perf, res)
+                der_server = derive_server_only(perf, res, meta.get("target", target))
                 reasons = []
                 if perf["error_rate"] > max_error:
                     reasons.append(f"error_rate {perf['error_rate']:.3f} > {max_error}")
@@ -140,7 +299,10 @@ def collect(results_dir, max_error, min_samples):
                     "target": meta["target"], "profile": meta["profile"],
                     "scenario": meta["scenario"], "meta": meta,
                     "rate_limits": meta.get("rate_limits", "unknown"),
-                    "perf": perf, "res": res, "der": der,
+                    "perf": perf, "res": res, "der": der, "der_server": der_server,
+                    "host": host, "host_flags": host_flags(meta, host),
+                    "bottleneck": bottleneck(meta, res),
+                    "is_fallback": perf["fallback_count"] > 0,
                     "valid": not reasons, "reasons": reasons,
                 })
     return cells
@@ -191,36 +353,83 @@ def build_report(cells):
         "**cpu_ms_per_request** answer *can AXIAM match competitors at lower cost?* "
         "Compare across targets at equal profile + latency.",
         "",
+        "> `fallback` = the cell measured a fallback operation instead of the "
+        "labelled logical op (e.g. Zitadel's login() falling back to "
+        "client_credentials — see docs/methodology.md). Fallback cells are "
+        "excluded from head-to-head winner tables but kept here for the full "
+        "picture.",
+        "",
+        "> `bottleneck` names the stack container(s) whose average CPU reached "
+        "≥ 95% of their configured cap during the measure window — `none` "
+        "means nothing in the stack saturated (the client, network, or an "
+        "un-pegged serialization point is the limiter instead).",
+        "",
+        "> Cells with `err`=100% have their throughput/latency columns blanked "
+        "(`—`) — those numbers would describe the failure path, not the "
+        "operation being measured.",
+        "",
     ]
 
     # 1. Full results table
     lines += ["## All results", ""]
     rows = []
     for c in sorted(cells, key=lambda c: (c["scenario"], c["profile"], c["target"])):
-        p, r, d = c["perf"], c["res"], c["der"]
+        p, r, d, h = c["perf"], c["res"], c["der"], c["host"]
+        full_outage = p["error_rate"] >= 1.0
+        thr = None if full_outage else p["throughput"]
+        p50 = None if full_outage else p["p50"]
+        p95 = None if full_outage else p["p95"]
+        p99 = None if full_outage else p["p99"]
+        thr_core = None if full_outage else d["throughput_per_core"]
+        cpu_ms = None if full_outage else d["cpu_ms_per_request"]
+        mhz_ratio = (h["mhz_min"] / h["mhz_max"]) if h["mhz_max"] > 0 else 0.0
+        flags = list(c["host_flags"])
+        if c["is_fallback"]:
+            flags.append("fallback-op")
         rows.append([
             c["scenario"], c["profile"], c["target"], c["rate_limits"],
-            f"{p['throughput']:.0f}", f"{p['p95']:.1f}", f"{p['p99']:.1f}",
+            dash(thr, ".0f"), dash(p50, ".1f"), dash(p95, ".1f"), dash(p99, ".1f"),
             f"{p['error_rate']*100:.2f}%",
             f"{r['cpu_cores_avg']:.2f}", f"{r['mem_mib_avg']:.0f}",
-            f"{d['throughput_per_core']:.0f}", f"{d['cpu_ms_per_request']:.3f}",
+            dash(thr_core, ".0f"), dash(cpu_ms, ".3f"),
+            c["bottleneck"],
+            "yes" if c["is_fallback"] else "no",
+            f"{h['mhz_avg']:.0f}", f"{mhz_ratio:.2f}", f"{h['temp_max']:.0f}",
+            f"{h['k6_cores_avg']:.2f}",
+            ";".join(flags) or "-",
             "✓" if c["valid"] else "✗",
         ])
     lines += [md_table(
-        ["scenario", "profile", "target", "rate_limits", "thr(req/s)", "p95(ms)",
-         "p99(ms)", "err", "cpu(cores)", "mem(MiB)", "thr/core", "cpu_ms/req",
-         "valid"],
+        ["scenario", "profile", "target", "rate_limits", "thr(req/s)", "p50(ms)",
+         "p95(ms)", "p99(ms)", "err", "cpu(cores)", "mem(MiB)", "thr/core",
+         "cpu_ms/req", "bottleneck", "fallback", "mhz_avg", "mhz_min/max",
+         "temp_max(C)", "k6_cores", "host_flags", "valid"],
         rows), ""]
 
     # 2. Efficiency comparison per (scenario, profile) across targets
     lines += ["## Efficiency comparison (across targets)", "",
-              "Higher `thr/core` and lower `cpu_ms/req` is better.", ""]
+              "Higher `thr/core` and lower `cpu_ms/req` is better. "
+              "`server-only` recomputes both against just the primary "
+              "server/app container's CPU+mem (excludes DB/broker/edge), so "
+              "AXIAM's RabbitMQ+SurrealDB inclusion in the whole-stack numbers "
+              "is visible rather than silently folded in (A5.5).", ""]
     for sc in scenarios:
         for pr in profiles:
-            group = [c for c in valid if c["scenario"] == sc and c["profile"] == pr]
-            if len(group) < 2:
+            group_all = [c for c in valid if c["scenario"] == sc and c["profile"] == pr]
+            if len(group_all) < 2:
                 continue
+            fallback_cells = [c for c in group_all if c["is_fallback"]]
+            group = [c for c in group_all if not c["is_fallback"]]
             lines += [f"### {sc} @ {pr}", ""]
+            if fallback_cells:
+                lines += [
+                    "> ⚠️ fallback-op cell(s) excluded from this head-to-head: "
+                    + ", ".join(sorted(f"{c['target']}" for c in fallback_cells))
+                    + " (see the full matrix above; comparability: fallback-op).", "",
+                ]
+            if len(group) < 2:
+                lines += ["_Fewer than 2 non-fallback targets — nothing to compare._", ""]
+                continue
             # Refuse to render a head-to-head across incomparable rate-limit
             # postures (e.g. AXIAM throttled vs an unthrottled competitor, or a
             # cell with an unknown posture). This is the guard that stops the
@@ -241,13 +450,16 @@ def build_report(cells):
             rows = []
             best = max(group, key=lambda c: c["der"]["throughput_per_core"])
             for c in sorted(group, key=lambda c: -c["der"]["throughput_per_core"]):
-                d, p = c["der"], c["perf"]
+                d, ds, p = c["der"], c["der_server"], c["perf"]
                 marker = " 🏆" if c is best else ""
                 rows.append([c["target"] + marker, f"{p['throughput']:.0f}",
-                             f"{p['p95']:.1f}", f"{d['throughput_per_core']:.0f}",
-                             f"{d['throughput_per_gib']:.0f}", f"{d['cpu_ms_per_request']:.3f}"])
+                             f"{p['p50']:.1f}", f"{p['p95']:.1f}",
+                             f"{d['throughput_per_core']:.0f}", f"{d['throughput_per_gib']:.0f}",
+                             f"{d['cpu_ms_per_request']:.3f}",
+                             f"{ds['throughput_per_core']:.0f}", f"{ds['cpu_ms_per_request']:.3f}"])
             lines += [md_table(
-                ["target", "thr(req/s)", "p95(ms)", "thr/core", "thr/GiB", "cpu_ms/req"],
+                ["target", "thr(req/s)", "p50(ms)", "p95(ms)", "thr/core", "thr/GiB",
+                 "cpu_ms/req", "server-only thr/core", "server-only cpu_ms/req"],
                 rows), ""]
 
     # 3. Security-cost matrix per (target, scenario)
@@ -262,19 +474,50 @@ def build_report(cells):
                 continue
             lines += [f"### {tg} / {sc}", ""]
             rows = [["p0-plaintext (base)", f"{base['perf']['throughput']:.0f}",
-                     f"{base['perf']['p95']:.1f}", "baseline", "baseline"]]
+                     f"{base['perf']['p50']:.1f}", f"{base['perf']['p95']:.1f}",
+                     "baseline", "baseline"]]
             for c in sorted(others, key=lambda c: PROFILE_RANK.get(c["profile"], 99)):
                 tb, pb = base["perf"]["throughput"], base["perf"]["p95"]
                 t, p = c["perf"]["throughput"], c["perf"]["p95"]
                 d_thr = (1 - t / tb) * 100 if tb else 0.0
                 d_p95 = p - pb
-                rows.append([c["profile"], f"{t:.0f}", f"{p:.1f}",
+                rows.append([c["profile"], f"{t:.0f}", f"{c['perf']['p50']:.1f}", f"{p:.1f}",
                              f"{-d_thr:+.1f}%", f"{d_p95:+.1f}"])
             lines += [md_table(
-                ["profile", "thr(req/s)", "p95(ms)", "Δ-throughput", "Δ-p95(ms)"],
+                ["profile", "thr(req/s)", "p50(ms)", "p95(ms)", "Δ-throughput", "Δ-p95(ms)"],
                 rows), ""]
 
-    # 4. Excluded
+    # 4. Appendix: per-container resource breakdown (A5.3)
+    lines += ["## Appendix: per-container resource breakdown", "",
+              "Per-cell, per-container average CPU/mem from the resource sampler, "
+              "the cap it was measured against (from meta.json, falling back to "
+              "the compose default), and whether it hit the bottleneck threshold "
+              "(cpu_avg ≥ 95% of cap).", ""]
+    rows = []
+    for c in sorted(valid, key=lambda c: (c["scenario"], c["profile"], c["target"])):
+        containers_meta = {cm.get("name"): cm for cm in (c["meta"].get("containers") or [])}
+        for cname, stats in sorted((c["res"].get("containers") or {}).items()):
+            cm = containers_meta.get(cname)
+            if cm is not None and cm.get("cpu_cap") not in (None, ""):
+                try:
+                    cap = float(cm["cpu_cap"])
+                except (TypeError, ValueError):
+                    cap = default_cpu_cap(cname)
+            else:
+                cap = default_cpu_cap(cname)
+            hot = "✓" if stats.get("cpu_avg", 0.0) >= 0.95 * cap else "·"
+            rows.append([c["scenario"], c["profile"], c["target"], cname,
+                         f"{stats.get('cpu_avg', 0.0):.2f}", f"{cap:.2f}",
+                         f"{stats.get('mem_avg', 0.0):.0f}", hot])
+    if rows:
+        lines += [md_table(
+            ["scenario", "profile", "target", "container", "cpu_avg(cores)",
+             "cpu_cap", "mem_avg(MiB)", "hot"],
+            rows), ""]
+    else:
+        lines += ["_No per-container samples available (no res.csv rows)._", ""]
+
+    # 5. Excluded
     if invalid:
         lines += ["## Excluded (invalid) cells", ""]
         rows = [[c["target"], c["profile"], c["scenario"], "; ".join(c["reasons"])]

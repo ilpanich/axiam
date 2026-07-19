@@ -8,9 +8,17 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RESULTS="${BENCH_RESULTS_DIR:-$HERE/../results}/sdk"
 mkdir -p "$RESULTS"
 
-# Source the seed env so SDK benches hit a provisioned tenant/client.
-SEED_ENV="${BENCH_RESULTS_DIR:-$HERE/../results}/${BENCH_TARGET:-axiam}.seed.env"
-[ -f "$SEED_ENV" ] && source "$SEED_ENV"
+# Source the seed env so SDK benches hit a provisioned tenant/client. Lives
+# under .seed/ (client secrets kept out of the shareable results/ tree — see
+# A7 in claude_dev/benchmark-improvement-plan.md); fall back to the old
+# results/ location for a seed written before that move.
+SEED_ENV="${BENCH_SEED_DIR:-$HERE/../.seed}/${BENCH_TARGET:-axiam}.seed.env"
+LEGACY_SEED_ENV="${BENCH_RESULTS_DIR:-$HERE/../results}/${BENCH_TARGET:-axiam}.seed.env"
+if [ -f "$SEED_ENV" ]; then
+  source "$SEED_ENV"
+elif [ -f "$LEGACY_SEED_ENV" ]; then
+  source "$LEGACY_SEED_ENV"
+fi
 
 if [ "$#" -gt 0 ]; then
   SDKS=("$@")

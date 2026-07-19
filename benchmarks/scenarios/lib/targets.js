@@ -125,6 +125,10 @@ const keycloak = {
         grant_type: 'client_credentials',
         client_id: cfg.clientId,
         client_secret: cfg.clientSecret,
+        // Without an explicit scope Keycloak still issues a token, but it is
+        // not OIDC-capable (no 'openid' in the granted scope), so /userinfo
+        // rejects it. Request it explicitly, matching the login() ROPC grant.
+        scope: 'openid',
       }),
       params: FORM,
       expect: 200,
@@ -170,8 +174,13 @@ const keycloak = {
 // OIDC endpoints at well-known paths; ROPC is generally disabled, so `login`
 // falls back to client_credentials for the comparative token-issuance number.
 const zitadel = {
+  // ROPC is generally disabled on Zitadel, so "login" falls back to
+  // client_credentials for the comparative token-issuance number — this is NOT
+  // a password verification, so tag the built request `fallback: true` and
+  // doOp()/report.py surface it (bench_fallback counter, "fallback-op"
+  // annotation, excluded from head-to-head winner tables).
   login() {
-    return zitadel.clientCredentials();
+    return Object.assign({}, zitadel.clientCredentials(), { fallback: true });
   },
   clientCredentials() {
     // Add the bench project's reserved audience scope so the issued token is

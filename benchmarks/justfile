@@ -229,7 +229,10 @@ bench-up:
     done
     echo "[bench-up] {{target}} is ready."
 
-# Provision org/tenant/user/client for a target; writes results/<target>.seed.env.
+# Provision org/tenant/user/client for a target; writes .seed/<target>.seed.env
+# (client secrets/passwords — gitignored, kept out of the results/ tree we
+# share) and, once the post-seed smoke checks pass, results/<target>.seed.ok
+# (a no-secret marker bench-run refuses to start the k6 matrix without).
 # Seeding talks to the plaintext app port (:8090) for AXIAM/Keycloak, which keep
 # HTTP alongside HTTPS. Zitadel under a TLS profile serves TLS-only, so its seed
 # must go over https:<tls-port> — derived from the profile env here and passed as
@@ -299,3 +302,33 @@ sdk-bench-all:
 # Remove all run artifacts (keeps the dir).
 bench-clean:
     find results -type f ! -name '.gitkeep' -delete || true
+
+# Package shareable results into results-<date>.tar.xz. Only k6 summaries,
+# resource/host CSVs, run metadata, and the generated report are included —
+# NOT .seed/ (client secrets, bench user password), which report.py and this
+# recipe never read from and which `git` never sees (see .gitignore / A7 in
+# claude_dev/benchmark-improvement-plan.md). Verifies the archive is clean
+# before leaving it on disk.
+bench-pack:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    OUT="results-$(date +%Y-%m-%d).tar.xz"
+    FILELIST="$(mktemp)"
+    trap 'rm -f "$FILELIST"' EXIT
+    find results \( -name '*.k6.json' -o -name '*.res.csv' -o -name '*.host.csv' \
+      -o -name '*.meta.json' -o -name 'report.md' \) -type f > "$FILELIST"
+    if [ ! -s "$FILELIST" ]; then
+      echo "[bench-pack] nothing to pack — run a benchmark + 'just bench-report' first" >&2
+      exit 1
+    fi
+    tar -cJf "$OUT" -T "$FILELIST"
+    echo "[bench-pack] wrote $OUT ($(wc -l < "$FILELIST") files)"
+    echo "[bench-pack] verifying no secret material leaked in..."
+    if tar -tJf "$OUT" | grep -qiE '\.seed/|seed\.env'; then
+      echo "[bench-pack] ERROR: a .seed/ path made it into the archive" >&2; exit 1
+    fi
+    if tar -xJOf "$OUT" | grep -qiE 'SECRET|PASSWORD'; then
+      echo "[bench-pack] ERROR: SECRET/PASSWORD text found in packed content — investigate before sharing" >&2
+      exit 1
+    fi
+    echo "[bench-pack] OK — $OUT contains no secret material."

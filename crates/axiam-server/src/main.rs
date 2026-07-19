@@ -405,9 +405,17 @@ async fn main() -> std::io::Result<()> {
     // revoke_all_sessions / revoke_all_sessions_except on password change and reset).
     let auth_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client_cloned().await);
     // Single shared bounding semaphore for all CPU-bound crypto operations (CQ-B02 / REQ-14 AC-2).
-    // Limits concurrent Argon2 and PKI keygen/sign operations to 4 to prevent DoS via
-    // runtime thread starvation. Constructed once, cloned (Arc) into each service.
-    let crypto_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    // Limits concurrent Argon2 and PKI keygen/sign operations to prevent runtime-thread
+    // starvation AND an unauthenticated memory-DoS (each Argon2id arena is ~19 MiB; B1).
+    // Permit count is `AXIAM__AUTH__MAX_CONCURRENT_HASHES` (0 = auto → min(cores, 4)).
+    // Constructed once, cloned (Arc) into each service.
+    let crypto_hash_permits = config.auth.resolved_max_concurrent_hashes();
+    tracing::info!(
+        permits = crypto_hash_permits,
+        acquire_timeout_secs = config.auth.hash_acquire_timeout_secs,
+        "crypto hash gate configured (B1)"
+    );
+    let crypto_semaphore = Arc::new(tokio::sync::Semaphore::new(crypto_hash_permits));
 
     let auth_service = AuthService::new(
         user_repo.clone(),
@@ -556,6 +564,7 @@ async fn main() -> std::io::Result<()> {
         session_repo.clone(),
         handler_refresh_token_repo.clone(),
         Arc::clone(&crypto_semaphore),
+        config.auth.hash_acquire_timeout_secs,
     );
     let email_verification_service = EmailVerificationService::new(
         user_repo.clone(),

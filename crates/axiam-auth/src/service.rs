@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::config::AuthConfig;
+use crate::crypto_gate::acquire_hash_permit;
 use crate::error::AuthError;
 use crate::token::AUD_USER;
 use crate::{password, token, totp};
@@ -212,7 +213,28 @@ impl<
                     Err(AxiamError::NotFound { .. }) => {
                         // SEC-026: timing equalization — run a dummy Argon2 verify so
                         // user-not-found takes the same time as wrong-password (ASVS V2).
-                        let _permit = self.crypto_semaphore.acquire().await.ok();
+                        //
+                        // B1: acquire the crypto permit with the SAME
+                        // acquire-with-timeout used by the real wrong-password
+                        // verify below (step 3), so the two branches stay
+                        // constant-time in BOTH regimes:
+                        //   * normal load — both acquire immediately and run
+                        //     exactly one Argon2id verify → 401;
+                        //   * saturation  — both hit the same timeout and return
+                        //     the same 503 backpressure error *before* hashing.
+                        // Making only the real path shed load (while this dummy
+                        // path waited unboundedly and always hashed) would make
+                        // "existing + wrong password → 503" distinguishable from
+                        // "no such user → 401" under load — reintroducing the very
+                        // enumeration oracle SEC-026 closes. Propagating the error
+                        // here keeps them indistinguishable, and also subjects the
+                        // enumeration/dummy path to the memory-DoS bound (an
+                        // attacker spamming unknown usernames is throttled too).
+                        let _permit = acquire_hash_permit(
+                            &self.crypto_semaphore,
+                            std::time::Duration::from_secs(self.config.hash_acquire_timeout_secs),
+                        )
+                        .await?;
                         let pepper_owned = self.config.pepper.clone();
                         let _ = tokio::task::spawn_blocking(move || {
                             password::verify_password(
@@ -239,11 +261,12 @@ impl<
         }
 
         // 3. Verify password — CPU-bound Argon2id runs in spawn_blocking behind semaphore (CQ-B02).
-        let _permit = self
-            .crypto_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        //    B1: bounded acquire — 503 backpressure on timeout instead of unbounded queueing.
+        let _permit = acquire_hash_permit(
+            &self.crypto_semaphore,
+            std::time::Duration::from_secs(self.config.hash_acquire_timeout_secs),
+        )
+        .await?;
         let pw_owned = input.password.clone();
         let hash_owned = user.password_hash.clone();
         let pepper_owned = self.config.pepper.clone();
@@ -710,11 +733,13 @@ impl<
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
 
         // 1. Verify current password — CPU-bound, run in spawn_blocking behind semaphore (CQ-B02).
-        let _permit = self
-            .crypto_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        //    B1: bounded acquire — held for the whole change_password call so the SEC-028
+        //    same-password check and the history verify reuse this single permit.
+        let _permit = acquire_hash_permit(
+            &self.crypto_semaphore,
+            std::time::Duration::from_secs(self.config.hash_acquire_timeout_secs),
+        )
+        .await?;
         let pw_owned = current_password.to_string();
         let hash_owned = user.password_hash.clone();
         let pepper_owned = self.config.pepper.clone();

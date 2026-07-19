@@ -130,6 +130,33 @@ from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see
 `AXIAM__AMQP__URL` at the deployment layer (see how
 `docker-compose.prod.yml` does this for the Compose path).
 
+## Argon2id hash concurrency (memory-DoS protection)
+
+Password hashing/verification uses Argon2id with OWASP-recommended parameters
+(`m=19456, t=2, p=1`). Each **in-flight** Argon2id operation allocates a
+~19 MiB memory arena. Unbounded concurrency is therefore an unauthenticated
+**memory-DoS** vector: a burst of concurrent logins multiplies that arena by
+the number of simultaneous hashes. In benchmarking, an unbounded login flood
+pegged 2 cores and drove server RSS to ~970 MiB (≈ 50 concurrent × 19 MiB),
+approaching the 1024 MiB container cap, while p95 latency ballooned to ~2.1 s.
+
+AXIAM bounds this with a process-wide semaphore shared across all CPU-bound
+crypto (login, password change, password reset, and PKI keygen/sign). The
+permit count caps peak concurrent arenas (and thus peak crypto RSS); a
+configurable acquire timeout sheds load with an HTTP **503** backpressure
+response instead of queueing unboundedly once every permit is held. The
+Argon2id cost parameters themselves are never weakened to gain throughput.
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__AUTH__MAX_CONCURRENT_HASHES` | Max concurrent Argon2id hash/verify operations. `0` (default) = auto → `min(CPU cores, 4)`. Raise only if the host has spare memory headroom (peak crypto RSS ≈ this value × 19 MiB); lower to harden a tightly memory-capped container. |
+| `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS` | Seconds a request waits for a hash permit before returning a `503 service_unavailable` backpressure error. Default `5`. Lower for faster load-shedding under attack; raise to tolerate longer queues before shedding. |
+
+The 503 path preserves the SEC-026 username-enumeration defence: the login
+"user not found" branch is subject to the same permit acquisition and timeout
+as the real password-verify branch, so the two remain timing- and
+status-indistinguishable under both normal and saturated load.
+
 ## TLS termination
 
 AXIAM supports two TLS patterns (ASVS V9.1.2/V9.1.3). Both enforce TLS 1.3 as

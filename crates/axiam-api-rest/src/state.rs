@@ -329,7 +329,9 @@ impl<C: Connection + Clone> AppState<C> {
     /// state.email_encryption_key = Some(TEST_KEY);
     /// ```
     pub fn for_test(db: Surreal<C>, auth_config: AuthConfig) -> Self {
-        let crypto_semaphore = Arc::new(Semaphore::new(4));
+        // B1: resolve the hash-gate permit count from config (0 = auto → min(cores, 4)).
+        let crypto_semaphore =
+            Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));
         let pki_config = axiam_pki::PkiConfig {
             encryption_key: None,
         };
@@ -404,6 +406,7 @@ impl<C: Connection + Clone> AppState<C> {
             session_repo.clone(),
             refresh_token_repo.clone(),
             Arc::clone(&crypto_semaphore),
+            auth_config.hash_acquire_timeout_secs,
         );
         let email_verification_service = EmailVerificationService::new(
             user_repo.clone(),

@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod crypto;
+pub mod crypto_gate;
 pub mod error;
 pub mod hibp_breaker;
 pub mod lockout;

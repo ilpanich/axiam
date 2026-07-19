@@ -100,6 +100,26 @@ pub struct AuthConfig {
     /// allowing a half-open probe request (default: 30). Overridable via
     /// `AXIAM__AUTH__HIBP_BREAKER_COOLDOWN_SECS`.
     pub hibp_breaker_cooldown_secs: u64,
+    /// B1: Maximum number of Argon2id hash/verify operations allowed to run
+    /// concurrently, enforced by the process-wide `crypto_semaphore` shared
+    /// across the login, password-change, password-reset and PKI crypto paths.
+    ///
+    /// Each in-flight Argon2id operation allocates a ~19 MiB memory arena
+    /// (OWASP params m=19456), so unbounded concurrency is an unauthenticated
+    /// memory-DoS vector: the login benchmark pegged 2 cores and reached
+    /// ~970 MiB RSS ≈ 50 concurrent × 19 MiB arenas, against a 1024 MiB
+    /// container cap. This permit count bounds peak concurrent arenas.
+    ///
+    /// `0` means "auto" and resolves to `min(available_parallelism, 4)` at
+    /// semaphore-construction time (see [`AuthConfig::resolved_max_concurrent_hashes`]).
+    /// Override via `AXIAM__AUTH__MAX_CONCURRENT_HASHES`.
+    pub max_concurrent_hashes: usize,
+    /// B1: How long (in seconds) a request waits to acquire a crypto-hash
+    /// permit before giving up and returning a `ServiceUnavailable` (HTTP 503)
+    /// backpressure error, instead of queueing unboundedly and adding to
+    /// tail latency. Default: 5. Override via
+    /// `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS`.
+    pub hash_acquire_timeout_secs: u64,
 }
 
 impl AuthConfig {
@@ -130,6 +150,24 @@ impl AuthConfig {
         self.jwt_encoding_key = Some(Arc::new(enc));
         self.jwt_decoding_key = Some(Arc::new(dec));
         Ok(())
+    }
+
+    /// B1: Resolve `max_concurrent_hashes` (0 = auto) to a concrete permit
+    /// count for the crypto semaphore.
+    ///
+    /// Auto (`0`) resolves to `min(available_parallelism, 4)`: bound by the
+    /// core count so Argon2id (a CPU-bound operation) does not oversubscribe
+    /// cores, and capped at 4 so peak concurrent ~19 MiB arenas stay well
+    /// under typical container memory caps. A non-zero value is used verbatim
+    /// (a `0` after resolution is impossible — it would be a zero-permit
+    /// semaphore that deadlocks all hashing, so it is clamped to 1).
+    pub fn resolved_max_concurrent_hashes(&self) -> usize {
+        match self.max_concurrent_hashes {
+            0 => std::thread::available_parallelism()
+                .map(|n| n.get().min(4))
+                .unwrap_or(4),
+            n => n.max(1),
+        }
     }
 }
 
@@ -164,6 +202,9 @@ impl Default for AuthConfig {
             jwt_decoding_key: None,
             hibp_breaker_threshold: 5,
             hibp_breaker_cooldown_secs: 30,
+            // B1: 0 = auto → min(available_parallelism, 4) at construction.
+            max_concurrent_hashes: 0,
+            hash_acquire_timeout_secs: 5,
         }
     }
 }

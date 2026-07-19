@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+use crate::crypto_gate::acquire_hash_permit;
 use crate::error::AuthError;
 use crate::password::{self, DUMMY_HASH, hash_password, verify_password};
 use crate::policy::{PolicyCheckResult, evaluate_password};
@@ -60,6 +61,9 @@ where
     /// equalization below and the T-24-92 current-password check) to
     /// prevent CPU-bound crypto from starving the Tokio async runtime.
     crypto_semaphore: Arc<Semaphore>,
+    /// B1: Seconds to wait for a `crypto_semaphore` permit before returning a
+    /// 503 backpressure error. Threaded from `AuthConfig::hash_acquire_timeout_secs`.
+    hash_acquire_timeout_secs: u64,
 }
 
 impl<U, R, F, H, S, T> PasswordResetService<U, R, F, H, S, T>
@@ -79,6 +83,7 @@ where
         session_repo: S,
         refresh_token_repo: T,
         crypto_semaphore: Arc<Semaphore>,
+        hash_acquire_timeout_secs: u64,
     ) -> Self {
         Self {
             user_repo,
@@ -88,6 +93,7 @@ where
             session_repo,
             refresh_token_repo,
             crypto_semaphore,
+            hash_acquire_timeout_secs,
         }
     }
 
@@ -101,12 +107,33 @@ where
     /// user) so those responses are time-indistinguishable from the
     /// valid-account branch — no hand-tuned fixed-duration sleep.
     async fn dummy_hash_wait(&self, pepper: Option<&str>) {
-        let _permit = self.crypto_semaphore.acquire().await.ok();
-        let pepper_owned = pepper.map(str::to_string);
-        let _ = tokio::task::spawn_blocking(move || {
-            password::verify_password("dummy", DUMMY_HASH, pepper_owned.as_deref())
-        })
+        // B1: bound this enumeration-defence dummy hash by the crypto
+        // semaphore (and its timeout) so it counts against the same
+        // concurrency budget as real verifies and cannot itself become an
+        // un-throttled arena allocator.
+        //
+        // Unlike the login not-found branch, we deliberately do NOT surface a
+        // backpressure error here: `initiate_reset`'s *valid-account* branch
+        // does no Argon2 work and never touches the semaphore, so if this path
+        // returned 503 under saturation while the valid path returned
+        // `Ok(None)`, that difference would itself be a user-enumeration oracle
+        // (D-15). Instead we bound the wait by the same timeout and, if it
+        // elapses, simply skip the dummy hash and return normally — the
+        // observable result (`Ok(None)`) is identical to the valid branch
+        // regardless of load. Memory stays bounded because the permit *count*
+        // still caps concurrent arenas even when this path skips hashing.
+        let acquired = tokio::time::timeout(
+            std::time::Duration::from_secs(self.hash_acquire_timeout_secs),
+            self.crypto_semaphore.acquire(),
+        )
         .await;
+        if let Ok(Ok(_permit)) = acquired {
+            let pepper_owned = pepper.map(str::to_string);
+            let _ = tokio::task::spawn_blocking(move || {
+                password::verify_password("dummy", DUMMY_HASH, pepper_owned.as_deref())
+            })
+            .await;
+        }
     }
 
     /// Initiate a password reset for the given email.
@@ -232,11 +259,14 @@ where
         // run under the crypto_semaphore-gated spawn_blocking path (A3)
         // consistent with every other Argon2 call site in this codebase.
         {
-            let _permit = self
-                .crypto_semaphore
-                .acquire()
-                .await
-                .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+            // B1: bounded acquire — 503 backpressure on timeout. Enumeration is
+            // not a concern here (the caller already holds a valid reset token),
+            // so surfacing the error is safe and correct.
+            let _permit = acquire_hash_permit(
+                &self.crypto_semaphore,
+                std::time::Duration::from_secs(self.hash_acquire_timeout_secs),
+            )
+            .await?;
             let new_pw_owned = new_password.to_string();
             let current_hash_owned = user.password_hash.clone();
             let pepper_owned = pepper.map(str::to_string);
@@ -260,11 +290,14 @@ where
         // call site (A3) — `confirm_reset` previously performed this work
         // fully ungated.
         let check: PolicyCheckResult = {
-            let _permit = self
-                .crypto_semaphore
-                .acquire()
-                .await
-                .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+            // B1: bounded acquire — held for the duration of the policy
+            // evaluation so the history check's Argon2 verifies run under one
+            // permit; 503 backpressure on timeout.
+            let _permit = acquire_hash_permit(
+                &self.crypto_semaphore,
+                std::time::Duration::from_secs(self.hash_acquire_timeout_secs),
+            )
+            .await?;
             evaluate_password(
                 new_password,
                 pepper,
@@ -465,6 +498,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         let result = svc.initiate_reset(tid, &user.email, 1, None).await.unwrap();
@@ -496,6 +530,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         let result = svc
@@ -561,6 +596,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         let result = svc.initiate_reset(tid, &user.email, 1, None).await.unwrap();
@@ -588,6 +624,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         // First 3 requests should succeed.
@@ -624,6 +661,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         // Generate first token.
@@ -691,6 +729,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         let (raw_token, _uid, _exp) = svc
@@ -731,6 +770,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
         let policy = relaxed_policy();
 
@@ -779,6 +819,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
         let policy = relaxed_policy();
 
@@ -809,6 +850,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         let (raw_token, _uid, _exp) = svc
@@ -860,6 +902,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         let (raw_token, _uid, _exp) = svc
@@ -914,6 +957,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         let (raw_token, _uid, _exp) = svc
@@ -999,6 +1043,7 @@ mod tests {
             session_repo,
             refresh_token_repo,
             Arc::new(Semaphore::new(4)),
+            5,
         );
 
         fn mean(samples: &[StdDuration]) -> StdDuration {

@@ -19,7 +19,6 @@ use axiam_authz::types::{AccessDecision, AccessRequest};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
 use axiam_db::SurrealAuditLogRepository;
-use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -231,53 +230,42 @@ pub async fn batch_check_access<C: Connection + Clone>(
             .await?;
     }
 
-    // T-27-10/T-27-11: evaluate concurrently, bounded by
-    // AuthzConfig::batch_max_concurrency (D-07), preserving input order via
-    // sort_by_key after collection (D-06). The per-item append_check_as_audit
-    // fire-and-forget call is preserved inside the same mapped future.
-    let batch_max_concurrency = state.authz_config.batch_max_concurrency;
+    // D1: build the ordered AccessRequest list (resolving each item's effective
+    // subject and writing the per-item check_as audit entry), then hand the
+    // WHOLE batch to the engine's coalesced path in a single call. Same-subject
+    // / same-resource items share their role-assignment + ancestor + grant
+    // lookups instead of re-issuing them per item (the bench's batch shape).
     let checker: &dyn AuthzChecker = authz.get_ref().as_ref();
     let audit_repo_ref: &SurrealAuditLogRepository<C> = &state.audit_repo;
     let tenant_id = user.tenant_id;
     let actor_id = user.user_id;
 
-    let mut indexed: Vec<(usize, Result<AccessDecision, AxiamApiError>)> =
-        stream::iter(body.checks.into_iter().enumerate())
-            .map(|(i, check)| async move {
-                let resource_id = check.resource_id;
-                let effective_subject = if let Some(sid) = check.subject_id {
-                    // T-15-04: audit each cross-subject item individually.
-                    append_check_as_audit(audit_repo_ref, tenant_id, actor_id, sid, resource_id)
-                        .await;
-                    sid
-                } else {
-                    actor_id
-                };
+    let mut access_requests = Vec::with_capacity(body.checks.len());
+    for check in body.checks {
+        let resource_id = check.resource_id;
+        let effective_subject = if let Some(sid) = check.subject_id {
+            // T-15-04: audit each cross-subject item individually.
+            append_check_as_audit(audit_repo_ref, tenant_id, actor_id, sid, resource_id).await;
+            sid
+        } else {
+            actor_id
+        };
 
-                let access_req = AccessRequest {
-                    tenant_id,
-                    subject_id: effective_subject,
-                    action: check.action,
-                    resource_id,
-                    scope: check.scope,
-                };
-
-                let decision = checker
-                    .check_access(&access_req)
-                    .await
-                    .map_err(AxiamApiError::from);
-                (i, decision)
-            })
-            .buffer_unordered(batch_max_concurrency)
-            .collect()
-            .await;
-
-    indexed.sort_by_key(|&(i, _)| i);
-
-    let mut results = Vec::with_capacity(indexed.len());
-    for (_, decision) in indexed {
-        results.push(decision_to_response(decision?));
+        access_requests.push(AccessRequest {
+            tenant_id,
+            subject_id: effective_subject,
+            action: check.action,
+            resource_id,
+            scope: check.scope,
+        });
     }
+
+    let decisions = checker
+        .check_access_batch(&access_requests)
+        .await
+        .map_err(AxiamApiError::from)?;
+
+    let results = decisions.into_iter().map(decision_to_response).collect();
 
     Ok(HttpResponse::Ok().json(BatchCheckAccessResponse { results }))
 }

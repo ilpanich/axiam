@@ -109,6 +109,7 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
         host: "127.0.0.1".into(),
         port: 0,
         grpc_authz_per_sec: 100,
+        ..GrpcConfig::default()
     };
     // Ensure the TLS branch is NOT taken.
     unsafe {

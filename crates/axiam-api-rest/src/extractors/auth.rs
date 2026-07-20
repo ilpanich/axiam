@@ -387,6 +387,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             jwt_decoding_key: None,
             hibp_breaker_threshold: 5,
             hibp_breaker_cooldown_secs: 30,
+            max_concurrent_hashes: 0,
+            hash_acquire_timeout_secs: 5,
         }
     }
 

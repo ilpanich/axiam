@@ -130,6 +130,113 @@ from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see
 `AXIAM__AMQP__URL` at the deployment layer (see how
 `docker-compose.prod.yml` does this for the Compose path).
 
+## Argon2id hash concurrency (memory-DoS protection)
+
+Password hashing/verification uses Argon2id with OWASP-recommended parameters
+(`m=19456, t=2, p=1`). Each **in-flight** Argon2id operation allocates a
+~19 MiB memory arena. Unbounded concurrency is therefore an unauthenticated
+**memory-DoS** vector: a burst of concurrent logins multiplies that arena by
+the number of simultaneous hashes. In benchmarking, an unbounded login flood
+pegged 2 cores and drove server RSS to ~970 MiB (≈ 50 concurrent × 19 MiB),
+approaching the 1024 MiB container cap, while p95 latency ballooned to ~2.1 s.
+
+AXIAM bounds this with a process-wide semaphore shared across all CPU-bound
+crypto (login, password change, password reset, and PKI keygen/sign). The
+permit count caps peak concurrent arenas (and thus peak crypto RSS); a
+configurable acquire timeout sheds load with an HTTP **503** backpressure
+response instead of queueing unboundedly once every permit is held. The
+Argon2id cost parameters themselves are never weakened to gain throughput.
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__AUTH__MAX_CONCURRENT_HASHES` | Max concurrent Argon2id hash/verify operations. `0` (default) = auto → `min(CPU cores, 4)`. Raise only if the host has spare memory headroom (peak crypto RSS ≈ this value × 19 MiB); lower to harden a tightly memory-capped container. |
+| `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS` | Seconds a request waits for a hash permit before returning a `503 service_unavailable` backpressure error. Default `5`. Lower for faster load-shedding under attack; raise to tolerate longer queues before shedding. |
+
+The 503 path preserves the SEC-026 username-enumeration defence: the login
+"user not found" branch is subject to the same permit acquisition and timeout
+as the real password-verify branch, so the two remain timing- and
+status-indistinguishable under both normal and saturated load.
+
+## Authorization decision cache (optional, D7)
+
+An optional per-tenant cache of authorization decisions that skips the 3–4
+SurrealDB round-trips per check. **Off by default**; enabling it changes
+performance only, never the decision an endpoint returns.
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | Master switch. Default `false` — the authorization path is then byte-for-byte identical to a build without the cache. Set `true` to enable. |
+| `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | Cached-decision TTL in seconds (default `5`). Also the upper bound on revocation latency if an invalidation event is ever missed — keep it short. |
+| `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | Max cached decisions **per tenant** before FIFO eviction (default `10000`). Memory bound. |
+
+**Security posture (safe under AXIAM's additive allow-wins / default-deny
+model):** every access-*narrowing* mutation (role/grant/group/resource change)
+invalidates the affected cache entries immediately, wired into the mutation
+handlers — so **no revocation can leave a stale allow**. The TTL is only a
+bounded-staleness backstop: even a missed invalidation self-heals within
+`AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Full rationale and the per-mutation
+invalidation table are in the [Admin Guide](../admin/README.md#authorization-decision-cache-optional-d7).
+
+## Rate limiting
+
+Every authentication/OAuth2 endpoint is rate-limited (see
+`crates/axiam-api-rest/src/config/rate_limit.rs`) by two cooperating layers:
+a per-replica in-memory `Governor` and a `SurrealDB`-backed shared counter
+that closes the multi-replica gap (`middleware::rate_limit_shared`). Both
+layers derive their bucket key the same way.
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` | Max `/auth/login` requests per minute per key (default `10`). |
+| `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` | Max register requests per minute per key (default `5`). |
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `20`). |
+| `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | Max password-reset requests per minute per key (default `3`). |
+| `AXIAM__RATE_LIMIT__MFA_PER_MIN` | Max MFA enroll/confirm/verify requests per minute per key (default `5`). |
+| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | Max `/oauth2/introspect` requests per minute per key (default `10`). |
+| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | Max `/oauth2/revoke` requests per minute per key (default `10`). |
+| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | Max authz-check requests per minute per key (default `300`). |
+| `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy hops to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0` — set to `1` behind a single ingress/nginx). |
+| `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
+
+### `AXIAM__RATE_LIMIT__KEY` — NAT'd-fleet key configurability (D8)
+
+By default (`ip`) every rate-limit bucket keys on the caller's source IP —
+this is the original, unchanged behavior for every endpoint.
+
+For `/oauth2/token`, `/oauth2/revoke`, and `/oauth2/introspect` **only**,
+`AXIAM__RATE_LIMIT__KEY` can instead key on the authenticating OAuth2
+`client_id` (parsed from the form-encoded `client_secret_post` body, RFC 6749
+§2.3.1):
+
+- **`ip`** (default) — key on source IP alone, exactly as before. Many
+  distinct OAuth2 clients egressing through one NAT gateway / corporate
+  proxy / load balancer share a single bucket, so one noisy or
+  misconfigured client can exhaust the token/introspect/revoke quota for
+  every other client behind the same IP.
+- **`client_id`** — key on the OAuth2 `client_id` alone. Each client gets an
+  independent bucket regardless of source IP, which fixes the NAT collision
+  above but means a client rotating IPs is still tracked as one bucket
+  (intentional — the identity that matters here is the client, not the
+  network path).
+- **`ip_client_id`** — key on the `(ip, client_id)` pair. Each client gets an
+  independent bucket **per IP it connects from**, so a compromised/leaked
+  client credential being hammered from one attacker IP doesn't throttle the
+  same client operating legitimately from its normal IP.
+
+**`/auth/login` (and every other rate-limited endpoint) always keys per-IP,
+regardless of this setting.** Login authenticates a *user* via
+username/password — there is no OAuth2 client identity anywhere in that
+request to key on. This is enforced in code (`server.rs` wires `/auth/login`
+with the plain, IP-only `build_governor`/`RateLimitShared::new`
+constructors, which never read `AXIAM__RATE_LIMIT__KEY`) and is not
+configurable — see `RateLimitKeyMode`'s doc comment in
+`crates/axiam-api-rest/src/config/rate_limit.rs` for the full rationale.
+
+When a `client_id`/`ip_client_id`-mode request has no parseable `client_id`
+(malformed body, wrong content type, etc.), the rate limiter fails **safe**
+by falling back to the IP key for that request — it never disables rate
+limiting outright.
+
 ## TLS termination
 
 AXIAM supports two TLS patterns (ASVS V9.1.2/V9.1.3). Both enforce TLS 1.3 as

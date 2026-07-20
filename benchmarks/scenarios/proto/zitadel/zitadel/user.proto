@@ -1,0 +1,47 @@
+// Trimmed vendor copy — see ../README.md for provenance and what was cut.
+//
+// Source: https://github.com/zitadel/zitadel/blob/v4.15.2/proto/zitadel/user.proto
+// (1021 lines upstream — Human/Machine profile/email/phone/IdP-link detail,
+// U2F/passwordless factors, etc.) Only the top-level `User` envelope and the
+// `UserState` enum it embeds are kept, with field numbers copied verbatim
+// from upstream. The `human`/`machine` oneof (upstream fields 7/8, each
+// pulling in Profile/Email/Phone/Machine sub-messages and their own nested
+// options) is deliberately OMITTED: this benchmark only asserts the RPC
+// completes and decodes the user's identity envelope (id/state/user_name),
+// it does not assert on profile contents. Dropping fields 7/8 from this
+// trimmed .proto does not break wire compatibility — protobuf decoders
+// silently skip unknown field numbers, so a real `GetMyUserResponse`
+// carrying a `human` or `machine` payload still decodes cleanly here; those
+// bytes are simply not surfaced to the k6 script. All
+// `protoc-gen-openapiv2` field-option annotations were stripped for the same
+// reason as in object.proto.
+syntax = "proto3";
+
+package zitadel.user.v1;
+
+option go_package = "github.com/zitadel/zitadel/pkg/grpc/user";
+
+import "zitadel/object.proto";
+
+enum UserState {
+  USER_STATE_UNSPECIFIED = 0;
+  USER_STATE_ACTIVE = 1;
+  USER_STATE_INACTIVE = 2;
+  USER_STATE_DELETED = 3;
+  USER_STATE_LOCKED = 4;
+  USER_STATE_SUSPEND = 5;
+  USER_STATE_INITIAL = 6;
+}
+
+message User {
+  string id = 1;
+  zitadel.v1.ObjectDetails details = 2;
+  UserState state = 3;
+  string user_name = 4;
+  repeated string login_names = 5;
+  string preferred_login_name = 6;
+  // Upstream fields 7 (human) / 8 (machine) intentionally omitted — see the
+  // file-level comment above. Reserved so nothing here ever redefines them.
+  reserved 7, 8;
+  reserved "human", "machine";
+}

@@ -21,13 +21,19 @@ export const cfg = {
   host: str('BENCH_HOST', 'localhost'),
   port: num('BENCH_PORT', 8090),
   grpcAddr: str('BENCH_GRPC_ADDR', 'localhost:50051'),
-  // gRPC transport security is INDEPENDENT of the HTTP edge's TLS profile. The
-  // bench never TLS-terminates gRPC: the nginx edge (targets/axiam/tls/*.conf)
-  // proxies HTTP only, and the axiam-server gRPC port is published plaintext on
-  // :50051 for every profile (p0-p3). So the connect plaintext flag must NOT be
-  // derived from BENCH_SCHEME (https there is only the REST edge). Default
-  // plaintext; set BENCH_GRPC_PLAINTEXT=false only if you front gRPC with a TLS
-  // terminator.
+  // gRPC transport security is INDEPENDENT of the HTTP edge's TLS profile — the
+  // nginx edge (targets/axiam/tls/*.conf) proxies HTTP only, so a p1/p3 nginx-
+  // fronted profile still leaves :50051 plaintext. The connect plaintext flag
+  // must NOT be derived from BENCH_SCHEME. Default plaintext for every profile.
+  //
+  // D2: AXIAM's own gRPC server (crates/axiam-api-grpc/src/server.rs) natively
+  // terminates TLS on :50051 when AXIAM__GRPC_TLS_CERT_PATH/KEY_PATH are set
+  // (no proxy involved) — the p2-tls13 native overlay
+  // (targets/axiam/docker-compose.native-tls.yml) enables it and
+  // profiles/p2-tls13.env sets BENCH_GRPC_PLAINTEXT=false to match, so the k6
+  // gRPC dial and the server's listener agree. Any other profile that wants a
+  // TLS gRPC dial (e.g. a custom nginx grpc_pass front) can also set
+  // BENCH_GRPC_PLAINTEXT=false by hand.
   grpcPlaintext: str('BENCH_GRPC_PLAINTEXT', 'true') === 'true',
 
   // --- tenancy / credentials provisioned by runner/seed.sh ---
@@ -90,6 +96,21 @@ export function tlsOptions() {
     }];
   }
   return o;
+}
+
+// k6 net/grpc `Client.connect(addr, params)` params for AXIAM's dedicated gRPC
+// port (D2). Mirrors scenarios/zitadel_userinfo_grpc.js's connectParams(): when
+// not plaintext, k6's grpc client takes its own `tls: { insecureSkipVerify }`
+// key (distinct from tlsOptions()'s top-level `insecureSkipTLSVerify`, which
+// only covers k6's http/websocket clients) — required here because the p2
+// native-TLS overlay's server cert is signed by the same throwaway private CA
+// as the REST edge (see tlsOptions() above), which k6 cannot verify.
+export function grpcConnectParams() {
+  const params = { plaintext: cfg.grpcPlaintext };
+  if (!cfg.grpcPlaintext) {
+    params.tls = cfg.verifyTls ? {} : { insecureSkipVerify: true };
+  }
+  return params;
 }
 
 // Standard three-stage closed-loop model: warm-up (uncounted) → measure → cooldown.

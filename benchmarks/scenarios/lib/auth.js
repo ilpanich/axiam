@@ -23,8 +23,8 @@ export function mintToken() {
   throw new Error('auth.mintToken: could not obtain a token for setup (check seeding + profile)');
 }
 
-// Log in as the seeded *user* (never client_credentials) and return the session
-// credentials the authz scenarios need. Two AXIAM specifics drive this:
+// Shared cookie-jar extraction for `login()` responses. Two AXIAM specifics
+// drive this:
 //   1. `/api/v1/auth/login` delivers tokens ONLY via Set-Cookie (axiam_access,
 //      axiam_csrf, axiam_refresh) — the JSON body carries no token — so we read
 //      them back out of k6's cookie jar (HttpOnly is irrelevant to the jar).
@@ -34,9 +34,25 @@ export function mintToken() {
 //      T-27-12). A client-credentials service-account subject would neither match
 //      the seeded grant nor the required subject_id, so authz scenarios log in as
 //      the user.
-// The access token doubles as the gRPC bearer metadata; the CSRF token is
-// required as an X-CSRF-Token header (double-submit) on non-GET REST calls under
-// /api/v1.
+// Falls back to a body token for targets/profiles that return one there instead
+// of (or in addition to) cookies (e.g. Keycloak's ROPC "login").
+// Used by both `loginSession()` (authz scenarios) and `mintUserToken()`
+// (token-holding scenarios like userinfo) so the cookie-reading logic lives in
+// exactly one place.
+export function readAccessFromLogin(built, res, jar) {
+  const cookies = jar.cookiesForURL(built.url);
+  let body = null;
+  try { body = res.json(); } catch (_e) { /* cookie-only response, no JSON body */ }
+  const access = (cookies.axiam_access && cookies.axiam_access[0]) || (body && (body.access_token || body.token));
+  const refresh = (cookies.axiam_refresh && cookies.axiam_refresh[0]) || (body && body.refresh_token);
+  const csrf = cookies.axiam_csrf && cookies.axiam_csrf[0];
+  return { access_token: access, refresh_token: refresh, csrf_token: csrf };
+}
+
+// Log in as the seeded *user* (never client_credentials) and return the session
+// credentials the authz scenarios need. The access token doubles as the gRPC
+// bearer metadata; the CSRF token is required as an X-CSRF-Token header
+// (double-submit) on non-GET REST calls under /api/v1.
 export function loginSession() {
   const jar = http.cookieJar();
   const built = adapter().login();
@@ -44,15 +60,47 @@ export function loginSession() {
   if (res.status !== (built.expect || 200)) {
     throw new Error(`auth.loginSession: login failed (status ${res.status}) — check seeding + profile`);
   }
-  const cookies = jar.cookiesForURL(built.url);
-  let access = cookies.axiam_access && cookies.axiam_access[0];
-  if (!access) {
-    // Fall back to a body token in case a target/profile returns one there.
-    try { const b = res.json(); access = b.access_token || b.token; } catch (_e) { /* none */ }
+  const { access_token, csrf_token } = readAccessFromLogin(built, res, jar);
+  if (!access_token) throw new Error('auth.loginSession: no axiam_access cookie (or body token) in login response');
+  return { access_token, csrf_token };
+}
+
+// Obtain a token that represents the seeded *user* (not a service account),
+// for scenarios that need a genuine OIDC subject (e.g. userinfo). Tries the
+// target's `login()` op first; falls back to `clientCredentials()` only if
+// login isn't available/successful (e.g. a target with ROPC disabled) or
+// returns no usable token. `is_user_token` tells the caller (and the report,
+// via `bench_fallback`) whether the fallback was used, so a client-credentials
+// subject reading /userinfo isn't silently mistaken for the real op.
+export function mintUserToken() {
+  const a = adapter();
+  const jar = http.cookieJar();
+  const built = a.login();
+  // Some adapters' login() IS client_credentials in disguise, tagged
+  // `fallback: true` (see zitadel in targets.js) — skip straight to the
+  // explicit client_credentials branch below rather than "succeeding" here
+  // and mislabelling it is_user_token: true.
+  if (!built.fallback) {
+    const res = http.request(built.method, built.url, built.body || null, built.params || {});
+    if (res.status === (built.expect || 200)) {
+      const { access_token, refresh_token } = readAccessFromLogin(built, res, jar);
+      if (access_token) {
+        return { access_token, refresh_token, is_user_token: true };
+      }
+    }
   }
-  const csrf = cookies.axiam_csrf && cookies.axiam_csrf[0];
-  if (!access) throw new Error('auth.loginSession: no axiam_access cookie (or body token) in login response');
-  return { access_token: access, csrf_token: csrf };
+  // Fall back to client_credentials (e.g. a target whose login() already IS
+  // client_credentials — see zitadel in targets.js — or a login that failed).
+  const cc = a.clientCredentials();
+  const ccRes = http.request(cc.method, cc.url, cc.body || null, cc.params || {});
+  if (ccRes.status !== (cc.expect || 200)) {
+    throw new Error(`auth.mintUserToken: could not obtain a token for setup (status ${ccRes.status})`);
+  }
+  let body;
+  try { body = ccRes.json(); } catch (_e) { body = {}; }
+  const access = body.access_token || body.token;
+  if (!access) throw new Error('auth.mintUserToken: client_credentials fallback returned no token');
+  return { access_token: access, refresh_token: body.refresh_token, is_user_token: false };
 }
 
 // Decode the (unverified) claims from a JWT payload segment. Used only to read

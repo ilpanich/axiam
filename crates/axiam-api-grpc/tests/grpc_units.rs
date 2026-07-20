@@ -76,6 +76,7 @@ fn grpc_config_bind_address_panics_on_bad_host() {
         host: "not a host".into(),
         port: 1,
         grpc_authz_per_sec: 1,
+        ..GrpcConfig::default()
     };
     let _ = c.bind_address();
 }

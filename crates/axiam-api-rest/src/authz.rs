@@ -29,6 +29,46 @@ pub trait AuthzChecker: Send + Sync {
         &'a self,
         request: &'a AccessRequest,
     ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>>;
+
+    /// Evaluate an ordered batch of checks, returning decisions in input order
+    /// (result `i` ↔ `requests[i]`).
+    ///
+    /// The default implementation simply calls [`Self::check_access`] per item;
+    /// the real [`AuthorizationEngine`] overrides it with a **coalesced** path
+    /// that resolves the shared role-assignment / ancestor / scope lookups once
+    /// per `(tenant, subject)` / `(tenant, resource)` group instead of once per
+    /// item (D1). Both the REST and gRPC batch handlers route through this.
+    fn check_access_batch<'a>(
+        &'a self,
+        requests: &'a [AccessRequest],
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<Vec<AccessDecision>>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(requests.len());
+            for req in requests {
+                out.push(self.check_access(req).await?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// Invalidate **all** cached authorization decisions for a tenant (D7).
+    ///
+    /// The default implementation is a no-op — checkers without a decision
+    /// cache (the test doubles, and the engine when the cache feature flag is
+    /// off) simply ignore it. The real [`AuthorizationEngine`] forwards to its
+    /// cache. Mutation handlers call this after an access-*narrowing* change
+    /// whose affected-subject set isn't cheaply known (grant revoke,
+    /// role/permission delete or update, group-role unassignment, resource
+    /// reparent/delete) so that **no revocation can leave a stale allow**.
+    fn invalidate_tenant(&self, _tenant_id: Uuid) {}
+
+    /// Invalidate cached decisions for a single subject within a tenant (D7).
+    ///
+    /// Default no-op (see [`Self::invalidate_tenant`]). Mutation handlers call
+    /// this when exactly one subject's effective permissions change (user role
+    /// unassign/assign, group membership add/remove) — the targeted, cheaper
+    /// alternative to a full tenant flush.
+    fn invalidate_subject(&self, _tenant_id: Uuid, _subject_id: Uuid) {}
 }
 
 impl<R, P, Res, S, G> AuthzChecker for AuthorizationEngine<R, P, Res, S, G>
@@ -44,6 +84,21 @@ where
         request: &'a AccessRequest,
     ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
         Box::pin(AuthorizationEngine::check_access(self, request))
+    }
+
+    fn check_access_batch<'a>(
+        &'a self,
+        requests: &'a [AccessRequest],
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<Vec<AccessDecision>>> + Send + 'a>> {
+        Box::pin(AuthorizationEngine::check_access_batch(self, requests))
+    }
+
+    fn invalidate_tenant(&self, tenant_id: Uuid) {
+        AuthorizationEngine::invalidate_tenant(self, tenant_id);
+    }
+
+    fn invalidate_subject(&self, tenant_id: Uuid, subject_id: Uuid) {
+        AuthorizationEngine::invalidate_subject(self, tenant_id, subject_id);
     }
 }
 

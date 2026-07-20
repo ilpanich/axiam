@@ -2,6 +2,32 @@
 
 use axiam_server::cleanup;
 
+// D9 (memory-retention experiment): opt-in jemalloc global allocator.
+//
+// Default build uses the platform allocator (glibc malloc in the release
+// container image) — unchanged. Enabling the `jemalloc` cargo feature
+// (`cargo build --release -p axiam-server --features jemalloc`) swaps the
+// process-wide allocator to jemalloc, which is a candidate fix for the
+// observed RSS-retention issue: server RSS never returns to baseline after a
+// login burst (~93 -> ~646 MiB permanently, see
+// claude_dev/memory-retention-experiment.md). B1 already bounds the
+// concurrency *peak* via the Argon2 semaphore; this experiment targets the
+// *retention* — glibc malloc is known to keep freed arenas mapped rather
+// than returning pages to the OS, while jemalloc's decay-based purging
+// actively `madvise`s freed dirty/muzzy pages back to the kernel.
+//
+// Decay tuning is deliberately NOT hardcoded here: jemalloc's dirty/muzzy
+// page decay times are configured at process startup via the `MALLOC_CONF`
+// (or tikv-jemallocator's `_RJEM_MALLOC_CONF`) environment variable, e.g.
+//   MALLOC_CONF=dirty_decay_ms:1000,muzzy_decay_ms:0
+// which returns freed pages to the OS within ~1s of a burst subsiding
+// instead of jemalloc's default ~10s decay. See the experiment note for the
+// full rationale and the A/B measurement procedure (pending laptop
+// hardware — this feature is default-off so it ships safely un-measured).
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +68,7 @@ use axiam_federation::oidc::OidcFederationService;
 #[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::jwks_cache::JwksCache as Oauth2JwksCache;
 use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService, PkiConfig};
 use secrecy::ExposeSecret;
@@ -91,6 +118,11 @@ struct AppConfig {
     grpc: GrpcConfig,
     #[serde(default)]
     authz: axiam_authz::AuthzConfig,
+    /// B3: `GET /oauth2/jwks` HTTP caching config (currently just the
+    /// `Cache-Control` max-age). Configured via `AXIAM__OAUTH2__*` env vars,
+    /// e.g. `AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS`.
+    #[serde(default)]
+    oauth2: axiam_oauth2::jwks_cache::JwksCacheConfig,
     #[serde(default)]
     amqp: AmqpConfig,
     #[serde(default)]
@@ -405,9 +437,17 @@ async fn main() -> std::io::Result<()> {
     // revoke_all_sessions / revoke_all_sessions_except on password change and reset).
     let auth_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client_cloned().await);
     // Single shared bounding semaphore for all CPU-bound crypto operations (CQ-B02 / REQ-14 AC-2).
-    // Limits concurrent Argon2 and PKI keygen/sign operations to 4 to prevent DoS via
-    // runtime thread starvation. Constructed once, cloned (Arc) into each service.
-    let crypto_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    // Limits concurrent Argon2 and PKI keygen/sign operations to prevent runtime-thread
+    // starvation AND an unauthenticated memory-DoS (each Argon2id arena is ~19 MiB; B1).
+    // Permit count is `AXIAM__AUTH__MAX_CONCURRENT_HASHES` (0 = auto → min(cores, 4)).
+    // Constructed once, cloned (Arc) into each service.
+    let crypto_hash_permits = config.auth.resolved_max_concurrent_hashes();
+    tracing::info!(
+        permits = crypto_hash_permits,
+        acquire_timeout_secs = config.auth.hash_acquire_timeout_secs,
+        "crypto hash gate configured (B1)"
+    );
+    let crypto_semaphore = Arc::new(tokio::sync::Semaphore::new(crypto_hash_permits));
 
     let auth_service = AuthService::new(
         user_repo.clone(),
@@ -502,6 +542,10 @@ async fn main() -> std::io::Result<()> {
         SurrealFederationLoginStateRepository::new(db.client_cloned().await);
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
+    // B3: process-wide in-process cache for AXIAM's OWN `GET /oauth2/jwks`
+    // response (distinct from the federation JWKS cache above -- see
+    // `axiam_oauth2::jwks_cache` module docs).
+    let oauth2_jwks_cache = Arc::new(Oauth2JwksCache::new());
     // Disable automatic redirects to prevent SSRF bypass (an HTTPS URL
     // could redirect to http:// or an internal host). Apply a global
     // timeout for consistent outbound HTTP behaviour.
@@ -556,6 +600,7 @@ async fn main() -> std::io::Result<()> {
         session_repo.clone(),
         handler_refresh_token_repo.clone(),
         Arc::clone(&crypto_semaphore),
+        config.auth.hash_acquire_timeout_secs,
     );
     let email_verification_service = EmailVerificationService::new(
         user_repo.clone(),
@@ -611,15 +656,36 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
+    // D7: build the shared authorization decision cache. `None` unless
+    // `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true` — when `None`, every engine
+    // below is constructed exactly as before (no cache, zero behaviour
+    // change). The SAME `Arc<DecisionCache>` is cloned into the REST, gRPC and
+    // AMQP engines so an invalidation triggered from a REST mutation handler is
+    // observed on every read path (all role/permission/resource mutations are
+    // REST endpoints).
+    let decision_cache = config.authz.build_decision_cache();
+    if decision_cache.is_some() {
+        tracing::info!(
+            ttl_secs = config.authz.decision_cache_ttl_secs,
+            max_entries = config.authz.decision_cache_max_entries,
+            "AuthZ decision cache ENABLED (D7)"
+        );
+    }
+
     // Build REST-facing authorization checker (D-01, D-02).
-    let rest_authz: Arc<dyn axiam_api_rest::authz::AuthzChecker> =
-        Arc::new(axiam_authz::AuthorizationEngine::new(
+    let rest_authz: Arc<dyn axiam_api_rest::authz::AuthzChecker> = {
+        let engine = axiam_authz::AuthorizationEngine::new(
             role_repo.clone(),
             permission_repo.clone(),
             resource_repo.clone(),
             scope_repo.clone(),
             group_repo.clone(),
-        ));
+        );
+        Arc::new(match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        })
+    };
 
     // Spawn AMQP authorization consumer on a background task.
     // Uses a publisher channel because the consumer also publishes responses.
@@ -627,13 +693,19 @@ async fn main() -> std::io::Result<()> {
         .create_publisher_channel()
         .await
         .expect("Failed to create AMQP authz publisher channel");
-    let amqp_engine = axiam_authz::AuthorizationEngine::new(
-        role_repo.clone(),
-        permission_repo.clone(),
-        resource_repo.clone(),
-        scope_repo.clone(),
-        group_repo.clone(),
-    );
+    let amqp_engine = {
+        let engine = axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        );
+        match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        }
+    };
     // SEC-022/SECHRD-08: Resolve the mandatory AMQP master signing key. In a
     // debug build this falls back to a documented dev-only default when
     // unset; in a release build (the production container image) an unset
@@ -783,13 +855,19 @@ async fn main() -> std::io::Result<()> {
 
     // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();
-    let grpc_engine = axiam_authz::AuthorizationEngine::new(
-        role_repo.clone(),
-        permission_repo.clone(),
-        resource_repo.clone(),
-        scope_repo.clone(),
-        group_repo.clone(),
-    );
+    let grpc_engine = {
+        let engine = axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        );
+        match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        }
+    };
     let grpc_user_repo = user_repo.clone();
     let grpc_auth_config = config.auth.clone();
     let grpc_config = config.grpc.clone();
@@ -911,6 +989,8 @@ async fn main() -> std::io::Result<()> {
         federation_login_state_repo: federation_login_state_repo.clone(),
         http_client: http_client.clone(),
         jwks_cache: jwks_cache.clone(),
+        oauth2_jwks_cache: oauth2_jwks_cache.clone(),
+        oauth2_jwks_cache_config: config.oauth2.clone(),
         crypto_semaphore: Arc::clone(&crypto_semaphore),
         email_config_repo: email_config_repo.clone(),
         password_reset_service: password_reset_service.clone(),
@@ -951,6 +1031,35 @@ async fn main() -> std::io::Result<()> {
             .configure(health_routes::<axiam_db::DbClient>)
             .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
             .configure(openapi_routes)
+    })
+    // D3 native mTLS: lift the rustls-VERIFIED client certificate off the TLS
+    // connection into the per-connection extensions so cert-auth handlers read
+    // the verified peer cert (via `HttpRequest::conn_data`) instead of a
+    // spoofable proxy header. Only fires on the rustls bind with client-auth
+    // enabled; on plaintext / server-auth-only connections there is no peer cert
+    // and nothing is inserted (backward compatible).
+    .on_connect(|conn, ext| {
+        use actix_tls::accept::rustls_0_23::TlsStream;
+        use actix_web::rt::net::TcpStream;
+        if let Some(tls) = conn.downcast_ref::<TlsStream<TcpStream>>() {
+            let (_io, session) = tls.get_ref();
+            if let Some(certs) = session.peer_certificates()
+                && let Some(leaf) = certs.first()
+            {
+                match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref()) {
+                    Ok(vc) => {
+                        ext.insert(vc);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to parse verified client certificate; \
+                             cert-mapped identity will be unavailable for this connection"
+                        );
+                    }
+                }
+            }
+        }
     });
 
     // Bind plaintext (proxy-terminated TLS, the default) or, when
@@ -959,7 +1068,26 @@ async fn main() -> std::io::Result<()> {
     // misconfiguration, so a misconfigured TLS server never starts insecurely.
     let http_server = if tls_config.enabled {
         let rustls_config = axiam_server::tls::build_rustls_server_config(&tls_config)?;
-        tracing::info!(bind = %bind_addr, "Direct TLS enabled — negotiating TLS 1.3 only");
+        tracing::info!(
+            bind = %bind_addr,
+            http2_offered = tls_config.http2,
+            resumption = "tls1.3-tickets",
+            early_data = false,
+            "Direct TLS enabled — negotiating TLS 1.3 only"
+        );
+        // B2 honesty: the http2=false knob narrows the rustls config's ALPN to
+        // http/1.1, but actix-web's rustls HttpService re-adds h2 to ALPN, so
+        // h2 still wins negotiation on this bind. Warn so an operator expecting
+        // a true http/1.1-only listener is not misled.
+        if !tls_config.http2 {
+            tracing::warn!(
+                "server.tls.http2=false requested: the rustls config advertises http/1.1 only, \
+                 but the actix-web rustls HttpServer bind unconditionally re-adds h2 to ALPN, so \
+                 h2 remains offered and preferred. For a genuine http/1.1-only TLS listener (e.g. \
+                 the p2 h2-isolation benchmark cell) front the server with the tls13-h1 nginx edge. \
+                 See docs/security-profiles.md."
+            );
+        }
         http_server.bind_rustls_0_23(&bind_addr, rustls_config)?
     } else {
         http_server.bind(&bind_addr)?

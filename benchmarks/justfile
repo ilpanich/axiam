@@ -31,6 +31,24 @@ build := "0"
 #                           ACTIVE). Head-to-head numbers taken this way are NOT
 #                           comparable to competitors and report.py will flag them.
 rl := "neutralized"
+# dbcaps selects the datastore's CPU/mem envelope (C2):
+#   capped (default) — the standard envelope, same as every other container
+#                       (BENCH_DB_CPUS/BENCH_DB_MEM defaults in each target's
+#                       docker-compose.yml, normally 2 CPUs / 1024 MiB).
+#   uncapped          — raises the datastore to 4 CPUs / 2048 MiB so a run can
+#                       show whether the datastore — not the server — is the
+#                       ceiling. BENCH_DB_CPUS/BENCH_DB_MEM are already
+#                       env-driven in every target's compose file; this just
+#                       wires the two values through. An operator-supplied
+#                       BENCH_DB_CPUS/BENCH_DB_MEM still wins over either mode.
+dbcaps := "capped"
+# repeat controls how many times `bench-matrix` runs the whole target×profile
+# ×scenario matrix (C1: median-of-N). Each pass writes into its own
+# results/run-<i>/ subtree (same flat per-cell layout underneath), and
+# `bench-report`/`report.py` auto-detect the results/run-*/ layout and median
+# every metric per cell across the valid runs. Set repeat=1 for a quick single
+# pass (still lands under results/run-1/).
+repeat := "3"
 
 # Generate throwaway TLS/mTLS certs for the security profiles (idempotent).
 bench-certs:
@@ -111,6 +129,24 @@ bench-up:
       fi
     fi
 
+    # DB CPU/mem envelope (C2, all targets — see `dbcaps` at the top of this
+    # file). BENCH_DB_CPUS/BENCH_DB_MEM are already read directly by every
+    # target's docker-compose.yml (surrealdb/postgres `cpus:`/`mem_limit:`),
+    # so this only needs to set the two env vars before `docker compose up`;
+    # an operator-supplied BENCH_DB_CPUS/BENCH_DB_MEM still wins. The chosen
+    # values are recorded in meta.json automatically — run-benchmark.sh reads
+    # each container's actual cpu/mem cap straight off `docker inspect`
+    # (HostConfig.NanoCpus/Memory) rather than trusting this shell's env, so a
+    # separate `bench-run` invocation still captures whatever cap the running
+    # DB container was actually started with.
+    if [ "{{dbcaps}}" = "uncapped" ]; then
+      export BENCH_DB_CPUS="${BENCH_DB_CPUS:-4}"
+      export BENCH_DB_MEM="${BENCH_DB_MEM:-2048m}"
+      echo "[bench-up] DB caps: UNCAPPED (${BENCH_DB_CPUS} CPUs / ${BENCH_DB_MEM}) — measuring the server ceiling, not the datastore's"
+    elif [ "{{dbcaps}}" != "capped" ]; then
+      echo "[bench-up] unknown dbcaps='{{dbcaps}}' (use dbcaps=capped or dbcaps=uncapped)" >&2; exit 1
+    fi
+
     PROFILE_ARG=""
     OVERRIDE_ARG=""
     if [ "{{profile}}" != "p0-plaintext" ]; then
@@ -126,12 +162,19 @@ bench-up:
         # stack inside its CPU cap — comparable to keycloak/zitadel native TLS.
         # See targets/axiam/docker-compose.native-tls.yml.
         OVERRIDE_ARG="-f targets/axiam/docker-compose.native-tls.yml"
+      elif [ "{{profile}}" = "p3-mtls" ]; then
+        # p3 = TLS 1.3 + X.509 client-cert auth. AXIAM now verifies client certs
+        # in-process (D3: rustls WebPkiClientVerifier over profiles/certs/ca.crt),
+        # so terminate mTLS natively — no nginx edge — making the VERIFIED peer
+        # cert the identity source (not a proxy header) and keeping the crypto
+        # inside AXIAM's cap. Layers the mTLS overlay on top of the native-TLS
+        # one (same pattern p2 used in 649798e).
+        OVERRIDE_ARG="-f targets/axiam/docker-compose.native-tls.yml -f targets/axiam/docker-compose.native-mtls.yml"
       else
-        # p1-tls12 / p3-mtls: the native stack can't do TLS 1.2 or client-cert
-        # auth, so keep the nginx edge for those.
+        # p1-tls12: the native stack is TLS 1.3-only by policy and can't do
+        # TLS 1.2, so keep the nginx edge for that profile (see docs/security-profiles.md).
         case "{{profile}}" in
           p1-tls12) export BENCH_NGINX_CONF=tls12.conf ;;
-          p3-mtls)  export BENCH_NGINX_CONF=mtls.conf ;;
         esac
         PROFILE_ARG="--profile tls"
       fi
@@ -183,8 +226,9 @@ bench-up:
       fi
     }
     port_conflict=0
-    if [ "{{target}}" = "axiam" ] && [ "{{profile}}" = "p2-tls13" ]; then
-      # Native TLS: the server publishes the TLS port (+ grpc); no plaintext 8090.
+    if [ "{{target}}" = "axiam" ] && [ -n "$OVERRIDE_ARG" ]; then
+      # Native TLS/mTLS (p2-tls13, p3-mtls): the server publishes the TLS port
+      # (+ grpc); no plaintext 8090. Detected via the native compose override.
       check_port "${BENCH_TLS_PORT:-8443}" "TLS / BENCH_TLS_PORT" || port_conflict=1
     else
       check_port "${BENCH_APP_PORT:-8090}" "app / BENCH_APP_PORT" || port_conflict=1
@@ -217,8 +261,16 @@ bench-up:
     esac
     echo "[bench-up] waiting for {{target}} to serve at $READY_URL (timeout 180s)"
     ready_deadline=$(( $(date +%s) + 180 ))
+    # Native mTLS (axiam p3-mtls, client_auth=required): the listener rejects any
+    # connection without a verified client cert, so the readiness probe must
+    # present one too. BENCH_CLIENT_CERT/KEY come from the sourced profile env.
+    READY_MTLS=""
+    if [ "{{target}}" = "axiam" ] && [ "{{profile}}" = "p3-mtls" ] \
+       && [ -n "${BENCH_CLIENT_CERT:-}" ] && [ -n "${BENCH_CLIENT_KEY:-}" ]; then
+      READY_MTLS="--cert ${BENCH_CLIENT_CERT} --key ${BENCH_CLIENT_KEY}"
+    fi
     # -k: the TLS profiles front a throwaway private CA k6 also can't verify.
-    until curl -skf -o /dev/null "$READY_URL"; do
+    until curl -skf $READY_MTLS -o /dev/null "$READY_URL"; do
       if [ "$(date +%s)" -ge "$ready_deadline" ]; then
         echo "[bench-up] TIMEOUT: {{target}} did not become ready at $READY_URL" >&2
         docker compose -f "$COMPOSE" $PROFILE_ARG ps >&2 || true
@@ -229,7 +281,10 @@ bench-up:
     done
     echo "[bench-up] {{target}} is ready."
 
-# Provision org/tenant/user/client for a target; writes results/<target>.seed.env.
+# Provision org/tenant/user/client for a target; writes .seed/<target>.seed.env
+# (client secrets/passwords — gitignored, kept out of the results/ tree we
+# share) and, once the post-seed smoke checks pass, results/<target>.seed.ok
+# (a no-secret marker bench-run refuses to start the k6 matrix without).
 # Seeding talks to the plaintext app port (:8090) for AXIAM/Keycloak, which keep
 # HTTP alongside HTTPS. Zitadel under a TLS profile serves TLS-only, so its seed
 # must go over https:<tls-port> — derived from the profile env here and passed as
@@ -238,9 +293,12 @@ bench-seed:
     #!/usr/bin/env bash
     set -euo pipefail
     if { [ "{{target}}" = "zitadel" ] && [ "{{profile}}" != "p0-plaintext" ]; } \
-       || { [ "{{target}}" = "axiam" ] && [ "{{profile}}" = "p2-tls13" ]; }; then
+       || { [ "{{target}}" = "axiam" ] && { [ "{{profile}}" = "p2-tls13" ] || [ "{{profile}}" = "p3-mtls" ]; }; }; then
       # TLS-only listeners (zitadel built-in TLS; axiam native rustls) have no
       # plaintext side port, so seed over https at the TLS port (seed.sh uses -k).
+      # For axiam p3-mtls the native listener also REQUIRES a client cert, so
+      # sourcing the profile env exports BENCH_CLIENT_CERT/KEY, which seed.sh
+      # presents transparently on every request (see its curl wrapper).
       source profiles/{{profile}}.env
       BASE="${BENCH_SCHEME:-https}://${BENCH_HOST:-localhost}:${BENCH_PORT:-8443}"
       bash runner/seed.sh {{target}} "$BASE"
@@ -274,18 +332,33 @@ bench-report:
     python3 runner/report.py --results results
 
 # Full unattended matrix: every target × profile × scenario, with up/seed/run/down.
+# repeat=N (default 3, see `repeat` above): runs the whole matrix N times,
+# each pass writing into its own results/run-<i>/ subtree using the SAME flat
+# target/profile/scenario layout underneath, so the existing per-cell code
+# (seed marker, run-benchmark.sh) is reused unchanged. report.py auto-detects
+# the results/run-*/ layout and medians each cell across the valid runs (C1).
+# `rl` and `dbcaps` are forwarded to every bench-up so
+# `just target=axiam rl=prod bench-matrix` / `just dbcaps=uncapped bench-matrix`
+# work end-to-end (not just for a single manual bench-up).
 bench-matrix:
     #!/usr/bin/env bash
     set -euo pipefail
-    for t in {{targets}}; do
-      for p in {{profiles}}; do
-        echo "=== $t / $p ==="
-        just target=$t profile=$p bench-up
-        just target=$t profile=$p bench-seed
-        just target=$t profile=$p bench-run
-        just target=$t bench-down
+    for i in $(seq 1 {{repeat}}); do
+      RUN_DIR="results/run-$i"
+      echo "### repeat $i/{{repeat}} -> $RUN_DIR ###"
+      mkdir -p "$RUN_DIR"
+      export BENCH_RESULTS_DIR="$PWD/$RUN_DIR"
+      for t in {{targets}}; do
+        for p in {{profiles}}; do
+          echo "=== run $i: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
+          just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up
+          just target=$t profile=$p bench-seed
+          just target=$t profile=$p bench-run
+          just target=$t bench-down
+        done
       done
     done
+    unset BENCH_RESULTS_DIR
     just bench-report
 
 # --- SDK client benchmarks --- (pass the language as sdk=, e.g. sdk=python)
@@ -299,3 +372,33 @@ sdk-bench-all:
 # Remove all run artifacts (keeps the dir).
 bench-clean:
     find results -type f ! -name '.gitkeep' -delete || true
+
+# Package shareable results into results-<date>.tar.xz. Only k6 summaries,
+# resource/host CSVs, run metadata, and the generated report are included —
+# NOT .seed/ (client secrets, bench user password), which report.py and this
+# recipe never read from and which `git` never sees (see .gitignore / A7 in
+# claude_dev/benchmark-improvement-plan.md). Verifies the archive is clean
+# before leaving it on disk.
+bench-pack:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    OUT="results-$(date +%Y-%m-%d).tar.xz"
+    FILELIST="$(mktemp)"
+    trap 'rm -f "$FILELIST"' EXIT
+    find results \( -name '*.k6.json' -o -name '*.res.csv' -o -name '*.host.csv' \
+      -o -name '*.meta.json' -o -name 'report.md' \) -type f > "$FILELIST"
+    if [ ! -s "$FILELIST" ]; then
+      echo "[bench-pack] nothing to pack — run a benchmark + 'just bench-report' first" >&2
+      exit 1
+    fi
+    tar -cJf "$OUT" -T "$FILELIST"
+    echo "[bench-pack] wrote $OUT ($(wc -l < "$FILELIST") files)"
+    echo "[bench-pack] verifying no secret material leaked in..."
+    if tar -tJf "$OUT" | grep -qiE '\.seed/|seed\.env'; then
+      echo "[bench-pack] ERROR: a .seed/ path made it into the archive" >&2; exit 1
+    fi
+    if tar -xJOf "$OUT" | grep -qiE 'SECRET|PASSWORD'; then
+      echo "[bench-pack] ERROR: SECRET/PASSWORD text found in packed content — investigate before sharing" >&2
+      exit 1
+    fi
+    echo "[bench-pack] OK — $OUT contains no secret material."

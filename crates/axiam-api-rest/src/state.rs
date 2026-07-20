@@ -69,6 +69,9 @@ use axiam_federation::oidc::OidcFederationService;
 #[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::jwks_cache::{
+    JwksCache as Oauth2JwksCache, JwksCacheConfig as Oauth2JwksCacheConfig,
+};
 use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService};
 use surrealdb::{Connection, Surreal};
@@ -265,7 +268,20 @@ pub struct AppState<C: Connection + Clone> {
     pub assertion_replay_repo: SurrealAssertionReplayRepository<C>,
     pub federation_login_state_repo: SurrealFederationLoginStateRepository<C>,
     pub http_client: reqwest::Client,
+    /// Federation JWKS cache: caches REMOTE identity providers' JWKS
+    /// documents fetched during OIDC federation login. NOT related to
+    /// `oauth2_jwks_cache` below -- see `axiam_oauth2::jwks_cache` module
+    /// docs for the distinction.
     pub jwks_cache: Arc<JwksCache>,
+    /// B3: in-process cache + ETag for AXIAM's OWN `GET /oauth2/jwks`
+    /// response (the signing keys AXIAM serves to relying parties).
+    /// Constructed once at startup and shared via this `Arc` so all workers
+    /// hit the same cache instead of each maintaining its own.
+    pub oauth2_jwks_cache: Arc<Oauth2JwksCache>,
+    /// B3: `Cache-Control` max-age (and header rendering) for the
+    /// `GET /oauth2/jwks` response. Configured via
+    /// `AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS` (default 300s).
+    pub oauth2_jwks_cache_config: Oauth2JwksCacheConfig,
     pub crypto_semaphore: Arc<Semaphore>,
     /// D-02: `None` when `AXIAM__EMAIL_ENCRYPTION_KEY` is unset — the six
     /// email-config routes fail closed rather than silently using a
@@ -329,7 +345,9 @@ impl<C: Connection + Clone> AppState<C> {
     /// state.email_encryption_key = Some(TEST_KEY);
     /// ```
     pub fn for_test(db: Surreal<C>, auth_config: AuthConfig) -> Self {
-        let crypto_semaphore = Arc::new(Semaphore::new(4));
+        // B1: resolve the hash-gate permit count from config (0 = auto → min(cores, 4)).
+        let crypto_semaphore =
+            Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));
         let pki_config = axiam_pki::PkiConfig {
             encryption_key: None,
         };
@@ -404,6 +422,7 @@ impl<C: Connection + Clone> AppState<C> {
             session_repo.clone(),
             refresh_token_repo.clone(),
             Arc::clone(&crypto_semaphore),
+            auth_config.hash_acquire_timeout_secs,
         );
         let email_verification_service = EmailVerificationService::new(
             user_repo.clone(),
@@ -458,6 +477,8 @@ impl<C: Connection + Clone> AppState<C> {
             federation_login_state_repo: SurrealFederationLoginStateRepository::new(db.clone()),
             http_client: reqwest::Client::new(),
             jwks_cache: Arc::new(JwksCache::new()),
+            oauth2_jwks_cache: Arc::new(Oauth2JwksCache::new()),
+            oauth2_jwks_cache_config: Oauth2JwksCacheConfig::default(),
             crypto_semaphore,
             email_config_repo: None,
             password_reset_service,

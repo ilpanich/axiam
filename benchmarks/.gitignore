@@ -1,6 +1,12 @@
 # Generated benchmark artifacts
 results/**
 !results/.gitkeep
+# Seed fixtures: client secrets + the bench user's password (runner/seed.sh).
+# Kept out of results/ (which we share via `just bench-pack`) — see A7 in
+# claude_dev/benchmark-improvement-plan.md.
+.seed/
+# Packed shareable result bundles (just bench-pack)
+results-*.tar.xz
 # Throwaway TLS/mTLS material (regenerate with `just bench-certs`)
 profiles/certs/
 

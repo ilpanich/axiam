@@ -9,6 +9,12 @@ export const m = {
   failed: new Counter('bench_failed'),       // failed logical operations
   errorRate: new Rate('bench_error_rate'),   // fraction failed (validity gate)
   latency: new Trend('bench_op_latency_ms', true), // end-to-end op latency
+  // Count of iterations that measured a fallback operation instead of the
+  // labelled logical op (e.g. Zitadel's login() falling back to
+  // client_credentials, or a userinfo setup() that couldn't mint a real user
+  // token). report.py annotates any cell with bench_fallback > 0 as
+  // comparability: fallback-op and excludes it from head-to-head tables.
+  fallback: new Counter('bench_fallback'),
 };
 
 // Execute one built request (from targets.js) and record uniform metrics.
@@ -16,6 +22,8 @@ export const m = {
 export function doOp(built, params) {
   const reqParams = Object.assign({}, built.params || {}, params || {});
   const res = http.request(built.method, built.url, built.body || null, reqParams);
+
+  if (built.fallback) m.fallback.add(1);
 
   const expected = built.expect || 200;
   const passed = check(res, {

@@ -46,7 +46,9 @@ export default function () {
     vuRefresh = tok.refresh_token;
     if (!vuRefresh) {
       // Target issued no refresh token (e.g. pure client_credentials) — nothing to
-      // measure; mint again as the closest comparable token-issuance op.
+      // measure; mint again as the closest comparable token-issuance op. This is
+      // not a refresh, so tag + count it as a fallback (comparability: fallback-op).
+      m.fallback.add(1);
       doOp(a.clientCredentials());
       return;
     }

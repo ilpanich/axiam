@@ -91,6 +91,19 @@ services:
     container_name: bench-keycloak-postgres
     cpus: ${BENCH_DB_CPUS:-2}
     mem_limit: ${BENCH_DB_MEM:-1024m}
+    # Minimal, uniform tuning applied identically to Zitadel's postgres (C2) —
+    # sized for the standard 1 GiB cap, not a durability change (see the
+    # durability-parity note in docs/methodology.md §7). Defaults left
+    # otherwise stock so the comparison stays "same DB, sane settings", not
+    # "tuned for AXIAM's benefit".
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=512MB"
+      - "-c"
+      - "max_connections=200"
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak

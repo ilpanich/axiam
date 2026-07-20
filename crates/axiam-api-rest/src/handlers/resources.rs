@@ -157,6 +157,10 @@ pub async fn update<C: Connection + Clone>(
         .resource_repo
         .update(user.tenant_id, path.into_inner(), input)
         .await?;
+    // D7 (REVOCATION — security critical): a resource update can re-parent it,
+    // changing which ancestor-scoped roles cascade down and thereby NARROWING
+    // access for subjects targeting this subtree. Flush the tenant.
+    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
     Ok(HttpResponse::Ok().json(resource))
 }
 
@@ -185,6 +189,9 @@ pub async fn delete<C: Connection + Clone>(
         .resource_repo
         .delete(user.tenant_id, path.into_inner())
         .await?;
+    // D7 (REVOCATION — security critical): deleting a resource removes it (and
+    // its subtree scoping) from the hierarchy, narrowing access. Flush tenant.
+    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
     Ok(HttpResponse::NoContent().finish())
 }
 

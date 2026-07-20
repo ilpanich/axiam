@@ -181,6 +181,10 @@ pub async fn update<C: Connection + Clone>(
         .role_repo
         .update(user.tenant_id, path.into_inner(), body.into_inner())
         .await?;
+    // D7: a role change (e.g. is_global, name) can narrow effective access for
+    // an unknown set of subjects — flush the whole tenant so no stale allow
+    // can survive. No-op when the decision cache is disabled.
+    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
     Ok(HttpResponse::Ok().json(role))
 }
 
@@ -209,6 +213,9 @@ pub async fn delete<C: Connection + Clone>(
         .role_repo
         .delete(user.tenant_id, path.into_inner())
         .await?;
+    // D7: deleting a role revokes it from every subject holding it — flush the
+    // tenant so no cached allow granted through this role can survive.
+    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -239,6 +246,7 @@ pub async fn assign_to_user<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
+    let target_user = req.user_id;
     state
         .role_repo
         .assign_to_user(
@@ -248,6 +256,13 @@ pub async fn assign_to_user<C: Connection + Clone>(
             req.resource_id,
         )
         .await?;
+    // D7: only this subject's effective permissions change — targeted flush.
+    // (Assignment widens access, the safe direction, but we invalidate anyway
+    // so the new grant is visible immediately rather than after the TTL.)
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_subject(user.tenant_id, target_user);
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -281,6 +296,14 @@ pub async fn unassign_from_user<C: Connection + Clone>(
         .role_repo
         .unassign_from_user(user.tenant_id, p.user_id, p.role_id, query.resource_id)
         .await?;
+    // D7 (REVOCATION — security critical): unassigning a role removes access
+    // for exactly this subject. Invalidate immediately so a cached allow cannot
+    // survive; the additive allow-wins model makes this stale-allow the only
+    // dangerous staleness direction.
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_subject(user.tenant_id, p.user_id);
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -320,6 +343,9 @@ pub async fn assign_to_group<C: Connection + Clone>(
             req.resource_id,
         )
         .await?;
+    // D7: the affected subjects are every member of the group (set unknown
+    // without a query) — conservative per-tenant flush.
+    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -353,6 +379,10 @@ pub async fn unassign_from_group<C: Connection + Clone>(
         .role_repo
         .unassign_from_group(user.tenant_id, p.group_id, p.role_id, query.resource_id)
         .await?;
+    // D7 (REVOCATION — security critical): unassigning a role from a group
+    // revokes it from every member. The member set isn't known here without a
+    // query, so flush the whole tenant — this must never leave a stale allow.
+    authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
     Ok(HttpResponse::NoContent().finish())
 }
 

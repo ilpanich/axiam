@@ -43,6 +43,8 @@ reqwest = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+# D3: parse SAN/SPKI from the rustls-verified client certificate (native mTLS).
+x509-parser = { workspace = true }
 url = { workspace = true }
 subtle = { workspace = true }
 rand = { workspace = true }

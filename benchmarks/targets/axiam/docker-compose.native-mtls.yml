@@ -1,0 +1,30 @@
+# Overlay for AXIAM native (in-process) mutual TLS — used ONLY for the p3-mtls
+# profile via `just target=axiam profile=p3-mtls bench-up`, layered ON TOP of
+# docker-compose.native-tls.yml (which already enables the TLS 1.3 listener,
+# mounts profiles/certs at /certs, republishes the TLS port and disables the
+# https self-probe healthcheck). This overlay only adds the client-certificate
+# verifier configuration (D3), so the two files compose together:
+#
+#   -f docker-compose.yml \
+#   -f docker-compose.native-tls.yml \
+#   -f docker-compose.native-mtls.yml
+#
+# Why native for p3: AXIAM now terminates client-certificate auth in-process
+# (crates/axiam-server/src/tls.rs builds a rustls WebPkiClientVerifier over the
+# client-CA bundle). Fronting with nginx for mTLS would keep proxy-header
+# identity assertion (a spoofing surface) in the trusted path and measure
+# nginx's TLS work outside AXIAM's CPU cap. Native mTLS makes the VERIFIED peer
+# certificate — surfaced to handlers via on_connect / conn extensions — the sole
+# identity source, and keeps the measurement inside AXIAM's cap (comparable to
+# how p2 was moved native in 649798e). No nginx edge runs for p3 anymore.
+#
+# The client CA is the same throwaway private CA k6 presents its client cert
+# against: profiles/certs/ca.crt, already mounted read-only at /certs by the
+# native-tls overlay. k6 sends its client cert via tlsAuth (BENCH_CLIENT_CERT/
+# KEY from profiles/p3-mtls.env); the server requires + verifies it.
+services:
+  axiam-server:
+    environment:
+      # Require a client certificate, verified against the mounted CA bundle.
+      AXIAM__SERVER__TLS__CLIENT_AUTH: "required"
+      AXIAM__SERVER__TLS__CLIENT_CA_PATH: /certs/ca.crt

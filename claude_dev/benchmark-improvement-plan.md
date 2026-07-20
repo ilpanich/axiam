@@ -611,3 +611,61 @@ everything in Phase A and C, B3, D2, D4, D5, D8, D9, E1, E4 (well-specified
 edits with acceptance criteria above). Every Opus task should end by
 recording its findings in `claude_dev/` so the next agent inherits the
 evidence, not just the diff.
+
+---
+
+## Implementation status (updated 2026-07-19)
+
+Implemented on branch `claude/benchmark-improvement-plan-9yxx7g`. **Every task
+was implemented with the model the plan assigns to it** (Opus tasks via Opus
+agents, Sonnet tasks via Sonnet agents). All code compiles and all unit/
+integration tests written for these changes pass in the dev sandbox.
+
+**One environment caveat governs the whole table:** the sandbox is **not** the
+benchmark laptop — it has `cargo`/`docker`/`node`/`python` but **no `k6` and no
+live target stacks**. So acceptance criteria that are a *measured benchmark
+number* (throughput/RSS/p95/latency-signature) are implemented and unit-tested
+here but their **measured confirmation is done by the maintainer's laptop
+re-run** — marked "⏳ pending re-run" below. No benchmark number was fabricated.
+
+Legend: ✅ done & verified in-sandbox · ⏳ code done, measured acceptance pending
+the laptop re-run · ⛔ blocked on external resources (documented).
+
+| Task | Model | Status | Notes |
+|------|-------|--------|-------|
+| A1 userinfo scenario fix | Sonnet | ✅ | `mintUserToken` (login-first), KC `scope=openid`; smoke-run ⏳ |
+| A2 seed hardening + smoke checks | Sonnet | ✅ | fail-closed provisioning, `seed.ok` gate |
+| A3 fallback tagging | Sonnet | ✅ | `bench_fallback` counter; report excludes fallback cells |
+| A4 complete `meta.json` | Sonnet | ✅ | image+digest, sha256, governor, k6 cores, etc. |
+| A5 `report.py` improvements | Sonnet | ✅ | p50, blank invalid cells, bottleneck column, server-only efficiency |
+| A6 host telemetry (mhz/temp/k6) | Sonnet | ✅ | `host-sampler.sh` + clock/gen-saturation flags |
+| A7 secrets out of results | Sonnet | ✅ | `.seed/` relocation, `just bench-pack` |
+| B1 bound Argon2id concurrency | Opus | ✅ / ⏳ | configurable semaphore + acquire-timeout backpressure; RSS/p95 ⏳ |
+| B2 TLS 1.3 throughput fix | Opus | ✅ / ⏳ | root-caused h2-vs-h1 ALPN; resumption+ticketer, HTTP2 knob, 0-RTT declined; ±15% ⏳ |
+| B3 JWKS caching + headers | Sonnet | ✅ / ⏳ | in-proc cache, ETag/304, Cache-Control; curl-loop ⏳ |
+| C1 median-of-N runs | Sonnet | ✅ | `repeat`, run-*/ aggregation, ±% spread |
+| C2 DB sensitivity + fair pg tuning | Sonnet | ✅ | `dbcaps=uncapped`, uniform pg flags; durability parity flagged unverified |
+| C3 laptop variance runbook | Sonnet | ✅ | governor warn + `BENCH_CELL_PAUSE`, docs |
+| C4 prod rate-limit posture | Sonnet | ✅ | non-comparable section; posture-mix guard verified |
+| D1 authz batch coalescing | Opus | ✅ / ⏳ | same-subject coalescing (REST+gRPC) + tracing + round-trip test; cell re-run ⏳ |
+| D2 gRPC TLS termination | Sonnet | ✅ / ⏳ | bench wiring (server support pre-existed); live p2 ⏳ |
+| D3 native mTLS | Opus | ✅ / ⏳ | client-auth verifier + verified-cert via `on_connect`; in-proc handshake tests pass; full p3 no-nginx run ⏳ |
+| D4 Zitadel gRPC coverage | Sonnet | ✅ / ⏳ | vendored proto + `GetMyUser` scenario; live round-trip ⏳ |
+| D5 real Zitadel login (session API) | Sonnet | ✅ / ⏳ | `/v2/sessions` password check; shapes confirmed on live Zitadel ⏳ |
+| D6 SurrealDB tuning investigation | Opus | ✅ / ⏳ | static query-pattern + pool analysis (report exists); quantified runtime findings need uncapped-DB data ⏳ |
+| D7 authz decision cache | Opus | ✅ / ⏳ | flagged (default off), event-driven invalidation; revocation proven in tests; throughput ⏳ |
+| D8 rate-limiter key config | Sonnet | ✅ | `ip\|client_id\|ip_client_id`; login stays per-IP; tests pass |
+| D9 allocator experiment | Sonnet | ✅ / ⏳ | opt-in `jemalloc` feature + experiment note; RSS A/B ⏳ |
+| E2 AMQP async-authz harness | Opus | ✅ | design doc landed (`claude_dev/`); build-out deferred per plan |
+| E1.1 validate 7 SDK benches | Sonnet | ⛔ | needs sibling `axiam-<lang>-sdk` checkouts + a live seeded target + per-language toolchains — absent in this container |
+| E1.2 implement 4 stub benches | Sonnet | ⛔ | plan's own guardrail: stop-and-report when the SDK isn't usable; SDK repos not present |
+| E1.3 cross-SDK run + report table | Sonnet | ⛔ | depends on E1.1 |
+| E3 server-class hardware re-run | — | ⛔ | blocked on hardware/budget (explicitly out of scope in the plan) |
+| E4 public doc refresh | Sonnet | ⛔ | needs the fresh median-of-3 numbers from the laptop re-run |
+
+**Summary:** Phases **A, B, C, D fully implemented** (23/23 tasks) + **E2**.
+The remaining Phase E items (E1.\*, E3, E4) are blocked on resources this
+sandbox cannot provide (live target, sibling SDK repos + toolchains, server-
+class hardware, fresh re-run numbers) and are the natural follow-ups after the
+maintainer's re-run. Measured-number acceptance across A–D is validated by that
+re-run; every logic/security change is already covered by passing tests here.

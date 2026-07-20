@@ -10,6 +10,8 @@
 mod connection;
 mod error;
 pub mod helpers;
+pub mod metrics;
+mod pool;
 pub mod repository;
 mod schema;
 pub mod seeder;
@@ -17,6 +19,7 @@ pub mod seeder;
 pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};
+pub use pool::{DbCheckout, DbPool};
 pub use repository::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,

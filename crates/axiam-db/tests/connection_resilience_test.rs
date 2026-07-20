@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use axiam_db::{DbConfig, DbError, DbManager};
+use axiam_db::{DbConfig, DbError, DbManager, DbPool};
 use surrealdb::types::AuthError;
 
 /// Four weeks in seconds, mirroring `connection.rs`'s private
@@ -117,6 +117,9 @@ async fn recovers_from_token_expiry_without_restart() {
         reconnect_base_ms: 250,
         reconnect_ceiling_ms: 30_000,
         reconnect_max_retries: 10,
+        pool_size: 1,
+        pool_max_in_flight: 0,
+        pool_acquire_timeout_secs: 5,
     };
 
     // Short TTL: a 4s token, proactive re-signin at 0.5 * 4s = 2s — well
@@ -174,6 +177,9 @@ async fn reconnect_exhaustion_stays_unhealthy_and_keeps_probing_forever() {
         reconnect_base_ms: 50,
         reconnect_ceiling_ms: 200,
         reconnect_max_retries: 3,
+        pool_size: 1,
+        pool_max_in_flight: 0,
+        pool_acquire_timeout_secs: 5,
     };
 
     // Connect against the live server first (proves the manager itself is
@@ -227,6 +233,9 @@ async fn successful_reconnect_flips_health_back_to_ok_without_restart() {
         reconnect_base_ms: 50,
         reconnect_ceiling_ms: 200,
         reconnect_max_retries: 3,
+        pool_size: 1,
+        pool_max_in_flight: 0,
+        pool_acquire_timeout_secs: 5,
     };
 
     let short_ttl = Duration::from_secs(4);
@@ -240,4 +249,60 @@ async fn successful_reconnect_flips_health_back_to_ok_without_restart() {
     db.health_check()
         .await
         .expect("health_check should still be healthy without a process restart");
+}
+
+/// CQ-B48 closure proof (F2): a multi-handle [`DbPool`] built with a short,
+/// test-only root-token TTL keeps EVERY pooled handle authenticated past the
+/// raw TTL via each handle's own proactive re-signin task — so the repositories
+/// that bind those handles never hit the former restart-only ~4-week 401
+/// outage. Before F2, the ~30 `client_cloned()` repo snapshots were NOT renewed
+/// and would 401 once their token expired; here we drive queries through the
+/// pooled handles well past the TTL and assert no auth outage.
+///
+/// Requires a running SurrealDB (`just dev-up`). Run explicitly:
+/// `cargo test -p axiam-db --test connection_resilience_test -- --ignored`
+#[tokio::test]
+#[ignore = "requires a live SurrealDB instance (just dev-up)"]
+async fn pooled_handles_survive_token_expiry_without_restart() {
+    let config = DbConfig {
+        url: std::env::var("AXIAM_TEST_DB_URL").unwrap_or_else(|_| "127.0.0.1:8000".into()),
+        namespace: "axiam_test_cqb48".into(),
+        database: "pool_renewal".into(),
+        username: "root".into(),
+        password: "root".into(),
+        token_refresh_fraction: 0.5,
+        reconnect_base_ms: 250,
+        reconnect_ceiling_ms: 30_000,
+        reconnect_max_retries: 10,
+        // Three independent handles, each with its OWN renewal lifecycle.
+        pool_size: 3,
+        pool_max_in_flight: 0,
+        pool_acquire_timeout_secs: 5,
+    };
+
+    // 4s token, proactive re-signin at 0.5 * 4s = 2s per handle.
+    let short_ttl = Duration::from_secs(4);
+    let pool = DbPool::connect_with_ttl(&config, short_ttl)
+        .await
+        .expect("pool connect_with_ttl should succeed against a live SurrealDB");
+    assert_eq!(pool.size(), 3, "pool should have built three handles");
+
+    // Wait well past several proactive-refresh cycles and past the raw TTL.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    // health_check probes ALL pooled handles — every one must still authenticate
+    // (the per-handle re-signin kept it inside the TTL; no 401 outage).
+    pool.health_check().await.expect(
+        "every pooled handle should still be healthy — per-handle re-signin \
+         kept each session alive without a process restart (CQ-B48 closed)",
+    );
+
+    // Drive a repo-style bound handle past the TTL too: a handle checked out for
+    // a repository must run a query cleanly, proving the snapshot-401 is gone.
+    let bound = pool.handle_for_repo().await;
+    bound
+        .query("RETURN 1")
+        .await
+        .and_then(|r| r.check())
+        .expect("a query on a pooled repo-bound handle should succeed post-TTL");
 }

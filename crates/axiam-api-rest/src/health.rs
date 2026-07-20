@@ -26,6 +26,18 @@ impl HealthChecker for axiam_db::DbManager {
     }
 }
 
+impl HealthChecker for axiam_db::DbPool {
+    fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async {
+            // Probes every pooled handle so readiness reflects the whole pool
+            // (an auth-expired or poisoned handle anywhere trips the gate).
+            self.health_check()
+                .await
+                .map_err(|e| format!("db health check failed: {e}"))
+        })
+    }
+}
+
 /// Always-healthy test double (mirrors the `AllowAllAuthzChecker` test
 /// fixture precedent already established in this crate). Used by
 /// `AppState::for_test` so test harnesses that don't specifically exercise

@@ -747,8 +747,8 @@ the laptop re-run · ⛔ blocked on external resources (documented).
 | D8 rate-limiter key config | Sonnet | ✅ | `ip\|client_id\|ip_client_id`; login stays per-IP; tests pass |
 | D9 allocator experiment | Sonnet | ✅ / ⏳ | opt-in `jemalloc` feature + experiment note; RSS A/B ⏳ |
 | E2 AMQP async-authz harness | Opus | ✅ | design doc landed (`claude_dev/`); build-out deferred per plan |
-| E1.1 validate 7 SDK benches | Sonnet | ⛔ | needs sibling `axiam-<lang>-sdk` checkouts + a live seeded target + per-language toolchains — absent in this container |
-| E1.2 implement 4 stub benches | Sonnet | ⛔ | plan's own guardrail: stop-and-report when the SDK isn't usable; SDK repos not present |
+| E1.1 validate 7 SDK benches | Sonnet | ⏳ | code-bearing benches exist; live validation (an `ok` record against a seeded target) is a laptop step — no stack/egress here |
+| E1.2 implement 4 stub benches | Sonnet | ✅ / ⏳ | **implemented** (c, cpp, kotlin, swift) against their sibling SDKs; c/cpp/kotlin compile+run here (spec-conformant `error`/`pending` records, c `ok` proven vs a mock + valgrind-clean), swift code-complete but uncompiled (no toolchain). Live `ok` vs a seeded target ⏳ laptop |
 | E1.3 cross-SDK run + report table | Sonnet | ⛔ | depends on E1.1 |
 | E3 server-class hardware re-run | — | ⛔ | blocked on hardware/budget (explicitly out of scope in the plan) |
 | E4 public doc refresh | Sonnet | ⛔ | needs the fresh median-of-3 numbers from the laptop re-run |
@@ -756,12 +756,15 @@ the laptop re-run · ⛔ blocked on external resources (documented).
 | F2 implement `DbPool` + wire repos | Opus | ⬜ planned | pool_size=1 default (today's behavior); >1 opt-in until F3 data |
 | F3 pool bench validation + expiry soak | Sonnet | ⬜ planned | before/after cells + short-TTL soak |
 
-**Summary:** Phases **A, B, C, D fully implemented** (23/23 tasks) + **E2**.
-The remaining Phase E items (E1.\*, E3, E4) are blocked on resources this
-sandbox cannot provide (live target, sibling SDK repos + toolchains, server-
-class hardware, fresh re-run numbers) and are the natural follow-ups after the
-maintainer's re-run. Measured-number acceptance across A–D is validated by that
-re-run; every logic/security change is already covered by passing tests here.
+**Summary:** Phases **A, B, C, D fully implemented** (23/23 tasks) + **E2** +
+**Phase F** (F1+F2, merged in #207) + **E1.2** (the four stub SDK benches now
+wired: c/cpp/kotlin compile & run here, swift code-complete). The remaining
+Phase E items (E1.1 live validation, E1.3, E3, E4) and **F3** need resources
+this sandbox cannot provide — a live seeded target (container-image egress is
+blocked here, so no AXIAM/SurrealDB/RabbitMQ stack), server-class hardware, and
+the fresh re-run numbers — and are the natural follow-ups on the maintainer's
+laptop. Measured-number acceptance across A–D/F is validated by that re-run;
+every logic/security change is already covered by passing tests here.
 
 ---
 

@@ -23,3 +23,8 @@ sdk/csharp/bin/
 sdk/csharp/obj/
 sdk/php/vendor/
 sdk/php/composer.lock
+sdk/cpp/build/
+sdk/c/build/
+sdk/kotlin/build/
+sdk/kotlin/.gradle/
+sdk/swift/.build/

@@ -704,7 +704,7 @@ evidence, not just the diff.
 
 ---
 
-## Implementation status (updated 2026-07-19)
+## Implementation status (updated 2026-07-20)
 
 Implemented on branch `claude/benchmark-improvement-plan-9yxx7g`. **Every task
 was implemented with the model the plan assigns to it** (Opus tasks via Opus
@@ -748,13 +748,13 @@ the laptop re-run · ⛔ blocked on external resources (documented).
 | D9 allocator experiment | Sonnet | ✅ / ⏳ | opt-in `jemalloc` feature + experiment note; RSS A/B ⏳ |
 | E2 AMQP async-authz harness | Opus | ✅ | design doc landed (`claude_dev/`); build-out deferred per plan |
 | E1.1 validate 7 SDK benches | Sonnet | ⏳ | code-bearing benches exist; live validation (an `ok` record against a seeded target) is a laptop step — no stack/egress here |
-| E1.2 implement 4 stub benches | Sonnet | ✅ / ⏳ | **implemented** (c, cpp, kotlin, swift) against their sibling SDKs; c/cpp/kotlin compile+run here (spec-conformant `error`/`pending` records, c `ok` proven vs a mock + valgrind-clean), swift code-complete but uncompiled (no toolchain). Live `ok` vs a seeded target ⏳ laptop |
+| E1.2 implement 4 stub benches | Sonnet | ✅ / ⏳ | **implemented** (c, cpp, kotlin, swift) against their sibling SDKs; c/cpp/kotlin compile+run here (spec-conformant `error`/`pending` records, c `ok` proven vs a mock + valgrind-clean), swift code-complete but uncompiled (no toolchain); merged #208. Live `ok` vs a seeded target ⏳ laptop |
 | E1.3 cross-SDK run + report table | Sonnet | ⛔ | depends on E1.1 |
 | E3 server-class hardware re-run | — | ⛔ | blocked on hardware/budget (explicitly out of scope in the plan) |
 | E4 public doc refresh | Sonnet | ⛔ | needs the fresh median-of-3 numbers from the laptop re-run |
-| F1 DB pool design + instrumentation | Opus | ⬜ planned | added 2026-07-20; run after the laptop re-run |
-| F2 implement `DbPool` + wire repos | Opus | ⬜ planned | pool_size=1 default (today's behavior); >1 opt-in until F3 data |
-| F3 pool bench validation + expiry soak | Sonnet | ⬜ planned | before/after cells + short-TTL soak |
+| F1 DB pool design + instrumentation | Opus | ✅ | `claude_dev/db-pool-design.md` + zero-behavior-change boundary metrics (in-flight gauge, checkout counter, latency wrapper); merged #207 |
+| F2 implement `DbPool` + wire repos | Opus | ✅ | `DbPool` of N independent handles, all 48 repo call-sites rewired, `pool_size=1`+cap=0 byte-identical default (tested), CQ-B48 closed; 49 axiam-db tests pass; merged #207 |
+| F3 pool bench validation + expiry soak | Sonnet | ⛔ | needs the live seeded stack — pool 1-vs-N cells + the `#[ignore]` expiry soak are a laptop step |
 
 **Summary:** Phases **A, B, C, D fully implemented** (23/23 tasks) + **E2** +
 **Phase F** (F1+F2, merged in #207) + **E1.2** (the four stub SDK benches now

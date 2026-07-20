@@ -10,6 +10,7 @@ emit_pending() {
   case "$sdk" in
     rust) ver="1.0.0-alpha7" ;;
     python) ver="1.0.0a2" ;;
+    swift) ver="1.0.0-alpha12" ;;
     *) ver="1.0.0-alpha2" ;;
   esac
   cat <<EOF

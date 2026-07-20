@@ -543,12 +543,10 @@ impl DbManager {
         // probe alarms when the request-serving repositories' tokens expire —
         // the manager handle above is proactively re-signed-in and would report
         // healthy even while every repo DB request 401s.
-        let probe = metrics::instrument_query(
-            "health_check.probe",
-            self.health_probe.query("RETURN 1"),
-        )
-        .await
-        .map_err(Self::classify_query_error)?;
+        let probe =
+            metrics::instrument_query("health_check.probe", self.health_probe.query("RETURN 1"))
+                .await
+                .map_err(Self::classify_query_error)?;
         probe.check().map_err(Self::classify_query_error)?;
         Ok(())
     }

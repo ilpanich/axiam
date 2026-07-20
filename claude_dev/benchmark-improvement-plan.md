@@ -593,6 +593,95 @@ documented "not worth it".
 
 ---
 
+## Phase F — DB connection management & pooling (added 2026-07-20, post-merge)
+
+**Investigation findings** (read from the vendored `surrealdb` **3.2.1** source,
+`src/engine/remote/http/native.rs` + `src/lib.rs`, not assumed):
+
+- The crate offers **no native connection pool** and no tuning surface: you
+  cannot inject a custom `reqwest::Client`, set pool limits, or cap concurrency.
+- The HTTP engine is **not** a serial single connection, though: `run_router`
+  spawns a tokio task **per request** over one shared `reqwest::Client`, which
+  maintains its own implicit per-host HTTP/1.1 connection pool (connections
+  opened on demand, effectively unbounded).
+- **But** every `Surreal::clone()` shares the *same* `Arc<inner>` — one router
+  dispatch task and one `reqwest::Client` for the entire process (a clone only
+  mints a new session id). All ~30 repository handles funnel through that
+  single dispatcher, DB concurrency has **no upper bound** (stampede risk, the
+  same class of problem B1 fixed for Argon2), and the documented CQ-B48 gap
+  remains: repo-clone sessions expire independently (~4-week token TTL) with a
+  process restart as the only recovery.
+- Honest expectation-setting: D6's bench evidence shows the SurrealDB
+  container's CPU cap was the wall on authz cells, so a pool is a
+  **correctness/robustness win first** (bounded concurrency, owned session
+  lifecycle, no single-funnel) and a throughput win **to be measured, not
+  presumed** (F3).
+
+So: agreed with the maintainer — a hand-rolled pool is warranted; the crate
+will not provide one. The design below keeps the stateless HTTP engine.
+
+### F1. Instrumentation-first design — **Opus**
+
+*Files:* `claude_dev/db-pool-design.md` (new), `crates/axiam-db` (metrics only).
+
+1. Add client-path instrumentation (no behavior change): route-channel wait
+   time, in-flight DB request gauge, request spawn→response latency; capture
+   TCP-connection counts to the DB (`ss -tan`) during one authz bench cell so
+   the single-funnel cost is quantified before building anything.
+2. Write the design doc: a `DbPool` of **N independent `Surreal<Client>`
+   handles** (each its own router task + `reqwest::Client`, built via the
+   existing `DbManager` init path), checkout = least-in-flight (or round-robin)
+   **plus** a `tokio::sync::Semaphore` cap with acquire timeout returning the
+   existing overload error (B1 taxonomy — no new error shape). Config:
+   `AXIAM__DB__POOL_SIZE` (default TBD in design, modest e.g. 4) and
+   `AXIAM__DB__POOL_MAX_IN_FLIGHT` + timeout.
+3. Lifecycle ownership: the pool owns proactive re-signin + health/reconnect
+   **per pooled handle** — closing CQ-B48 (repositories stop holding startup
+   auth-snapshot clones that silently expire).
+4. Decide the least-invasive repository seam: ~30 repos take an owned
+   `Surreal<Client>` at construction today; design the provider handle
+   (e.g. `Arc<DbPool>` yielding a checkout guard) with minimal churn.
+
+*Acceptance:* design doc committed; instrumentation merged with zero behavior
+change; measured funnel numbers from one bench cell recorded in the doc.
+
+### F2. Implement `DbPool` + wire repositories — **Opus**
+
+*Files:* `crates/axiam-db/src/pool.rs` (new), `connection.rs`, repository
+constructors, `axiam-server` composition, docs.
+
+1. Implement per F1. `pool_size=1` must behave byte-for-byte like today and be
+   the first-release default (safe rollout); `>1` is opt-in until F3 data
+   justifies a new default.
+2. Tests: checkout distribution; bounded concurrency + acquire-timeout →
+   overload error; a short-TTL session-expiry renewal test (reuse
+   `connect_with_ttl`) proving pooled handles re-sign-in — i.e. the CQ-B48
+   401-outage is gone; per-handle poisoned-handle eviction (mirror the
+   existing D-12 swap test).
+3. Update `connection.rs` module docs — the "Known residual gap" paragraph
+   must be rewritten to describe the pool.
+
+*Acceptance:* workspace tests green; construction-only API change for repos;
+config keys documented in the deployment docs.
+
+### F3. Bench validation + expiry soak — **Sonnet**
+
+Re-run the four authz cells + token cells before/after (pool 1 vs N) on the
+laptop per the Phase C protocol (median-of-3, labeled sensitivity rows — with
+the D7 cache **off** for apples-to-apples, then one combined cell); run a
+short-TTL soak proving no 401 outage after token expiry; record everything in
+`claude_dev/surrealdb-tuning-report.md` (new §9) and fold into the E4 doc
+refresh.
+
+*Acceptance:* before/after cells recorded; soak passes; an honest written
+conclusion — ship `pool_size>1` as default, or keep 1 and close with a
+negative result.
+
+*Order:* F1 → F2 → F3, **after** the Phase A–D laptop re-run so clean
+baselines exist.
+
+---
+
 ## Execution order & dependency summary
 
 ```
@@ -603,11 +692,12 @@ Phase C (C1–C3 before the re-run;
    → RE-RUN MATRIX on the XPS (A6 telemetry proves/disproves clock effects)
 Phase D: D1 → D6 → D7 (sequential); D2, D3, D4, D5, D8, D9 independent
 Phase E: E4 after the Phase C re-run; E1/E2 when capacity allows; E3 blocked
+Phase F: F1 → F2 → F3 (sequential), AFTER the Phase A–D laptop re-run
 ```
 
-Model split summary: **Opus** — B1, B2, D1, D3, D6, D7, E2 (debugging,
-security-sensitive server internals, cache/verifier design). **Sonnet** —
-everything in Phase A and C, B3, D2, D4, D5, D8, D9, E1, E4 (well-specified
+Model split summary: **Opus** — B1, B2, D1, D3, D6, D7, E2, F1, F2 (debugging,
+security-sensitive server internals, cache/verifier/pool design). **Sonnet** —
+everything in Phase A and C, B3, D2, D4, D5, D8, D9, E1, E4, F3 (well-specified
 edits with acceptance criteria above). Every Opus task should end by
 recording its findings in `claude_dev/` so the next agent inherits the
 evidence, not just the diff.
@@ -662,6 +752,9 @@ the laptop re-run · ⛔ blocked on external resources (documented).
 | E1.3 cross-SDK run + report table | Sonnet | ⛔ | depends on E1.1 |
 | E3 server-class hardware re-run | — | ⛔ | blocked on hardware/budget (explicitly out of scope in the plan) |
 | E4 public doc refresh | Sonnet | ⛔ | needs the fresh median-of-3 numbers from the laptop re-run |
+| F1 DB pool design + instrumentation | Opus | ⬜ planned | added 2026-07-20; run after the laptop re-run |
+| F2 implement `DbPool` + wire repos | Opus | ⬜ planned | pool_size=1 default (today's behavior); >1 opt-in until F3 data |
+| F3 pool bench validation + expiry soak | Sonnet | ⬜ planned | before/after cells + short-TTL soak |
 
 **Summary:** Phases **A, B, C, D fully implemented** (23/23 tasks) + **E2**.
 The remaining Phase E items (E1.\*, E3, E4) are blocked on resources this
@@ -669,3 +762,71 @@ sandbox cannot provide (live target, sibling SDK repos + toolchains, server-
 class hardware, fresh re-run numbers) and are the natural follow-ups after the
 maintainer's re-run. Measured-number acceptance across A–D is validated by that
 re-run; every logic/security change is already covered by passing tests here.
+
+---
+
+## Collecting the data — laptop re-run runbook (added 2026-07-20)
+
+Everything below runs from `benchmarks/` on the XPS, against **merged `main`**.
+Full detail lives in `docs/methodology.md` §8 (median-of-N), §9 (DB caps),
+§10 (laptop variance control), §11 (prod posture); this is the short path.
+
+**0. Prerequisites.** `docker` + compose v2, `just`, `k6`, `python3`. Laptop
+prep per §10: on AC power, `sudo cpupower frequency-set -g performance`
+(the runner warns if not), optionally pin no-turbo — but run the WHOLE matrix
+in one mode. The A6 host sampler runs automatically; check the report's
+`clock_variance` / `generator_saturated` flags before trusting any cell.
+
+**1. Build AXIAM locally — this is the critical flag.** The published ghcr
+image predates all of Phase B/D, so every AXIAM cell must use a local source
+build of merged `main`: pass **`build=1`** (forces `docker compose --build`;
+it is also the automatic fallback when the pull fails). Keycloak/Zitadel are
+unchanged pulled images. First time (or after cert changes): `just bench-certs`.
+
+**2. Main matrix (median-of-3 is the default `repeat`):**
+
+```bash
+cd benchmarks
+just build=1 targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13" bench-matrix
+```
+
+`bench-matrix` loops bench-up → bench-seed → bench-run → bench-down per
+target×profile into `results/run-<i>/…`, then runs `bench-report`
+(auto-medians when `run-*/` dirs exist). Seeding is fail-closed (A2): if a
+seed smoke check fails, `bench-run` refuses to start — inspect
+`results/<target>/seed-failure/`. Expected first-run friction: the new
+Zitadel session-API seeding (D5) has two flagged best-guesses (`expect: 201`
+vs 200; management-API field names) — if its smoke check trips, adjust per
+the in-code comments in `scenarios/lib/targets.js` / `runner/seed.sh`.
+
+**3. AXIAM-only extra passes** (each a labeled section/sensitivity row, not
+mixed into head-to-head):
+
+```bash
+# p3 native mTLS (D3 — no nginx container should appear in `docker ps`)
+just target=axiam profile=p3-mtls build=1 bench-up bench-seed bench-run bench-down
+# C4 prod rate-limit posture
+just target=axiam rl=prod build=1 bench-up bench-seed bench-run bench-down
+# C2 DB-uncapped sensitivity (one AXIAM + one Zitadel pass)
+just target=axiam dbcaps=uncapped build=1 bench-up bench-seed bench-run bench-down
+just target=zitadel dbcaps=uncapped bench-up bench-seed bench-run bench-down
+# D7 decision-cache sensitivity (default is OFF; one labeled ON pass)
+AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true just target=axiam build=1 bench-up bench-seed bench-run bench-down
+```
+
+**4. B2 TLS verification — zero new runs first.** Before any p2 re-run, read
+the archived 2026-07-19 k6 JSONs: the `http_version` tag (expect `2` at p2 vs
+`1.1` at p0) and `http_req_tls_handshaking` attribute the halving with no new
+data. Then the isolation cell: re-run only `oauth2_client_credentials` +
+`token_refresh` at p2 with the h1-only edge (`tls13-h1.conf`) and compare —
+acceptance is p2 within ~15% of p0.
+
+**5. B1/D9 memory checks.** During the login cell, watch server RSS
+(`docker stats`): B1 acceptance is ≤ ~350 MiB at 50 VUs. The D9 jemalloc A/B
+is separate — procedure in `claude_dev/memory-retention-experiment.md`
+(build with `--features jemalloc`, compare 10-min post-burst RSS).
+
+**6. Package/publish:** `just bench-pack` produces the shareable
+`results-<date>.tar.xz` (only k6/res/host/meta/report files; it greps the
+archive for secrets and fails if any leak). Then E4 (public doc refresh) can
+run against the fresh numbers.

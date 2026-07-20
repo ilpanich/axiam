@@ -63,6 +63,12 @@ services:
       # 0 = auto → min(cores, 4). Set explicitly to exercise a specific value under load.
       AXIAM__AUTH__MAX_CONCURRENT_HASHES: "${AXIAM__AUTH__MAX_CONCURRENT_HASHES:-0}"
       AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS: "${AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS:-5}"
+      # --- Authz decision cache (D7) ----------------------------------------------
+      # Default OFF (today's behavior). Flip ENABLED=true only for the labeled
+      # cache-sensitivity pass — never for the head-to-head matrix.
+      AXIAM__AUTHZ__DECISION_CACHE_ENABLED: "${AXIAM__AUTHZ__DECISION_CACHE_ENABLED:-false}"
+      AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS: "${AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS:-5}"
+      AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES: "${AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES:-10000}"
       AXIAM__SERVER__HOST: "0.0.0.0"
       AXIAM__GRPC__HOST: "0.0.0.0"
       # First-run bootstrap gate (D-03a): satisfies the fail-closed admin gate so

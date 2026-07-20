@@ -378,7 +378,10 @@ mod tests {
         // times out — the acquire-timeout path cannot fire under the default.
         let a = pool.checkout().await.expect("checkout 1");
         let b = pool.checkout().await.expect("checkout 2");
-        let c = pool.checkout().await.expect("checkout 3 (never caps when disabled)");
+        let c = pool
+            .checkout()
+            .await
+            .expect("checkout 3 (never caps when disabled)");
         assert_eq!(
             pool.handles[0].in_flight.load(Ordering::Relaxed),
             3,
@@ -415,7 +418,11 @@ mod tests {
             .iter()
             .map(|h| h.in_flight.load(Ordering::Relaxed))
             .collect();
-        assert_eq!(counts, vec![3, 3, 3], "least-in-flight must spread load evenly");
+        assert_eq!(
+            counts,
+            vec![3, 3, 3],
+            "least-in-flight must spread load evenly"
+        );
         assert!(counts.iter().all(|c| *c > 0), "no handle may be starved");
 
         drop(held);
@@ -429,7 +436,10 @@ mod tests {
     #[tokio::test]
     async fn saturated_pool_times_out_to_service_unavailable() {
         let pool = DbPool::from_handles(vec![new_mem().await], 2, Duration::from_millis(20));
-        assert!(pool.semaphore.is_some(), "a positive cap must build a semaphore");
+        assert!(
+            pool.semaphore.is_some(),
+            "a positive cap must build a semaphore"
+        );
 
         // Saturate the 2 permits.
         let _a = pool.checkout().await.expect("1st permit");

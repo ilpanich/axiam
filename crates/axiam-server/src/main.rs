@@ -295,7 +295,8 @@ async fn main() -> std::io::Result<()> {
     {
         let boot_fed_repo =
             axiam_db::SurrealFederationConfigRepository::new(pool.handle_for_repo().await);
-        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(pool.handle_for_repo().await);
+        let boot_audit_repo =
+            axiam_db::SurrealAuditLogRepository::new(pool.handle_for_repo().await);
         if let Some(fed_key) = config.auth.federation_encryption_key {
             match axiam_federation::secrets::migrate_plaintext_federation_secrets(
                 &boot_fed_repo,
@@ -369,10 +370,12 @@ async fn main() -> std::io::Result<()> {
                 // Back-fill default-role grants for any permissions added to the
                 // registry since this tenant was bootstrapped (bootstrap, which
                 // grants permissions to roles, self-disables after first admin).
-                let backfilled =
-                    axiam_db::reconcile_default_role_grants(&pool.handle_for_repo().await, tenant.id)
-                        .await
-                        .expect("Failed to reconcile default role grants for tenant");
+                let backfilled = axiam_db::reconcile_default_role_grants(
+                    &pool.handle_for_repo().await,
+                    tenant.id,
+                )
+                .await
+                .expect("Failed to reconcile default role grants for tenant");
                 if backfilled > 0 {
                     tracing::info!(
                         tenant = %tenant.id,
@@ -515,7 +518,8 @@ async fn main() -> std::io::Result<()> {
     // `web::Data<SurrealNotificationRuleRepository>` extractor. Without this
     // registration every /api/v1/notification-rules request 500s with
     // "App data is not configured".
-    let notification_rule_repo = SurrealNotificationRuleRepository::new(pool.handle_for_repo().await);
+    let notification_rule_repo =
+        SurrealNotificationRuleRepository::new(pool.handle_for_repo().await);
     // Email-config repository (28-04, FUNC-03) — required by the
     // `handlers::email_config::*` handlers' `web::Data<SurrealEmailConfigRepository<C>>`
     // extractor. Only constructed when AXIAM__EMAIL_ENCRYPTION_KEY is present (same
@@ -537,7 +541,8 @@ async fn main() -> std::io::Result<()> {
                 None
             }
         };
-    let federation_config_repo = SurrealFederationConfigRepository::new(pool.handle_for_repo().await);
+    let federation_config_repo =
+        SurrealFederationConfigRepository::new(pool.handle_for_repo().await);
     let federation_link_repo = SurrealFederationLinkRepository::new(pool.handle_for_repo().await);
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(pool.handle_for_repo().await);
     // NEW-4: durable AMQP nonce store for replay protection, shared by the
@@ -564,7 +569,8 @@ async fn main() -> std::io::Result<()> {
     let refresh_token_repo = SurrealRefreshTokenRepository::new(pool.handle_for_repo().await);
     // Separate instance for password-reset/change handlers that need direct
     // RefreshTokenRepository access via web::Data (TokenService owns the main one).
-    let handler_refresh_token_repo = SurrealRefreshTokenRepository::new(pool.handle_for_repo().await);
+    let handler_refresh_token_repo =
+        SurrealRefreshTokenRepository::new(pool.handle_for_repo().await);
 
     // OAuth2 authorization code grant services.
     let authorize_service = AuthorizeService::new(

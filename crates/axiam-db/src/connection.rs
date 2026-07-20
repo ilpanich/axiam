@@ -297,14 +297,8 @@ impl DbManager {
     pub(crate) async fn connect_handle(
         config: &DbConfig,
         ttl: Duration,
-    ) -> Result<
-        (
-            Arc<RwLock<Surreal<Client>>>,
-            JoinHandle<()>,
-            JoinHandle<()>,
-        ),
-        surrealdb::Error,
-    > {
+    ) -> Result<(Arc<RwLock<Surreal<Client>>>, JoinHandle<()>, JoinHandle<()>), surrealdb::Error>
+    {
         let db = Surreal::new::<Http>(&config.url).await?;
         db.signin(Root {
             username: config.username.clone(),

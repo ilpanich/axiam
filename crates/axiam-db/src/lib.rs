@@ -10,6 +10,7 @@
 mod connection;
 mod error;
 pub mod helpers;
+pub mod metrics;
 pub mod repository;
 mod schema;
 pub mod seeder;

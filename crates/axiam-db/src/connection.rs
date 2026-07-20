@@ -71,6 +71,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::error::DbError;
+use crate::metrics;
 
 /// Cadence at which [`spawn_reconnect_loop`]'s background task polls
 /// `health_check` while the connection is believed healthy. Independent of
@@ -502,6 +503,11 @@ impl DbManager {
     /// residual gap"; repositories keep their own independent snapshot
     /// exactly as before this migration (RESEARCH Pitfall 2 — out of scope).
     pub async fn client_cloned(&self) -> Surreal<Client> {
+        // F1 instrumentation (zero behavior change): count how many handles are
+        // handed out. Under the current single-router architecture every clone
+        // shares the SAME dispatcher/`reqwest::Client`, so this counter directly
+        // quantifies the single-funnel fan-in the F2 pool will replace.
+        metrics::record_handle_checkout();
         self.db.read().await.clone()
     }
 
@@ -522,8 +528,11 @@ impl DbManager {
     /// without a process restart.
     pub async fn health_check(&self) -> Result<(), DbError> {
         let guard = self.db.read().await;
-        let result = guard
-            .query("RETURN 1")
+        // F1 instrumentation (zero behavior change): the health probe is a real
+        // query through the `axiam-db` boundary, so route it through the
+        // in-flight gauge + latency wrapper. `instrument_query` is a transparent
+        // passthrough — it awaits exactly this future and returns its output.
+        let result = metrics::instrument_query("health_check.manager", guard.query("RETURN 1"))
             .await
             .map_err(Self::classify_query_error)?;
         // Surface any statement-level error (HTTP returns 200 even on SQL error).
@@ -534,11 +543,12 @@ impl DbManager {
         // probe alarms when the request-serving repositories' tokens expire —
         // the manager handle above is proactively re-signed-in and would report
         // healthy even while every repo DB request 401s.
-        let probe = self
-            .health_probe
-            .query("RETURN 1")
-            .await
-            .map_err(Self::classify_query_error)?;
+        let probe = metrics::instrument_query(
+            "health_check.probe",
+            self.health_probe.query("RETURN 1"),
+        )
+        .await
+        .map_err(Self::classify_query_error)?;
         probe.check().map_err(Self::classify_query_error)?;
         Ok(())
     }

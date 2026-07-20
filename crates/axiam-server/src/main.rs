@@ -48,7 +48,7 @@ use axiam_auth::{
 };
 use axiam_core::repository::{OrganizationRepository, Pagination, TenantRepository};
 use axiam_db::{
-    DbConfig, DbManager, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
+    DbConfig, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
     SurrealAssertionReplayRepository, SurrealAuditLogRepository,
     SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
@@ -247,13 +247,18 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    // Connect to SurrealDB
-    let db = DbManager::connect(&config.db)
-        .await
-        .expect("Failed to connect to SurrealDB");
+    // Connect to SurrealDB. `DbPool` holds N independent, individually-renewable
+    // handles (default `pool_size = 1` ⇒ byte-for-byte today's single handle).
+    // Held as `Arc` because it is both the source of every repository's bound
+    // handle (`handle_for_repo`) and the process health checker.
+    let pool = Arc::new(
+        axiam_db::DbPool::connect(&config.db)
+            .await
+            .expect("Failed to connect to SurrealDB"),
+    );
 
     // Run schema migrations
-    axiam_db::run_migrations(&db.client_cloned().await)
+    axiam_db::run_migrations(&pool.handle_for_repo().await)
         .await
         .expect("Failed to run database migrations");
 
@@ -264,7 +269,7 @@ async fn main() -> std::io::Result<()> {
     // Errors are logged, never fatal — an unminted token just means the
     // env-var gate (AXIAM_BOOTSTRAP_ADMIN_EMAIL) remains the only way in,
     // which is a safe (fail-closed) degraded state, not a startup blocker.
-    match axiam_db::mint_bootstrap_setup_token_if_needed(&db.client_cloned().await).await {
+    match axiam_db::mint_bootstrap_setup_token_if_needed(&pool.handle_for_repo().await).await {
         Ok(Some(token)) => {
             // D-03b: the ONE deliberate secret-log exception — logged exactly
             // once, at first boot only. Only the sha256 hash is ever
@@ -289,8 +294,8 @@ async fn main() -> std::io::Result<()> {
     // to avoid serving plaintext-secret rows after this deploy.
     {
         let boot_fed_repo =
-            axiam_db::SurrealFederationConfigRepository::new(db.client_cloned().await);
-        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(db.client_cloned().await);
+            axiam_db::SurrealFederationConfigRepository::new(pool.handle_for_repo().await);
+        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(pool.handle_for_repo().await);
         if let Some(fed_key) = config.auth.federation_encryption_key {
             match axiam_federation::secrets::migrate_plaintext_federation_secrets(
                 &boot_fed_repo,
@@ -316,7 +321,7 @@ async fn main() -> std::io::Result<()> {
     {
         if let Some(email_key) = config.email_encryption_key {
             let boot_email_repo =
-                SurrealEmailConfigRepository::new(db.client_cloned().await, email_key);
+                SurrealEmailConfigRepository::new(pool.handle_for_repo().await, email_key);
             match boot_email_repo.backfill_plaintext_secrets().await {
                 Ok(n) => tracing::info!(migrated = n, "email config secrets backfill complete"),
                 Err(e) => tracing::warn!(error = %e, "email config secrets backfill failed"),
@@ -332,8 +337,8 @@ async fn main() -> std::io::Result<()> {
     // Seed permissions for all existing tenants (D-07).
     // Uses UPSERT — safe to run on every startup.
     {
-        let seed_org_repo = SurrealOrganizationRepository::new(db.client_cloned().await);
-        let seed_tenant_repo = SurrealTenantRepository::new(db.client_cloned().await);
+        let seed_org_repo = SurrealOrganizationRepository::new(pool.handle_for_repo().await);
+        let seed_tenant_repo = SurrealTenantRepository::new(pool.handle_for_repo().await);
         let all_orgs = seed_org_repo
             .list(Pagination {
                 offset: 0,
@@ -355,7 +360,7 @@ async fn main() -> std::io::Result<()> {
                 .expect("Failed to list tenants for permission seeding");
             for tenant in tenants.items {
                 axiam_db::seed_permissions(
-                    &db.client_cloned().await,
+                    &pool.handle_for_repo().await,
                     tenant.id,
                     axiam_api_rest::permissions::PERMISSION_REGISTRY,
                 )
@@ -365,7 +370,7 @@ async fn main() -> std::io::Result<()> {
                 // registry since this tenant was bootstrapped (bootstrap, which
                 // grants permissions to roles, self-disables after first admin).
                 let backfilled =
-                    axiam_db::reconcile_default_role_grants(&db.client_cloned().await, tenant.id)
+                    axiam_db::reconcile_default_role_grants(&pool.handle_for_repo().await, tenant.id)
                         .await
                         .expect("Failed to reconcile default role grants for tenant");
                 if backfilled > 0 {
@@ -405,11 +410,11 @@ async fn main() -> std::io::Result<()> {
 
     // Raw SurrealDB handle — registered as app_data so handlers that need direct
     // access (e.g. /api/v1/admin/bootstrap) can request `web::Data<Surreal<C>>`.
-    let db_handle = db.client_cloned().await;
-    let org_repo = SurrealOrganizationRepository::new(db.client_cloned().await);
-    let tenant_repo = SurrealTenantRepository::new(db.client_cloned().await);
+    let db_handle = pool.handle_for_repo().await;
+    let org_repo = SurrealOrganizationRepository::new(pool.handle_for_repo().await);
+    let tenant_repo = SurrealTenantRepository::new(pool.handle_for_repo().await);
     let user_repo = SurrealUserRepository::with_pepper(
-        db.client_cloned().await,
+        pool.handle_for_repo().await,
         config
             .auth
             .pepper
@@ -417,25 +422,25 @@ async fn main() -> std::io::Result<()> {
             .map(|p| p.expose_secret().to_string())
             .unwrap_or_default(),
     );
-    let group_repo = SurrealGroupRepository::new(db.client_cloned().await);
-    let role_repo = SurrealRoleRepository::new(db.client_cloned().await);
-    let permission_repo = SurrealPermissionRepository::new(db.client_cloned().await);
-    let resource_repo = SurrealResourceRepository::new(db.client_cloned().await);
-    let scope_repo = SurrealScopeRepository::new(db.client_cloned().await);
-    let service_account_repo = SurrealServiceAccountRepository::new(db.client_cloned().await);
-    let session_repo = SurrealSessionRepository::new(db.client_cloned().await);
+    let group_repo = SurrealGroupRepository::new(pool.handle_for_repo().await);
+    let role_repo = SurrealRoleRepository::new(pool.handle_for_repo().await);
+    let permission_repo = SurrealPermissionRepository::new(pool.handle_for_repo().await);
+    let resource_repo = SurrealResourceRepository::new(pool.handle_for_repo().await);
+    let scope_repo = SurrealScopeRepository::new(pool.handle_for_repo().await);
+    let service_account_repo = SurrealServiceAccountRepository::new(pool.handle_for_repo().await);
+    let session_repo = SurrealSessionRepository::new(pool.handle_for_repo().await);
     // REQ-7 / D-15: per-request session-validity check so revoked sessions'
     // access tokens are rejected immediately (the AuthenticatedUser extractor
     // consults this on every authenticated request).
     let session_validator: std::sync::Arc<dyn axiam_api_rest::SessionValidator> =
         std::sync::Arc::new(session_repo.clone());
-    let audit_repo = SurrealAuditLogRepository::new(db.client_cloned().await);
-    let ca_cert_repo = SurrealCaCertificateRepository::new(db.client_cloned().await);
+    let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo().await);
+    let ca_cert_repo = SurrealCaCertificateRepository::new(pool.handle_for_repo().await);
     let federation_link_repo_for_auth =
-        SurrealFederationLinkRepository::new(db.client_cloned().await);
+        SurrealFederationLinkRepository::new(pool.handle_for_repo().await);
     // A separate refresh-token repo instance for AuthService (used by
     // revoke_all_sessions / revoke_all_sessions_except on password change and reset).
-    let auth_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client_cloned().await);
+    let auth_refresh_token_repo = SurrealRefreshTokenRepository::new(pool.handle_for_repo().await);
     // Single shared bounding semaphore for all CPU-bound crypto operations (CQ-B02 / REQ-14 AC-2).
     // Limits concurrent Argon2 and PKI keygen/sign operations to prevent runtime-thread
     // starvation AND an unauthenticated memory-DoS (each Argon2id arena is ~19 MiB; B1).
@@ -458,13 +463,13 @@ async fn main() -> std::io::Result<()> {
         Arc::clone(&crypto_semaphore),
     );
     // Password history repository — used by the password-change handler.
-    let password_history_repo = SurrealPasswordHistoryRepository::new(db.client_cloned().await);
-    let consent_repo = axiam_db::SurrealConsentRepository::new(db.client_cloned().await);
-    let account_deletion_repo = SurrealAccountDeletionRepository::new(db.client_cloned().await);
-    let export_job_repo = SurrealExportJobRepository::new(db.client_cloned().await);
-    let erasure_proof_repo = SurrealErasureProofRepository::new(db.client_cloned().await);
+    let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo().await);
+    let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo().await);
+    let account_deletion_repo = SurrealAccountDeletionRepository::new(pool.handle_for_repo().await);
+    let export_job_repo = SurrealExportJobRepository::new(pool.handle_for_repo().await);
+    let erasure_proof_repo = SurrealErasureProofRepository::new(pool.handle_for_repo().await);
 
-    let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(db.client_cloned().await);
+    let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(pool.handle_for_repo().await);
     let webauthn_service = WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
         .expect("Failed to build WebauthnService");
     let mfa_method_service = MfaMethodService::new(user_repo.clone(), webauthn_cred_repo.clone());
@@ -475,13 +480,13 @@ async fn main() -> std::io::Result<()> {
     let pki_config = PkiConfig {
         encryption_key: load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY"),
     };
-    let cert_repo = SurrealCertificateRepository::new(db.client_cloned().await);
+    let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo().await);
     let ca_service = CaService::new(
         ca_cert_repo.clone(),
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
     );
-    let pgp_repo = SurrealPgpKeyRepository::new(db.client_cloned().await);
+    let pgp_repo = SurrealPgpKeyRepository::new(pool.handle_for_repo().await);
     let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore));
     let cert_service = CertService::new(
         ca_cert_repo,
@@ -493,9 +498,9 @@ async fn main() -> std::io::Result<()> {
     // SurrealCaCertificateRepository is cloned; each clone shares the underlying Surreal<C>.
     let device_auth_service = DeviceAuthService::new(
         cert_repo.clone(),
-        SurrealCaCertificateRepository::new(db.client_cloned().await),
+        SurrealCaCertificateRepository::new(pool.handle_for_repo().await),
     );
-    let webhook_repo = SurrealWebhookRepository::new(db.client_cloned().await);
+    let webhook_repo = SurrealWebhookRepository::new(pool.handle_for_repo().await);
     // SEC-031/SEC-059: Webhook secrets stored AES-256-GCM encrypted using the
     // same PKI encryption key. Absent key -> None (SEC-012 fail-closed
     // pattern, mirrors `pki_config.encryption_key` above): the server still
@@ -505,12 +510,12 @@ async fn main() -> std::io::Result<()> {
     let webhook_enc_key: Option<[u8; 32]> = load_key_from_env("AXIAM__PKI__ENCRYPTION_KEY");
     let webhook_delivery =
         axiam_api_rest::webhook::WebhookDeliveryService::new(webhook_repo.clone(), webhook_enc_key);
-    let settings_repo = SurrealSettingsRepository::new(db.client_cloned().await);
+    let settings_repo = SurrealSettingsRepository::new(pool.handle_for_repo().await);
     // Notification-rule repository — required by the notification_rules handlers'
     // `web::Data<SurrealNotificationRuleRepository>` extractor. Without this
     // registration every /api/v1/notification-rules request 500s with
     // "App data is not configured".
-    let notification_rule_repo = SurrealNotificationRuleRepository::new(db.client_cloned().await);
+    let notification_rule_repo = SurrealNotificationRuleRepository::new(pool.handle_for_repo().await);
     // Email-config repository (28-04, FUNC-03) — required by the
     // `handlers::email_config::*` handlers' `web::Data<SurrealEmailConfigRepository<C>>`
     // extractor. Only constructed when AXIAM__EMAIL_ENCRYPTION_KEY is present (same
@@ -522,7 +527,7 @@ async fn main() -> std::io::Result<()> {
     let email_config_repo: Option<SurrealEmailConfigRepository<axiam_db::DbClient>> =
         match config.email_encryption_key {
             Some(email_key) => Some(SurrealEmailConfigRepository::new(
-                db.client_cloned().await,
+                pool.handle_for_repo().await,
                 email_key,
             )),
             None => {
@@ -532,14 +537,14 @@ async fn main() -> std::io::Result<()> {
                 None
             }
         };
-    let federation_config_repo = SurrealFederationConfigRepository::new(db.client_cloned().await);
-    let federation_link_repo = SurrealFederationLinkRepository::new(db.client_cloned().await);
-    let assertion_replay_repo = SurrealAssertionReplayRepository::new(db.client_cloned().await);
+    let federation_config_repo = SurrealFederationConfigRepository::new(pool.handle_for_repo().await);
+    let federation_link_repo = SurrealFederationLinkRepository::new(pool.handle_for_repo().await);
+    let assertion_replay_repo = SurrealAssertionReplayRepository::new(pool.handle_for_repo().await);
     // NEW-4: durable AMQP nonce store for replay protection, shared by the
     // authz + audit consumers and swept by the periodic cleanup task.
-    let amqp_nonce_repo = SurrealAmqpNonceRepository::new(db.client_cloned().await);
+    let amqp_nonce_repo = SurrealAmqpNonceRepository::new(pool.handle_for_repo().await);
     let federation_login_state_repo =
-        SurrealFederationLoginStateRepository::new(db.client_cloned().await);
+        SurrealFederationLoginStateRepository::new(pool.handle_for_repo().await);
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
     // B3: process-wide in-process cache for AXIAM's OWN `GET /oauth2/jwks`
@@ -554,12 +559,12 @@ async fn main() -> std::io::Result<()> {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("failed to build reqwest client");
-    let oauth2_client_repo = SurrealOAuth2ClientRepository::new(db.client_cloned().await);
-    let auth_code_repo = SurrealAuthorizationCodeRepository::new(db.client_cloned().await);
-    let refresh_token_repo = SurrealRefreshTokenRepository::new(db.client_cloned().await);
+    let oauth2_client_repo = SurrealOAuth2ClientRepository::new(pool.handle_for_repo().await);
+    let auth_code_repo = SurrealAuthorizationCodeRepository::new(pool.handle_for_repo().await);
+    let refresh_token_repo = SurrealRefreshTokenRepository::new(pool.handle_for_repo().await);
     // Separate instance for password-reset/change handlers that need direct
     // RefreshTokenRepository access via web::Data (TokenService owns the main one).
-    let handler_refresh_token_repo = SurrealRefreshTokenRepository::new(db.client_cloned().await);
+    let handler_refresh_token_repo = SurrealRefreshTokenRepository::new(pool.handle_for_repo().await);
 
     // OAuth2 authorization code grant services.
     let authorize_service = AuthorizeService::new(
@@ -588,9 +593,9 @@ async fn main() -> std::io::Result<()> {
     // purely to build the two hoisted services below; no handler touches
     // them directly, so they are not their own AppState field.
     let password_reset_token_repo =
-        SurrealPasswordResetTokenRepository::new(db.client_cloned().await);
+        SurrealPasswordResetTokenRepository::new(pool.handle_for_repo().await);
     let email_verification_token_repo =
-        SurrealEmailVerificationTokenRepository::new(db.client_cloned().await);
+        SurrealEmailVerificationTokenRepository::new(pool.handle_for_repo().await);
 
     let password_reset_service = PasswordResetService::new(
         user_repo.clone(),
@@ -644,7 +649,7 @@ async fn main() -> std::io::Result<()> {
     let tls_config = config.server.tls.clone();
     let rate_limit_cfg = config.rate_limit.clone();
     let auth_config = config.auth.clone();
-    let health_checker: Arc<dyn HealthChecker> = Arc::new(db);
+    let health_checker: Arc<dyn HealthChecker> = pool;
 
     // PERF-01: initialize the process-wide HIBP circuit breaker from
     // AuthConfig (config-crate wired, not a manual env parse) before the

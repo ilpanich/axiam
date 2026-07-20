@@ -30,17 +30,20 @@
 //! treating expired/invalid root credentials as an ordinary, possibly
 //! transient query error.
 //!
-//! **Known residual gap (documented, not fixed here):** every repository in
-//! `axiam-server` is constructed via `db.client_cloned().await`. Cloning a
-//! `Surreal<C>` mints a brand-new session id and copies the CURRENT auth
-//! state as a value snapshot — it does not share future re-signins or
-//! reconnects with `DbManager`'s own handle. This module's proactive
-//! re-signin and reconnect loop therefore only keep `DbManager`'s OWN
-//! session (used by `health_check`) alive; the ~30 already-cloned repository
-//! sessions each still expire independently on their own original schedule.
-//! This matches the phase's locked scope (`26-RESEARCH.md` /
-//! `27-RESEARCH.md` Pitfall 2) — there is no connection pool, and threading a
-//! shared/swappable handle into the repositories is explicitly out of scope.
+//! ## Session lifecycle (CQ-B48 closed by the DbPool, F2)
+//!
+//! Repositories no longer hold frozen `client_cloned()` snapshots. They bind a
+//! handle from [`crate::DbPool`], which holds N INDEPENDENT `Surreal<Client>`
+//! handles (not clones), each with its OWN proactive re-signin and reconnect
+//! loop — the same D-04/PERF-04 machinery this module implements, now spawned
+//! once per pooled handle instead of only for the manager's single handle.
+//! Every session a request can reach therefore belongs to a pooled handle that
+//! is kept authenticated inside the root-token TTL and rebuilt on
+//! expiry/poison, so the former restart-only ~4-week outage is gone. The
+//! deliberately-un-renewed startup-snapshot `health_probe` that used to alarm
+//! on that gap is removed; readiness is now established by [`crate::DbPool`]
+//! probing its pooled handles (see [`DbManager::connect_handle`], the shared
+//! per-handle connect+spawn path both [`DbManager`] and the pool build through).
 //!
 //! ## Reconnect loop, full-jitter backoff, poisoned-handle eviction (PERF-04)
 //!
@@ -86,7 +89,7 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// truth and can never drift apart. Four weeks comfortably outlives any
 /// normal uptime even without renewal; the renewal mechanism above exists so
 /// that ceiling is never actually load-bearing.
-const ROOT_TOKEN_DURATION: Duration = Duration::from_secs(4 * 7 * 24 * 3600);
+pub(crate) const ROOT_TOKEN_DURATION: Duration = Duration::from_secs(4 * 7 * 24 * 3600);
 
 /// Configuration for connecting to SurrealDB.
 #[derive(Debug, Clone, Deserialize)]
@@ -123,6 +126,31 @@ pub struct DbConfig {
     /// interval forever (D-11) — it never exits the process. Overridable via
     /// `AXIAM__DB__RECONNECT_MAX_RETRIES`; default 10.
     pub reconnect_max_retries: u32,
+    /// Number of INDEPENDENT `Surreal<Client>` handles the [`crate::DbPool`]
+    /// builds — each with its OWN router task, `reqwest` client (hence its own
+    /// implicit TCP pool) and renewable signin session (NOT `.clone()`s of one
+    /// handle). Overridable via `AXIAM__DB__POOL_SIZE`. DEFAULT `1` —
+    /// byte-for-byte today's behavior (one handle, one funnel, one session):
+    /// the safe-rollout default. `>1` is opt-in until F3 laptop data justifies
+    /// a new default. A value of `0` is treated as `1`.
+    pub pool_size: usize,
+    /// Process-wide cap on concurrent in-flight DB ops across ALL pooled
+    /// handles — the stampede bound, analogous to B1's `MAX_CONCURRENT_HASHES`
+    /// Argon2id gate. Overridable via `AXIAM__DB__POOL_MAX_IN_FLIGHT`.
+    /// DEFAULT `0` = **disabled/unbounded** (no semaphore is built and the
+    /// checkout acquire-timeout path can never fire) — this preserves today's
+    /// unbounded DB concurrency so the default config is a no-op behavior
+    /// change. Set a positive value to enable the bound; F3 tunes it against
+    /// real load. It must never be set below expected steady-state concurrency
+    /// or it becomes a latency source.
+    pub pool_max_in_flight: usize,
+    /// How long [`crate::DbPool::checkout`] waits for a semaphore permit before
+    /// returning the existing overload error (`AxiamError::ServiceUnavailable`
+    /// → HTTP 503, B1's taxonomy). Only consulted when `pool_max_in_flight > 0`.
+    /// Overridable via `AXIAM__DB__POOL_ACQUIRE_TIMEOUT_SECS`. DEFAULT `5`
+    /// (matches B1's `hash_acquire_timeout_secs` so backpressure feels the same
+    /// across the Argon2id gate and the DB pool).
+    pub pool_acquire_timeout_secs: u64,
 }
 
 impl Default for DbConfig {
@@ -137,6 +165,11 @@ impl Default for DbConfig {
             reconnect_base_ms: 250,
             reconnect_ceiling_ms: 30_000,
             reconnect_max_retries: 10,
+            // pool_size=1 + disabled cap ⇒ the pool is byte-for-byte today's
+            // single-funnel, unbounded-concurrency behavior (the safe default).
+            pool_size: 1,
+            pool_max_in_flight: 0,
+            pool_acquire_timeout_secs: 5,
         }
     }
 }
@@ -186,17 +219,6 @@ pub struct DbManager {
     /// and reconnect-loop tasks so all sides observe/refresh the SAME
     /// current handle (see module docs, Pitfall 2).
     db: Arc<RwLock<Surreal<Client>>>,
-    /// CQ-B48: a handle cloned ONCE at startup — the same auth-snapshot
-    /// generation the request-serving repositories receive from
-    /// `client_cloned()` during composition. The manager's own handle is
-    /// proactively re-signed-in, but those startup repo clones are NOT, so
-    /// after the root-token TTL (~4 weeks) they 401 while the manager handle
-    /// stays valid — an *undetectable* outage if `health_check` probes only the
-    /// manager. `health_check` also probes THIS handle so the readiness gate
-    /// trips exactly when the repositories' tokens expire (it shares their
-    /// lifetime); recovery still requires a restart, which is the honest signal
-    /// until the repo handles are made renewable.
-    health_probe: Surreal<Client>,
     /// Handle to the background proactive re-signin task (D-03/D-04),
     /// owned so it is explicitly droppable/abortable rather than a
     /// fire-and-forget detached task.
@@ -248,6 +270,41 @@ impl DbManager {
         // ever actually reaching this extended TTL.
         Self::extend_root_token_duration(config, ttl).await;
 
+        let (db, refresh_handle, reconnect_handle) = Self::connect_handle(config, ttl).await?;
+
+        info!("Successfully connected to SurrealDB");
+
+        Ok(Self {
+            db,
+            refresh_handle,
+            reconnect_handle,
+        })
+    }
+
+    /// Build ONE fully-independent, authenticated HTTP handle and spawn its
+    /// per-handle proactive re-signin ([`spawn_proactive_resignin`]) and
+    /// reconnect ([`spawn_reconnect_loop`]) tasks. This is the single shared
+    /// "one live handle + its own D-04/PERF-04 lifecycle" path that both
+    /// [`connect_with_ttl`](Self::connect_with_ttl) (the single-handle manager)
+    /// and [`crate::DbPool`] (N handles) construct through — so a pooled handle
+    /// is genuinely an independent connection with its own router task,
+    /// `reqwest` client and renewable session, never a `.clone()` that shares
+    /// one `Arc<inner>`.
+    ///
+    /// `pub(crate)` because the pool lives in a sibling module; the caller is
+    /// responsible for running [`extend_root_token_duration`](Self::extend_root_token_duration)
+    /// beforehand (idempotent, so once per process is enough even for N handles).
+    pub(crate) async fn connect_handle(
+        config: &DbConfig,
+        ttl: Duration,
+    ) -> Result<
+        (
+            Arc<RwLock<Surreal<Client>>>,
+            JoinHandle<()>,
+            JoinHandle<()>,
+        ),
+        surrealdb::Error,
+    > {
         let db = Surreal::new::<Http>(&config.url).await?;
         db.signin(Root {
             username: config.username.clone(),
@@ -258,28 +315,19 @@ impl DbManager {
             .use_db(&config.database)
             .await?;
 
-        info!("Successfully connected to SurrealDB");
-
         let db = Arc::new(RwLock::new(db));
-        // CQ-B48: capture a startup-generation clone (same lineage as the repo
-        // clones built during composition) for expiry-detecting health checks.
-        let health_probe = db.read().await.clone();
         let refresh_handle = Self::spawn_proactive_resignin(Arc::clone(&db), config, ttl);
         let reconnect_handle = Self::spawn_reconnect_loop(Arc::clone(&db), config.clone());
-
-        Ok(Self {
-            db,
-            health_probe,
-            refresh_handle,
-            reconnect_handle,
-        })
+        Ok((db, refresh_handle, reconnect_handle))
     }
 
     /// Best-effort: redefine the root user with a long token duration so the
     /// connection's cached JWT does not expire mid-process. Failures are logged
     /// and ignored (the server still starts; it just reverts to the ~1h window).
-    /// Idempotent — safe to run on every startup.
-    async fn extend_root_token_duration(config: &DbConfig, ttl: Duration) {
+    /// Idempotent — safe to run on every startup (and once per process is
+    /// enough even when [`crate::DbPool`] builds N handles). `pub(crate)` so the
+    /// pool module can run it once before constructing its handles.
+    pub(crate) async fn extend_root_token_duration(config: &DbConfig, ttl: Duration) {
         let setup = match Surreal::new::<Http>(&config.url).await {
             Ok(s) => s,
             Err(e) => {
@@ -497,11 +545,12 @@ impl DbManager {
     /// successful reconnect-loop swap is observed by the very next call.
     ///
     /// Callers may further `.clone()` the returned value to obtain an
-    /// additional handle. With the HTTP engine clones share the stored
-    /// namespace/database selection, but NOT future re-signin/reconnect
-    /// traffic on the manager's own handle — see module docs' "Known
-    /// residual gap"; repositories keep their own independent snapshot
-    /// exactly as before this migration (RESEARCH Pitfall 2 — out of scope).
+    /// additional handle sharing this handle's `Arc<inner>` (same router +
+    /// `reqwest` client). Production composition no longer uses this to fan out
+    /// repositories — that path is now [`crate::DbPool::handle_for_repo`], which
+    /// hands out INDEPENDENT, renewable pooled handles (see the module-doc
+    /// "Session lifecycle" section). This accessor is retained for the
+    /// single-handle [`DbManager`] and its resilience tests.
     pub async fn client_cloned(&self) -> Surreal<Client> {
         // F1 instrumentation (zero behavior change): count how many handles are
         // handed out. Under the current single-router architecture every clone
@@ -537,17 +586,6 @@ impl DbManager {
             .map_err(Self::classify_query_error)?;
         // Surface any statement-level error (HTTP returns 200 even on SQL error).
         result.check().map_err(Self::classify_query_error)?;
-        drop(guard);
-
-        // CQ-B48: also exercise the startup-generation handle so the readiness
-        // probe alarms when the request-serving repositories' tokens expire —
-        // the manager handle above is proactively re-signed-in and would report
-        // healthy even while every repo DB request 401s.
-        let probe =
-            metrics::instrument_query("health_check.probe", self.health_probe.query("RETURN 1"))
-                .await
-                .map_err(Self::classify_query_error)?;
-        probe.check().map_err(Self::classify_query_error)?;
         Ok(())
     }
 

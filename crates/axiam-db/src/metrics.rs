@@ -138,10 +138,33 @@ where
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::Mutex;
+
     use super::*;
+
+    /// `DB_IN_FLIGHT` is a single process-wide static, and `cargo test` runs
+    /// `#[tokio::test]` functions in parallel across threads within the same
+    /// test binary — so two tests that both read/assert the gauge's absolute
+    /// value can race (one test's `baseline` capture landing between another
+    /// concurrently-running test's increment and decrement), causing an
+    /// intermittent, non-deterministic failure even though the gauge logic
+    /// itself is correct (observed once in CI: `left: 0, right: 1`). Every
+    /// test below that touches `DB_IN_FLIGHT` (directly or via
+    /// `instrument_query`) holds this lock for its full body so the shared
+    /// static's mutations never interleave across tests.
+    ///
+    /// `tokio::sync::Mutex` (not `std::sync::Mutex`) deliberately — the lock
+    /// is held across an `.await` point below, and holding a std mutex guard
+    /// across an await is an anti-pattern clippy correctly flags
+    /// (`await_holding_lock`): it isn't designed to be released by a
+    /// different task/thread than the one that acquired it.
+    static GAUGE_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
     #[test]
     fn handle_checkout_counter_increments_monotonically() {
+        // DB_HANDLE_CHECKOUTS is monotonic-only (never decremented), so a
+        // delta assertion is race-safe without the gauge lock even under
+        // parallel test execution.
         let before = db_handle_checkouts();
         record_handle_checkout();
         record_handle_checkout();
@@ -154,6 +177,7 @@ mod tests {
 
     #[tokio::test]
     async fn in_flight_gauge_is_incremented_during_and_restored_after() {
+        let _serialize = GAUGE_TEST_LOCK.lock().await;
         let baseline = db_in_flight();
         // The gauge must read baseline+1 *inside* the instrumented future and
         // return to baseline once it resolves.
@@ -172,6 +196,7 @@ mod tests {
 
     #[tokio::test]
     async fn instrument_query_returns_inner_output_unchanged() {
+        let _serialize = GAUGE_TEST_LOCK.lock().await;
         // Passthrough invariant: the wrapper must yield exactly the inner value.
         let out = instrument_query("test.passthrough", async { 40 + 2 }).await;
         assert_eq!(out, 42);
@@ -179,6 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn gauge_restored_even_when_future_errors() {
+        let _serialize = GAUGE_TEST_LOCK.lock().await;
         let baseline = db_in_flight();
         let r: Result<(), &str> = instrument_query("test.err", async { Err("boom") }).await;
         assert!(r.is_err());

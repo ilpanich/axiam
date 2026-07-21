@@ -310,7 +310,13 @@ jobs:
           AXIAM__AMQP__SIGNING_KEY="$(openssl rand -hex 32)"
           export AXIAM__AMQP__SIGNING_KEY
           docker compose -f docker/docker-compose.e2e.yml up -d --build --wait
-        timeout-minutes: 15
+        # The release build alone now takes ~14-15 min (grown with recent phases:
+        # tikv-jemallocator, actix-tls, rcgen, x509-parser, samael, tonic-build,
+        # etc.), leaving near-zero margin under the old 15-min step timeout —
+        # observed a hairline timeout where every service reported Healthy in
+        # the same second the step timed out. The job-level timeout-minutes: 75
+        # above has ample headroom, so give this step real margin instead.
+        timeout-minutes: 30
 
       - name: Dump server logs on failure
         if: failure()

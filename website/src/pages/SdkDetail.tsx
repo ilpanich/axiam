@@ -163,6 +163,14 @@ export default function SdkDetail({ sdk, go }: SdkDetailProps) {
         >
           Repository ↗
         </a>
+        <a
+          className="ax-ghost"
+          href={sdk.examplesUrl}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Examples ↗
+        </a>
       </div>
 
       <div style={{ marginBottom: 24 }} className="ax-grid-2">

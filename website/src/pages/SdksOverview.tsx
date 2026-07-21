@@ -29,9 +29,11 @@ export default function SdksOverview({ openSdk }: SdksOverviewProps) {
           Talk to AXIAM in your language
         </h1>
         <p style={{ margin: 0, fontSize: 17, color: "#94a3b8", maxWidth: 680 }}>
-          Seven official SDKs conform to a single behavioral contract (§1–§11) —
-          login &amp; MFA, REST/gRPC/AMQP authorization, and framework guards.
-          Pick a language to see the quickstart.
+          Eleven official SDKs share one behavioral contract — login &amp; MFA,
+          authorization, strict TLS/mTLS and framework guards. The original seven
+          (Rust, TypeScript, Python, Java, C#, PHP, Go) add gRPC and AMQP
+          transports; Kotlin, Swift, C and C++ cover the REST surface. Pick a
+          language to see the quickstart.
         </p>
       </div>
       <div className="ax-grid-3">

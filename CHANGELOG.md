@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha15] - 2026-07-21
+
+### Added
+
+- F2 — DbPool of N independent handles, wire repositories, close CQ-B48
+- F1 — connection-pool design doc + boundary instrumentation
+- D7 — decision caching behind a flag (default off) with revocation invalidation
+- D8 — configurable rate-limiter key (ip|client_id|ip_client_id)
+- D3 — native mTLS (client-certificate) auth
+- B1 — bound concurrent Argon2id hashing (perf + memory-DoS fix)
+- AXIAM native (in-process) TLS for the p2-tls13 profile
+- TLS profiles for keycloak + zitadel; RSA certs; port pre-flight
+- Auto-provision Zitadel client via management API
+
+### Changed
+
+- Regression test for gRPC-over-TLS crypto provider
+- Fix stale F1/F2 status rows (still showed "planned" post-merge)
+- Mark E1.2 done (four stub SDK benches wired)
+- Wire the four stub SDK benches (c, cpp, kotlin, swift)
+- Cargo fmt F2 (DbPool)
+- Cargo fmt F1 instrumentation wiring
+- Laptop re-run runbook + Phase F (DB connection pooling)
+- Cargo fmt (rustfmt CI fix)
+- Per-task implementation status table
+- D9 — optional jemalloc allocator for RSS-retention experiment
+- Drive gRPC over TLS at p2 (native gRPC TLS wiring)
+- B3 — JWKS in-process cache + HTTP caching headers (ETag/304)
+- D1 — coalesce same-subject authz batches + tracing
+- B2 — TLS 1.3 throughput diagnosis + fixes on token endpoints
+- Zitadel gRPC benchmark coverage
+- AMQP async-authz load harness design
+- Real Zitadel login via session API v2 (password verification)
+- SurrealDB tuning investigation — preliminary static analysis
+- Re-run protocol — median-of-N, DB tuning, laptop runbook, prod posture
+- Harness correctness & honesty (A1–A7)
+- Expand plan E1 — implement & validate the SDK client benches
+- Benchmark improvement implementation plan; refine throttling assessment
+- Add public + private analysis of the first full benchmark run
+- Re-enabled pepper and moved compose to latest AXIAM image version
+
+### Fixed
+
+- Make Keycloak and Zitadel seed users loginable
+- Install ring rustls CryptoProvider so gRPC-over-TLS works
+- Serialize F1 gauge tests against shared-static race (flaky CI)
+- Give the E2E backend-startup step real timeout margin
+- Correct actix test app-factory return type (D8 integration test)
+- Fill new config fields in remaining test literals
+- Clippy collapsible-if, grpc test field, OpenAPI drift
+- Gate bench-up on target HTTP readiness
+
 ## [1.0.0-alpha12] - 2026-07-19
 
 ### Fixed

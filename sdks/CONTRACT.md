@@ -48,6 +48,11 @@ each language uses its own idiomatic naming convention as shown below.
 | single access check | `check_access`    | `checkAccess`             | `check_access`      | `checkAccess`    | `CheckAccess`   | `checkAccess`   | `CheckAccess`   |
 | browser access alias| `can`             | `can`                     | `can`               | `can`            | `Can`           | `can`           | `Can`           |
 | batch access check  | `batch_check`     | `batchCheck`              | `batch_check`       | `batchCheck`     | `BatchCheck`    | `batchCheck`    | `BatchCheck`    |
+| userinfo (gRPC)     | `get_user_info`   | `getUserInfo`             | `get_user_info`     | `getUserInfo`    | `GetUserInfoAsync` | `getUserInfo` | `GetUserInfo`   |
+
+`get_user_info` is a **gRPC-only** operation (added 2026-07, contract 1.3) — see
+[§1.1](#§11-grpc-only-operations) for its normative semantics. Unlike every other row in
+this map it has no REST form and is implemented only by SDKs that ship a gRPC transport.
 
 **Additional languages (Kotlin, Swift, C, C++ — added 2026-07):** these expose the same
 canonical operations with the same `(action, resource[, scope])` argument order. Casing:
@@ -56,7 +61,11 @@ canonical operations with the same `(action, resource[, scope])` argument order.
 `refresh`, `logout`, `check_access`, `can`, `batch_check`); **C** uses snake_case with an
 `axiam_` prefix on every symbol (`axiam_login`, `axiam_verify_mfa`, `axiam_refresh`,
 `axiam_logout`, `axiam_check_access`, `axiam_can`, `axiam_batch_check`). No new
-login/auth/authz method names beyond this map are permitted in these SDKs either.
+login/auth/authz method names beyond this map are permitted in these SDKs either. The
+gRPC-only `get_user_info` operation is **deferred** in all four of these SDKs for as long
+as they ship no gRPC transport (they already defer gRPC in v1 — see §1.1); when a gRPC
+transport is added, the method name is `getUserInfo` (Kotlin/Swift), `get_user_info` (C++),
+or `axiam_get_user_info` (C).
 
 **Argument order:** every operation above takes the acted-upon subject before the object it
 acts on — concretely, `check_access`/`can` take `(action, resource[, scope])` in every SDK,
@@ -67,7 +76,38 @@ to match its own `checkAccess(action, resource)` and every other SDK's `can`/`Ca
 **Notes:**
 - `can` is an alias for `check_access` targeting browser/UI scenarios; it calls `POST /api/v1/authz/check` via REST (avoids N round-trips when combined with `batch_check` for page-level permission gating).
 - `batch_check` calls `POST /api/v1/authz/check/batch` and returns results in the same order as input.
+- `get_user_info` calls `axiam.v1.UserInfoService/GetUserInfo` over gRPC (§1.1). It is the only operation in this map without a REST equivalent in the SDK vocabulary.
 - No SDK is permitted to expose additional login/auth/authz method names that diverge from this map.
+
+### §1.1 gRPC-only operations
+
+`get_user_info` is the first operation whose SDK surface is served **only over gRPC**. It is
+the low-latency counterpart of the server's REST `GET /oauth2/userinfo` endpoint and mirrors
+Zitadel's `zitadel.auth.v1.AuthService/GetMyUser`. The following semantics are **normative and
+identical in every SDK that implements it**:
+
+1. **Transport.** Invokes `axiam.v1.UserInfoService/GetUserInfo` (proto in the vendored
+   `proto/axiam/v1/userinfo.proto`) on the same gRPC channel the SDK already builds. The
+   request message is empty; identity is derived entirely server-side from the bearer token.
+2. **Metadata.** The call carries `authorization: Bearer <current access token>` and the
+   `x-tenant-id` metadata key on every outgoing RPC (the §5 rule already mandates `x-tenant-id`
+   on all RPCs — this operation is no exception). Reuse the SDK's existing gRPC
+   channel/interceptor machinery; do not build a second channel.
+3. **Precondition.** Requires a prior successful `login()` (or an explicitly injected token).
+   Calling it with no token MUST raise the `AuthenticationError` taxonomy type (§2)
+   **client-side, without a wire call**.
+4. **Auth-failure / refresh.** A gRPC `UNAUTHENTICATED` response participates in the §9
+   single-flight refresh guard exactly like a REST `401` (the §9 text already reads
+   "401 (or gRPC `UNAUTHENTICATED`)"). On a successful refresh the SDK retries the RPC once.
+5. **Return shape.** A small typed value/record `UserInfo { sub, tenant_id, org_id, email?,
+   preferred_username? }`. `sub`, `tenant_id`, and `org_id` are always present; `email` is
+   populated only when the access token carries the `email` scope, and `preferred_username`
+   only with the `profile` scope (the server gates these exactly as the REST endpoint does).
+6. **Deferral / no REST substitution.** An SDK that ships no gRPC transport MUST document
+   `get_user_info` as a deferred follow-up in its scope section (same pattern as its existing
+   "gRPC transport deferred" carve-out) and MUST NOT silently substitute the REST
+   `/oauth2/userinfo` endpoint — that endpoint is intentionally outside the SDK method
+   vocabulary (it is exercised only by the protocol-level benchmark scenarios, not by any SDK).
 
 ### Async method naming (SDK-Q08)
 
@@ -642,6 +682,14 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-07 (§1.1 gRPC userinfo, contract 1.3)** — **non-breaking / additive.** Added a new
+  canonical operation `get_user_info` (§1 naming map + §1.1 normative semantics), served only
+  over gRPC via `axiam.v1.UserInfoService/GetUserInfo` (new `proto/axiam/v1/userinfo.proto`).
+  It mirrors the server's REST `/oauth2/userinfo` claim set and OIDC scope gating. No existing
+  signature changes. SDKs with a gRPC transport (Rust, TypeScript, Python, Java, C#, PHP, Go)
+  add the method; REST-only SDKs (Kotlin, Swift, C, C++) document it as a deferred follow-up.
+  SDKs that ship the operation state "§1–§11" conformance unchanged (the new op lives in §1).
+
 - **2026-07 (SDK-Q08/SDK-Q09, pre-1.0)** — confirmed-breaking, made now rather than deferred:
   - PHP: `AxiamClient::can()` argument order reversed from `(resource, action)` to
     `(action, resource)` — matches `checkAccess()` and every other SDK's `can`/`Can` (§1).
@@ -679,6 +727,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.2 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07*
+*Contract version: 1.3 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

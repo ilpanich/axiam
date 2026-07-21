@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["authorize","error","oidc","pkce","token"]};
+window.SIDEBAR_ITEMS = {"mod":["authorize","error","jwks_cache","oidc","pkce","token"]};

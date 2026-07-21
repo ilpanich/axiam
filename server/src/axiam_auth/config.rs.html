@@ -100,71 +100,112 @@
 <a href=#100 id=100 data-nosnippet>100</a>    /// allowing a half-open probe request (default: 30). Overridable via
 <a href=#101 id=101 data-nosnippet>101</a>    /// `AXIAM__AUTH__HIBP_BREAKER_COOLDOWN_SECS`.
 <a href=#102 id=102 data-nosnippet>102</a>    </span><span class="kw">pub </span>hibp_breaker_cooldown_secs: u64,
-<a href=#103 id=103 data-nosnippet>103</a>}
-<a href=#104 id=104 data-nosnippet>104</a>
-<a href=#105 id=105 data-nosnippet>105</a><span class="kw">impl </span>AuthConfig {
-<a href=#106 id=106 data-nosnippet>106</a>    <span class="doccomment">/// Effective issuer for JWT `iss` claims and OIDC discovery.
-<a href=#107 id=107 data-nosnippet>107</a>    ///
-<a href=#108 id=108 data-nosnippet>108</a>    /// Returns `oauth2_issuer_url` when set, falling back to
-<a href=#109 id=109 data-nosnippet>109</a>    /// `jwt_issuer`. Trailing slashes are stripped so that the
-<a href=#110 id=110 data-nosnippet>110</a>    /// OIDC discovery `issuer` exactly matches token `iss` claims
-<a href=#111 id=111 data-nosnippet>111</a>    /// (OIDC Core §2 requires an exact string match).
-<a href=#112 id=112 data-nosnippet>112</a>    </span><span class="kw">pub fn </span>effective_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>str {
-<a href=#113 id=113 data-nosnippet>113</a>        <span class="kw">if </span><span class="self">self</span>.oauth2_issuer_url.is_empty() {
-<a href=#114 id=114 data-nosnippet>114</a>            <span class="self">self</span>.jwt_issuer.trim_end_matches(<span class="string">'/'</span>)
-<a href=#115 id=115 data-nosnippet>115</a>        } <span class="kw">else </span>{
-<a href=#116 id=116 data-nosnippet>116</a>            <span class="self">self</span>.oauth2_issuer_url.trim_end_matches(<span class="string">'/'</span>)
-<a href=#117 id=117 data-nosnippet>117</a>        }
-<a href=#118 id=118 data-nosnippet>118</a>    }
-<a href=#119 id=119 data-nosnippet>119</a>
-<a href=#120 id=120 data-nosnippet>120</a>    <span class="doccomment">/// CQ-B14: Parse Ed25519 keys from PEM once and cache in `Arc`.
-<a href=#121 id=121 data-nosnippet>121</a>    ///
-<a href=#122 id=122 data-nosnippet>122</a>    /// Call this once at startup after loading config from environment.
-<a href=#123 id=123 data-nosnippet>123</a>    /// After this returns `Ok(())`, all token functions skip per-call PEM
-<a href=#124 id=124 data-nosnippet>124</a>    /// parsing and use the cached keys instead.
-<a href=#125 id=125 data-nosnippet>125</a>    </span><span class="kw">pub fn </span>resolve_keys(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), String&gt; {
-<a href=#126 id=126 data-nosnippet>126</a>        <span class="kw">let </span>enc = EncodingKey::from_ed_pem(<span class="self">self</span>.jwt_private_key_pem.as_bytes())
-<a href=#127 id=127 data-nosnippet>127</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT private key PEM: {e}"</span>))<span class="question-mark">?</span>;
-<a href=#128 id=128 data-nosnippet>128</a>        <span class="kw">let </span>dec = DecodingKey::from_ed_pem(<span class="self">self</span>.jwt_public_key_pem.as_bytes())
-<a href=#129 id=129 data-nosnippet>129</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT public key PEM: {e}"</span>))<span class="question-mark">?</span>;
-<a href=#130 id=130 data-nosnippet>130</a>        <span class="self">self</span>.jwt_encoding_key = <span class="prelude-val">Some</span>(Arc::new(enc));
-<a href=#131 id=131 data-nosnippet>131</a>        <span class="self">self</span>.jwt_decoding_key = <span class="prelude-val">Some</span>(Arc::new(dec));
-<a href=#132 id=132 data-nosnippet>132</a>        <span class="prelude-val">Ok</span>(())
-<a href=#133 id=133 data-nosnippet>133</a>    }
-<a href=#134 id=134 data-nosnippet>134</a>}
-<a href=#135 id=135 data-nosnippet>135</a>
-<a href=#136 id=136 data-nosnippet>136</a><span class="kw">impl </span>Default <span class="kw">for </span>AuthConfig {
-<a href=#137 id=137 data-nosnippet>137</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-<a href=#138 id=138 data-nosnippet>138</a>        <span class="self">Self </span>{
-<a href=#139 id=139 data-nosnippet>139</a>            jwt_private_key_pem: String::new(),
-<a href=#140 id=140 data-nosnippet>140</a>            jwt_public_key_pem: String::new(),
-<a href=#141 id=141 data-nosnippet>141</a>            access_token_lifetime_secs: <span class="number">900</span>,
-<a href=#142 id=142 data-nosnippet>142</a>            refresh_token_lifetime_secs: <span class="number">2_592_000</span>,
-<a href=#143 id=143 data-nosnippet>143</a>            auth_code_lifetime_secs: <span class="number">600</span>,
-<a href=#144 id=144 data-nosnippet>144</a>            jwt_issuer: <span class="string">"axiam"</span>.into(),
-<a href=#145 id=145 data-nosnippet>145</a>            oauth2_issuer_url: String::new(),
-<a href=#146 id=146 data-nosnippet>146</a>            pepper: <span class="prelude-val">None</span>,
-<a href=#147 id=147 data-nosnippet>147</a>            min_password_length: <span class="number">12</span>,
-<a href=#148 id=148 data-nosnippet>148</a>            mfa_encryption_key: <span class="prelude-val">None</span>,
-<a href=#149 id=149 data-nosnippet>149</a>            federation_encryption_key: <span class="prelude-val">None</span>,
-<a href=#150 id=150 data-nosnippet>150</a>            allow_missing_aud_as_user: <span class="bool-val">true</span>,
-<a href=#151 id=151 data-nosnippet>151</a>            cookie_secure: <span class="bool-val">true</span>,
-<a href=#152 id=152 data-nosnippet>152</a>            mfa_challenge_lifetime_secs: <span class="number">300</span>,
-<a href=#153 id=153 data-nosnippet>153</a>            totp_issuer: <span class="string">"AXIAM"</span>.into(),
-<a href=#154 id=154 data-nosnippet>154</a>            max_failed_login_attempts: <span class="number">5</span>,
-<a href=#155 id=155 data-nosnippet>155</a>            lockout_duration_secs: <span class="number">900</span>,
-<a href=#156 id=156 data-nosnippet>156</a>            lockout_backoff_multiplier: <span class="number">2.0</span>,
-<a href=#157 id=157 data-nosnippet>157</a>            max_lockout_duration_secs: <span class="number">3600</span>,
-<a href=#158 id=158 data-nosnippet>158</a>            email_verification_grace_period_hours: <span class="number">24</span>,
-<a href=#159 id=159 data-nosnippet>159</a>            password_reset_token_expiry_hours: <span class="number">1</span>,
-<a href=#160 id=160 data-nosnippet>160</a>            webauthn_rp_id: <span class="string">"localhost"</span>.into(),
-<a href=#161 id=161 data-nosnippet>161</a>            webauthn_rp_origin: <span class="string">"http://localhost:8090"</span>.into(),
-<a href=#162 id=162 data-nosnippet>162</a>            webauthn_rp_name: <span class="string">"AXIAM"</span>.into(),
-<a href=#163 id=163 data-nosnippet>163</a>            jwt_encoding_key: <span class="prelude-val">None</span>,
-<a href=#164 id=164 data-nosnippet>164</a>            jwt_decoding_key: <span class="prelude-val">None</span>,
-<a href=#165 id=165 data-nosnippet>165</a>            hibp_breaker_threshold: <span class="number">5</span>,
-<a href=#166 id=166 data-nosnippet>166</a>            hibp_breaker_cooldown_secs: <span class="number">30</span>,
-<a href=#167 id=167 data-nosnippet>167</a>        }
-<a href=#168 id=168 data-nosnippet>168</a>    }
-<a href=#169 id=169 data-nosnippet>169</a>}
+<a href=#103 id=103 data-nosnippet>103</a>    <span class="doccomment">/// B1: Maximum number of Argon2id hash/verify operations allowed to run
+<a href=#104 id=104 data-nosnippet>104</a>    /// concurrently, enforced by the process-wide `crypto_semaphore` shared
+<a href=#105 id=105 data-nosnippet>105</a>    /// across the login, password-change, password-reset and PKI crypto paths.
+<a href=#106 id=106 data-nosnippet>106</a>    ///
+<a href=#107 id=107 data-nosnippet>107</a>    /// Each in-flight Argon2id operation allocates a ~19 MiB memory arena
+<a href=#108 id=108 data-nosnippet>108</a>    /// (OWASP params m=19456), so unbounded concurrency is an unauthenticated
+<a href=#109 id=109 data-nosnippet>109</a>    /// memory-DoS vector: the login benchmark pegged 2 cores and reached
+<a href=#110 id=110 data-nosnippet>110</a>    /// ~970 MiB RSS ≈ 50 concurrent × 19 MiB arenas, against a 1024 MiB
+<a href=#111 id=111 data-nosnippet>111</a>    /// container cap. This permit count bounds peak concurrent arenas.
+<a href=#112 id=112 data-nosnippet>112</a>    ///
+<a href=#113 id=113 data-nosnippet>113</a>    /// `0` means "auto" and resolves to `min(available_parallelism, 4)` at
+<a href=#114 id=114 data-nosnippet>114</a>    /// semaphore-construction time (see [`AuthConfig::resolved_max_concurrent_hashes`]).
+<a href=#115 id=115 data-nosnippet>115</a>    /// Override via `AXIAM__AUTH__MAX_CONCURRENT_HASHES`.
+<a href=#116 id=116 data-nosnippet>116</a>    </span><span class="kw">pub </span>max_concurrent_hashes: usize,
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="doccomment">/// B1: How long (in seconds) a request waits to acquire a crypto-hash
+<a href=#118 id=118 data-nosnippet>118</a>    /// permit before giving up and returning a `ServiceUnavailable` (HTTP 503)
+<a href=#119 id=119 data-nosnippet>119</a>    /// backpressure error, instead of queueing unboundedly and adding to
+<a href=#120 id=120 data-nosnippet>120</a>    /// tail latency. Default: 5. Override via
+<a href=#121 id=121 data-nosnippet>121</a>    /// `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS`.
+<a href=#122 id=122 data-nosnippet>122</a>    </span><span class="kw">pub </span>hash_acquire_timeout_secs: u64,
+<a href=#123 id=123 data-nosnippet>123</a>}
+<a href=#124 id=124 data-nosnippet>124</a>
+<a href=#125 id=125 data-nosnippet>125</a><span class="kw">impl </span>AuthConfig {
+<a href=#126 id=126 data-nosnippet>126</a>    <span class="doccomment">/// Effective issuer for JWT `iss` claims and OIDC discovery.
+<a href=#127 id=127 data-nosnippet>127</a>    ///
+<a href=#128 id=128 data-nosnippet>128</a>    /// Returns `oauth2_issuer_url` when set, falling back to
+<a href=#129 id=129 data-nosnippet>129</a>    /// `jwt_issuer`. Trailing slashes are stripped so that the
+<a href=#130 id=130 data-nosnippet>130</a>    /// OIDC discovery `issuer` exactly matches token `iss` claims
+<a href=#131 id=131 data-nosnippet>131</a>    /// (OIDC Core §2 requires an exact string match).
+<a href=#132 id=132 data-nosnippet>132</a>    </span><span class="kw">pub fn </span>effective_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>str {
+<a href=#133 id=133 data-nosnippet>133</a>        <span class="kw">if </span><span class="self">self</span>.oauth2_issuer_url.is_empty() {
+<a href=#134 id=134 data-nosnippet>134</a>            <span class="self">self</span>.jwt_issuer.trim_end_matches(<span class="string">'/'</span>)
+<a href=#135 id=135 data-nosnippet>135</a>        } <span class="kw">else </span>{
+<a href=#136 id=136 data-nosnippet>136</a>            <span class="self">self</span>.oauth2_issuer_url.trim_end_matches(<span class="string">'/'</span>)
+<a href=#137 id=137 data-nosnippet>137</a>        }
+<a href=#138 id=138 data-nosnippet>138</a>    }
+<a href=#139 id=139 data-nosnippet>139</a>
+<a href=#140 id=140 data-nosnippet>140</a>    <span class="doccomment">/// CQ-B14: Parse Ed25519 keys from PEM once and cache in `Arc`.
+<a href=#141 id=141 data-nosnippet>141</a>    ///
+<a href=#142 id=142 data-nosnippet>142</a>    /// Call this once at startup after loading config from environment.
+<a href=#143 id=143 data-nosnippet>143</a>    /// After this returns `Ok(())`, all token functions skip per-call PEM
+<a href=#144 id=144 data-nosnippet>144</a>    /// parsing and use the cached keys instead.
+<a href=#145 id=145 data-nosnippet>145</a>    </span><span class="kw">pub fn </span>resolve_keys(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), String&gt; {
+<a href=#146 id=146 data-nosnippet>146</a>        <span class="kw">let </span>enc = EncodingKey::from_ed_pem(<span class="self">self</span>.jwt_private_key_pem.as_bytes())
+<a href=#147 id=147 data-nosnippet>147</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT private key PEM: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#148 id=148 data-nosnippet>148</a>        <span class="kw">let </span>dec = DecodingKey::from_ed_pem(<span class="self">self</span>.jwt_public_key_pem.as_bytes())
+<a href=#149 id=149 data-nosnippet>149</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT public key PEM: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#150 id=150 data-nosnippet>150</a>        <span class="self">self</span>.jwt_encoding_key = <span class="prelude-val">Some</span>(Arc::new(enc));
+<a href=#151 id=151 data-nosnippet>151</a>        <span class="self">self</span>.jwt_decoding_key = <span class="prelude-val">Some</span>(Arc::new(dec));
+<a href=#152 id=152 data-nosnippet>152</a>        <span class="prelude-val">Ok</span>(())
+<a href=#153 id=153 data-nosnippet>153</a>    }
+<a href=#154 id=154 data-nosnippet>154</a>
+<a href=#155 id=155 data-nosnippet>155</a>    <span class="doccomment">/// B1: Resolve `max_concurrent_hashes` (0 = auto) to a concrete permit
+<a href=#156 id=156 data-nosnippet>156</a>    /// count for the crypto semaphore.
+<a href=#157 id=157 data-nosnippet>157</a>    ///
+<a href=#158 id=158 data-nosnippet>158</a>    /// Auto (`0`) resolves to `min(available_parallelism, 4)`: bound by the
+<a href=#159 id=159 data-nosnippet>159</a>    /// core count so Argon2id (a CPU-bound operation) does not oversubscribe
+<a href=#160 id=160 data-nosnippet>160</a>    /// cores, and capped at 4 so peak concurrent ~19 MiB arenas stay well
+<a href=#161 id=161 data-nosnippet>161</a>    /// under typical container memory caps. A non-zero value is used verbatim
+<a href=#162 id=162 data-nosnippet>162</a>    /// (a `0` after resolution is impossible — it would be a zero-permit
+<a href=#163 id=163 data-nosnippet>163</a>    /// semaphore that deadlocks all hashing, so it is clamped to 1).
+<a href=#164 id=164 data-nosnippet>164</a>    </span><span class="kw">pub fn </span>resolved_max_concurrent_hashes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#165 id=165 data-nosnippet>165</a>        <span class="kw">match </span><span class="self">self</span>.max_concurrent_hashes {
+<a href=#166 id=166 data-nosnippet>166</a>            <span class="number">0 </span>=&gt; std::thread::available_parallelism()
+<a href=#167 id=167 data-nosnippet>167</a>                .map(|n| n.get().min(<span class="number">4</span>))
+<a href=#168 id=168 data-nosnippet>168</a>                .unwrap_or(<span class="number">4</span>),
+<a href=#169 id=169 data-nosnippet>169</a>            n =&gt; n.max(<span class="number">1</span>),
+<a href=#170 id=170 data-nosnippet>170</a>        }
+<a href=#171 id=171 data-nosnippet>171</a>    }
+<a href=#172 id=172 data-nosnippet>172</a>}
+<a href=#173 id=173 data-nosnippet>173</a>
+<a href=#174 id=174 data-nosnippet>174</a><span class="kw">impl </span>Default <span class="kw">for </span>AuthConfig {
+<a href=#175 id=175 data-nosnippet>175</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#176 id=176 data-nosnippet>176</a>        <span class="self">Self </span>{
+<a href=#177 id=177 data-nosnippet>177</a>            jwt_private_key_pem: String::new(),
+<a href=#178 id=178 data-nosnippet>178</a>            jwt_public_key_pem: String::new(),
+<a href=#179 id=179 data-nosnippet>179</a>            access_token_lifetime_secs: <span class="number">900</span>,
+<a href=#180 id=180 data-nosnippet>180</a>            refresh_token_lifetime_secs: <span class="number">2_592_000</span>,
+<a href=#181 id=181 data-nosnippet>181</a>            auth_code_lifetime_secs: <span class="number">600</span>,
+<a href=#182 id=182 data-nosnippet>182</a>            jwt_issuer: <span class="string">"axiam"</span>.into(),
+<a href=#183 id=183 data-nosnippet>183</a>            oauth2_issuer_url: String::new(),
+<a href=#184 id=184 data-nosnippet>184</a>            pepper: <span class="prelude-val">None</span>,
+<a href=#185 id=185 data-nosnippet>185</a>            min_password_length: <span class="number">12</span>,
+<a href=#186 id=186 data-nosnippet>186</a>            mfa_encryption_key: <span class="prelude-val">None</span>,
+<a href=#187 id=187 data-nosnippet>187</a>            federation_encryption_key: <span class="prelude-val">None</span>,
+<a href=#188 id=188 data-nosnippet>188</a>            allow_missing_aud_as_user: <span class="bool-val">true</span>,
+<a href=#189 id=189 data-nosnippet>189</a>            cookie_secure: <span class="bool-val">true</span>,
+<a href=#190 id=190 data-nosnippet>190</a>            mfa_challenge_lifetime_secs: <span class="number">300</span>,
+<a href=#191 id=191 data-nosnippet>191</a>            totp_issuer: <span class="string">"AXIAM"</span>.into(),
+<a href=#192 id=192 data-nosnippet>192</a>            max_failed_login_attempts: <span class="number">5</span>,
+<a href=#193 id=193 data-nosnippet>193</a>            lockout_duration_secs: <span class="number">900</span>,
+<a href=#194 id=194 data-nosnippet>194</a>            lockout_backoff_multiplier: <span class="number">2.0</span>,
+<a href=#195 id=195 data-nosnippet>195</a>            max_lockout_duration_secs: <span class="number">3600</span>,
+<a href=#196 id=196 data-nosnippet>196</a>            email_verification_grace_period_hours: <span class="number">24</span>,
+<a href=#197 id=197 data-nosnippet>197</a>            password_reset_token_expiry_hours: <span class="number">1</span>,
+<a href=#198 id=198 data-nosnippet>198</a>            webauthn_rp_id: <span class="string">"localhost"</span>.into(),
+<a href=#199 id=199 data-nosnippet>199</a>            webauthn_rp_origin: <span class="string">"http://localhost:8090"</span>.into(),
+<a href=#200 id=200 data-nosnippet>200</a>            webauthn_rp_name: <span class="string">"AXIAM"</span>.into(),
+<a href=#201 id=201 data-nosnippet>201</a>            jwt_encoding_key: <span class="prelude-val">None</span>,
+<a href=#202 id=202 data-nosnippet>202</a>            jwt_decoding_key: <span class="prelude-val">None</span>,
+<a href=#203 id=203 data-nosnippet>203</a>            hibp_breaker_threshold: <span class="number">5</span>,
+<a href=#204 id=204 data-nosnippet>204</a>            hibp_breaker_cooldown_secs: <span class="number">30</span>,
+<a href=#205 id=205 data-nosnippet>205</a>            <span class="comment">// B1: 0 = auto → min(available_parallelism, 4) at construction.
+<a href=#206 id=206 data-nosnippet>206</a>            </span>max_concurrent_hashes: <span class="number">0</span>,
+<a href=#207 id=207 data-nosnippet>207</a>            hash_acquire_timeout_secs: <span class="number">5</span>,
+<a href=#208 id=208 data-nosnippet>208</a>        }
+<a href=#209 id=209 data-nosnippet>209</a>    }
+<a href=#210 id=210 data-nosnippet>210</a>}
 </code></pre></div></section></main></body></html>

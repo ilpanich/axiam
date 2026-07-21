@@ -192,48 +192,55 @@
 <a href=#192 id=192 data-nosnippet>192</a>        .scope_repo
 <a href=#193 id=193 data-nosnippet>193</a>        .update(user.tenant_id, path.scope_id, input)
 <a href=#194 id=194 data-nosnippet>194</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#195 id=195 data-nosnippet>195</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(scope))
-<a href=#196 id=196 data-nosnippet>196</a>}
-<a href=#197 id=197 data-nosnippet>197</a>
-<a href=#198 id=198 data-nosnippet>198</a><span class="doccomment">/// `DELETE /api/v1/resources/{resource_id}/scopes/{scope_id}`
-<a href=#199 id=199 data-nosnippet>199</a></span><span class="attr">#[utoipa::path(
-<a href=#200 id=200 data-nosnippet>200</a>    delete,
-<a href=#201 id=201 data-nosnippet>201</a>    path = <span class="string">"/api/v1/resources/{resource_id}/scopes/{scope_id}"</span>,
-<a href=#202 id=202 data-nosnippet>202</a>    tag = <span class="string">"scopes"</span>,
-<a href=#203 id=203 data-nosnippet>203</a>    params(
-<a href=#204 id=204 data-nosnippet>204</a>        (<span class="string">"resource_id" </span>= Uuid, Path, description = <span class="string">"Resource ID"</span>),
-<a href=#205 id=205 data-nosnippet>205</a>        (<span class="string">"scope_id" </span>= Uuid, Path, description = <span class="string">"Scope ID"</span>),
-<a href=#206 id=206 data-nosnippet>206</a>    ),
-<a href=#207 id=207 data-nosnippet>207</a>    responses(
-<a href=#208 id=208 data-nosnippet>208</a>        (status = <span class="number">204</span>, description = <span class="string">"Scope deleted"</span>),
-<a href=#209 id=209 data-nosnippet>209</a>        (status = <span class="number">404</span>, description = <span class="string">"Scope not found"</span>),
+<a href=#195 id=195 data-nosnippet>195</a>    <span class="comment">// D7 (REVOCATION — security critical): decisions are cached by scope *name*.
+<a href=#196 id=196 data-nosnippet>196</a>    // Renaming a scope narrows access for requests using the old name — flush
+<a href=#197 id=197 data-nosnippet>197</a>    // the tenant so no scoped allow can survive under the stale name.
+<a href=#198 id=198 data-nosnippet>198</a>    </span>authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+<a href=#199 id=199 data-nosnippet>199</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(scope))
+<a href=#200 id=200 data-nosnippet>200</a>}
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a><span class="doccomment">/// `DELETE /api/v1/resources/{resource_id}/scopes/{scope_id}`
+<a href=#203 id=203 data-nosnippet>203</a></span><span class="attr">#[utoipa::path(
+<a href=#204 id=204 data-nosnippet>204</a>    delete,
+<a href=#205 id=205 data-nosnippet>205</a>    path = <span class="string">"/api/v1/resources/{resource_id}/scopes/{scope_id}"</span>,
+<a href=#206 id=206 data-nosnippet>206</a>    tag = <span class="string">"scopes"</span>,
+<a href=#207 id=207 data-nosnippet>207</a>    params(
+<a href=#208 id=208 data-nosnippet>208</a>        (<span class="string">"resource_id" </span>= Uuid, Path, description = <span class="string">"Resource ID"</span>),
+<a href=#209 id=209 data-nosnippet>209</a>        (<span class="string">"scope_id" </span>= Uuid, Path, description = <span class="string">"Scope ID"</span>),
 <a href=#210 id=210 data-nosnippet>210</a>    ),
-<a href=#211 id=211 data-nosnippet>211</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#212 id=212 data-nosnippet>212</a>)]
-<a href=#213 id=213 data-nosnippet>213</a><span class="kw">pub async fn </span>delete&lt;C: Connection + Clone&gt;(
-<a href=#214 id=214 data-nosnippet>214</a>    user: AuthenticatedUser,
-<a href=#215 id=215 data-nosnippet>215</a>    authz: AuthzData,
-<a href=#216 id=216 data-nosnippet>216</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#217 id=217 data-nosnippet>217</a>    path: web::Path&lt;ScopePath&gt;,
-<a href=#218 id=218 data-nosnippet>218</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#219 id=219 data-nosnippet>219</a>    RequirePermission::new(<span class="string">"scopes:delete"</span>, Uuid::nil())
-<a href=#220 id=220 data-nosnippet>220</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#221 id=221 data-nosnippet>221</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#222 id=222 data-nosnippet>222</a>    <span class="kw">let </span>existing = state
-<a href=#223 id=223 data-nosnippet>223</a>        .scope_repo
-<a href=#224 id=224 data-nosnippet>224</a>        .get_by_id(user.tenant_id, path.scope_id)
+<a href=#211 id=211 data-nosnippet>211</a>    responses(
+<a href=#212 id=212 data-nosnippet>212</a>        (status = <span class="number">204</span>, description = <span class="string">"Scope deleted"</span>),
+<a href=#213 id=213 data-nosnippet>213</a>        (status = <span class="number">404</span>, description = <span class="string">"Scope not found"</span>),
+<a href=#214 id=214 data-nosnippet>214</a>    ),
+<a href=#215 id=215 data-nosnippet>215</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#216 id=216 data-nosnippet>216</a>)]
+<a href=#217 id=217 data-nosnippet>217</a><span class="kw">pub async fn </span>delete&lt;C: Connection + Clone&gt;(
+<a href=#218 id=218 data-nosnippet>218</a>    user: AuthenticatedUser,
+<a href=#219 id=219 data-nosnippet>219</a>    authz: AuthzData,
+<a href=#220 id=220 data-nosnippet>220</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#221 id=221 data-nosnippet>221</a>    path: web::Path&lt;ScopePath&gt;,
+<a href=#222 id=222 data-nosnippet>222</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#223 id=223 data-nosnippet>223</a>    RequirePermission::new(<span class="string">"scopes:delete"</span>, Uuid::nil())
+<a href=#224 id=224 data-nosnippet>224</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
 <a href=#225 id=225 data-nosnippet>225</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">if </span>existing.resource_id != path.resource_id {
-<a href=#227 id=227 data-nosnippet>227</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::NotFound {
-<a href=#228 id=228 data-nosnippet>228</a>            entity: <span class="string">"Scope"</span>.into(),
-<a href=#229 id=229 data-nosnippet>229</a>            id: path.scope_id.to_string(),
-<a href=#230 id=230 data-nosnippet>230</a>        }
-<a href=#231 id=231 data-nosnippet>231</a>        .into());
-<a href=#232 id=232 data-nosnippet>232</a>    }
-<a href=#233 id=233 data-nosnippet>233</a>    state
-<a href=#234 id=234 data-nosnippet>234</a>        .scope_repo
-<a href=#235 id=235 data-nosnippet>235</a>        .delete(user.tenant_id, path.scope_id)
-<a href=#236 id=236 data-nosnippet>236</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#237 id=237 data-nosnippet>237</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#238 id=238 data-nosnippet>238</a>}
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">let </span>existing = state
+<a href=#227 id=227 data-nosnippet>227</a>        .scope_repo
+<a href=#228 id=228 data-nosnippet>228</a>        .get_by_id(user.tenant_id, path.scope_id)
+<a href=#229 id=229 data-nosnippet>229</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#230 id=230 data-nosnippet>230</a>    <span class="kw">if </span>existing.resource_id != path.resource_id {
+<a href=#231 id=231 data-nosnippet>231</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::NotFound {
+<a href=#232 id=232 data-nosnippet>232</a>            entity: <span class="string">"Scope"</span>.into(),
+<a href=#233 id=233 data-nosnippet>233</a>            id: path.scope_id.to_string(),
+<a href=#234 id=234 data-nosnippet>234</a>        }
+<a href=#235 id=235 data-nosnippet>235</a>        .into());
+<a href=#236 id=236 data-nosnippet>236</a>    }
+<a href=#237 id=237 data-nosnippet>237</a>    state
+<a href=#238 id=238 data-nosnippet>238</a>        .scope_repo
+<a href=#239 id=239 data-nosnippet>239</a>        .delete(user.tenant_id, path.scope_id)
+<a href=#240 id=240 data-nosnippet>240</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#241 id=241 data-nosnippet>241</a>    <span class="comment">// D7 (REVOCATION — security critical): deleting a scope removes it from
+<a href=#242 id=242 data-nosnippet>242</a>    // grants that referenced it, narrowing scoped access — flush the tenant.
+<a href=#243 id=243 data-nosnippet>243</a>    </span>authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+<a href=#244 id=244 data-nosnippet>244</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#245 id=245 data-nosnippet>245</a>}
 </code></pre></div></section></main></body></html>

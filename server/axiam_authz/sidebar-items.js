@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["config","engine","types"]};
+window.SIDEBAR_ITEMS = {"mod":["config","decision_cache","engine","types"]};

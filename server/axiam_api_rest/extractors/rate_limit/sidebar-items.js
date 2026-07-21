@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["XForwardedForKeyExtractor"]};
+window.SIDEBAR_ITEMS = {"fn":["extract_form_client_id"],"struct":["ClientAwareKeyExtractor","RateLimitClientId","XForwardedForKeyExtractor"]};

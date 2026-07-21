@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["rate_limit"],"struct":["ServerConfig","TlsConfig"]};
+window.SIDEBAR_ITEMS = {"enum":["ClientAuth"],"mod":["rate_limit"],"struct":["ServerConfig","TlsConfig"]};

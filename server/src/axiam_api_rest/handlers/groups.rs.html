@@ -184,107 +184,123 @@
 <a href=#184 id=184 data-nosnippet>184</a>        .group_repo
 <a href=#185 id=185 data-nosnippet>185</a>        .delete(user.tenant_id, path.into_inner())
 <a href=#186 id=186 data-nosnippet>186</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#187 id=187 data-nosnippet>187</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#188 id=188 data-nosnippet>188</a>}
-<a href=#189 id=189 data-nosnippet>189</a>
-<a href=#190 id=190 data-nosnippet>190</a><span class="comment">// -----------------------------------------------------------------------
-<a href=#191 id=191 data-nosnippet>191</a>// Handlers — Membership
-<a href=#192 id=192 data-nosnippet>192</a>// -----------------------------------------------------------------------
-<a href=#193 id=193 data-nosnippet>193</a>
-<a href=#194 id=194 data-nosnippet>194</a></span><span class="doccomment">/// `POST /api/v1/groups/{group_id}/members`
-<a href=#195 id=195 data-nosnippet>195</a></span><span class="attr">#[utoipa::path(
-<a href=#196 id=196 data-nosnippet>196</a>    post,
-<a href=#197 id=197 data-nosnippet>197</a>    path = <span class="string">"/api/v1/groups/{group_id}/members"</span>,
-<a href=#198 id=198 data-nosnippet>198</a>    tag = <span class="string">"groups"</span>,
-<a href=#199 id=199 data-nosnippet>199</a>    params((<span class="string">"group_id" </span>= Uuid, Path, description = <span class="string">"Group ID"</span>)),
-<a href=#200 id=200 data-nosnippet>200</a>    request_body = AddMemberRequest,
-<a href=#201 id=201 data-nosnippet>201</a>    responses(
-<a href=#202 id=202 data-nosnippet>202</a>        (status = <span class="number">204</span>, description = <span class="string">"Member added"</span>),
-<a href=#203 id=203 data-nosnippet>203</a>    ),
-<a href=#204 id=204 data-nosnippet>204</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#205 id=205 data-nosnippet>205</a>)]
-<a href=#206 id=206 data-nosnippet>206</a><span class="kw">pub async fn </span>add_member&lt;C: Connection + Clone&gt;(
-<a href=#207 id=207 data-nosnippet>207</a>    user: AuthenticatedUser,
-<a href=#208 id=208 data-nosnippet>208</a>    authz: AuthzData,
-<a href=#209 id=209 data-nosnippet>209</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#210 id=210 data-nosnippet>210</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#211 id=211 data-nosnippet>211</a>    body: web::Json&lt;AddMemberRequest&gt;,
-<a href=#212 id=212 data-nosnippet>212</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#213 id=213 data-nosnippet>213</a>    RequirePermission::new(<span class="string">"groups:add_member"</span>, Uuid::nil())
-<a href=#214 id=214 data-nosnippet>214</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#215 id=215 data-nosnippet>215</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#216 id=216 data-nosnippet>216</a>    state
-<a href=#217 id=217 data-nosnippet>217</a>        .group_repo
-<a href=#218 id=218 data-nosnippet>218</a>        .add_member(user.tenant_id, body.user_id, path.into_inner())
-<a href=#219 id=219 data-nosnippet>219</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#220 id=220 data-nosnippet>220</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#221 id=221 data-nosnippet>221</a>}
-<a href=#222 id=222 data-nosnippet>222</a>
-<a href=#223 id=223 data-nosnippet>223</a><span class="doccomment">/// `GET /api/v1/groups/{group_id}/members`
-<a href=#224 id=224 data-nosnippet>224</a></span><span class="attr">#[utoipa::path(
-<a href=#225 id=225 data-nosnippet>225</a>    get,
-<a href=#226 id=226 data-nosnippet>226</a>    path = <span class="string">"/api/v1/groups/{group_id}/members"</span>,
-<a href=#227 id=227 data-nosnippet>227</a>    tag = <span class="string">"groups"</span>,
-<a href=#228 id=228 data-nosnippet>228</a>    params(
-<a href=#229 id=229 data-nosnippet>229</a>        (<span class="string">"group_id" </span>= Uuid, Path, description = <span class="string">"Group ID"</span>),
-<a href=#230 id=230 data-nosnippet>230</a>        Pagination,
-<a href=#231 id=231 data-nosnippet>231</a>    ),
-<a href=#232 id=232 data-nosnippet>232</a>    responses(
-<a href=#233 id=233 data-nosnippet>233</a>        (status = <span class="number">200</span>, description = <span class="string">"List of group members"</span>, body = inline(PaginatedResult&lt;UserResponse&gt;)),
-<a href=#234 id=234 data-nosnippet>234</a>    ),
-<a href=#235 id=235 data-nosnippet>235</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#236 id=236 data-nosnippet>236</a>)]
-<a href=#237 id=237 data-nosnippet>237</a><span class="kw">pub async fn </span>list_members&lt;C: Connection + Clone&gt;(
-<a href=#238 id=238 data-nosnippet>238</a>    user: AuthenticatedUser,
-<a href=#239 id=239 data-nosnippet>239</a>    authz: AuthzData,
-<a href=#240 id=240 data-nosnippet>240</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#241 id=241 data-nosnippet>241</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#242 id=242 data-nosnippet>242</a>    query: web::Query&lt;Pagination&gt;,
-<a href=#243 id=243 data-nosnippet>243</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#244 id=244 data-nosnippet>244</a>    RequirePermission::new(<span class="string">"groups:list_members"</span>, Uuid::nil())
-<a href=#245 id=245 data-nosnippet>245</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#246 id=246 data-nosnippet>246</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#247 id=247 data-nosnippet>247</a>    <span class="kw">let </span>result = state
-<a href=#248 id=248 data-nosnippet>248</a>        .group_repo
-<a href=#249 id=249 data-nosnippet>249</a>        .get_members(user.tenant_id, path.into_inner(), query.into_inner())
-<a href=#250 id=250 data-nosnippet>250</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#251 id=251 data-nosnippet>251</a>    <span class="kw">let </span>items: Vec&lt;UserResponse&gt; = result.items.into_iter().map(UserResponse::from).collect();
-<a href=#252 id=252 data-nosnippet>252</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(PaginatedResult {
-<a href=#253 id=253 data-nosnippet>253</a>        items,
-<a href=#254 id=254 data-nosnippet>254</a>        total: result.total,
-<a href=#255 id=255 data-nosnippet>255</a>        offset: result.offset,
-<a href=#256 id=256 data-nosnippet>256</a>        limit: result.limit,
-<a href=#257 id=257 data-nosnippet>257</a>    }))
-<a href=#258 id=258 data-nosnippet>258</a>}
-<a href=#259 id=259 data-nosnippet>259</a>
-<a href=#260 id=260 data-nosnippet>260</a><span class="doccomment">/// `DELETE /api/v1/groups/{group_id}/members/{user_id}`
-<a href=#261 id=261 data-nosnippet>261</a></span><span class="attr">#[utoipa::path(
-<a href=#262 id=262 data-nosnippet>262</a>    delete,
-<a href=#263 id=263 data-nosnippet>263</a>    path = <span class="string">"/api/v1/groups/{group_id}/members/{user_id}"</span>,
-<a href=#264 id=264 data-nosnippet>264</a>    tag = <span class="string">"groups"</span>,
-<a href=#265 id=265 data-nosnippet>265</a>    params(
-<a href=#266 id=266 data-nosnippet>266</a>        (<span class="string">"group_id" </span>= Uuid, Path, description = <span class="string">"Group ID"</span>),
-<a href=#267 id=267 data-nosnippet>267</a>        (<span class="string">"user_id" </span>= Uuid, Path, description = <span class="string">"User ID"</span>),
-<a href=#268 id=268 data-nosnippet>268</a>    ),
-<a href=#269 id=269 data-nosnippet>269</a>    responses(
-<a href=#270 id=270 data-nosnippet>270</a>        (status = <span class="number">204</span>, description = <span class="string">"Member removed"</span>),
-<a href=#271 id=271 data-nosnippet>271</a>    ),
-<a href=#272 id=272 data-nosnippet>272</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#273 id=273 data-nosnippet>273</a>)]
-<a href=#274 id=274 data-nosnippet>274</a><span class="kw">pub async fn </span>remove_member&lt;C: Connection + Clone&gt;(
-<a href=#275 id=275 data-nosnippet>275</a>    user: AuthenticatedUser,
-<a href=#276 id=276 data-nosnippet>276</a>    authz: AuthzData,
-<a href=#277 id=277 data-nosnippet>277</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#278 id=278 data-nosnippet>278</a>    path: web::Path&lt;MemberPath&gt;,
-<a href=#279 id=279 data-nosnippet>279</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#280 id=280 data-nosnippet>280</a>    RequirePermission::new(<span class="string">"groups:remove_member"</span>, Uuid::nil())
-<a href=#281 id=281 data-nosnippet>281</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
-<a href=#282 id=282 data-nosnippet>282</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#283 id=283 data-nosnippet>283</a>    <span class="kw">let </span>p = path.into_inner();
-<a href=#284 id=284 data-nosnippet>284</a>    state
-<a href=#285 id=285 data-nosnippet>285</a>        .group_repo
-<a href=#286 id=286 data-nosnippet>286</a>        .remove_member(user.tenant_id, p.user_id, p.group_id)
-<a href=#287 id=287 data-nosnippet>287</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#288 id=288 data-nosnippet>288</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#289 id=289 data-nosnippet>289</a>}
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="comment">// D7 (REVOCATION — security critical): deleting a group removes its
+<a href=#188 id=188 data-nosnippet>188</a>    // inherited roles from every member. Member set unknown here — flush tenant.
+<a href=#189 id=189 data-nosnippet>189</a>    </span>authz.get_ref().as_ref().invalidate_tenant(user.tenant_id);
+<a href=#190 id=190 data-nosnippet>190</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#191 id=191 data-nosnippet>191</a>}
+<a href=#192 id=192 data-nosnippet>192</a>
+<a href=#193 id=193 data-nosnippet>193</a><span class="comment">// -----------------------------------------------------------------------
+<a href=#194 id=194 data-nosnippet>194</a>// Handlers — Membership
+<a href=#195 id=195 data-nosnippet>195</a>// -----------------------------------------------------------------------
+<a href=#196 id=196 data-nosnippet>196</a>
+<a href=#197 id=197 data-nosnippet>197</a></span><span class="doccomment">/// `POST /api/v1/groups/{group_id}/members`
+<a href=#198 id=198 data-nosnippet>198</a></span><span class="attr">#[utoipa::path(
+<a href=#199 id=199 data-nosnippet>199</a>    post,
+<a href=#200 id=200 data-nosnippet>200</a>    path = <span class="string">"/api/v1/groups/{group_id}/members"</span>,
+<a href=#201 id=201 data-nosnippet>201</a>    tag = <span class="string">"groups"</span>,
+<a href=#202 id=202 data-nosnippet>202</a>    params((<span class="string">"group_id" </span>= Uuid, Path, description = <span class="string">"Group ID"</span>)),
+<a href=#203 id=203 data-nosnippet>203</a>    request_body = AddMemberRequest,
+<a href=#204 id=204 data-nosnippet>204</a>    responses(
+<a href=#205 id=205 data-nosnippet>205</a>        (status = <span class="number">204</span>, description = <span class="string">"Member added"</span>),
+<a href=#206 id=206 data-nosnippet>206</a>    ),
+<a href=#207 id=207 data-nosnippet>207</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#208 id=208 data-nosnippet>208</a>)]
+<a href=#209 id=209 data-nosnippet>209</a><span class="kw">pub async fn </span>add_member&lt;C: Connection + Clone&gt;(
+<a href=#210 id=210 data-nosnippet>210</a>    user: AuthenticatedUser,
+<a href=#211 id=211 data-nosnippet>211</a>    authz: AuthzData,
+<a href=#212 id=212 data-nosnippet>212</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#213 id=213 data-nosnippet>213</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#214 id=214 data-nosnippet>214</a>    body: web::Json&lt;AddMemberRequest&gt;,
+<a href=#215 id=215 data-nosnippet>215</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#216 id=216 data-nosnippet>216</a>    RequirePermission::new(<span class="string">"groups:add_member"</span>, Uuid::nil())
+<a href=#217 id=217 data-nosnippet>217</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#218 id=218 data-nosnippet>218</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#219 id=219 data-nosnippet>219</a>    <span class="kw">let </span>new_member = body.user_id;
+<a href=#220 id=220 data-nosnippet>220</a>    state
+<a href=#221 id=221 data-nosnippet>221</a>        .group_repo
+<a href=#222 id=222 data-nosnippet>222</a>        .add_member(user.tenant_id, body.user_id, path.into_inner())
+<a href=#223 id=223 data-nosnippet>223</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#224 id=224 data-nosnippet>224</a>    <span class="comment">// D7: adding a member widens that one subject's inherited access (safe
+<a href=#225 id=225 data-nosnippet>225</a>    // direction) — targeted flush so it takes effect immediately.
+<a href=#226 id=226 data-nosnippet>226</a>    </span>authz
+<a href=#227 id=227 data-nosnippet>227</a>        .get_ref()
+<a href=#228 id=228 data-nosnippet>228</a>        .as_ref()
+<a href=#229 id=229 data-nosnippet>229</a>        .invalidate_subject(user.tenant_id, new_member);
+<a href=#230 id=230 data-nosnippet>230</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#231 id=231 data-nosnippet>231</a>}
+<a href=#232 id=232 data-nosnippet>232</a>
+<a href=#233 id=233 data-nosnippet>233</a><span class="doccomment">/// `GET /api/v1/groups/{group_id}/members`
+<a href=#234 id=234 data-nosnippet>234</a></span><span class="attr">#[utoipa::path(
+<a href=#235 id=235 data-nosnippet>235</a>    get,
+<a href=#236 id=236 data-nosnippet>236</a>    path = <span class="string">"/api/v1/groups/{group_id}/members"</span>,
+<a href=#237 id=237 data-nosnippet>237</a>    tag = <span class="string">"groups"</span>,
+<a href=#238 id=238 data-nosnippet>238</a>    params(
+<a href=#239 id=239 data-nosnippet>239</a>        (<span class="string">"group_id" </span>= Uuid, Path, description = <span class="string">"Group ID"</span>),
+<a href=#240 id=240 data-nosnippet>240</a>        Pagination,
+<a href=#241 id=241 data-nosnippet>241</a>    ),
+<a href=#242 id=242 data-nosnippet>242</a>    responses(
+<a href=#243 id=243 data-nosnippet>243</a>        (status = <span class="number">200</span>, description = <span class="string">"List of group members"</span>, body = inline(PaginatedResult&lt;UserResponse&gt;)),
+<a href=#244 id=244 data-nosnippet>244</a>    ),
+<a href=#245 id=245 data-nosnippet>245</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#246 id=246 data-nosnippet>246</a>)]
+<a href=#247 id=247 data-nosnippet>247</a><span class="kw">pub async fn </span>list_members&lt;C: Connection + Clone&gt;(
+<a href=#248 id=248 data-nosnippet>248</a>    user: AuthenticatedUser,
+<a href=#249 id=249 data-nosnippet>249</a>    authz: AuthzData,
+<a href=#250 id=250 data-nosnippet>250</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#251 id=251 data-nosnippet>251</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#252 id=252 data-nosnippet>252</a>    query: web::Query&lt;Pagination&gt;,
+<a href=#253 id=253 data-nosnippet>253</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#254 id=254 data-nosnippet>254</a>    RequirePermission::new(<span class="string">"groups:list_members"</span>, Uuid::nil())
+<a href=#255 id=255 data-nosnippet>255</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#256 id=256 data-nosnippet>256</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="kw">let </span>result = state
+<a href=#258 id=258 data-nosnippet>258</a>        .group_repo
+<a href=#259 id=259 data-nosnippet>259</a>        .get_members(user.tenant_id, path.into_inner(), query.into_inner())
+<a href=#260 id=260 data-nosnippet>260</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#261 id=261 data-nosnippet>261</a>    <span class="kw">let </span>items: Vec&lt;UserResponse&gt; = result.items.into_iter().map(UserResponse::from).collect();
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(PaginatedResult {
+<a href=#263 id=263 data-nosnippet>263</a>        items,
+<a href=#264 id=264 data-nosnippet>264</a>        total: result.total,
+<a href=#265 id=265 data-nosnippet>265</a>        offset: result.offset,
+<a href=#266 id=266 data-nosnippet>266</a>        limit: result.limit,
+<a href=#267 id=267 data-nosnippet>267</a>    }))
+<a href=#268 id=268 data-nosnippet>268</a>}
+<a href=#269 id=269 data-nosnippet>269</a>
+<a href=#270 id=270 data-nosnippet>270</a><span class="doccomment">/// `DELETE /api/v1/groups/{group_id}/members/{user_id}`
+<a href=#271 id=271 data-nosnippet>271</a></span><span class="attr">#[utoipa::path(
+<a href=#272 id=272 data-nosnippet>272</a>    delete,
+<a href=#273 id=273 data-nosnippet>273</a>    path = <span class="string">"/api/v1/groups/{group_id}/members/{user_id}"</span>,
+<a href=#274 id=274 data-nosnippet>274</a>    tag = <span class="string">"groups"</span>,
+<a href=#275 id=275 data-nosnippet>275</a>    params(
+<a href=#276 id=276 data-nosnippet>276</a>        (<span class="string">"group_id" </span>= Uuid, Path, description = <span class="string">"Group ID"</span>),
+<a href=#277 id=277 data-nosnippet>277</a>        (<span class="string">"user_id" </span>= Uuid, Path, description = <span class="string">"User ID"</span>),
+<a href=#278 id=278 data-nosnippet>278</a>    ),
+<a href=#279 id=279 data-nosnippet>279</a>    responses(
+<a href=#280 id=280 data-nosnippet>280</a>        (status = <span class="number">204</span>, description = <span class="string">"Member removed"</span>),
+<a href=#281 id=281 data-nosnippet>281</a>    ),
+<a href=#282 id=282 data-nosnippet>282</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#283 id=283 data-nosnippet>283</a>)]
+<a href=#284 id=284 data-nosnippet>284</a><span class="kw">pub async fn </span>remove_member&lt;C: Connection + Clone&gt;(
+<a href=#285 id=285 data-nosnippet>285</a>    user: AuthenticatedUser,
+<a href=#286 id=286 data-nosnippet>286</a>    authz: AuthzData,
+<a href=#287 id=287 data-nosnippet>287</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#288 id=288 data-nosnippet>288</a>    path: web::Path&lt;MemberPath&gt;,
+<a href=#289 id=289 data-nosnippet>289</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#290 id=290 data-nosnippet>290</a>    RequirePermission::new(<span class="string">"groups:remove_member"</span>, Uuid::nil())
+<a href=#291 id=291 data-nosnippet>291</a>        .check(<span class="kw-2">&amp;</span>user, authz.get_ref().as_ref())
+<a href=#292 id=292 data-nosnippet>292</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#293 id=293 data-nosnippet>293</a>    <span class="kw">let </span>p = path.into_inner();
+<a href=#294 id=294 data-nosnippet>294</a>    state
+<a href=#295 id=295 data-nosnippet>295</a>        .group_repo
+<a href=#296 id=296 data-nosnippet>296</a>        .remove_member(user.tenant_id, p.user_id, p.group_id)
+<a href=#297 id=297 data-nosnippet>297</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#298 id=298 data-nosnippet>298</a>    <span class="comment">// D7 (REVOCATION — security critical): removing a member drops the group's
+<a href=#299 id=299 data-nosnippet>299</a>    // inherited roles for exactly this subject — targeted flush, immediate.
+<a href=#300 id=300 data-nosnippet>300</a>    </span>authz
+<a href=#301 id=301 data-nosnippet>301</a>        .get_ref()
+<a href=#302 id=302 data-nosnippet>302</a>        .as_ref()
+<a href=#303 id=303 data-nosnippet>303</a>        .invalidate_subject(user.tenant_id, p.user_id);
+<a href=#304 id=304 data-nosnippet>304</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#305 id=305 data-nosnippet>305</a>}
 </code></pre></div></section></main></body></html>

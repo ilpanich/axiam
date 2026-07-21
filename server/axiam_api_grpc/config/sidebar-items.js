@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["GrpcConfig"]};
+window.SIDEBAR_ITEMS = {"enum":["GrpcRateLimitKeyMode"],"struct":["GrpcConfig"]};

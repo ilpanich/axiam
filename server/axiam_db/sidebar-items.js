@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["DbError"],"fn":["run_migrations","schema_v1"],"mod":["helpers","repository","seeder"],"struct":["DbClient","DbConfig","DbManager"],"trait":["Connection"]};
+window.SIDEBAR_ITEMS = {"enum":["DbError"],"fn":["run_migrations","schema_v1"],"mod":["helpers","metrics","repository","seeder"],"struct":["DbCheckout","DbClient","DbConfig","DbManager","DbPool"],"trait":["Connection"]};

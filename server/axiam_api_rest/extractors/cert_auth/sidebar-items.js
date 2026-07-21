@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["CertificateAuthenticated"]};
+window.SIDEBAR_ITEMS = {"struct":["CertificateAuthenticated","VerifiedClientCert"]};

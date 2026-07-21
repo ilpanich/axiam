@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="In-process JWKS cache with RFC 7232 conditional-GET (ETag) support (B3)."><title>axiam_oauth2::jwks_cache - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module jwks_cache</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-alpha15</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module jwks_<wbr>cache</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#baseline-finding-this-module-addresses" title="Baseline finding this module addresses">Baseline finding this module addresses</a></li><li><a href="#not-the-same-thing-as-axiam_federationjwks_cachejwkscache" title="Not the same thing as `axiam_federation::jwks_cache::JwksCache`">Not the same thing as <code>axiam_federation::jwks_cache::JwksCache</code></a></li><li><a href="#known-limitations-documented-per-b3-not-fixed-here" title="Known limitations (documented per B3, not fixed here)">Known limitations (documented per B3, not fixed here)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>jwks_<wbr>cache</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/jwks_cache.rs.html#1-413">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>In-process JWKS cache with RFC 7232 conditional-GET (ETag) support (B3).</p>
+<h3 id="baseline-finding-this-module-addresses"><a class="doc-anchor" href="#baseline-finding-this-module-addresses">§</a>Baseline finding this module addresses</h3>
+<p>Before this module existed, <code>GET /oauth2/jwks</code> called
+<a href="../oidc/fn.build_jwks.html" title="fn axiam_oauth2::oidc::build_jwks"><code>crate::oidc::build_jwks</code></a> fresh on every single request: PEM strip →
+base64 decode → SHA-256(kid) → JSON-serialize, with zero HTTP caching
+headers. The benchmark’s low 0.062 cpu·ms/req for that endpoint is
+simply because that computation is cheap (a 44-byte Ed25519 SPKI, no
+I/O) — it was never evidence of caching. This module adds a real
+in-process cache plus <code>ETag</code>/<code>If-None-Match</code>/304 support so repeat
+requests (the overwhelming majority in practice — relying parties are
+expected to poll <code>jwks_uri</code> on an interval, not per-request) skip the
+recompute and the response body entirely.</p>
+<h3 id="not-the-same-thing-as-axiam_federationjwks_cachejwkscache"><a class="doc-anchor" href="#not-the-same-thing-as-axiam_federationjwks_cachejwkscache">§</a>Not the same thing as <code>axiam_federation::jwks_cache::JwksCache</code></h3>
+<p>That cache stores REMOTE identity providers’ JWKS documents fetched
+during OIDC federation login (keyed by <code>(tenant_id, federation_config_id)</code>,
+TTL-based, with stale-while-revalidate). This module caches AXIAM’s OWN
+signing-key JWKS — the document AXIAM <em>serves</em> at <code>GET /oauth2/jwks</code> —
+and invalidates itself based on the input key material rather than a
+wall-clock TTL. The two are unrelated and live in different crates.</p>
+<h3 id="known-limitations-documented-per-b3-not-fixed-here"><a class="doc-anchor" href="#known-limitations-documented-per-b3-not-fixed-here">§</a>Known limitations (documented per B3, not fixed here)</h3>
+<ul>
+<li><strong>No key-rotation mechanism exists today.</strong> <code>AuthConfig</code> loads
+<code>jwt_public_key_pem</code> once at process startup from config/env and it
+never changes for the life of the process — there is no reachable
+code path that swaps it at runtime. In practice this cache is
+therefore built exactly once per process. It is still keyed by a hash
+of the input PEM (rather than being unconditionally “build once and
+never touch again”) so that IF a future rotation mechanism starts
+swapping the PEM string held by the caller between calls, this cache
+picks the change up automatically on the very next <a href="struct.JwksCache.html#method.get" title="method axiam_oauth2::jwks_cache::JwksCache::get"><code>JwksCache::get</code></a>
+call — no code in that future rotation path needs to know this cache
+exists or call anything special. <a href="struct.JwksCache.html#method.invalidate" title="method axiam_oauth2::jwks_cache::JwksCache::invalidate"><code>JwksCache::invalidate</code></a> is also
+provided for a caller that wants to force an eager rebuild instead of
+waiting for the input hash to differ.</li>
+<li><strong>The endpoint is not actually per-tenant.</strong> <code>GET /oauth2/jwks</code> serves
+ONE global key set sourced from the server-wide <code>AuthConfig</code>, despite
+living under the tenant-aware API surface. Every tenant is served the
+same signing key today; this cache mirrors that reality (it is a
+single-slot cache, not a per-tenant map).</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.JwksCache.html" title="struct axiam_oauth2::jwks_cache::JwksCache">Jwks<wbr>Cache</a></dt><dd>Thread-safe, single-slot, in-process cache for AXIAM’s own JWKS
+response (see module docs for the distinction from
+<code>axiam_federation::jwks_cache::JwksCache</code>).</dd><dt><a class="struct" href="struct.JwksCacheConfig.html" title="struct axiam_oauth2::jwks_cache::JwksCacheConfig">Jwks<wbr>Cache<wbr>Config</a></dt><dd>Configuration for the <code>GET /oauth2/jwks</code> HTTP caching headers (B3).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.JwksCacheResponse.html" title="enum axiam_oauth2::jwks_cache::JwksCacheResponse">Jwks<wbr>Cache<wbr>Response</a></dt><dd>Outcome of a <a href="struct.JwksCache.html#method.get" title="method axiam_oauth2::jwks_cache::JwksCache::get"><code>JwksCache::get</code></a> call.</dd></dl></section></div></main></body></html>

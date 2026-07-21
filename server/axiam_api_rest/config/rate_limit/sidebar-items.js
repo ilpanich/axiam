@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["RateLimitConfig"]};
+window.SIDEBAR_ITEMS = {"enum":["RateLimitKeyMode"],"struct":["RateLimitConfig"]};

@@ -75,6 +75,9 @@ export default function (data) {
     'results length matches batch size': (r) =>
       r && r.message && Array.isArray(r.message.results) && r.message.results.length === BATCH_SIZE,
   });
+  // D11: record the raw gRPC status code so the summary alone can show which
+  // code dominates on a failing run (mirrors zitadel_userinfo_grpc.js).
+  m.grpcStatus.add(res && res.status != null ? res.status : -1);
   m.latency.add(Date.now() - start);
   m.errorRate.add(!ok);
   if (ok) m.ok.add(1); else m.failed.add(1);

@@ -26,8 +26,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use axiam_authz::AuthorizationEngine;
 use axiam_authz::types::{AccessDecision, AccessRequest};
+use axiam_authz::{AuthorizationEngine, BatchStrategy};
 use axiam_core::error::AxiamResult;
 use axiam_core::models::group::{CreateGroup, Group, UpdateGroup};
 use axiam_core::models::permission::{
@@ -403,6 +403,9 @@ fn build_engine(
         }],
     );
 
+    // These tests assert the COALESCED path's round-trip counts, so pin the
+    // strategy explicitly — the engine default is now `Concurrent` (D10), whose
+    // per-item scheduling deliberately issues one lookup set per item.
     let engine = AuthorizationEngine::new(
         MockRoleRepo {
             counter: counters.role_assignments.clone(),
@@ -421,7 +424,8 @@ fn build_engine(
             by_resource: HashMap::new(),
         },
         MockGroupRepo,
-    );
+    )
+    .with_batch_config(BatchStrategy::Coalesced, 16);
 
     (engine, counters)
 }
@@ -561,7 +565,8 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
             by_resource: HashMap::new(),
         },
         MockGroupRepo,
-    );
+    )
+    .with_batch_config(BatchStrategy::Coalesced, 16);
 
     // Order: A/read/x (allow), A/write/x (deny — no grant), B/write/y (allow),
     // A/read/x (allow again — same group as item 0).
@@ -646,4 +651,57 @@ async fn empty_subject_denies_without_extra_round_trips() {
     assert_eq!(Counters::get(&counters.ancestors), 0);
     assert_eq!(Counters::get(&counters.grants), 0);
     assert_eq!(batched[0], AccessDecision::Deny("no roles assigned".into()));
+}
+
+/// D10: the DEFAULT `Concurrent` strategy evaluates each item independently, so
+/// a same-subject batch of 5 issues one lookup **set per item** (5/5/5) rather
+/// than coalescing to 1/1/1 — the deliberate trade-off that recovers per-item
+/// DB parallelism. Decisions and order must still be byte-identical to the
+/// sequential per-item `check_access` baseline (concurrency introduces no
+/// ordering or decision bug). This is the same-subject counterpart to the
+/// coalescing test above, proving both strategies agree on results while
+/// differing only in scheduling.
+#[tokio::test]
+async fn concurrent_strategy_is_per_item_and_matches_sequential() {
+    let tenant = Uuid::new_v4();
+    let subject = Uuid::new_v4();
+    let resource_id = Uuid::new_v4();
+    // build_engine pins Coalesced; rebuild the SAME topology as Concurrent (the
+    // engine default) to exercise the D10 path explicitly.
+    let (coalesced_engine, counters) = build_engine(tenant, subject, resource_id, "read");
+    // Reconstruct an identical engine in the default (Concurrent) strategy by
+    // toggling the one built above — `with_batch_config` is a pure setter.
+    let engine = coalesced_engine.with_batch_config(BatchStrategy::Concurrent, 16);
+
+    let requests: Vec<AccessRequest> = (0..5)
+        .map(|_| AccessRequest {
+            tenant_id: tenant,
+            subject_id: subject,
+            action: "read".into(),
+            resource_id,
+            scope: None,
+        })
+        .collect();
+
+    // Sequential per-item baseline decisions.
+    counters.reset();
+    let mut sequential = Vec::new();
+    for req in &requests {
+        sequential.push(engine.check_access(req).await.unwrap());
+    }
+
+    // Concurrent batch: per-item round-trips (5 each, NOT coalesced to 1).
+    counters.reset();
+    let batched = engine.check_access_batch(&requests).await.unwrap();
+    assert_eq!(
+        Counters::get(&counters.role_assignments),
+        5,
+        "concurrent strategy issues one role-assignment lookup PER ITEM"
+    );
+    assert_eq!(Counters::get(&counters.ancestors), 5);
+    assert_eq!(Counters::get(&counters.grants), 5);
+
+    // ...yet decisions are byte-identical and in order.
+    assert_eq!(batched, sequential);
+    assert!(batched.iter().all(|d| *d == AccessDecision::Allow));
 }

@@ -23,11 +23,11 @@ where
     G: GroupRepository,
 {
     engine: AuthorizationEngine<R, P, Res, S, G>,
-    /// Retained from the pre-D1 concurrent-fan-out design and still accepted by
-    /// [`Self::new`] for call-site/config compatibility (`AuthzConfig::
-    /// batch_max_concurrency`, default 16). The D1 coalesced batch path issues
-    /// a small fixed number of DB round-trips per batch rather than one
-    /// per-item future, so the concurrency bound is no longer applied here.
+    /// Retained for call-site/config compatibility (`AuthzConfig::
+    /// batch_max_concurrency`, default 16). As of D10 the concurrency bound is
+    /// owned by the `AuthorizationEngine` itself (applied via
+    /// `with_batch_config` at construction and enforced by
+    /// [`BatchStrategy::Concurrent`]), so this copy is no longer consulted here.
     #[allow(dead_code)]
     batch_max_concurrency: usize,
 }

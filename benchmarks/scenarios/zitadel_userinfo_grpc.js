@@ -87,6 +87,10 @@ export default function (data) {
     { metadata: { authorization: `Bearer ${data.access_token}` } },
   );
   const ok = check(res, { 'grpc status OK': (r) => r && r.status === grpc.StatusOK });
+  // D11: record the raw gRPC status code (e.g. 7=PermissionDenied,
+  // 16=Unauthenticated) so a 100%-non-OK run is diagnosable from the summary
+  // alone, not just a failed-checks count with no hint why.
+  m.grpcStatus.add(res && res.status != null ? res.status : -1);
   m.latency.add(Date.now() - start);
   m.errorRate.add(!ok);
   if (ok) m.ok.add(1); else m.failed.add(1);

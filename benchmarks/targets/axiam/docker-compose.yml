@@ -145,7 +145,19 @@ services:
     restart: "no"
 
   surrealdb:
-    image: surrealdb/surrealdb:v3
+    # A9: surrealdb/surrealdb:v3 is a floating tag — it can point at a different
+    # build over time, which breaks provenance ("what exactly did this run
+    # measure against?"). No network/registry access is available where this
+    # override was authored, so a real digest can't be resolved and pinned
+    # here without risking a fabricated (unpullable) sha256. Instead, pin it
+    # at run time: pull once, resolve the digest, then export
+    # BENCH_SURREALDB_IMAGE to override this default, e.g.:
+    #   docker pull surrealdb/surrealdb:v3
+    #   export BENCH_SURREALDB_IMAGE="surrealdb/surrealdb@$(docker inspect --format '{{index .RepoDigests 0}}' surrealdb/surrealdb:v3 | cut -d@ -f2)"
+    # (run-benchmark.sh's meta.json also now records image_id/build_ref as a
+    # fallback identifier for whatever tag actually ran — see A9 in
+    # claude_dev/benchmark-improvement-plan.md.)
+    image: ${BENCH_SURREALDB_IMAGE:-surrealdb/surrealdb:v3}
     container_name: bench-axiam-surrealdb
     cpus: ${BENCH_DB_CPUS:-2}
     mem_limit: ${BENCH_DB_MEM:-1024m}

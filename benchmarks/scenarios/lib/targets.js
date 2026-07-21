@@ -243,11 +243,21 @@ const zitadel = {
   clientCredentials() {
     // Add the bench project's reserved audience scope so the issued token is
     // introspectable by the resource server: Zitadel only marks a token `active`
-    // to an API app whose project is in the token's aud. Falls back to plain
-    // openid when no project was seeded (e.g. manual/jwks-only setups).
+    // to an API app whose project is in the token's aud.
+    //
+    // D11: ALWAYS also request Zitadel's own reserved `zitadel` project
+    // audience (`urn:zitadel:iam:org:project:id:zitadel:aud`), in addition to
+    // the bench-project audience above. Zitadel's Auth API (zitadel.auth.v1,
+    // e.g. AuthService/GetMyUser used by zitadel_userinfo_grpc.js) rejects any
+    // token whose aud doesn't include that reserved project id — REST
+    // `/oidc/v1/userinfo` doesn't care, which is why REST userinfo worked
+    // while the gRPC AuthService call returned 100% non-OK. Adding the extra
+    // audience is harmless for introspection/userinfo (extra audiences are
+    // fine), so it's simplest to always include it here rather than plumb a
+    // separate "reserved audience" request path through to the gRPC scenario.
     const scope = cfg.projectId
-      ? `openid urn:zitadel:iam:org:project:id:${cfg.projectId}:aud`
-      : 'openid';
+      ? `openid urn:zitadel:iam:org:project:id:zitadel:aud urn:zitadel:iam:org:project:id:${cfg.projectId}:aud`
+      : 'openid urn:zitadel:iam:org:project:id:zitadel:aud';
     return {
       method: 'POST',
       url: `${baseUrl()}/oauth/v2/token`,

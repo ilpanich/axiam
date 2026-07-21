@@ -705,3 +705,35 @@ async fn concurrent_strategy_is_per_item_and_matches_sequential() {
     assert_eq!(batched, sequential);
     assert!(batched.iter().all(|d| *d == AccessDecision::Allow));
 }
+
+/// Regression for the HRTB "implementation of `FnOnce` is not general enough"
+/// error: the REST `AuthzChecker` impl and the gRPC async-trait erase
+/// `check_access_batch` into a `Pin<Box<dyn Future + Send + 'a>>`. Reproduce
+/// exactly that coercion here so the engine crate guards the concurrent path's
+/// boxability WITHOUT needing the api-rest/api-grpc build (they require
+/// protoc/libxml2, absent in the dev sandbox — this is where CI first caught it).
+#[tokio::test]
+async fn concurrent_batch_future_is_boxable_as_send_trait_object() {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    let tenant = Uuid::new_v4();
+    let subject = Uuid::new_v4();
+    let resource_id = Uuid::new_v4();
+    let (engine, _counters) = build_engine(tenant, subject, resource_id, "read");
+    let engine = engine.with_batch_config(BatchStrategy::Concurrent, 16);
+
+    let requests = vec![AccessRequest {
+        tenant_id: tenant,
+        subject_id: subject,
+        action: "read".into(),
+        resource_id,
+        scope: None,
+    }];
+
+    // Same shape as axiam-api-rest/src/authz.rs check_access_batch.
+    let fut: Pin<Box<dyn Future<Output = AxiamResult<Vec<AccessDecision>>> + Send + '_>> =
+        Box::pin(engine.check_access_batch(&requests));
+    let decisions = fut.await.unwrap();
+    assert_eq!(decisions, vec![AccessDecision::Allow]);
+}

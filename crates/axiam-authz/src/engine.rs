@@ -359,7 +359,19 @@ where
     ) -> AxiamResult<Vec<AccessDecision>> {
         use futures::stream::{StreamExt, TryStreamExt};
 
-        futures::stream::iter(requests.iter().map(|req| self.check_access(req)))
+        // Build the per-item futures EAGERLY into a Vec before handing them to
+        // the stream. Mapping `requests.iter()` lazily inside `stream::iter`
+        // would store the `|req| self.check_access(req)` closure in the stream
+        // adapter, and when the whole `check_access_batch` future is erased
+        // behind the `AuthzChecker` trait object (`Pin<Box<dyn Future + Send>>`
+        // in axiam-api-rest / the gRPC async-trait), the borrow checker cannot
+        // prove that closure is `for<'a> FnMut(&'a AccessRequest) -> …`
+        // ("implementation of `FnOnce` is not general enough"). Collecting
+        // first applies the closure in this concrete-lifetime scope, so the
+        // boxed future holds only already-built item futures — no HRTB closure.
+        let item_futures: Vec<_> = requests.iter().map(|req| self.check_access(req)).collect();
+
+        futures::stream::iter(item_futures)
             .buffered(self.batch_max_concurrency.max(1))
             .try_collect()
             .await

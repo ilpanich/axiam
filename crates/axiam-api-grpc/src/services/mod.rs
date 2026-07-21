@@ -3,7 +3,9 @@
 pub mod authorization;
 pub mod token;
 pub mod user;
+pub mod userinfo;
 
 pub use authorization::AuthorizationServiceImpl;
 pub use token::TokenServiceImpl;
 pub use user::UserServiceImpl;
+pub use userinfo::UserInfoServiceImpl;

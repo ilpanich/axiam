@@ -57,3 +57,7 @@ required-features = ["client"]
 [[test]]
 name = "grpc_auth_test"
 required-features = ["client"]
+
+[[test]]
+name = "grpc_userinfo_test"
+required-features = ["client"]

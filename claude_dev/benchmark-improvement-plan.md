@@ -936,3 +936,24 @@ errors).
    sensitivity set), D9 jemalloc A/B.
 5. E4 public-doc refresh from run-3 medians (run-2 second draft is already
    published as preliminary).
+
+### Run-2 follow-up tasks — implementation status (2026-07-21)
+
+Implemented on branch `claude/benchmark-analysis-docs-wm7wyq`, **each with the
+model the task specifies** (A8/A9/D11/labeling via Sonnet agents; D10 via Opus).
+Same sandbox caveat as before: no `k6`/live stack here, so measured-number
+acceptance (batch throughput, gRPC cell validity, `bench_fallback==0`) is
+confirmed on the run-3 laptop matrix. All logic changes are unit/behaviour-tested
+here.
+
+| Task | Model | Status | Notes |
+|------|-------|--------|-------|
+| A8 token_refresh user-token | Sonnet | ✅ / ⏳ | `token_refresh.js` → `mintUserToken()` (login-first); AXIAM `axiam_refresh` cookie + KC ROPC `refresh_token` now feed real rotation; Zitadel keeps the tagged fallback (needs offline_access flow). `bench_fallback==0` for AXIAM/KC ⏳ run-3 |
+| A9 provenance | Sonnet | ✅ | `image_id` fallback when RepoDigests empty, `build_ref`=`git rev-parse HEAD` in meta, `${BENCH_SURREALDB_IMAGE}`/`${BENCH_PG_IMAGE}` digest-pin overrides in composes; `bash -n` + `compose config` clean |
+| D11 Zitadel gRPC audience | Sonnet | ✅ / ⏳ | reserved `urn:zitadel:iam:org:project:id:zitadel:aud` added to Zitadel CC scope; `bench_grpc_status` Trend records gRPC status in all 3 gRPC scenarios. Valid 0%-error cell ⏳ run-3 |
+| Report labeling polish | Sonnet | ✅ | `report.py`: `fallback-op` vs `cc-token-setup` split (keeps Zitadel userinfo comparable), gRPC 100%-error blanking keyed off `bench_*`, gRPC-status appendix; `py_compile` + synthetic-tree validation |
+| D10 batch serialization | Opus | ✅ / ⏳ | grants-query hypothesis **disproven** (single-check uses the same query); shipped config-selectable `BatchStrategy` (default `concurrent` = per-item parallel, byte-identical decisions; `coalesced` retained). `claude_dev/authz-batch-investigation.md`. Batch>single throughput ⏳ run-3 |
+
+The run-3 checklist above is unchanged; A8/A9/D11/labeling land the "small harness
+diffs" of step 1, and D10 lands the batch fix ahead of step 3's laptop A/B (run
+both `AXIAM__AUTHZ__BATCH_STRATEGY` modes to confirm the default).

@@ -85,7 +85,14 @@ services:
     networks: [bench]
 
   postgres:
-    image: postgres:16-alpine
+    # A9: postgres:16-alpine is a floating tag (breaks provenance — see the
+    # matching note on surrealdb in targets/axiam/docker-compose.yml, and on
+    # keycloak's own postgres in targets/keycloak/docker-compose.yml). No
+    # registry access here to resolve+pin a real digest, so pin it at run
+    # time instead by exporting BENCH_PG_IMAGE, e.g.:
+    #   docker pull postgres:16-alpine
+    #   export BENCH_PG_IMAGE="postgres@$(docker inspect --format '{{index .RepoDigests 0}}' postgres:16-alpine | cut -d@ -f2)"
+    image: ${BENCH_PG_IMAGE:-postgres:16-alpine}
     container_name: bench-zitadel-postgres
     cpus: ${BENCH_DB_CPUS:-2}
     mem_limit: ${BENCH_DB_MEM:-1024m}

@@ -711,6 +711,10 @@ async fn main() -> std::io::Result<()> {
             resource_repo.clone(),
             scope_repo.clone(),
             group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
         );
         Arc::new(match decision_cache.as_ref() {
             Some(cache) => engine.with_decision_cache(cache.clone()),
@@ -731,6 +735,10 @@ async fn main() -> std::io::Result<()> {
             resource_repo.clone(),
             scope_repo.clone(),
             group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
         );
         match decision_cache.as_ref() {
             Some(cache) => engine.with_decision_cache(cache.clone()),
@@ -893,6 +901,10 @@ async fn main() -> std::io::Result<()> {
             resource_repo.clone(),
             scope_repo.clone(),
             group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
         );
         match decision_cache.as_ref() {
             Some(cache) => engine.with_decision_cache(cache.clone()),

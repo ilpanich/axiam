@@ -12,6 +12,7 @@ use axiam_core::repository::{
 use tracing::Instrument;
 use uuid::Uuid;
 
+use crate::config::BatchStrategy;
 use crate::decision_cache::DecisionCache;
 use crate::types::{AccessDecision, AccessRequest};
 
@@ -43,6 +44,14 @@ where
     /// When `None`, `check_access` / `check_access_batch` behave exactly as a
     /// build without the cache.
     decision_cache: Option<Arc<DecisionCache>>,
+    /// How `check_access_batch` schedules its work (D10). Defaults to
+    /// [`BatchStrategy::Concurrent`]; `axiam-server` overrides from
+    /// `AXIAM__AUTHZ__BATCH_STRATEGY`. Never affects decisions or their order.
+    batch_strategy: BatchStrategy,
+    /// Bound on in-flight per-item evaluations under
+    /// [`BatchStrategy::Concurrent`] (D-07 pool-safety). Ignored by
+    /// `Coalesced`. Defaults to 16.
+    batch_max_concurrency: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +140,24 @@ where
             scope_repo,
             group_repo,
             decision_cache: None,
+            batch_strategy: BatchStrategy::Concurrent,
+            batch_max_concurrency: 16,
         }
+    }
+
+    /// Set the batch-evaluation strategy and its concurrency bound (D10).
+    /// Consumed builder style so existing `new(..)` call sites are unaffected;
+    /// `axiam-server` calls this once per engine from `AuthzConfig`. Neither
+    /// value changes decisions or result order — only DB scheduling.
+    #[must_use]
+    pub fn with_batch_config(
+        mut self,
+        strategy: BatchStrategy,
+        batch_max_concurrency: usize,
+    ) -> Self {
+        self.batch_strategy = strategy;
+        self.batch_max_concurrency = batch_max_concurrency.max(1);
+        self
     }
 
     /// Attach a shared [`DecisionCache`] to this engine (D7). Consumed builder
@@ -288,24 +314,78 @@ where
         }
     }
 
-    /// Evaluate an ordered batch of authorization checks, coalescing the shared
-    /// DB lookups so that items repeating the same subject or resource resolve
-    /// each lookup **once** instead of once per item.
+    /// Evaluate an ordered batch of authorization checks.
     ///
     /// The returned `Vec` has the same length and order as `requests`; result
     /// `i` is the decision for `requests[i]` and is byte-identical to what
-    /// [`Self::check_access`] would return for that request in isolation.
+    /// [`Self::check_access`] would return for that request in isolation — this
+    /// holds for **both** [`BatchStrategy`] variants, which differ only in how
+    /// the DB work is scheduled:
     ///
-    /// Round-trip reduction for the benchmark shape (5 items, one shared subject
-    /// and resource, no scope): **15 round-trips → 3** — one
-    /// `get_user_role_assignments`, one `get_ancestors`, and one batched
-    /// `get_role_permission_grants_for_roles` across every applicable role in
-    /// the batch.
+    /// - [`BatchStrategy::Concurrent`] (default, D10) — each item is an
+    ///   independent cache-aware [`Self::check_access`], run concurrently
+    ///   (bounded by `batch_max_concurrency`). Recovers per-item DB parallelism.
+    /// - [`BatchStrategy::Coalesced`] (D1) — shared role-assignment/ancestor/
+    ///   grant lookups resolved once per (tenant, subject|resource): 15
+    ///   round-trips → 3 for the benchmark's 5-item shape. Fewer round-trips,
+    ///   but serializes on the DB under load (see run-2 analysis).
     pub async fn check_access_batch(
         &self,
         requests: &[AccessRequest],
     ) -> AxiamResult<Vec<AccessDecision>> {
-        // D7: with no cache attached, this is exactly the D1 coalesced path —
+        match self.batch_strategy {
+            BatchStrategy::Concurrent => self.evaluate_concurrent(requests).await,
+            BatchStrategy::Coalesced => self.evaluate_coalesced_cached(requests).await,
+        }
+    }
+
+    /// **D10 default** — evaluate each item as an independent, cache-aware
+    /// [`Self::check_access`], run **concurrently** with a bound of
+    /// `batch_max_concurrency` in-flight, preserving input order.
+    ///
+    /// Why this is the default (run-2 evidence): the coalesced path
+    /// ([`Self::evaluate_batch`]) minimizes round-trips but resolves the whole
+    /// batch on a single task, which serialized on the database (DB pinned at
+    /// ~1 core, ~1 s p50, everything else idle) and did not beat repeated
+    /// single checks. Single `check_access` calls, by contrast, saturated the
+    /// DB (2 cores, 745 req/s) precisely because 50 of them ran concurrently.
+    /// Evaluating a batch's items the same way recovers that parallelism.
+    /// `check_access` is reused verbatim, so every item's decision, deny reason,
+    /// cache lookup and cache insert are identical to a standalone call —
+    /// `buffered` keeps results in request order.
+    async fn evaluate_concurrent(
+        &self,
+        requests: &[AccessRequest],
+    ) -> AxiamResult<Vec<AccessDecision>> {
+        use futures::stream::{StreamExt, TryStreamExt};
+
+        // Build the per-item futures EAGERLY into a Vec before handing them to
+        // the stream. Mapping `requests.iter()` lazily inside `stream::iter`
+        // would store the `|req| self.check_access(req)` closure in the stream
+        // adapter, and when the whole `check_access_batch` future is erased
+        // behind the `AuthzChecker` trait object (`Pin<Box<dyn Future + Send>>`
+        // in axiam-api-rest / the gRPC async-trait), the borrow checker cannot
+        // prove that closure is `for<'a> FnMut(&'a AccessRequest) -> …`
+        // ("implementation of `FnOnce` is not general enough"). Collecting
+        // first applies the closure in this concrete-lifetime scope, so the
+        // boxed future holds only already-built item futures — no HRTB closure.
+        let item_futures: Vec<_> = requests.iter().map(|req| self.check_access(req)).collect();
+
+        futures::stream::iter(item_futures)
+            .buffered(self.batch_max_concurrency.max(1))
+            .try_collect()
+            .await
+    }
+
+    /// **D1 path** (opt-in via `AXIAM__AUTHZ__BATCH_STRATEGY=coalesced`) —
+    /// coalesced evaluation with the D7 decision cache layered on top: serve
+    /// hits from the cache, evaluate only the misses through the shared-lookup
+    /// batch path, then backfill. Input order is preserved.
+    async fn evaluate_coalesced_cached(
+        &self,
+        requests: &[AccessRequest],
+    ) -> AxiamResult<Vec<AccessDecision>> {
+        // With no cache attached, this is exactly the D1 coalesced path —
         // zero behaviour change.
         let Some(cache) = self.decision_cache.as_ref() else {
             return self.evaluate_batch(requests).await;

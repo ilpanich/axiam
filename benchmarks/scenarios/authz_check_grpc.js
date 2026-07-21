@@ -63,6 +63,9 @@ export default function (data) {
     { metadata: { authorization: `Bearer ${data.access_token}` } },
   );
   const ok = check(res, { 'grpc status OK': (r) => r && r.status === grpc.StatusOK });
+  // D11: record the raw gRPC status code so the summary alone can show which
+  // code dominates on a failing run (mirrors zitadel_userinfo_grpc.js).
+  m.grpcStatus.add(res && res.status != null ? res.status : -1);
   m.latency.add(Date.now() - start);
   m.errorRate.add(!ok);
   if (ok) m.ok.add(1); else m.failed.add(1);

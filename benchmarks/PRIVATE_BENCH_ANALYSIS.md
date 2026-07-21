@@ -274,6 +274,26 @@ Next steps (**D10**, supersedes the D1 re-run):
    measured 46), ship that while the query is investigated.
 4. Explain gRPC's exact 2× and eliminate it.
 
+**D10 UPDATE (code landed; measurement pending run 3).** Step 1's grants-query
+hypothesis is **disproven by the source**: the single-check path
+(`AuthorizationEngine::evaluate`, `engine.rs:248`) issues the *same*
+`get_role_permission_grants_for_roles` query and runs at 745/s with the DB
+pegged — so the `meta::id(in)` scan is on the fast path too and is not the batch
+bottleneck. The remaining, evidence-backed cause is the coalesced path's loss of
+query-level parallelism (single checks flood the DB and parallelize to 2 cores;
+the coalesced batch collapses each 5-item request into one serial 3-query chain
+and the DB sits at ~1 core, everything idle, ~1 s p50 — pure waiting).
+Implemented step 3 as the shipped fix: a config-selectable `BatchStrategy`
+(`crates/axiam-authz`), default **`concurrent`** — `check_access_batch` now runs
+each item as an independent cache-aware `check_access`, bounded-concurrently
+(`buffered(batch_max_concurrency)`), byte-identical decisions + order (proven by
+tests). The `coalesced` D1 path is retained behind
+`AXIAM__AUTHZ__BATCH_STRATEGY=coalesced` for the laptop A/B. Full write-up:
+`claude_dev/authz-batch-investigation.md`. gRPC's 2× (step 4) is not a second DB
+query (both handlers route identically through `check_access_batch`; the gRPC
+per-item UUID parse is CPU-trivial) — expected to shrink or vanish once the
+batch parallelizes; confirm on run 3.
+
 ### 4.3 ❌ [HIGH] TLS 1.3 halving persists — resumption hypothesis REFUTED, h2 is the surviving lead
 
 Run 2 p2 vs p0 (capped): CC −49.2%, refresh-fallback −50.2%, introspection

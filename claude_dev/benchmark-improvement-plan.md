@@ -833,3 +833,106 @@ is separate — procedure in `claude_dev/memory-retention-experiment.md`
 `results-<date>.tar.xz` (only k6/res/host/meta/report files; it greps the
 archive for secrets and fails if any leak). Then E4 (public doc refresh) can
 run against the fresh numbers.
+
+---
+
+## Run-2 measured verification (added 2026-07-21)
+
+The maintainer executed a **preliminary** version of the re-run on the XPS
+9570 against a source build of merged `main` (released as **1.0.0-alpha15**):
+one full capped matrix (all targets, p0+p2) and one DB-uncapped sensitivity
+pass (AXIAM + Zitadel, DB at 4 CPU / 2048 MiB). Single run per cell — the C1
+median-of-3 protocol was NOT used this time, so ≲10% deltas are noise. Full
+analysis: `benchmarks/PRIVATE_BENCH_ANALYSIS.md` (run-2 rewrite) and the
+second-draft `benchmarks/PUBLIC_BENCH_ANALYSIS.md`.
+
+### Measured-acceptance resolution of the ⏳ items
+
+| Task | Run-2 verdict | Evidence (capped p0 unless noted) |
+|------|--------------|-----------------------------------|
+| A1 userinfo fix | ✅ **PASS** | valid 3-way cell; AXIAM 5457 req/s (KC 3561, Zitadel 967), 0% errors |
+| A2 seed hardening | ✅ **PASS** | Keycloak ROPC works: 22.3 req/s, hash-bound |
+| A3 fallback tagging | ✅ **PASS** (and then some) | counter fired 100% on `token_refresh` for ALL targets → exposed new bug A8 |
+| A4 meta.json | ✅ **PASS** (residual → A9) | all fields present; but `image_digest: unknown` everywhere, stale `alpha12` tag string |
+| A5/A6 report + host telemetry | ✅ **PASS** | mhz/temp/k6-cores in every cell; governor `performance`; temps 95–100 °C, pegged-cell clocks ~3.7–3.9 GHz |
+| A7 secrets out of results | ✅ **PASS** | shared archive is secret-free (verified by grep) |
+| B1 Argon2 semaphore | ✅ **PASS** (RSS target near-miss explained) | login 35→**67.5 req/s**, p95 2127→**907 ms** (gate passes), RSS peak 970→**478 MiB**; the 350 MiB target is missed only by D9 retention |
+| B2 TLS 1.3 fix | ❌ **FAIL — still −49%** | CC 1788→908 at p2; BUT `http_req_tls_handshaking≈0` proves resumption works → hypothesis 2 refuted, **h2 multiplexing now sole suspect**; the `tls13-h1.conf` isolation cell was not run — it is the next single action |
+| B3 JWKS caching | ➖ neutral | 27.1k/24.1k req/s, still generator-limited; ETag path unexercised by k6 |
+| C2 DB sensitivity | ✅ **RAN** | authz REST +37% (745→1017), userinfo +33% (server pegs at 7261/s), CC +1.6% (DB cap was never the token wall); Zitadel jwks +73%/userinfo +78% with PG pegging 4 cores |
+| C1/C3/C4 | ⏳ not exercised | single-run pass; prod-posture and median-of-3 wait for run 3 |
+| D1 batch coalescing | ❌ **FAIL — unchanged** | REST 46/s p50 ~1.05 s, gRPC 23/s p50 ~2.15 s, invariant to caps/TLS; DB pinned at ~1.0 core in every config → serialized DB query suspected → new task D10 |
+| D2 gRPC TLS | ✅ **PASS** | p2 gRPC cells ran over TLS (handshakes visible) with no penalty (746 vs 722); needed the #218 crypto-provider fix |
+| D3 native mTLS | ⏳ | no p3 cells in this run |
+| D4 Zitadel gRPC | ❌ **FAIL — 100% gRPC errors** | CC token lacks Zitadel-project audience; also `mintUserToken` can't consume the session token → new task D11 |
+| D5 Zitadel real login | ✅ **PASS** | real bcrypt-bound login: 2.0 req/s, p50 ~22 s, server pegged (gate-invalid cell, correctly labeled) |
+| D6/D7 | ⏳ | uncapped data now in hand for D6; D7 cache-ON sensitivity cell not run |
+| D9 allocator retention | ⏳ confirmed still present | baseline 115 MiB → ~478 MiB retained after login burst (was ~646); experiment still worth running |
+| F3 pool bench validation | ⏳ | not run |
+| Side-finding | ⚠ attribute before marketing | authz single-check REST 290→**745 req/s** and gRPC p99 850→**90 ms** — cause not attributable (D1/F2/SurrealDB-drift) until A9 pins images |
+| Side-finding | ⚠ Keycloak 2–5× faster than run 1 | same image tag; treat run 2 as baseline; A9 prevents recurrence |
+
+### New tasks from run 2
+
+**A8. `token_refresh` must mint a user token — Sonnet.**
+*Files:* `benchmarks/scenarios/token_refresh.js`, `lib/auth.js`, seed as needed.
+`mintToken()` (CC-first) means NO target ever gets a refresh token — the cell
+has been a CC-issuance fallback on all three targets in both runs (run 1's
+AXIAM "refresh rotation" numbers included: 886 ≈ ½ × CC 1743, the fallback's
+two-requests-per-iteration signature). Switch setup to `mintUserToken()`
+(AXIAM login sets `axiam_refresh`; KC ROPC returns `refresh_token`; for
+Zitadel investigate an OIDC/`offline_access` path and keep the fallback tag if
+impossible). *Acceptance:* `bench_fallback == 0` for AXIAM and Keycloak refresh
+cells; AXIAM cell shows real single-use rotation (throughput no longer ≈ ½ CC).
+
+**A9. Provenance: image digests, real version stamp, pinned DB images — Sonnet.**
+*Files:* `benchmarks/runner/run-benchmark.sh`, `targets/*/docker-compose.yml`.
+Record image **ID** always (RepoDigests is empty for local builds — that's why
+every run-2 digest reads `unknown`), add a `build_ref` meta field
+(`git rev-parse HEAD`) when `build=1`, fix the stale `1.0.0-alpha12` tag
+string, and pin `surrealdb`/`postgres` by digest (floating `v3` blocked
+attribution of the 2.5× authz improvement). *Acceptance:* meta.json uniquely
+identifies every binary in the stack for both pulled and locally-built images.
+
+**D10. Batch-authz serialization investigation — Opus** (supersedes the D1
+re-run). Evidence: batch latency constant (~1.05 s REST / ~2.15 s gRPC ≈ 2×)
+across caps and TLS; DB consumes almost exactly **one core in every
+configuration including uncapped** → the batch's work appears serialized on a
+single DB-side thread; closed-loop math (50 VUs / 46 per-s ≈ 1.09 s) explains
+the p50 as pure queueing on a ~22 ms serialized unit. Steps: (1) time the 3
+coalesced queries with SurrealDB query logging, `EXPLAIN` the batched
+`get_role_permission_grants_for_roles`; (2) if convicted: index it, or issue
+per-role queries concurrently, and explain gRPC's exact 2× (suspect the
+per-item subject validation path); (3) control experiment — batch handler as
+`join_all` of N single-check evaluations (singles run 745/s; 5-way concurrent
+singles ≈ 149 batch/s equivalent vs the measured 46). *Acceptance:* unchanged
+from D1 (batch checks/s > single checks/s; gRPC batch passes the 2 s gate).
+
+**D11. Zitadel gRPC audience + session-token handling — Sonnet.**
+*Files:* `benchmarks/scenarios/lib/targets.js`, `lib/auth.js`,
+`zitadel_userinfo_grpc.js`. Add
+`urn:zitadel:iam:org:project:id:zitadel:aud` scope to the Zitadel CC mint used
+for gRPC setup (Zitadel's own APIs reject tokens without the project
+audience — the run-2 cell was 100% non-OK at ~20 ms with PG pegged), teach the
+harness to either consume the D5 session token or explicitly skip it, and add
+a k6 counter recording the gRPC error status so this failure shape is
+diagnosable from the summary. *Acceptance:* valid cell (0% errors), expected
+order of magnitude ~1.7–2 k/s given the error-path resource profile.
+
+**Report labeling polish (fold into A5 follow-up):** distinguish
+`fallback-op` (cell measures the wrong op) from `cc-token-setup` (right op,
+token-provenance caveat — Zitadel userinfo); blank throughput for 100%-error
+cells in gRPC scenarios too (zitadel_userinfo_grpc printed 1725 "req/s" of
+errors).
+
+### Run-3 checklist (supersedes the runbook's step order where they differ)
+
+1. Land A8, A9, D11 + labeling polish (small harness diffs).
+2. **B2 conviction cell first** — p2 `oauth2_client_credentials` through
+   `tls13-h1.conf` (minutes); then fix/document per the private doc §4.3.
+3. D10 investigation (can proceed in parallel with 1–2).
+4. Full capped matrix with `repeat=3` (C1), plus: p3-mtls (D3), D7 cache-ON
+   labeled cell, C4 prod posture, Keycloak uncapped pass (completes C2's
+   sensitivity set), D9 jemalloc A/B.
+5. E4 public-doc refresh from run-3 medians (run-2 second draft is already
+   published as preliminary).

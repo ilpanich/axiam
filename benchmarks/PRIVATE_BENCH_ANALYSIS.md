@@ -1,416 +1,410 @@
 # PRIVATE — Benchmark Post-Mortem & Improvement Plan
 
-> Internal working document. Companion to `PUBLIC_BENCH_ANALYSIS.md`; same
-> dataset (single full-matrix run of 2026-07-19, AXIAM 1.0.0-alpha vs
-> Keycloak 26.7.0 vs Zitadel v4.15.2, p0-plaintext + p2-tls13, 50 VUs,
-> 2 CPU / 1024 MiB caps for servers and DBs). This file collects everything we
-> should NOT publish as-is: harness bugs, unexplained anomalies, tuning
-> hypotheses, and AXIAM work items derived from the raw data.
+> Internal working document. Companion to `PUBLIC_BENCH_ANALYSIS.md`.
+> **Updated 2026-07-21** for the second (preliminary) run: one full "DB-capped"
+> matrix (AXIAM 1.0.0-alpha15 source build vs Keycloak 26.7.0 vs Zitadel
+> v4.15.2, p0-plaintext + p2-tls13, 50 VUs, 2 CPU / 1024 MiB caps) plus one
+> "DB-uncapped" sensitivity pass (AXIAM + Zitadel only, DB at 4 CPU / 2048 MiB,
+> servers still capped). Same Dell XPS 15 9570 host as run 1; the A6 host
+> telemetry (CPU MHz, temperature, k6 cores) and the A4 metadata are present in
+> every cell this time. Still **single-run** cells (the C1 median-of-3
+> machinery exists but was not used for this preliminary pass). This file
+> collects everything we should NOT publish as-is: harness bugs, unexplained
+> anomalies, tuning hypotheses, and AXIAM work items derived from the raw data.
+> Run-1 (2026-07-19) findings that are now resolved are kept, compressed, for
+> the record.
 
-## 1. Harness bugs that invalidated cells (fix before the next run)
+## 0. Run-2 executive summary (what moved, what didn't)
 
-### 1.1 `userinfo` uses a client-credentials token → 100% errors on AXIAM and Keycloak
+Measured on the capped matrix, p0, vs run 1:
 
-`scenarios/userinfo.js` calls `mintToken()` (`scenarios/lib/auth.js`), which
-tries `clientCredentials` **first**. AXIAM and Keycloak correctly refuse a
-service-account token at `/userinfo` (no user subject / missing `openid`
-scope), so both targets fail every request — 1.66 M error responses for AXIAM
-at ~10 k/s, which also means the "throughput" in `report.md` for those cells is
-the error path. Zitadel passes only because its machine user is a first-class
-user identity.
+| Area | Run 1 | Run 2 | Verdict |
+|---|---|---|---|
+| B1 login (Argon2 semaphore) | 35 req/s, p95 2127 ms, RSS→970 MiB | **67.5 req/s, p95 907 ms, RSS peak ~478 MiB** | ✅ fixed (2×, gate passes) |
+| authz single check REST | 290 req/s, p50 139 ms | **745 req/s, p50 67 ms** | ✅ 2.5× (attribution below, §4.6) |
+| authz single check gRPC p99 | 850 ms tail | **90 ms** | ✅ tail gone |
+| A1 userinfo | 100% errors | **valid on all 3 targets; AXIAM fastest (5457/s)** | ✅ fixed |
+| A2 Keycloak ROPC | 100% errors | **works (22.3/s, hash-bound)** | ✅ fixed |
+| D5 Zitadel real login | CC fallback (405/s, no hash) | **real session-API login: 2.0/s, p50 ~22 s (bcrypt)** | ✅ harness fixed; cell gate-invalid |
+| B2 TLS 1.3 on token endpoints | CC −55% | **CC −49% — still halved** | ❌ NOT fixed; resumption hypothesis refuted (§4.3) |
+| D1 authz batch | 41/22 req/s, p50 1.1/2.3 s | **46/23 req/s, p50 1.05/2.15 s** | ❌ unchanged; new root-cause lead (§4.2) |
+| token_refresh | "real rotation" (so we thought) | **`bench_fallback` fired on 100% of iterations on ALL THREE targets** | ❌ new harness finding (§1.6) |
+| D4 Zitadel gRPC | not covered | **runs, but 100% gRPC errors** (§1.7) | ❌ needs audience fix |
+| Keycloak overall | CC 143, intro 337, jwks 644 | **CC 346, intro 1765, jwks 3855** | ⚠ 2–5× better, same image tag (§2.0) |
 
-Fix: `userinfo.js` must use a *user* token — `loginSession()` for AXIAM,
-ROPC for Keycloak — and the Keycloak adapter's `clientCredentials()` should
-also request `scope=openid` so its tokens are userinfo/OIDC-capable when a
-service-account comparison is intended. Bonus: after this fix userinfo becomes
-a real 3-way comparison (Zitadel's 258–281 req/s at p95 ~270 ms looks very
-beatable: its Postgres was pegged at 2.03 cores in that cell).
+Uncapping the DB (4 CPU): AXIAM authz single +37% (→1017 REST), userinfo +33%
+(→7261, server pegs for the first time), CC +1.6% (DB cap was NOT the token
+wall), batch unchanged (not resource-bound). Zitadel: jwks +73%, userinfo +78%
+with Postgres pegging even 4 cores — Zitadel is deeply DB-bound.
 
-### 1.2 Keycloak ROPC (password login) → 100% errors
+## 1. Harness bugs & data-validity issues
 
-The seed *does* create the client with `directAccessGrantsEnabled: true` and
-the user with a non-temporary password, but every `grant_type=password`
-request failed in both profiles, and the seed script swallows provisioning
-errors (`|| true` on the client and user `POST`s) — a 409/400 there would go
-unnoticed and produce exactly this outcome. Actions:
+### 1.1 ✅ FIXED+VERIFIED — `userinfo` used a client-credentials token
 
-- Remove the `|| true`s; assert HTTP 2xx on every seed call.
-- Add a **post-seed smoke check** to `runner/seed.sh` for every target: one
-  real request per scenario-critical flow (ROPC, CC, introspect, refresh,
-  userinfo, authz) that hard-fails the run *before* burning 2 × 10 × 160 s of
-  benchmark time on a mis-seeded target.
-- Capture a sample response body for failed checks into the results dir —
-  today the k6 summary only records pass/fail counts, so diagnosing "status
-  is 200: 0 passes / 3824 fails" requires re-running by hand.
+Run 2 confirms the A1 fix: `mintUserToken()` (login-first) produces valid
+userinfo cells on AXIAM and Keycloak; 0% errors everywhere. Bonus realized:
+userinfo is now a real 3-way comparison and AXIAM wins it (5457 vs 3561 KC vs
+967 Zitadel, capped p0). Note AXIAM's cell is DB-pegged (2.04 cores) with a
+bimodal latency shape (p50 4.6 ms, p95 46 ms) — see §3.1; uncapped it does
+7261/s and the *server* saturates for the first time outside login.
 
-### 1.3 The password-login comparison is three different operations
+### 1.2 ✅ FIXED+VERIFIED — Keycloak ROPC
 
-- AXIAM: real Argon2id login (`/api/v1/auth/login`).
-- Keycloak: real ROPC (currently failing per 1.2).
-- Zitadel: adapter silently falls back to `client_credentials` → **no password
-  hash at all**; its 393–405 req/s "login" is incomparable and flattering.
+Fail-closed seeding (A2) + the follow-up seed fix (commit `8e72ca1`) work:
+ROPC produces a valid hash-bound login cell (22.3 req/s, KC server pegged at
+2.0 cores). Note KC's login p95 (2273–2380 ms) **breaches the 2 s validity
+gate** — flag it in the report rather than dropping it; it's a real measure of
+Argon2id-under-JVM at this concurrency.
 
-Options: (a) drive Zitadel's session/login API v2 (it is scriptable over
-HTTP) for a true login; (b) mark the Zitadel login cell non-comparative in
-`report.py` the way authz cells already are; at minimum (b) before the site
-publishes anything. Also document each vendor's password hash + parameters
-(AXIAM: Argon2id/OWASP; Keycloak 26: Argon2id default; Zitadel: bcrypt by
-default) — hash choice dominates this scenario and readers must know.
+### 1.3 ✅ MOSTLY FIXED — password-login comparability
 
-### 1.4 `token_refresh` silently degrades on targets without CC refresh tokens
+All three targets now hash for real: AXIAM Argon2id (OWASP), Keycloak 26
+Argon2id (default), Zitadel **bcrypt at its default cost** via the D5
+session-API flow. Zitadel's cell is honest but extreme: 2.0 req/s, p50 ~22 s
+at 50 VUs — its server pegs 2 cores doing ~1 CPU-second of bcrypt per login.
+Publish with care: state hash algorithms + defaults explicitly, keep the
+gate-invalid flag on the KC/Zitadel cells, and don't present 34× as if
+Zitadel were doing the same work as AXIAM — it's doing *more expensive* work
+per login at its shipped defaults. The p95 gate (2 s) makes AXIAM the only
+target with a *valid* login cell at 50 VUs; that's the defensible headline.
 
-Zitadel issues no refresh token on client-credentials, so each iteration does
-`mintToken()` (untimed) + a *fallback* `clientCredentials` op (timed) — hence
-its "refresh" throughput is exactly half its CC throughput (201 vs 396). The
-scenario should **tag the op actually measured** (e.g. a k6 tag / meta field
-`measured_op: refresh|issuance_fallback`) so `report.py` can label or exclude
-fallback cells instead of presenting them as refreshes. Real fix, same as 1.3:
-obtain a user-grant refresh token for Zitadel via its login API.
+### 1.6 ❌ NEW — `token_refresh` is a fallback op on ALL THREE targets (and retroactively was in run 1 for AXIAM too)
 
-### 1.5 meta.json is missing fields the methodology promises
+The A3 `bench_fallback` counter fired on **100% of iterations for every
+target** (AXIAM 145 555, KC 32 566, Zitadel 34 408 — each ≈ iterations).
+Cause: `token_refresh.js` still mints via `mintToken()` → client-credentials
+first → **no target issues a refresh token on the CC grant** (spec-correct),
+so every VU permanently takes the `clientCredentials` fallback branch. The
+cell therefore measures "CC issuance with an extra untimed mint per
+iteration" everywhere.
 
-`docs/methodology.md` §7 says every record embeds the *image digest* and
-scenario file hash; `runner/run-benchmark.sh` currently records neither (no
-`image`/`digest` key exists in any meta.json of this run — I checked). We
-also don't record host kernel, docker version, CPU model/frequency, or the
-`BENCH_BATCH_SIZE`. Add them — without the AXIAM image digest we cannot even
-say precisely which alpha build produced these numbers.
+Retroactive correction for run 1: AXIAM's celebrated 886/373 req/s "refresh
+rotation" cells were the **same fallback** — 886 ≈ exactly half of CC 1743,
+the two-requests-per-iteration signature we spotted on Zitadel but missed on
+ourselves. The instrumentation did its job. Run 2's ratios all match
+(AXIAM 910 ≈ ½×1788; 453 ≈ ½×908).
 
-## 2. Benchmark-coverage gaps (what the next rounds should add)
+Fix (**A8**): `token_refresh.js` setup must obtain the token via
+`mintUserToken()` (login-first — AXIAM's login sets `axiam_refresh`; KC ROPC
+returns `refresh_token`; Zitadel needs an OIDC flow or `offline_access` via
+its session/OIDC bridge — investigate; keep the fallback tag for targets where
+it's genuinely impossible). Until then, `report.py` already excludes these
+cells from head-to-head winner tables (verified working — keep it that way)
+and the public doc §4 carries the correction.
 
-1. **Zitadel gRPC.** We benchmarked AXIAM's gRPC authz but no competitor gRPC
-   at all. Keycloak has none — fine. **Zitadel's primary API surface is gRPC**
-   (auth, management, session services): add a `zitadel` gRPC adapter and at
-   least token-adjacent + session flows so AXIAM's Tonic stack is compared
-   against Zitadel's Go gRPC stack, not only REST. k6 already does gRPC
-   (we use it for AXIAM), so this is adapter + proto work only.
-2. **gRPC over TLS.** The bench pins AXIAM gRPC to plaintext :50051 in every
-   profile (`BENCH_GRPC_PLAINTEXT=true`, see `scenarios/lib/config.js`) — the
-   p2 "gRPC" numbers are plaintext gRPC while REST pays TLS. Terminate TLS on
-   the gRPC listener too (tonic/rustls) or the p2 matrix is internally
-   inconsistent.
-3. **p1-tls12 and p3-mtls were not run.** p3 especially matters — mTLS
-   client-cert auth is a core AXIAM/IoT story (and see §4.4: today AXIAM
-   can't even do p3 without nginx).
-4. **Median of ≥3 runs** (methodology §7). Single-run deltas like Zitadel's
-   "+32% under TLS" on jwks are obviously noise; the public doc had to
-   hand-wave this. `report.py --repeat` support exists on paper — wire
-   `bench-matrix` to actually do N passes and aggregate.
-5. **Saturation studies / open-loop load.** Closed-loop 50 VUs measures
-   "throughput at 50 concurrent users", conflating latency with capacity, and
-   caps fast endpoints (AXIAM jwks at 27 k/s was generator/loop-limited:
-   server CPU only 1.27/2 cores). Add a `constant-arrival-rate` executor
-   variant and/or a VU sweep (50→100→200…) recording the knee point. Also
-   assert and *record* k6 host CPU headroom per run (methodology promises
-   this gate; the sampler currently samples only target containers).
-6. **Prod-posture run.** All AXIAM numbers here have rate limits neutralized —
-   correct for capacity comparison, but we should also publish one clearly
-   labeled `rl=prod` AXIAM-only run so operators see the shipped defaults'
-   throughput envelope (and competitors' *lack* of default per-IP limiting can
-   be presented as an AXIAM security advantage rather than a benchmark
-   asterisk).
-7. **SDK client benches** (all 7 wired per `sdk/README.md`) and the deferred
-   **AMQP async-authz harness** — both still unexercised; the AMQP one needs
-   the custom (non-k6) publisher/consumer harness already sketched in
-   `README.md`.
-8. **Warm-up/steady-state validation.** Keycloak's JVM likely benefits from
-   longer warm-up than 30 s (JIT); consider per-target warm-up override and a
-   time-series sanity plot per cell (the res.csv already has 1 s resolution —
-   plot it) to confirm steady state before trusting a 120 s window.
-9. **Measure (don't just fear) thermal throttling.** The XPS 15 9570
-   (i7-8750H) throttles under sustained all-core load — but this run's data
-   shows no sign that *variable* throttling skewed comparisons: load was
-   moderate (≤ ~4/12 threads) and CPU-bound cells repeated far apart in the
-   2-hour session agree within noise (AXIAM introspection 2199 vs 2192 req/s
-   ~27 min apart; CPU-pegged Keycloak CC 143 vs 138 ~17 min apart). What the
-   data *cannot* exclude is a constant reduced sustained clock deflating all
-   absolute numbers equally, because `docker stats` utilization is
-   clock-blind. So: add CPU frequency + temperature columns to
-   `resource/sampler.sh` (host-side) and publish them in the report, pin the
-   CPU governor to `performance`, consider a no-turbo stability mode, and
-   note that a desktop/server re-run is deferred until hardware is available
-   (no VM budget at present) — the laptop remains the reference host for now.
+### 1.7 ❌ NEW — Zitadel gRPC scenario: 100% gRPC errors
 
-## 3. Database bottleneck: findings + tuning plan
+`zitadel_userinfo_grpc` ran (proto loads, 1725 req/s of *responses* at ~20 ms)
+but **every call returned a non-OK gRPC status** in both profiles. Two stacked
+causes, both visible in the data:
 
-Per-container CPU averages (measure window) show three regimes — AXIAM
-DB-bound, Keycloak server-bound, Zitadel DB-bound — detailed in the public
-doc §3. Internal takeaways:
+1. `bench_fallback=1` in setup: `mintUserToken()` fell back to
+   client-credentials because Zitadel's D5 `login()` returns a **session
+   token** in the body (`sessionToken`), which `readAccessFromLogin()` doesn't
+   recognize (it looks for `access_token`/cookies) → no user token.
+2. The CC machine-user token it used instead lacks the **Zitadel-project
+   audience** — Zitadel's own APIs (auth.v1 included) reject tokens minted
+   without `urn:zitadel:iam:org:project:id:zitadel:aud` scope. REST
+   `/oidc/v1/userinfo` accepts the plain CC token (hence REST userinfo works,
+   966/s) but the gRPC Auth API does not.
 
-### 3.1 SurrealDB is AXIAM's ceiling in this envelope
+Fix (**D11**): add the `urn:zitadel:iam:org:project:id:zitadel:aud` scope to
+the Zitadel `clientCredentials()` body used for gRPC setup (or exchange the
+session token properly), and record the k6 gRPC error *status* in a counter so
+the next failure of this shape is diagnosable from the summary alone. The
+res.csv shows Postgres pegged (2.03 cores) even on the error path — the
+requests were doing real DB work before failing, so a valid cell should land in
+the same order of magnitude (~1.7–2 k/s), which would make a genuinely
+interesting protocol-efficiency pairing vs Zitadel REST userinfo (967/s).
 
-SurrealDB pegged its 2-core cap on `authz_check_*` (2.02/1.88 avg) and ran
-1.7+ cores on `oauth2_client_credentials`/`token_refresh` while `axiam-server`
-never exceeded ~1.0 core on those flows. Actions:
+### 1.8 ⚠ PARTIAL — provenance fields: digests unknown, stale tag, floating DB tag
 
-- **Sensitivity run: uncap the DB** (`BENCH_DB_CPUS=4` or unlimited) for one
-  AXIAM-only pass to measure how far the *server* scales when the DB isn't the
-  wall. Cheap and hugely informative; do the same for Zitadel/Postgres for
-  fairness if published.
-- **Tune SurrealDB instead of just uncapping**: we run `surrealdb/surrealdb:v3`
-  with stock flags + SurrealKV on a laptop NVMe. Investigate: in-memory vs
-  surrealkv backend for the bench (durability parity question below),
-  SurrealDB query/transaction cache settings, and AXIAM-side connection-pool
-  sizing (is the pool large enough that the DB, not pool contention, is truly
-  the limit? — server idle + DB pegged suggests yes, but verify).
-- **Durability parity check (fairness):** Postgres 16 defaults to
-  `synchronous_commit=on` (fsync per commit); confirm what SurrealKV's flush
-  semantics are in v3 defaults. If the two sit at different durability points,
-  either align them or disclose it — token_refresh/introspection are
-  write-heavy enough for this to matter.
-- **Postgres tuning for competitors** (fairness in the other direction):
-  stock `postgres:16-alpine` has 128 MB `shared_buffers`, tiny
-  `work_mem`. Zitadel is Postgres-bound in this envelope; a minimally tuned
-  Postgres (shared_buffers ≈ 256 MB within the 1 GiB cap, appropriate
-  max_connections) is the honest competitor configuration. Keycloak won't
-  care (its DB is idle) but apply uniformly.
-- **Report should attribute bottlenecks automatically**: `report.py` already
-  has per-container samples; emit a `bottleneck: server|db|broker|none` tag
-  per cell (container avg ≥ ~95% of its cap) so this analysis doesn't have to
-  be redone by hand every run.
+A4 landed and every meta.json now has kernel/docker/CPU/governor/k6-cores —
+good. But all `image_digest` fields read `"unknown"` (locally-built images
+have no RepoDigests; pulled ones should have been inspected before the run)
+and the AXIAM tag string says `1.0.0-alpha12` while the binary is a local
+build of merged main (released as **1.0.0-alpha15**). Also
+`surrealdb/surrealdb:v3` is a **floating tag** — we cannot prove the DB
+version was identical between runs 1 and 2 (relevant to §4.6 attribution).
 
-### 3.2 RabbitMQ shows periodic 1-core spikes
+Fix (**A9**): (a) stamp the real built version into the image tag (or a
+`build_ref` meta field with `git rev-parse HEAD`); (b) fall back to
+`docker images --digests` / image ID when RepoDigests is empty, and record
+the image *ID* always; (c) pin `surrealdb` (and postgres) by digest in the
+bench composes.
 
-`bench-axiam-rabbitmq` averages 0.1–0.3 cores but p95 ≈ 1.0 core in nearly
-every scenario — periodic bursts (audit/event publishing flushes) that
-consume CPU inside AXIAM's measured footprint but deliver value competitors
-aren't providing (signed audit trail). Options: sample the broker's queue
-depths during runs to confirm audit ingestion keeps up; consider batching
-audit publishes on the server side; and in the report, break the efficiency
-metrics down per-container so the "AXIAM includes a broker" penalty is
-visible instead of silently folded in.
+### 1.9 ✅ VERIFIED — secrets hygiene (A7)
 
-## 4. AXIAM product work items (evidence-ranked)
+The shared run-2 archive contains no secret material (checked: the only
+`SECRET|PASSWORD` grep hits are scenario filenames in meta.json). `bench-pack`
+does its job.
 
-### 4.1 [HIGH] Bound concurrent Argon2id verifications (perf + DoS hardening)
+## 2. Cross-target observations that need internal follow-up
 
-`oauth2_password_login`: server pegged at 2.0 cores, RSS climbing to
-~970 MiB of the 1024 MiB cap, p95 2.1 s (gate breach) at only ~35 req/s.
-The memory math is exact: 50 concurrent VUs × 19 MiB (OWASP Argon2id m=19456)
-≈ 950 MiB — i.e. **login concurrency is unbounded** and each in-flight login
-holds a full Argon2 arena. At 64+ concurrent logins this OOM-kills the
-container (memory DoS reachable from an unauthenticated endpoint — the
-per-IP limiter mitigates single-source floods, but distributed sources
-bypass it). Fix: a semaphore sized ≈ number of cores around the Argon2
-verify (fail fast / queue with timeout when saturated). Keeps params at
-OWASP levels, converts the failure mode from OOM to bounded latency,
-and should *raise* effective login throughput by eliminating memory
-pressure + scheduler thrash. Consider `tokio::task::spawn_blocking` pool
-sizing review at the same time.
+### 2.0 ⚠ Keycloak improved 2–5× vs run 1 on the SAME image tag
 
-Related observation: after the login scenario, server RSS never returned to
-baseline (~93 MiB before, ~646 MiB for every subsequent scenario) — allocator
-retention, not a leak per se, but worth a look (jemalloc/mimalloc with decay
-tuning, or `malloc_trim`-style release) since it inflates AXIAM's reported
-memory footprint in every scenario that runs after a login burst.
+KC 26.7.0 / postgres:16-alpine in both runs, yet: CC 143→346, introspection
+337→1765, jwks 644→3855, userinfo (error path)→3561. Its latency *shape*
+changed too (run 1: p50 ~90–300 ms; run 2: p50 3–8 ms with an ~80 ms p95
+mode — classic JVM fast-path + GC/queueing tail). Plausible contributors, none
+proven: C2's uniform Postgres tuning (though KC's DB is nearly idle), the A2
+seed rebuild (a correctly-configured realm/client), no 1.66 M-error userinfo/
+ROPC storms polluting the same session, and possible image drift under the
+mutable `26.7.0` tag (digest unrecorded in run 1 — see §1.8). **Action:** treat
+run 2 as the honest baseline going forward, say so in the public doc (done),
+and let A9 digest-pinning prevent this ambiguity from recurring. Do NOT quote
+run-1 Keycloak multiples (12×, 6.5×…) anywhere anymore; the current honest
+multiples are CC 5.2×, introspection 1.3×, jwks 7.0×, userinfo 1.5×.
 
-### 4.2 [HIGH] Fix the authz batch path (currently slower than N single checks)
+Two uncomfortable, publish-with-care facts from the new KC numbers:
+- **Introspection is now close** (2229 vs 1765 = 1.26×). AXIAM still wins
+  throughput, p95 (27 vs 83 ms) and cpu·ms/req (1.07 vs 1.33), but the "6.5×"
+  era is over.
+- **KC beats AXIAM on cpu·ms/req for userinfo** (0.56 vs 0.69) — driven by
+  AXIAM's stack including a pegged SurrealDB + RabbitMQ. Whole-stack
+  efficiency is the metric we chose; keep it, but the server-only breakdown
+  (A5) should be surfaced next time to show AXIAM's server itself is cheaper.
 
-Batch of 5 checks: REST 41 req/s (=205 checks/s) vs single-check REST
-290 checks/s; gRPC batch 22 req/s (=110 checks/s) vs single gRPC 485/s —
-**batching makes it worse**, with p95 1.5–2.6 s and p50 over 1.1 s while the
-server sits at 0.07–0.11 cores and SurrealDB at only ~1.2 cores (neither
-saturated!). A 5-item batch taking ~1.1 s median with both CPUs mostly idle
-smells like serialized per-item DB round-trips *plus* some fixed per-item
-stall (lock contention, per-check transaction, or an N+1 explosion in the
-RBAC hierarchy walk). Investigate `axiam-authz` + the batch handlers:
+### 2.1 Zitadel is even more DB-bound than we thought
 
-- Execute batch items concurrently (join_all) or, better, coalesce into one
-  DB query for the common same-subject case.
-- Profile a single batch request server-side (tracing spans per check) to
-  find the stall — the idle-CPU + high-latency signature suggests waiting,
-  not computing.
-- Same investigation covers the single-check gRPC p99 (850 ms vs p95 173 ms —
-  a nasty tail, possibly SurrealKV compaction stalls or connection-pool
-  exhaustion under burst).
+Uncapped (PG 4 CPU/2 GiB): jwks 2034→3520 with PG at **3.9/4 cores**; userinfo
+967→1718 with PG at **4.01/4**; introspection 923→1027 (its server becomes the
+wall at 1.9/2). Zitadel's ceiling in any small envelope is Postgres. For
+fairness we already tuned PG uniformly (C2) — mention in methodology that the
+uncapped pass gave Zitadel's DB 2× the CPU AXIAM's server had.
 
-### 4.3 [HIGH] Investigate the TLS 1.3 throughput halving on token endpoints
+### 2.2 Benchmark-coverage gaps still open
 
-Native rustls p2 vs p0: client_credentials −55%, token_refresh −58%, yet
-introspection −0.3% and jwks −13.9%. In the degraded cells *nothing is
-saturated* (server 0.64 cores, DB 1.11) — latency simply doubles (26→58 ms
-p50). That pattern (per-request fixed cost added, no CPU wall) points at
-connection behavior, not record crypto: suspects are per-request handshakes
-(keep-alive not effective on the rustls listener for POSTs?), missing TLS
-session resumption (no session tickets configured in
-`crates/axiam-server/src/tls.rs`?), Nagle/`TCP_NODELAY` on the TLS listener,
-or actix worker/acceptor tuning differences between the plaintext and rustls
-binds. Reproduce with a single curl/openssl session vs fresh-handshake loop;
-enable rustls session tickets + verify keep-alive; do NOT enable 0-RTT (replay
-risk on POST token endpoints — explicitly document that decision). Whatever
-the cause, it's worth ~2× on our two most marketable numbers.
+1. **p3-mtls / p1-tls12** — still not run (D3 native mTLS code is merged and
+   waiting for its no-nginx p3 pass).
+2. **Median-of-3** (C1) — machinery merged, not exercised; next full run must
+   use it. All run-2 deltas < ~10% should be treated as noise until then.
+3. **Saturation / open-loop** — closed-loop 50 VUs still caps jwks (k6 ~5.4
+   cores, borderline against the generator-headroom gate) and now visibly
+   floors authz/token cells in the uncapped pass (§3.2): nothing saturated,
+   throughput = 50 / round-trip-latency. A `constant-arrival-rate` variant is
+   the only way to measure the real knee.
+4. **rl=prod posture run** (C4) — still pending.
+5. **SDK benches (E1) and AMQP harness (E2)** — unchanged.
+6. **D7 decision-cache ON pass** — not in this archive; run the labeled
+   sensitivity cell next time.
 
-#### 4.3.1 B2 root-cause analysis (code landed; measurement pending laptop re-run)
+## 3. Bottleneck attribution (run-2 data)
 
-**Status:** durable fixes + instrumentation implemented in the server and bench
-harness; the *measured* confirmation is **pending a laptop re-run** (this
-working environment has no k6, no live stack, and an empty `results/` tree — the
-raw 2026-07-19 k6 JSON with the sub-metrics named below lives on the
-maintainer's laptop). Nothing below claims a measured result yet.
+### 3.1 Capped matrix — the three regimes still hold, with better resolution
 
-**Ranked hypotheses**
+- **AXIAM:** DB-pegged on authz single checks (2.01–2.02/2) and userinfo
+  (2.04/2); DB-heavy but unpegged on CC/refresh (1.76); server-heavy only on
+  login (1.66, by design) and jwks (1.24–1.56, generator-limited). Batch
+  cells: **nothing** is loaded (server 0.03–0.06, DB 1.03–1.09) — see §4.2.
+- **Keycloak:** server pegged at 2.00 in *every* cell, DB ≤ 0.35. Unchanged.
+- **Zitadel:** PG pegged or near-pegged everywhere except login (server-pegged
+  doing bcrypt).
 
-1. **[LEADING] ALPN/protocol asymmetry — h2 (p2) vs http/1.1 (p0).** Over TLS,
-   k6 (Go `net/http`, `ForceAttemptHTTP2=true`) negotiates **h2** whenever the
-   server offers it; the plaintext p0 listener is **http/1.1**. So p2 and p0 are
-   not the same protocol. Confirmed from source that AXIAM's TLS bind *does*
-   offer h2: actix-web's `HttpServer::bind_rustls_0_23` →
-   `actix_http::HttpService::rustls_0_23_with_config` unconditionally sets
-   `config.alpn_protocols = ["h2","http/1.1", …]` (actix-http 3.13.1,
-   `src/service.rs`), h2 first, so it wins. Under h2, k6 funnels all 50 VUs'
-   requests through a **single multiplexed TCP/h2 connection** with default
-   flow-control windows, where http/1.1 uses a per-VU connection pool — a
-   plausible ~2× serialization ceiling with no CPU wall, exactly matching the
-   observed p50-doubling-without-saturation signature. Why introspection
-   (−0.3%) and jwks (−13.9%) barely move: introspection/jwks are GETs that are
-   cheaper/cacheable and less sensitive to the single-conn ceiling than the POST
-   token grants.
-   *Confirm/refute on the laptop with ZERO new runs:* read the **`http_version`**
-   tag already present in the 2026-07-19 k6 JSON — p2 token cells should show
-   `2`, p0 `1.1`. If p2 is already `1.1`, this hypothesis is refuted.
+### 3.2 Uncapped sensitivity — what it taught us
 
-2. **[SECONDARY] No TLS session resumption — full handshake per connection.**
-   The old `tls.rs` set neither a ticketer nor a session store, so rustls did a
-   **full ECDHE handshake on every connection**. k6 opens many short-lived
-   connections, making the handshake a per-request fixed cost — the same
-   "fixed cost, not record crypto" signature. This is additive to (1).
-   *Confirm/refute with ZERO new runs:* inspect **`http_req_tls_handshaking`**
-   (and `http_req_connecting`) in the existing p2 JSON — if handshaking time is
-   a large, roughly-constant slice of `http_req_duration` on the degraded cells,
-   resumption is a real contributor; if it's near-zero (connections reused),
-   it's not the dominant term and (1) dominates.
+- **authz single checks:** +37% REST (745→1017), DB now 2.84/4 (unpegged),
+  server 0.88/2 (unpegged) → the remaining limit is **round-trip latency**
+  (p50 46.5 ms ⇒ 50 VUs / 0.0465 s ≈ 1075/s — exactly what we measured).
+  Cutting per-check latency (D7 cache, or fewer round-trips) is now worth
+  more than CPU. The 3-round-trip structure at ~15 ms each is the floor.
+- **client_credentials: the DB cap was NOT the wall** (+1.6%, DB plateaus at
+  1.76 cores regardless of cap). Token issuance is latency-structured too
+  (p50 25.6 ms ⇒ ~1950/s closed-loop ceiling; we sit at 1817). To move this
+  number: shave round-trips per issuance (§4.5), not DB CPU.
+- **userinfo: first non-login AXIAM server saturation** (2.01/2 cores at
+  7261/s, DB 3.33). This is the cell to profile server-side CPU on next —
+  it's our highest-rate authenticated read path.
+- **batch: identical uncapped** — definitive proof it's not resource-bound.
 
-3. **Keep-alive parity — checked, not a factor.** The plaintext and rustls
-   binds are the **same** `HttpServer` builder in `main.rs` (only the bind
-   method differs); actix keep-alive/`client_request_timeout` are therefore
-   identical across p0/p2. Corroborate on the laptop via `http_req_connecting`
-   being ~0 on warm iterations (connection reuse) in both profiles.
+### 3.3 SurrealDB tuning (D6) — sharpened by the uncapped data
 
-4. **TCP_NODELAY — checked, not a factor.** actix-server sets `TCP_NODELAY` by
-   default on accepted sockets, and both binds share that accept path, so Nagle
-   is off equally in p0 and p2.
+The DB pegging on authz/userinfo is real work, not cap artifact (it happily
+eats 2.8–3.3 cores when allowed). Next D6 steps, in order of expected value:
+profile the 3 coalesced authz queries and the userinfo read with SurrealDB
+slow-query logging; check `get_role_permission_grants_for_roles` for the §4.2
+serialization; then the durability-parity statement (C2.3) before publishing
+any tuned numbers. RabbitMQ still shows the periodic ~1-core p95 spikes
+(avg 0.01–0.41) — unchanged, same batching recommendation as run 1.
 
-**What changed (code)**
+## 4. AXIAM product work items (evidence-ranked, updated)
 
-- `crates/axiam-server/src/tls.rs`: (a) new `AXIAM__SERVER__TLS__HTTP2` knob
-  (default `true`) driving `config.alpn_protocols` (h2+h1.1 vs h1.1-only), via a
-  unit-tested `alpn_protocols()` helper; (b) **TLS 1.3 ticket resumption**
-  enabled — `config.ticketer = rustls::crypto::ring::Ticketer::new()?` plus a
-  bounded `ServerSessionMemoryCache::new(512)` (rustls 0.23.42). 0-RTT/early
-  data left **off** (default `max_early_data_size=0`).
-- `crates/axiam-api-rest/src/config/mod.rs`: `TlsConfig.http2: bool` (custom
-  `Default` → `true`).
-- `crates/axiam-server/src/main.rs`: TLS-bind logging of `http2_offered` /
-  `resumption` / `early_data`, plus a startup **warning** when `http2=false`
-  that actix re-adds h2 (so the knob is not silently misleading).
-- Bench: `benchmarks/targets/axiam/tls/tls13-h1.conf` (an http/1.1-only TLS 1.3
-  nginx edge) + `AXIAM__SERVER__TLS__HTTP2` pass-through on the native-tls
-  overlay, so p2 can be run **both ways** to isolate the h2 effect in one
-  sitting.
+### 4.1 ✅ B1 Argon2id semaphore — CONFIRMED, with a residual
 
-**Important honesty caveat on the knob:** because actix-web's rustls bind
-re-adds h2 to ALPN, `http2=false` on the *native* listener does not by itself
-produce an http/1.1-only server. The genuine apples-to-apples h1 cell is run via
-the `tls13-h1.conf` nginx edge (or, later, a native H1-only actix service — not
-built here to avoid an untestable hand-rolled `actix_server` path). Session
-resumption, by contrast, is a real unconditional server-side improvement that
-landed.
+Measured: 67.5 req/s (was 35), p95 907 ms (was 2127), server peak ~478 MiB
+(was ~970), 0% errors, gate passes, at unchanged OWASP parameters. The
+acceptance target "RSS under ~350 MiB" was missed on paper but the miss is the
+**D9 retention effect**, not concurrency: baseline RSS before the login cell
+is ~115 MiB, peak during is ~478, and RSS then stays ~478 for every subsequent
+scenario in the session (run 1: retained ~646). So: semaphore works; allocator
+retention (D9) is still worth the jemalloc A/B, since it inflates AXIAM's
+published memory column for every post-login cell (visible in run 2's mem
+figures: cells that ran after login report ~880–950 MiB stack vs ~420–490
+before).
 
-**Acceptance (pending laptop):** re-run only the p2 vs p0 cells for
-`oauth2_client_credentials` and `token_refresh`; success = p2 within ~15% of p0
-throughput with introspection/jwks not regressed. Expected path: the
-`http_version`/`http_req_tls_handshaking` reads above first attribute the split
-between h2 (1) and handshakes (2); resumption is already in; if h2 is confirmed
-dominant, run the `tls13-h1.conf` cell to show p2-h1 ≈ p0.
+### 4.2 ❌ [HIGH] Batch authz — D1 coalescing landed, numbers did not move; NEW root-cause hypothesis
 
-### 4.4 [MEDIUM] Native mTLS (and the TLS 1.2 decision)
+Run 2 (capped or uncapped, p0 or p2 — all identical): REST batch 46/s at p50
+~1.05 s; gRPC batch 23/s at p50 ~2.15 s; server 0.03–0.06 cores; **DB pinned
+at 1.03–1.09 cores in every configuration, including with 4 cores available**.
+That last fact is the tell: the batch path consumes almost exactly ONE core's
+worth of DB no matter what — i.e. its work is **serialized on a single
+DB-side thread**. Closed-loop arithmetic then explains everything:
+50 VUs / 46 per-s ≈ 1.09 s queueing delay = the observed p50; throughput is
+pinned at 1/(per-batch serialized CPU time ≈ 22 ms).
 
-Discovered during bench tuning: AXIAM's native rustls listener is TLS 1.3
-server-auth only — **p3-mtls (and p1-tls12) require an nginx edge in front of
-AXIAM**, while Keycloak and Zitadel terminate mTLS in-process. For an IAM
-whose roadmap sells certificate-based auth for IoT (mTLS), client-cert
-verification belongs in the server: implement rustls client-auth (verifier
-against the tenant/org CA from axiam-pki, expose SAN/SPKI to the auth layer
-for certificate-mapped identities). That also makes the p3 benchmark a fair
-in-cap measurement. For TLS 1.2: either add it natively for p1 or take the
-explicit stance "AXIAM is TLS 1.3-only, use an edge proxy for legacy
-clients" — the security posture docs currently say TLS 1.3 minimum, so
-consider simply documenting p1 as N/A-by-policy for native AXIAM.
+So the D1 coalescing was correct but aimed at the wrong cost: it removed
+round-trips (15→3), while the dominant cost is (hypothesis) **one of the
+coalesced queries executing serially inside SurrealDB** — prime suspect the
+batched `get_role_permission_grants_for_roles` (IN-across-roles), possibly
+unindexed/table-scanning, and (for gRPC ≈ 2× REST) the per-item
+subject_id/T-27-12 validation path issuing a second heavy query. Note the
+single-check path improved 2.5× in the same release — whatever serializes is
+specific to the batch's query shape.
 
-### 4.5 [MEDIUM] Feed the DB-bound flows (after §3.1 tuning data)
+Next steps (**D10**, supersedes the D1 re-run):
+1. Reproduce one batch call against the bench stack with SurrealDB query
+   logging; time each of the 3 queries; `EXPLAIN` the grants query.
+2. If the grants query is the serial cost: index it, or split it back into
+   per-role queries issued **concurrently** (ironic but plausible win), or
+   pre-join role→grants in one round-trip per role set.
+3. Control experiment: implement the batch handler as `join_all` of N
+   single-check evaluations and benchmark both shapes — if 5 concurrent
+   singles beat the coalesced batch (745/5 ≈ 149 batches/s equivalent vs
+   measured 46), ship that while the query is investigated.
+4. Explain gRPC's exact 2× and eliminate it.
 
-If SurrealDB remains the wall after tuning: reduce per-op DB work in the hot
-paths — candidates visible from this run: per-check RBAC reads
-(cache the subject's effective-permission set with short TTL + event-driven
-invalidation; the additive-only/allow-wins model of v1.0-beta makes a
-decision cache tractable), token-issuance writes (client_credentials at
-1743/s drove SurrealDB to 1.74 cores — check for redundant reads of
-client/tenant per issuance; cache client credentials verification material),
-and introspection lookups (opaque-token read path; 2199/s at 1.42 DB cores is
-already good — low priority).
+### 4.3 ❌ [HIGH] TLS 1.3 halving persists — resumption hypothesis REFUTED, h2 is the surviving lead
 
-### 4.6 [LOW] Quick wins
+Run 2 p2 vs p0 (capped): CC −49.2%, refresh-fallback −50.2%, introspection
+−0.4%, jwks −10.9%, userinfo −9.8%, login +0.4%. New, decisive evidence from
+the A6/k6 data: in the degraded p2 token cells `http_req_tls_handshaking` avg
+≈ **0.001 ms** and `http_req_connecting` ≈ 0 — the B2 session-resumption +
+keep-alive work is functioning, handshakes are simply not happening per
+request, and yet p50 still exactly doubles (25.9→53.8 ms) with **everything**
+(server CPU 0.98→0.56, DB 1.76→1.00 cores) halving in lockstep. That is a
+concurrency ceiling upstream of the server, precisely the
+**h2-single-connection multiplexing** signature (hypothesis 1 in the B2
+analysis below): k6 negotiates h2 over TLS and funnels all 50 VUs through one
+multiplexed connection, while p0 http/1.1 uses a per-VU connection pool.
 
-- **JWKS caching headers**: we serve 27 k/s easily, but adding
-  `Cache-Control`/`ETag` (per-tenant key rotation aware) cuts client refetch
-  storms in real deployments; also consider whether `?tenant_id=` JWKS should
-  be served from an in-process cache invalidated on rotation (it probably
-  already is, given 0.062 cpu·ms/req — verify and document).
-- **userinfo**: once the harness bug is fixed we'll get a real number; given
-  every other AXIAM read path, expect a strong one — make sure the endpoint
-  accepts (or cleanly 403s) service-account tokens per OIDC spec rather than
-  whatever produced the current 100% failure shape, and document the choice.
-- **gRPC TLS support in the bench image docs** (pairs with §2.2).
+Why introspection/userinfo/jwks barely move: their per-request latencies
+(1.3–20 ms) sit under the single-connection ceiling; the POST token grants
+(26 ms+) don't.
 
-## 5. Security-hardening notes distilled from this exercise
+**Next actions (zero server code until measured):**
+1. Run the p2 cell through the already-merged h1-only edge
+   (`targets/axiam/tls/tls13-h1.conf`) for `oauth2_client_credentials` — if
+   p2-h1 ≈ p0, h2 is convicted. (This was the one B2 acceptance step not run
+   in this round.)
+2. Confirm from the raw k6 JSON (laptop) that p2 cells carry
+   `http_version=2` tags.
+3. If convicted, decide the *product* stance: k6-specific artifact vs real
+   client behavior. Real SDKs/service-mesh clients open connection pools;
+   single-conn h2 serialization mostly punishes benchmark-style single-host
+   clients. Options: tune h2 stream/flow-control windows on the actix
+   listener; document `AXIAM__SERVER__TLS__HTTP2=false` + edge guidance; or
+   accept and document. The honest public position meanwhile (published in
+   run-2 doc): "TLS 1.3 halves AXIAM's token-endpoint throughput *under this
+   load generator*; root cause isolated to connection behavior, not crypto —
+   fix in validation."
 
-1. **Unauthenticated memory-DoS via login** (§4.1) — the concrete numbers
-   make this a real finding, not a theory: ~50 concurrent logins ≈ 950 MiB.
-   Semaphore + optional per-tenant login concurrency quota. Track as a
-   security work item, not only perf.
-2. **Rate limiter posture**: the bench had to neutralize AXIAM's per-IP
-   limits while competitors ship none by default — that's a *differentiator*
-   to market (secure-by-default) and the `rl=prod` run (§2.6) turns it into
-   published evidence. Also consider making limiter keys configurable
-   (per-client-id / per-tenant, not only per-IP) so NAT'd fleets don't
-   collide — a lesson directly from the "single source IP" bench constraint.
-3. **mTLS in-process** (§4.4) — removes nginx from the trusted path; today
-   client-cert identity would be asserted via proxy headers, which is a
-   header-spoofing surface if the edge is misconfigured. Native verification
-   closes it.
-4. **TLS session tickets**: when implementing (§4.3), use rotating ticket
-   keys (rustls default resumption with periodic key rotation), and skip
-   0-RTT on state-changing endpoints.
-5. **Bench secrets hygiene**: seed.env files with client secrets and
-   passwords land in `results/` (gitignored, but they were just shared in an
-   archive). They're throwaway bench creds, but the runner could redact
-   secrets from anything under `results/` to make result archives shareable
-   by construction.
+The 4.3.1 root-cause analysis from run 1 (hypotheses, code landed: ALPN knob,
+ticketer+session cache, 0-RTT declined, tls13-h1 edge) remains accurate;
+run 2 upgraded hypothesis 2 (resumption) from "secondary" to "refuted as
+dominant term" and left hypothesis 1 (h2) as the only live suspect.
 
-## 6. Reporting/presentation improvements for the site
+### 4.4 [MEDIUM] Native mTLS — merged, still unmeasured
 
-- Per-container CPU/mem breakdown per cell (bottleneck attribution tag,
-  §3.1) — it's the single most explanatory piece of data we have and it's
-  currently only in raw CSVs.
-- Add p50 to `report.md` (it's already in the k6 summaries; the public doc
-  had to be assembled by hand from both sources).
-- Blank out throughput/latency columns for `error_rate=100%` cells in
-  `report.md` — printing 10 358 req/s of 401s as "throughput" invites
-  misquoting.
-- Mark fallback-op cells (Zitadel login/refresh, §1.3–1.4) as
-  non-comparative in the report the way authz cells already are.
-- Charts for the site from the §5 public tables: grouped bars
-  (throughput and thr/core per scenario × target, one group per profile),
-  p95 latency dot plot, and a "TLS cost" delta chart — all derivable from
-  the public doc's matrix without new data.
+No p3 cells in this archive. The p3 no-nginx run stays on the next-run list.
+(gRPC-over-TLS *did* get validated this round — see §4.7.)
 
-## 7. Suggested order of execution
+### 4.5 [MEDIUM] Feed the DB-bound flows — now with uncapped guidance
 
-1. Harness fixes §1.1–1.5 + smoke checks (unblocks a fully-valid matrix).
-2. Argon2 semaphore (§4.1) and TLS investigation (§4.3) — biggest product
-   wins, both likely small diffs.
-3. Re-run matrix (median of 3) + DB-uncapped sensitivity pass (§3.1) on the
-   laptop; publish updated draft.
-4. Batch-authz fix (§4.2); Zitadel gRPC + login-API adapters (§2.1, §1.3);
-   p3-mtls once native mTLS lands (§4.4).
-5. Server-class hardware run → replace "draft" label on the site.
+Post-uncapped picture (§3.2): authz checks and userinfo scale with DB CPU;
+token issuance does NOT (latency-structured). Priorities: (a) D7 decision
+cache ON sensitivity cell — with checks now at 745–1017/s and DB-bound, the
+cache's expected win is large and measurable; (b) count round-trips per CC
+issuance and remove redundant client/tenant reads (the 25.6 ms p50 at ~1
+server-core is mostly waiting); (c) userinfo server-side profile (first
+server-saturating read path, §3.2).
+
+### 4.6 ⚠ Attribute the 2.5× single-check improvement honestly
+
+authz_check_rest went 290→745 req/s and the gRPC p99 tail (850 ms) vanished
+between runs, but *which* change did it (D1 handler work? F2 pool lifecycle?
+SurrealDB drift under the floating `v3` tag? seed shape?) is **not
+attributable** with digests unrecorded (§1.8). Before quoting "2.5× faster
+authz" in marketing: pin images (A9), re-run once on the pinned stack, and
+bisect only if the number doesn't reproduce. The public doc currently states
+the improvement with the harness/server changes as joint attribution — keep
+that phrasing until proven.
+
+### 4.7 ✅ Quick wins landed this round
+
+- **gRPC over TLS (D2 + #218 crypto-provider fix): validated live** — p2 gRPC
+  cells ran over TLS (per-VU handshakes visible: `tls_handshaking` avg
+  1.9 ms on authz_check_grpc p2) with **no throughput penalty** (746 vs 722
+  p0; batch identical). The p2 matrix is no longer internally inconsistent.
+- **JWKS (B3):** flat at 24.1–27.4 k/s, still generator-limited; ETag/304
+  behavior not exercised by the bench (k6 sends no If-None-Match) — fine.
+- **userinfo endpoint semantics:** AXIAM cleanly accepts the user token and
+  is the fastest target — the run-1 "make sure it 403s cleanly" note is moot.
+
+### 4.8 [LOW] Report/labeling polish for run 3
+
+- `report.py` treats `bench_fallback` in *setup* (Zitadel userinfo mints a CC
+  token once) identically to per-iteration fallback — distinguish
+  `fallback-op` (cell measures the wrong op) from `cc-token-setup` (op is
+  right, token provenance is a caveat). Zitadel's REST userinfo cell is
+  currently over-penalized by the label.
+- Blank the throughput column for the 100%-error zitadel_userinfo_grpc cell
+  (1725/s of errors invites misquoting — the run-1 lesson, new instance).
+- Surface the A5 server-only efficiency table in the public doc next time
+  (see §2.0, KC userinfo cpu·ms).
+
+## 5. Security-hardening notes (updated)
+
+1. **Login memory-DoS (B1): closed and verified** — peak RSS bounded (~478
+   MiB incl. retention, was ~970 at the cap edge), backpressure instead of
+   OOM. Residual: D9 retention keeps ~360 MiB of allocator arena after the
+   burst; not a DoS, but run the experiment.
+2. **Rate limiter posture** — unchanged stance; C4 prod-posture run still
+   pending. The competitors' new numbers don't change the argument: neither
+   KC nor Zitadel ships default per-IP limits.
+3. **TLS 0-RTT stays off** (reaffirmed; resumption tickets active and now
+   proven effective in-bench).
+4. **mTLS in-process** — merged, needs the p3 run for the proxy-headers
+   surface to be retired in the bench too.
+5. **Zitadel bcrypt observation** (from D5): at Zitadel defaults a single
+   laptop core sustains ~1 login/s — worth a neutral doc note on hash-cost
+   tradeoffs (AXIAM's Argon2id at OWASP params + semaphore gives 67/s on 2
+   cores with bounded memory; the *combination* of strong hashing and
+   concurrency bounding is the differentiator).
+
+## 6. Reporting/presentation for the site (run-2 deliverables)
+
+- Public doc rewritten (second draft) with: real 3-way login and userinfo
+  tables, the refresh-cell correction (prominent, it corrects draft 1), TLS
+  status honesty, KC-improvement note, uncapped sensitivity section, and the
+  host-telemetry summary (temps hit 95–100 °C; clocks held 3.7–3.9 GHz on
+  CPU-pegged cells, ~3.2 GHz on the k6-heavy jwks cells; governor
+  `performance`; per-cell mhz/temp columns now in the raw data).
+- Charts unchanged from the run-1 plan (grouped bars, p95 dots, TLS-delta) —
+  all derivable from the §5 matrix of the public doc.
+- Do NOT chart: token_refresh (fallback everywhere), zitadel_userinfo_grpc
+  (invalid), any run-1 Keycloak multiple.
+
+## 7. Suggested order of execution (updated for run 3)
+
+1. **A8** refresh-token user-mint + **D11** Zitadel gRPC audience + **A9**
+   digest/version stamping + §4.8 label polish — all small harness diffs,
+   they unblock the last invalid/ambiguous cells.
+2. **B2 conviction cell**: p2 CC via `tls13-h1.conf` (one cell, minutes) —
+   then fix or document per §4.3.3.
+3. **D10** batch serialization investigation (query profiling + concurrent
+   control experiment).
+4. **Run 3 on the laptop**: full capped matrix, median-of-3 (C1), incl.
+   p3-mtls (D3), D7-cache-ON cell, C4 prod posture, and the uncapped pass
+   for Keycloak too (completes the sensitivity set).
+5. E4 public refresh from run 3; then the deferred E1/E2/E3 ladder.

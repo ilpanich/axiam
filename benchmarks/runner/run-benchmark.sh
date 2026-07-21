@@ -82,7 +82,11 @@ else
 fi
 
 # The authz scenarios (gRPC and REST) are AXIAM-only; drop them for other targets.
-AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js"
+# userinfo_grpc.js (axiam.v1.UserInfoService/GetUserInfo) is AXIAM's own gRPC
+# identity read — the counterpart of Zitadel's zitadel_userinfo_grpc.js; it dials
+# AXIAM's proto and has no equivalent on Keycloak, so it is AXIAM-only too. The
+# two vendors' gRPC-userinfo scenarios pair up cross-vendor in report.py.
+AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js"
 
 # D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
 # counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and

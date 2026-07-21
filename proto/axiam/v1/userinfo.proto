@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package axiam.v1;
+
+option php_metadata_namespace = "Axiam\\Sdk\\Grpc\\Gen\\Metadata";
+// PHP-only codegen options — must match authorization.proto's values so all
+// files in package axiam.v1 agree (buf PACKAGE_SAME_PHP_NAMESPACE). Ignored
+// by every other language's codegen.
+option php_namespace = "Axiam\\Sdk\\Grpc\\Gen";
+
+// OIDC-style userinfo for the *authenticated* caller — the low-latency gRPC
+// counterpart of the REST `GET /oauth2/userinfo` endpoint, analogous to
+// Zitadel's `zitadel.auth.v1.AuthService/GetMyUser`.
+//
+// Identity is derived entirely from the `authorization: Bearer <access_token>`
+// metadata header (validated by the server's auth interceptor); the request
+// body is empty. The returned claim set mirrors the REST endpoint exactly,
+// including OIDC scope gating (see the field comments below).
+service UserInfoService {
+  // Return the authenticated caller's identity claims. `sub`, `tenant_id`, and
+  // `org_id` are always populated; `email` and `preferred_username` are gated
+  // on the "email" and "profile" scopes respectively.
+  rpc GetUserInfo(GetUserInfoRequest) returns (GetUserInfoResponse);
+}
+
+// Empty request — every parameter is read from the authorization bearer token,
+// not from request fields.
+message GetUserInfoRequest {}
+
+message GetUserInfoResponse {
+  // Subject (user) UUID. Always present.
+  string sub = 1;
+  // Tenant UUID. Always present.
+  string tenant_id = 2;
+  // Organization UUID. Always present.
+  string org_id = 3;
+  // User email. Present only when the token carries the "email" scope.
+  optional string email = 4;
+  // Preferred username. Present only when the token carries the "profile" scope.
+  optional string preferred_username = 5;
+}

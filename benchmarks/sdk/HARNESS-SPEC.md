@@ -39,14 +39,24 @@ concurrency 1. `refresh()` also requires a prior successful `login()` on the sam
 client instance.
 
 **Out of SDK-harness scope.** `oauth2_token` (client-credentials grant),
-`introspect`, and `userinfo` are real AXIAM server endpoints (`/oauth2/token`,
-`/oauth2/introspect`, `/oauth2/userinfo`) and are measured at the protocol level
-by the k6 scenarios (`scenarios/oauth2_client_credentials.js`,
-`scenarios/token_introspection.js`, `scenarios/userinfo.js`). No SDK wraps them
-by contract — CONTRACT.md §1 locks the SDK method vocabulary to `login`,
-`verify_mfa`, `refresh`, `logout`, `check_access`/`can`, and `batch_check` only —
-so there is no SDK client call to time for these three ops. Do not add them to
-an SDK bench's `ops`.
+`introspect`, and the REST `userinfo` are real AXIAM server endpoints
+(`/oauth2/token`, `/oauth2/introspect`, `/oauth2/userinfo`) and are measured at
+the protocol level by the k6 scenarios (`scenarios/oauth2_client_credentials.js`,
+`scenarios/token_introspection.js`, `scenarios/userinfo.js`). No SDK wraps the
+REST endpoints by contract — CONTRACT.md §1 does not expose `oauth2_token` /
+`introspect` / a REST `userinfo` as SDK methods — so there is no SDK client call
+to time for those three ops. Do not add them to an SDK bench's `ops`.
+
+**`get_user_info` (gRPC-only, optional).** CONTRACT.md §1.1 (contract 1.3) adds a
+canonical gRPC-only operation `get_user_info` (`axiam.v1.UserInfoService/GetUserInfo`).
+It IS a real SDK method — but only in SDKs that ship a gRPC transport (Rust,
+TypeScript, Python, Java, C#, PHP, Go). A gRPC-capable SDK bench MAY add a
+`get_user_info` op: run a warm-up then N timed iterations at `SDK_BENCH_CONCURRENCY`
+after a successful `login()` (the op needs the login's access token), against a
+target reachable at `BENCH_GRPC_ADDR`, recording per-op latency like the other ops.
+A REST-only SDK bench (Kotlin, Swift, C, C++) MUST NOT add it and should emit a
+`pending` record with reason `grpc-not-supported` if asked. This op is distinct
+from the protocol-level k6 `userinfo_grpc.js` scenario, which measures the server.
 
 ## Inputs (environment)
 

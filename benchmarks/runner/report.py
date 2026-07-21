@@ -314,6 +314,10 @@ SERVER_CONTAINER = {
 NON_COMPARATIVE_SCENARIOS = {
     "authz_check_grpc", "authz_batch_grpc", "authz_check_rest", "authz_batch_rest",
     "zitadel_userinfo_grpc",
+    # AXIAM's own gRPC identity RPC (axiam.v1.UserInfoService/GetUserInfo).
+    # AXIAM-only (Keycloak has no gRPC userinfo), so it never forms a cross-vendor
+    # cell; it does form an AXIAM within-vendor REST-vs-gRPC efficiency pair below.
+    "userinfo_grpc",
 }
 
 # Within-vendor REST-vs-gRPC pairs for the same logical operation — the
@@ -324,6 +328,7 @@ PROTOCOL_EFFICIENCY_PAIRS = {
     "axiam": [
         ("authz_check_rest", "authz_check_grpc", "authorization decision"),
         ("authz_batch_rest", "authz_batch_grpc", "batch authorization decision"),
+        ("userinfo", "userinfo_grpc", "identity read (userinfo)"),
     ],
     "zitadel": [
         ("userinfo", "zitadel_userinfo_grpc", "identity read (userinfo)"),

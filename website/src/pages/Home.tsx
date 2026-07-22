@@ -472,9 +472,10 @@ export default function Home({ go, openSdk }: HomeProps) {
               }}
             >
               Every line of code, every test, every commit was produced through
-              human-AI pair programming with Claude Code (Opus 4.6). The
-              architect provides vision, constraints and review; the AI provides
-              implementation at scale.
+              human-AI pair programming with Claude Code. Development began on
+              Opus 4.6 and continued across newer Anthropic models — later Opus
+              releases, Sonnet and Fable. The architect provides vision,
+              constraints and review; the AI provides implementation at scale.
             </p>
             <p style={{ fontSize: 16, lineHeight: 1.7, color: "#94a3b8", margin: 0 }}>
               The deeper goal is to explore the future of software itself — where

@@ -69,6 +69,18 @@ services:
       AXIAM__AUTHZ__DECISION_CACHE_ENABLED: "${AXIAM__AUTHZ__DECISION_CACHE_ENABLED:-false}"
       AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS: "${AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS:-5}"
       AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES: "${AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES:-10000}"
+      # --- Authz batch strategy (D10) ---------------------------------------------
+      # Default `concurrent` (per-item parallel evaluation — the run-2 fix for the
+      # coalesced path's DB serialization). Set `coalesced` for the labeled A/B
+      # sensitivity pass; decisions are identical either way.
+      AXIAM__AUTHZ__BATCH_STRATEGY: "${AXIAM__AUTHZ__BATCH_STRATEGY:-concurrent}"
+      AXIAM__AUTHZ__BATCH_MAX_CONCURRENCY: "${AXIAM__AUTHZ__BATCH_MAX_CONCURRENCY:-16}"
+      # --- SurrealDB connection pool (F2/F3) --------------------------------------
+      # Defaults (1 handle, cap disabled) are byte-for-byte the pre-pool behavior.
+      # POOL_SIZE>1 / a positive MAX_IN_FLIGHT are the F3 sensitivity knobs.
+      AXIAM__DB__POOL_SIZE: "${AXIAM__DB__POOL_SIZE:-1}"
+      AXIAM__DB__POOL_MAX_IN_FLIGHT: "${AXIAM__DB__POOL_MAX_IN_FLIGHT:-0}"
+      AXIAM__DB__POOL_ACQUIRE_TIMEOUT_SECS: "${AXIAM__DB__POOL_ACQUIRE_TIMEOUT_SECS:-5}"
       AXIAM__SERVER__HOST: "0.0.0.0"
       AXIAM__GRPC__HOST: "0.0.0.0"
       # First-run bootstrap gate (D-03a): satisfies the fail-closed admin gate so

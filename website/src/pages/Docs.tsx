@@ -53,6 +53,73 @@ function CodeBlock({ block }: { block: Extract<DocBlock, { type: "code" }> }) {
   );
 }
 
+function Table({ block }: { block: Extract<DocBlock, { type: "table" }> }) {
+  return (
+    <div
+      className="glass-card"
+      style={{
+        borderRadius: 12,
+        overflowX: "auto",
+        margin: "0 0 20px",
+      }}
+    >
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: 13.5,
+          minWidth: 520,
+        }}
+      >
+        <thead>
+          <tr>
+            {block.headers.map((h, i) => (
+              <th
+                key={i}
+                style={{
+                  textAlign: "left",
+                  padding: "12px 16px",
+                  borderBottom: "1px solid rgba(0,212,255,.18)",
+                  color: "#67e8f9",
+                  fontWeight: 700,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {block.rows.map((row, ri) => (
+            <tr key={ri}>
+              {row.map((cell, ci) => (
+                <td
+                  key={ci}
+                  style={{
+                    padding: "11px 16px",
+                    borderBottom: "1px solid rgba(255,255,255,.06)",
+                    color: ci === 0 ? "#e2e8f0" : "#cbd5e1",
+                    verticalAlign: "top",
+                    lineHeight: 1.55,
+                    fontFamily:
+                      ci === 0
+                        ? "ui-monospace,Menlo,monospace"
+                        : undefined,
+                    whiteSpace: ci === 0 ? "nowrap" : "normal",
+                  }}
+                >
+                  {renderInline(cell)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function Callout({
   kind,
   text,
@@ -120,6 +187,8 @@ function Block({ block, go }: { block: DocBlock; go: (p: Page) => void }) {
       );
     case "code":
       return <CodeBlock block={block} />;
+    case "table":
+      return <Table block={block} />;
     case "note":
       return <Callout kind="note" text={block.text} />;
     case "warn":

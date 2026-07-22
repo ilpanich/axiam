@@ -23,6 +23,7 @@ export type DocBlock =
   | { type: "code"; caption?: string; code: string }
   | { type: "note"; text: string }
   | { type: "warn"; text: string }
+  | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "cards"; cards: DocCard[] };
 
 export interface DocPage {
@@ -43,9 +44,18 @@ export const DOC_SECTIONS: DocSectionGroup[] = [
   { label: "Getting started", slugs: ["quickstart", "installation", "concepts"] },
   {
     label: "Platform",
-    slugs: ["auth", "authz", "oauth2", "federation", "pki", "webhooks", "audit"],
+    slugs: [
+      "auth",
+      "authz",
+      "grpc",
+      "oauth2",
+      "federation",
+      "pki",
+      "webhooks",
+      "audit",
+    ],
   },
-  { label: "Operate", slugs: ["deploy", "sdks"] },
+  { label: "Operate", slugs: ["deploy", "configuration", "sdks"] },
 ];
 
 export const DOC_PAGES: DocPage[] = [
@@ -87,7 +97,7 @@ export const DOC_PAGES: DocPage[] = [
         cards: [
           {
             title: "Browse the SDKs →",
-            body: "Quickstarts for all seven languages.",
+            body: "Quickstarts for all eleven languages.",
             to: "sdks",
           },
           {
@@ -238,6 +248,80 @@ export const DOC_PAGES: DocPage[] = [
       {
         type: "code",
         code: "// synchronous check\nconst ok = await axiam.can('read', 'doc:1');\n\n// batch several checks in one round trip\nconst results = await axiam.canAll([\n  ['read', 'doc:1'],\n  ['write', 'doc:1'],\n]);",
+      },
+    ],
+  },
+
+  {
+    slug: "grpc",
+    section: "Platform",
+    navLabel: "gRPC API",
+    title: "gRPC API",
+    intro:
+      "A low-latency gRPC surface for service-mesh authorization checks, token validation and user lookups — backed by Tonic and one protobuf contract shared across every SDK.",
+    blocks: [
+      { type: "h", id: "why", text: "Why gRPC" },
+      {
+        type: "p",
+        text: "REST is the general-purpose surface; gRPC exists for the hot path. Inside a service mesh, sidecars and backends make authorization checks on nearly every request, where connection reuse and binary framing keep tail latency low. In the benchmark run, AXIAM's single gRPC `CheckAccess` held a p99 of 90 ms at database saturation and served TLS 1.3 with no measurable penalty versus plaintext.",
+      },
+      { type: "h", id: "services", text: "Services" },
+      {
+        type: "p",
+        text: "Three services are defined in `proto/axiam/v1/`. Every request message is tenant-scoped — `tenant_id` is a field on every RPC, because AXIAM is multi-tenant with no default tenant.",
+      },
+      {
+        type: "table",
+        headers: ["Service", "RPCs", "Purpose"],
+        rows: [
+          [
+            "AuthorizationService",
+            "CheckAccess, BatchCheckAccess",
+            "Single access check, or several checks in one round-trip.",
+          ],
+          [
+            "TokenService",
+            "ValidateToken, IntrospectToken",
+            "Signature + expiry validation, or full RFC 7662-style claims.",
+          ],
+          [
+            "UserService",
+            "GetUser, ValidateCredentials",
+            "Lookup by ID, or a username/password check that issues no token.",
+          ],
+        ],
+      },
+      { type: "h", id: "server", text: "The server" },
+      {
+        type: "p",
+        text: "The gRPC server starts inside `axiam-server` alongside the REST and AMQP listeners. It binds to `127.0.0.1:50051` by default — loopback only — and is meant to be reached in-cluster over an internal network or mTLS, never exposed through a public ingress. Configure the bind address, port and per-IP rate limit with the `AXIAM__GRPC__*` environment variables (see Configuration).",
+      },
+      {
+        type: "note",
+        text: "In the Kubernetes manifests, gRPC (port 50051) is intentionally *not* routed through the Ingress — it is reachable only via the in-cluster `axiam-server` ClusterIP service.",
+      },
+      { type: "h", id: "consume", text: "Consuming the API" },
+      {
+        type: "p",
+        text: "The seven full SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) ship pre-generated client stubs, so you consume gRPC without running codegen yourself. Tenant is always explicit, and the call surface mirrors the REST `can()` / `canAll()` you already know.",
+      },
+      {
+        type: "code",
+        caption: "authorization check over gRPC · Rust",
+        code: 'use axiam_sdk::AxiamClient;\n\nlet axiam = AxiamClient::builder()\n    .base_url("https://iam.acme.dev")\n    .tenant_slug("acme")\n    .org_slug("acme")\n    .grpc(true) // route checks over the gRPC transport\n    .build()?;\n\nlet ok = axiam.can("read", "doc:1").await?;',
+      },
+      { type: "h", id: "codegen", text: "Generating your own stubs" },
+      {
+        type: "p",
+        text: "If you integrate from a language without a published AXIAM SDK, generate stubs directly from the `.proto` files with `buf generate` (or `protoc` plus your language's gRPC plugin). The files are self-contained proto3 with no external imports beyond the well-known types, and a CI job runs `buf lint` and `buf breaking` against them on every change, so the contract is guarded against accidental breakage.",
+      },
+      {
+        type: "code",
+        code: "# generate client stubs from the vendored proto/ tree\nbuf generate",
+      },
+      {
+        type: "note",
+        text: "The Kotlin, Swift, C and C++ SDKs cover the REST surface today; gRPC is a planned follow-up for them. Until it lands, use the REST transport or generate stubs directly from `proto/`.",
       },
     ],
   },
@@ -415,17 +499,280 @@ export const DOC_PAGES: DocPage[] = [
   },
 
   {
+    slug: "configuration",
+    section: "Operate",
+    navLabel: "Configuration",
+    title: "Configuration & environment variables",
+    intro:
+      "Every setting on the AXIAM server image is an environment variable. This is the reference: what each variable means, its default, and an example value.",
+    blocks: [
+      { type: "h", id: "naming", text: "The naming convention" },
+      {
+        type: "p",
+        text: "All configuration keys use a double underscore (`__`) after the `AXIAM` prefix — for example `AXIAM__DB__USERNAME`. The `__` separates both the prefix and the nested key levels (this is how the config layer distinguishes them). A single underscore (`AXIAM_DB__USERNAME`) is silently ignored and the in-code default wins, so double-check the doubling when a value doesn't take effect.",
+      },
+      {
+        type: "warn",
+        text: "Secrets (database password, JWT keys, the AES-256-GCM encryption keys, the peppers) must come from a secret manager or mounted secret — never bake real key material into an image, a compose file or git. Use a placeholder like `<set-in-secret-manager>` in any template, and never reuse a value across environments.",
+      },
+      { type: "h", id: "connectivity", text: "Connectivity & bind addresses" },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__DB__URL",
+            "SurrealDB address as a bare host:port — not a URL scheme (the Ws engine resolves a scheme as a hostname and fails).",
+            "surrealdb:8000",
+          ],
+          ["AXIAM__DB__NAMESPACE", "SurrealDB namespace.", "axiam"],
+          ["AXIAM__DB__DATABASE", "SurrealDB database.", "axiam"],
+          [
+            "AXIAM__AMQP__URL",
+            "RabbitMQ AMQP connection string. Assembled from the broker credentials at the deployment layer.",
+            "amqp://user:pass@rabbitmq:5672",
+          ],
+          [
+            "AXIAM__SERVER__HOST",
+            "REST bind address (default 127.0.0.1). Set 0.0.0.0 in a container.",
+            "0.0.0.0",
+          ],
+          ["AXIAM__SERVER__PORT", "REST bind port (default 8090).", "8090"],
+          [
+            "AXIAM__GRPC__HOST",
+            "gRPC bind address (default 127.0.0.1, loopback-only). Set 0.0.0.0 to serve in-cluster.",
+            "0.0.0.0",
+          ],
+          ["AXIAM__GRPC__PORT", "gRPC bind port (default 50051).", "50051"],
+          [
+            "AXIAM__GRPC__GRPC_AUTHZ_PER_SEC",
+            "Max gRPC authz requests per second per IP (default 100).",
+            "100",
+          ],
+          [
+            "AXIAM__SERVER__CORS_ALLOWED_ORIGINS",
+            "Allowed CORS origins; empty disables cross-origin requests (restrictive default).",
+            "https://admin.acme.dev",
+          ],
+          [
+            "RUST_LOG",
+            "Log verbosity / filter. Keep it narrow in production — no internal module exposure.",
+            "info",
+          ],
+        ],
+      },
+      { type: "h", id: "secrets", text: "Secrets & encryption keys" },
+      {
+        type: "p",
+        text: "These are required for a real deployment. Generate the 32-byte hex keys with `openssl rand -hex 32` and the Ed25519 JWT keypair with `openssl genpkey -algorithm ed25519`.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          ["AXIAM__DB__USERNAME", "SurrealDB username.", "axiam"],
+          ["AXIAM__DB__PASSWORD", "SurrealDB password.", "<set-in-secret-manager>"],
+          [
+            "AXIAM__AUTH__JWT_PRIVATE_KEY_PEM",
+            "Ed25519 JWT signing private key (PEM).",
+            "-----BEGIN PRIVATE KEY----- …",
+          ],
+          [
+            "AXIAM__AUTH__JWT_PUBLIC_KEY_PEM",
+            "Ed25519 JWT verification public key (PEM), paired with the private key.",
+            "-----BEGIN PUBLIC KEY----- …",
+          ],
+          [
+            "AXIAM__AUTH__MFA_ENCRYPTION_KEY",
+            "AES-256-GCM key (32-byte hex) encrypting TOTP MFA secrets at rest.",
+            "<64 hex chars>",
+          ],
+          [
+            "AXIAM__PKI__ENCRYPTION_KEY",
+            "AES-256-GCM key (hex) encrypting CA signing keys (and webhook secrets) at rest.",
+            "<64 hex chars>",
+          ],
+          [
+            "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY",
+            "AES-256-GCM key (hex) encrypting SAML/OIDC federation client secrets at rest.",
+            "<64 hex chars>",
+          ],
+          [
+            "AXIAM__EMAIL_ENCRYPTION_KEY",
+            "AES-256-GCM key (hex) encrypting email/SMTP secrets; also gates the email-config admin endpoints.",
+            "<64 hex chars>",
+          ],
+          [
+            "AXIAM__GDPR_PSEUDONYM_PEPPER",
+            "HMAC-SHA256 pepper (hex) pseudonymizing audit-log actor identities on GDPR erasure.",
+            "<64 hex chars>",
+          ],
+          [
+            "AXIAM__AUTH__PEPPER",
+            "Password pepper (string) prepended before Argon2id hashing.",
+            "<random string>",
+          ],
+        ],
+      },
+      { type: "h", id: "oauth2", text: "OAuth2 & OIDC" },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__AUTH__OAUTH2_ISSUER_URL",
+            "Public issuer URL for OIDC discovery. Must be an origin, not a path (path-based issuers are rejected).",
+            "https://iam.acme.dev",
+          ],
+          [
+            "AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS",
+            "Cache-Control max-age on the JWKS endpoint, in seconds.",
+            "300",
+          ],
+          [
+            "AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER",
+            "Compatibility switch — treat a token with no audience claim as a user token. Leave off unless you need it.",
+            "false",
+          ],
+        ],
+      },
+      { type: "h", id: "hashing", text: "Argon2id hash concurrency" },
+      {
+        type: "p",
+        text: "Each in-flight Argon2id operation allocates a ~19 MiB arena, so unbounded concurrency is a memory-DoS vector. A process-wide semaphore caps peak concurrent arenas and sheds excess load with a 503 rather than queueing unboundedly. The cost parameters themselves are never weakened for throughput.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__AUTH__MAX_CONCURRENT_HASHES",
+            "Max concurrent Argon2id hash/verify ops. 0 (default) = auto → min(CPU cores, 4). Peak crypto RSS ≈ this × 19 MiB.",
+            "0",
+          ],
+          [
+            "AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS",
+            "Seconds a request waits for a hash permit before returning a 503 backpressure error (default 5).",
+            "5",
+          ],
+        ],
+      },
+      { type: "h", id: "authz-cache", text: "Authorization decision cache (optional)" },
+      {
+        type: "p",
+        text: "An optional per-tenant cache that skips the SurrealDB round-trips per check. Off by default; enabling it changes performance only, never the decision returned. Every access-narrowing mutation invalidates the affected entries immediately, so no revocation can leave a stale allow — the TTL is only a bounded-staleness backstop.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__AUTHZ__DECISION_CACHE_ENABLED",
+            "Master switch (default false).",
+            "false",
+          ],
+          [
+            "AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS",
+            "Cached-decision TTL, and the upper bound on revocation latency if an invalidation is ever missed (default 5).",
+            "5",
+          ],
+          [
+            "AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES",
+            "Max cached decisions per tenant before FIFO eviction (default 10000).",
+            "10000",
+          ],
+        ],
+      },
+      { type: "h", id: "rate-limit", text: "Rate limiting" },
+      {
+        type: "p",
+        text: "Every auth/OAuth2 endpoint is rate-limited per-key, per-minute. Defaults are shown; `/auth/login` always keys per-IP regardless of the key mode.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          ["AXIAM__RATE_LIMIT__LOGIN_PER_MIN", "Max /auth/login per minute per key.", "10"],
+          ["AXIAM__RATE_LIMIT__REGISTER_PER_MIN", "Max register requests per minute.", "5"],
+          ["AXIAM__RATE_LIMIT__TOKEN_PER_MIN", "Max /oauth2/token per minute.", "20"],
+          [
+            "AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN",
+            "Max password-reset requests per minute.",
+            "3",
+          ],
+          ["AXIAM__RATE_LIMIT__MFA_PER_MIN", "Max MFA enroll/confirm/verify per minute.", "5"],
+          [
+            "AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN",
+            "Max /oauth2/introspect per minute.",
+            "10",
+          ],
+          ["AXIAM__RATE_LIMIT__REVOKE_PER_MIN", "Max /oauth2/revoke per minute.", "10"],
+          [
+            "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN",
+            "Max authz-check requests per minute.",
+            "300",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__TRUSTED_HOPS",
+            "Trusted reverse-proxy hops to skip from the right of X-Forwarded-For (set 1 behind a single ingress).",
+            "0",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__KEY",
+            "Bucket-key mode for token/introspect/revoke: ip | client_id | ip_client_id.",
+            "ip",
+          ],
+        ],
+      },
+      { type: "h", id: "tls", text: "Direct TLS termination (opt-in)" },
+      {
+        type: "p",
+        text: "By default the server binds plaintext and a proxy/ingress terminates TLS 1.3 in front of it. To terminate TLS inside the server process instead, set the following — the listener then binds with rustls restricted to TLS 1.3 only. When enabled, both paths are mandatory and the server fails fast at startup on a missing, unreadable or mismatched cert/key (it never falls back to plaintext).",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__SERVER__TLS__ENABLED",
+            "Enable in-process TLS 1.3 (default false).",
+            "true",
+          ],
+          [
+            "AXIAM__SERVER__TLS__CERT_PATH",
+            "Path to the PEM certificate chain (leaf first).",
+            "/etc/axiam/tls/tls.crt",
+          ],
+          [
+            "AXIAM__SERVER__TLS__KEY_PATH",
+            "Path to the PEM private key (PKCS#8, PKCS#1 or SEC1).",
+            "/etc/axiam/tls/tls.key",
+          ],
+        ],
+      },
+      {
+        type: "note",
+        text: "The AMQP URL is assembled from the broker's own `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` into `AXIAM__AMQP__URL` at the deployment layer. See Docker & Kubernetes for how the shipped compose file and manifests wire these together.",
+      },
+    ],
+  },
+
+  {
     slug: "sdks",
     section: "Operate",
     navLabel: "SDKs",
     title: "Client SDKs",
     intro:
-      "Seven official client libraries, all conforming to one cross-language behavioral contract.",
+      "Eleven official client libraries, all conforming to one cross-language behavioral contract.",
     blocks: [
-      { type: "h", id: "contract", text: "One contract, seven languages" },
+      { type: "h", id: "contract", text: "One contract, many languages" },
       {
         type: "p",
-        text: "AXIAM ships SDKs for Rust, TypeScript, Python, Java, C#, PHP and Go. Each lives in its own repository but vendors the same CONTRACT.md, OpenAPI spec and protobuf definitions, so behavior is identical whichever language you pick. The contract spans login and MFA, REST/gRPC/AMQP authorization, secret handling, strict TLS, single-flight refresh and declarative route guards.",
+        text: "AXIAM ships SDKs for Rust, TypeScript, Python, Java, C#, PHP, Go, Kotlin, Swift, C and C++. Each lives in its own repository but vendors the same CONTRACT.md, OpenAPI spec and protobuf definitions, so behavior is identical whichever language you pick. The contract spans login and MFA, authorization, secret handling, strict TLS/mTLS, single-flight refresh and declarative route guards.",
+      },
+      {
+        type: "p",
+        text: "The original seven — Rust, TypeScript, Python, Java, C#, PHP and Go — implement the full §1–§11 contract including the gRPC and AMQP transports. The Kotlin, Swift, C and C++ SDKs cover the REST surface (§1–§7, §9–§11, including §6.1 mTLS); gRPC and AMQP are planned follow-ups for them.",
       },
       {
         type: "p",

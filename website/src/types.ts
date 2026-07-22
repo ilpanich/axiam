@@ -60,6 +60,12 @@ export interface Phase {
   n: number;
   title: string;
   focus: string;
+  /** Approximate start date, e.g. "Feb 24, 2026" — derived from the issue tracker + commit history. */
+  start: string;
+  /** Approximate end date, e.g. "Feb 25, 2026", or "Ongoing" for the in-progress phase. */
+  end: string;
+  /** Delivery state — completed phases are "done"; the current hardening phase is "ongoing". */
+  status: "done" | "ongoing";
 }
 
 /** One target's result within a benchmark scenario. */

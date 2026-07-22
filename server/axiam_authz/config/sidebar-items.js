@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AuthzConfig"]};
+window.SIDEBAR_ITEMS = {"enum":["BatchStrategy"],"struct":["AuthzConfig"]};

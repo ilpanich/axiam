@@ -23,11 +23,11 @@
 <a href=#23 id=23 data-nosnippet>23</a>    G: GroupRepository,
 <a href=#24 id=24 data-nosnippet>24</a>{
 <a href=#25 id=25 data-nosnippet>25</a>    engine: AuthorizationEngine&lt;R, P, Res, S, G&gt;,
-<a href=#26 id=26 data-nosnippet>26</a>    <span class="doccomment">/// Retained from the pre-D1 concurrent-fan-out design and still accepted by
-<a href=#27 id=27 data-nosnippet>27</a>    /// [`Self::new`] for call-site/config compatibility (`AuthzConfig::
-<a href=#28 id=28 data-nosnippet>28</a>    /// batch_max_concurrency`, default 16). The D1 coalesced batch path issues
-<a href=#29 id=29 data-nosnippet>29</a>    /// a small fixed number of DB round-trips per batch rather than one
-<a href=#30 id=30 data-nosnippet>30</a>    /// per-item future, so the concurrency bound is no longer applied here.
+<a href=#26 id=26 data-nosnippet>26</a>    <span class="doccomment">/// Retained for call-site/config compatibility (`AuthzConfig::
+<a href=#27 id=27 data-nosnippet>27</a>    /// batch_max_concurrency`, default 16). As of D10 the concurrency bound is
+<a href=#28 id=28 data-nosnippet>28</a>    /// owned by the `AuthorizationEngine` itself (applied via
+<a href=#29 id=29 data-nosnippet>29</a>    /// `with_batch_config` at construction and enforced by
+<a href=#30 id=30 data-nosnippet>30</a>    /// [`BatchStrategy::Concurrent`]), so this copy is no longer consulted here.
 <a href=#31 id=31 data-nosnippet>31</a>    </span><span class="attr">#[allow(dead_code)]
 <a href=#32 id=32 data-nosnippet>32</a>    </span>batch_max_concurrency: usize,
 <a href=#33 id=33 data-nosnippet>33</a>}

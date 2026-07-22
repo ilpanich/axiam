@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha16] - 2026-07-22
+
+### Added
+
+- Add AXIAM gRPC userinfo scenario + protocol-efficiency pairing
+- Implement UserInfoService and integration tests
+- Add gRPC UserInfoService/GetUserInfo (contract 1.3)
+- Add missing SDKs, gRPC + config docs, real benchmark data
+- Implement run-2 follow-up tasks (A8, A9, D10, D11, report polish)
+
+### Changed
+
+- Use a random seeded-user password in userinfo tests
+- Add gRPC userinfo implementation plan
+- Run-2 analysis (1.0.0-alpha15) — update public/private bench docs + plan
+
+### Fixed
+
+- Make concurrent batch future boxable behind AuthzChecker trait
+
 ## [1.0.0-alpha15] - 2026-07-21
 
 ### Added

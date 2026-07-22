@@ -768,11 +768,22 @@ every logic/security change is already covered by passing tests here.
 
 ---
 
-## Collecting the data — laptop re-run runbook (added 2026-07-20)
+## Collecting the data — run-3 laptop runbook (rewritten 2026-07-22 for the released 1.0.0-alpha16/17)
 
-Everything below runs from `benchmarks/` on the XPS, against **merged `main`**.
-Full detail lives in `docs/methodology.md` §8 (median-of-N), §9 (DB caps),
-§10 (laptop variance control), §11 (prod posture); this is the short path.
+Everything below runs from `benchmarks/` on the XPS. Every improvement in this
+plan is now **released**: v1.0.0-alpha16 carries all of Phases A–D + F plus the
+run-2 follow-ups (A8 refresh user-token, A9 provenance, D10 batch strategy,
+D11 Zitadel gRPC audience, report labeling) and the new gRPC-userinfo scenario
+pair; v1.0.0-alpha17 (current) adds only dependency bumps. Run the harness from
+a checkout of the **`v1.0.0-alpha17` tag** (or `main` at that commit) so the
+scenarios/runner match the server build. Full protocol detail stays in
+`docs/methodology.md` §8 (median-of-N), §9 (DB caps), §10 (laptop variance
+control), §11 (prod posture); this is the short path, ordered per the run-3
+checklist below. Two harness enablers for this runbook landed 2026-07-22: the
+justfile honors a pre-set `BENCH_NGINX_CONF` at p2 (the B2 h1-isolation cell),
+and the bench compose passes through `AXIAM__AUTHZ__BATCH_STRATEGY` /
+`AXIAM__AUTHZ__BATCH_MAX_CONCURRENCY` / `AXIAM__DB__POOL_*` (the D10 and F3
+A/B knobs — without the pass-through those exports never reached the server).
 
 **0. Prerequisites.** `docker` + compose v2, `just`, `k6`, `python3`. Laptop
 prep per §10: on AC power, `sudo cpupower frequency-set -g performance`
@@ -780,59 +791,128 @@ prep per §10: on AC power, `sudo cpupower frequency-set -g performance`
 in one mode. The A6 host sampler runs automatically; check the report's
 `clock_variance` / `generator_saturated` flags before trusting any cell.
 
-**1. Build AXIAM locally — this is the critical flag.** The published ghcr
-image predates all of Phase B/D, so every AXIAM cell must use a local source
-build of merged `main`: pass **`build=1`** (forces `docker compose --build`;
-it is also the automatic fallback when the pull fails). Keycloak/Zitadel are
-unchanged pulled images. First time (or after cert changes): `just bench-certs`.
+**1. Image selection — `build=1` is NO LONGER needed.** The published ghcr
+image now contains everything: `bench-up` defaults `BENCH_AXIAM_IMAGE` to
+`ghcr.io/ilpanich/axiam/server:<workspace version>` (1.0.0-alpha17 on the
+current tree) and pulls it (release.yml publishes per-tag images). If the
+unauthenticated pull is denied (private GHCR package): `docker login ghcr.io`,
+or `build=1` (also the automatic fallback on pull failure). Preferring the
+*pulled* release image is what completes A9's acceptance: meta.json records a
+real `RepoDigest` instead of run-2's `image_digest: unknown` everywhere, so
+run-3 deltas are attributable to a pinned binary. Optionally pin the
+datastores for the same reason (`BENCH_SURREALDB_IMAGE` / `BENCH_PG_IMAGE`
+accept digest-pinned refs). Keycloak/Zitadel stay unchanged pulled images.
+First time (or after cert changes): `just bench-certs`.
 
-**2. Main matrix (median-of-3 is the default `repeat`):**
+**2. B2 conviction cell FIRST (minutes, before the matrix).** Run 2 proved
+resumption works (`http_req_tls_handshaking ≈ 0`), leaving h2 multiplexing the
+sole suspect for the p2 −49%. Setting `BENCH_NGINX_CONF` at p2 now forces the
+nginx-fronted path (TLS 1.3, ALPN `http/1.1` only) instead of the native
+listener:
 
 ```bash
 cd benchmarks
-just build=1 targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13" bench-matrix
+export BENCH_NGINX_CONF=tls13-h1.conf
+just target=axiam profile=p2-tls13 bench-up
+just target=axiam profile=p2-tls13 bench-seed
+just target=axiam profile=p2-tls13 scenario=oauth2_client_credentials.js bench-run
+just target=axiam profile=p2-tls13 scenario=token_refresh.js bench-run
+just target=axiam bench-down
+unset BENCH_NGINX_CONF
 ```
 
-`bench-matrix` loops bench-up → bench-seed → bench-run → bench-down per
-target×profile into `results/run-<i>/…`, then runs `bench-report`
-(auto-medians when `run-*/` dirs exist). Seeding is fail-closed (A2): if a
-seed smoke check fails, `bench-run` refuses to start — inspect
-`results/<target>/seed-failure/`. Expected first-run friction: the new
-Zitadel session-API seeding (D5) has two flagged best-guesses (`expect: 201`
-vs 200; management-API field names) — if its smoke check trips, adjust per
-the in-code comments in `scenarios/lib/targets.js` / `runner/seed.sh`.
+Confirm the cell's k6 `http_version` tag reads `1.1` (native/h2 cells read
+`2`); acceptance is within ~15% of p0. Note: `BENCH_AXIAM_TLS_HTTP2=false` on
+the native listener is an intent signal only (actix re-adds h2 to ALPN), so
+this nginx cell is the only true h1 control.
 
-**3. AXIAM-only extra passes** (each a labeled section/sensitivity row, not
-mixed into head-to-head):
+**3. Main matrix (median-of-3 is the default `repeat`):**
 
 ```bash
-# p3 native mTLS (D3 — no nginx container should appear in `docker ps`)
-just target=axiam profile=p3-mtls build=1 bench-up bench-seed bench-run bench-down
-# C4 prod rate-limit posture
-just target=axiam rl=prod build=1 bench-up bench-seed bench-run bench-down
-# C2 DB-uncapped sensitivity (one AXIAM + one Zitadel pass)
-just target=axiam dbcaps=uncapped build=1 bench-up bench-seed bench-run bench-down
-just target=zitadel dbcaps=uncapped bench-up bench-seed bench-run bench-down
-# D7 decision-cache sensitivity (default is OFF; one labeled ON pass)
-AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true just target=axiam build=1 bench-up bench-seed bench-run bench-down
+just targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13" bench-matrix
 ```
 
-**4. B2 TLS verification — zero new runs first.** Before any p2 re-run, read
-the archived 2026-07-19 k6 JSONs: the `http_version` tag (expect `2` at p2 vs
-`1.1` at p0) and `http_req_tls_handshaking` attribute the halving with no new
-data. Then the isolation cell: re-run only `oauth2_client_credentials` +
-`token_refresh` at p2 with the h1-only edge (`tls13-h1.conf`) and compare —
-acceptance is p2 within ~15% of p0.
+(No `build=1` — see step 1.) Same flow as before: bench-up → bench-seed →
+bench-run → bench-down per target×profile into `results/run-<i>/…`, then
+`bench-report` auto-medians. Seeding stays fail-closed (A2) — on a smoke-check
+trip inspect `results/<target>/seed-failure/`. **New data this matrix collects
+vs run 2 — verify each while it runs:**
 
-**5. B1/D9 memory checks.** During the login cell, watch server RSS
-(`docker stats`): B1 acceptance is ≤ ~350 MiB at 50 VUs. The D9 jemalloc A/B
-is separate — procedure in `claude_dev/memory-retention-experiment.md`
-(build with `--features jemalloc`, compare 10-min post-burst RSS).
+- **A8:** `token_refresh` now mints a *user* token. Check `bench_fallback == 0`
+  on the AXIAM and Keycloak refresh cells, and that AXIAM refresh is no longer
+  ≈ ½ × client-credentials (real single-use rotation). Zitadel refresh remains
+  a tagged fallback (no offline_access flow yet).
+- **D10 (the batch-authz speedup):** the four authz cells run the new default
+  `AXIAM__AUTHZ__BATCH_STRATEGY=concurrent`. Acceptance: batch checks/s
+  **exceeds** single checks/s, and `authz_batch_grpc` passes the 2 s p95 gate.
+  The coalesced control cells are in step 4.
+- **gRPC userinfo pair:** `userinfo_grpc.js` (AXIAM's UserInfoService, new in
+  alpha16, auto-included for the axiam target) pairs with
+  `zitadel_userinfo_grpc.js` carrying the D11 audience fix — expect a valid
+  0%-error Zitadel cell (~1.7–2 k/s); the new `bench_grpc_status` appendix in
+  the report diagnoses any residue.
+- **A9:** spot-check one meta.json per stack — image digests/IDs present (no
+  `unknown`), correct version stamp, `build_ref` only when built locally.
 
-**6. Package/publish:** `just bench-pack` produces the shareable
+**4. AXIAM-only labeled passes** (sensitivity rows, never mixed into
+head-to-head). Give each pass its own subtree via `BENCH_RESULTS_DIR` so
+labeled cells cannot collide with matrix cells (seed marker and results both
+honor it):
+
+```bash
+# D10 batch-strategy A/B — the matrix measured the `concurrent` default;
+# this is the `coalesced` control. The four authz cells are the payload.
+export BENCH_RESULTS_DIR=$PWD/results/sens-batch-coalesced
+AXIAM__AUTHZ__BATCH_STRATEGY=coalesced just target=axiam bench-up bench-seed
+for s in authz_check_rest.js authz_batch_rest.js authz_check_grpc.js authz_batch_grpc.js; do
+  just target=axiam scenario=$s bench-run
+done
+just target=axiam bench-down
+
+# F3 pool A/B — pool_size=1 (default) is the matrix baseline; this is pool 4.
+# Optionally add a third labeled row with AXIAM__DB__POOL_MAX_IN_FLIGHT=64.
+export BENCH_RESULTS_DIR=$PWD/results/sens-pool-4
+AXIAM__DB__POOL_SIZE=4 just target=axiam bench-up bench-seed bench-run bench-down
+
+# p3 native mTLS (D3 — verify NO nginx container in `docker ps` during the run)
+export BENCH_RESULTS_DIR=$PWD/results/sens-p3-mtls
+just target=axiam profile=p3-mtls bench-up bench-seed bench-run bench-down
+
+# C4 prod rate-limit posture (verify report.py refuses to mix postures)
+export BENCH_RESULTS_DIR=$PWD/results/sens-rl-prod
+just target=axiam rl=prod bench-up bench-seed bench-run bench-down
+
+# C2 completion — Keycloak uncapped-DB pass (AXIAM+Zitadel were done in run 2)
+export BENCH_RESULTS_DIR=$PWD/results/sens-kc-uncapped
+just target=keycloak dbcaps=uncapped bench-up bench-seed bench-run bench-down
+
+# D7 decision-cache ON (default stays OFF everywhere else); after the pool A/B,
+# one combined cache+pool cell per F3.
+export BENCH_RESULTS_DIR=$PWD/results/sens-cache-on
+AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true just target=axiam bench-up bench-seed bench-run bench-down
+unset BENCH_RESULTS_DIR
+```
+
+**5. F3 expiry soak (cargo, not k6).** Proves pooled handles re-sign-in across
+token expiry (CQ-B48 closed) on a live DB: `just dev-up`, then
+
+```bash
+cargo test -p axiam-db --test connection_resilience_test \
+  pooled_handles_survive_token_expiry_without_restart -- --ignored --nocapture
+```
+
+**6. B1/D9 memory checks.** During the login cell, watch server RSS
+(`docker stats`): B1's latency gate already passed in run 2 (p95 907 ms); the
+~350 MiB RSS target is only reachable together with D9 — the jemalloc A/B
+procedure is in `claude_dev/memory-retention-experiment.md` (that experiment
+DOES need a local build: `build=1` + `--features jemalloc`, compare 10-min
+post-burst RSS).
+
+**7. Package/publish:** `just bench-pack` produces the shareable
 `results-<date>.tar.xz` (only k6/res/host/meta/report files; it greps the
-archive for secrets and fails if any leak). Then E4 (public doc refresh) can
-run against the fresh numbers.
+archive for secrets and fails if any leak). Then E4 (public doc refresh) runs
+against the run-3 medians — the run-2 second draft is already published as
+preliminary.
 
 ---
 
@@ -925,9 +1005,10 @@ token-provenance caveat — Zitadel userinfo); blank throughput for 100%-error
 cells in gRPC scenarios too (zitadel_userinfo_grpc printed 1725 "req/s" of
 errors).
 
-### Run-3 checklist (supersedes the runbook's step order where they differ)
+### Run-3 checklist (the 2026-07-22 runbook above implements this order)
 
-1. Land A8, A9, D11 + labeling polish (small harness diffs).
+1. ~~Land A8, A9, D11 + labeling polish (small harness diffs).~~ **Done —
+   released in v1.0.0-alpha16** (v1.0.0-alpha17 adds only dependency bumps).
 2. **B2 conviction cell first** — p2 `oauth2_client_credentials` through
    `tls13-h1.conf` (minutes); then fix/document per the private doc §4.3.
 3. D10 investigation (can proceed in parallel with 1–2).

@@ -1,0 +1,8 @@
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
+
+# only fail on vulnerabilities, not unmaintained/unsound warnings
+informational_warnings = ["unmaintained"]
+
+# ignore by severity threshold instead of ID
+severity_threshold = "medium"

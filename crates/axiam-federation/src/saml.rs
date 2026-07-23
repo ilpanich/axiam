@@ -1295,4 +1295,903 @@ mod tests {
             "expected ReplayDetected, got: {err:?}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // R5 additions — stateful repo stubs + non-xmlsec logic coverage
+    //
+    // These drive `handle_saml_response` end-to-end against the committed
+    // xmlsec fixtures (the ONLY source of signed XML) plus stateful in-memory
+    // repos, and unit-test the pure helpers (`extract_assertion_claims`,
+    // `apply_attribute_map`, `bind_signature_to_assertion`, `deflate_encode`,
+    // `xml_escape`) and the guard clauses of `build_authn_request` /
+    // `generate_sp_metadata` that run before any network I/O.
+    // -----------------------------------------------------------------------
+
+    use std::str::FromStr;
+    use std::sync::Mutex;
+
+    use axiam_core::models::user::UserStatus;
+
+    /// Config repo that returns a preset config (or NotFound if `None`).
+    struct MapConfigRepo {
+        config: Option<FederationConfig>,
+    }
+    impl FederationConfigRepository for MapConfigRepo {
+        async fn create(
+            &self,
+            _: CreateFederationConfig,
+        ) -> axiam_core::error::AxiamResult<FederationConfig> {
+            unimplemented!()
+        }
+        async fn get_by_id(
+            &self,
+            _: Uuid,
+            _: Uuid,
+        ) -> axiam_core::error::AxiamResult<FederationConfig> {
+            self.config.clone().ok_or(AxiamError::NotFound {
+                entity: "federation_config".into(),
+                id: "missing-cfg".into(),
+            })
+        }
+        async fn update(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: UpdateFederationConfig,
+        ) -> axiam_core::error::AxiamResult<FederationConfig> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: Uuid, _: Uuid) -> axiam_core::error::AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn list(
+            &self,
+            _: Uuid,
+            _: Pagination,
+        ) -> axiam_core::error::AxiamResult<PaginatedResult<FederationConfig>> {
+            unimplemented!()
+        }
+        async fn list_with_legacy_plaintext_secret(
+            &self,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
+            unimplemented!()
+        }
+        async fn set_encrypted_secret(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: String,
+            _: String,
+            _: i64,
+        ) -> axiam_core::error::AxiamResult<()> {
+            unimplemented!()
+        }
+    }
+
+    /// Link repo that records created links and can be configured to return an
+    /// existing link, a NotFound (→ provisioning path), a generic DB error, or
+    /// a create failure.
+    struct RecordingLinkRepo {
+        existing: Option<FederationLink>,
+        get_returns_db_error: bool,
+        fail_create: bool,
+        created: Mutex<Vec<CreateFederationLink>>,
+    }
+    impl RecordingLinkRepo {
+        fn provisioning() -> Self {
+            Self {
+                existing: None,
+                get_returns_db_error: false,
+                fail_create: false,
+                created: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl FederationLinkRepository for RecordingLinkRepo {
+        async fn create(
+            &self,
+            input: CreateFederationLink,
+        ) -> axiam_core::error::AxiamResult<FederationLink> {
+            if self.fail_create {
+                return Err(AxiamError::Database("link create boom".into()));
+            }
+            let link = FederationLink {
+                id: Uuid::new_v4(),
+                tenant_id: input.tenant_id,
+                user_id: input.user_id,
+                federation_config_id: input.federation_config_id,
+                external_subject: input.external_subject.clone(),
+                external_email: input.external_email.clone(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            self.created.lock().unwrap().push(input);
+            Ok(link)
+        }
+        async fn get_by_external_subject(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: &str,
+        ) -> axiam_core::error::AxiamResult<FederationLink> {
+            if self.get_returns_db_error {
+                return Err(AxiamError::Database("link lookup boom".into()));
+            }
+            self.existing.clone().ok_or(AxiamError::NotFound {
+                entity: "federation_link".into(),
+                id: "no-link".into(),
+            })
+        }
+        async fn get_by_user_id(
+            &self,
+            _: Uuid,
+            _: Uuid,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationLink>> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: Uuid, _: Uuid) -> axiam_core::error::AxiamResult<()> {
+            unimplemented!()
+        }
+    }
+
+    /// User repo that records created users and can be configured with a preset
+    /// user for `get_by_id` (existing-link path) or a create failure.
+    struct RecordingUserRepo {
+        preset: Option<User>,
+        fail_create: bool,
+        created: Mutex<Vec<CreateUser>>,
+    }
+    impl RecordingUserRepo {
+        fn provisioning() -> Self {
+            Self {
+                preset: None,
+                fail_create: false,
+                created: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl UserRepository for RecordingUserRepo {
+        async fn create(&self, input: CreateUser) -> axiam_core::error::AxiamResult<User> {
+            if self.fail_create {
+                return Err(AxiamError::Database("user create boom".into()));
+            }
+            let user = User {
+                id: Uuid::new_v4(),
+                tenant_id: input.tenant_id,
+                username: input.username.clone(),
+                email: input.email.clone(),
+                password_hash: "x".into(),
+                status: UserStatus::Active,
+                mfa_enabled: false,
+                mfa_secret: None,
+                totp_last_used_step: None,
+                failed_login_attempts: 0,
+                last_failed_login_at: None,
+                locked_until: None,
+                email_verified_at: None,
+                deletion_pending: false,
+                scheduled_purge_at: None,
+                metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            self.created.lock().unwrap().push(input);
+            Ok(user)
+        }
+        async fn get_by_id(&self, _: Uuid, _: Uuid) -> axiam_core::error::AxiamResult<User> {
+            self.preset.clone().ok_or(AxiamError::NotFound {
+                entity: "user".into(),
+                id: "no-user".into(),
+            })
+        }
+        async fn get_by_username(&self, _: Uuid, _: &str) -> axiam_core::error::AxiamResult<User> {
+            unimplemented!()
+        }
+        async fn get_by_email(&self, _: Uuid, _: &str) -> axiam_core::error::AxiamResult<User> {
+            unimplemented!()
+        }
+        async fn update(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: UpdateUser,
+        ) -> axiam_core::error::AxiamResult<User> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: Uuid, _: Uuid) -> axiam_core::error::AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn update_totp_step(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: u64,
+        ) -> axiam_core::error::AxiamResult<bool> {
+            unimplemented!()
+        }
+        async fn list(
+            &self,
+            _: Uuid,
+            _: Pagination,
+        ) -> axiam_core::error::AxiamResult<PaginatedResult<User>> {
+            unimplemented!()
+        }
+        async fn increment_failed_logins(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: u32,
+            _: i64,
+            _: f64,
+            _: i64,
+        ) -> axiam_core::error::AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn anonymize_user(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> axiam_core::error::AxiamResult<()> {
+            unimplemented!()
+        }
+    }
+
+    type AcsService =
+        SamlFederationService<MapConfigRepo, RecordingLinkRepo, RecordingUserRepo, MemReplayRepo>;
+
+    /// A federation config wired to the committed fixtures: `client_id` matches
+    /// the fixture Audience (`https://sp.example.com`), cert matches the
+    /// fixture signature, attribute_map resolves `email`.
+    fn acs_config() -> FederationConfig {
+        let mut c = test_federation_config(Some(test_cert_pem()));
+        c.attribute_map = serde_json::json!({ "email": "email", "name": "displayName" });
+        c
+    }
+
+    fn make_acs_service(
+        config: Option<FederationConfig>,
+        link: RecordingLinkRepo,
+        user: RecordingUserRepo,
+    ) -> AcsService {
+        SamlFederationService::new(
+            MapConfigRepo { config },
+            link,
+            user,
+            MemReplayRepo::new(),
+            reqwest::Client::new(),
+        )
+    }
+
+    fn well_signed_b64() -> String {
+        STANDARD.encode(load_fixture("well_signed_response.xml"))
+    }
+
+    // ----- handle_saml_response: full happy-path provisioning -----
+
+    #[tokio::test]
+    async fn handle_saml_response_provisions_new_user() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        let result = svc
+            .handle_saml_response(tenant, cfg_id, &well_signed_b64(), None, None, None, false)
+            .await
+            .expect("well-signed fixture should provision a user");
+
+        assert!(
+            result.newly_provisioned,
+            "expected a freshly provisioned user"
+        );
+        // NameID in the fixture is `user@example.com`; the `email` attribute
+        // maps to the same value, so username and email both resolve to it.
+        assert_eq!(result.user.email, "user@example.com");
+        assert_eq!(result.user.username, "user@example.com");
+        assert_eq!(result.federation_link.external_subject, "user@example.com");
+    }
+
+    // ----- handle_saml_response: existing link returns the linked user -----
+
+    #[tokio::test]
+    async fn handle_saml_response_returns_existing_link() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let user_id = Uuid::new_v4();
+
+        let preset_user = User {
+            id: user_id,
+            tenant_id: tenant,
+            username: "existing".into(),
+            email: "existing@example.com".into(),
+            password_hash: "x".into(),
+            status: UserStatus::Active,
+            mfa_enabled: false,
+            mfa_secret: None,
+            totp_last_used_step: None,
+            failed_login_attempts: 0,
+            last_failed_login_at: None,
+            locked_until: None,
+            email_verified_at: None,
+            deletion_pending: false,
+            scheduled_purge_at: None,
+            metadata: serde_json::Value::Null,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let existing_link = FederationLink {
+            id: Uuid::new_v4(),
+            tenant_id: tenant,
+            user_id,
+            federation_config_id: cfg_id,
+            external_subject: "user@example.com".into(),
+            external_email: Some("existing@example.com".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let link_repo = RecordingLinkRepo {
+            existing: Some(existing_link),
+            get_returns_db_error: false,
+            fail_create: false,
+            created: Mutex::new(Vec::new()),
+        };
+        let user_repo = RecordingUserRepo {
+            preset: Some(preset_user),
+            fail_create: false,
+            created: Mutex::new(Vec::new()),
+        };
+
+        let svc = make_acs_service(Some(cfg), link_repo, user_repo);
+        let result = svc
+            .handle_saml_response(tenant, cfg_id, &well_signed_b64(), None, None, None, false)
+            .await
+            .expect("existing link should resolve");
+
+        assert!(
+            !result.newly_provisioned,
+            "existing link must not re-provision"
+        );
+        assert_eq!(result.user.id, user_id);
+    }
+
+    // ----- handle_saml_response: replay is rejected on second submit -----
+
+    #[tokio::test]
+    async fn handle_saml_response_rejects_replayed_assertion() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        // First submit succeeds and records the assertion ID.
+        svc.handle_saml_response(tenant, cfg_id, &well_signed_b64(), None, None, None, false)
+            .await
+            .expect("first submit should succeed");
+
+        // Second submit of the SAME assertion (same tenant + assertion_id
+        // `well-signed-1`) must be rejected. WHY: `insert_assertion` returns
+        // `AxiamError::ReplayDetected` on the duplicate, mapped to
+        // `FederationError::AssertionReplay` — and this fires BEFORE any claims
+        // are re-trusted or the user re-provisioned.
+        let err = svc
+            .handle_saml_response(tenant, cfg_id, &well_signed_b64(), None, None, None, false)
+            .await
+            .expect_err("replayed assertion must be rejected");
+        assert!(
+            matches!(err, FederationError::AssertionReplay),
+            "expected AssertionReplay, got: {err:?}"
+        );
+    }
+
+    // ----- handle_saml_response: tampered signature is rejected (security) ---
+
+    #[tokio::test]
+    async fn handle_saml_response_rejects_tampered_signature() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        let b64 = STANDARD.encode(load_fixture("tampered_response.xml"));
+        let err = svc
+            .handle_saml_response(tenant, cfg_id, &b64, None, None, None, false)
+            .await
+            .expect_err("tampered fixture must be rejected");
+        // WHY: xmlsec digest/signature verification fails on the mutated body,
+        // surfaced as SamlSignatureInvalid BEFORE claims/replay are touched.
+        assert!(
+            matches!(err, FederationError::SamlSignatureInvalid(_)),
+            "expected SamlSignatureInvalid, got: {err:?}"
+        );
+    }
+
+    // ----- handle_saml_response: InResponseTo / Destination / Audience binds -
+
+    #[tokio::test]
+    async fn handle_saml_response_rejects_missing_in_response_to() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        // The fixture carries no InResponseTo; supplying an expected request ID
+        // must reject it as an unsolicited response (SEC-005). Runs AFTER
+        // signature verification, so the rejection is on the binding, not crypto.
+        let err = svc
+            .handle_saml_response(
+                tenant,
+                cfg_id,
+                &well_signed_b64(),
+                None,
+                Some("_expected-req-id"),
+                None,
+                false,
+            )
+            .await
+            .expect_err("missing InResponseTo must be rejected when an ID is expected");
+        match err {
+            FederationError::SamlResponseFailed(msg) => {
+                assert!(
+                    msg.contains("InResponseTo"),
+                    "expected InResponseTo rejection, got: {msg}"
+                );
+            }
+            other => panic!("expected SamlResponseFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_saml_response_require_in_response_to_flag_rejects() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        // No expected ID, but `require_in_response_to = true` and the fixture
+        // has no InResponseTo → unsolicited-response rejection (SECFIX-04).
+        let err = svc
+            .handle_saml_response(tenant, cfg_id, &well_signed_b64(), None, None, None, true)
+            .await
+            .expect_err("require_in_response_to must reject a response with no InResponseTo");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("InResponseTo")),
+            "expected SamlResponseFailed(InResponseTo), got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_saml_response_rejects_destination_mismatch() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        // Fixture Response has no Destination attribute; requiring one rejects it.
+        let err = svc
+            .handle_saml_response(
+                tenant,
+                cfg_id,
+                &well_signed_b64(),
+                None,
+                None,
+                Some("https://acs.example.com/expected"),
+                false,
+            )
+            .await
+            .expect_err("missing Destination must be rejected when one is expected");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("Destination")),
+            "expected SamlResponseFailed(Destination), got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_saml_response_rejects_audience_mismatch() {
+        let tenant = Uuid::new_v4();
+        let mut cfg = acs_config();
+        // Break the audience match: fixture Audience is `https://sp.example.com`.
+        cfg.client_id = "https://not-the-sp.example.com".into();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+
+        // Signature still verifies (cert-based, independent of client_id), but
+        // the AudienceRestriction no longer matches our SP entity ID → reject
+        // BEFORE replay insertion or provisioning.
+        let err = svc
+            .handle_saml_response(tenant, cfg_id, &well_signed_b64(), None, None, None, false)
+            .await
+            .expect_err("audience mismatch must be rejected");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("Audience")),
+            "expected SamlResponseFailed(Audience), got: {err:?}"
+        );
+    }
+
+    // ----- handle_saml_response: config guard clauses -----
+
+    #[tokio::test]
+    async fn handle_saml_response_rejects_disabled_config() {
+        let tenant = Uuid::new_v4();
+        let mut cfg = acs_config();
+        cfg.enabled = false;
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        let err = svc
+            .handle_saml_response(tenant, cfg_id, &well_signed_b64(), None, None, None, false)
+            .await
+            .expect_err("disabled config must be rejected");
+        assert!(
+            matches!(err, FederationError::ConfigDisabled),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_saml_response_rejects_protocol_mismatch() {
+        let tenant = Uuid::new_v4();
+        let mut cfg = acs_config();
+        cfg.protocol = FederationProtocol::OidcConnect;
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        let err = svc
+            .handle_saml_response(tenant, cfg_id, &well_signed_b64(), None, None, None, false)
+            .await
+            .expect_err("protocol mismatch must be rejected");
+        assert!(
+            matches!(err, FederationError::ProtocolMismatch(_)),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_saml_response_rejects_bad_base64() {
+        let tenant = Uuid::new_v4();
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        let err = svc
+            .handle_saml_response(tenant, cfg_id, "!!!not-base64!!!", None, None, None, false)
+            .await
+            .expect_err("invalid base64 must be rejected");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("Base64")),
+            "got: {err:?}"
+        );
+    }
+
+    // ----- build_authn_request: guard clauses (run before any network I/O) --
+
+    #[tokio::test]
+    async fn build_authn_request_rejects_config_not_found() {
+        let svc = make_acs_service(
+            None, // repo returns NotFound
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        let err = svc
+            .build_authn_request(Uuid::new_v4(), Uuid::new_v4(), "https://acs", None)
+            .await
+            .expect_err("unknown config must map to ConfigNotFound");
+        assert!(
+            matches!(err, FederationError::ConfigNotFound(_)),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_authn_request_rejects_disabled_config() {
+        let mut cfg = acs_config();
+        cfg.enabled = false;
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        let err = svc
+            .build_authn_request(Uuid::new_v4(), cfg_id, "https://acs", None)
+            .await
+            .expect_err("disabled config must be rejected");
+        assert!(
+            matches!(err, FederationError::ConfigDisabled),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_authn_request_rejects_protocol_mismatch() {
+        let mut cfg = acs_config();
+        cfg.protocol = FederationProtocol::OidcConnect;
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        let err = svc
+            .build_authn_request(Uuid::new_v4(), cfg_id, "https://acs", None)
+            .await
+            .expect_err("non-SAML config must be rejected");
+        assert!(
+            matches!(err, FederationError::ProtocolMismatch(_)),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_authn_request_rejects_missing_metadata_url() {
+        let mut cfg = acs_config();
+        cfg.metadata_url = None; // already None in the base config, explicit here
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        let err = svc
+            .build_authn_request(Uuid::new_v4(), cfg_id, "https://acs", None)
+            .await
+            .expect_err("missing metadata URL must be rejected");
+        assert!(
+            matches!(err, FederationError::SamlMetadataFailed(ref m) if m.contains("metadata URL")),
+            "got: {err:?}"
+        );
+    }
+
+    // ----- generate_sp_metadata -----
+
+    #[tokio::test]
+    async fn generate_sp_metadata_emits_expected_fields() {
+        let cfg = acs_config();
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        let xml = svc
+            .generate_sp_metadata(Uuid::new_v4(), cfg_id, "https://acs.example.com/saml")
+            .await
+            .expect("metadata generation should succeed");
+        assert!(xml.contains("entityID=\"https://sp.example.com\""), "{xml}");
+        assert!(xml.contains("https://acs.example.com/saml"), "{xml}");
+        assert!(xml.contains("WantAssertionsSigned=\"true\""), "{xml}");
+        assert!(xml.contains("AuthnRequestsSigned=\"true\""), "{xml}");
+    }
+
+    #[tokio::test]
+    async fn generate_sp_metadata_rejects_protocol_mismatch() {
+        let mut cfg = acs_config();
+        cfg.protocol = FederationProtocol::OidcConnect;
+        let cfg_id = cfg.id;
+        let svc = make_acs_service(
+            Some(cfg),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        let err = svc
+            .generate_sp_metadata(Uuid::new_v4(), cfg_id, "https://acs")
+            .await
+            .expect_err("non-SAML config must be rejected");
+        assert!(
+            matches!(err, FederationError::ProtocolMismatch(_)),
+            "got: {err:?}"
+        );
+    }
+
+    // ----- extract_assertion_claims (parsed, unsigned assertion XML) -----
+
+    #[test]
+    fn extract_assertion_claims_reads_nameid_session_and_attributes() {
+        // Unsigned assertion XML — extract_assertion_claims performs no crypto,
+        // so crafting the shape here (NOT a signed document) is legitimate.
+        let xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1" Version="2.0" IssueInstant="2099-01-01T00:00:00Z">
+  <saml:Issuer>https://idp.example.com</saml:Issuer>
+  <saml:Subject>
+    <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">nid-value-123</saml:NameID>
+  </saml:Subject>
+  <saml:AuthnStatement AuthnInstant="2099-01-01T00:00:00Z" SessionIndex="sess-42">
+    <saml:AuthnContext>
+      <saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:Password</saml:AuthnContextClassRef>
+    </saml:AuthnContext>
+  </saml:AuthnStatement>
+  <saml:AttributeStatement>
+    <saml:Attribute Name="mail">
+      <saml:AttributeValue>a@b.com</saml:AttributeValue>
+      <saml:AttributeValue>a2@b.com</saml:AttributeValue>
+    </saml:Attribute>
+    <saml:Attribute FriendlyName="fn-only">
+      <saml:AttributeValue>fv</saml:AttributeValue>
+    </saml:Attribute>
+  </saml:AttributeStatement>
+</saml:Assertion>"#;
+        let assertion = samael::schema::Assertion::from_str(xml).expect("assertion should parse");
+        let claims = extract_assertion_claims(&assertion).expect("claims should extract");
+        assert_eq!(claims.name_id, "nid-value-123");
+        assert_eq!(claims.session_index.as_deref(), Some("sess-42"));
+        assert_eq!(
+            claims.attributes.get("mail").map(Vec::as_slice),
+            Some(["a@b.com".to_string(), "a2@b.com".to_string()].as_slice())
+        );
+        // No Name → falls back to FriendlyName as the key.
+        assert_eq!(
+            claims.attributes.get("fn-only").map(Vec::as_slice),
+            Some(["fv".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn extract_assertion_claims_rejects_missing_nameid() {
+        let xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1" Version="2.0" IssueInstant="2099-01-01T00:00:00Z">
+  <saml:Issuer>https://idp.example.com</saml:Issuer>
+</saml:Assertion>"#;
+        let assertion = samael::schema::Assertion::from_str(xml).expect("assertion should parse");
+        let err = extract_assertion_claims(&assertion)
+            .expect_err("assertion without Subject/NameID must be rejected");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("NameID")),
+            "got: {err:?}"
+        );
+    }
+
+    // ----- apply_attribute_map (pure) -----
+
+    #[test]
+    fn apply_attribute_map_resolves_email_and_name() {
+        let mut attributes = HashMap::new();
+        attributes.insert("mail".to_string(), vec!["u@example.com".to_string()]);
+        attributes.insert("cn".to_string(), vec!["Full Name".to_string()]);
+        let claims = SamlAssertionClaims {
+            name_id: "nid".into(),
+            session_index: None,
+            attributes,
+        };
+        let map = serde_json::json!({ "email": "mail", "name": "cn" });
+        let (email, name) = apply_attribute_map(&claims, &map);
+        assert_eq!(email.as_deref(), Some("u@example.com"));
+        assert_eq!(name.as_deref(), Some("Full Name"));
+    }
+
+    #[test]
+    fn apply_attribute_map_falls_back_to_display_name_key() {
+        let mut attributes = HashMap::new();
+        attributes.insert("displayName".to_string(), vec!["Disp".to_string()]);
+        let claims = SamlAssertionClaims {
+            name_id: "nid".into(),
+            session_index: None,
+            attributes,
+        };
+        // No "name" mapping; the code then tries the "displayName" field key.
+        let map = serde_json::json!({ "displayName": "displayName" });
+        let (email, name) = apply_attribute_map(&claims, &map);
+        assert!(email.is_none());
+        assert_eq!(name.as_deref(), Some("Disp"));
+    }
+
+    #[test]
+    fn apply_attribute_map_returns_none_when_unmapped() {
+        let claims = SamlAssertionClaims {
+            name_id: "nid".into(),
+            session_index: None,
+            attributes: HashMap::new(),
+        };
+        let (email, name) = apply_attribute_map(&claims, &serde_json::json!({}));
+        assert!(email.is_none());
+        assert!(name.is_none());
+    }
+
+    // ----- bind_signature_to_assertion (XSW defense; pure introspection) -----
+
+    #[test]
+    fn bind_signature_accepts_single_assertion_with_matching_reference() {
+        let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+  <saml:Assertion ID="asrt-1">
+    <ds:Signature><ds:SignedInfo><ds:Reference URI="#asrt-1"/></ds:SignedInfo></ds:Signature>
+  </saml:Assertion>
+</samlp:Response>"##;
+        bind_signature_to_assertion(xml.as_bytes(), "asrt-1")
+            .expect("single assertion with matching reference must bind");
+    }
+
+    #[test]
+    fn bind_signature_rejects_two_assertions_xsw() {
+        // Two <Assertion> elements is the classic XML Signature Wrapping shape.
+        let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+  <saml:Assertion ID="asrt-1">
+    <ds:Signature><ds:SignedInfo><ds:Reference URI="#asrt-1"/></ds:SignedInfo></ds:Signature>
+  </saml:Assertion>
+  <saml:Assertion ID="asrt-forged"/>
+</samlp:Response>"##;
+        let err = bind_signature_to_assertion(xml.as_bytes(), "asrt-forged")
+            .expect_err("two assertions must be rejected");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("exactly 1 Assertion")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_signature_rejects_reference_not_pointing_at_assertion() {
+        // One assertion, but the signature reference points elsewhere → the
+        // verified signature is not bound to the consumed assertion.
+        let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+  <saml:Assertion ID="asrt-1">
+    <ds:Signature><ds:SignedInfo><ds:Reference URI="#some-other-element"/></ds:SignedInfo></ds:Signature>
+  </saml:Assertion>
+</samlp:Response>"##;
+        let err = bind_signature_to_assertion(xml.as_bytes(), "asrt-1")
+            .expect_err("non-matching reference must be rejected");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("XML Signature Wrapping")),
+            "got: {err:?}"
+        );
+    }
+
+    // ----- pure helpers: deflate_encode + xml_escape -----
+
+    #[test]
+    fn deflate_encode_roundtrips() {
+        use flate2::read::DeflateDecoder;
+        use std::io::Read;
+
+        let original = b"<AuthnRequest>redirect-binding-deflate-payload</AuthnRequest>";
+        let deflated = deflate_encode(original).expect("deflate must succeed");
+        assert!(!deflated.is_empty());
+        assert_ne!(deflated.as_slice(), original.as_slice());
+
+        let mut decoder = DeflateDecoder::new(deflated.as_slice());
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).expect("inflate must succeed");
+        assert_eq!(out.as_slice(), original.as_slice());
+    }
+
+    #[test]
+    fn xml_escape_escapes_all_special_chars() {
+        let escaped = xml_escape(r#"a&b"c'd<e>f"#);
+        assert_eq!(escaped, "a&amp;b&quot;c&apos;d&lt;e&gt;f");
+    }
 }

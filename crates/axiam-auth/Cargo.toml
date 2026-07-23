@@ -10,6 +10,11 @@ rust-version.workspace = true
 [dependencies]
 axiam-core = { workspace = true }
 argon2 = { workspace = true }
+# hash_password (src/password.rs) generates the Argon2 salt with
+# argon2::password_hash::rand_core::OsRng, which only exists when rand_core 0.6's
+# `getrandom` feature is enabled. Declare it here so axiam-auth builds standalone
+# instead of relying on feature unification from api-rest/pki/server.
+rand_core = { version = "0.6", features = ["getrandom"] }
 jsonwebtoken = { workspace = true }
 totp-rs = { workspace = true }
 rand = { workspace = true }

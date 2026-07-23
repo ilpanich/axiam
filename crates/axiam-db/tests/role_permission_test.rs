@@ -600,7 +600,15 @@ async fn duplicate_action_rejected() {
         })
         .await;
 
-    assert!(result.is_err(), "duplicate action should be rejected");
+    // A duplicate `action` violates the unique index and must surface as a
+    // Conflict (AxiamError::AlreadyExists -> HTTP 409), routed through
+    // classify_write_error — not a generic Database error (HTTP 500).
+    let err = result.unwrap_err();
+    let dbg = format!("{err:?}");
+    assert!(
+        dbg.contains("AlreadyExists"),
+        "duplicate action must map to AlreadyExists (409 Conflict), not a 500; got: {dbg}"
+    );
 }
 
 #[tokio::test]

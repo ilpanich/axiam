@@ -158,7 +158,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "permission"))?;
 
         let rows: Vec<PermissionRow> = result.take(0).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "permission", &id_str)?;
@@ -246,7 +246,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         let result = builder.await.map_err(DbError::from)?;
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e.to_string(), "permission"))?;
 
         let rows: Vec<PermissionRow> = result.take(0).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "permission", &id_str)?;

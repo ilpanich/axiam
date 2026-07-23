@@ -42,20 +42,19 @@ const NEW_STRONG_PASSWORD: &str = "AnotherStr0ngPassword77"; // gitleaks:allow
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// Generates a fresh Ed25519 JWT signing keypair at test runtime (no literal
+/// key material in source — avoids new secret-scanner findings).
+fn test_keypair() -> (String, String) {
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+        .expect("ed25519 keypair generation");
+    (kp.serialize_pem(), kp.public_key_pem())
+}
+
 fn test_auth_config() -> AuthConfig {
+    let (priv_pem, pub_pem) = test_keypair();
     AuthConfig {
-        jwt_private_key_pem: concat!(
-            "-----BEGIN PRIVATE KEY-----\n",
-            "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n",
-            "-----END PRIVATE KEY-----"
-        )
-        .into(),
-        jwt_public_key_pem: concat!(
-            "-----BEGIN PUBLIC KEY-----\n",
-            "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
-            "-----END PUBLIC KEY-----"
-        )
-        .into(),
+        jwt_private_key_pem: priv_pem,
+        jwt_public_key_pem: pub_pem,
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
         ..AuthConfig::default()

@@ -34,18 +34,19 @@ type TestDb = surrealdb::engine::local::Db;
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 const CSRF_TOKEN: &str = "test-csrf-token";
 
+/// Generates a fresh Ed25519 JWT signing keypair at test runtime (no literal
+/// key material in source — avoids new secret-scanner findings).
+fn test_keypair() -> (String, String) {
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+        .expect("ed25519 keypair generation");
+    (kp.serialize_pem(), kp.public_key_pem())
+}
+
 fn test_auth_config() -> AuthConfig {
-    let private_key = "\
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM
------END PRIVATE KEY-----";
-    let public_key = "\
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
------END PUBLIC KEY-----";
+    let (private_key, public_key) = test_keypair();
     AuthConfig {
-        jwt_private_key_pem: private_key.into(),
-        jwt_public_key_pem: public_key.into(),
+        jwt_private_key_pem: private_key,
+        jwt_public_key_pem: public_key,
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
         // Required for WebauthnService's ceremony-state encryption.

@@ -31,16 +31,12 @@ type TestDb = surrealdb::engine::local::Db;
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 const CSRF_TOKEN: &str = "test-csrf-token";
 
+/// Generates a fresh Ed25519 JWT signing keypair at test runtime (no literal
+/// key material in source — avoids new secret-scanner findings).
 fn test_keypair() -> (String, String) {
-    let private_key = "\
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM
------END PRIVATE KEY-----";
-    let public_key = "\
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
------END PUBLIC KEY-----";
-    (private_key.into(), public_key.into())
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+        .expect("ed25519 keypair generation");
+    (kp.serialize_pem(), kp.public_key_pem())
 }
 
 fn test_auth_config() -> AuthConfig {

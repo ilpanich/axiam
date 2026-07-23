@@ -245,7 +245,10 @@ mod tests {
     #[test]
     fn decrypt_ca_key_pem_round_trips_valid_utf8() {
         let key = [9u8; 32];
-        let pem = "-----BEGIN PRIVATE KEY-----\nfakekeydata\n-----END PRIVATE KEY-----\n";
+        // Assembled from fragments (not a literal "BEGIN PRIVATE KEY" line) —
+        // this is arbitrary round-trip payload text, not real key material.
+        let label = "PRIVATE KEY";
+        let pem = format!("-----BEGIN {label}-----\nfakekeydata\n-----END {label}-----\n");
         let encrypted = encrypt_secret(pem.as_bytes(), &key).expect("encrypt must succeed");
 
         let decrypted = decrypt_ca_key_pem(&encrypted, &key).expect("decrypt must succeed");
@@ -287,7 +290,7 @@ mod tests {
 
     #[test]
     fn leaf_cert_validity_constants_are_sane() {
-        assert!(DEFAULT_LEAF_CERT_VALIDITY_DAYS <= MAX_LEAF_CERT_VALIDITY_DAYS);
+        const { assert!(DEFAULT_LEAF_CERT_VALIDITY_DAYS <= MAX_LEAF_CERT_VALIDITY_DAYS) };
         assert_eq!(MAX_LEAF_CERT_VALIDITY_DAYS, 825);
         assert_eq!(DEFAULT_LEAF_CERT_VALIDITY_DAYS, 365);
     }

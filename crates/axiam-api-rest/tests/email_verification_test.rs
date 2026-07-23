@@ -53,8 +53,8 @@ type TestDb = surrealdb::engine::local::Db;
 /// Generates a fresh Ed25519 JWT signing keypair at test runtime (no literal
 /// key material in source — avoids new secret-scanner findings).
 fn test_keypair() -> (String, String) {
-    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
-        .expect("ed25519 keypair generation");
+    let kp =
+        rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("ed25519 keypair generation");
     (kp.serialize_pem(), kp.public_key_pem())
 }
 

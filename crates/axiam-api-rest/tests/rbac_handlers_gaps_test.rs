@@ -29,18 +29,19 @@ type TestDb = surrealdb::engine::local::Db;
 const CSRF_TOKEN: &str = "test-csrf-token";
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
+/// Generates a fresh Ed25519 JWT signing keypair at test runtime (no literal
+/// key material in source — avoids new secret-scanner findings).
+fn test_keypair() -> (String, String) {
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+        .expect("ed25519 keypair generation");
+    (kp.serialize_pem(), kp.public_key_pem())
+}
+
 fn test_auth_config() -> AuthConfig {
-    let private_key = "\
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM
------END PRIVATE KEY-----";
-    let public_key = "\
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
------END PUBLIC KEY-----";
+    let (private_key, public_key) = test_keypair();
     AuthConfig {
-        jwt_private_key_pem: private_key.into(),
-        jwt_public_key_pem: public_key.into(),
+        jwt_private_key_pem: private_key,
+        jwt_public_key_pem: public_key,
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
         ..AuthConfig::default()
@@ -151,20 +152,14 @@ async fn get_permission_not_found_returns_404() {
     assert_eq!(resp.status().as_u16(), 404);
 }
 
-// NOTE (found while writing this test, not fixed here per the additive-only
-// mandate): `SurrealPermissionRepository::create` maps its unique-index
-// violation via a bare `.map_err(|e| DbError::Migration(e.to_string()))`
-// instead of routing it through `classify_write_error` the way sibling
-// repos do (e.g. `role.rs`'s `assign_to_user`/`assign_to_group`, per the
-// QUAL-03/D-09 policy documented on `classify_write_error`). `DbError::
-// Migration` converts to `AxiamError::Database` -> HTTP 500, so creating a
-// permission with an `action` that already exists in the tenant currently
-// returns 500 instead of the expected 409. This test asserts the ACTUAL
-// (buggy) behavior rather than the intended one, per the "verify real
-// behavior, don't assume" rule — flip the expected status to 409 once
-// `permission.rs::create` is fixed to call `classify_write_error`.
+// Creating a permission with an `action` that already exists in the tenant
+// must return 409 Conflict: `SurrealPermissionRepository::create` now routes
+// its unique-index violation through `classify_write_error` (the QUAL-03/D-09
+// policy used by sibling repos), mapping it to `AxiamError::AlreadyExists` ->
+// HTTP 409 rather than the former `DbError::Migration` -> `AxiamError::Database`
+// -> HTTP 500. This test locks in the corrected behavior end-to-end.
 #[actix_rt::test]
-async fn create_permission_duplicate_action_returns_500_not_409_known_bug() {
+async fn create_permission_duplicate_action_returns_409_conflict() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
@@ -186,9 +181,9 @@ async fn create_permission_duplicate_action_returns_500_not_409_known_bug() {
     let second = test::call_service(&app, make_req()).await;
     assert_eq!(
         second.status().as_u16(),
-        500,
-        "documents a real bug: duplicate permission action should be 409, is 500 \
-         (permission.rs::create doesn't use classify_write_error)"
+        409,
+        "a duplicate permission action must return 409 Conflict via \
+         classify_write_error, not 500"
     );
 }
 

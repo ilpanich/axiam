@@ -307,7 +307,10 @@ async fn decode_state_token_rejects_issuer_mismatch() {
     let res = svc_b
         .finish_registration(tenant, user, &token, "my key", &dummy_register_response())
         .await;
-    assert!(res.is_err(), "a token from a different issuer must be rejected");
+    assert!(
+        res.is_err(),
+        "a token from a different issuer must be rejected"
+    );
     assert!(matches!(
         res.unwrap_err(),
         AxiamError::AuthenticationFailed { .. }

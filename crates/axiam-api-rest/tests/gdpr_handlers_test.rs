@@ -148,7 +148,10 @@ macro_rules! test_app {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(AppState::for_test($db.clone(), $auth.clone())))
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
+                    $auth.clone(),
+                )))
                 .app_data(web::Data::new($authz as Arc<dyn AuthzChecker>))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
@@ -667,7 +670,9 @@ async fn cancel_succeeds_then_second_use_is_forbidden() {
 
     let req = test::TestRequest::get()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
-        .uri(&format!("/api/v1/auth/account/delete/cancel?token={raw_token}"))
+        .uri(&format!(
+            "/api/v1/auth/account/delete/cancel?token={raw_token}"
+        ))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
@@ -677,7 +682,9 @@ async fn cancel_succeeds_then_second_use_is_forbidden() {
     // Re-using the same (already-cancelled, single-use) token must fail.
     let req2 = test::TestRequest::get()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
-        .uri(&format!("/api/v1/auth/account/delete/cancel?token={raw_token}"))
+        .uri(&format!(
+            "/api/v1/auth/account/delete/cancel?token={raw_token}"
+        ))
         .to_request();
     let resp2 = test::call_service(&app, req2).await;
     assert_eq!(resp2.status().as_u16(), 403);
@@ -704,7 +711,9 @@ async fn cancel_expired_grace_window_is_forbidden() {
 
     let req = test::TestRequest::get()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
-        .uri(&format!("/api/v1/auth/account/delete/cancel?token={raw_token}"))
+        .uri(&format!(
+            "/api/v1/auth/account/delete/cancel?token={raw_token}"
+        ))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 403);

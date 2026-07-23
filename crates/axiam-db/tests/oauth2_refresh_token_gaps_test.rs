@@ -235,7 +235,19 @@ async fn delete_expired_removes_expired_and_revoked_but_keeps_active() {
     let deleted_count = repo.delete_expired().await.unwrap();
     assert_eq!(deleted_count, 2, "expired + revoked rows should be purged");
 
-    assert!(repo.get_by_token_hash(tenant_id, &expired_hash).await.is_err());
-    assert!(repo.get_by_token_hash(tenant_id, &revoked_hash).await.is_err());
-    assert!(repo.get_by_token_hash(tenant_id, &active_hash).await.is_ok());
+    assert!(
+        repo.get_by_token_hash(tenant_id, &expired_hash)
+            .await
+            .is_err()
+    );
+    assert!(
+        repo.get_by_token_hash(tenant_id, &revoked_hash)
+            .await
+            .is_err()
+    );
+    assert!(
+        repo.get_by_token_hash(tenant_id, &active_hash)
+            .await
+            .is_ok()
+    );
 }

@@ -426,7 +426,10 @@ async fn cert_generate_rejects_validity_days_above_default_max() {
         )
         .await;
 
-    assert!(result.is_err(), "validity_days above effective max must fail");
+    assert!(
+        result.is_err(),
+        "validity_days above effective max must fail"
+    );
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(
         err_msg.contains("validity_days must be between 1 and 365"),
@@ -551,10 +554,7 @@ async fn cert_generate_rejects_ca_with_no_stored_private_key() {
         "leaf issuance against a CA with no stored private key must fail"
     );
     let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_msg.contains("no stored private key"),
-        "got: {err_msg}"
-    );
+    assert!(err_msg.contains("no stored private key"), "got: {err_msg}");
 }
 
 /// `PkiConfig.encryption_key == None` must block leaf issuance even against a
@@ -608,10 +608,7 @@ async fn cert_generate_rejects_when_encryption_key_not_configured() {
         "leaf issuance must fail when no encryption key is configured"
     );
     let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_msg.contains("ENCRYPTION_KEY not set"),
-        "got: {err_msg}"
-    );
+    assert!(err_msg.contains("ENCRYPTION_KEY not set"), "got: {err_msg}");
 }
 
 // ---------------------------------------------------------------------------

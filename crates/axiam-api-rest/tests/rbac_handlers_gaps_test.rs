@@ -105,7 +105,10 @@ macro_rules! test_app {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(AppState::for_test($db.clone(), $auth.clone())))
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
+                    $auth.clone(),
+                )))
                 .app_data(web::Data::new($authz as Arc<dyn AuthzChecker>))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())

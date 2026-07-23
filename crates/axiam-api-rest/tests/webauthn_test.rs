@@ -128,7 +128,10 @@ macro_rules! test_app {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(AppState::for_test($db.clone(), $auth.clone())))
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
+                    $auth.clone(),
+                )))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
@@ -173,10 +176,7 @@ fn dummy_auth_response_json() -> Value {
 fn fake_state_token(payload_raw: &[u8]) -> String {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    format!(
-        "header.{}.signature",
-        URL_SAFE_NO_PAD.encode(payload_raw)
-    )
+    format!("header.{}.signature", URL_SAFE_NO_PAD.encode(payload_raw))
 }
 
 // ---------------------------------------------------------------------------

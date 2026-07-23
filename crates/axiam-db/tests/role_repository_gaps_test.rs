@@ -137,10 +137,7 @@ async fn get_by_name_is_scoped_to_tenant() {
     .await
     .unwrap();
 
-    let found = repo
-        .get_by_name(other_tid, "scoped-role")
-        .await
-        .unwrap();
+    let found = repo.get_by_name(other_tid, "scoped-role").await.unwrap();
     assert!(
         found.is_none(),
         "a role from another tenant must not be visible"
@@ -411,9 +408,7 @@ async fn assign_to_user_duplicate_edge_is_rejected() {
 
     // Assigning the exact same (user, role, no resource) edge again must
     // fail — it hits idx_has_role_unique.
-    let result = repo
-        .assign_to_user(tenant_id, user_id, role.id, None)
-        .await;
+    let result = repo.assign_to_user(tenant_id, user_id, role.id, None).await;
     assert!(
         result.is_err(),
         "duplicate has_role edge must be rejected, not silently ignored"

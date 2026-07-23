@@ -45,7 +45,11 @@ async fn setup() -> (Db, Uuid) {
     (db, tenant.id)
 }
 
-fn create_input(tenant_id: Uuid, name: &str, events: Vec<NotificationEventType>) -> CreateNotificationRule {
+fn create_input(
+    tenant_id: Uuid,
+    name: &str,
+    events: Vec<NotificationEventType>,
+) -> CreateNotificationRule {
     CreateNotificationRule {
         tenant_id,
         name: name.into(),
@@ -122,7 +126,10 @@ async fn update_partial_fields() {
 
     assert_eq!(updated.name, "renamed");
     assert!(!updated.enabled);
-    assert_eq!(updated.recipient_emails, vec!["ops@example.com".to_string()]);
+    assert_eq!(
+        updated.recipient_emails,
+        vec!["ops@example.com".to_string()]
+    );
     assert_eq!(updated.events.len(), 2);
 }
 

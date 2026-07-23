@@ -363,3 +363,124 @@ async fn confirm_reset_weak_password_returns_400() {
     // per the handler's own doc comment — not AxiamError::PasswordPolicy (422).
     assert_eq!(resp.status().as_u16(), 400);
 }
+
+// ---------------------------------------------------------------------------
+// R4: request_reset — RateLimited-swallow branch (real service call, not the
+// inline `#[cfg(test)]` unit tests which only simulate the match arms) and
+// mail-publish-failure branch via a real HTTP round trip.
+// ---------------------------------------------------------------------------
+
+/// Mail publisher that always fails — proves `request_reset` swallows a
+/// publish error and still returns the uniform `{"sent": true}` (D-15),
+/// exercised through the real HTTP handler rather than the file's own
+/// `#[cfg(test)]` simulated-branch unit tests.
+#[derive(Clone, Default)]
+struct FailingPublisher;
+
+impl MailPublisher for FailingPublisher {
+    async fn publish(&self, _msg: OutboundMailMessage) -> AxiamResult<()> {
+        Err(axiam_core::error::AxiamError::Internal(
+            "mock publish failure".into(),
+        ))
+    }
+}
+
+#[actix_rt::test]
+async fn request_reset_mail_publish_failure_still_returns_sent_true() {
+    let f = setup().await;
+    let auth = test_auth_config();
+
+    let mut state = AppState::for_test(f.db.clone(), auth.clone());
+    state.mail_outbound_publisher = Arc::new(FailingPublisher);
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(state))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/reset")
+        .set_json(json!({
+            "tenant_id": f.tenant_id,
+            "email": "reset-gaps-user@example.com",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(
+        body["sent"], true,
+        "a mail-publish failure must still funnel into the uniform sent:true response (D-15)"
+    );
+}
+
+/// After `MAX_RESETS_PER_DAY` (3) successful requests for the SAME user, a
+/// further request must be swallowed into the SAME `{"sent": true}` response
+/// (D-15 — a distinct 429 would let an attacker enumerate valid accounts by
+/// timing when the per-user limit trips). Uses a permissive per-IP
+/// `RateLimitConfig` override so the assertion actually reaches the
+/// per-user service-level limit instead of being pre-empted by the
+/// route's own IP-based governor (default `password_reset_per_min: 3`
+/// would otherwise 429 the 4th request before the handler ever runs).
+#[actix_rt::test]
+async fn request_reset_rate_limited_after_max_per_day_still_returns_sent_true() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(AppState::for_test(f.db.clone(), auth.clone())))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| {
+                register_api_v1_routes::<TestDb>(
+                    cfg,
+                    &RateLimitConfig {
+                        password_reset_per_min: 100,
+                        ..RateLimitConfig::default()
+                    },
+                )
+            }),
+    )
+    .await;
+
+    let make_req = || {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/reset")
+            .set_json(json!({
+                "tenant_id": f.tenant_id,
+                "email": "reset-gaps-user@example.com",
+            }))
+            .to_request()
+    };
+
+    // First 3 requests consume the per-user daily allowance (MAX_RESETS_PER_DAY).
+    for i in 0..3 {
+        let resp = test::call_service(&app, make_req()).await;
+        assert_eq!(resp.status().as_u16(), 200, "request #{i} must return 200");
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(body["sent"], true);
+    }
+
+    // 4th request exceeds MAX_RESETS_PER_DAY -> service returns
+    // Err(RateLimited), which the handler must swallow into the SAME
+    // uniform 200 {"sent": true} (D-15), not a 429/500.
+    let resp = test::call_service(&app, make_req()).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "a per-user rate-limited request must still return 200 (D-15 swallow)"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["sent"], true);
+    assert!(body.get("token").is_none());
+}

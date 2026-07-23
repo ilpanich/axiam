@@ -1178,3 +1178,490 @@ async fn reset_mfa_allowed_for_admin_returns_204() {
         "authorized admin caller must succeed in resetting MFA"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R4: login workspace-identity validation arms (org/tenant id-vs-slug).
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn login_rejects_missing_org_identifier() {
+    let (db, _org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn login_rejects_missing_tenant_identifier() {
+    let (db, org_id, _tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn login_rejects_unknown_org_slug() {
+    let (db, _org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "org_slug": "no-such-org",
+            "tenant_id": tenant_id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn login_rejects_unknown_tenant_slug() {
+    let (db, org_id, _tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_slug": "no-such-tenant",
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn login_accepts_org_slug_and_tenant_slug() {
+    let (db, _org_id, _tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "org_slug": "test-org",
+            "tenant_slug": "test-tenant",
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "slug-based org/tenant resolution must succeed"
+    );
+}
+
+/// SECURITY (NEW-1): a caller passing a raw `tenant_id` that legitimately
+/// exists but belongs to a DIFFERENT org than the supplied `org_id` must be
+/// rejected — otherwise a client could bind their own tenant to a foreign
+/// org_id and mint a cross-organization token.
+#[actix_rt::test]
+async fn login_rejects_tenant_org_mismatch() {
+    let (db, _org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+
+    // Create a second, unrelated organization (no tenant relationship to
+    // `tenant_id` above).
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let other_org = org_repo
+        .create(CreateOrganization {
+            name: "Other Org".into(),
+            slug: "other-org".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            // tenant_id is real, but belongs to the ORIGINAL org, not other_org.
+            "tenant_id": tenant_id,
+            "org_id": other_org.id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "tenant/org mismatch must be rejected as invalid credentials"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R4: refresh — missing cookie / unknown tenant arms.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn refresh_missing_cookie_returns_401() {
+    let (db, org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    // Need a CSRF-cookie pair from a login first so we don't get a 403
+    // before ever reaching the handler's missing-refresh-cookie check.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let csrf_token = extract_cookie_value(&resp, "axiam_csrf").unwrap();
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/refresh")
+        .insert_header(("Cookie", format!("axiam_csrf={csrf_token}")))
+        .insert_header(("X-CSRF-Token", csrf_token))
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn refresh_with_unknown_tenant_id_returns_401() {
+    let (db, org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let refresh_token = extract_cookie_value(&resp, "axiam_refresh").unwrap();
+    let csrf_token = extract_cookie_value(&resp, "axiam_csrf").unwrap();
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/refresh")
+        .insert_header((
+            "Cookie",
+            cookie_header(&[
+                ("axiam_refresh", &refresh_token),
+                ("axiam_csrf", &csrf_token),
+            ]),
+        ))
+        .insert_header(("X-CSRF-Token", csrf_token))
+        .set_json(serde_json::json!({
+            "tenant_id": Uuid::new_v4(),
+            "org_id": org_id,
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+// ---------------------------------------------------------------------------
+// R4: session-based voluntary MFA enroll/confirm + login MfaRequired/verify
+// branches. These endpoints (enroll_mfa/confirm_mfa/verify_mfa) had no
+// coverage — only the setup-token variants (mfa/setup/enroll,
+// mfa/setup/confirm) were exercised above.
+// ---------------------------------------------------------------------------
+
+/// Helper: log in as alice and return (access_token, csrf_token).
+async fn login_get_cookies(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    tenant_id: Uuid,
+    org_id: Uuid,
+) -> (String, String) {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "login must succeed");
+    let access_token = extract_cookie_value(&resp, "axiam_access").unwrap();
+    let csrf_token = extract_cookie_value(&resp, "axiam_csrf").unwrap();
+    (access_token, csrf_token)
+}
+
+#[actix_rt::test]
+async fn enroll_and_confirm_mfa_then_login_requires_verify() {
+    let (db, org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = mfa_auth_config(); // MFA encryption key set, enforcement OFF.
+    let app = test_app!(db, auth);
+
+    let (access_token, csrf_token) = login_get_cookies(&app, tenant_id, org_id).await;
+
+    // Step 1: voluntary enroll (session-based, not setup-token).
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/enroll")
+        .insert_header((
+            "Cookie",
+            cookie_header(&[("axiam_access", &access_token), ("axiam_csrf", &csrf_token)]),
+        ))
+        .insert_header(("X-CSRF-Token", csrf_token.clone()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "enroll_mfa must succeed");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let secret_base32 = body["secret_base32"].as_str().unwrap().to_string();
+    assert!(
+        body["totp_uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/"),
+        "enroll_mfa must return a totp_uri"
+    );
+
+    // `step_offset` lets the caller request a code for a step other than the
+    // current one (e.g. `+1`) — needed because the server persists a
+    // `totp_last_used_step` replay guard (SECHRD-01): reusing a code from an
+    // already-consumed step is correctly rejected, so step 7 below must mint
+    // a code for the NEXT step rather than the exact same code confirm_mfa
+    // already consumed in step 3 (no real sleep needed — skew=1 accepts the
+    // next step early).
+    let gen_code_at_offset = |secret_b32: &str, step_offset: i64| -> String {
+        let secret = totp_rs::Secret::Encoded(secret_b32.to_string());
+        let secret_bytes = secret.to_bytes().unwrap();
+        let totp = totp_rs::TOTP::new(
+            totp_rs::Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some("AXIAM-Test".into()),
+            "alice@example.com".into(),
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let current_step = now / 30;
+        let target_time = ((current_step as i64 + step_offset).max(0) as u64) * 30;
+        totp.generate(target_time)
+    };
+    let gen_code = |secret_b32: &str| -> String { gen_code_at_offset(secret_b32, 0) };
+
+    // Step 2: confirm with a WRONG code first — must 401 and NOT enable MFA.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/confirm")
+        .insert_header((
+            "Cookie",
+            cookie_header(&[("axiam_access", &access_token), ("axiam_csrf", &csrf_token)]),
+        ))
+        .insert_header(("X-CSRF-Token", csrf_token.clone()))
+        .set_json(serde_json::json!({ "totp_code": "000000" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "confirm_mfa with a wrong TOTP code must fail"
+    );
+
+    // Step 3: confirm with the correct code — must succeed.
+    let code = gen_code(&secret_base32);
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/confirm")
+        .insert_header((
+            "Cookie",
+            cookie_header(&[("axiam_access", &access_token), ("axiam_csrf", &csrf_token)]),
+        ))
+        .insert_header(("X-CSRF-Token", csrf_token.clone()))
+        .set_json(serde_json::json!({ "totp_code": code }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "confirm_mfa must succeed");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["mfa_enabled"], true);
+
+    // Step 4: a FRESH login must now be challenged (202 MfaRequired) instead
+    // of succeeding outright — exercises the login handler's MfaRequired
+    // branch (available_methods lookup) which was previously untested.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        202,
+        "login for an MFA-enabled user must return 202 MfaRequired"
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["mfa_required"], true);
+    let challenge_token = body["challenge_token"].as_str().unwrap().to_string();
+    assert!(
+        body["available_methods"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "available_methods must be populated for an MFA-enabled user, got {body}"
+    );
+
+    // Step 5: verify_mfa with a WRONG code must 401.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/verify")
+        .set_json(serde_json::json!({
+            "challenge_token": &challenge_token,
+            "totp_code": "000000"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "verify_mfa with a wrong TOTP code must fail"
+    );
+
+    // Step 6: verify_mfa with a garbage challenge_token must 401.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/verify")
+        .set_json(serde_json::json!({
+            "challenge_token": "not-a-real-challenge-token",
+            "totp_code": "000000"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "verify_mfa with an invalid challenge_token must fail"
+    );
+
+    // Step 7: verify_mfa with the CORRECT code must succeed and set cookies
+    // (not return tokens in the body — same contract as the setup/confirm
+    // and login-success paths). Use the NEXT step (see `gen_code_at_offset`
+    // docs above) since step 3 already consumed the current step.
+    let code = gen_code_at_offset(&secret_base32, 1);
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/verify")
+        .set_json(serde_json::json!({
+            "challenge_token": &challenge_token,
+            "totp_code": code
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "verify_mfa must succeed");
+
+    let access_value = extract_cookie_value(&resp, "axiam_access");
+    assert!(
+        access_value.is_some() && !access_value.unwrap().is_empty(),
+        "axiam_access cookie must be set after verify_mfa"
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        body["access_token"].is_null() || body.get("access_token").is_none(),
+        "access_token must NOT appear in verify_mfa response body"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R4: change_password — oversized new_password DoS guard.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn change_password_rejects_oversized_new_password() {
+    let (db, org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let (access_token, csrf_token) = login_get_cookies(&app, tenant_id, org_id).await;
+
+    let oversized = "a".repeat(1025);
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/password/change")
+        .insert_header((
+            "Cookie",
+            cookie_header(&[("axiam_access", &access_token), ("axiam_csrf", &csrf_token)]),
+        ))
+        .insert_header(("X-CSRF-Token", csrf_token))
+        .set_json(serde_json::json!({
+            "current_password": "password12345",
+            "new_password": oversized
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}

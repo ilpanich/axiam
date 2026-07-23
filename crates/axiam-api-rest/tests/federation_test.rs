@@ -22,12 +22,20 @@ use axiam_db::repository::{
     SurrealUserRepository,
 };
 use axiam_federation::secrets::decrypt_client_secret_or_legacy;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
+
+/// The public first-time-SSO routes (`/api/v1/auth/federation/*`) are wrapped
+/// in per-IP rate limiting (`RateLimitShared`/governor), which needs a peer
+/// address to extract a rate-limit key — `test::TestRequest` has none by
+/// default, so every request to those routes must set one explicitly
+/// (mirrors `federation_first_time_sso_test.rs::TEST_PEER`).
+const TEST_PEER: &str = "127.0.0.1:23456";
 
 fn test_keypair() -> (String, String) {
     // Ed25519 test-only fixture — NOT secret; split with concat! to satisfy
@@ -891,4 +899,1227 @@ async fn oidc_secret_update_rotates_encrypted_secret() {
         decrypted, "new-rotated-secret",
         "post-rotation decrypted secret must match the new plaintext"
     );
+}
+
+// ---------------------------------------------------------------------------
+// R4: additional CRUD validation-arm coverage (create/update field validation,
+// encryption-key-not-configured, IdP cert validation, cross-tenant 404s,
+// nonexistent-config errors).
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn create_federation_config_rejects_empty_provider() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "provider": "",
+            "protocol": "OidcConnect",
+            "client_id": "some-id",
+            "client_secret": "some-secret",
+            "attribute_map": {}
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn create_federation_config_rejects_empty_client_id() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "provider": "Some Provider",
+            "protocol": "OidcConnect",
+            "client_id": "",
+            "client_secret": "some-secret",
+            "attribute_map": {}
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn create_federation_config_rejects_empty_client_secret() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "provider": "Some Provider",
+            "protocol": "OidcConnect",
+            "client_id": "some-id",
+            "client_secret": "",
+            "attribute_map": {}
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn create_federation_config_rejects_empty_metadata_url() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "provider": "Some Provider",
+            "protocol": "OidcConnect",
+            "metadata_url": "",
+            "client_id": "some-id",
+            "client_secret": "some-secret",
+            "attribute_map": {}
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn create_federation_config_rejects_invalid_idp_signing_cert_pem() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "provider": "Some Provider",
+            "protocol": "Saml",
+            "client_id": "some-id",
+            "client_secret": "some-secret",
+            "attribute_map": {},
+            "idp_signing_cert_pem": "not-a-valid-pem-cert"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn create_federation_config_fails_without_encryption_key_configured() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    // No federation_encryption_key set -> the `create` handler must 400.
+    let (priv_pem, pub_pem) = test_keypair();
+    let auth = AuthConfig {
+        jwt_private_key_pem: priv_pem,
+        jwt_public_key_pem: pub_pem,
+        access_token_lifetime_secs: 900,
+        jwt_issuer: "axiam-test".into(),
+        federation_encryption_key: None,
+        ..AuthConfig::default()
+    };
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "provider": "Some Provider",
+            "protocol": "OidcConnect",
+            "client_id": "some-id",
+            "client_secret": "some-secret",
+            "attribute_map": {}
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn update_federation_config_rejects_empty_provider() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_config(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "provider": "" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn update_federation_config_rejects_empty_client_id() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_config(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "client_id": "" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn update_federation_config_rejects_empty_client_secret() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_config(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "client_secret": "" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn update_federation_config_rejects_empty_metadata_url() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_config(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "metadata_url": "" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn update_federation_config_rejects_invalid_idp_signing_cert_pem() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_saml_config(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "idp_signing_cert_pem": "garbage" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn update_nonexistent_federation_config_returns_404() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let fake_id = Uuid::new_v4();
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/federation-configs/{fake_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "provider": "Won't Apply" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+#[actix_rt::test]
+async fn delete_nonexistent_federation_config_returns_404() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let fake_id = Uuid::new_v4();
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/federation-configs/{fake_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+#[actix_rt::test]
+async fn get_federation_config_from_other_tenant_returns_404() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_config(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    // Mint a token scoped to a DIFFERENT (never-created) tenant — the JWT
+    // extractor performs no session/tenant DB lookup in this harness, so the
+    // repository's tenant-scoped query is what must reject the cross-tenant
+    // access (SEC data-isolation guarantee).
+    let other_tenant_id = Uuid::new_v4();
+    let other_token = mint_token(&auth, user_id, other_tenant_id, org_id);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {other_token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+#[actix_rt::test]
+async fn update_federation_config_from_other_tenant_returns_404() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_config(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let other_tenant_id = Uuid::new_v4();
+    let other_token = mint_token(&auth, user_id, other_tenant_id, org_id);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {other_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "provider": "Hijacked" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+#[actix_rt::test]
+async fn delete_federation_config_from_other_tenant_returns_404() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_config(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let other_tenant_id = Uuid::new_v4();
+    let other_token = mint_token(&auth, user_id, other_tenant_id, org_id);
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {other_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// R4: oidc_authorize / oidc_callback (authenticated linking flow) — validation
+// and unconfigured-service error arms.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn oidc_authorize_rejects_empty_redirect_uri() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/authorize")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "redirect_uri": "",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_authorize_rejects_empty_state() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/authorize")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "redirect_uri": "https://example.com/cb",
+            "state": "",
+            "nonce": "some-nonce"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_authorize_rejects_empty_nonce() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/authorize")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "redirect_uri": "https://example.com/cb",
+            "state": "some-state",
+            "nonce": ""
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+/// `test_app!` (this file) never installs `oidc_federation_service` (stays
+/// `None` — only `federation_first_time_sso_test.rs` wires it up), so a
+/// well-formed request must hit the "federation encryption key not
+/// configured" 400 arm.
+#[actix_rt::test]
+async fn oidc_authorize_fails_when_service_not_configured() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/authorize")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "redirect_uri": "https://example.com/cb",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_authorize_without_auth_returns_401() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/authorize")
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "redirect_uri": "https://example.com/cb",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn oidc_callback_rejects_empty_code() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/callback")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "code": "",
+            "redirect_uri": "https://example.com/cb",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_callback_rejects_empty_redirect_uri() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/callback")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "code": "some-code",
+            "redirect_uri": "",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_callback_rejects_empty_state() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/callback")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "code": "some-code",
+            "redirect_uri": "https://example.com/cb",
+            "state": "",
+            "nonce": "some-nonce"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_callback_fails_when_service_not_configured() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/callback")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "code": "some-code",
+            "redirect_uri": "https://example.com/cb",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_callback_without_auth_returns_401() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/callback")
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "code": "some-code",
+            "redirect_uri": "https://example.com/cb",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+// ---------------------------------------------------------------------------
+// R4: SAML SP flow — nonexistent config / missing-auth arms.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn saml_authn_request_nonexistent_config_returns_error() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/saml/authn-request")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "acs_url": "https://example.com/acs"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().as_u16() >= 400);
+}
+
+#[actix_rt::test]
+async fn saml_acs_nonexistent_config_returns_error() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/saml/acs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "saml_response": "irrelevant-not-empty",
+            "acs_url": "https://example.com/acs"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().as_u16() >= 400);
+}
+
+#[actix_rt::test]
+async fn saml_acs_without_auth_returns_401() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/saml/acs")
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "saml_response": "irrelevant-not-empty",
+            "acs_url": "https://example.com/acs"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn saml_metadata_rejects_empty_acs_url() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let config = create_saml_config(&app, &token).await;
+    let config_id = config["id"].as_str().unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/api/v1/federation/saml/metadata?config_id={config_id}&acs_url="
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_metadata_without_auth_returns_401() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let config = create_saml_config(&app, &token).await;
+    let config_id = config["id"].as_str().unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/api/v1/federation/saml/metadata?config_id={config_id}\
+             &acs_url=https%3A%2F%2Fexample.com%2Facs"
+        ))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn saml_metadata_nonexistent_config_returns_error() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/api/v1/federation/saml/metadata?config_id={}\
+             &acs_url=https%3A%2F%2Fexample.com%2Facs",
+            Uuid::new_v4()
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().as_u16() >= 400);
+}
+
+// ---------------------------------------------------------------------------
+// R4: federation link endpoints — missing-auth arms.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn list_user_links_without_auth_returns_401() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/federation-links/user/{}", Uuid::new_v4()))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn delete_link_without_auth_returns_401() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/federation-links/{}", Uuid::new_v4()))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+// ---------------------------------------------------------------------------
+// R4: public first-time-SSO endpoints — validation, redirect_uri guard,
+// unknown org/tenant slug, and unconfigured-service arms. These do NOT need
+// a mock IdP because every scenario below returns before any outbound
+// discovery/token-exchange call is made.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn oidc_start_public_rejects_empty_redirect_uri() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/start")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": ""
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_start_public_rejects_invalid_redirect_uri_scheme() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/start")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "http://evil.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_start_public_rejects_missing_org_identifier() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/start")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "https://spa.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_start_public_rejects_unknown_org_slug() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/start")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_slug": "no-such-org-slug",
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "https://spa.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn oidc_start_public_rejects_missing_tenant_identifier() {
+    let (db, org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/start")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "https://spa.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_start_public_rejects_unknown_tenant_slug() {
+    let (db, org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/start")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_slug": "no-such-tenant-slug",
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "https://spa.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+/// `test_app!` never wires up `oidc_federation_service` in this file, so a
+/// fully-valid org/tenant/redirect_uri combination must still 400 on the
+/// "federation encryption key not configured" arm (service is `None`).
+#[actix_rt::test]
+async fn oidc_start_public_fails_when_service_not_configured() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/start")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "https://spa.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_callback_public_rejects_empty_state() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/callback")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({ "state": "", "code": "some-code" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_callback_public_rejects_empty_code() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/callback")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({ "state": "some-state", "code": "" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn oidc_callback_public_rejects_unknown_state() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/callback")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "state": "state-that-was-never-issued",
+            "code": "some-code"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn saml_login_public_rejects_empty_redirect_uri() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/saml/login")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": ""
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_login_public_rejects_invalid_redirect_uri() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/saml/login")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "ftp://not-allowed.example.com"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_login_public_rejects_missing_org_identifier() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/saml/login")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "https://spa.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_login_public_rejects_unknown_org_slug() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/saml/login")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_slug": "no-such-org-slug",
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "https://spa.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn saml_login_public_rejects_missing_tenant_identifier() {
+    let (db, org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/saml/login")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "https://spa.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_login_public_rejects_unknown_tenant_slug() {
+    let (db, org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/saml/login")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_slug": "no-such-tenant-slug",
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "https://spa.example.com/callback"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn saml_acs_public_rejects_empty_relay_state() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/saml/acs")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "relay_state": "",
+            "saml_response_b64": "irrelevant-not-empty"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_acs_public_rejects_empty_saml_response() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/saml/acs")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "relay_state": "some-relay-state",
+            "saml_response_b64": ""
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_acs_public_rejects_unknown_relay_state() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/saml/acs")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "relay_state": "relay-state-that-was-never-issued",
+            "saml_response_b64": "irrelevant-not-empty"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
 }

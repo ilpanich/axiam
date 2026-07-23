@@ -358,6 +358,48 @@ async fn device_auth_unbound_cert_returns_error() {
     assert_ne!(resp.status().as_u16(), 200);
 }
 
+// ---------------------------------------------------------------------------
+// R4: cert_auth.rs — invalid-encoding and unknown-certificate arms.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn device_auth_invalid_url_encoding_returns_401() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    // "%zz" is not a valid percent-encoded byte (z is not a hex digit) —
+    // exercises `urldecode`'s `hex_val` error arm.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/device")
+        .insert_header(("X-Client-Certificate", "%zz-not-valid-percent-encoding"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn device_auth_unknown_certificate_returns_401() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    // A well-formed, self-signed certificate that was never registered
+    // via the CA/certificate-issuance API — `DeviceAuthService::authenticate`
+    // must reject it as unknown (NotFound -> AuthenticationFailed).
+    let cert = rcgen::generate_simple_self_signed(vec!["never-registered.example.com".into()])
+        .expect("generate self-signed cert");
+    let pem = cert.cert.pem();
+
+    let encoded_pem = urlencode(&pem);
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/device")
+        .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
 #[actix_rt::test]
 async fn device_auth_missing_cert_header_returns_401() {
     let (db, _org_id, _tenant_id) = setup_db().await;

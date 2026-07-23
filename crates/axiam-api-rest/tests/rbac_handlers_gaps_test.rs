@@ -205,6 +205,219 @@ async fn create_permission_denied_without_grant_returns_403() {
     assert_eq!(resp.status().as_u16(), 403);
 }
 
+#[actix_rt::test]
+async fn update_permission_not_found_returns_404() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (h, v) = auth_header(&token);
+    let req = with_csrf(test::TestRequest::put())
+        .uri(&format!("/api/v1/permissions/{}", Uuid::new_v4()))
+        .insert_header((h, v))
+        .set_json(json!({ "description": "won't apply" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+/// Unlike `get`/`update`, `delete` on a nonexistent permission is idempotent
+/// (204) rather than 404 — this locks in that actual repository behavior
+/// (deleting a row that's already absent is a no-op success, not an error).
+#[actix_rt::test]
+async fn delete_permission_not_found_is_idempotent_204() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (h, v) = auth_header(&token);
+    let req = with_csrf(test::TestRequest::delete())
+        .uri(&format!("/api/v1/permissions/{}", Uuid::new_v4()))
+        .insert_header((h, v))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 204);
+}
+
+#[actix_rt::test]
+async fn update_permission_denied_without_grant_returns_403() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth, Arc::new(DenyAllAuthzChecker));
+
+    let (h, v) = auth_header(&token);
+    let req = with_csrf(test::TestRequest::put())
+        .uri(&format!("/api/v1/permissions/{}", Uuid::new_v4()))
+        .insert_header((h, v))
+        .set_json(json!({ "description": "won't apply" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+#[actix_rt::test]
+async fn delete_permission_denied_without_grant_returns_403() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth, Arc::new(DenyAllAuthzChecker));
+
+    let (h, v) = auth_header(&token);
+    let req = with_csrf(test::TestRequest::delete())
+        .uri(&format!("/api/v1/permissions/{}", Uuid::new_v4()))
+        .insert_header((h, v))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+// ---------------------------------------------------------------------------
+// permissions.rs — role<->permission grant/revoke not-found / denied
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn grant_to_role_denied_without_grant_returns_403() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth, Arc::new(DenyAllAuthzChecker));
+
+    let (h, v) = auth_header(&token);
+    let req = with_csrf(test::TestRequest::post())
+        .uri(&format!("/api/v1/roles/{}/permissions", Uuid::new_v4()))
+        .insert_header((h, v))
+        .set_json(json!({ "permission_id": Uuid::new_v4() }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+#[actix_rt::test]
+async fn grant_to_role_nonexistent_role_returns_error() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+    let (h, v) = auth_header(&token);
+
+    // Create a real permission, but reference a role_id that was never created.
+    let req = with_csrf(test::TestRequest::post())
+        .uri("/api/v1/permissions")
+        .insert_header((h, v.clone()))
+        .set_json(json!({ "action": "grants:nonexistent-role", "description": "d" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let perm: Value = test::read_body_json(resp).await;
+    let perm_id = perm["id"].as_str().unwrap();
+
+    let req = with_csrf(test::TestRequest::post())
+        .uri(&format!("/api/v1/roles/{}/permissions", Uuid::new_v4()))
+        .insert_header((h, v))
+        .set_json(json!({ "permission_id": perm_id }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        resp.status().as_u16() >= 400,
+        "granting a permission to a nonexistent role must fail, got {}",
+        resp.status().as_u16()
+    );
+}
+
+#[actix_rt::test]
+async fn revoke_from_role_denied_without_grant_returns_403() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth, Arc::new(DenyAllAuthzChecker));
+
+    let (h, v) = auth_header(&token);
+    let req = with_csrf(test::TestRequest::delete())
+        .uri(&format!(
+            "/api/v1/roles/{}/permissions/{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ))
+        .insert_header((h, v))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+/// CQ-B07: `revoke_from_role`'s repository implementation verifies BOTH the
+/// role AND the permission resolve within the caller's tenant before the
+/// DELETE runs — a `permission_id` that doesn't exist at all (never created,
+/// in any tenant) fails that same existence check and is treated identically
+/// to a genuine cross-tenant edge: 403 `AuthorizationDenied`, not a 404. This
+/// locks in that real (and previously untested) security-first behavior.
+#[actix_rt::test]
+async fn revoke_from_role_nonexistent_permission_returns_403_cross_tenant_denied() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (h, v) = auth_header(&token);
+    // Create a real role so the revoke path runs the full repo query, just
+    // with a permission_id that was never created anywhere.
+    let req = with_csrf(test::TestRequest::post())
+        .uri("/api/v1/roles")
+        .insert_header((h, v.clone()))
+        .set_json(json!({
+            "name": "Revoke Target Role",
+            "description": "role for revoke-never-granted test",
+            "is_global": true
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201, "role creation must succeed");
+    let role: Value = test::read_body_json(resp).await;
+    let role_id = role["id"].as_str().unwrap();
+
+    let req = with_csrf(test::TestRequest::delete())
+        .uri(&format!(
+            "/api/v1/roles/{role_id}/permissions/{}",
+            Uuid::new_v4()
+        ))
+        .insert_header((h, v))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "revoking a nonexistent permission must fail the CQ-B07 tenant-membership guard"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["message"], "Authorization denied: cross-tenant permission revocation denied");
+}
+
+#[actix_rt::test]
+async fn list_role_permissions_denied_without_grant_returns_403() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth, Arc::new(DenyAllAuthzChecker));
+
+    let (h, v) = auth_header(&token);
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/roles/{}/permissions", Uuid::new_v4()))
+        .insert_header((h, v))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
 // ---------------------------------------------------------------------------
 // roles.rs — not-found, list_users, list_groups
 // ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ jobs:
           sudo docker image prune --all --force || true
           df -h
 
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c  # stable (2026-03-27)
         with:
           toolchain: stable
           # cargo-llvm-cov reads the profraw files the instrumented binaries

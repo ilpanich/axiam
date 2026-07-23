@@ -308,12 +308,33 @@ seed_keycloak() {
   [ -n "$CLIENT_SECRET" ] || { echo "[seed/keycloak] could not read client secret for '$CLIENT_ID'"; exit 1; }
 
   echo "[seed/keycloak] creating benchmark user"
+  # firstName/lastName + requiredActions:[] are REQUIRED for a loginable account.
+  # Keycloak 24+ ships the declarative user profile enabled, with firstName and
+  # lastName marked required. A user created without them gets the VERIFY_PROFILE
+  # required action attached on first login — which the non-interactive ROPC grant
+  # cannot satisfy, so it fails 400 invalid_grant "Account is not fully set up".
+  # Setting them here (and clearing requiredActions) keeps the account fully set up.
   kc_post "/admin/realms/$REALM/users" \
-    "{\"username\":\"$BENCH_USERNAME\",\"enabled\":true,\"email\":\"bench@bench.dev\",\"emailVerified\":true,\"credentials\":[{\"type\":\"password\",\"value\":\"$BENCH_PASSWORD\",\"temporary\":false}]}"
+    "{\"username\":\"$BENCH_USERNAME\",\"enabled\":true,\"email\":\"bench@bench.dev\",\"emailVerified\":true,\"firstName\":\"Bench\",\"lastName\":\"User\",\"requiredActions\":[],\"credentials\":[{\"type\":\"password\",\"value\":\"$BENCH_PASSWORD\",\"temporary\":false}]}"
 
   local KC_USER_ID
   KC_USER_ID=$(kc_get "/admin/realms/$REALM/users?username=$BENCH_USERNAME&exact=true" | jq -r '.[0].id // empty')
   [ -n "$KC_USER_ID" ] || { echo "[seed/keycloak] could not find created user '$BENCH_USERNAME'"; exit 1; }
+
+  # Idempotency: kc_post treats 409 (already-exists) as OK and does NOT update, so
+  # a user left over from an earlier seed keeps its old, possibly-incomplete state
+  # (missing names, a lingering VERIFY_PROFILE action). PUT the corrected state
+  # unconditionally so a re-seed always yields a fully-set-up, loginable account.
+  local put_resp put_code
+  put_resp=$(curl -sS -X PUT "$BASE/admin/realms/$REALM/users/$KC_USER_ID" -H "$H" \
+    -H "Content-Type: application/json" \
+    -d "{\"enabled\":true,\"email\":\"bench@bench.dev\",\"emailVerified\":true,\"firstName\":\"Bench\",\"lastName\":\"User\",\"requiredActions\":[]}" \
+    -w $'\n%{http_code}')
+  put_code="${put_resp##*$'\n'}"
+  case "$put_code" in
+    204) ;;
+    *) echo "[seed/keycloak] PUT user $BENCH_USERNAME -> HTTP $put_code: ${put_resp%$'\n'*}" >&2; exit 1 ;;
+  esac
 
   # VERIFY the user is enabled and actually has a password credential set — a
   # re-seed (409) with a pre-existing disabled user or a wiped credential is
@@ -329,6 +350,14 @@ seed_keycloak() {
     | jq -r '[.[] | select(.type=="password")] | length')
   if [ "${has_pw_cred:-0}" -lt 1 ]; then
     echo "[seed/keycloak] bench user '$BENCH_USERNAME' has no password credential set — fix it or delete+re-seed" >&2
+    exit 1
+  fi
+  # Any lingering required action (e.g. VERIFY_PROFILE) makes ROPC fail 400
+  # "Account is not fully set up" — verify none remain after the PUT above.
+  local pending_actions
+  pending_actions=$(echo "$user_json" | jq -r '(.requiredActions // []) | length')
+  if [ "${pending_actions:-0}" -gt 0 ]; then
+    echo "[seed/keycloak] bench user '$BENCH_USERNAME' still has pending requiredActions ($(echo "$user_json" | jq -c '.requiredActions')) — ROPC login will fail 'Account is not fully set up'" >&2
     exit 1
   fi
 
@@ -453,10 +482,17 @@ seed_zitadel() {
   # idempotency handling is attempted — a 409 here is treated the same as any
   # other failure: warn and fall back.
   echo "[seed/zitadel] creating benchmark human user (password login, D5)"
+  # The password MUST be passed as "initialPassword" — that is the field name in
+  # the management-v1 AddHumanUserRequest schema. A top-level "password" key (the
+  # v2 user-API shape) is an UNKNOWN field to the v1 gRPC gateway and is silently
+  # dropped: the create returns 200 but the user lands in USER_STATE_INITIAL with
+  # NO usable password, so the later session-create smoke check fails with
+  # "User has not set a password (COMMAND-3nJ4t)". initialPassword creates the
+  # user already ACTIVE (change-not-required) so the password login works.
   local hu_resp hu_code hu_body
   hu_resp=$(curl -sSk -H "Authorization: Bearer $PAT" -H "Content-Type: application/json" \
     -X POST "$BASE/management/v1/users/human" \
-    --data "{\"userName\":\"$BENCH_USERNAME\",\"profile\":{\"firstName\":\"Bench\",\"lastName\":\"User\"},\"email\":{\"email\":\"bench@bench.dev\",\"isEmailVerified\":true},\"password\":\"$BENCH_PASSWORD\",\"passwordChangeRequired\":false}" \
+    --data "{\"userName\":\"$BENCH_USERNAME\",\"profile\":{\"firstName\":\"Bench\",\"lastName\":\"User\"},\"email\":{\"email\":\"bench@bench.dev\",\"isEmailVerified\":true},\"initialPassword\":\"$BENCH_PASSWORD\"}" \
     -w $'\n%{http_code}') || hu_resp=$'\n000'
   hu_code="${hu_resp##*$'\n'}"; hu_body="${hu_resp%$'\n'*}"
   if [ "$hu_code" -ge 200 ] 2>/dev/null && [ "$hu_code" -lt 300 ] 2>/dev/null; then

@@ -45,6 +45,58 @@ def dash(value, fmt):
     return "—" if value is None else format(value, fmt)
 
 
+def is_full_outage(perf):
+    """True when every iteration failed — throughput/latency then describe the
+    failure path, not the operation being measured, so they get blanked to an
+    em dash (A5.2, generalized here to gRPC — "Report labeling polish").
+
+    Keys off the custom bench_* metrics (bench_error_rate / bench_ok /
+    bench_failed) that every scenario emits uniformly for REST *and* gRPC
+    alike (scenarios/lib/metrics.js) — never an HTTP-specific field like
+    http_req_failed, which doesn't exist at all in a pure-gRPC scenario's k6
+    summary (e.g. zitadel_userinfo_grpc, run 2: ~1725 "req/s" of throughput
+    that was actually 100% non-OK gRPC statuses). The ok_count/failed_count
+    check is a defensive fallback for the edge case where bench_error_rate
+    itself is absent/zero (e.g. a very old summary predating that Rate
+    metric) but the counters still show every iteration failed.
+    """
+    if perf["error_rate"] >= 1.0:
+        return True
+    return perf["failed_count"] > 0 and perf["ok_count"] == 0
+
+
+def classify_fallback(fallback_count, iteration_count):
+    """Distinguish the two situations `bench_fallback` (scenarios/lib/metrics.js)
+    can signal (run-2 analysis, "Report labeling polish" — fold into A5 follow-up):
+
+    - "fallback-op": a PER-ITERATION fallback — the cell measures the WRONG
+      operation on (nearly) every iteration, e.g. token_refresh.js falling
+      back to client_credentials issuance every time. fallback_count is on
+      the order of the iteration count itself (run-2's numbers: AXIAM 145555,
+      Keycloak 32566, Zitadel 34408 — each approx. equal to iterations). This
+      class must stay excluded from head-to-head winner tables — it's a
+      genuinely different (usually cheaper) operation than the label says.
+    - "cc-token-setup": a SETUP-ONLY provenance note — the cell measures the
+      RIGHT operation; only the *token's provenance* is a caveat, e.g.
+      Zitadel's userinfo/userinfo-gRPC setup() minting a client-credentials
+      token exactly once because a real user token wasn't obtainable.
+      fallback_count is a tiny constant (typically 1) no matter how many
+      thousands of iterations ran. This class is kept in comparisons.
+    - "none": bench_fallback never fired for this cell.
+
+    Threshold: fallback_count <= max(2, 1% of iterations) is "clearly a
+    small, bounded, setup-time event" — comfortably above a stray
+    single/double setup-fallback, comfortably below the ~100%-of-iterations
+    rate every per-iteration fallback case observed so far actually has —
+    so it's classified cc-token-setup. Anything above that line recurs on
+    (nearly) every iteration, so it's fallback-op.
+    """
+    if fallback_count <= 0:
+        return "none"
+    threshold = max(2, 0.01 * iteration_count)
+    return "cc-token-setup" if fallback_count <= threshold else "fallback-op"
+
+
 def load_k6_summary(path):
     """Extract throughput, latency percentiles, error rate from a k6 summary."""
     with open(path) as f:
@@ -73,10 +125,20 @@ def load_k6_summary(path):
     # fall back to iteration rate if custom counter absent
     if throughput == 0.0:
         throughput = counter_rate("iterations")
+
+    ok_count = counter_count("bench_ok")
+    failed_count = counter_count("bench_failed")
+    fallback_count = counter_count("bench_fallback")
+    # Iteration-count proxy for classify_fallback()'s heuristic: bench_ok +
+    # bench_failed already accounts for every measured iteration for both
+    # REST and gRPC scenarios alike (scenarios/lib/metrics.js), so reuse them
+    # rather than depending on k6's own built-in "iterations" metric.
+    iteration_count = ok_count + failed_count
+
     return {
         "throughput": throughput,
-        "ok_count": counter_count("bench_ok"),
-        "failed_count": counter_count("bench_failed"),
+        "ok_count": ok_count,
+        "failed_count": failed_count,
         "error_rate": rate_value("bench_error_rate"),
         "p50": trend("bench_op_latency_ms", "med"),
         "p95": trend("bench_op_latency_ms", "p(95)"),
@@ -85,7 +147,18 @@ def load_k6_summary(path):
         # A3: iterations that measured a fallback op (e.g. Zitadel login() ->
         # client_credentials, or a userinfo setup() that fell back) rather than
         # the labelled logical op.
-        "fallback_count": counter_count("bench_fallback"),
+        "fallback_count": fallback_count,
+        # Report labeling polish: which of the two very different situations
+        # above this cell's bench_fallback count represents — see
+        # classify_fallback().
+        "fallback_class": classify_fallback(fallback_count, iteration_count),
+        # D11: gRPC status Trend, present only when the scenario is a gRPC one
+        # (scenarios/lib/metrics.js's bench_grpc_status). Absent entirely for
+        # REST cells and for any results tree predating D11 — tolerated via
+        # has_grpc_status rather than assumed present.
+        "has_grpc_status": "bench_grpc_status" in metrics,
+        "grpc_status_avg": trend("bench_grpc_status", "avg"),
+        "grpc_status_max": trend("bench_grpc_status", "max"),
     }
 
 
@@ -241,6 +314,10 @@ SERVER_CONTAINER = {
 NON_COMPARATIVE_SCENARIOS = {
     "authz_check_grpc", "authz_batch_grpc", "authz_check_rest", "authz_batch_rest",
     "zitadel_userinfo_grpc",
+    # AXIAM's own gRPC identity RPC (axiam.v1.UserInfoService/GetUserInfo).
+    # AXIAM-only (Keycloak has no gRPC userinfo), so it never forms a cross-vendor
+    # cell; it does form an AXIAM within-vendor REST-vs-gRPC efficiency pair below.
+    "userinfo_grpc",
 }
 
 # Within-vendor REST-vs-gRPC pairs for the same logical operation — the
@@ -251,6 +328,7 @@ PROTOCOL_EFFICIENCY_PAIRS = {
     "axiam": [
         ("authz_check_rest", "authz_check_grpc", "authorization decision"),
         ("authz_batch_rest", "authz_batch_grpc", "batch authorization decision"),
+        ("userinfo", "userinfo_grpc", "identity read (userinfo)"),
     ],
     "zitadel": [
         ("userinfo", "zitadel_userinfo_grpc", "identity read (userinfo)"),
@@ -356,7 +434,11 @@ def collect_dir(results_dir, max_error, min_samples):
                     "perf": perf, "res": res, "der": der, "der_server": der_server,
                     "host": host, "host_flags": host_flags(meta, host),
                     "bottleneck": bottleneck(meta, res),
-                    "is_fallback": perf["fallback_count"] > 0,
+                    # Report labeling polish: only "fallback-op" (the cell
+                    # measured the wrong op) is exclusion-worthy; "cc-token-setup"
+                    # (right op, token-provenance caveat) stays comparable — see
+                    # classify_fallback().
+                    "is_fallback": perf["fallback_class"] == "fallback-op",
                     "valid": not reasons, "reasons": reasons,
                 })
     return cells
@@ -379,6 +461,7 @@ RUN_DIR_RE = re.compile(r"run-\d+")
 PERF_MEDIAN_FIELDS = [
     "throughput", "ok_count", "failed_count", "error_rate",
     "p50", "p95", "p99", "avg", "fallback_count",
+    "grpc_status_avg", "grpc_status_max",
 ]
 RES_MEDIAN_FIELDS = ["cpu_cores_avg", "cpu_cores_p95", "mem_mib_avg", "mem_mib_p95", "samples"]
 HOST_MEDIAN_FIELDS = ["mhz_avg", "mhz_min", "mhz_max", "temp_max", "host_cpu_util_avg", "k6_cores_avg", "samples"]
@@ -424,6 +507,21 @@ def aggregate_cell(runs):
     res = _median_res([r["res"] for r in basis])
     host = _median_of([r["host"] for r in basis], HOST_MEDIAN_FIELDS)
 
+    # Report labeling polish: fallback_class/has_grpc_status aren't numeric,
+    # so _median_of (PERF_MEDIAN_FIELDS) can't aggregate them — combine
+    # across ALL raw runs (not just `basis`) the same way `is_fallback` used
+    # to, below. fallback-op wins over cc-token-setup if the runs disagree
+    # (shouldn't happen for a stable scenario, but fallback-op is the more
+    # conservative/exclusion-worthy label).
+    fb_classes = {r["perf"].get("fallback_class", "none") for r in runs}
+    if "fallback-op" in fb_classes:
+        perf["fallback_class"] = "fallback-op"
+    elif "cc-token-setup" in fb_classes:
+        perf["fallback_class"] = "cc-token-setup"
+    else:
+        perf["fallback_class"] = "none"
+    perf["has_grpc_status"] = any(r["perf"].get("has_grpc_status") for r in basis)
+
     thr_vals = [r["perf"]["throughput"] for r in basis]
     thr_median = perf["throughput"]
     thr_spread_pct = (((max(thr_vals) - min(thr_vals)) / 2.0) / thr_median * 100.0
@@ -443,7 +541,7 @@ def aggregate_cell(runs):
         "perf": perf, "res": res, "der": der, "der_server": der_server,
         "host": host, "host_flags": host_flags(meta, host),
         "bottleneck": bottleneck(meta, res),
-        "is_fallback": any(r["is_fallback"] for r in runs),
+        "is_fallback": perf["fallback_class"] == "fallback-op",
         "valid": n_valid >= 2 and not reasons,
         "reasons": reasons,
         "n_valid_runs": n_valid, "n_runs": n_total, "thr_spread_pct": thr_spread_pct,
@@ -523,20 +621,30 @@ def build_report(cells, multi_run=False):
         "**cpu_ms_per_request** answer *can AXIAM match competitors at lower cost?* "
         "Compare across targets at equal profile + latency.",
         "",
-        "> `fallback` = the cell measured a fallback operation instead of the "
-        "labelled logical op (e.g. Zitadel's login() falling back to "
-        "client_credentials — see docs/methodology.md). Fallback cells are "
-        "excluded from head-to-head winner tables but kept here for the full "
-        "picture.",
+        "> `fallback` = `fallback-op` when the cell measured a fallback "
+        "operation instead of the labelled logical op (e.g. Zitadel's "
+        "login() falling back to client_credentials — see "
+        "docs/methodology.md). fallback-op cells are excluded from "
+        "head-to-head winner tables but kept here for the full picture. "
+        "`cc-token-setup` means only the *token's provenance* is a caveat — "
+        "a client-credentials token was minted once in setup() (e.g. "
+        "Zitadel's userinfo/userinfo-gRPC scenarios, when a real user token "
+        "wasn't obtainable) but the measured operation is still the "
+        "labelled one, so these cells stay in head-to-head comparisons "
+        "(Report labeling polish).",
         "",
         "> `bottleneck` names the stack container(s) whose average CPU reached "
         "≥ 95% of their configured cap during the measure window — `none` "
         "means nothing in the stack saturated (the client, network, or an "
         "un-pegged serialization point is the limiter instead).",
         "",
-        "> Cells with `err`=100% have their throughput/latency columns blanked "
-        "(`—`) — those numbers would describe the failure path, not the "
-        "operation being measured.",
+        "> Cells with 100% error have their throughput/latency columns "
+        "blanked (`—`) — those numbers would describe the failure path, not "
+        "the operation being measured. This applies to gRPC cells too "
+        "(keyed off `bench_error_rate`/`bench_ok`/`bench_failed`, not an "
+        "HTTP-specific field, since a pure-gRPC scenario's k6 summary has no "
+        "http_req_* metrics at all); see the gRPC status appendix below for "
+        "which status code dominated a failing gRPC cell.",
         "",
     ]
     if multi_run:
@@ -559,7 +667,7 @@ def build_report(cells, multi_run=False):
     rows = []
     for c in sorted(cells, key=lambda c: (c["scenario"], c["profile"], c["target"])):
         p, r, d, h = c["perf"], c["res"], c["der"], c["host"]
-        full_outage = p["error_rate"] >= 1.0
+        full_outage = is_full_outage(p)
         thr = None if full_outage else p["throughput"]
         p50 = None if full_outage else p["p50"]
         p95 = None if full_outage else p["p95"]
@@ -567,8 +675,9 @@ def build_report(cells, multi_run=False):
         thr_core = None if full_outage else d["throughput_per_core"]
         cpu_ms = None if full_outage else d["cpu_ms_per_request"]
         mhz_ratio = (h["mhz_min"] / h["mhz_max"]) if h["mhz_max"] > 0 else 0.0
+        fb_class = p.get("fallback_class", "none")
         flags = list(c["host_flags"])
-        if c["is_fallback"]:
+        if fb_class == "fallback-op":
             flags.append("fallback-op")
         row = [
             c["scenario"], c["profile"], c["target"], c["rate_limits"],
@@ -577,7 +686,7 @@ def build_report(cells, multi_run=False):
             f"{r['cpu_cores_avg']:.2f}", f"{r['mem_mib_avg']:.0f}",
             dash(thr_core, ".0f"), dash(cpu_ms, ".3f"),
             c["bottleneck"],
-            "yes" if c["is_fallback"] else "no",
+            fb_class if fb_class != "none" else "no",
             f"{h['mhz_avg']:.0f}", f"{mhz_ratio:.2f}", f"{h['temp_max']:.0f}",
             f"{h['k6_cores_avg']:.2f}",
             ";".join(flags) or "-",
@@ -622,7 +731,7 @@ def build_report(cells, multi_run=False):
         rows = []
         for c in sorted(prod_cells, key=lambda c: (c["scenario"], c["profile"])):
             p = c["perf"]
-            full_outage = p["error_rate"] >= 1.0
+            full_outage = is_full_outage(p)
             rows.append([
                 c["scenario"], c["profile"],
                 dash(None if full_outage else p["throughput"], ".0f"),
@@ -656,12 +765,26 @@ def build_report(cells, multi_run=False):
                 continue
             fallback_cells = [c for c in group_all if c["is_fallback"]]
             group = [c for c in group_all if not c["is_fallback"]]
+            # Report labeling polish: cc-token-setup cells (right op, only the
+            # token's provenance is a caveat) are NOT excluded — `group`
+            # already includes them since is_fallback is fallback-op-only —
+            # just called out with a lighter footnote below.
+            cc_cells = [c for c in group if c["perf"].get("fallback_class") == "cc-token-setup"]
             lines += [f"### {sc} @ {pr}", ""]
             if fallback_cells:
                 lines += [
                     "> ⚠️ fallback-op cell(s) excluded from this head-to-head: "
                     + ", ".join(sorted(f"{c['target']}" for c in fallback_cells))
                     + " (see the full matrix above; comparability: fallback-op).", "",
+                ]
+            if cc_cells:
+                lines += [
+                    "> ℹ️ cc-token-setup provenance note (kept in this "
+                    "head-to-head): "
+                    + ", ".join(sorted(f"{c['target']}" for c in cc_cells))
+                    + " — the measured operation is the labelled one; only the "
+                    "token used to reach it was minted via client_credentials "
+                    "once in setup() (comparability: cc-token-setup).", "",
                 ]
             if len(group) < 2:
                 lines += ["_Fewer than 2 non-fallback targets — nothing to compare._", ""]
@@ -688,7 +811,8 @@ def build_report(cells, multi_run=False):
             for c in sorted(group, key=lambda c: -c["der"]["throughput_per_core"]):
                 d, ds, p = c["der"], c["der_server"], c["perf"]
                 marker = " 🏆" if c is best else ""
-                rows.append([c["target"] + marker, f"{p['throughput']:.0f}",
+                note = " (cc-token-setup)" if p.get("fallback_class") == "cc-token-setup" else ""
+                rows.append([c["target"] + marker + note, f"{p['throughput']:.0f}",
                              f"{p['p50']:.1f}", f"{p['p95']:.1f}",
                              f"{d['throughput_per_core']:.0f}", f"{d['throughput_per_gib']:.0f}",
                              f"{d['cpu_ms_per_request']:.3f}",
@@ -719,6 +843,11 @@ def build_report(cells, multi_run=False):
                                if c["target"] == tg and c["scenario"] == grpc_sc and c["profile"] == pr), None)
                 if not rest_c or not grpc_c:
                     continue
+                # Report labeling polish: only fallback-op (wrong op measured)
+                # skips the pair. cc-token-setup cells (e.g. Zitadel's
+                # userinfo/userinfo-gRPC, whose setup() mints a
+                # client-credentials token once) still measure the labelled
+                # op and are kept, with a footnote on the affected row(s).
                 if rest_c["is_fallback"] or grpc_c["is_fallback"]:
                     continue  # A3: a fallback-op cell measures a different operation — skip the pair.
                 any_pair_rendered = True
@@ -728,11 +857,13 @@ def build_report(cells, multi_run=False):
                 d_thr = ((gp["throughput"] - rp["throughput"]) / rp["throughput"] * 100.0
                          if rp["throughput"] else 0.0)
                 d_cpu_ms = gd["cpu_ms_per_request"] - rd["cpu_ms_per_request"]
+                rest_note = " (cc-token-setup)" if rp.get("fallback_class") == "cc-token-setup" else ""
+                grpc_note = " (cc-token-setup)" if gp.get("fallback_class") == "cc-token-setup" else ""
                 rows = [
-                    ["REST (" + rest_sc + ")", f"{rp['throughput']:.0f}", f"{rp['p50']:.1f}",
+                    ["REST (" + rest_sc + ")" + rest_note, f"{rp['throughput']:.0f}", f"{rp['p50']:.1f}",
                      f"{rp['p95']:.1f}", f"{rd['throughput_per_core']:.0f}",
                      f"{rd['cpu_ms_per_request']:.3f}", "baseline"],
-                    ["gRPC (" + grpc_sc + ")", f"{gp['throughput']:.0f}", f"{gp['p50']:.1f}",
+                    ["gRPC (" + grpc_sc + ")" + grpc_note, f"{gp['throughput']:.0f}", f"{gp['p50']:.1f}",
                      f"{gp['p95']:.1f}", f"{gd['throughput_per_core']:.0f}",
                      f"{gd['cpu_ms_per_request']:.3f}", f"{d_thr:+.1f}% thr, {d_cpu_ms:+.3f} cpu_ms/req"],
                 ]
@@ -808,6 +939,37 @@ def build_report(cells, multi_run=False):
             rows), ""]
     else:
         lines += ["_No per-container samples available (no res.csv rows)._", ""]
+
+    # 4b. Appendix: gRPC status codes (D11 + Report labeling polish). Only
+    # rendered for cells whose k6 summary actually carried the
+    # bench_grpc_status Trend (gRPC scenarios only — absent for REST cells
+    # and for any results tree predating D11, tolerated via has_grpc_status
+    # rather than assumed present). Lets a 100%-error gRPC cell (throughput/
+    # latency blanked above) be diagnosed straight from the report: which
+    # status code dominated.
+    grpc_cells = [c for c in cells if c["perf"].get("has_grpc_status")]
+    if grpc_cells:
+        lines += [
+            "## Appendix: gRPC status codes", "",
+            "`status_avg`/`status_max` are the average/maximum raw gRPC "
+            "status code seen during the measure window (e.g. 0=OK, "
+            "7=PermissionDenied, 16=Unauthenticated) — only present for gRPC "
+            "scenarios (scenarios/lib/metrics.js's `bench_grpc_status` "
+            "Trend). Useful for diagnosing a 100%-error gRPC cell where the "
+            "throughput/latency columns in \"All results\" are blanked "
+            "(`—`).", "",
+        ]
+        rows = []
+        for c in sorted(grpc_cells, key=lambda c: (c["scenario"], c["profile"], c["target"])):
+            p = c["perf"]
+            rows.append([
+                c["scenario"], c["profile"], c["target"],
+                f"{p['error_rate'] * 100:.2f}%",
+                f"{p['grpc_status_avg']:.1f}", f"{p['grpc_status_max']:.0f}",
+            ])
+        lines += [md_table(
+            ["scenario", "profile", "target", "err", "status_avg", "status_max"],
+            rows), ""]
 
     # 5. Excluded
     if invalid:

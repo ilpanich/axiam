@@ -64,3 +64,112 @@ pub(crate) fn decrypt_secret(data: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<V
         .decrypt(&nonce, ciphertext)
         .map_err(|e| AxiamError::Crypto(format!("AES-256-GCM decryption failed: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_keypair_ed25519_produces_usable_pem() {
+        let kp = generate_keypair(&KeyAlgorithm::Ed25519).expect("ed25519 keygen must succeed");
+        let pem = kp.serialize_pem();
+        assert!(pem.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn generate_keypair_rsa4096_errors_under_ring_backend() {
+        // SURFACED LIMITATION (not endorsed): rcgen's `ring` backend cannot
+        // *generate* RSA keys, so `generate_keypair(Rsa4096)` returns an error
+        // today, even though RSA-4096 is a documented certificate target. This
+        // test pins the current behavior and covers the RSA error arm; if RSA
+        // key generation becomes available, update this assertion.
+        let result = generate_keypair(&KeyAlgorithm::Rsa4096);
+        assert!(
+            result.is_err(),
+            "expected RSA-4096 keygen to error under the ring backend"
+        );
+    }
+
+    #[test]
+    fn compute_fingerprint_is_deterministic_sha256_hex() {
+        let der = b"some-fake-der-bytes";
+        let fp1 = compute_fingerprint(der);
+        let fp2 = compute_fingerprint(der);
+        assert_eq!(fp1, fp2);
+        assert_eq!(fp1.len(), 64, "SHA-256 hex digest must be 64 chars");
+        assert!(fp1.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let expected = hex::encode(Sha256::digest(der));
+        assert_eq!(fp1, expected);
+    }
+
+    #[test]
+    fn compute_fingerprint_differs_for_different_input() {
+        let fp_a = compute_fingerprint(b"input-a");
+        let fp_b = compute_fingerprint(b"input-b");
+        assert_ne!(fp_a, fp_b);
+    }
+
+    #[test]
+    fn encrypt_decrypt_secret_round_trip() {
+        let key = [7u8; 32];
+        let plaintext = b"top secret pem data".to_vec();
+        let ciphertext = encrypt_secret(&plaintext, &key).expect("encryption must succeed");
+        // Nonce (12 bytes) is prepended, so ciphertext must be longer than plaintext.
+        assert!(ciphertext.len() > plaintext.len());
+        let decrypted = decrypt_secret(&ciphertext, &key).expect("decryption must succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_produces_distinct_ciphertext_each_call() {
+        let key = [1u8; 32];
+        let plaintext = b"same plaintext".to_vec();
+        let c1 = encrypt_secret(&plaintext, &key).unwrap();
+        let c2 = encrypt_secret(&plaintext, &key).unwrap();
+        assert_ne!(c1, c2, "random nonce must make ciphertexts differ");
+    }
+
+    #[test]
+    fn decrypt_secret_rejects_too_short_data() {
+        let key = [2u8; 32];
+        let err = decrypt_secret(&[0u8; 5], &key).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("missing nonce"), "got: {msg}");
+    }
+
+    #[test]
+    fn decrypt_secret_rejects_wrong_key() {
+        let key_a = [3u8; 32];
+        let key_b = [4u8; 32];
+        let ciphertext = encrypt_secret(b"data", &key_a).unwrap();
+        let err = decrypt_secret(&ciphertext, &key_b).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("decryption failed"), "got: {msg}");
+    }
+
+    #[test]
+    fn decrypt_secret_rejects_tampered_ciphertext() {
+        let key = [5u8; 32];
+        let mut ciphertext = encrypt_secret(b"authentic data", &key).unwrap();
+        // Flip a bit in the ciphertext body (after the 12-byte nonce) to break the
+        // AES-GCM authentication tag.
+        let last = ciphertext.len() - 1;
+        ciphertext[last] ^= 0xFF;
+        let err = decrypt_secret(&ciphertext, &key).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("decryption failed"), "got: {msg}");
+    }
+
+    #[test]
+    fn decrypt_secret_exact_12_bytes_no_nonce_error_but_ciphertext_empty_fails_auth() {
+        // Exactly 12 bytes means an empty ciphertext body — this is not the
+        // "too short" branch (data.len() == 12, not < 12) but auth still fails
+        // because there is no valid tag.
+        let key = [6u8; 32];
+        let err = decrypt_secret(&[0u8; 12], &key).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(!msg.contains("missing nonce"), "got: {msg}");
+        assert!(msg.contains("decryption failed"), "got: {msg}");
+    }
+}

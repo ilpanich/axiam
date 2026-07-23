@@ -82,7 +82,11 @@ else
 fi
 
 # The authz scenarios (gRPC and REST) are AXIAM-only; drop them for other targets.
-AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js"
+# userinfo_grpc.js (axiam.v1.UserInfoService/GetUserInfo) is AXIAM's own gRPC
+# identity read — the counterpart of Zitadel's zitadel_userinfo_grpc.js; it dials
+# AXIAM's proto and has no equivalent on Keycloak, so it is AXIAM-only too. The
+# two vendors' gRPC-userinfo scenarios pair up cross-vendor in report.py.
+AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js"
 
 # D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
 # counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and
@@ -156,6 +160,16 @@ RL_POSTURE="$(detect_rl_posture)"
 echo "[run] rate-limit posture: $RL_POSTURE"
 
 # --- Reproducibility metadata (methodology.md §7 / A4) ----------------------
+# A9: git commit of the working tree this run executed from. Recorded
+# unconditionally (harmless when the AXIAM image was pulled prebuilt) but
+# especially meaningful when the target was launched with `just build=1 …`
+# (or BENCH_BUILD=1 / a `--build` compose invocation): a locally-built image
+# has no useful RepoDigests/tag provenance of its own (see image_id fallback
+# in containers_json below), so build_ref is what actually pins the source
+# for that binary. $BENCH is this repo's benchmarks/ dir, so its parent is
+# the repo root.
+BUILD_REF="$(git -C "$BENCH/.." rev-parse HEAD 2>/dev/null || echo unknown)"
+
 # Host facts that don't change across scenarios in this run — gathered once.
 HOST_KERNEL="$(uname -r 2>/dev/null || echo unknown)"
 DOCKER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
@@ -244,18 +258,34 @@ role_default_mem_mib() {
 
 # Emits the JSON array for meta.json's "containers" field: one entry per
 # running container in this target's stack, with image, image_digest (from
-# `docker inspect`), role, and its CPU + mem cap. Both caps are read straight
-# off the running container (`HostConfig.NanoCpus`/`HostConfig.Memory`, what
-# `--cpus`/`--memory` (compose `cpus:`/`mem_limit:`) actually set) rather than
-# trusted from this shell's env — BENCH_DB_CPUS/BENCH_DB_MEM/BENCH_MQ_CPUS/
+# `docker inspect`), image_id, role, and its CPU + mem cap. Both caps are read
+# straight off the running container (`HostConfig.NanoCpus`/`HostConfig.Memory`,
+# what `--cpus`/`--memory` (compose `cpus:`/`mem_limit:`) actually set) rather
+# than trusted from this shell's env — BENCH_DB_CPUS/BENCH_DB_MEM/BENCH_MQ_CPUS/
 # BENCH_EDGE_CPUS are only exported inside `just bench-up`'s own subshell, so
 # a separate `bench-run` invocation would otherwise silently miss a
 # non-default cap the operator set at bench-up time (this is how a C2
 # `dbcaps=uncapped` run ends up correctly recorded even though `bench-run` is
 # a separate process from `bench-up`). Falls back to the compose-file default
 # only if the inspected value is unset (no `--cpus`/`--memory` was applied).
+#
+# A9: `image` is `.Config.Image` — what the container was actually launched
+# as (e.g. reflects BENCH_AXIAM_IMAGE at `bench-up` time, so it tracks the
+# real tag rather than a value hardcoded here). `image_digest` is the
+# RepoDigests[0] entry when one exists (pulled-by-digest or a registry image
+# docker has resolved); for a LOCALLY-BUILT image (`just build=1 …` /
+# `--build`) RepoDigests is empty (no registry involved), which is exactly
+# the "unknown" gap this fixes: we now fall back to the image ID — first the
+# container's own `.Image` field (the sha256 the container was created
+# against), then `docker image inspect` on the image ref itself — so
+# image_digest is only ever the literal "unknown" when docker can give us
+# neither. `image_id` is always populated (when obtainable) as a sibling
+# field so a digest-vs-id distinction is never lost even when image_digest
+# did find a real RepoDigest. Together with build_ref (git commit, above)
+# this makes every binary in the stack identifiable even when the tag string
+# is stale or generic (e.g. ":latest").
 containers_json() {
-  local first=1 line cname role img dig cap nanocpus mem_bytes mem_mib
+  local first=1 line cname role img dig id cap nanocpus mem_bytes mem_mib
   echo -n "["
   while read -r line; do
     [ -z "$line" ] && continue
@@ -263,7 +293,21 @@ containers_json() {
     docker inspect "$cname" >/dev/null 2>&1 || continue
     img="$(docker inspect --format '{{.Config.Image}}' "$cname" 2>/dev/null || echo unknown)"
     dig="$(docker inspect --format '{{index .RepoDigests 0}}' "$cname" 2>/dev/null || echo '')"
-    [ -z "$dig" ] && dig="unknown"
+    # RepoDigests is empty (or the literal Go zero-value "<no value>" if the
+    # index itself is out of range) for locally-built images — fall back to
+    # the container's own image ID, then to `docker image inspect` on the
+    # image ref, before giving up and recording "unknown".
+    [ "$dig" = "<no value>" ] && dig=""
+    id="$(docker inspect --format '{{.Image}}' "$cname" 2>/dev/null || echo '')"
+    [ "$id" = "<no value>" ] && id=""
+    if [ -z "$id" ]; then
+      id="$(docker image inspect --format '{{.Id}}' "$img" 2>/dev/null || echo '')"
+      [ "$id" = "<no value>" ] && id=""
+    fi
+    if [ -z "$dig" ]; then
+      if [ -n "$id" ]; then dig="$id"; else dig="unknown"; fi
+    fi
+    [ -n "$id" ] || id="unknown"
     nanocpus="$(docker inspect --format '{{.HostConfig.NanoCpus}}' "$cname" 2>/dev/null || echo 0)"
     if [ -n "$nanocpus" ] && [ "$nanocpus" != "0" ]; then
       cap="$(awk -v n="$nanocpus" 'BEGIN{printf "%.3f", n/1000000000}')"
@@ -278,8 +322,8 @@ containers_json() {
     fi
     [ "$first" -eq 1 ] || echo -n ","
     first=0
-    printf '{"name":"%s","role":"%s","image":"%s","image_digest":"%s","cpu_cap":%s,"mem_cap_mib":%s}' \
-      "$(json_escape "$cname")" "$role" "$(json_escape "$img")" "$(json_escape "$dig")" "$cap" "$mem_mib"
+    printf '{"name":"%s","role":"%s","image":"%s","image_digest":"%s","image_id":"%s","cpu_cap":%s,"mem_cap_mib":%s}' \
+      "$(json_escape "$cname")" "$role" "$(json_escape "$img")" "$(json_escape "$dig")" "$(json_escape "$id")" "$cap" "$mem_mib"
   done < <(container_specs_for_target)
   echo -n "]"
 }
@@ -352,6 +396,7 @@ run_one() {
   "docker_version": "$(json_escape "$DOCKER_VERSION")",
   "cpu_model": "$(json_escape "$CPU_MODEL")",
   "cpu_governor": "$(json_escape "$CPU_GOVERNOR")",
+  "build_ref": "$(json_escape "$BUILD_REF")",
   "k6_cpu_cores_avg": $k6_cpu_cores_avg,
   "containers": $(containers_json)
 }

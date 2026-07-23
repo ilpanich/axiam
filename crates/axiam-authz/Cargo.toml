@@ -17,6 +17,9 @@ tracing = { workspace = true }
 # thiserror: used for AuthzError derive; verified by cargo check
 thiserror = { workspace = true }
 uuid = { workspace = true }
+# futures: bounded-concurrency (buffered) per-item batch evaluation in engine.rs
+# (D10 concurrent BatchStrategy); verified by cargo check.
+futures = "0.3"
 
 [dev-dependencies]
 axiam-db = { path = "../axiam-db" }

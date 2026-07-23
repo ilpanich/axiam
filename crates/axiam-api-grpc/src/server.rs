@@ -48,8 +48,11 @@ use crate::middleware::rate_limit::{
 };
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
 use crate::proto::token_service_server::TokenServiceServer;
+use crate::proto::user_info_service_server::UserInfoServiceServer;
 use crate::proto::user_service_server::UserServiceServer;
-use crate::services::{AuthorizationServiceImpl, TokenServiceImpl, UserServiceImpl};
+use crate::services::{
+    AuthorizationServiceImpl, TokenServiceImpl, UserInfoServiceImpl, UserServiceImpl,
+};
 
 /// Start the gRPC server with all registered services.
 ///
@@ -84,7 +87,7 @@ where
     Res: ResourceRepository + 'static,
     S: ScopeRepository + 'static,
     G: GroupRepository + 'static,
-    U: UserRepository + 'static,
+    U: UserRepository + Clone + 'static,
     C: Connection + 'static,
 {
     tracing::info!(
@@ -116,7 +119,14 @@ where
     // IntrospectToken. Wrap them with the same AuthInterceptor chokepoint
     // as AuthorizationService so every gRPC call requires a verified bearer JWT.
     let user_svc = UserServiceServer::with_interceptor(
-        UserServiceImpl::new(user_repo, auth_config.clone()),
+        UserServiceImpl::new(user_repo.clone(), auth_config.clone()),
+        AuthInterceptor::new(auth_config.clone()),
+    );
+    // UserInfoService: OIDC-style self lookup — identity derived entirely from
+    // the interceptor-verified bearer token (no request body), mirroring the
+    // REST `/oauth2/userinfo` endpoint. Guarded by the same AuthInterceptor.
+    let user_info_svc = UserInfoServiceServer::with_interceptor(
+        UserInfoServiceImpl::new(user_repo),
         AuthInterceptor::new(auth_config.clone()),
     );
     let token_svc = TokenServiceServer::with_interceptor(
@@ -163,6 +173,7 @@ where
                 .tls_config(tls_config)?
                 .add_service(authz_svc)
                 .add_service(user_svc)
+                .add_service(user_info_svc)
                 .add_service(token_svc)
                 .serve(addr)
                 .await
@@ -175,6 +186,7 @@ where
             builder
                 .add_service(authz_svc)
                 .add_service(user_svc)
+                .add_service(user_info_svc)
                 .add_service(token_svc)
                 .serve(addr)
                 .await

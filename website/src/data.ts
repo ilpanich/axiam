@@ -1,9 +1,15 @@
-import type { Sdk, Post, Phase, BenchRow } from "./types";
+import type {
+  Sdk,
+  Post,
+  Phase,
+  BenchScenario,
+  BenchEfficiencyRow,
+} from "./types";
 
 /**
  * Content model for the AXIAM website. Mirrors the design's data source: the
- * seven official client SDKs, the news posts, the 19-phase roadmap, and the
- * illustrative benchmark rows.
+ * eleven official client SDKs, the news posts, the 19-phase roadmap, and the
+ * preliminary benchmark scenarios.
  */
 
 export const SDKS: Sdk[] = [
@@ -16,6 +22,7 @@ export const SDKS: Sdk[] = [
     docsLabel: "docs.rs",
     docsUrl: "https://docs.rs/axiam-sdk",
     repoUrl: "https://github.com/ilpanich/axiam-rust-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-rust-sdk/tree/main/examples",
     pkg: "axiam-sdk",
     install: "cargo add axiam-sdk",
     blurb: "Native async client with the full REST, gRPC and AMQP surface.",
@@ -53,6 +60,7 @@ async fn get_doc(path: web::Path<String>) -> impl Responder {
     docsLabel: "tsdocs.dev",
     docsUrl: "https://tsdocs.dev/docs/axiam-sdk",
     repoUrl: "https://github.com/ilpanich/axiam-typescript-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-typescript-sdk/tree/main/examples",
     pkg: "axiam-sdk",
     install: "npm install axiam-sdk",
     blurb:
@@ -94,6 +102,7 @@ export class DocsController {
     docsLabel: "Read the Docs",
     docsUrl: "https://axiam-sdk.readthedocs.io/",
     repoUrl: "https://github.com/ilpanich/axiam-python-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-python-sdk/tree/main/examples",
     pkg: "axiam-sdk",
     install: "pip install axiam-sdk",
     blurb:
@@ -132,6 +141,7 @@ def read_doc(doc_id: str,
     docsLabel: "javadoc.io",
     docsUrl: "https://javadoc.io/doc/io.github.ilpanich/axiam-sdk",
     repoUrl: "https://github.com/ilpanich/axiam-java-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-java-sdk/tree/main/examples",
     pkg: "io.github.ilpanich:axiam-sdk",
     install: 'implementation("io.github.ilpanich:axiam-sdk:1.0.0")',
     blurb:
@@ -171,6 +181,7 @@ class DocController {
     docsLabel: "fuget.org",
     docsUrl: "https://www.fuget.org/packages/Axiam.Sdk",
     repoUrl: "https://github.com/ilpanich/axiam-csharp-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-csharp-sdk/tree/main/examples",
     pkg: "Axiam.Sdk",
     install: "dotnet add package Axiam.Sdk",
     blurb:
@@ -206,6 +217,7 @@ public class DocsController : ControllerBase
     registry: "Packagist",
     registryUrl: "https://packagist.org/packages/axiam/axiam-sdk",
     repoUrl: "https://github.com/ilpanich/axiam-php-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-php-sdk/tree/main/examples",
     pkg: "axiam/axiam-sdk",
     install: "composer require axiam/axiam-sdk",
     blurb: "PSR-friendly client with middleware for Laravel and Symfony apps.",
@@ -246,6 +258,7 @@ class DocController
     docsLabel: "pkg.go.dev",
     docsUrl: "https://pkg.go.dev/github.com/ilpanich/axiam-go-sdk#section-documentation",
     repoUrl: "https://github.com/ilpanich/axiam-go-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-go-sdk/tree/main/examples",
     pkg: "github.com/ilpanich/axiam-go-sdk",
     install: "go get github.com/ilpanich/axiam-go-sdk",
     blurb:
@@ -270,6 +283,193 @@ ok, _ := client.Can(ctx, "read", "doc:1")`,
 // runs before it — a denied request never reaches getDoc.
 mux.Handle("GET /docs/{id}",
     axiam.Require("read", "doc:{id}")(http.HandlerFunc(getDoc)))`,
+  },
+  {
+    id: "kotlin",
+    name: "Kotlin",
+    abbr: "Kt",
+    registry: "Maven Central",
+    registryUrl:
+      "https://central.sonatype.com/artifact/io.github.ilpanich/axiam-sdk-kotlin",
+    docsLabel: "javadoc.io",
+    docsUrl: "https://javadoc.io/doc/io.github.ilpanich/axiam-sdk-kotlin",
+    repoUrl: "https://github.com/ilpanich/axiam-kotlin-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-kotlin-sdk/tree/main/examples",
+    pkg: "io.github.ilpanich:axiam-sdk-kotlin",
+    install: 'implementation("io.github.ilpanich:axiam-sdk-kotlin:1.0.0-alpha15")',
+    blurb:
+      "Coroutine-native REST client for the JVM, with Ktor route guards and declarative helpers.",
+    highlights: [
+      "Coroutines — every op is a suspend fn",
+      "Ktor plugin + guard annotations",
+      "Sensitive<T> secrets, strict TLS & mTLS",
+    ],
+    quickstart: `import io.axiam.sdk.AxiamClient
+import kotlinx.coroutines.runBlocking
+
+runBlocking {
+    AxiamClient.builder("https://iam.acme.dev", tenantId = "acme")
+        .orgSlug("acme")
+        .build()
+        .use { axiam ->
+            val result = axiam.login(email, password)
+            if (result.mfaRequired)
+                axiam.verifyMfa(result.challengeToken!!, totpCode)
+            val ok = axiam.can("read", resourceId = "doc:1")
+        }
+}`,
+    guardLabel: "Guard by Ktor plugin",
+    guardExample: `import io.axiam.sdk.ktor.*
+
+install(AxiamAuthentication) { client = axiamClient }
+
+routing {
+    // requireAccess runs the check before the body — a deny short-circuits.
+    get("/documents/{id}") {
+        val user = call.requireAccess("read", call.parameters["id"]!!)
+            ?: return@get
+        call.respondText("hello \${user.userId}")
+    }
+}`,
+  },
+  {
+    id: "swift",
+    name: "Swift",
+    abbr: "Sw",
+    registry: "SwiftPM",
+    registryUrl: "https://github.com/ilpanich/axiam-swift-sdk",
+    docsLabel: "DocC",
+    docsUrl: "https://ilpanich.github.io/axiam-swift-sdk/",
+    repoUrl: "https://github.com/ilpanich/axiam-swift-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-swift-sdk/tree/main/Examples",
+    pkg: "AxiamSDK",
+    install:
+      '.package(url: "https://github.com/ilpanich/axiam-swift-sdk.git", from: "1.0.0-alpha15")',
+    blurb:
+      "Cross-platform REST client on SwiftNIO — client-cert mTLS works on Linux and Apple platforms alike.",
+    highlights: [
+      "AsyncHTTPClient + NIOSSL, one code path",
+      "async/await, single-flight refresh",
+      "Sensitive<T>, custom-CA & client-cert mTLS",
+    ],
+    quickstart: `import AxiamSDK
+
+let config = try AxiamConfig(
+    baseURL: URL(string: "https://iam.acme.dev")!,
+    tenantSlug: "acme",
+    orgSlug: "acme")
+let axiam = try AxiamClient(config: config)
+
+switch try await axiam.login(email: email, password: password) {
+case .authenticated(let user): print("in as \\(user.userID)")
+case .mfaRequired:             try await axiam.verifyMfa(totpCode)
+case .mfaSetupRequired:        break
+}
+let ok = try await axiam.can("read", resource: "doc:1")`,
+    guardLabel: "Guard by helper factory",
+    guardExample: `// makeGuards() returns declarative check factories (§11).
+let guards = axiam.makeGuards()
+let requireRead = guards.requireAccess("read", resource: "doc:1")
+
+let ctx = AxiamRequestContext(
+    headers: ["Authorization": "Bearer \\(jwt)", "X-Tenant-ID": "acme"],
+    cookies: ["axiam_access": cookieJwt])
+
+// Throws AuthzError (403) if denied — never reaches your handler.
+let user = try await requireRead(ctx)`,
+  },
+  {
+    id: "c",
+    name: "C",
+    abbr: "C",
+    registry: "vcpkg · CMake",
+    registryUrl: "https://github.com/ilpanich/axiam-c-sdk#install",
+    docsLabel: "Doxygen",
+    docsUrl: "https://ilpanich.github.io/axiam-c-sdk/",
+    repoUrl: "https://github.com/ilpanich/axiam-c-sdk",
+    examplesUrl: "https://github.com/ilpanich/axiam-c-sdk/tree/main/examples",
+    pkg: "axiam-c-sdk",
+    install: "vcpkg install axiam-c-sdk --overlay-ports=./ports",
+    blurb:
+      "C11 client over libcurl + OpenSSL — a small, offline-friendly REST surface with mTLS.",
+    highlights: [
+      "C11, every symbol axiam_-prefixed",
+      "libcurl HTTP, strict TLS & in-memory mTLS",
+      "Framework-agnostic route guard",
+    ],
+    quickstart: `#include <axiam/axiam.h>
+
+axiam_client_config_t *cfg = axiam_client_config_new();
+axiam_client_config_set_base_url(cfg, "https://iam.acme.dev");
+axiam_client_config_set_tenant_slug(cfg, "acme");
+axiam_client_config_set_org_slug(cfg, "acme");
+
+axiam_error_t err;
+axiam_client_t *axiam = axiam_client_new(cfg, &err);
+axiam_client_config_free(cfg);
+
+axiam_login_result_t login = {0};
+axiam_login(axiam, email, password, &login, &err);
+
+axiam_check_result_t res = {0};
+axiam_check_access(axiam, "read", "doc:1", NULL, NULL, &res, &err);
+printf("allowed: %d\\n", res.allowed);`,
+    guardLabel: "Guard by macro",
+    guardExample: `#include <axiam/guard.h>
+
+// The adapter fills axiam_headers_t from the real request; the guard
+// verifies the session (JWKS) then runs the check — fail closed.
+axiam_guard_status_t st =
+    AXIAM_REQUIRE_ACCESS(axiam, &headers, "read", "doc:1", NULL);
+
+if (st != AXIAM_GUARD_ALLOW)
+    return respond(st);   // 401 / 403 / 503 — never reaches the handler`,
+  },
+  {
+    id: "cpp",
+    name: "C++",
+    abbr: "C++",
+    registry: "vcpkg · Conan",
+    registryUrl: "https://github.com/ilpanich/axiam-cplusplus-sdk#install",
+    docsLabel: "Doxygen",
+    docsUrl: "https://ilpanich.github.io/axiam-cplusplus-sdk/",
+    repoUrl: "https://github.com/ilpanich/axiam-cplusplus-sdk",
+    examplesUrl:
+      "https://github.com/ilpanich/axiam-cplusplus-sdk/tree/main/examples",
+    pkg: "axiam-cpp-sdk",
+    install: "vcpkg install axiam-cpp-sdk --overlay-ports=./ports",
+    blurb:
+      "Idiomatic C++17 client over libcurl + OpenSSL — exceptions, RAII and framework-agnostic guards.",
+    highlights: [
+      "C++17, axiam:: namespace, RAII",
+      "libcurl + OpenSSL, strict TLS & mTLS",
+      "Route guards + AXIAM_REQUIRE_ACCESS",
+    ],
+    quickstart: `#include <axiam/axiam.hpp>
+
+axiam::Client axiam = axiam::Client::builder()
+    .base_url("https://iam.acme.dev")
+    .tenant_slug("acme")
+    .org_slug("acme")
+    .build();
+
+auto login = axiam.login(email, password);
+if (login.mfa_required)
+    login = axiam.verify_mfa(login.challenge_token, totp);
+
+axiam::AccessDecision d = axiam.check_access("read", "doc:1");
+std::cout << "allowed=" << std::boolalpha << d.allowed << "\\n";`,
+    guardLabel: "Guard by helper",
+    guardExample: `#include <axiam/guard.hpp>
+
+// The host adapter authenticates the request into an AxiamUser; the
+// helpers compose on top of check_access and fail closed.
+void handler(axiam::Client& axiam,
+             const std::optional<axiam::AxiamUser>& user) {
+    axiam::require_auth(user);                 // 401 if unauthenticated
+    AXIAM_REQUIRE_ACCESS(axiam, user, "read", "doc:1");  // 403 if denied
+    // ... serve the protected resource ...
+}`,
   },
 ];
 
@@ -388,57 +588,276 @@ export const POSTS: Post[] = [
   },
 ];
 
+/**
+ * Roadmap phases. Start/end dates are approximate, reconstructed from the
+ * project's GitHub issue tracker (each task issue carries a `phase:N` label and
+ * a close date) and commit history; phases are sequential and do not overlap.
+ * Phases 0–18 are the delivered 64-task roadmap; phase 19 is the open-ended
+ * hardening effort that began after the platform reached feature-complete.
+ */
 export const PHASES: Phase[] = [
-  { n: 0, title: "Project foundation", focus: "CI, dev environment, tooling" },
+  {
+    n: 0,
+    title: "Project foundation",
+    focus: "CI, dev environment, tooling",
+    start: "Feb 24, 2026",
+    end: "Feb 25, 2026",
+    status: "done",
+  },
   {
     n: 1,
     title: "Core domain types & DB repositories",
     focus: "Domain model on SurrealDB",
+    start: "Feb 25, 2026",
+    end: "Feb 26, 2026",
+    status: "done",
   },
-  { n: 2, title: "Authentication", focus: "Password, JWT, MFA" },
-  { n: 3, title: "Authorization engine", focus: "RBAC with resource hierarchy" },
-  { n: 4, title: "REST API", focus: "Actix-Web" },
-  { n: 5, title: "gRPC API", focus: "Tonic + Protocol Buffers" },
-  { n: 6, title: "AMQP integration", focus: "RabbitMQ via Lapin" },
-  { n: 7, title: "Audit logging", focus: "Append-only, tamper-evident" },
-  { n: 8, title: "PKI & certificates", focus: "Hierarchical X.509, mTLS" },
-  { n: 9, title: "Webhook system", focus: "HMAC-SHA256 signed delivery" },
+  {
+    n: 2,
+    title: "Authentication",
+    focus: "Password, JWT, MFA",
+    start: "Feb 26, 2026",
+    end: "Feb 27, 2026",
+    status: "done",
+  },
+  {
+    n: 3,
+    title: "Authorization engine",
+    focus: "RBAC with resource hierarchy",
+    start: "Feb 27, 2026",
+    end: "Feb 28, 2026",
+    status: "done",
+  },
+  {
+    n: 4,
+    title: "REST API",
+    focus: "Actix-Web",
+    start: "Feb 28, 2026",
+    end: "Mar 3, 2026",
+    status: "done",
+  },
+  {
+    n: 5,
+    title: "gRPC API",
+    focus: "Tonic + Protocol Buffers",
+    start: "Mar 3, 2026",
+    end: "Mar 4, 2026",
+    status: "done",
+  },
+  {
+    n: 6,
+    title: "AMQP integration",
+    focus: "RabbitMQ via Lapin",
+    start: "Mar 4, 2026",
+    end: "Mar 5, 2026",
+    status: "done",
+  },
+  {
+    n: 7,
+    title: "Audit logging",
+    focus: "Append-only, tamper-evident",
+    start: "Mar 5, 2026",
+    end: "Mar 6, 2026",
+    status: "done",
+  },
+  {
+    n: 8,
+    title: "PKI & certificates",
+    focus: "Hierarchical X.509, mTLS",
+    start: "Mar 6, 2026",
+    end: "Mar 8, 2026",
+    status: "done",
+  },
+  {
+    n: 9,
+    title: "Webhook system",
+    focus: "HMAC-SHA256 signed delivery",
+    start: "Mar 8, 2026",
+    end: "Mar 10, 2026",
+    status: "done",
+  },
   {
     n: 10,
     title: "OAuth2 & OIDC",
     focus: "PKCE, client credentials, rotation",
+    start: "Mar 10, 2026",
+    end: "Mar 14, 2026",
+    status: "done",
   },
-  { n: 11, title: "Federation", focus: "SAML + OIDC SSO" },
+  {
+    n: 11,
+    title: "Federation",
+    focus: "SAML + OIDC SSO",
+    start: "Mar 14, 2026",
+    end: "Mar 15, 2026",
+    status: "done",
+  },
   {
     n: 12,
     title: "Hierarchical settings & password policy",
     focus: "Cascading configuration",
+    start: "Mar 15, 2026",
+    end: "Mar 19, 2026",
+    status: "done",
   },
   {
     n: 13,
     title: "Email service & account flows",
     focus: "Verification, recovery",
+    start: "Mar 19, 2026",
+    end: "Mar 22, 2026",
+    status: "done",
   },
-  { n: 14, title: "Advanced MFA", focus: "TOTP step-up and beyond" },
-  { n: 15, title: "Admin frontend", focus: "React admin UI" },
-  { n: 16, title: "Docker & Kubernetes", focus: "Deployment manifests" },
-  { n: 17, title: "SDKs", focus: "Rust, TS, Python, Java, C#, PHP, Go" },
+  {
+    n: 14,
+    title: "Advanced MFA",
+    focus: "TOTP step-up and beyond",
+    start: "Mar 22, 2026",
+    end: "Mar 26, 2026",
+    status: "done",
+  },
+  {
+    n: 15,
+    title: "Admin frontend",
+    focus: "React admin UI",
+    start: "Mar 26, 2026",
+    end: "Mar 28, 2026",
+    status: "done",
+  },
+  {
+    n: 16,
+    title: "Docker & Kubernetes",
+    focus: "Deployment manifests",
+    start: "Mar 28, 2026",
+    end: "Mar 31, 2026",
+    status: "done",
+  },
+  {
+    n: 17,
+    title: "SDKs",
+    focus: "Rust, TS, Python, Java, C#, PHP, Go",
+    start: "Mar 31, 2026",
+    end: "Jul 3, 2026",
+    status: "done",
+  },
   {
     n: 18,
     title: "Security audit, compliance, docs",
     focus: "Hardening & documentation",
+    start: "Jul 3, 2026",
+    end: "Jul 12, 2026",
+    status: "done",
+  },
+  {
+    n: 19,
+    title: "Benchmarking, testing, fixing & improving",
+    focus: "Load & soak testing, benchmarks, bug fixes and hardening toward beta",
+    start: "Jul 12, 2026",
+    end: "Ongoing",
+    status: "ongoing",
   },
 ];
 
-export const BENCH: BenchRow[] = [
+/**
+ * Preliminary benchmark scenarios, transcribed from
+ * `benchmarks/PUBLIC_BENCH_ANALYSIS.md` (draft 2, run of 2026-07-21, AXIAM
+ * 1.0.0-alpha15 vs Keycloak 26.7.0 vs Zitadel v4.15.2). All figures are the
+ * p0-plaintext profile from the capped matrix (§3/§7), single run — a credible
+ * signal, not a final verdict. Only valid, comparable cells are charted.
+ */
+export const BENCH_SCENARIOS: BenchScenario[] = [
   {
-    name: "AXIAM",
-    value: "1.00×",
-    width: "100%",
-    fill: "linear-gradient(90deg,#00d4ff,#a855f7)",
+    id: "client_credentials",
+    title: "Machine-to-machine token issuance",
+    unit: "throughput · requests/s · plaintext",
+    bars: [
+      { target: "AXIAM", value: 1788, display: "1,788", axiam: true },
+      { target: "Zitadel", value: 419, display: "419" },
+      { target: "Keycloak", value: 346, display: "346" },
+    ],
+    takeaway:
+      "AXIAM issues 4.3× more tokens/s than Zitadel and 5.2× more than Keycloak, at a p99 of 36 ms.",
   },
-  { name: "System B", value: "0.62×", width: "62%", fill: "rgba(148,163,184,.45)" },
-  { name: "System C", value: "0.48×", width: "48%", fill: "rgba(148,163,184,.35)" },
+  {
+    id: "introspection",
+    title: "Token introspection (RFC 7662)",
+    unit: "throughput · requests/s · plaintext",
+    bars: [
+      { target: "AXIAM", value: 2229, display: "2,229", axiam: true },
+      { target: "Keycloak", value: 1765, display: "1,765" },
+      { target: "Zitadel", value: 923, display: "923" },
+    ],
+    takeaway:
+      "The closest head-to-head: AXIAM leads Keycloak by 1.26× (2.4× vs Zitadel) with a 3× better p95 and zero TLS penalty.",
+  },
+  {
+    id: "jwks",
+    title: "JWKS fetch (RFC 7517)",
+    unit: "throughput · requests/s · plaintext",
+    bars: [
+      { target: "AXIAM", value: 27059, display: "27,059", axiam: true },
+      { target: "Keycloak", value: 3855, display: "3,855" },
+      { target: "Zitadel", value: 2034, display: "2,034" },
+    ],
+    takeaway:
+      "A 7–13× gap — and AXIAM's server sat under its CPU cap while the load generator saturated, so its true ceiling is higher still.",
+  },
+  {
+    id: "userinfo",
+    title: "OIDC userinfo",
+    unit: "throughput · requests/s · plaintext",
+    bars: [
+      { target: "AXIAM", value: 5457, display: "5,457", axiam: true },
+      { target: "Keycloak", value: 3561, display: "3,561" },
+      { target: "Zitadel", value: 967, display: "967" },
+    ],
+    takeaway:
+      "AXIAM leads throughput (1.5× Keycloak, 5.6× Zitadel) even while DB-limited; on whole-stack CPU per request Keycloak is narrowly more efficient here.",
+  },
+  {
+    id: "password_login",
+    title: "Password login (real hashing)",
+    unit: "throughput · requests/s · plaintext",
+    bars: [
+      { target: "AXIAM", value: 67.5, display: "67.5", axiam: true },
+      { target: "Keycloak", value: 22.3, display: "22.3" },
+      { target: "Zitadel", value: 2.0, display: "2.0" },
+    ],
+    takeaway:
+      "At 50 concurrent users on 2 CPUs, AXIAM is the only target under the 2 s p95 gate. Hash configuration dominates this cell — Zitadel's default bcrypt cost is simply very expensive.",
+  },
 ];
+
+/**
+ * Whole-stack efficiency, head-to-head (p0-plaintext). `req/s per core` is
+ * higher-is-better; `cpu·ms/req` is lower-is-better. AXIAM's figures still
+ * carry its audit broker and, on some cells, a saturated database inside them —
+ * which is why Keycloak edges it on the userinfo cpu·ms/req cell.
+ */
+export const BENCH_EFFICIENCY: BenchEfficiencyRow[] = [
+  { scenario: "Client credentials", perCore: ["617", "167", "117"], cpuMs: ["1.62", "6.00", "8.53"] },
+  { scenario: "Token introspection", perCore: ["936", "753", "250"], cpuMs: ["1.07", "1.33", "4.01"] },
+  { scenario: "JWKS fetch", perCore: ["16,388", "1,922", "681"], cpuMs: ["0.061", "0.52", "1.47"] },
+  { scenario: "OIDC userinfo", perCore: ["1,453", "1,778", "340"], cpuMs: ["0.69", "0.56", "2.94"] },
+];
+
+/**
+ * AXIAM-only authorization decisions (no head-to-head — Keycloak and Zitadel
+ * expose no equivalent endpoint). Each check is a full RBAC evaluation against
+ * live data. Values are p0-plaintext throughput (requests/s).
+ */
+export const BENCH_AUTHZ: BenchScenario = {
+  id: "authz",
+  title: "Authorization decisions (AXIAM-only)",
+  unit: "throughput · requests/s · plaintext",
+  bars: [
+    { target: "REST · single", value: 745, display: "745", axiam: true },
+    { target: "gRPC · single", value: 722, display: "722", axiam: true },
+    { target: "REST · batch ×5", value: 46, display: "46" },
+    { target: "gRPC · batch ×5", value: 23, display: "23" },
+  ],
+  takeaway:
+    "Single checks improved 1.5–2.5× since draft 1 and now run at DB saturation (gRPC p99 tail collapsed 850 → 90 ms). The batch endpoints remain the known weak spot — currently slower than repeated single checks, and under investigation.",
+};
 
 export const GITHUB_URL = "https://github.com/ilpanich/axiam";

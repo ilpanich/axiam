@@ -9,7 +9,7 @@
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::webauthn::WebauthnService;
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::webauthn_credential::{
     CreateWebauthnCredential, WebauthnCredential, WebauthnCredentialType,
 };
@@ -282,4 +282,71 @@ async fn finish_authentication_rejects_wrong_purpose_token() {
         .finish_authentication(tenant, &token, &dummy_auth_response())
         .await;
     assert!(res.is_err());
+}
+
+#[tokio::test]
+async fn decode_state_token_rejects_issuer_mismatch() {
+    // Two services share signing keys but declare different `jwt_issuer`s.
+    // A token minted by one must be rejected by the other even though the
+    // signature itself verifies (Validation::set_issuer enforcement).
+    let mut cfg_a = config(true);
+    cfg_a.jwt_issuer = "issuer-a".into();
+    let svc_a = WebauthnService::new(empty_repo(), cfg_a).unwrap();
+
+    let mut cfg_b = config(true);
+    cfg_b.jwt_issuer = "issuer-b".into();
+    let svc_b = WebauthnService::new(empty_repo(), cfg_b).unwrap();
+
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let (_ccr, token) = svc_a
+        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .await
+        .unwrap();
+
+    let res = svc_b
+        .finish_registration(tenant, user, &token, "my key", &dummy_register_response())
+        .await;
+    assert!(
+        res.is_err(),
+        "a token from a different issuer must be rejected"
+    );
+    assert!(matches!(
+        res.unwrap_err(),
+        AxiamError::AuthenticationFailed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn decode_state_token_rejects_wrong_encryption_key() {
+    // Same signing keys and issuer, but a different `mfa_encryption_key`:
+    // the JWT signature/issuer/purpose all check out, so decode reaches the
+    // embedded-ciphertext decrypt step and fails there with a distinct
+    // `Crypto` error rather than the generic `WebauthnStateInvalid`.
+    let mut cfg_a = config(true);
+    cfg_a.mfa_encryption_key = Some([7u8; 32]);
+    let svc_a = WebauthnService::new(empty_repo(), cfg_a).unwrap();
+
+    let mut cfg_b = config(true);
+    cfg_b.mfa_encryption_key = Some([9u8; 32]);
+    let svc_b = WebauthnService::new(empty_repo(), cfg_b).unwrap();
+
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let (_ccr, token) = svc_a
+        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .await
+        .unwrap();
+
+    let res = svc_b
+        .finish_registration(tenant, user, &token, "my key", &dummy_register_response())
+        .await;
+    assert!(
+        res.is_err(),
+        "a state token encrypted under a different key must fail to decrypt"
+    );
+    assert!(
+        matches!(res.unwrap_err(), AxiamError::Crypto(_)),
+        "decrypt failure must surface as Crypto, distinct from WebauthnStateInvalid"
+    );
 }

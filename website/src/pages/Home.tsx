@@ -70,7 +70,7 @@ const ACCENTS = {
 const HERO_STATS = [
   { value: "64", label: "tasks" },
   { value: "19", label: "phases" },
-  { value: "7", label: "SDKs" },
+  { value: "11", label: "SDKs" },
   { value: "100%", label: "Rust" },
 ];
 
@@ -472,9 +472,10 @@ export default function Home({ go, openSdk }: HomeProps) {
               }}
             >
               Every line of code, every test, every commit was produced through
-              human-AI pair programming with Claude Code (Opus 4.6). The
-              architect provides vision, constraints and review; the AI provides
-              implementation at scale.
+              human-AI pair programming with Claude Code. Development began on
+              Opus 4.6 and continued across newer Anthropic models — later Opus
+              releases, Sonnet and Fable. The architect provides vision,
+              constraints and review; the AI provides implementation at scale.
             </p>
             <p style={{ fontSize: 16, lineHeight: 1.7, color: "#94a3b8", margin: 0 }}>
               The deeper goal is to explore the future of software itself — where
@@ -539,7 +540,7 @@ export default function Home({ go, openSdk }: HomeProps) {
           textAlign: "center",
         }}
       >
-        <h2 className="ax-h2">Seven SDKs, one behavioral contract</h2>
+        <h2 className="ax-h2">Eleven SDKs, one behavioral contract</h2>
         <p style={{ margin: "14px 0 30px", fontSize: 17, color: "#94a3b8" }}>
           Every client library vendors the same cross-language contract, OpenAPI
           spec and protobufs.

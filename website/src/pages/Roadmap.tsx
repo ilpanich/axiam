@@ -1,5 +1,18 @@
 import { PHASES } from "../data";
 
+/**
+ * Render a phase's date range compactly: drop the year from the start date when
+ * both ends share it ("Feb 24 – Feb 25, 2026"), and keep the open-ended
+ * "Ongoing" marker as-is ("Jul 12, 2026 – Ongoing").
+ */
+function formatRange(start: string, end: string): string {
+  const yearOf = (d: string) => d.match(/\d{4}$/)?.[0];
+  if (end !== "Ongoing" && yearOf(start) && yearOf(start) === yearOf(end)) {
+    return `${start.replace(/,\s*\d{4}$/, "")} – ${end}`;
+  }
+  return `${start} – ${end}`;
+}
+
 export default function Roadmap() {
   return (
     <div style={{ maxWidth: 900, margin: "0 auto", padding: "56px 40px 90px" }}>
@@ -21,12 +34,17 @@ export default function Roadmap() {
           letterSpacing: "-.02em",
         }}
       >
-        64 tasks. 19 phases.
+        64 tasks. 19 phases. And counting.
       </h1>
       <p style={{ margin: "0 0 14px", fontSize: 17, color: "#94a3b8", maxWidth: 640 }}>
         A structured path from project foundation to a security-audited,
-        SDK-complete platform. AXIAM remains a work in progress until a stable
+        SDK-complete platform — followed by an ongoing phase of benchmarking,
+        testing and hardening. AXIAM remains a work in progress until a stable
         release.
+      </p>
+      <p style={{ margin: "0 0 20px", fontSize: 13, color: "#64748b", maxWidth: 640 }}>
+        Phase dates are approximate, reconstructed from the project's issue
+        tracker and commit history.
       </p>
       <div style={{ display: "flex", gap: 22, marginBottom: 40 }}>
         <div
@@ -49,6 +67,26 @@ export default function Roadmap() {
           />
           Done
         </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 14,
+            color: "#94a3b8",
+          }}
+        >
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: "50%",
+              background: "#fbbf24",
+              boxShadow: "0 0 8px #fbbf24",
+            }}
+          />
+          Ongoing
+        </div>
       </div>
       <div style={{ position: "relative", paddingLeft: 26 }}>
         <div
@@ -62,68 +100,93 @@ export default function Roadmap() {
           }}
         />
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {PHASES.map((ph) => (
-            <div key={ph.n} style={{ position: "relative" }}>
-              <div
-                style={{
-                  position: "absolute",
-                  left: -25,
-                  top: 20,
-                  width: 12,
-                  height: 12,
-                  borderRadius: "50%",
-                  background: "#0d0d2b",
-                  border: "2px solid #27c93f",
-                  boxShadow: "0 0 8px rgba(39,201,63,.6)",
-                }}
-              />
-              <div
-                className="glass-card ax-lift"
-                style={{
-                  padding: "16px 22px",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 18,
-                }}
-              >
+          {PHASES.map((ph) => {
+            const ongoing = ph.status === "ongoing";
+            const accent = ongoing ? "#fbbf24" : "#27c93f";
+            return (
+              <div key={ph.n} style={{ position: "relative" }}>
                 <div
                   style={{
-                    flex: "none",
-                    fontSize: 12,
-                    fontWeight: 700,
-                    color: "#64748b",
-                    width: 64,
-                    fontFamily: "ui-monospace,Menlo,monospace",
+                    position: "absolute",
+                    left: -25,
+                    top: 20,
+                    width: 12,
+                    height: 12,
+                    borderRadius: "50%",
+                    background: "#0d0d2b",
+                    border: `2px solid ${accent}`,
+                    boxShadow: ongoing
+                      ? "0 0 8px rgba(251,191,36,.6)"
+                      : "0 0 8px rgba(39,201,63,.6)",
                   }}
-                >
-                  Phase {ph.n}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div
-                    style={{ fontSize: 15.5, fontWeight: 700, color: "#f8fafc" }}
-                  >
-                    {ph.title}
-                  </div>
-                  <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 2 }}>
-                    {ph.focus}
-                  </div>
-                </div>
-                <span
-                  className="ax-pill"
+                />
+                <div
+                  className="glass-card ax-lift"
                   style={{
-                    flex: "none",
-                    background: "rgba(39,201,63,.12)",
-                    border: "1px solid rgba(39,201,63,.35)",
-                    color: "#5ee688",
-                    padding: "4px 12px",
-                    fontSize: 11.5,
+                    padding: "16px 22px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 18,
                   }}
                 >
-                  Done
-                </span>
+                  <div
+                    style={{
+                      flex: "none",
+                      width: 64,
+                      fontFamily: "ui-monospace,Menlo,monospace",
+                    }}
+                  >
+                    <div
+                      style={{ fontSize: 12, fontWeight: 700, color: "#64748b" }}
+                    >
+                      Phase {ph.n}
+                    </div>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div
+                      style={{
+                        fontSize: 15.5,
+                        fontWeight: 700,
+                        color: "#f8fafc",
+                      }}
+                    >
+                      {ph.title}
+                    </div>
+                    <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 2 }}>
+                      {ph.focus}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: "#64748b",
+                        marginTop: 6,
+                        fontFamily: "ui-monospace,Menlo,monospace",
+                      }}
+                    >
+                      {formatRange(ph.start, ph.end)}
+                    </div>
+                  </div>
+                  <span
+                    className="ax-pill"
+                    style={{
+                      flex: "none",
+                      background: ongoing
+                        ? "rgba(251,191,36,.12)"
+                        : "rgba(39,201,63,.12)",
+                      border: ongoing
+                        ? "1px solid rgba(251,191,36,.35)"
+                        : "1px solid rgba(39,201,63,.35)",
+                      color: ongoing ? "#fcd34d" : "#5ee688",
+                      padding: "4px 12px",
+                      fontSize: 11.5,
+                    }}
+                  >
+                    {ongoing ? "Ongoing" : "Done"}
+                  </span>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>

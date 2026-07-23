@@ -15,6 +15,12 @@ export const m = {
   // token). report.py annotates any cell with bench_fallback > 0 as
   // comparability: fallback-op and excludes it from head-to-head tables.
   fallback: new Counter('bench_fallback'),
+  // D11: gRPC status code of each invoke(), so a 100%-non-OK scenario is
+  // diagnosable from the summary alone (e.g. 7=PermissionDenied,
+  // 16=Unauthenticated) instead of just showing up as failed checks with no
+  // hint why. A Trend (not a Counter) so the summary's percentile/avg stats
+  // surface which code dominates. Recorded by the gRPC scenarios only.
+  grpcStatus: new Trend('bench_grpc_status'),
 };
 
 // Execute one built request (from targets.js) and record uniform metrics.

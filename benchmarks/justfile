@@ -156,7 +156,14 @@ bench-up:
       just bench-certs
     fi
     if [ "{{profile}}" != "p0-plaintext" ] && [ "{{target}}" = "axiam" ]; then
-      if [ "{{profile}}" = "p2-tls13" ]; then
+      if [ "{{profile}}" = "p2-tls13" ] && [ -n "${BENCH_NGINX_CONF:-}" ]; then
+        # B2 isolation cell: an operator-set BENCH_NGINX_CONF (tls13-h1.conf)
+        # forces the nginx-fronted p2 path instead of the native rustls
+        # listener, giving a TLS 1.3 + HTTP/1.1-only edge to isolate the
+        # h2-vs-h1.1 effect. See targets/axiam/tls/tls13-h1.conf. Invoke as:
+        #   BENCH_NGINX_CONF=tls13-h1.conf just target=axiam profile=p2-tls13 bench-up
+        PROFILE_ARG="--profile tls"
+      elif [ "{{profile}}" = "p2-tls13" ]; then
         # p2 = TLS 1.3, server-auth: exactly what AXIAM's native rustls listener
         # does, so terminate in-process (no nginx) to measure AXIAM's own TLS
         # stack inside its CPU cap — comparable to keycloak/zitadel native TLS.

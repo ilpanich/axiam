@@ -704,7 +704,7 @@ evidence, not just the diff.
 
 ---
 
-## Implementation status (updated 2026-07-19)
+## Implementation status (updated 2026-07-20)
 
 Implemented on branch `claude/benchmark-improvement-plan-9yxx7g`. **Every task
 was implemented with the model the plan assigns to it** (Opus tasks via Opus
@@ -748,13 +748,13 @@ the laptop re-run · ⛔ blocked on external resources (documented).
 | D9 allocator experiment | Sonnet | ✅ / ⏳ | opt-in `jemalloc` feature + experiment note; RSS A/B ⏳ |
 | E2 AMQP async-authz harness | Opus | ✅ | design doc landed (`claude_dev/`); build-out deferred per plan |
 | E1.1 validate 7 SDK benches | Sonnet | ⏳ | code-bearing benches exist; live validation (an `ok` record against a seeded target) is a laptop step — no stack/egress here |
-| E1.2 implement 4 stub benches | Sonnet | ✅ / ⏳ | **implemented** (c, cpp, kotlin, swift) against their sibling SDKs; c/cpp/kotlin compile+run here (spec-conformant `error`/`pending` records, c `ok` proven vs a mock + valgrind-clean), swift code-complete but uncompiled (no toolchain). Live `ok` vs a seeded target ⏳ laptop |
+| E1.2 implement 4 stub benches | Sonnet | ✅ / ⏳ | **implemented** (c, cpp, kotlin, swift) against their sibling SDKs; c/cpp/kotlin compile+run here (spec-conformant `error`/`pending` records, c `ok` proven vs a mock + valgrind-clean), swift code-complete but uncompiled (no toolchain); merged #208. Live `ok` vs a seeded target ⏳ laptop |
 | E1.3 cross-SDK run + report table | Sonnet | ⛔ | depends on E1.1 |
 | E3 server-class hardware re-run | — | ⛔ | blocked on hardware/budget (explicitly out of scope in the plan) |
 | E4 public doc refresh | Sonnet | ⛔ | needs the fresh median-of-3 numbers from the laptop re-run |
-| F1 DB pool design + instrumentation | Opus | ⬜ planned | added 2026-07-20; run after the laptop re-run |
-| F2 implement `DbPool` + wire repos | Opus | ⬜ planned | pool_size=1 default (today's behavior); >1 opt-in until F3 data |
-| F3 pool bench validation + expiry soak | Sonnet | ⬜ planned | before/after cells + short-TTL soak |
+| F1 DB pool design + instrumentation | Opus | ✅ | `claude_dev/db-pool-design.md` + zero-behavior-change boundary metrics (in-flight gauge, checkout counter, latency wrapper); merged #207 |
+| F2 implement `DbPool` + wire repos | Opus | ✅ | `DbPool` of N independent handles, all 48 repo call-sites rewired, `pool_size=1`+cap=0 byte-identical default (tested), CQ-B48 closed; 49 axiam-db tests pass; merged #207 |
+| F3 pool bench validation + expiry soak | Sonnet | ⛔ | needs the live seeded stack — pool 1-vs-N cells + the `#[ignore]` expiry soak are a laptop step |
 
 **Summary:** Phases **A, B, C, D fully implemented** (23/23 tasks) + **E2** +
 **Phase F** (F1+F2, merged in #207) + **E1.2** (the four stub SDK benches now
@@ -768,11 +768,22 @@ every logic/security change is already covered by passing tests here.
 
 ---
 
-## Collecting the data — laptop re-run runbook (added 2026-07-20)
+## Collecting the data — run-3 laptop runbook (rewritten 2026-07-22 for the released 1.0.0-alpha16/17)
 
-Everything below runs from `benchmarks/` on the XPS, against **merged `main`**.
-Full detail lives in `docs/methodology.md` §8 (median-of-N), §9 (DB caps),
-§10 (laptop variance control), §11 (prod posture); this is the short path.
+Everything below runs from `benchmarks/` on the XPS. Every improvement in this
+plan is now **released**: v1.0.0-alpha16 carries all of Phases A–D + F plus the
+run-2 follow-ups (A8 refresh user-token, A9 provenance, D10 batch strategy,
+D11 Zitadel gRPC audience, report labeling) and the new gRPC-userinfo scenario
+pair; v1.0.0-alpha17 (current) adds only dependency bumps. Run the harness from
+a checkout of the **`v1.0.0-alpha17` tag** (or `main` at that commit) so the
+scenarios/runner match the server build. Full protocol detail stays in
+`docs/methodology.md` §8 (median-of-N), §9 (DB caps), §10 (laptop variance
+control), §11 (prod posture); this is the short path, ordered per the run-3
+checklist below. Two harness enablers for this runbook landed 2026-07-22: the
+justfile honors a pre-set `BENCH_NGINX_CONF` at p2 (the B2 h1-isolation cell),
+and the bench compose passes through `AXIAM__AUTHZ__BATCH_STRATEGY` /
+`AXIAM__AUTHZ__BATCH_MAX_CONCURRENCY` / `AXIAM__DB__POOL_*` (the D10 and F3
+A/B knobs — without the pass-through those exports never reached the server).
 
 **0. Prerequisites.** `docker` + compose v2, `just`, `k6`, `python3`. Laptop
 prep per §10: on AC power, `sudo cpupower frequency-set -g performance`
@@ -780,56 +791,250 @@ prep per §10: on AC power, `sudo cpupower frequency-set -g performance`
 in one mode. The A6 host sampler runs automatically; check the report's
 `clock_variance` / `generator_saturated` flags before trusting any cell.
 
-**1. Build AXIAM locally — this is the critical flag.** The published ghcr
-image predates all of Phase B/D, so every AXIAM cell must use a local source
-build of merged `main`: pass **`build=1`** (forces `docker compose --build`;
-it is also the automatic fallback when the pull fails). Keycloak/Zitadel are
-unchanged pulled images. First time (or after cert changes): `just bench-certs`.
+**1. Image selection — `build=1` is NO LONGER needed.** The published ghcr
+image now contains everything: `bench-up` defaults `BENCH_AXIAM_IMAGE` to
+`ghcr.io/ilpanich/axiam/server:<workspace version>` (1.0.0-alpha17 on the
+current tree) and pulls it (release.yml publishes per-tag images). If the
+unauthenticated pull is denied (private GHCR package): `docker login ghcr.io`,
+or `build=1` (also the automatic fallback on pull failure). Preferring the
+*pulled* release image is what completes A9's acceptance: meta.json records a
+real `RepoDigest` instead of run-2's `image_digest: unknown` everywhere, so
+run-3 deltas are attributable to a pinned binary. Optionally pin the
+datastores for the same reason (`BENCH_SURREALDB_IMAGE` / `BENCH_PG_IMAGE`
+accept digest-pinned refs). Keycloak/Zitadel stay unchanged pulled images.
+First time (or after cert changes): `just bench-certs`.
 
-**2. Main matrix (median-of-3 is the default `repeat`):**
+**2. B2 conviction cell FIRST (minutes, before the matrix).** Run 2 proved
+resumption works (`http_req_tls_handshaking ≈ 0`), leaving h2 multiplexing the
+sole suspect for the p2 −49%. Setting `BENCH_NGINX_CONF` at p2 now forces the
+nginx-fronted path (TLS 1.3, ALPN `http/1.1` only) instead of the native
+listener:
 
 ```bash
 cd benchmarks
-just build=1 targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13" bench-matrix
+export BENCH_NGINX_CONF=tls13-h1.conf
+just target=axiam profile=p2-tls13 bench-up
+just target=axiam profile=p2-tls13 bench-seed
+just target=axiam profile=p2-tls13 scenario=oauth2_client_credentials.js bench-run
+just target=axiam profile=p2-tls13 scenario=token_refresh.js bench-run
+just target=axiam bench-down
+unset BENCH_NGINX_CONF
 ```
 
-`bench-matrix` loops bench-up → bench-seed → bench-run → bench-down per
-target×profile into `results/run-<i>/…`, then runs `bench-report`
-(auto-medians when `run-*/` dirs exist). Seeding is fail-closed (A2): if a
-seed smoke check fails, `bench-run` refuses to start — inspect
-`results/<target>/seed-failure/`. Expected first-run friction: the new
-Zitadel session-API seeding (D5) has two flagged best-guesses (`expect: 201`
-vs 200; management-API field names) — if its smoke check trips, adjust per
-the in-code comments in `scenarios/lib/targets.js` / `runner/seed.sh`.
+Confirm the cell's k6 `http_version` tag reads `1.1` (native/h2 cells read
+`2`); acceptance is within ~15% of p0. Note: `BENCH_AXIAM_TLS_HTTP2=false` on
+the native listener is an intent signal only (actix re-adds h2 to ALPN), so
+this nginx cell is the only true h1 control.
 
-**3. AXIAM-only extra passes** (each a labeled section/sensitivity row, not
-mixed into head-to-head):
+**3. Main matrix (median-of-3 is the default `repeat`):**
 
 ```bash
-# p3 native mTLS (D3 — no nginx container should appear in `docker ps`)
-just target=axiam profile=p3-mtls build=1 bench-up bench-seed bench-run bench-down
-# C4 prod rate-limit posture
-just target=axiam rl=prod build=1 bench-up bench-seed bench-run bench-down
-# C2 DB-uncapped sensitivity (one AXIAM + one Zitadel pass)
-just target=axiam dbcaps=uncapped build=1 bench-up bench-seed bench-run bench-down
-just target=zitadel dbcaps=uncapped bench-up bench-seed bench-run bench-down
-# D7 decision-cache sensitivity (default is OFF; one labeled ON pass)
-AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true just target=axiam build=1 bench-up bench-seed bench-run bench-down
+just targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13" bench-matrix
 ```
 
-**4. B2 TLS verification — zero new runs first.** Before any p2 re-run, read
-the archived 2026-07-19 k6 JSONs: the `http_version` tag (expect `2` at p2 vs
-`1.1` at p0) and `http_req_tls_handshaking` attribute the halving with no new
-data. Then the isolation cell: re-run only `oauth2_client_credentials` +
-`token_refresh` at p2 with the h1-only edge (`tls13-h1.conf`) and compare —
-acceptance is p2 within ~15% of p0.
+(No `build=1` — see step 1.) Same flow as before: bench-up → bench-seed →
+bench-run → bench-down per target×profile into `results/run-<i>/…`, then
+`bench-report` auto-medians. Seeding stays fail-closed (A2) — on a smoke-check
+trip inspect `results/<target>/seed-failure/`. **New data this matrix collects
+vs run 2 — verify each while it runs:**
 
-**5. B1/D9 memory checks.** During the login cell, watch server RSS
-(`docker stats`): B1 acceptance is ≤ ~350 MiB at 50 VUs. The D9 jemalloc A/B
-is separate — procedure in `claude_dev/memory-retention-experiment.md`
-(build with `--features jemalloc`, compare 10-min post-burst RSS).
+- **A8:** `token_refresh` now mints a *user* token. Check `bench_fallback == 0`
+  on the AXIAM and Keycloak refresh cells, and that AXIAM refresh is no longer
+  ≈ ½ × client-credentials (real single-use rotation). Zitadel refresh remains
+  a tagged fallback (no offline_access flow yet).
+- **D10 (the batch-authz speedup):** the four authz cells run the new default
+  `AXIAM__AUTHZ__BATCH_STRATEGY=concurrent`. Acceptance: batch checks/s
+  **exceeds** single checks/s, and `authz_batch_grpc` passes the 2 s p95 gate.
+  The coalesced control cells are in step 4.
+- **gRPC userinfo pair:** `userinfo_grpc.js` (AXIAM's UserInfoService, new in
+  alpha16, auto-included for the axiam target) pairs with
+  `zitadel_userinfo_grpc.js` carrying the D11 audience fix — expect a valid
+  0%-error Zitadel cell (~1.7–2 k/s); the new `bench_grpc_status` appendix in
+  the report diagnoses any residue.
+- **A9:** spot-check one meta.json per stack — image digests/IDs present (no
+  `unknown`), correct version stamp, `build_ref` only when built locally.
 
-**6. Package/publish:** `just bench-pack` produces the shareable
+**4. AXIAM-only labeled passes** (sensitivity rows, never mixed into
+head-to-head). Give each pass its own subtree via `BENCH_RESULTS_DIR` so
+labeled cells cannot collide with matrix cells (seed marker and results both
+honor it):
+
+```bash
+# D10 batch-strategy A/B — the matrix measured the `concurrent` default;
+# this is the `coalesced` control. The four authz cells are the payload.
+export BENCH_RESULTS_DIR=$PWD/results/sens-batch-coalesced
+AXIAM__AUTHZ__BATCH_STRATEGY=coalesced just target=axiam bench-up bench-seed
+for s in authz_check_rest.js authz_batch_rest.js authz_check_grpc.js authz_batch_grpc.js; do
+  just target=axiam scenario=$s bench-run
+done
+just target=axiam bench-down
+
+# F3 pool A/B — pool_size=1 (default) is the matrix baseline; this is pool 4.
+# Optionally add a third labeled row with AXIAM__DB__POOL_MAX_IN_FLIGHT=64.
+export BENCH_RESULTS_DIR=$PWD/results/sens-pool-4
+AXIAM__DB__POOL_SIZE=4 just target=axiam bench-up bench-seed bench-run bench-down
+
+# p3 native mTLS (D3 — verify NO nginx container in `docker ps` during the run)
+export BENCH_RESULTS_DIR=$PWD/results/sens-p3-mtls
+just target=axiam profile=p3-mtls bench-up bench-seed bench-run bench-down
+
+# C4 prod rate-limit posture (verify report.py refuses to mix postures)
+export BENCH_RESULTS_DIR=$PWD/results/sens-rl-prod
+just target=axiam rl=prod bench-up bench-seed bench-run bench-down
+
+# C2 completion — Keycloak uncapped-DB pass (AXIAM+Zitadel were done in run 2)
+export BENCH_RESULTS_DIR=$PWD/results/sens-kc-uncapped
+just target=keycloak dbcaps=uncapped bench-up bench-seed bench-run bench-down
+
+# D7 decision-cache ON (default stays OFF everywhere else); after the pool A/B,
+# one combined cache+pool cell per F3.
+export BENCH_RESULTS_DIR=$PWD/results/sens-cache-on
+AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true just target=axiam bench-up bench-seed bench-run bench-down
+unset BENCH_RESULTS_DIR
+```
+
+**5. F3 expiry soak (cargo, not k6).** Proves pooled handles re-sign-in across
+token expiry (CQ-B48 closed) on a live DB: `just dev-up`, then
+
+```bash
+cargo test -p axiam-db --test connection_resilience_test \
+  pooled_handles_survive_token_expiry_without_restart -- --ignored --nocapture
+```
+
+**6. B1/D9 memory checks.** During the login cell, watch server RSS
+(`docker stats`): B1's latency gate already passed in run 2 (p95 907 ms); the
+~350 MiB RSS target is only reachable together with D9 — the jemalloc A/B
+procedure is in `claude_dev/memory-retention-experiment.md` (that experiment
+DOES need a local build: `build=1` + `--features jemalloc`, compare 10-min
+post-burst RSS).
+
+**7. Package/publish:** `just bench-pack` produces the shareable
 `results-<date>.tar.xz` (only k6/res/host/meta/report files; it greps the
-archive for secrets and fails if any leak). Then E4 (public doc refresh) can
-run against the fresh numbers.
+archive for secrets and fails if any leak). Then E4 (public doc refresh) runs
+against the run-3 medians — the run-2 second draft is already published as
+preliminary.
+
+---
+
+## Run-2 measured verification (added 2026-07-21)
+
+The maintainer executed a **preliminary** version of the re-run on the XPS
+9570 against a source build of merged `main` (released as **1.0.0-alpha15**):
+one full capped matrix (all targets, p0+p2) and one DB-uncapped sensitivity
+pass (AXIAM + Zitadel, DB at 4 CPU / 2048 MiB). Single run per cell — the C1
+median-of-3 protocol was NOT used this time, so ≲10% deltas are noise. Full
+analysis: `benchmarks/PRIVATE_BENCH_ANALYSIS.md` (run-2 rewrite) and the
+second-draft `benchmarks/PUBLIC_BENCH_ANALYSIS.md`.
+
+### Measured-acceptance resolution of the ⏳ items
+
+| Task | Run-2 verdict | Evidence (capped p0 unless noted) |
+|------|--------------|-----------------------------------|
+| A1 userinfo fix | ✅ **PASS** | valid 3-way cell; AXIAM 5457 req/s (KC 3561, Zitadel 967), 0% errors |
+| A2 seed hardening | ✅ **PASS** | Keycloak ROPC works: 22.3 req/s, hash-bound |
+| A3 fallback tagging | ✅ **PASS** (and then some) | counter fired 100% on `token_refresh` for ALL targets → exposed new bug A8 |
+| A4 meta.json | ✅ **PASS** (residual → A9) | all fields present; but `image_digest: unknown` everywhere, stale `alpha12` tag string |
+| A5/A6 report + host telemetry | ✅ **PASS** | mhz/temp/k6-cores in every cell; governor `performance`; temps 95–100 °C, pegged-cell clocks ~3.7–3.9 GHz |
+| A7 secrets out of results | ✅ **PASS** | shared archive is secret-free (verified by grep) |
+| B1 Argon2 semaphore | ✅ **PASS** (RSS target near-miss explained) | login 35→**67.5 req/s**, p95 2127→**907 ms** (gate passes), RSS peak 970→**478 MiB**; the 350 MiB target is missed only by D9 retention |
+| B2 TLS 1.3 fix | ❌ **FAIL — still −49%** | CC 1788→908 at p2; BUT `http_req_tls_handshaking≈0` proves resumption works → hypothesis 2 refuted, **h2 multiplexing now sole suspect**; the `tls13-h1.conf` isolation cell was not run — it is the next single action |
+| B3 JWKS caching | ➖ neutral | 27.1k/24.1k req/s, still generator-limited; ETag path unexercised by k6 |
+| C2 DB sensitivity | ✅ **RAN** | authz REST +37% (745→1017), userinfo +33% (server pegs at 7261/s), CC +1.6% (DB cap was never the token wall); Zitadel jwks +73%/userinfo +78% with PG pegging 4 cores |
+| C1/C3/C4 | ⏳ not exercised | single-run pass; prod-posture and median-of-3 wait for run 3 |
+| D1 batch coalescing | ❌ **FAIL — unchanged** | REST 46/s p50 ~1.05 s, gRPC 23/s p50 ~2.15 s, invariant to caps/TLS; DB pinned at ~1.0 core in every config → serialized DB query suspected → new task D10 |
+| D2 gRPC TLS | ✅ **PASS** | p2 gRPC cells ran over TLS (handshakes visible) with no penalty (746 vs 722); needed the #218 crypto-provider fix |
+| D3 native mTLS | ⏳ | no p3 cells in this run |
+| D4 Zitadel gRPC | ❌ **FAIL — 100% gRPC errors** | CC token lacks Zitadel-project audience; also `mintUserToken` can't consume the session token → new task D11 |
+| D5 Zitadel real login | ✅ **PASS** | real bcrypt-bound login: 2.0 req/s, p50 ~22 s, server pegged (gate-invalid cell, correctly labeled) |
+| D6/D7 | ⏳ | uncapped data now in hand for D6; D7 cache-ON sensitivity cell not run |
+| D9 allocator retention | ⏳ confirmed still present | baseline 115 MiB → ~478 MiB retained after login burst (was ~646); experiment still worth running |
+| F3 pool bench validation | ⏳ | not run |
+| Side-finding | ⚠ attribute before marketing | authz single-check REST 290→**745 req/s** and gRPC p99 850→**90 ms** — cause not attributable (D1/F2/SurrealDB-drift) until A9 pins images |
+| Side-finding | ⚠ Keycloak 2–5× faster than run 1 | same image tag; treat run 2 as baseline; A9 prevents recurrence |
+
+### New tasks from run 2
+
+**A8. `token_refresh` must mint a user token — Sonnet.**
+*Files:* `benchmarks/scenarios/token_refresh.js`, `lib/auth.js`, seed as needed.
+`mintToken()` (CC-first) means NO target ever gets a refresh token — the cell
+has been a CC-issuance fallback on all three targets in both runs (run 1's
+AXIAM "refresh rotation" numbers included: 886 ≈ ½ × CC 1743, the fallback's
+two-requests-per-iteration signature). Switch setup to `mintUserToken()`
+(AXIAM login sets `axiam_refresh`; KC ROPC returns `refresh_token`; for
+Zitadel investigate an OIDC/`offline_access` path and keep the fallback tag if
+impossible). *Acceptance:* `bench_fallback == 0` for AXIAM and Keycloak refresh
+cells; AXIAM cell shows real single-use rotation (throughput no longer ≈ ½ CC).
+
+**A9. Provenance: image digests, real version stamp, pinned DB images — Sonnet.**
+*Files:* `benchmarks/runner/run-benchmark.sh`, `targets/*/docker-compose.yml`.
+Record image **ID** always (RepoDigests is empty for local builds — that's why
+every run-2 digest reads `unknown`), add a `build_ref` meta field
+(`git rev-parse HEAD`) when `build=1`, fix the stale `1.0.0-alpha12` tag
+string, and pin `surrealdb`/`postgres` by digest (floating `v3` blocked
+attribution of the 2.5× authz improvement). *Acceptance:* meta.json uniquely
+identifies every binary in the stack for both pulled and locally-built images.
+
+**D10. Batch-authz serialization investigation — Opus** (supersedes the D1
+re-run). Evidence: batch latency constant (~1.05 s REST / ~2.15 s gRPC ≈ 2×)
+across caps and TLS; DB consumes almost exactly **one core in every
+configuration including uncapped** → the batch's work appears serialized on a
+single DB-side thread; closed-loop math (50 VUs / 46 per-s ≈ 1.09 s) explains
+the p50 as pure queueing on a ~22 ms serialized unit. Steps: (1) time the 3
+coalesced queries with SurrealDB query logging, `EXPLAIN` the batched
+`get_role_permission_grants_for_roles`; (2) if convicted: index it, or issue
+per-role queries concurrently, and explain gRPC's exact 2× (suspect the
+per-item subject validation path); (3) control experiment — batch handler as
+`join_all` of N single-check evaluations (singles run 745/s; 5-way concurrent
+singles ≈ 149 batch/s equivalent vs the measured 46). *Acceptance:* unchanged
+from D1 (batch checks/s > single checks/s; gRPC batch passes the 2 s gate).
+
+**D11. Zitadel gRPC audience + session-token handling — Sonnet.**
+*Files:* `benchmarks/scenarios/lib/targets.js`, `lib/auth.js`,
+`zitadel_userinfo_grpc.js`. Add
+`urn:zitadel:iam:org:project:id:zitadel:aud` scope to the Zitadel CC mint used
+for gRPC setup (Zitadel's own APIs reject tokens without the project
+audience — the run-2 cell was 100% non-OK at ~20 ms with PG pegged), teach the
+harness to either consume the D5 session token or explicitly skip it, and add
+a k6 counter recording the gRPC error status so this failure shape is
+diagnosable from the summary. *Acceptance:* valid cell (0% errors), expected
+order of magnitude ~1.7–2 k/s given the error-path resource profile.
+
+**Report labeling polish (fold into A5 follow-up):** distinguish
+`fallback-op` (cell measures the wrong op) from `cc-token-setup` (right op,
+token-provenance caveat — Zitadel userinfo); blank throughput for 100%-error
+cells in gRPC scenarios too (zitadel_userinfo_grpc printed 1725 "req/s" of
+errors).
+
+### Run-3 checklist (the 2026-07-22 runbook above implements this order)
+
+1. ~~Land A8, A9, D11 + labeling polish (small harness diffs).~~ **Done —
+   released in v1.0.0-alpha16** (v1.0.0-alpha17 adds only dependency bumps).
+2. **B2 conviction cell first** — p2 `oauth2_client_credentials` through
+   `tls13-h1.conf` (minutes); then fix/document per the private doc §4.3.
+3. D10 investigation (can proceed in parallel with 1–2).
+4. Full capped matrix with `repeat=3` (C1), plus: p3-mtls (D3), D7 cache-ON
+   labeled cell, C4 prod posture, Keycloak uncapped pass (completes C2's
+   sensitivity set), D9 jemalloc A/B.
+5. E4 public-doc refresh from run-3 medians (run-2 second draft is already
+   published as preliminary).
+
+### Run-2 follow-up tasks — implementation status (2026-07-21)
+
+Implemented on branch `claude/benchmark-analysis-docs-wm7wyq`, **each with the
+model the task specifies** (A8/A9/D11/labeling via Sonnet agents; D10 via Opus).
+Same sandbox caveat as before: no `k6`/live stack here, so measured-number
+acceptance (batch throughput, gRPC cell validity, `bench_fallback==0`) is
+confirmed on the run-3 laptop matrix. All logic changes are unit/behaviour-tested
+here.
+
+| Task | Model | Status | Notes |
+|------|-------|--------|-------|
+| A8 token_refresh user-token | Sonnet | ✅ / ⏳ | `token_refresh.js` → `mintUserToken()` (login-first); AXIAM `axiam_refresh` cookie + KC ROPC `refresh_token` now feed real rotation; Zitadel keeps the tagged fallback (needs offline_access flow). `bench_fallback==0` for AXIAM/KC ⏳ run-3 |
+| A9 provenance | Sonnet | ✅ | `image_id` fallback when RepoDigests empty, `build_ref`=`git rev-parse HEAD` in meta, `${BENCH_SURREALDB_IMAGE}`/`${BENCH_PG_IMAGE}` digest-pin overrides in composes; `bash -n` + `compose config` clean |
+| D11 Zitadel gRPC audience | Sonnet | ✅ / ⏳ | reserved `urn:zitadel:iam:org:project:id:zitadel:aud` added to Zitadel CC scope; `bench_grpc_status` Trend records gRPC status in all 3 gRPC scenarios. Valid 0%-error cell ⏳ run-3 |
+| Report labeling polish | Sonnet | ✅ | `report.py`: `fallback-op` vs `cc-token-setup` split (keeps Zitadel userinfo comparable), gRPC 100%-error blanking keyed off `bench_*`, gRPC-status appendix; `py_compile` + synthetic-tree validation |
+| D10 batch serialization | Opus | ✅ / ⏳ | grants-query hypothesis **disproven** (single-check uses the same query); shipped config-selectable `BatchStrategy` (default `concurrent` = per-item parallel, byte-identical decisions; `coalesced` retained). `claude_dev/authz-batch-investigation.md`. Batch>single throughput ⏳ run-3 |
+
+The run-3 checklist above is unchanged; A8/A9/D11/labeling land the "small harness
+diffs" of step 1, and D10 lands the batch fix ahead of step 3's laptop A/B (run
+both `AXIAM__AUTHZ__BATCH_STRATEGY` modes to confirm the default).

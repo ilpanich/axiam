@@ -349,6 +349,82 @@ mod tests {
         }
     }
 
+    /// A client repo that always reports the client as genuinely unknown
+    /// (`AxiamError::NotFound`), used to prove `authorize` maps that specific
+    /// case to `OAuth2Error::InvalidClient`.
+    #[derive(Clone)]
+    struct MockClientRepoNotFound;
+
+    impl OAuth2ClientRepository for MockClientRepoNotFound {
+        async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+            unimplemented!()
+        }
+        async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
+            unimplemented!()
+        }
+        async fn get_by_client_id(
+            &self,
+            _tenant_id: Uuid,
+            _client_id: &str,
+        ) -> AxiamResult<OAuth2Client> {
+            Err(AxiamError::NotFound {
+                entity: "oauth2_client".into(),
+                id: _client_id.to_string(),
+            })
+        }
+        async fn update(
+            &self,
+            _tid: Uuid,
+            _id: Uuid,
+            _input: UpdateOAuth2Client,
+        ) -> AxiamResult<OAuth2Client> {
+            unimplemented!()
+        }
+        async fn delete(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn list(
+            &self,
+            _tid: Uuid,
+            _page: Pagination,
+        ) -> AxiamResult<PaginatedResult<OAuth2Client>> {
+            unimplemented!()
+        }
+    }
+
+    /// A code repo whose `create` always fails with a DB-outage-shaped
+    /// error, used to prove step 8 (code persistence) maps failures to
+    /// `OAuth2Error::ServerError` rather than panicking or masking them.
+    #[derive(Clone)]
+    struct MockCodeRepoFailing;
+
+    impl AuthorizationCodeRepository for MockCodeRepoFailing {
+        async fn create(&self, _input: CreateAuthorizationCode) -> AxiamResult<AuthorizationCode> {
+            Err(AxiamError::Database("simulated code-store outage".into()))
+        }
+        async fn get_by_hash(
+            &self,
+            _tid: Uuid,
+            _hash: &str,
+            _client_id: &str,
+            _redirect_uri: &str,
+        ) -> AxiamResult<AuthorizationCode> {
+            unimplemented!()
+        }
+        async fn consume(
+            &self,
+            _tid: Uuid,
+            _hash: &str,
+            _client_id: &str,
+            _redirect_uri: &str,
+        ) -> AxiamResult<AuthorizationCode> {
+            unimplemented!()
+        }
+        async fn delete_expired(&self) -> AxiamResult<u64> {
+            Ok(0)
+        }
+    }
+
     fn make_client(is_public: bool) -> OAuth2Client {
         OAuth2Client {
             id: Uuid::new_v4(),
@@ -482,5 +558,251 @@ mod tests {
                  (a DB outage must never be reported as invalid_client)"
             ),
         }
+    }
+
+    // A genuinely-unknown client_id (AxiamError::NotFound) must map to
+    // OAuth2Error::InvalidClient (bad client_id case).
+    #[tokio::test]
+    async fn authorize_unknown_client_id_returns_invalid_client() {
+        let svc = AuthorizeService::new(MockClientRepoNotFound, MockCodeRepo, 300);
+        let req = make_authorize_request(Uuid::new_v4(), &make_client(false), None);
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), OAuth2Error::InvalidClient(_)),
+            "unknown client_id must map to InvalidClient"
+        );
+    }
+
+    // redirect_uri not in the client's registered set must be rejected
+    // before any other validation (RFC 6749 §4.1.2.1).
+    #[tokio::test]
+    async fn authorize_redirect_uri_mismatch_returns_invalid_redirect_uri() {
+        let client = make_client(false);
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let mut req = make_authorize_request(tenant_id, &client, None);
+        req.redirect_uri = "https://evil.example.com/callback".into();
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, OAuth2Error::InvalidRedirectUri(_)),
+            "unregistered redirect_uri must map to InvalidRedirectUri, got: {:?}",
+            err
+        );
+    }
+
+    // Only response_type=code is supported; anything else is rejected
+    // (only reachable once client + redirect_uri are known-good).
+    #[tokio::test]
+    async fn authorize_unsupported_response_type_returns_error() {
+        let client = make_client(false);
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let mut req = make_authorize_request(tenant_id, &client, None);
+        req.response_type = "token".into();
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OAuth2Error::UnsupportedResponseType
+        ));
+    }
+
+    // A client not registered for the authorization_code grant type must
+    // be rejected with unauthorized_client.
+    #[tokio::test]
+    async fn authorize_client_without_grant_type_returns_unauthorized_client() {
+        let mut client = make_client(false);
+        client.grant_types = vec!["client_credentials".into()];
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let req = make_authorize_request(tenant_id, &client, None);
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OAuth2Error::UnauthorizedClient(_)
+        ));
+    }
+
+    // Requesting a scope not in the client's registered scope set must
+    // be rejected with invalid_scope.
+    #[tokio::test]
+    async fn authorize_unregistered_scope_returns_invalid_scope() {
+        let client = make_client(false);
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let mut req = make_authorize_request(tenant_id, &client, None);
+        req.scope = Some("openid super-admin".into());
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), OAuth2Error::InvalidScope(_)));
+    }
+
+    // Omitting `scope` entirely must succeed with an empty scope set
+    // (no implicit grant of the client's full registered scopes).
+    #[tokio::test]
+    async fn authorize_without_scope_succeeds_with_empty_scopes() {
+        let client = make_client(false);
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let mut req = make_authorize_request(tenant_id, &client, None);
+        req.scope = None;
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_ok(), "omitted scope must still succeed");
+    }
+
+    // code_challenge present without code_challenge_method is invalid_request.
+    #[tokio::test]
+    async fn authorize_pkce_challenge_without_method_returns_invalid_request() {
+        let client = make_client(false);
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let mut req = make_authorize_request(tenant_id, &client, None);
+        req.code_challenge = Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into());
+        req.code_challenge_method = None;
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OAuth2Error::InvalidRequest(_)
+        ));
+    }
+
+    // code_challenge_method present without code_challenge is invalid_request.
+    #[tokio::test]
+    async fn authorize_pkce_method_without_challenge_returns_invalid_request() {
+        let client = make_client(false);
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let mut req = make_authorize_request(tenant_id, &client, None);
+        req.code_challenge = None;
+        req.code_challenge_method = Some("S256".into());
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OAuth2Error::InvalidRequest(_)
+        ));
+    }
+
+    // Only S256 is a supported code_challenge_method; e.g. "plain" is rejected.
+    #[tokio::test]
+    async fn authorize_pkce_unsupported_method_returns_invalid_request() {
+        let client = make_client(false);
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let mut req = make_authorize_request(tenant_id, &client, None);
+        req.code_challenge = Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into());
+        req.code_challenge_method = Some("plain".into());
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OAuth2Error::InvalidRequest(_)
+        ));
+    }
+
+    // A failure while persisting the authorization code must surface as a
+    // ServerError, not panic or silently drop the request.
+    #[tokio::test]
+    async fn authorize_code_store_failure_returns_server_error() {
+        let client = make_client(false);
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepoFailing,
+            300,
+        );
+        let req = make_authorize_request(tenant_id, &client, None);
+        let result = svc.authorize(req).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), OAuth2Error::ServerError(_)));
+    }
+
+    // hash_code must be deterministic and distinct for distinct inputs
+    // (used by consumers to look codes up by hash).
+    #[test]
+    fn hash_code_is_deterministic_and_distinguishes_inputs() {
+        let a1 = hash_code("code-a");
+        let a2 = hash_code("code-a");
+        let b = hash_code("code-b");
+
+        assert_eq!(a1, a2, "hashing the same code twice must be stable");
+        assert_ne!(a1, b, "different codes must hash differently");
+        assert_eq!(a1.len(), 64, "SHA-256 hex digest must be 64 chars");
+    }
+
+    // parse_scopes: whitespace-separated parsing and the None => empty rule.
+    #[test]
+    fn parse_scopes_splits_on_whitespace_and_handles_none() {
+        assert_eq!(parse_scopes(None), Vec::<String>::new());
+        assert_eq!(parse_scopes(Some("")), Vec::<String>::new());
+        assert_eq!(
+            parse_scopes(Some("openid  profile   email")),
+            vec!["openid", "profile", "email"]
+        );
     }
 }

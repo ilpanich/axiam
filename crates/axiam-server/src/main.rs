@@ -186,6 +186,26 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("Starting AXIAM server...");
 
+    // REQ-15 AC-1: install the process-level rustls CryptoProvider.
+    // rustls 0.23 links BOTH `ring` and `aws-lc-rs` in this build (transitively —
+    // e.g. via rustls-platform-verifier), so it cannot auto-select a default
+    // provider and any code path that consults the process default panics with
+    // "Could not automatically determine the process-level CryptoProvider".
+    // The REST listener sidesteps this by passing `ring::default_provider()`
+    // explicitly (see `tls::build_rustls_server_config`), but tonic's gRPC
+    // `ServerTlsConfig` (crates/axiam-api-grpc/src/server.rs) builds its rustls
+    // config from the process default — without this call every gRPC-over-TLS
+    // handshake panics on the tokio worker and the connection is dropped (0 bytes
+    // back), while REST TLS keeps working. Install `ring` (matching REST) once,
+    // before any listener is built. Idempotent: `Err` means a provider was
+    // already installed, which is fine.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("rustls default CryptoProvider was already installed");
+    }
+
     let mut config = load_config();
 
     // Load MFA encryption key from env (skipped by serde on AuthConfig).
@@ -691,6 +711,10 @@ async fn main() -> std::io::Result<()> {
             resource_repo.clone(),
             scope_repo.clone(),
             group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
         );
         Arc::new(match decision_cache.as_ref() {
             Some(cache) => engine.with_decision_cache(cache.clone()),
@@ -711,6 +735,10 @@ async fn main() -> std::io::Result<()> {
             resource_repo.clone(),
             scope_repo.clone(),
             group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
         );
         match decision_cache.as_ref() {
             Some(cache) => engine.with_decision_cache(cache.clone()),
@@ -873,6 +901,10 @@ async fn main() -> std::io::Result<()> {
             resource_repo.clone(),
             scope_repo.clone(),
             group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
         );
         match decision_cache.as_ref() {
             Some(cache) => engine.with_decision_cache(cache.clone()),

@@ -236,3 +236,62 @@ fn decrypt_ca_key_pem(data: &[u8], key_bytes: &[u8; 32]) -> AxiamResult<String> 
     String::from_utf8(plaintext)
         .map_err(|e| AxiamError::Crypto(format!("decrypted key is not valid UTF-8: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::encrypt_secret;
+
+    #[test]
+    fn decrypt_ca_key_pem_round_trips_valid_utf8() {
+        let key = [9u8; 32];
+        // Assembled from fragments (not a literal "BEGIN PRIVATE KEY" line) —
+        // this is arbitrary round-trip payload text, not real key material.
+        let label = "PRIVATE KEY";
+        let pem = format!("-----BEGIN {label}-----\nfakekeydata\n-----END {label}-----\n");
+        let encrypted = encrypt_secret(pem.as_bytes(), &key).expect("encrypt must succeed");
+
+        let decrypted = decrypt_ca_key_pem(&encrypted, &key).expect("decrypt must succeed");
+        assert_eq!(decrypted, pem);
+    }
+
+    #[test]
+    fn decrypt_ca_key_pem_rejects_non_utf8_plaintext() {
+        let key = [10u8; 32];
+        // 0x80 is not a valid single-byte UTF-8 sequence starter.
+        let invalid_utf8: &[u8] = &[0xFF, 0xFE, 0x80];
+        let encrypted = encrypt_secret(invalid_utf8, &key).expect("encrypt must succeed");
+
+        let err = decrypt_ca_key_pem(&encrypted, &key).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("not valid UTF-8"), "got: {msg}");
+    }
+
+    #[test]
+    fn decrypt_ca_key_pem_propagates_underlying_decrypt_error() {
+        let key = [11u8; 32];
+        // Too short to contain a 12-byte nonce — decrypt_secret's own error
+        // path, which decrypt_ca_key_pem must propagate unchanged.
+        let err = decrypt_ca_key_pem(&[1, 2, 3], &key).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("missing nonce"), "got: {msg}");
+    }
+
+    #[test]
+    fn decrypt_ca_key_pem_rejects_wrong_key() {
+        let key_a = [12u8; 32];
+        let key_b = [13u8; 32];
+        let encrypted = encrypt_secret(b"pem-bytes", &key_a).expect("encrypt must succeed");
+
+        let err = decrypt_ca_key_pem(&encrypted, &key_b).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("decryption failed"), "got: {msg}");
+    }
+
+    #[test]
+    fn leaf_cert_validity_constants_are_sane() {
+        const { assert!(DEFAULT_LEAF_CERT_VALIDITY_DAYS <= MAX_LEAF_CERT_VALIDITY_DAYS) };
+        assert_eq!(MAX_LEAF_CERT_VALIDITY_DAYS, 825);
+        assert_eq!(DEFAULT_LEAF_CERT_VALIDITY_DAYS, 365);
+    }
+}

@@ -83,3 +83,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 # rsa 0.9 requires a rand_core 0.6 CryptoRng; the workspace `rand` (0.9) ThreadRng
 # does not satisfy it. Use rand_core 0.6 OsRng for RSA test-key generation.
 rand_core = { version = "0.6", features = ["getrandom"] }
+# Generates ephemeral Ed25519 JWT signing keypairs at test runtime instead of
+# embedding literal PEM key material in source (GitGuardian: no new secret
+# literals). Already a workspace dependency (axiam-pki, axiam-server).
+rcgen = { workspace = true }

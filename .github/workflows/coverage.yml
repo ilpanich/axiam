@@ -82,8 +82,13 @@ jobs:
       - name: Collect coverage (workspace)
         run: cargo llvm-cov --workspace --no-report --no-fail-fast
 
+      # All three axiam-api-grpc integration tests carry required-features=["client"],
+      # so they are skipped by the --workspace run above and must be instrumented
+      # explicitly here. Previously only grpc_authz_test was collected, which left
+      # UserService/TokenService (grpc_auth_test) and UserInfoService
+      # (grpc_userinfo_test) uninstrumented despite having passing integration tests.
       - name: Collect coverage (gRPC client feature)
-        run: cargo llvm-cov --no-report -p axiam-api-grpc --features client --test grpc_authz_test
+        run: cargo llvm-cov --no-report -p axiam-api-grpc --features client --test grpc_authz_test --test grpc_auth_test --test grpc_userinfo_test
 
       - name: Generate lcov report
         run: cargo llvm-cov report --lcov --output-path lcov.info

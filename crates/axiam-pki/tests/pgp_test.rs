@@ -201,3 +201,243 @@ async fn pgp_rsa4096_export_key_encrypts_successfully() {
         "ciphertext must be an armored PGP message"
     );
 }
+
+// ---------------------------------------------------------------------------
+// encrypt_for_export: status/purpose validation branches
+// ---------------------------------------------------------------------------
+
+/// A revoked (non-Active) key must be rejected for encryption, regardless
+/// of algorithm/purpose (pgp.rs `encrypt_for_export`, status check).
+#[tokio::test]
+async fn pgp_encrypt_rejects_revoked_key() {
+    let db = setup_db().await;
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let repo = SurrealPgpKeyRepository::new(db);
+    let svc = PgpService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let generated = svc
+        .generate(CreatePgpKey {
+            tenant_id,
+            name: "Revoked Export Key".into(),
+            email: "revoked@axiam.dev".into(),
+            algorithm: PgpKeyAlgorithm::Rsa4096,
+            purpose: PgpKeyPurpose::Export,
+        })
+        .await
+        .expect("Rsa4096 Export key generation must succeed");
+
+    svc.revoke(tenant_id, generated.key.id)
+        .await
+        .expect("revoke must succeed");
+
+    let result = svc
+        .encrypt_for_export(tenant_id, generated.key.id, b"secret data")
+        .await;
+
+    assert!(result.is_err(), "revoked key must be rejected");
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("not active"),
+        "error must mention the key is not active, got: {err_msg}"
+    );
+}
+
+/// A key generated for AuditSigning (not Export) must be rejected by
+/// `encrypt_for_export` even when the algorithm supports encryption
+/// (pgp.rs `encrypt_for_export`, purpose check).
+#[tokio::test]
+async fn pgp_encrypt_rejects_non_export_purpose() {
+    let db = setup_db().await;
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let repo = SurrealPgpKeyRepository::new(db);
+    let svc = PgpService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    // AuditSigning keys can only be Ed25519 in practice, but the purpose
+    // check runs before the algorithm check, so any AuditSigning key must
+    // be rejected here regardless.
+    let generated = svc
+        .generate(CreatePgpKey {
+            tenant_id,
+            name: "Signing Key".into(),
+            email: "signer@axiam.dev".into(),
+            algorithm: PgpKeyAlgorithm::Ed25519,
+            purpose: PgpKeyPurpose::AuditSigning,
+        })
+        .await
+        .expect("AuditSigning key generation must succeed");
+
+    let result = svc
+        .encrypt_for_export(tenant_id, generated.key.id, b"secret data")
+        .await;
+
+    assert!(result.is_err(), "non-Export key must be rejected");
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("Export"),
+        "error must mention Export keys, got: {err_msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// generate(): missing encryption key configuration (SEC-012)
+// ---------------------------------------------------------------------------
+
+/// Generating a non-Export (i.e. server-stored) key without
+/// `PkiConfig::encryption_key` configured must fail fast rather than
+/// storing an unencrypted private key (pgp.rs `generate`, SEC-012).
+#[tokio::test]
+async fn pgp_generate_audit_signing_without_encryption_key_errors() {
+    let db = setup_db().await;
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let repo = SurrealPgpKeyRepository::new(db);
+    let svc = PgpService::new(
+        repo,
+        PkiConfig {
+            encryption_key: None,
+        },
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let result = svc
+        .generate(CreatePgpKey {
+            tenant_id,
+            name: "No Key Config".into(),
+            email: "nokey@axiam.dev".into(),
+            algorithm: PgpKeyAlgorithm::Ed25519,
+            purpose: PgpKeyPurpose::AuditSigning,
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "AuditSigning key generation without an encryption key must fail"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("ENCRYPTION_KEY"),
+        "error must mention the missing encryption key config, got: {err_msg}"
+    );
+}
+
+/// Export keys are never stored encrypted (private key is returned once,
+/// never persisted), so generating one must succeed even with no
+/// encryption key configured.
+#[tokio::test]
+async fn pgp_generate_export_key_without_encryption_key_succeeds() {
+    let db = setup_db().await;
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let repo = SurrealPgpKeyRepository::new(db);
+    let svc = PgpService::new(
+        repo,
+        PkiConfig {
+            encryption_key: None,
+        },
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let result = svc
+        .generate(CreatePgpKey {
+            tenant_id,
+            name: "Export No Key Config".into(),
+            email: "exportnokey@axiam.dev".into(),
+            algorithm: PgpKeyAlgorithm::Rsa4096,
+            purpose: PgpKeyPurpose::Export,
+        })
+        .await
+        .expect("Export key generation must not require an encryption key");
+
+    assert!(
+        result.private_key_armored.is_some(),
+        "Export key must return its private key"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// sign_audit_batch: missing signing key / missing encryption key
+// ---------------------------------------------------------------------------
+
+/// Signing a batch for a tenant with no AuditSigning key at all must
+/// surface a not-found error from `get_signing_key`, not panic.
+#[tokio::test]
+async fn pgp_sign_audit_batch_without_signing_key_errors() {
+    let db = setup_db().await;
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let repo = SurrealPgpKeyRepository::new(db);
+    let svc = PgpService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let entries = make_audit_entries(tenant_id);
+    let result = svc.sign_audit_batch(tenant_id, entries).await;
+
+    assert!(
+        result.is_err(),
+        "signing with no AuditSigning key for the tenant must fail"
+    );
+}
+
+/// A service configured with no `PkiConfig::encryption_key` cannot decrypt
+/// a stored signing key's private key material, so `sign_audit_batch` must
+/// fail even though a valid signing key exists.
+#[tokio::test]
+async fn pgp_sign_audit_batch_without_encryption_key_errors() {
+    let db = setup_db().await;
+    let tenant_id = uuid::Uuid::new_v4();
+
+    // Generate the signing key with a properly configured service.
+    let repo = SurrealPgpKeyRepository::new(db.clone());
+    let setup_svc = PgpService::new(
+        repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    setup_svc
+        .generate(CreatePgpKey {
+            tenant_id,
+            name: "Auditor".into(),
+            email: "audit2@axiam.dev".into(),
+            algorithm: PgpKeyAlgorithm::Ed25519,
+            purpose: PgpKeyPurpose::AuditSigning,
+        })
+        .await
+        .expect("AuditSigning key generation must succeed");
+
+    // Now build a second service pointed at the same DB but with no
+    // encryption key configured, and try to sign with it.
+    let repo2 = SurrealPgpKeyRepository::new(db);
+    let svc_no_key = PgpService::new(
+        repo2,
+        PkiConfig {
+            encryption_key: None,
+        },
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let entries = make_audit_entries(tenant_id);
+    let result = svc_no_key.sign_audit_batch(tenant_id, entries).await;
+
+    assert!(
+        result.is_err(),
+        "signing without a configured encryption key must fail"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("ENCRYPTION_KEY"),
+        "error must mention the missing encryption key config, got: {err_msg}"
+    );
+}

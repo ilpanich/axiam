@@ -33,6 +33,171 @@ fn parse_outcome(s: &str) -> Option<AuditOutcome> {
     }
 }
 
+/// Outcome of processing a single AMQP audit-event delivery.
+///
+/// Return type of the broker-free [`process_audit_event`] seam. The pure
+/// decode/verify/replay/parse/persist logic decides the fate of the delivery,
+/// and the thin consumer loop translates it into `ack`/`nack` channel I/O.
+#[derive(Debug)]
+pub enum AuditIngestOutcome {
+    /// The event was verified, fresh, non-replayed, well-formed, and was
+    /// successfully appended to the audit log — the caller must `ack`.
+    Ack,
+    /// The delivery must be rejected with `nack(requeue: false)` — malformed
+    /// payload, unsigned/invalid signature, key_version below the minimum,
+    /// stale/future `issued_at`, a replayed nonce, a nonce-store error, an
+    /// unknown `actor_type`/`outcome`, or a persistence failure. Every one of
+    /// these mapped to the same `requeue: false` nack in the original loop.
+    NackDrop,
+}
+
+/// Decode, verify, replay-check, parse, and persist a single serialized
+/// [`AuditEventMessage`], returning the [`AuditIngestOutcome`] the consumer
+/// loop should enact. This is a behavior-preserving extraction of the
+/// per-message body of [`start_audit_consumer`]'s `while let` loop — the loop
+/// now only performs channel I/O (consume, ack/nack) around this function.
+///
+/// `now` is injected (the loop passes `Utc::now()`) so the NEW-4 freshness gate
+/// is deterministically testable. All rejection paths return
+/// [`AuditIngestOutcome::NackDrop`], matching the original `nack(requeue:
+/// false)` branches exactly; the sole success path returns
+/// [`AuditIngestOutcome::Ack`] after the append succeeds.
+pub async fn process_audit_event<A, N>(
+    raw: &[u8],
+    audit_repo: &A,
+    master_signing_key: &[u8],
+    nonce_repo: &N,
+    replay_skew: chrono::Duration,
+    now: chrono::DateTime<Utc>,
+) -> AuditIngestOutcome
+where
+    A: AuditLogRepository,
+    N: AmqpNonceRepository,
+{
+    let mut msg: AuditEventMessage = match serde_json::from_slice(raw) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(error = %e, "Invalid audit event payload, nacking");
+            return AuditIngestOutcome::NackDrop;
+        }
+    };
+
+    // SEC-022/055/SECHRD-08: Verify the per-tenant derived HMAC signature.
+    // Unsigned or invalid-signature messages are always rejected — there is
+    // no fail-open path (D-05c, T-25-20).
+    let received_sig = msg.hmac_signature.take();
+    let tenant_id = msg.tenant_id;
+    let key_version = msg.key_version;
+    let canonical_bytes = serde_json::to_vec(&msg).unwrap_or_else(|_| raw.to_vec());
+    let valid = verify_tenant_signature(
+        master_signing_key,
+        tenant_id,
+        key_version,
+        &canonical_bytes,
+        received_sig.as_deref(),
+    );
+    if !valid {
+        warn!(
+            tenant_id = %tenant_id,
+            "AuditEventMessage unsigned or HMAC verification failed — rejecting (SEC-022/055/SECHRD-08)"
+        );
+        return AuditIngestOutcome::NackDrop;
+    }
+
+    // NEW-4 (hard cutover): reject pre-v2 messages that predate the
+    // mandatory nonce/issued_at replay-protection fields.
+    if key_version < MIN_ACCEPTED_KEY_VERSION {
+        warn!(
+            tenant_id = %tenant_id,
+            key_version,
+            "AuditEventMessage key_version below minimum — rejecting (NEW-4 replay protection)"
+        );
+        return AuditIngestOutcome::NackDrop;
+    }
+
+    // NEW-4: reject stale/future messages outside the freshness window.
+    if !is_fresh(msg.issued_at, now, replay_skew) {
+        warn!(
+            tenant_id = %tenant_id,
+            issued_at = %msg.issued_at,
+            "AuditEventMessage issued_at outside freshness window — rejecting (NEW-4)"
+        );
+        return AuditIngestOutcome::NackDrop;
+    }
+
+    // NEW-4: durable nonce dedup. Insert-or-conflict; a ReplayDetected
+    // conflict means this exact signed message was already consumed. The
+    // nonce only needs to outlive the freshness window (issued_at + skew).
+    let nonce_expires_at = msg.issued_at + replay_skew;
+    match nonce_repo
+        .insert_nonce(tenant_id, msg.nonce, nonce_expires_at)
+        .await
+    {
+        Ok(()) => {}
+        Err(AxiamError::ReplayDetected) => {
+            warn!(
+                tenant_id = %tenant_id,
+                nonce = %msg.nonce,
+                "AuditEventMessage nonce replay detected — rejecting (NEW-4)"
+            );
+            return AuditIngestOutcome::NackDrop;
+        }
+        Err(e) => {
+            error!(
+                error = %e,
+                tenant_id = %tenant_id,
+                "Failed to record AuditEventMessage nonce — rejecting (dead-letter, NEW-4)"
+            );
+            return AuditIngestOutcome::NackDrop;
+        }
+    }
+
+    let actor_type = match parse_actor_type(&msg.actor_type) {
+        Some(t) => t,
+        None => {
+            warn!(
+                actor_type = %msg.actor_type,
+                "Unknown actor_type in audit event, nacking"
+            );
+            return AuditIngestOutcome::NackDrop;
+        }
+    };
+
+    let outcome = match parse_outcome(&msg.outcome) {
+        Some(o) => o,
+        None => {
+            warn!(
+                outcome = %msg.outcome,
+                "Unknown outcome in audit event, nacking"
+            );
+            return AuditIngestOutcome::NackDrop;
+        }
+    };
+
+    let entry = CreateAuditLogEntry {
+        tenant_id: msg.tenant_id,
+        actor_id: msg.actor_id,
+        actor_type,
+        action: msg.action,
+        resource_id: msg.resource_id,
+        outcome,
+        ip_address: msg.ip_address,
+        metadata: msg.metadata,
+    };
+
+    if let Err(e) = audit_repo.append(entry).await {
+        error!(
+            error = %e,
+            "Failed to persist audit event, nacking (dead-letter)"
+        );
+        // requeue: false — dead-letter the message instead of silently
+        // dropping it or requeuing (CQ-B05 / REQ-14 AC-5).
+        return AuditIngestOutcome::NackDrop;
+    }
+
+    AuditIngestOutcome::Ack
+}
+
 /// Start consuming audit events from `axiam.audit.events` and persisting them.
 ///
 /// SEC-022/055/SECHRD-08: Every `AuditEventMessage` is verified before
@@ -85,109 +250,25 @@ pub async fn start_audit_consumer<A, N>(
 
         let tag = delivery.delivery_tag;
 
-        let mut msg: AuditEventMessage = match serde_json::from_slice(&delivery.data) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    delivery_tag = tag,
-                    "Invalid audit event payload, nacking"
-                );
-                let _ = delivery
-                    .acker
-                    .nack(BasicNackOptions {
-                        requeue: false,
-                        ..BasicNackOptions::default()
-                    })
-                    .await;
-                continue;
-            }
-        };
-
-        // SEC-022/055/SECHRD-08: Verify the per-tenant derived HMAC
-        // signature. Unsigned or invalid-signature messages are always
-        // rejected — there is no fail-open path (D-05c, T-25-20).
-        let received_sig = msg.hmac_signature.take();
-        let tenant_id = msg.tenant_id;
-        let key_version = msg.key_version;
-        let canonical_bytes = serde_json::to_vec(&msg).unwrap_or_else(|_| delivery.data.clone());
-        let valid = verify_tenant_signature(
+        // Decode/verify/replay-check/parse/persist off the channel (broker-free,
+        // unit-tested via `process_audit_event`). The loop only translates the
+        // returned outcome into channel I/O below.
+        match process_audit_event(
+            &delivery.data,
+            &audit_repo,
             &master_signing_key,
-            tenant_id,
-            key_version,
-            &canonical_bytes,
-            received_sig.as_deref(),
-        );
-        if !valid {
-            warn!(
-                delivery_tag = tag,
-                tenant_id = %tenant_id,
-                "AuditEventMessage unsigned or HMAC verification failed — rejecting (SEC-022/055/SECHRD-08)"
-            );
-            let _ = delivery
-                .acker
-                .nack(BasicNackOptions {
-                    requeue: false,
-                    ..BasicNackOptions::default()
-                })
-                .await;
-            continue;
-        }
-
-        // NEW-4 (hard cutover): reject pre-v2 messages that predate the
-        // mandatory nonce/issued_at replay-protection fields.
-        if key_version < MIN_ACCEPTED_KEY_VERSION {
-            warn!(
-                delivery_tag = tag,
-                tenant_id = %tenant_id,
-                key_version,
-                "AuditEventMessage key_version below minimum — rejecting (NEW-4 replay protection)"
-            );
-            let _ = delivery
-                .acker
-                .nack(BasicNackOptions {
-                    requeue: false,
-                    ..BasicNackOptions::default()
-                })
-                .await;
-            continue;
-        }
-
-        // NEW-4: reject stale/future messages outside the freshness window.
-        let now = Utc::now();
-        if !is_fresh(msg.issued_at, now, replay_skew) {
-            warn!(
-                delivery_tag = tag,
-                tenant_id = %tenant_id,
-                issued_at = %msg.issued_at,
-                "AuditEventMessage issued_at outside freshness window — rejecting (NEW-4)"
-            );
-            let _ = delivery
-                .acker
-                .nack(BasicNackOptions {
-                    requeue: false,
-                    ..BasicNackOptions::default()
-                })
-                .await;
-            continue;
-        }
-
-        // NEW-4: durable nonce dedup. Insert-or-conflict; a ReplayDetected
-        // conflict means this exact signed message was already consumed. The
-        // nonce only needs to outlive the freshness window (issued_at + skew).
-        let nonce_expires_at = msg.issued_at + replay_skew;
-        match nonce_repo
-            .insert_nonce(tenant_id, msg.nonce, nonce_expires_at)
-            .await
+            &nonce_repo,
+            replay_skew,
+            Utc::now(),
+        )
+        .await
         {
-            Ok(()) => {}
-            Err(AxiamError::ReplayDetected) => {
-                warn!(
-                    delivery_tag = tag,
-                    tenant_id = %tenant_id,
-                    nonce = %msg.nonce,
-                    "AuditEventMessage nonce replay detected — rejecting (NEW-4)"
-                );
+            AuditIngestOutcome::Ack => {
+                if let Err(e) = delivery.acker.ack(BasicAckOptions::default()).await {
+                    error!(error = %e, delivery_tag = tag, "Failed to ack audit delivery");
+                }
+            }
+            AuditIngestOutcome::NackDrop => {
                 let _ = delivery
                     .acker
                     .nack(BasicNackOptions {
@@ -195,95 +276,7 @@ pub async fn start_audit_consumer<A, N>(
                         ..BasicNackOptions::default()
                     })
                     .await;
-                continue;
             }
-            Err(e) => {
-                error!(
-                    error = %e,
-                    delivery_tag = tag,
-                    tenant_id = %tenant_id,
-                    "Failed to record AuditEventMessage nonce — rejecting (dead-letter, NEW-4)"
-                );
-                let _ = delivery
-                    .acker
-                    .nack(BasicNackOptions {
-                        requeue: false,
-                        ..BasicNackOptions::default()
-                    })
-                    .await;
-                continue;
-            }
-        }
-
-        let actor_type = match parse_actor_type(&msg.actor_type) {
-            Some(t) => t,
-            None => {
-                warn!(
-                    actor_type = %msg.actor_type,
-                    delivery_tag = tag,
-                    "Unknown actor_type in audit event, nacking"
-                );
-                let _ = delivery
-                    .acker
-                    .nack(BasicNackOptions {
-                        requeue: false,
-                        ..BasicNackOptions::default()
-                    })
-                    .await;
-                continue;
-            }
-        };
-
-        let outcome = match parse_outcome(&msg.outcome) {
-            Some(o) => o,
-            None => {
-                warn!(
-                    outcome = %msg.outcome,
-                    delivery_tag = tag,
-                    "Unknown outcome in audit event, nacking"
-                );
-                let _ = delivery
-                    .acker
-                    .nack(BasicNackOptions {
-                        requeue: false,
-                        ..BasicNackOptions::default()
-                    })
-                    .await;
-                continue;
-            }
-        };
-
-        let entry = CreateAuditLogEntry {
-            tenant_id: msg.tenant_id,
-            actor_id: msg.actor_id,
-            actor_type,
-            action: msg.action,
-            resource_id: msg.resource_id,
-            outcome,
-            ip_address: msg.ip_address,
-            metadata: msg.metadata,
-        };
-
-        if let Err(e) = audit_repo.append(entry).await {
-            error!(
-                error = %e,
-                delivery_tag = tag,
-                "Failed to persist audit event, nacking (dead-letter)"
-            );
-            // requeue: false — dead-letter the message instead of silently
-            // dropping it or requeuing (CQ-B05 / REQ-14 AC-5).
-            let _ = delivery
-                .acker
-                .nack(BasicNackOptions {
-                    requeue: false,
-                    ..BasicNackOptions::default()
-                })
-                .await;
-            continue;
-        }
-
-        if let Err(e) = delivery.acker.ack(BasicAckOptions::default()).await {
-            error!(error = %e, delivery_tag = tag, "Failed to ack audit delivery");
         }
     }
 

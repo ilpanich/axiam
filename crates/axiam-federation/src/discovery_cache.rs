@@ -348,4 +348,161 @@ mod tests {
             "expected fetch error to propagate once stale window has also elapsed: {result:?}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // R5 additions — real-fetch happy path, TTL-expiry refetch, and the
+    // `fetch_discovery_document` error arms (via wiremock + the
+    // `allow_private_networks` seam so a loopback mock IdP is reachable).
+    // -----------------------------------------------------------------------
+
+    fn doc_json(base: &str) -> serde_json::Value {
+        serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+        })
+    }
+
+    #[tokio::test]
+    async fn cold_fetch_populates_cache_then_serves_from_cache() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json(&base)))
+            // Exactly one HTTP hit across both get_or_fetch calls.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = DiscoveryCache::new_allow_private_networks();
+        let http = reqwest::Client::new();
+        let url = format!("{base}/.well-known/openid-configuration");
+
+        let first = cache.get_or_fetch(&http, &url).await.expect("cold fetch");
+        assert_eq!(first.issuer, base);
+        assert_eq!(first.jwks_uri, format!("{base}/jwks"));
+
+        // Second call within TTL: served from cache, no second HTTP request.
+        let second = cache.get_or_fetch(&http, &url).await.expect("cache hit");
+        assert_eq!(second.issuer, base);
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn ttl_expired_entry_triggers_refetch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json(&base)))
+            // Stale entry is past TTL → exactly one live refetch happens.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = DiscoveryCache::new_allow_private_networks();
+        let url = format!("{base}/.well-known/openid-configuration");
+
+        // Seed a stale entry (past 1-h TTL) with a distinguishable issuer.
+        let mut stale = test_doc();
+        stale.issuer = "https://stale-issuer.example.com".to_string();
+        insert_entry(&cache, &url, Utc::now() - CDuration::minutes(90), stale).await;
+
+        let http = reqwest::Client::new();
+        let refreshed = cache.get_or_fetch(&http, &url).await.expect("refetch");
+        // The stale issuer must have been replaced by the freshly fetched one.
+        assert_eq!(refreshed.issuer, base);
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_non_success_status_propagates_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let cache = DiscoveryCache::new_allow_private_networks();
+        let http = reqwest::Client::new();
+        let url = format!("{base}/.well-known/openid-configuration");
+        let err = cache
+            .get_or_fetch(&http, &url)
+            .await
+            .expect_err("404 with no cached entry must error");
+        assert!(
+            matches!(err, FederationError::DiscoveryFailed(ref m) if m.contains("404")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_invalid_json_propagates_parse_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<<not json>>"))
+            .mount(&server)
+            .await;
+
+        let cache = DiscoveryCache::new_allow_private_networks();
+        let http = reqwest::Client::new();
+        let url = format!("{base}/.well-known/openid-configuration");
+        let err = cache
+            .get_or_fetch(&http, &url)
+            .await
+            .expect_err("unparseable discovery document must error");
+        assert!(
+            matches!(err, FederationError::DiscoveryFailed(ref m) if m.contains("parse")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_oversized_body_is_rejected() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        // Body larger than MAX_DISCOVERY_SIZE (256 KiB) → capped read rejects it
+        // before any parse is attempted.
+        let big = "a".repeat(300 * 1024);
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(big))
+            .mount(&server)
+            .await;
+
+        let cache = DiscoveryCache::new_allow_private_networks();
+        let http = reqwest::Client::new();
+        let url = format!("{base}/.well-known/openid-configuration");
+        let err = cache
+            .get_or_fetch(&http, &url)
+            .await
+            .expect_err("oversized body must be rejected");
+        assert!(
+            matches!(err, FederationError::DiscoveryFailed(ref m) if m.contains("too large")),
+            "got: {err:?}"
+        );
+    }
 }

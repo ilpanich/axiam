@@ -1124,4 +1124,507 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
         // late panic-during-drop.
         server.verify().await;
     }
+
+    // -----------------------------------------------------------------------
+    // R5 additions — provisioning / account-linking + token-exchange error arms
+    //
+    // These use lightweight stateful stub repos (no SurrealDB needed) to drive
+    // the private `provision_or_link_user` / `provision_new_user` branches, and
+    // `wiremock` (via the `allow_private_networks` seam) to drive the
+    // `exchange_code` error arms.
+    // -----------------------------------------------------------------------
+
+    use axiam_core::error::{AxiamError, AxiamResult};
+    use axiam_core::models::federation::{
+        CreateFederationConfig, FederationConfig, UpdateFederationConfig,
+    };
+    use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
+    use axiam_core::repository::{PaginatedResult, Pagination};
+    use std::sync::Mutex;
+
+    struct StubConfigRepo;
+    impl FederationConfigRepository for StubConfigRepo {
+        async fn create(&self, _: CreateFederationConfig) -> AxiamResult<FederationConfig> {
+            unimplemented!()
+        }
+        async fn get_by_id(&self, _: Uuid, _: Uuid) -> AxiamResult<FederationConfig> {
+            unimplemented!()
+        }
+        async fn update(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: UpdateFederationConfig,
+        ) -> AxiamResult<FederationConfig> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: Uuid, _: Uuid) -> AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn list(
+            &self,
+            _: Uuid,
+            _: Pagination,
+        ) -> AxiamResult<PaginatedResult<FederationConfig>> {
+            unimplemented!()
+        }
+        async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {
+            unimplemented!()
+        }
+        async fn set_encrypted_secret(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: String,
+            _: String,
+            _: i64,
+        ) -> AxiamResult<()> {
+            unimplemented!()
+        }
+    }
+
+    struct StubLinkRepo {
+        existing: Option<FederationLink>,
+        get_returns_db_error: bool,
+        fail_create: bool,
+        created: Mutex<Vec<CreateFederationLink>>,
+    }
+    impl StubLinkRepo {
+        fn provisioning() -> Self {
+            Self {
+                existing: None,
+                get_returns_db_error: false,
+                fail_create: false,
+                created: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl FederationLinkRepository for StubLinkRepo {
+        async fn create(&self, input: CreateFederationLink) -> AxiamResult<FederationLink> {
+            if self.fail_create {
+                return Err(AxiamError::Database("link create boom".into()));
+            }
+            let link = FederationLink {
+                id: Uuid::new_v4(),
+                tenant_id: input.tenant_id,
+                user_id: input.user_id,
+                federation_config_id: input.federation_config_id,
+                external_subject: input.external_subject.clone(),
+                external_email: input.external_email.clone(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            self.created.lock().unwrap().push(input);
+            Ok(link)
+        }
+        async fn get_by_external_subject(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: &str,
+        ) -> AxiamResult<FederationLink> {
+            if self.get_returns_db_error {
+                return Err(AxiamError::Database("link lookup boom".into()));
+            }
+            self.existing.clone().ok_or(AxiamError::NotFound {
+                entity: "federation_link".into(),
+                id: "no-link".into(),
+            })
+        }
+        async fn get_by_user_id(&self, _: Uuid, _: Uuid) -> AxiamResult<Vec<FederationLink>> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: Uuid, _: Uuid) -> AxiamResult<()> {
+            unimplemented!()
+        }
+    }
+
+    struct StubUserRepo {
+        preset: Option<User>,
+        fail_create: bool,
+        created: Mutex<Vec<CreateUser>>,
+    }
+    impl StubUserRepo {
+        fn provisioning() -> Self {
+            Self {
+                preset: None,
+                fail_create: false,
+                created: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl UserRepository for StubUserRepo {
+        async fn create(&self, input: CreateUser) -> AxiamResult<User> {
+            if self.fail_create {
+                return Err(AxiamError::Database("user create boom".into()));
+            }
+            let user = User {
+                id: Uuid::new_v4(),
+                tenant_id: input.tenant_id,
+                username: input.username.clone(),
+                email: input.email.clone(),
+                password_hash: "x".into(),
+                status: UserStatus::Active,
+                mfa_enabled: false,
+                mfa_secret: None,
+                totp_last_used_step: None,
+                failed_login_attempts: 0,
+                last_failed_login_at: None,
+                locked_until: None,
+                email_verified_at: None,
+                deletion_pending: false,
+                scheduled_purge_at: None,
+                metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            self.created.lock().unwrap().push(input);
+            Ok(user)
+        }
+        async fn get_by_id(&self, _: Uuid, _: Uuid) -> AxiamResult<User> {
+            self.preset.clone().ok_or(AxiamError::NotFound {
+                entity: "user".into(),
+                id: "no-user".into(),
+            })
+        }
+        async fn get_by_username(&self, _: Uuid, _: &str) -> AxiamResult<User> {
+            unimplemented!()
+        }
+        async fn get_by_email(&self, _: Uuid, _: &str) -> AxiamResult<User> {
+            unimplemented!()
+        }
+        async fn update(&self, _: Uuid, _: Uuid, _: UpdateUser) -> AxiamResult<User> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: Uuid, _: Uuid) -> AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn update_totp_step(&self, _: Uuid, _: Uuid, _: u64) -> AxiamResult<bool> {
+            unimplemented!()
+        }
+        async fn list(&self, _: Uuid, _: Pagination) -> AxiamResult<PaginatedResult<User>> {
+            unimplemented!()
+        }
+        async fn increment_failed_logins(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: u32,
+            _: i64,
+            _: f64,
+            _: i64,
+        ) -> AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn anonymize_user(&self, _: Uuid, _: Uuid, _: &str, _: &str) -> AxiamResult<()> {
+            unimplemented!()
+        }
+    }
+
+    type StubService = OidcFederationService<StubConfigRepo, StubLinkRepo, StubUserRepo>;
+
+    fn make_stub_service(
+        link: StubLinkRepo,
+        user: StubUserRepo,
+        cache: Arc<JwksCache>,
+    ) -> StubService {
+        OidcFederationService::new(
+            StubConfigRepo,
+            link,
+            user,
+            reqwest::Client::new(),
+            cache,
+            [0u8; 32], // gitleaks:allow
+        )
+    }
+
+    fn claims_with(email: Option<&str>) -> IdTokenClaims {
+        IdTokenClaims {
+            sub: "external-sub-1".into(),
+            iss: Some("https://idp.example.com".into()),
+            aud: None,
+            exp: None,
+            iat: None,
+            email: email.map(String::from),
+            email_verified: Some(true),
+            name: Some("Test User".into()),
+            nonce: None,
+        }
+    }
+
+    // ----- provisioning -----
+
+    #[tokio::test]
+    async fn provision_new_user_uses_email_for_username_and_email() {
+        let tenant = Uuid::new_v4();
+        let cfg = Uuid::new_v4();
+        let svc = make_stub_service(
+            StubLinkRepo::provisioning(),
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new()),
+        );
+        let claims = claims_with(Some("alice@example.com"));
+        let result = svc
+            .provision_or_link_user(tenant, cfg, &claims)
+            .await
+            .expect("provisioning should succeed");
+        assert!(result.newly_provisioned);
+        assert_eq!(result.user.username, "alice@example.com");
+        assert_eq!(result.user.email, "alice@example.com");
+        assert_eq!(result.federation_link.external_subject, "external-sub-1");
+        assert_eq!(
+            result.federation_link.external_email.as_deref(),
+            Some("alice@example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_new_user_without_email_synthesizes_identifiers() {
+        let tenant = Uuid::new_v4();
+        let cfg = Uuid::new_v4();
+        let svc = make_stub_service(
+            StubLinkRepo::provisioning(),
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new()),
+        );
+        let claims = claims_with(None);
+        let result = svc
+            .provision_or_link_user(tenant, cfg, &claims)
+            .await
+            .expect("provisioning without email should succeed");
+        assert!(result.newly_provisioned);
+        assert_eq!(
+            result.user.username,
+            format!("federated-{cfg}-external-sub-1")
+        );
+        assert_eq!(
+            result.user.email,
+            format!("external-sub-1.{cfg}@federated.local")
+        );
+        assert!(result.federation_link.external_email.is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_returns_existing_link_without_reprovisioning() {
+        let tenant = Uuid::new_v4();
+        let cfg = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let preset_user = User {
+            id: user_id,
+            tenant_id: tenant,
+            username: "existing".into(),
+            email: "existing@example.com".into(),
+            password_hash: "x".into(),
+            status: UserStatus::Active,
+            mfa_enabled: false,
+            mfa_secret: None,
+            totp_last_used_step: None,
+            failed_login_attempts: 0,
+            last_failed_login_at: None,
+            locked_until: None,
+            email_verified_at: None,
+            deletion_pending: false,
+            scheduled_purge_at: None,
+            metadata: serde_json::Value::Null,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let link = StubLinkRepo {
+            existing: Some(FederationLink {
+                id: Uuid::new_v4(),
+                tenant_id: tenant,
+                user_id,
+                federation_config_id: cfg,
+                external_subject: "external-sub-1".into(),
+                external_email: Some("existing@example.com".into()),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }),
+            get_returns_db_error: false,
+            fail_create: false,
+            created: Mutex::new(Vec::new()),
+        };
+        let user = StubUserRepo {
+            preset: Some(preset_user),
+            fail_create: false,
+            created: Mutex::new(Vec::new()),
+        };
+        let svc = make_stub_service(link, user, Arc::new(JwksCache::new()));
+        let result = svc
+            .provision_or_link_user(tenant, cfg, &claims_with(Some("x@example.com")))
+            .await
+            .expect("existing link should resolve");
+        assert!(!result.newly_provisioned);
+        assert_eq!(result.user.id, user_id);
+    }
+
+    #[tokio::test]
+    async fn provision_maps_link_lookup_db_error_to_provisioning_failed() {
+        let link = StubLinkRepo {
+            existing: None,
+            get_returns_db_error: true,
+            fail_create: false,
+            created: Mutex::new(Vec::new()),
+        };
+        let svc = make_stub_service(
+            link,
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .provision_or_link_user(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &claims_with(Some("a@b.com")),
+            )
+            .await
+            .expect_err("a non-NotFound lookup error must surface");
+        assert!(
+            matches!(err, FederationError::ProvisioningFailed(ref m) if m.contains("existing federation link")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_user_create_failure_maps_to_provisioning_failed() {
+        let user = StubUserRepo {
+            preset: None,
+            fail_create: true,
+            created: Mutex::new(Vec::new()),
+        };
+        let svc = make_stub_service(
+            StubLinkRepo::provisioning(),
+            user,
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .provision_or_link_user(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &claims_with(Some("a@b.com")),
+            )
+            .await
+            .expect_err("user create failure must surface");
+        assert!(
+            matches!(err, FederationError::ProvisioningFailed(ref m) if m.contains("create user")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_link_create_failure_maps_to_provisioning_failed() {
+        let link = StubLinkRepo {
+            existing: None,
+            get_returns_db_error: false,
+            fail_create: true,
+            created: Mutex::new(Vec::new()),
+        };
+        let svc = make_stub_service(
+            link,
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .provision_or_link_user(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &claims_with(Some("a@b.com")),
+            )
+            .await
+            .expect_err("link create failure must surface");
+        assert!(
+            matches!(err, FederationError::ProvisioningFailed(ref m) if m.contains("federation link")),
+            "got: {err:?}"
+        );
+    }
+
+    // ----- exchange_code error arms (wiremock) -----
+
+    #[tokio::test]
+    async fn exchange_code_non_success_status_maps_to_token_exchange_failed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("invalid_grant"))
+            .mount(&server)
+            .await;
+
+        let svc = make_stub_service(
+            StubLinkRepo::provisioning(),
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let endpoint = format!("{}/token", server.uri());
+        let err = svc
+            .exchange_code(&endpoint, "code", "https://rp/cb", "cid", "secret")
+            .await
+            .expect_err("HTTP 400 from token endpoint must fail");
+        // WHY: the raw IdP body is never leaked; the client sees the status only.
+        assert!(
+            matches!(err, FederationError::TokenExchangeFailed(ref m) if m.contains("400")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_invalid_json_maps_to_token_exchange_failed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json-at-all"))
+            .mount(&server)
+            .await;
+
+        let svc = make_stub_service(
+            StubLinkRepo::provisioning(),
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let endpoint = format!("{}/token", server.uri());
+        let err = svc
+            .exchange_code(&endpoint, "code", "https://rp/cb", "cid", "secret")
+            .await
+            .expect_err("unparseable token body must fail");
+        assert!(
+            matches!(err, FederationError::TokenExchangeFailed(ref m) if m.contains("parse")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_success_returns_id_token() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "access_token": "at",
+            "id_token": "the-id-token",
+            "token_type": "Bearer",
+            "expires_in": 3600
+        });
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let svc = make_stub_service(
+            StubLinkRepo::provisioning(),
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let endpoint = format!("{}/token", server.uri());
+        let tokens = svc
+            .exchange_code(&endpoint, "code", "https://rp/cb", "cid", "secret")
+            .await
+            .expect("valid token response should parse");
+        assert_eq!(tokens.id_token.as_deref(), Some("the-id-token"));
+    }
 }

@@ -948,3 +948,162 @@ async fn webhook_pins_resolved_ip() {
          listener, got: {e2e_result:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R4: `WebhookDeliveryService::deliver_once` / `encrypt_secret` direct calls
+// (previously never invoked by any test — every prior test only reached
+// delivery indirectly through the HTTP CRUD handlers or the AMQP consumer's
+// `#[ignore]`d live-broker test). No live broker or reachable HTTP sink is
+// needed — every scenario below returns before/instead of a successful
+// non-loopback POST, mirroring `webhook_consumer_test.rs`'s SSRF-blocked
+// rationale.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn deliver_once_fails_without_encryption_key_configured() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let webhook_repo = SurrealWebhookRepository::new(db.clone());
+    // No encryption key -> the service must fail-closed before ever looking
+    // up the webhook row.
+    let delivery_service = WebhookDeliveryService::new(webhook_repo, None);
+
+    let result = delivery_service
+        .deliver_once(
+            tenant_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "user.created",
+            &serde_json::json!({"key": "value"}),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "deliver_once must fail when no encryption key is configured"
+    );
+}
+
+#[actix_rt::test]
+async fn deliver_once_fails_for_unknown_webhook_id() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let webhook_repo = SurrealWebhookRepository::new(db.clone());
+    let delivery_service = WebhookDeliveryService::new(webhook_repo, Some(TEST_WEBHOOK_ENC_KEY));
+
+    let result = delivery_service
+        .deliver_once(
+            tenant_id,
+            Uuid::new_v4(), // never created
+            Uuid::new_v4(),
+            "user.created",
+            &serde_json::json!({"key": "value"}),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "deliver_once must fail for a webhook_id that doesn't exist"
+    );
+}
+
+/// Mirrors `webhook_consumer_test.rs`'s documented rationale: `deliver_once`'s
+/// SSRF guard hardcodes `allow_private=false`, so any loopback/private URL
+/// deterministically fails with `WebhookError::SsrfBlocked` — this proves the
+/// guard is genuinely wired into `deliver_once` (not just unit-tested in
+/// isolation against `ssrf::is_disallowed_ip`).
+#[actix_rt::test]
+async fn deliver_once_blocks_ssrf_loopback_url() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let webhook_repo = SurrealWebhookRepository::new(db.clone());
+    let delivery_service =
+        WebhookDeliveryService::new(webhook_repo.clone(), Some(TEST_WEBHOOK_ENC_KEY));
+
+    let encrypted_secret = delivery_service
+        .encrypt_secret("test-secret")
+        .expect("encrypt test secret");
+
+    let webhook = webhook_repo
+        .create(axiam_core::models::webhook::CreateWebhook {
+            tenant_id,
+            url: "https://127.0.0.1:9/webhook-delivery-test".into(),
+            events: vec!["user.created".into()],
+            secret: encrypted_secret,
+            retry_policy: None,
+        })
+        .await
+        .expect("create test webhook");
+
+    let result = delivery_service
+        .deliver_once(
+            tenant_id,
+            webhook.id,
+            Uuid::new_v4(),
+            "user.created",
+            &serde_json::json!({"key": "value"}),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "deliver_once must reject a loopback URL via the SSRF guard"
+    );
+}
+
+/// A webhook secret encrypted under one key cannot be decrypted with a
+/// DIFFERENT key — `deliver_once` must surface a decrypt failure rather than
+/// panicking or silently proceeding with garbage HMAC input.
+#[actix_rt::test]
+async fn deliver_once_fails_secret_decrypt_with_wrong_key() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let webhook_repo = SurrealWebhookRepository::new(db.clone());
+
+    // Encrypt the stored secret under a DIFFERENT key than the one the
+    // delivery service will be constructed with below.
+    let wrong_key = [0x99u8; 32];
+    let wrong_key_service = WebhookDeliveryService::new(webhook_repo.clone(), Some(wrong_key));
+    let encrypted_secret = wrong_key_service
+        .encrypt_secret("test-secret")
+        .expect("encrypt with wrong key");
+
+    let webhook = webhook_repo
+        .create(axiam_core::models::webhook::CreateWebhook {
+            tenant_id,
+            url: "https://127.0.0.1:9/webhook-delivery-test".into(),
+            events: vec!["user.created".into()],
+            secret: encrypted_secret,
+            retry_policy: None,
+        })
+        .await
+        .expect("create test webhook");
+
+    // Now construct the service the delivery attempt actually uses, with the
+    // ORIGINAL TEST_WEBHOOK_ENC_KEY — decrypting `wrong_key`-encrypted
+    // ciphertext must fail.
+    let delivery_service = WebhookDeliveryService::new(webhook_repo, Some(TEST_WEBHOOK_ENC_KEY));
+    let result = delivery_service
+        .deliver_once(
+            tenant_id,
+            webhook.id,
+            Uuid::new_v4(),
+            "user.created",
+            &serde_json::json!({"key": "value"}),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "deliver_once must fail when the stored secret can't be decrypted with the configured key"
+    );
+}
+
+#[actix_rt::test]
+async fn encrypt_secret_fails_without_encryption_key_configured() {
+    let (db, _org_id, _tenant_id) = setup_db().await;
+    let webhook_repo = SurrealWebhookRepository::new(db.clone());
+    let delivery_service = WebhookDeliveryService::new(webhook_repo, None);
+
+    let result = delivery_service.encrypt_secret("some-secret");
+    assert!(
+        result.is_err(),
+        "encrypt_secret must fail when no encryption key is configured"
+    );
+}

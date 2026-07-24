@@ -529,4 +529,45 @@ mod tests {
             "swapping one pooled handle must not disturb the others"
         );
     }
+
+    /// `health_check` queries EVERY pooled handle and succeeds when all of
+    /// them answer — the common case for a healthy `kv-mem` pool.
+    #[tokio::test]
+    async fn health_check_succeeds_across_all_mem_handles() {
+        let pool = DbPool::from_handles(
+            vec![new_mem().await, new_mem().await, new_mem().await],
+            0,
+            Duration::from_millis(20),
+        );
+        pool.health_check()
+            .await
+            .expect("health_check must succeed when every handle is reachable");
+    }
+
+    /// `handle_for_repo` round-robins across ALL pooled handles (not just the
+    /// `pool_size = 1` case covered above) — each successive call advances
+    /// the cursor and wraps back to the first handle after a full cycle.
+    #[tokio::test]
+    async fn handle_for_repo_round_robins_across_handles() {
+        let pool = DbPool::from_handles(
+            vec![
+                new_marked("h0").await,
+                new_marked("h1").await,
+                new_marked("h2").await,
+            ],
+            0,
+            Duration::from_millis(20),
+        );
+
+        let mut seen = Vec::new();
+        for _ in 0..7 {
+            let handle = pool.handle_for_repo().await;
+            seen.push(read_marker(&handle).await.remove(0));
+        }
+        assert_eq!(
+            seen,
+            vec!["h0", "h1", "h2", "h0", "h1", "h2", "h0"],
+            "handle_for_repo must round-robin across every pooled handle"
+        );
+    }
 }

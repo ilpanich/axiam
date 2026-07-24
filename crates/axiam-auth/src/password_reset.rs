@@ -1003,6 +1003,93 @@ mod tests {
         );
     }
 
+    /// A token belonging to a now-federated user must be rejected by
+    /// `confirm_reset` even though the token itself is valid and
+    /// unexpired: federated users cannot reset a local password (line
+    /// ~249, `AuthError::FederatedUserPasswordReset`). This exercises the
+    /// `confirm_reset`-side federation check, distinct from the
+    /// `initiate_reset`-side check covered by
+    /// `initiate_reset_returns_none_for_federated_user` above.
+    #[tokio::test]
+    async fn confirm_reset_rejects_federated_user() {
+        let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(())
+            .await
+            .unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        run_migrations(&db).await.unwrap();
+
+        let (_org_id, tid) = create_org_tenant(&db).await;
+
+        let user_repo = SurrealUserRepository::new(db.clone());
+        let token_repo = SurrealPasswordResetTokenRepository::new(db.clone());
+        let fed_repo = SurrealFederationLinkRepository::new(db.clone());
+        let hist_repo = SurrealPasswordHistoryRepository::new(db.clone());
+        let session_repo = SurrealSessionRepository::new(db.clone());
+        let refresh_token_repo = SurrealRefreshTokenRepository::new(db.clone());
+
+        let user = create_test_user(&user_repo, tid).await;
+
+        // Issue a reset token BEFORE the user is linked to federation, so
+        // the token exists and is valid when confirm_reset runs.
+        let svc = PasswordResetService::new(
+            user_repo,
+            token_repo,
+            fed_repo.clone(),
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            Arc::new(Semaphore::new(4)),
+            5,
+        );
+        let (raw_token, _uid, _exp) = svc
+            .initiate_reset(tid, &user.email, 1, None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Now link the user to a federation provider.
+        let fed_config_repo = SurrealFederationConfigRepository::new(db.clone());
+        let fed_config = fed_config_repo
+            .create(CreateFederationConfig {
+                tenant_id: tid,
+                provider: "google".into(),
+                protocol: FederationProtocol::OidcConnect,
+                metadata_url: None,
+                client_id: "google-client-id".into(),
+                client_secret: "google-secret".into(),
+                attribute_map: None,
+                idp_signing_cert_pem: None,
+                allowed_algorithms: None,
+            })
+            .await
+            .unwrap();
+        fed_repo
+            .create(CreateFederationLink {
+                tenant_id: tid,
+                user_id: user.id,
+                federation_config_id: fed_config.id,
+                external_subject: "ext-456".into(),
+                external_email: Some(user.email.clone()),
+            })
+            .await
+            .unwrap();
+
+        let policy = relaxed_policy();
+        // Runtime-generated new password: its value is irrelevant here (the test
+        // asserts the federated-user rejection, which precedes any password use)
+        // and deriving it avoids a hard-coded credential in the password argument.
+        let new_password = format!("Nn1!{}", uuid::Uuid::new_v4().simple());
+        let result = svc
+            .confirm_reset(tid, &raw_token, &new_password, &policy, None, None)
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(AxiamError::Validation { .. })),
+            "expected AuthError::FederatedUserPasswordReset (-> Validation), got: {result:?}"
+        );
+    }
+
     /// T-24-91 statistical timing test: sample the ineligible/unknown and
     /// federated `Ok(None)` branches (both now run the constant-time
     /// `dummy_hash_wait`) alongside the valid-account branch, and assert

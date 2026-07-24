@@ -199,3 +199,115 @@ fn hex_val(b: u8) -> Result<u8, ()> {
         _ => Err(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // urldecode / hex_val (R4) — these private helpers are only reachable
+    // indirectly through the HTTP `X-Client-Certificate` header path in
+    // integration tests, which only exercise the happy path plus one
+    // malformed-input case; test the pure logic directly here.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn urldecode_plain_string_round_trips() {
+        assert_eq!(urldecode("hello-world_1.2~3").unwrap(), "hello-world_1.2~3");
+    }
+
+    #[test]
+    fn urldecode_decodes_percent_sequences() {
+        // "%0A" -> newline, "%2B" -> '+'.
+        assert_eq!(urldecode("a%0Ab%2Bc").unwrap(), "a\nb+c");
+    }
+
+    #[test]
+    fn urldecode_rejects_truncated_percent_sequence() {
+        // Only one hex digit follows '%' before the string ends.
+        assert!(urldecode("abc%2").is_err());
+    }
+
+    #[test]
+    fn urldecode_rejects_invalid_hex_digit() {
+        assert!(urldecode("abc%zz").is_err());
+        assert!(urldecode("abc%2z").is_err());
+    }
+
+    #[test]
+    fn hex_val_accepts_all_case_variants() {
+        assert_eq!(hex_val(b'0').unwrap(), 0);
+        assert_eq!(hex_val(b'9').unwrap(), 9);
+        assert_eq!(hex_val(b'a').unwrap(), 10);
+        assert_eq!(hex_val(b'f').unwrap(), 15);
+        assert_eq!(hex_val(b'A').unwrap(), 10);
+        assert_eq!(hex_val(b'F').unwrap(), 15);
+    }
+
+    #[test]
+    fn hex_val_rejects_non_hex_byte() {
+        assert!(hex_val(b'g').is_err());
+        assert!(hex_val(b'Z').is_err());
+        assert!(hex_val(b' ').is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // fmt_ip (R4) — pure formatting helper for SAN IP entries.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_ip_formats_ipv4() {
+        assert_eq!(fmt_ip(&[192, 168, 1, 1]), "192.168.1.1");
+    }
+
+    #[test]
+    fn fmt_ip_formats_ipv6() {
+        // ::1 (loopback), 16 bytes, all zero except the last byte.
+        let mut bytes = [0u8; 16];
+        bytes[15] = 1;
+        assert_eq!(fmt_ip(&bytes), "0000:0000:0000:0000:0000:0000:0000:0001");
+    }
+
+    #[test]
+    fn fmt_ip_falls_back_to_hex_for_unexpected_length() {
+        // Neither 4 nor 16 bytes -> hex fallback (defensive branch).
+        assert_eq!(fmt_ip(&[1, 2, 3]), "010203");
+    }
+
+    // -----------------------------------------------------------------------
+    // VerifiedClientCert::from_der (R4) — the native-mTLS path, unreachable
+    // from `actix_web::test` (no real TLS handshake), so it is entirely
+    // untested by any HTTP integration test. Exercise it directly against a
+    // real self-signed certificate's DER encoding.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_der_parses_dns_san_and_spki_fingerprint() {
+        let cert = rcgen::generate_simple_self_signed(vec!["device.example.com".to_string()])
+            .expect("generate self-signed cert");
+        let der = cert.cert.der().to_vec();
+
+        let parsed = VerifiedClientCert::from_der(&der).expect("parse DER");
+        assert!(
+            parsed.sans.iter().any(|s| s == "DNS:device.example.com"),
+            "expected a DNS SAN entry, got: {:?}",
+            parsed.sans
+        );
+        assert_eq!(
+            parsed.spki_sha256.len(),
+            64,
+            "SPKI fingerprint must be a 32-byte hex string (64 hex chars)"
+        );
+        assert!(
+            parsed.spki_sha256.chars().all(|c| c.is_ascii_hexdigit()),
+            "SPKI fingerprint must be lowercase hex"
+        );
+        assert_eq!(parsed.der, der);
+    }
+
+    #[test]
+    fn from_der_rejects_garbage_bytes() {
+        let result = VerifiedClientCert::from_der(b"not a real certificate");
+        assert!(result.is_err(), "garbage DER must fail to parse");
+    }
+}

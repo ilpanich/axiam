@@ -120,6 +120,116 @@ async fn webhook_crud() {
     assert!(repo.get_by_id(tenant_id, wh.id).await.is_err());
 }
 
+#[tokio::test]
+async fn webhook_not_found_branches() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealWebhookRepository::new(db);
+    let missing = Uuid::new_v4();
+
+    assert!(repo.get_by_id(tenant_id, missing).await.is_err());
+    assert!(
+        repo.update(
+            tenant_id,
+            missing,
+            UpdateWebhook {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert!(repo.delete(tenant_id, missing).await.is_err());
+}
+
+#[tokio::test]
+async fn webhook_get_by_event_filters_enabled_and_event_type() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealWebhookRepository::new(db);
+
+    let matching = repo
+        .create(CreateWebhook {
+            tenant_id,
+            url: "https://hooks.example.com/matching".into(),
+            events: vec!["user.created".into(), "user.deleted".into()],
+            secret: "s1".into(),
+            retry_policy: None,
+        })
+        .await
+        .unwrap();
+
+    let wrong_event = repo
+        .create(CreateWebhook {
+            tenant_id,
+            url: "https://hooks.example.com/wrong-event".into(),
+            events: vec!["user.deleted".into()],
+            secret: "s2".into(),
+            retry_policy: None,
+        })
+        .await
+        .unwrap();
+    let _ = wrong_event;
+
+    let disabled = repo
+        .create(CreateWebhook {
+            tenant_id,
+            url: "https://hooks.example.com/disabled".into(),
+            events: vec!["user.created".into()],
+            secret: "s3".into(),
+            retry_policy: None,
+        })
+        .await
+        .unwrap();
+    repo.update(
+        tenant_id,
+        disabled.id,
+        UpdateWebhook {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let results = repo.get_by_event(tenant_id, "user.created").await.unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "only the enabled, matching webhook: {results:?}"
+    );
+    assert_eq!(results[0].id, matching.id);
+}
+
+#[tokio::test]
+async fn webhook_update_rotates_secret() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealWebhookRepository::new(db);
+
+    let wh = repo
+        .create(CreateWebhook {
+            tenant_id,
+            url: "https://hooks.example.com/rotate".into(),
+            events: vec!["user.created".into()],
+            secret: "old-secret".into(),
+            retry_policy: None,
+        })
+        .await
+        .unwrap();
+
+    let updated = repo
+        .update(
+            tenant_id,
+            wh.id,
+            UpdateWebhook {
+                secret: Some("new-secret".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.secret, "new-secret");
+}
+
 // ---------------------------------------------------------------------------
 // FederationConfig
 // ---------------------------------------------------------------------------
@@ -176,6 +286,102 @@ async fn federation_config_crud_and_backfill() {
 
     repo.delete(tenant_id, cfg.id).await.unwrap();
     assert!(repo.get_by_id(tenant_id, cfg.id).await.is_err());
+}
+
+#[tokio::test]
+async fn federation_config_not_found_branches() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+    let missing = Uuid::new_v4();
+
+    assert!(repo.get_by_id(tenant_id, missing).await.is_err());
+    assert!(
+        repo.update(
+            tenant_id,
+            missing,
+            UpdateFederationConfig {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert!(repo.delete(tenant_id, missing).await.is_err());
+}
+
+#[tokio::test]
+async fn federation_config_list_excludes_secret_columns() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+
+    repo.create(CreateFederationConfig {
+        tenant_id,
+        provider: "generic".into(),
+        protocol: FederationProtocol::OidcConnect,
+        metadata_url: None,
+        client_id: "cid".into(),
+        client_secret: "super-secret-plaintext".into(),
+        attribute_map: None,
+        idp_signing_cert_pem: None,
+        allowed_algorithms: None,
+    })
+    .await
+    .unwrap();
+
+    let page = repo.list(tenant_id, Pagination::default()).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items[0].client_secret, "",
+        "list() must never hydrate the plaintext secret (SECHRD-09/D-06)"
+    );
+    assert!(page.items[0].client_secret_ciphertext.is_none());
+}
+
+#[tokio::test]
+async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+
+    let legacy = repo
+        .create(CreateFederationConfig {
+            tenant_id,
+            provider: "legacy".into(),
+            protocol: FederationProtocol::OidcConnect,
+            metadata_url: None,
+            client_id: "cid-legacy".into(),
+            client_secret: "plain".into(),
+            attribute_map: None,
+            idp_signing_cert_pem: None,
+            allowed_algorithms: None,
+        })
+        .await
+        .unwrap();
+
+    let encrypted = repo
+        .create(CreateFederationConfig {
+            tenant_id,
+            provider: "encrypted".into(),
+            protocol: FederationProtocol::OidcConnect,
+            metadata_url: None,
+            client_id: "cid-encrypted".into(),
+            client_secret: "plain2".into(),
+            attribute_map: None,
+            idp_signing_cert_pem: None,
+            allowed_algorithms: None,
+        })
+        .await
+        .unwrap();
+    repo.set_encrypted_secret(tenant_id, encrypted.id, "nonce".into(), "cipher".into(), 1)
+        .await
+        .unwrap();
+
+    let pending = repo.list_with_legacy_plaintext_secret().await.unwrap();
+    assert!(pending.iter().any(|c| c.id == legacy.id));
+    assert!(
+        !pending.iter().any(|c| c.id == encrypted.id),
+        "an already-encrypted row must not be reported as legacy plaintext"
+    );
 }
 
 // ---------------------------------------------------------------------------

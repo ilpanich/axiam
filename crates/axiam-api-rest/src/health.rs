@@ -96,3 +96,34 @@ pub async fn ready<C: Connection + Clone>(state: web::Data<AppState<C>>) -> Http
         }),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+//
+// `impl HealthChecker for axiam_db::DbManager` and `impl HealthChecker for
+// axiam_db::DbPool` (above) are NOT covered here: `DbManager`'s only public
+// constructors (`connect`/`connect_with_ttl`) dial a real SurrealDB server,
+// and `DbPool`'s `from_handles` (the one constructor that accepts the
+// in-memory `Mem` engine) is a private `axiam-db`-internal fn, not
+// reachable from this crate. Exercising those two impls would need either a
+// live SurrealDB server or a new public test-only constructor in
+// `axiam-db` — both out of scope for this test-only pass. `ready<C>`'s own
+// Ok/Err branches are already covered end-to-end in `tests/health_test.rs`
+// via `MockHealthy`/`MockUnhealthy`.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Direct test of the `AlwaysHealthy` test-double `HealthChecker` impl
+    /// (used as `AppState::for_test`'s default `health_checker`, but every
+    /// existing `/ready` test overrides it with `MockHealthy`/`MockUnhealthy`
+    /// to control the branch under test — so `AlwaysHealthy::check()` itself
+    /// was never directly invoked).
+    #[tokio::test]
+    async fn always_healthy_check_returns_ok() {
+        let checker = AlwaysHealthy;
+        assert!(checker.check().await.is_ok());
+    }
+}

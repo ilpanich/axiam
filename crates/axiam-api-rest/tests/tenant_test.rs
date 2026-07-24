@@ -380,3 +380,272 @@ async fn cross_org_get_tenant_returns_403() {
         "cross-org tenant get must return 403"
     );
 }
+
+/// A caller authenticated for org A gets 403 on PUT a single tenant under org B
+/// (the same top-of-handler ownership guard as GET, exercised for `update`).
+#[actix_rt::test]
+async fn cross_org_update_tenant_returns_403() {
+    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: "org-b-update".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::put()
+        .uri(&format!(
+            "/api/v1/organizations/{}/tenants/{}",
+            org_b.id,
+            Uuid::new_v4()
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "name": "Sneaky Update" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "cross-org tenant update must return 403"
+    );
+}
+
+/// A caller authenticated for org A gets 403 on DELETE a single tenant under
+/// org B (same top-of-handler ownership guard, exercised for `delete`).
+#[actix_rt::test]
+async fn cross_org_delete_tenant_returns_403() {
+    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: "org-b-delete".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::delete()
+        .uri(&format!(
+            "/api/v1/organizations/{}/tenants/{}",
+            org_b.id,
+            Uuid::new_v4()
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "cross-org tenant delete must return 403"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-belongs-to-a-different-org 404s: distinct from the 403 guards above.
+// The caller's org DOES match the URL's org_id (passes the ownership guard),
+// but the tenant_id in the URL names a tenant that actually belongs to some
+// OTHER organization — the handler must look the tenant up and then 404
+// rather than trusting the path alone.
+// ---------------------------------------------------------------------------
+
+/// GET a tenant that exists but under a different org than the URL/token's
+/// org_id -> 404 (not 200), even though the ownership guard itself passes.
+#[actix_rt::test]
+async fn get_tenant_wrong_org_returns_404() {
+    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: "org-b-tenant-mismatch-get".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let other_tenant = tenant_repo
+        .create(CreateTenant {
+            organization_id: org_b.id,
+            name: "Org B's Tenant".into(),
+            slug: "org-b-tenant".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    // Token's org_id is org A, and the URL's org_id is also org A (guard
+    // passes), but the tenant_id in the path belongs to org B.
+    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/api/v1/organizations/{}/tenants/{}",
+            org_a_id, other_tenant.id
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "a tenant belonging to a different org must 404, not leak via 200"
+    );
+}
+
+/// PUT a tenant that exists but under a different org -> 404.
+#[actix_rt::test]
+async fn update_tenant_wrong_org_returns_404() {
+    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: "org-b-tenant-mismatch-update".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let other_tenant = tenant_repo
+        .create(CreateTenant {
+            organization_id: org_b.id,
+            name: "Org B's Tenant".into(),
+            slug: "org-b-tenant-update".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::put()
+        .uri(&format!(
+            "/api/v1/organizations/{}/tenants/{}",
+            org_a_id, other_tenant.id
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "name": "Should Not Apply" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "updating a tenant belonging to a different org must 404"
+    );
+}
+
+/// DELETE a tenant that exists but under a different org -> 404 (and it must
+/// NOT actually be deleted).
+#[actix_rt::test]
+async fn delete_tenant_wrong_org_returns_404() {
+    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let org_b = org_repo
+        .create(CreateOrganization {
+            name: "Org B".into(),
+            slug: "org-b-tenant-mismatch-delete".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let other_tenant = tenant_repo
+        .create(CreateTenant {
+            organization_id: org_b.id,
+            name: "Org B's Tenant".into(),
+            slug: "org-b-tenant-delete".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::delete()
+        .uri(&format!(
+            "/api/v1/organizations/{}/tenants/{}",
+            org_a_id, other_tenant.id
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "deleting a tenant belonging to a different org must 404"
+    );
+
+    // Still there, under its real org.
+    let still_there = tenant_repo.get_by_id(other_tenant.id).await.unwrap();
+    assert_eq!(still_there.organization_id, org_b.id);
+}
+
+/// `create`'s permission-seeding step (`seed_permissions`) is best-effort but
+/// its failure must be surfaced as a mapped 500, not silently swallowed or a
+/// raw internal error. Forced by redefining the `permission.action` field to
+/// an incompatible type so the seeder's UPSERT fails with a genuine SurrealDB
+/// coercion error — no production code changes, just DB-level fault
+/// injection ahead of the request.
+#[actix_rt::test]
+async fn create_tenant_seed_permissions_failure_returns_500() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    // Force every subsequent `permission` UPSERT (including the one
+    // `seed_permissions` issues for the newly-created tenant) to fail.
+    db.query("DEFINE FIELD OVERWRITE action ON TABLE permission TYPE int PERMISSIONS FULL")
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/organizations/{org_id}/tenants"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Broken Seed Tenant",
+            "slug": "broken-seed-tenant"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        500,
+        "a seed_permissions failure must map to a 500, not succeed or panic"
+    );
+}

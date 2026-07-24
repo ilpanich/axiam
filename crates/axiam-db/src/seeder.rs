@@ -556,3 +556,123 @@ pub async fn reconcile_default_role_grants<C: Connection>(
 
     Ok(created)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::models::organization::CreateOrganization;
+    use axiam_core::repository::{OrganizationRepository, PermissionRepository, TenantRepository};
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::Mem;
+
+    async fn setup_db() -> (Surreal<surrealdb::engine::local::Db>, Uuid) {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        crate::schema::run_migrations(&db).await.unwrap();
+
+        let org = crate::repository::SurrealOrganizationRepository::new(db.clone())
+            .create(CreateOrganization {
+                name: "Org".into(),
+                slug: "org".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let tenant = crate::repository::SurrealTenantRepository::new(db.clone())
+            .create(axiam_core::models::tenant::CreateTenant {
+                organization_id: org.id,
+                name: "Tenant".into(),
+                slug: "tenant".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        (db, tenant.id)
+    }
+
+    /// SECHRD-04: `find_or_create_role` must tolerate the UNIQUE-index race
+    /// where a concurrent caller creates the same (tenant_id, name) role
+    /// between the caller's `existing_id` lookup and this function's own
+    /// `create()` call — re-fetching the winner's ID instead of erroring.
+    #[tokio::test]
+    async fn find_or_create_role_recovers_from_concurrent_create_race() {
+        let (db, tenant_id) = setup_db().await;
+        let role_repo = SurrealRoleRepository::new(db.clone());
+
+        // Simulate "a concurrent caller already won": a role with this
+        // (tenant_id, name) already exists, but we call with existing_id =
+        // None (as if OUR pre-fetch ran before the winner's insert).
+        let winner = role_repo
+            .create(CreateRole {
+                tenant_id,
+                name: "super-admin".into(),
+                description: "concurrent winner".into(),
+                is_global: true,
+            })
+            .await
+            .unwrap();
+
+        let resolved = find_or_create_role(
+            &role_repo,
+            tenant_id,
+            None,
+            "super-admin",
+            "our attempted description",
+        )
+        .await
+        .expect("must recover from the UNIQUE-index race, not error");
+
+        assert_eq!(
+            resolved, winner.id,
+            "must resolve to the concurrent winner's role ID"
+        );
+    }
+
+    /// `grant_to_role_idempotent` must treat "already granted" (a concurrent
+    /// caller won the same grant) as success.
+    #[tokio::test]
+    async fn grant_to_role_idempotent_tolerates_duplicate_grant() {
+        let (db, tenant_id) = setup_db().await;
+        let role_repo = SurrealRoleRepository::new(db.clone());
+        let perm_repo = SurrealPermissionRepository::new(db.clone());
+
+        let role = role_repo
+            .create(CreateRole {
+                tenant_id,
+                name: "grant-race-role".into(),
+                description: "role".into(),
+                is_global: true,
+            })
+            .await
+            .unwrap();
+        let perm = perm_repo
+            .create(axiam_core::models::permission::CreatePermission {
+                tenant_id,
+                action: "widgets:list".into(),
+                description: "List widgets".into(),
+            })
+            .await
+            .unwrap();
+
+        // First grant succeeds normally.
+        grant_to_role_idempotent(&perm_repo, tenant_id, role.id, perm.id)
+            .await
+            .unwrap();
+
+        // A second grant of the SAME pair hits the UNIQUE (in, out) index —
+        // must be swallowed as Ok(()), not propagated as an error.
+        grant_to_role_idempotent(&perm_repo, tenant_id, role.id, perm.id)
+            .await
+            .expect("duplicate grant must be tolerated as already-granted");
+
+        let granted = granted_permission_ids(&perm_repo, tenant_id, role.id)
+            .await
+            .unwrap();
+        assert!(granted.contains(&perm.id));
+        assert_eq!(granted.len(), 1, "no duplicate edge must be created");
+    }
+}

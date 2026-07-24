@@ -199,6 +199,29 @@ async fn finish_registration_rejects_user_mismatch() {
 }
 
 #[tokio::test]
+async fn finish_registration_matching_tenant_and_user_fails_at_verification() {
+    // Correct tenant AND correct caller user — passes both ownership checks
+    // and reaches the webauthn-rs verification step, which then fails
+    // because `dummy_register_response()` is not a real authenticator
+    // response. Exercises the call-and-map_err region that the
+    // wrong-tenant/wrong-user tests above never reach.
+    let svc = WebauthnService::new(empty_repo(), config(true)).unwrap();
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let (_ccr, token) = svc
+        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .await
+        .unwrap();
+    let res = svc
+        .finish_registration(tenant, user, &token, "my key", &dummy_register_response())
+        .await;
+    assert!(
+        res.is_err(),
+        "a bogus authenticator response must fail webauthn-rs verification"
+    );
+}
+
+#[tokio::test]
 async fn finish_registration_rejects_garbage_token() {
     let svc = WebauthnService::new(empty_repo(), config(true)).unwrap();
     let res = svc

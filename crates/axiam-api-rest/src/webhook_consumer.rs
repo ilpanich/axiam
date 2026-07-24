@@ -436,6 +436,48 @@ mod webhook_consumer_tests {
         assert!(delay <= cfg.backoff_ceiling_ms);
     }
 
+    /// Direct unit test for the private `build_audit_entry` helper (D-09):
+    /// proves the system-actor convention (`Uuid::nil()` + `ActorType::System`)
+    /// and that every field passed through is threaded into the resulting
+    /// `CreateAuditLogEntry` unchanged. This is the only part of the
+    /// AMQP-consumer module reachable without a live RabbitMQ broker — the
+    /// surrounding `start_webhook_consumer`/`handle_delivery_failure` drive a
+    /// real `lapin::Channel`/`Acker`/`WebhookPublisher` (concrete types wired
+    /// to an actual broker connection, not trait objects), so they cannot be
+    /// exercised here; the crate's own `#[ignore]`d
+    /// `webhook_consumer_retries_then_dlqs_and_audits_end_to_end` integration
+    /// test (run via `just dev-up`) is the intended coverage path for those.
+    #[test]
+    fn build_audit_entry_builds_expected_entry() {
+        let tenant_id = Uuid::new_v4();
+        let webhook_id = Uuid::new_v4();
+        let metadata = serde_json::json!({"delivery_id": "abc", "attempt": 2});
+
+        let entry = build_audit_entry(
+            tenant_id,
+            webhook_id,
+            "webhook.delivery_attempt",
+            AuditOutcome::Failure,
+            metadata.clone(),
+        );
+
+        assert_eq!(entry.tenant_id, tenant_id);
+        assert_eq!(
+            entry.actor_id,
+            Uuid::nil(),
+            "webhook delivery is system-initiated, never attributed to a real actor"
+        );
+        assert!(matches!(entry.actor_type, ActorType::System));
+        assert_eq!(entry.action, "webhook.delivery_attempt");
+        assert_eq!(entry.resource_id, Some(webhook_id));
+        assert!(matches!(entry.outcome, AuditOutcome::Failure));
+        assert!(
+            entry.ip_address.is_none(),
+            "webhook delivery has no client IP to attribute"
+        );
+        assert_eq!(entry.metadata, Some(metadata));
+    }
+
     #[test]
     fn webhook_retry_config_defaults_resolve_when_env_unset() {
         // AXIAM__WEBHOOK__* is unique to this module — no other test in this

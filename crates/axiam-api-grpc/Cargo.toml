@@ -40,6 +40,13 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tokio = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
+# Test-only: installs the process-level rustls CryptoProvider (mirrors
+# axiam-server's main()) so the TLS-enabled `start_grpc_server` boot test
+# doesn't hit "Could not automatically determine the process-level
+# CryptoProvider" — tonic's `ServerTlsConfig` resolves the default provider,
+# and two providers (ring + aws-lc-rs) are linked transitively with none
+# installed by default in a bare test binary.
+rustls = { workspace = true, features = ["ring"] }
 
 [build-dependencies]
 tonic-build = { workspace = true }

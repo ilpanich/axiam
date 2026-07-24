@@ -421,6 +421,85 @@ async fn request_reset_mail_publish_failure_still_returns_sent_true() {
     );
 }
 
+/// After a successful `initiate_reset` (user found, mail enqueued), the
+/// handler resolves `org_id` for the mail message via a SEPARATE
+/// `tenant_repo.get_by_id` lookup. Deleting the tenant row between user
+/// creation and the request (SurrealDB has no FK enforcement, so the user
+/// row survives) makes that second lookup fail while `initiate_reset`
+/// itself still succeeds (it only queries the user table) — proving the
+/// `Err(e) => { warn!(...); Uuid::nil() }` fallback branch is taken and the
+/// response is still the uniform `{"sent": true}` (D-15), never a 500.
+#[actix_rt::test]
+async fn request_reset_org_id_resolution_failure_still_returns_sent_true() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    SurrealTenantRepository::new(f.db.clone())
+        .delete(f.tenant_id)
+        .await
+        .unwrap();
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/reset")
+        .set_json(json!({
+            "tenant_id": f.tenant_id,
+            "email": "reset-gaps-user@example.com",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(
+        body["sent"], true,
+        "org_id resolution failure must still funnel into sent:true (D-15), not a 500"
+    );
+}
+
+/// `request_reset`'s D-15 swallow only covers `Ok(None)`, `Ok(Some(..))`,
+/// and `Err(RateLimited)` — any OTHER service error must still propagate as
+/// a real error response via `Err(e) => return Err(e.into())`, not be
+/// silently absorbed. A `Surreal` handle with no namespace/database
+/// selected makes every repository call fail with a generic (non-NotFound)
+/// error, forcing `initiate_reset`'s `user_repo.get_by_email` to hit that
+/// exact fallthrough (a raw `tenant_id` is supplied so tenant resolution
+/// itself never touches the DB and short-circuits to `Some(id)` first).
+#[actix_rt::test]
+async fn request_reset_propagates_non_ratelimited_service_error() {
+    let auth = test_auth_config();
+    let broken_db = Surreal::new::<Mem>(()).await.unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(AppState::for_test(
+                broken_db,
+                auth.clone(),
+            )))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/reset")
+        .set_json(json!({
+            "tenant_id": Uuid::new_v4(),
+            "email": "whoever@example.com",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        500,
+        "a non-RateLimited service error must propagate as a real error, not be swallowed into sent:true"
+    );
+}
+
 /// After `MAX_RESETS_PER_DAY` (3) successful requests for the SAME user, a
 /// further request must be swallowed into the SAME `{"sent": true}` response
 /// (D-15 — a distinct 429 would let an attacker enumerate valid accounts by

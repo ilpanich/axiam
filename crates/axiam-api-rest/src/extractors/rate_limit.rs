@@ -344,6 +344,59 @@ mod client_aware_tests {
         assert_eq!(key, "203.0.113.9");
     }
 
+    /// Builds a `NotUntil` "rate limited" outcome directly from a real
+    /// `governor::RateLimiter`, without going through a full `actix_governor`
+    /// `Governor` middleware/request cycle: consume a 1-per-hour direct quota
+    /// once (succeeds), then again (fails) — the failure is exactly the
+    /// `NotUntil<QuantaInstant>` both `exceed_rate_limit_response` impls
+    /// take. Neither impl is reached by any HTTP-round-trip test in this
+    /// crate: those exercise `RateLimitShared`'s own 429 body
+    /// (`middleware::rate_limit_shared::too_many_requests_response`), never
+    /// the in-memory `Governor`'s per-`KeyExtractor` override.
+    fn rate_limited_not_until() -> NotUntil<QuantaInstant> {
+        use actix_governor::governor::{Quota, RateLimiter};
+        use std::num::NonZeroU32;
+
+        let quota = Quota::per_hour(NonZeroU32::new(1).unwrap());
+        let limiter = RateLimiter::direct(quota);
+        limiter.check().expect("first request must be allowed");
+        limiter
+            .check()
+            .expect_err("second request within the same window must be rate-limited")
+    }
+
+    #[test]
+    fn xff_extractor_exceed_rate_limit_response_shape() {
+        let negative = rate_limited_not_until();
+        let extractor = XForwardedForKeyExtractor::default();
+        let resp = extractor.exceed_rate_limit_response(&negative, HttpResponse::TooManyRequests());
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            resp.headers().contains_key(RETRY_AFTER),
+            "429 response must carry a Retry-After header (D-03)"
+        );
+        assert_eq!(
+            resp.headers().get(actix_web::http::header::CONTENT_TYPE),
+            Some(&actix_web::http::header::HeaderValue::from_static(
+                "application/json"
+            ))
+        );
+    }
+
+    #[test]
+    fn client_aware_extractor_exceed_rate_limit_response_shape() {
+        let negative = rate_limited_not_until();
+        let extractor = ClientAwareKeyExtractor::new(
+            XForwardedForKeyExtractor::default(),
+            RateLimitKeyMode::Ip,
+        );
+        let resp = extractor.exceed_rate_limit_response(&negative, HttpResponse::TooManyRequests());
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().contains_key(RETRY_AFTER));
+    }
+
     #[test]
     fn extract_form_client_id_parses_and_rejects_empty() {
         assert_eq!(

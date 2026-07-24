@@ -606,6 +606,27 @@ mod tests {
         assert!(response_body.get("token").is_none());
     }
 
+    /// A `tenant_slug` with NO accompanying `org_slug` is unresolvable (the
+    /// slug pair is required together) and must ALSO resolve to `None`
+    /// enumeration-safely, distinct from both the org-lookup-failure branch
+    /// above and the wholly-missing-context branch below.
+    #[tokio::test]
+    async fn tenant_slug_without_org_slug_resolves_to_none_enumeration_safe() {
+        let resolved = resolve_reset_tenant_id(
+            &FailingOrgRepo,
+            &UnreachableTenantRepo,
+            None,
+            None,
+            Some("some-tenant-slug"),
+        )
+        .await;
+
+        assert!(
+            resolved.is_none(),
+            "tenant_slug without org_slug must resolve to None (D-05 enumeration-safe funnel)"
+        );
+    }
+
     /// Missing tenant context entirely (no tenant_id, no tenant_slug) is
     /// ALSO enumeration-safe — it never distinguishes "field omitted" from
     /// "slug doesn't exist" at the response layer (D-05).

@@ -386,4 +386,192 @@ mod tests {
             .unwrap();
         assert_eq!(found2.status, AccountDeletionStatus::Cancelled);
     }
+
+    #[tokio::test]
+    async fn find_by_token_hash_returns_none_when_missing() {
+        let db = setup_db().await;
+        let repo = SurrealAccountDeletionRepository::new(db);
+        let found = repo
+            .find_by_token_hash(Uuid::new_v4(), "no-such-hash")
+            .await
+            .unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_completed_transitions_status() {
+        let db = setup_db().await;
+        let repo = SurrealAccountDeletionRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let purge_at = Utc::now() + Duration::days(30);
+
+        let req = repo
+            .create(CreateAccountDeletion {
+                tenant_id,
+                user_id,
+                cancel_token_hash: "hash-complete".into(),
+                scheduled_purge_at: purge_at,
+            })
+            .await
+            .unwrap();
+
+        repo.mark_completed(tenant_id, req.id).await.unwrap();
+        let found = repo
+            .find_by_token_hash(tenant_id, "hash-complete")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.status, AccountDeletionStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn find_pending_by_user_id_only_returns_pending_status() {
+        let db = setup_db().await;
+        let repo = SurrealAccountDeletionRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let purge_at = Utc::now() + Duration::days(30);
+
+        // No pending request yet.
+        assert!(
+            repo.find_pending_by_user_id(tenant_id, user_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let req = repo
+            .create(CreateAccountDeletion {
+                tenant_id,
+                user_id,
+                cancel_token_hash: "hash-pending".into(),
+                scheduled_purge_at: purge_at,
+            })
+            .await
+            .unwrap();
+
+        let found = repo
+            .find_pending_by_user_id(tenant_id, user_id)
+            .await
+            .unwrap()
+            .expect("pending deletion must be found");
+        assert_eq!(found.id, req.id);
+
+        // Once cancelled, it is no longer "pending".
+        repo.mark_cancelled(tenant_id, req.id).await.unwrap();
+        assert!(
+            repo.find_pending_by_user_id(tenant_id, user_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a cancelled request must not be returned as pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_by_token_hash_global_finds_across_tenants() {
+        let db = setup_db().await;
+        let repo = SurrealAccountDeletionRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let purge_at = Utc::now() + Duration::days(30);
+
+        let req = repo
+            .create(CreateAccountDeletion {
+                tenant_id,
+                user_id,
+                cancel_token_hash: "global-hash".into(),
+                scheduled_purge_at: purge_at,
+            })
+            .await
+            .unwrap();
+
+        // Found without needing to know the tenant_id.
+        let found = repo
+            .find_by_token_hash_global("global-hash")
+            .await
+            .unwrap()
+            .expect("must find the row by hash alone");
+        assert_eq!(found.id, req.id);
+
+        let missing = repo
+            .find_by_token_hash_global("no-such-hash-anywhere")
+            .await
+            .unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_with_pending_flag_sets_user_flag_and_creates_row_atomically() {
+        use crate::repository::{
+            SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+        };
+        use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+
+        let db = setup_db().await;
+
+        // Seed a real user row so the transaction's UPDATE has a target.
+        let org = SurrealOrganizationRepository::new(db.clone())
+            .create(axiam_core::models::organization::CreateOrganization {
+                name: "Org".into(),
+                slug: "org".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let tenant = SurrealTenantRepository::new(db.clone())
+            .create(axiam_core::models::tenant::CreateTenant {
+                organization_id: org.id,
+                name: "Tenant".into(),
+                slug: "tenant".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let user = SurrealUserRepository::new(db.clone())
+            .create(axiam_core::models::user::CreateUser {
+                tenant_id: tenant.id,
+                username: "delete-me".into(),
+                email: "delete-me@example.com".into(),
+                password: "SuperSecret123!".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+
+        let repo = SurrealAccountDeletionRepository::new(db.clone());
+        let purge_at = Utc::now() + Duration::days(30);
+
+        let deletion = repo
+            .create_with_pending_flag(tenant.id, user.id, purge_at, "atomic-hash".into())
+            .await
+            .unwrap();
+        assert_eq!(deletion.status, AccountDeletionStatus::Pending);
+        assert_eq!(deletion.cancel_token_hash, "atomic-hash");
+
+        // The user row must have been flipped to deletion_pending in the SAME
+        // transaction (D-14).
+        let user_repo = SurrealUserRepository::new(db.clone());
+        let updated_user = user_repo.get_by_id(tenant.id, user.id).await.unwrap();
+        assert!(updated_user.deletion_pending);
+
+        // A second call for the SAME user while one is already pending must
+        // roll back the whole transaction (duplicate-pending-request guard).
+        let dup = repo
+            .create_with_pending_flag(tenant.id, user.id, purge_at, "another-hash".into())
+            .await;
+        assert!(
+            dup.is_err(),
+            "a second pending deletion for the same user must be rejected"
+        );
+
+        // Exactly one account_deletion row must exist for this user.
+        let pending = repo
+            .find_pending_by_user_id(tenant.id, user.id)
+            .await
+            .unwrap()
+            .expect("original pending row must still exist");
+        assert_eq!(pending.cancel_token_hash, "atomic-hash");
+    }
 }

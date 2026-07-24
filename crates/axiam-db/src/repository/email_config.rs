@@ -1175,4 +1175,208 @@ mod tests {
         let result = repo.backfill_plaintext_secrets().await.unwrap();
         assert_eq!(result, 0);
     }
+
+    // --- Tenant overrides: get/set/delete + effective config merge ---
+
+    #[tokio::test]
+    async fn get_tenant_override_returns_none_when_not_set() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let result = repo.get_tenant_override(Uuid::new_v4()).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_and_get_tenant_override_round_trips_smtp_provider() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let tenant_id = Uuid::new_v4();
+
+        let input = SetTenantEmailOverride {
+            enabled: Some(false),
+            from_name: Some("Tenant Override".into()),
+            from_email: Some("override@example.com".into()),
+            reply_to: None,
+            provider: Some(ProviderConfig::Smtp(SmtpConfig {
+                host: "smtp.tenant.example.com".into(),
+                port: 2525,
+                username: "tenant-user".into(),
+                password: "tenant-secret".into(),
+                starttls: false,
+            })),
+        };
+
+        let set_result = repo
+            .set_tenant_override(tenant_id, input.clone())
+            .await
+            .unwrap();
+        assert_eq!(set_result.from_name.as_deref(), Some("Tenant Override"));
+
+        let fetched = repo
+            .get_tenant_override(tenant_id)
+            .await
+            .unwrap()
+            .expect("override must be stored");
+        assert_eq!(fetched.enabled, Some(false));
+        assert_eq!(fetched.from_name.as_deref(), Some("Tenant Override"));
+        assert_eq!(fetched.from_email.as_deref(), Some("override@example.com"));
+        match fetched.provider {
+            Some(ProviderConfig::Smtp(smtp)) => {
+                assert_eq!(smtp.host, "smtp.tenant.example.com");
+                assert_eq!(smtp.port, 2525);
+                assert_eq!(smtp.password, "tenant-secret");
+                assert!(!smtp.starttls);
+            }
+            other => panic!("expected Smtp provider override, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_tenant_override_with_no_provider_stores_none() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let tenant_id = Uuid::new_v4();
+
+        let input = SetTenantEmailOverride {
+            enabled: Some(true),
+            from_name: None,
+            from_email: None,
+            reply_to: None,
+            provider: None,
+        };
+        repo.set_tenant_override(tenant_id, input).await.unwrap();
+
+        let fetched = repo
+            .get_tenant_override(tenant_id)
+            .await
+            .unwrap()
+            .expect("override row must exist even without a provider");
+        assert!(fetched.provider.is_none());
+        // Empty-string sentinels are filtered back to None (D-02 style).
+        assert!(fetched.from_name.is_none());
+        assert!(fetched.from_email.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_tenant_override_removes_row() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let tenant_id = Uuid::new_v4();
+
+        repo.set_tenant_override(
+            tenant_id,
+            SetTenantEmailOverride {
+                enabled: Some(true),
+                from_name: Some("X".into()),
+                from_email: Some("x@example.com".into()),
+                reply_to: None,
+                provider: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(repo.get_tenant_override(tenant_id).await.unwrap().is_some());
+
+        repo.delete_tenant_override(tenant_id).await.unwrap();
+        assert!(repo.get_tenant_override(tenant_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_tenant_override_is_ok_when_nothing_to_delete() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        repo.delete_tenant_override(Uuid::new_v4()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_effective_config_returns_none_when_org_not_configured() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let result = repo
+            .get_effective_config(Uuid::new_v4(), Uuid::new_v4())
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_effective_config_falls_back_to_org_when_no_override() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+
+        repo.set_org_config(
+            org_id,
+            SetOrgEmailConfig {
+                enabled: true,
+                from_name: "Org Default".into(),
+                from_email: "org@example.com".into(),
+                reply_to: None,
+                provider: ProviderConfig::SendGrid(ApiProviderConfig {
+                    api_key: "org_key".into(),
+                    api_url: None,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let effective = repo
+            .get_effective_config(org_id, tenant_id)
+            .await
+            .unwrap()
+            .expect("org config must be present");
+        assert_eq!(effective.from_name, "Org Default");
+    }
+
+    #[tokio::test]
+    async fn get_effective_config_merges_tenant_override_onto_org() {
+        let db = setup_db().await;
+        let repo = SurrealEmailConfigRepository::new(db, test_key());
+        let org_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+
+        repo.set_org_config(
+            org_id,
+            SetOrgEmailConfig {
+                enabled: true,
+                from_name: "Org Default".into(),
+                from_email: "org@example.com".into(),
+                reply_to: None,
+                provider: ProviderConfig::Smtp(SmtpConfig {
+                    host: "smtp.org.example.com".into(),
+                    port: 587,
+                    username: "org-user".into(),
+                    password: "org-secret".into(),
+                    starttls: true,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        repo.set_tenant_override(
+            tenant_id,
+            SetTenantEmailOverride {
+                enabled: None,
+                from_name: Some("Tenant Name".into()),
+                from_email: None,
+                reply_to: None,
+                provider: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let effective = repo
+            .get_effective_config(org_id, tenant_id)
+            .await
+            .unwrap()
+            .expect("effective config must be present");
+        assert_eq!(
+            effective.from_name, "Tenant Name",
+            "tenant override must take precedence over org default"
+        );
+    }
 }

@@ -11,14 +11,17 @@ use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
+use axiam_core::models::federation::CreateFederationLink;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
-    FederationConfigRepository, OrganizationRepository, TenantRepository, UserRepository,
+    FederationConfigRepository, FederationLinkRepository, FederationLoginStateRepository,
+    OrganizationRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealFederationConfigRepository, SurrealOrganizationRepository, SurrealTenantRepository,
+    SurrealFederationConfigRepository, SurrealFederationLinkRepository,
+    SurrealFederationLoginStateRepository, SurrealOrganizationRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
 use axiam_federation::secrets::decrypt_client_secret_or_legacy;
@@ -479,6 +482,84 @@ async fn delete_nonexistent_federation_link_returns_404() {
     assert_eq!(resp.status().as_u16(), 404);
 }
 
+/// A user with an actual federation link must see it listed, with fields
+/// mapped by `FederationLinkResponse::from` (the `From<FederationLink>`
+/// conversion is otherwise only exercised on the always-empty case above).
+#[actix_rt::test]
+async fn list_user_federation_links_returns_existing_link() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    let link_repo = SurrealFederationLinkRepository::new(db.clone());
+    let created = link_repo
+        .create(CreateFederationLink {
+            tenant_id,
+            user_id,
+            federation_config_id: Uuid::new_v4(),
+            external_subject: "external-sub-xyz".into(),
+            external_email: Some("linked@example.com".into()),
+        })
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/federation-links/user/{user_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"].as_str().unwrap(), created.id.to_string());
+    assert_eq!(items[0]["user_id"].as_str().unwrap(), user_id.to_string());
+    assert_eq!(
+        items[0]["external_subject"].as_str().unwrap(),
+        "external-sub-xyz"
+    );
+    assert_eq!(
+        items[0]["external_email"].as_str().unwrap(),
+        "linked@example.com"
+    );
+}
+
+/// Deleting an existing federation link must succeed (204) — the sibling
+/// `delete_nonexistent_federation_link_returns_404` test above only ever
+/// exercises the 404 branch.
+#[actix_rt::test]
+async fn delete_existing_federation_link_returns_204() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    let link_repo = SurrealFederationLinkRepository::new(db.clone());
+    let created = link_repo
+        .create(CreateFederationLink {
+            tenant_id,
+            user_id,
+            federation_config_id: Uuid::new_v4(),
+            external_subject: "to-be-deleted".into(),
+            external_email: None,
+        })
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/federation-links/{}", created.id))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 204);
+}
+
 // ---------------------------------------------------------------------------
 // Helper: create a SAML federation config via the API
 // ---------------------------------------------------------------------------
@@ -581,7 +662,40 @@ async fn saml_acs_rejects_empty_saml_response() {
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
             "config_id": config_id,
-            "saml_response": ""
+            "saml_response": "",
+            // NOTE: `acs_url` is required (non-`Option`) on `SamlAcsRequest` —
+            // omitting it would fail JSON deserialization before the handler's
+            // own `saml_response.is_empty()` check ever runs, silently testing
+            // the wrong 400 (deserialize error, not the intended validation
+            // branch). Must be present and non-empty here.
+            "acs_url": "https://sp.example.com/acs"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn saml_acs_rejects_empty_acs_url() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let config = create_saml_config(&app, &token).await;
+    let config_id = config["id"].as_str().unwrap();
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/federation/saml/acs")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": config_id,
+            "saml_response": "not-empty-but-acs-url-is",
+            "acs_url": ""
         }))
         .to_request();
 
@@ -1786,6 +1900,31 @@ async fn oidc_start_public_rejects_invalid_redirect_uri_scheme() {
     assert_eq!(resp.status().as_u16(), 400);
 }
 
+/// A `redirect_uri` that fails to parse as a URL at all (not merely a
+/// disallowed scheme) must hit `validate_redirect_uri`'s
+/// `url::Url::parse` error arm, not the "must use HTTPS" branch exercised
+/// by the sibling `_scheme` test above.
+#[actix_rt::test]
+async fn oidc_start_public_rejects_malformed_redirect_uri() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/start")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "federation_config_id": Uuid::new_v4(),
+            "redirect_uri": "not a url at all"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
 #[actix_rt::test]
 async fn oidc_start_public_rejects_missing_org_identifier() {
     let (db, _org_id, tenant_id) = setup_db().await;
@@ -1941,6 +2080,48 @@ async fn oidc_callback_public_rejects_unknown_state() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
+}
+
+/// A login-state row that *is* found (unlike the "unknown state" sibling
+/// test above) still must be rejected cleanly when the encryption key
+/// (hence `oidc_federation_service`) is not configured — `test_app!` in
+/// this file always builds `AppState::for_test`, whose
+/// `oidc_federation_service` defaults to `None`. This is the only way to
+/// reach that branch in `oidc_callback_public`, since — with a real
+/// service — `oidc_start_public` is what would normally create the row,
+/// and it itself requires the service to succeed. Inserting the row
+/// directly via the repository decouples the two.
+#[actix_rt::test]
+async fn oidc_callback_public_fails_when_service_not_configured_but_state_exists() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db.clone(), auth);
+
+    let login_state_repo = SurrealFederationLoginStateRepository::new(db.clone());
+    login_state_repo
+        .insert(&axiam_core::repository::FederationLoginState {
+            state: "pre-existing-state".into(),
+            nonce: "pre-existing-nonce".into(),
+            tenant_id,
+            federation_config_id: Uuid::new_v4(),
+            redirect_uri: "https://spa.example.com/cb".into(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+            request_id: String::new(),
+        })
+        .await
+        .unwrap();
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/federation/oidc/callback")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .set_json(serde_json::json!({
+            "state": "pre-existing-state",
+            "code": "some-code"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
 }
 
 #[actix_rt::test]

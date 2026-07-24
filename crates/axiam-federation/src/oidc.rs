@@ -1458,6 +1458,45 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
         assert_eq!(result.user.id, user_id);
     }
 
+    /// An existing federation link resolves, but the linked `user_id` no
+    /// longer has a matching user row (e.g. the user was deleted out from
+    /// under the link) — `user_repo.get_by_id` fails and must be mapped to
+    /// `ProvisioningFailed`, not silently re-provisioned.
+    #[tokio::test]
+    async fn provision_existing_link_but_user_lookup_fails_maps_to_provisioning_failed() {
+        let tenant = Uuid::new_v4();
+        let cfg = Uuid::new_v4();
+        let link = StubLinkRepo {
+            existing: Some(FederationLink {
+                id: Uuid::new_v4(),
+                tenant_id: tenant,
+                user_id: Uuid::new_v4(),
+                federation_config_id: cfg,
+                external_subject: "external-sub-1".into(),
+                external_email: Some("existing@example.com".into()),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }),
+            get_returns_db_error: false,
+            fail_create: false,
+            created: Mutex::new(Vec::new()),
+        };
+        // preset: None -> StubUserRepo::get_by_id returns NotFound.
+        let svc = make_stub_service(
+            link,
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .provision_or_link_user(tenant, cfg, &claims_with(Some("x@example.com")))
+            .await
+            .expect_err("dangling link with no matching user must fail");
+        assert!(
+            matches!(err, FederationError::ProvisioningFailed(ref m) if m.contains("fetch linked user")),
+            "got: {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn provision_maps_link_lookup_db_error_to_provisioning_failed() {
         let link = StubLinkRepo {
@@ -1626,5 +1665,979 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
             .await
             .expect("valid token response should parse");
         assert_eq!(tokens.id_token.as_deref(), Some("the-id-token"));
+    }
+
+    /// A 200 token response whose body exceeds the 256 KiB read cap must be
+    /// rejected rather than fully buffered (CQ-B23).
+    #[tokio::test]
+    async fn exchange_code_oversized_success_body_maps_to_token_exchange_failed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Comfortably over the 256 KiB cap.
+        let oversized_body = "x".repeat(300 * 1024);
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(oversized_body))
+            .mount(&server)
+            .await;
+
+        let svc = make_stub_service(
+            StubLinkRepo::provisioning(),
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let endpoint = format!("{}/token", server.uri());
+        let err = svc
+            .exchange_code(&endpoint, "code", "https://rp/cb", "cid", "secret")
+            .await
+            .expect_err("oversized token response body must be rejected");
+        assert!(
+            matches!(err, FederationError::TokenExchangeFailed(ref m) if m.contains("too large")),
+            "{err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_authorization_url / handle_callback error arms + verify_id_token
+    // via the real service method (not the free-standing `verify()` test
+    // helper above, which duplicates but never exercises the production
+    // `OidcFederationService::verify_id_token`).
+    // -----------------------------------------------------------------------
+
+    /// Configurable `FederationConfigRepository` stub: returns a preset
+    /// `get_by_id` outcome. All other methods are never exercised by
+    /// `build_authorization_url`/`handle_callback`, so they stay
+    /// `unimplemented!()`.
+    enum ConfigOutcome {
+        Found(Box<FederationConfig>),
+        NotFound,
+        DbError,
+    }
+
+    struct ConfigRepoStub {
+        outcome: ConfigOutcome,
+    }
+
+    impl FederationConfigRepository for ConfigRepoStub {
+        async fn create(&self, _: CreateFederationConfig) -> AxiamResult<FederationConfig> {
+            unimplemented!()
+        }
+        async fn get_by_id(&self, _: Uuid, _: Uuid) -> AxiamResult<FederationConfig> {
+            match &self.outcome {
+                ConfigOutcome::Found(c) => Ok((**c).clone()),
+                ConfigOutcome::NotFound => Err(AxiamError::NotFound {
+                    entity: "federation_config".into(),
+                    id: "no-config".into(),
+                }),
+                ConfigOutcome::DbError => Err(AxiamError::Database("config lookup boom".into())),
+            }
+        }
+        async fn update(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: UpdateFederationConfig,
+        ) -> AxiamResult<FederationConfig> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: Uuid, _: Uuid) -> AxiamResult<()> {
+            unimplemented!()
+        }
+        async fn list(
+            &self,
+            _: Uuid,
+            _: Pagination,
+        ) -> AxiamResult<PaginatedResult<FederationConfig>> {
+            unimplemented!()
+        }
+        async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {
+            unimplemented!()
+        }
+        async fn set_encrypted_secret(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: String,
+            _: String,
+            _: i64,
+        ) -> AxiamResult<()> {
+            unimplemented!()
+        }
+    }
+
+    type ConfigService = OidcFederationService<ConfigRepoStub, StubLinkRepo, StubUserRepo>;
+
+    fn make_config_service(outcome: ConfigOutcome, cache: Arc<JwksCache>) -> ConfigService {
+        OidcFederationService::new(
+            ConfigRepoStub { outcome },
+            StubLinkRepo::provisioning(),
+            StubUserRepo::provisioning(),
+            reqwest::Client::new(),
+            cache,
+            [0u8; 32], // gitleaks:allow
+        )
+    }
+
+    /// A baseline valid, enabled OIDC config pointing at `metadata_url`.
+    fn base_config(metadata_url: Option<&str>) -> FederationConfig {
+        FederationConfig {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            provider: "test-idp".into(),
+            protocol: FederationProtocol::OidcConnect,
+            metadata_url: metadata_url.map(String::from),
+            client_id: "client-abc".into(),
+            client_secret: "plaintext-secret".into(),
+            attribute_map: serde_json::json!({}),
+            enabled: true,
+            allowed_algorithms: vec!["EdDSA".to_string()],
+            idp_signing_cert_pem: None,
+            client_secret_ciphertext: None,
+            client_secret_nonce: None,
+            client_secret_key_version: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_authorization_url_rejects_config_not_found() {
+        let svc = make_config_service(ConfigOutcome::NotFound, Arc::new(JwksCache::new()));
+        let err = svc
+            .build_authorization_url(Uuid::new_v4(), Uuid::new_v4(), "https://rp/cb", "st", "n1")
+            .await
+            .expect_err("missing config must fail");
+        assert!(matches!(err, FederationError::ConfigNotFound(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn build_authorization_url_maps_other_db_error_to_internal() {
+        let svc = make_config_service(ConfigOutcome::DbError, Arc::new(JwksCache::new()));
+        let err = svc
+            .build_authorization_url(Uuid::new_v4(), Uuid::new_v4(), "https://rp/cb", "st", "n1")
+            .await
+            .expect_err("non-NotFound lookup error must surface");
+        assert!(matches!(err, FederationError::Internal(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn build_authorization_url_rejects_disabled_config() {
+        let mut cfg = base_config(Some(
+            "https://idp.example.com/.well-known/openid-configuration",
+        ));
+        cfg.enabled = false;
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .build_authorization_url(Uuid::new_v4(), Uuid::new_v4(), "https://rp/cb", "st", "n1")
+            .await
+            .expect_err("disabled config must fail");
+        assert!(matches!(err, FederationError::ConfigDisabled), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn build_authorization_url_rejects_protocol_mismatch() {
+        let mut cfg = base_config(Some(
+            "https://idp.example.com/.well-known/openid-configuration",
+        ));
+        cfg.protocol = FederationProtocol::Saml;
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .build_authorization_url(Uuid::new_v4(), Uuid::new_v4(), "https://rp/cb", "st", "n1")
+            .await
+            .expect_err("SAML config must fail OIDC-only build");
+        assert!(
+            matches!(err, FederationError::ProtocolMismatch(_)),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_authorization_url_rejects_missing_metadata_url() {
+        let cfg = base_config(None);
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .build_authorization_url(Uuid::new_v4(), Uuid::new_v4(), "https://rp/cb", "st", "n1")
+            .await
+            .expect_err("missing metadata_url must fail");
+        assert!(
+            matches!(err, FederationError::DiscoveryFailed(ref m) if m.contains("metadata URL")),
+            "{err:?}"
+        );
+    }
+
+    /// `DiscoveryCache::get_or_fetch` validates that `authorization_endpoint`
+    /// parses as a URL *before* `build_authorization_url` ever gets the
+    /// document (see `discovery_cache.rs`'s per-endpoint validation loop),
+    /// so a malformed `authorization_endpoint` is rejected one layer down
+    /// with a `"{name} is not a valid URL: ..."` message — the
+    /// `url::Url::parse(&discovery.authorization_endpoint)` re-check inside
+    /// `build_authorization_url` itself (oidc.rs) is unreachable
+    /// belt-and-suspenders defense-in-depth given that upstream guarantee.
+    /// This test still exercises the real end-to-end error propagation path.
+    #[tokio::test]
+    async fn build_authorization_url_rejects_invalid_authorization_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        // authorization_endpoint is not a valid absolute URL.
+        let doc_json = serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": "::not a url::",
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json))
+            .mount(&server)
+            .await;
+
+        let metadata_url = format!("{base}/.well-known/openid-configuration");
+        let cfg = base_config(Some(&metadata_url));
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let err = svc
+            .build_authorization_url(Uuid::new_v4(), Uuid::new_v4(), "https://rp/cb", "st", "n1")
+            .await
+            .expect_err("invalid authorization_endpoint must fail discovery");
+        assert!(
+            matches!(err, FederationError::DiscoveryFailed(ref m) if m.contains("authorization_endpoint is not a valid URL")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_authorization_url_succeeds_and_includes_params() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let doc_json = serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json))
+            .mount(&server)
+            .await;
+
+        let metadata_url = format!("{base}/.well-known/openid-configuration");
+        let cfg = base_config(Some(&metadata_url));
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let result = svc
+            .build_authorization_url(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "https://rp/cb",
+                "state-1",
+                "nonce-1",
+            )
+            .await
+            .expect("valid discovery must succeed");
+        assert!(result.url.starts_with(&format!("{base}/authorize?")));
+        assert!(result.url.contains("state=state-1"));
+        assert!(result.url.contains("nonce=nonce-1"));
+        assert!(result.url.contains("client_id=client-abc"));
+    }
+
+    #[tokio::test]
+    async fn handle_callback_rejects_config_not_found() {
+        let svc = make_config_service(ConfigOutcome::NotFound, Arc::new(JwksCache::new()));
+        let err = svc
+            .handle_callback(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "code",
+                "https://rp/cb",
+                "n1",
+            )
+            .await
+            .expect_err("missing config must fail");
+        assert!(matches!(err, FederationError::ConfigNotFound(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_callback_rejects_disabled_config() {
+        let mut cfg = base_config(Some(
+            "https://idp.example.com/.well-known/openid-configuration",
+        ));
+        cfg.enabled = false;
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .handle_callback(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "code",
+                "https://rp/cb",
+                "n1",
+            )
+            .await
+            .expect_err("disabled config must fail");
+        assert!(matches!(err, FederationError::ConfigDisabled), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_callback_rejects_protocol_mismatch() {
+        let mut cfg = base_config(Some(
+            "https://idp.example.com/.well-known/openid-configuration",
+        ));
+        cfg.protocol = FederationProtocol::Saml;
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .handle_callback(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "code",
+                "https://rp/cb",
+                "n1",
+            )
+            .await
+            .expect_err("SAML config must fail OIDC-only callback");
+        assert!(
+            matches!(err, FederationError::ProtocolMismatch(_)),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_callback_rejects_missing_metadata_url() {
+        let cfg = base_config(None);
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new()),
+        );
+        let err = svc
+            .handle_callback(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "code",
+                "https://rp/cb",
+                "n1",
+            )
+            .await
+            .expect_err("missing metadata_url must fail");
+        assert!(
+            matches!(err, FederationError::DiscoveryFailed(ref m) if m.contains("metadata URL")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_callback_maps_other_db_error_to_internal() {
+        let svc = make_config_service(ConfigOutcome::DbError, Arc::new(JwksCache::new()));
+        let err = svc
+            .handle_callback(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "code",
+                "https://rp/cb",
+                "n1",
+            )
+            .await
+            .expect_err("non-NotFound lookup error must surface");
+        assert!(matches!(err, FederationError::Internal(_)), "{err:?}");
+    }
+
+    /// `discover()`'s `allow_private` seam is `false` by default (as it is
+    /// for every production `JwksCache::new()`), so a non-HTTPS
+    /// `metadata_url` must be rejected by `validate_metadata_url` before any
+    /// network call is attempted — no wiremock server needed.
+    #[tokio::test]
+    async fn discover_rejects_non_https_metadata_url_in_production_mode() {
+        let svc = make_config_service(ConfigOutcome::NotFound, Arc::new(JwksCache::new()));
+        let err = svc
+            .discover("http://insecure.example.com/.well-known/openid-configuration")
+            .await
+            .expect_err("non-HTTPS metadata_url must be rejected");
+        assert!(
+            matches!(err, FederationError::InvalidMetadataUrl(_)),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_callback_rejects_config_incomplete_when_secret_missing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let doc_json = serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json))
+            .mount(&server)
+            .await;
+
+        let metadata_url = format!("{base}/.well-known/openid-configuration");
+        let mut cfg = base_config(Some(&metadata_url));
+        cfg.client_secret = String::new(); // no legacy plaintext, no ciphertext
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let err = svc
+            .handle_callback(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "code",
+                "https://rp/cb",
+                "n1",
+            )
+            .await
+            .expect_err("missing client secret must fail before token exchange");
+        assert!(matches!(err, FederationError::ConfigIncomplete), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_callback_rejects_missing_id_token_in_token_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let doc_json = serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at",
+                "token_type": "Bearer"
+            })))
+            .mount(&server)
+            .await;
+
+        let metadata_url = format!("{base}/.well-known/openid-configuration");
+        let cfg = base_config(Some(&metadata_url));
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let err = svc
+            .handle_callback(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "code",
+                "https://rp/cb",
+                "n1",
+            )
+            .await
+            .expect_err("token response without id_token must fail");
+        assert!(
+            matches!(err, FederationError::TokenExchangeFailed(ref m) if m.contains("No id_token")),
+            "{err:?}"
+        );
+    }
+
+    /// Full happy-path IdP round trip through `handle_callback`: discovery,
+    /// token exchange, JWKS-verified ID token, nonce check, and new-user
+    /// provisioning — end to end through the real service methods.
+    #[tokio::test]
+    async fn handle_callback_full_success_provisions_new_user() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let doc_json = serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json))
+            .mount(&server)
+            .await;
+
+        let key = test_enc_key();
+        let claims = make_claims_json(&base, "client-abc", 300, Some("expected-nonce"));
+        let id_token = token_with_kid(&key, &claims, "test-key-1");
+
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at",
+                "id_token": id_token,
+                "token_type": "Bearer",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+
+        let jwks_json = serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": "test-key-1",
+                "use": "sig",
+                "x": TEST_PUB_X
+            }]
+        });
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&server)
+            .await;
+
+        let metadata_url = format!("{base}/.well-known/openid-configuration");
+        let cfg = base_config(Some(&metadata_url));
+        let cache = Arc::new(JwksCache::new_allow_private_networks());
+        let svc = OidcFederationService::new(
+            ConfigRepoStub {
+                outcome: ConfigOutcome::Found(Box::new(cfg)),
+            },
+            StubLinkRepo::provisioning(),
+            StubUserRepo::provisioning(),
+            reqwest::Client::new(),
+            cache,
+            [0u8; 32], // gitleaks:allow
+        );
+
+        let tenant_id = Uuid::new_v4();
+        let config_id = Uuid::new_v4();
+        let result = svc
+            .handle_callback(
+                tenant_id,
+                config_id,
+                "auth-code",
+                "https://rp/cb",
+                "expected-nonce",
+            )
+            .await
+            .expect("full happy-path callback must succeed");
+        assert!(result.newly_provisioned);
+        assert_eq!(result.federation_link.external_subject, "user-sub-123");
+    }
+
+    #[tokio::test]
+    async fn handle_callback_rejects_nonce_mismatch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let doc_json = serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json))
+            .mount(&server)
+            .await;
+
+        let key = test_enc_key();
+        let claims = make_claims_json(&base, "client-abc", 300, Some("actual-nonce"));
+        let id_token = token_with_kid(&key, &claims, "test-key-1");
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at",
+                "id_token": id_token,
+                "token_type": "Bearer"
+            })))
+            .mount(&server)
+            .await;
+
+        let jwks_json = serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": "test-key-1",
+                "use": "sig",
+                "x": TEST_PUB_X
+            }]
+        });
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&server)
+            .await;
+
+        let metadata_url = format!("{base}/.well-known/openid-configuration");
+        let cfg = base_config(Some(&metadata_url));
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let err = svc
+            .handle_callback(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "auth-code",
+                "https://rp/cb",
+                "expected-nonce", // does not match "actual-nonce" in the token
+            )
+            .await
+            .expect_err("nonce mismatch must be rejected");
+        assert!(
+            matches!(err, FederationError::IdTokenValidationFailed(ref m) if m.contains("Nonce mismatch")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_callback_rejects_missing_nonce_claim() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let doc_json = serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc_json))
+            .mount(&server)
+            .await;
+
+        let key = test_enc_key();
+        // No nonce claim at all.
+        let claims = make_claims_json(&base, "client-abc", 300, None);
+        let id_token = token_with_kid(&key, &claims, "test-key-1");
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at",
+                "id_token": id_token,
+                "token_type": "Bearer"
+            })))
+            .mount(&server)
+            .await;
+
+        let jwks_json = serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": "test-key-1",
+                "use": "sig",
+                "x": TEST_PUB_X
+            }]
+        });
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&server)
+            .await;
+
+        let metadata_url = format!("{base}/.well-known/openid-configuration");
+        let cfg = base_config(Some(&metadata_url));
+        let svc = make_config_service(
+            ConfigOutcome::Found(Box::new(cfg)),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let err = svc
+            .handle_callback(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "auth-code",
+                "https://rp/cb",
+                "expected-nonce",
+            )
+            .await
+            .expect_err("missing nonce claim must be rejected");
+        assert!(
+            matches!(err, FederationError::IdTokenValidationFailed(ref m) if m.contains("Missing nonce")),
+            "{err:?}"
+        );
+    }
+
+    // ----- verify_id_token via the real service method -----
+
+    #[tokio::test]
+    async fn verify_id_token_service_method_accepts_valid_token() {
+        let tid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        let cache = Arc::new(JwksCache::new());
+        populate_cache(Arc::clone(&cache), tid, cid, test_jwks()).await;
+
+        let svc = make_config_service(ConfigOutcome::NotFound, Arc::clone(&cache));
+
+        let key = test_enc_key();
+        let claims = make_claims_json("https://idp.example.com", "client-abc", 300, Some("n1"));
+        let token = token_with_kid(&key, &claims, "test-key-1");
+        let d = disc("https://idp.example.com");
+
+        let result = svc
+            .verify_id_token(&token, &d, "client-abc", &["EdDSA".to_string()], (tid, cid))
+            .await
+            .expect("valid token via real service method must be accepted");
+        assert_eq!(result.sub, "user-sub-123");
+    }
+
+    #[tokio::test]
+    async fn verify_id_token_service_method_rejects_invalid_signature() {
+        let tid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        let cache = Arc::new(JwksCache::new());
+        populate_cache(Arc::clone(&cache), tid, cid, test_jwks()).await;
+
+        let svc = make_config_service(ConfigOutcome::NotFound, Arc::clone(&cache));
+
+        // Sign with a DIFFERENT key than the one in the JWKS (same kid),
+        // so the signature check itself fails.
+        let wrong_key = EncodingKey::from_ed_pem(
+            "-----BEGIN PRIVATE KEY-----\n\
+MC4CAQAwBQYDK2VwBCIEIBLfK61TK+CQCIsKn3PAlRbLzK4ggyzu56VHk2CVWec0\n\
+-----END PRIVATE KEY-----"
+                .as_bytes(),
+        )
+        .expect("wrong test key must parse");
+        let claims = make_claims_json("https://idp.example.com", "client-abc", 300, Some("n1"));
+        let token = token_with_kid(&wrong_key, &claims, "test-key-1");
+        let d = disc("https://idp.example.com");
+
+        let result = svc
+            .verify_id_token(&token, &d, "client-abc", &["EdDSA".to_string()], (tid, cid))
+            .await;
+        assert!(
+            matches!(result, Err(FederationError::JwtSignatureInvalid)),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_id_token_service_method_rejects_disallowed_alg() {
+        let tid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        let cache = Arc::new(JwksCache::new());
+        populate_cache(Arc::clone(&cache), tid, cid, test_jwks()).await;
+
+        let svc = make_config_service(ConfigOutcome::NotFound, Arc::clone(&cache));
+
+        let key = test_enc_key();
+        let claims = make_claims_json("https://idp.example.com", "client-abc", 300, Some("n1"));
+        let token = token_with_kid(&key, &claims, "test-key-1");
+        let d = disc("https://idp.example.com");
+
+        // allowed_algorithms only lists RS256; token is signed EdDSA.
+        let result = svc
+            .verify_id_token(&token, &d, "client-abc", &["RS256".to_string()], (tid, cid))
+            .await;
+        assert!(
+            matches!(result, Err(FederationError::AlgorithmNotAllowed(_))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_id_token_service_method_forced_refetch_on_unknown_kid() {
+        let tid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+
+        let jwk_json = serde_json::json!({
+            "keys": [{ "kty": "OKP", "crv": "Ed25519", "kid": "known-key",
+                        "use": "sig", "x": TEST_PUB_X }]
+        });
+        let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_value(jwk_json).unwrap();
+        let cache = Arc::new(JwksCache::new());
+        populate_cache(Arc::clone(&cache), tid, cid, jwks).await;
+
+        let svc = make_config_service(ConfigOutcome::NotFound, Arc::clone(&cache));
+
+        let key = test_enc_key();
+        let claims = make_claims_json("https://idp.example.com", "client-abc", 300, Some("n1"));
+        let mut h = Header::new(Algorithm::EdDSA);
+        h.kid = Some("unknown-kid".to_string());
+        let token = encode(&h, &claims, &key).unwrap();
+
+        let d = OidcDiscoveryDocument {
+            issuer: "https://idp.example.com".to_string(),
+            authorization_endpoint: "https://idp.example.com/auth".to_string(),
+            token_endpoint: "https://idp.example.com/token".to_string(),
+            userinfo_endpoint: None,
+            jwks_uri: "http://127.0.0.1:0/unreachable-jwks".to_string(),
+        };
+
+        let result = svc
+            .verify_id_token(&token, &d, "client-abc", &["EdDSA".to_string()], (tid, cid))
+            .await;
+        assert!(
+            matches!(result, Err(FederationError::JwksKidUnknown)),
+            "{result:?}"
+        );
+    }
+
+    /// Unknown `kid` triggers a forced refetch (D-01/D-02/D-03) that *does*
+    /// find the key at the live JWKS endpoint — exercises the success arm of
+    /// the forced-refetch branch (as opposed to the sibling test above,
+    /// where the forced refetch itself fails because the endpoint is
+    /// unreachable).
+    #[tokio::test]
+    async fn verify_id_token_service_method_forced_refetch_finds_key_and_succeeds() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+
+        // Cache is stale: only knows about an unrelated kid.
+        let stale_jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_value(serde_json::json!({
+            "keys": [{ "kty": "OKP", "crv": "Ed25519", "kid": "known-key",
+                        "use": "sig", "x": TEST_PUB_X }]
+        }))
+        .unwrap();
+
+        let tid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        let cache = Arc::new(JwksCache::new_allow_private_networks());
+        populate_cache(Arc::clone(&cache), tid, cid, stale_jwks).await;
+
+        // Live endpoint has the real key under "test-key-1".
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks()))
+            .mount(&server)
+            .await;
+
+        let svc = make_config_service(ConfigOutcome::NotFound, Arc::clone(&cache));
+
+        let key = test_enc_key();
+        let claims = make_claims_json(&base, "client-abc", 300, Some("n1"));
+        let token = token_with_kid(&key, &claims, "test-key-1");
+        let d = OidcDiscoveryDocument {
+            issuer: base.clone(),
+            authorization_endpoint: format!("{base}/auth"),
+            token_endpoint: format!("{base}/token"),
+            userinfo_endpoint: None,
+            jwks_uri: format!("{base}/jwks"),
+        };
+
+        let result = svc
+            .verify_id_token(&token, &d, "client-abc", &["EdDSA".to_string()], (tid, cid))
+            .await
+            .expect("forced refetch must find the key and verification must succeed");
+        assert_eq!(result.sub, "user-sub-123");
+    }
+
+    /// A structurally valid, correctly-signed token whose claims fail the
+    /// `iss`/`aud`/`exp` checks must be rejected via the real service
+    /// method's `JwtClaimRejected` arm (not just the free-standing `verify()`
+    /// test helper used by the sibling `verify_rejects_*` tests above).
+    #[tokio::test]
+    async fn verify_id_token_service_method_rejects_claim_validation_failure() {
+        let tid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        let cache = Arc::new(JwksCache::new());
+        populate_cache(Arc::clone(&cache), tid, cid, test_jwks()).await;
+
+        let svc = make_config_service(ConfigOutcome::NotFound, Arc::clone(&cache));
+
+        let key = test_enc_key();
+        // aud does not match the client_id passed to verify_id_token.
+        let claims = make_claims_json("https://idp.example.com", "someone-else", 300, Some("n1"));
+        let token = token_with_kid(&key, &claims, "test-key-1");
+        let d = disc("https://idp.example.com");
+
+        let result = svc
+            .verify_id_token(&token, &d, "client-abc", &["EdDSA".to_string()], (tid, cid))
+            .await;
+        assert!(
+            matches!(result, Err(FederationError::JwtClaimRejected(_))),
+            "{result:?}"
+        );
+    }
+
+    // ----- map_algorithm_strings / find_jwk direct coverage -----
+
+    #[test]
+    fn map_algorithm_strings_maps_every_supported_name_and_drops_unknown() {
+        let names: Vec<String> = [
+            "RS256", "RS384", "RS512", "ES256", "ES384", "EdDSA", "PS256", "PS384", "PS512",
+            "none", "bogus",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let mapped = map_algorithm_strings(&names);
+        assert_eq!(
+            mapped,
+            vec![
+                Algorithm::RS256,
+                Algorithm::RS384,
+                Algorithm::RS512,
+                Algorithm::ES256,
+                Algorithm::ES384,
+                Algorithm::EdDSA,
+                Algorithm::PS256,
+                Algorithm::PS384,
+                Algorithm::PS512,
+            ]
+        );
+    }
+
+    #[test]
+    fn find_jwk_returns_none_for_no_kid_and_multiple_keys() {
+        let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_value(serde_json::json!({
+            "keys": [
+                { "kty": "OKP", "crv": "Ed25519", "kid": "k1", "use": "sig", "x": TEST_PUB_X },
+                { "kty": "OKP", "crv": "Ed25519", "kid": "k2", "use": "sig", "x": TEST_PUB_X },
+            ]
+        }))
+        .unwrap();
+        assert!(find_jwk(&jwks, None).is_none());
+    }
+
+    #[test]
+    fn find_jwk_returns_sole_key_when_kid_absent_and_single_key() {
+        let jwks = test_jwks();
+        let found = find_jwk(&jwks, None);
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn find_jwk_returns_none_when_kid_requested_not_present() {
+        let jwks = test_jwks();
+        assert!(find_jwk(&jwks, Some("does-not-exist")).is_none());
     }
 }

@@ -459,3 +459,420 @@ async fn first_time_oidc_sso_sets_cookies_and_me_succeeds() {
         "the provisioned user's email must come from the ID token's email claim"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Authenticated (account-linking) OIDC endpoints —
+// `POST /api/v1/federation/oidc/authorize` + `.../oidc/callback`.
+//
+// `federation_test.rs` only ever exercises these with
+// `oidc_federation_service: None` (AppState::for_test's default), so it can
+// only reach the "federation encryption key not configured" branch. These
+// tests reuse THIS file's `test_app!` (which wires a real
+// `OidcFederationService` against the wiremock IdP, exactly like the
+// first-time-SSO test above) to drive the real success/error branches:
+// server-side state/nonce persistence, IdP round-trip, and error mapping.
+// ---------------------------------------------------------------------------
+
+/// Starts a wiremock IdP with discovery + JWKS mounted, and returns
+/// `(MockServer, TestKeys, client_id)`. `/token` is NOT mounted — callers
+/// mount it themselves once they know the server-generated nonce (mirrors
+/// the first-time-SSO test above).
+async fn start_mock_idp() -> (MockServer, TestKeys, &'static str) {
+    let idp = MockServer::start().await;
+    let issuer = idp.uri();
+    let keys = TestKeys::generate("mock-idp-kid");
+    let client_id = "mock-idp-client";
+
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(keys.jwks_json()))
+        .mount(&idp)
+        .await;
+
+    let discovery_doc = json!({
+        "issuer": issuer,
+        "authorization_endpoint": format!("{issuer}/authorize"),
+        "token_endpoint": format!("{issuer}/token"),
+        "jwks_uri": format!("{issuer}/jwks"),
+    });
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(discovery_doc))
+        .mount(&idp)
+        .await;
+
+    (idp, keys, client_id)
+}
+
+/// Full happy path through the AUTHENTICATED (account-linking)
+/// `/api/v1/federation/oidc/authorize` + `/api/v1/federation/oidc/callback`
+/// endpoints: builds the authorize URL (persisting server-side state/nonce
+/// via `FederationLoginState`), then the callback consumes that state,
+/// round-trips the mock IdP, and provisions a new user.
+#[actix_rt::test]
+async fn oidc_authorize_and_callback_authenticated_happy_path() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin_user_id = create_admin_user(&db, tenant_id).await;
+    let admin_token = mint_token(&auth, admin_user_id, tenant_id, org_id);
+
+    let (idp, keys, client_id) = start_mock_idp().await;
+    let issuer = idp.uri();
+
+    let jwks_cache = Arc::new(JwksCache::new_allow_private_networks());
+    let app = test_app!(db, auth, jwks_cache);
+
+    let create_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "provider": "MockIdP",
+            "protocol": "OidcConnect",
+            "metadata_url": format!("{issuer}/.well-known/openid-configuration"),
+            "client_id": client_id,
+            "client_secret": "mock-idp-secret",
+        }))
+        .to_request();
+    let create_resp = test::call_service(&app, create_req).await;
+    assert_eq!(create_resp.status().as_u16(), 201);
+    let config_body: serde_json::Value = test::read_body_json(create_resp).await;
+    let config_id = config_body["id"].as_str().unwrap().to_string();
+
+    // --- authorize: builds URL + persists server-side state/nonce. ---
+    let authorize_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation/oidc/authorize")
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "config_id": config_id,
+            "redirect_uri": "https://rp.example.com/cb",
+            "state": "client-state-1",
+            "nonce": "client-supplied-nonce-ignored",
+        }))
+        .to_request();
+    let authorize_resp = test::call_service(&app, authorize_req).await;
+    assert_eq!(
+        authorize_resp.status().as_u16(),
+        200,
+        "authenticated oidc/authorize must succeed"
+    );
+    let authorize_body: serde_json::Value = test::read_body_json(authorize_resp).await;
+    let authorize_url = authorize_body["url"].as_str().unwrap();
+    let parsed = url::Url::parse(authorize_url).expect("valid authorize URL");
+    // T-04-31: the client-supplied nonce is never used — a fresh server-side
+    // nonce is generated and embedded instead.
+    let server_nonce = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "nonce")
+        .map(|(_, v)| v.into_owned())
+        .expect("authorize_url must carry a server-generated nonce");
+    assert_ne!(server_nonce, "client-supplied-nonce-ignored");
+
+    let now = now_secs();
+    let id_token_claims = json!({
+        "sub": "account-link-subject-1",
+        "iss": issuer,
+        "aud": client_id,
+        "exp": now + 3600,
+        "iat": now,
+        "nonce": server_nonce,
+        "email": "account-link-user@example.com",
+    });
+    let id_token = sign_jwt(&id_token_claims, &keys.encoding_key(), "mock-idp-kid");
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "at",
+            "id_token": id_token,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        })))
+        .mount(&idp)
+        .await;
+
+    let callback_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation/oidc/callback")
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "config_id": config_id,
+            "code": "auth-code",
+            "redirect_uri": "https://rp.example.com/cb",
+            "state": "client-state-1",
+            "nonce": "client-supplied-nonce-ignored",
+        }))
+        .to_request();
+    let callback_resp = test::call_service(&app, callback_req).await;
+    assert_eq!(
+        callback_resp.status().as_u16(),
+        200,
+        "authenticated oidc/callback must succeed"
+    );
+    let callback_body: serde_json::Value = test::read_body_json(callback_resp).await;
+    assert_eq!(callback_body["newly_provisioned"].as_bool(), Some(true));
+    assert!(callback_body.get("user_id").is_some());
+    assert!(callback_body.get("federation_link_id").is_some());
+}
+
+/// The authenticated `oidc/callback` must reject a `state` value that was
+/// never issued by `oidc/authorize` (or has already been consumed/expired) —
+/// `federation_login_state_repo.consume_by_state` returns `None`, which maps
+/// to `AuthenticationFailed` (401), not a panic or 500.
+#[actix_rt::test]
+async fn oidc_callback_authenticated_rejects_unknown_state() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin_user_id = create_admin_user(&db, tenant_id).await;
+    let admin_token = mint_token(&auth, admin_user_id, tenant_id, org_id);
+
+    let jwks_cache = Arc::new(JwksCache::new_allow_private_networks());
+    let app = test_app!(db, auth, jwks_cache);
+
+    let callback_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation/oidc/callback")
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "config_id": Uuid::new_v4(),
+            "code": "auth-code",
+            "redirect_uri": "https://rp.example.com/cb",
+            "state": "never-issued-state",
+            "nonce": "irrelevant",
+        }))
+        .to_request();
+    let callback_resp = test::call_service(&app, callback_req).await;
+    assert_eq!(
+        callback_resp.status().as_u16(),
+        401,
+        "unknown/expired state must be rejected as an authentication failure"
+    );
+}
+
+/// When the external IdP's `/token` endpoint errors, `handle_callback`'s
+/// `TokenExchangeFailed` must propagate through the authenticated
+/// `oidc/callback` handler as an upstream-dependency failure (503), not a
+/// 500 — exercises the handler's `map_err(AxiamError::from)` arm end to end.
+#[actix_rt::test]
+async fn oidc_callback_authenticated_propagates_idp_token_error() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin_user_id = create_admin_user(&db, tenant_id).await;
+    let admin_token = mint_token(&auth, admin_user_id, tenant_id, org_id);
+
+    let (idp, _keys, client_id) = start_mock_idp().await;
+    let issuer = idp.uri();
+    // IdP's token endpoint is broken.
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&idp)
+        .await;
+
+    let jwks_cache = Arc::new(JwksCache::new_allow_private_networks());
+    let app = test_app!(db, auth, jwks_cache);
+
+    let create_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "provider": "MockIdP",
+            "protocol": "OidcConnect",
+            "metadata_url": format!("{issuer}/.well-known/openid-configuration"),
+            "client_id": client_id,
+            "client_secret": "mock-idp-secret",
+        }))
+        .to_request();
+    let create_resp = test::call_service(&app, create_req).await;
+    assert_eq!(create_resp.status().as_u16(), 201);
+    let config_body: serde_json::Value = test::read_body_json(create_resp).await;
+    let config_id = config_body["id"].as_str().unwrap().to_string();
+
+    let authorize_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation/oidc/authorize")
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "config_id": config_id,
+            "redirect_uri": "https://rp.example.com/cb",
+            "state": "client-state-err",
+            "nonce": "irrelevant",
+        }))
+        .to_request();
+    let authorize_resp = test::call_service(&app, authorize_req).await;
+    assert_eq!(authorize_resp.status().as_u16(), 200);
+
+    let callback_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation/oidc/callback")
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "config_id": config_id,
+            "code": "auth-code",
+            "redirect_uri": "https://rp.example.com/cb",
+            "state": "client-state-err",
+            "nonce": "irrelevant",
+        }))
+        .to_request();
+    let callback_resp = test::call_service(&app, callback_req).await;
+    assert_eq!(
+        callback_resp.status().as_u16(),
+        503,
+        "an upstream IdP token-endpoint failure must surface as 503, not 500"
+    );
+}
+
+/// A disabled federation config must reject the authenticated
+/// `oidc/authorize` call with a validation error (400) — exercises
+/// `build_authorization_url`'s `ConfigDisabled` branch end to end through
+/// the handler's error mapping, using a REAL (not `None`) service.
+#[actix_rt::test]
+async fn oidc_authorize_authenticated_rejects_disabled_config() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin_user_id = create_admin_user(&db, tenant_id).await;
+    let admin_token = mint_token(&auth, admin_user_id, tenant_id, org_id);
+
+    let (idp, _keys, client_id) = start_mock_idp().await;
+    let issuer = idp.uri();
+
+    let jwks_cache = Arc::new(JwksCache::new_allow_private_networks());
+    let app = test_app!(db, auth, jwks_cache);
+
+    let create_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "provider": "MockIdP",
+            "protocol": "OidcConnect",
+            "metadata_url": format!("{issuer}/.well-known/openid-configuration"),
+            "client_id": client_id,
+            "client_secret": "mock-idp-secret",
+        }))
+        .to_request();
+    let create_resp = test::call_service(&app, create_req).await;
+    assert_eq!(create_resp.status().as_u16(), 201);
+    let config_body: serde_json::Value = test::read_body_json(create_resp).await;
+    let config_id = config_body["id"].as_str().unwrap().to_string();
+
+    // Disable it via the admin API.
+    let disable_req = test::TestRequest::put()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/federation-configs/{config_id}"))
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({ "enabled": false }))
+        .to_request();
+    let disable_resp = test::call_service(&app, disable_req).await;
+    assert_eq!(disable_resp.status().as_u16(), 200);
+
+    let authorize_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation/oidc/authorize")
+        .insert_header(("Authorization", format!("Bearer {admin_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "config_id": config_id,
+            "redirect_uri": "https://rp.example.com/cb",
+            "state": "some-state",
+            "nonce": "some-nonce",
+        }))
+        .to_request();
+    let authorize_resp = test::call_service(&app, authorize_req).await;
+    assert_eq!(
+        authorize_resp.status().as_u16(),
+        400,
+        "authorize against a disabled config must be rejected"
+    );
+}
+
+/// Cross-tenant isolation: a federation config created under tenant A must
+/// be invisible to an admin authenticated as tenant B — `oidc/authorize`
+/// must 404 (`FederationError::ConfigNotFound` via `get_by_id`'s
+/// tenant-scoped lookup), not leak the other tenant's config.
+#[actix_rt::test]
+async fn oidc_authorize_authenticated_rejects_cross_tenant_config() {
+    let (db, org_id, tenant_a) = setup_db().await;
+    let auth = test_auth_config();
+
+    // A second, unrelated tenant under the same org.
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let tenant_b = tenant_repo
+        .create(CreateTenant {
+            organization_id: org_id,
+            name: "Other Tenant".into(),
+            slug: "sso-first-time-tenant-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let admin_a = create_admin_user(&db, tenant_a).await;
+    let admin_a_token = mint_token(&auth, admin_a, tenant_a, org_id);
+    let admin_b = create_admin_user(&db, tenant_b.id).await;
+    let admin_b_token = mint_token(&auth, admin_b, tenant_b.id, org_id);
+
+    let jwks_cache = Arc::new(JwksCache::new_allow_private_networks());
+    let app = test_app!(db, auth, jwks_cache);
+
+    // Config created under tenant A.
+    let create_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation-configs")
+        .insert_header(("Authorization", format!("Bearer {admin_a_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "provider": "MockIdP",
+            "protocol": "OidcConnect",
+            "metadata_url": "https://idp.example.com/.well-known/openid-configuration",
+            "client_id": "cid",
+            "client_secret": "secret",
+        }))
+        .to_request();
+    let create_resp = test::call_service(&app, create_req).await;
+    assert_eq!(create_resp.status().as_u16(), 201);
+    let config_body: serde_json::Value = test::read_body_json(create_resp).await;
+    let config_id = config_body["id"].as_str().unwrap().to_string();
+
+    // Tenant B's admin attempts to authorize against tenant A's config.
+    let authorize_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/federation/oidc/authorize")
+        .insert_header(("Authorization", format!("Bearer {admin_b_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(json!({
+            "config_id": config_id,
+            "redirect_uri": "https://rp.example.com/cb",
+            "state": "some-state",
+            "nonce": "some-nonce",
+        }))
+        .to_request();
+    let authorize_resp = test::call_service(&app, authorize_req).await;
+    assert_eq!(
+        authorize_resp.status().as_u16(),
+        404,
+        "a config from a different tenant must be invisible (404), not leaked"
+    );
+}

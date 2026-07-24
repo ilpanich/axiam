@@ -5,8 +5,8 @@ import { apiMock, res } from "@/test/apiMock";
 vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 let searchParamsString = "token=tok-1&tenant_id=ten-1";
-vi.mock("react-router-dom", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react-router-dom")>();
+vi.mock("react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router")>();
   return {
     ...actual,
     useSearchParams: () => [new URLSearchParams(searchParamsString), vi.fn()],

@@ -1,7 +1,7 @@
 import { type ReactElement, type ReactNode } from "react";
 import { render, type RenderOptions } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 
 // A fresh QueryClient per render keeps caches isolated between tests, and we
 // disable retries so a rejected query settles immediately.

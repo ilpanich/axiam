@@ -1,5 +1,5 @@
 import { useState, useActionState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { ArrowLeft, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { authService } from "@/services/auth";
 import { PageHeader } from "@/components/PageHeader";

@@ -1,5 +1,5 @@
 import { useState, useActionState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { User, Lock, Shield, CheckCircle2, AlertCircle, Pencil, X, Loader2 } from "lucide-react";
 import { authService } from "@/services/auth";

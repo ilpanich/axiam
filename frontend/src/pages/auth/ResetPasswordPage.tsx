@@ -1,5 +1,5 @@
 import { useState, useActionState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router";
 import { ArrowLeft, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { authService } from "@/services/auth";
 import { PublicLayout } from "@/components/layout/PublicLayout";

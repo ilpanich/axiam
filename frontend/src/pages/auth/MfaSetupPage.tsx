@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { Loader2, ShieldAlert } from "lucide-react";
 import { authService } from "@/services/auth";
 import { fetchCurrentUser } from "@/lib/fetchCurrentUser";

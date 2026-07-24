@@ -111,7 +111,7 @@ async fn get_by_id_not_found() {
     let (db, _org, tenant_id) = setup().await;
     let repo = SurrealCertificateRepository::new(db);
     let err = repo.get_by_id(tenant_id, Uuid::new_v4()).await.unwrap_err();
-    assert!(format!("{err:?}").to_lowercase().contains("notfound") || format!("{err}").len() > 0);
+    assert!(format!("{err:?}").to_lowercase().contains("notfound") || !format!("{err}").is_empty());
 }
 
 #[tokio::test]

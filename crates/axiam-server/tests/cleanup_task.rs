@@ -31,6 +31,14 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 /// Convenience: connect an in-memory DB and run migrations.
+/// Runtime-generated throwaway password for fixture users that are never
+/// authenticated (these tests exercise cleanup/erasure logic, not login).
+/// Deriving it at runtime avoids a hard-coded credential flowing into the
+/// `password` field, which static scanners flag as a critical secret.
+fn fixture_password() -> String {
+    format!("Fx1!{}", Uuid::new_v4().simple())
+}
+
 async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
     let db = Surreal::new::<Mem>(()).await.expect("in-memory DB");
     db.use_ns("test").use_db("test").await.expect("use ns/db");
@@ -238,7 +246,7 @@ async fn erasure_pipeline_fatal_on_pseudonymize_failure() {
             tenant_id,
             username: "fatal_pseudonymize_user".into(),
             email: "fatal_pseudonymize@example.com".into(),
-            password: "FatalPseudo1234!".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
@@ -358,13 +366,17 @@ async fn run_erasure_pipeline_success_path_scrubs_audit_anonymizes_user_and_writ
             tenant_id,
             username: "erasure_success_user".into(),
             email: "erasure_success@example.com".into(),
-            password: "ErasureSuccess1234!".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
         .expect("create user");
     user_repo
-        .mark_deletion_pending(tenant_id, user.id, Utc::now() - chrono::Duration::seconds(1))
+        .mark_deletion_pending(
+            tenant_id,
+            user.id,
+            Utc::now() - chrono::Duration::seconds(1),
+        )
         .await
         .expect("mark deletion pending");
 
@@ -434,7 +446,10 @@ async fn run_erasure_pipeline_success_path_scrubs_audit_anonymizes_user_and_writ
         "ip_address must be scrubbed"
     );
     assert_eq!(
-        scrubbed_entry.metadata.get("actor_pseudonym").and_then(|v| v.as_str()),
+        scrubbed_entry
+            .metadata
+            .get("actor_pseudonym")
+            .and_then(|v| v.as_str()),
         Some(pseudonym.as_str()),
         "metadata.actor_pseudonym must carry the new correlation key"
     );
@@ -460,28 +475,44 @@ struct FailingAnonymizeUserRepo;
 
 impl UserRepository for FailingAnonymizeUserRepo {
     async fn create(&self, _: CreateUser) -> AxiamResult<User> {
-        unimplemented!("not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails")
+        unimplemented!(
+            "not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails"
+        )
     }
     async fn get_by_id(&self, _: Uuid, _: Uuid) -> AxiamResult<User> {
-        unimplemented!("not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails")
+        unimplemented!(
+            "not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails"
+        )
     }
     async fn get_by_username(&self, _: Uuid, _: &str) -> AxiamResult<User> {
-        unimplemented!("not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails")
+        unimplemented!(
+            "not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails"
+        )
     }
     async fn get_by_email(&self, _: Uuid, _: &str) -> AxiamResult<User> {
-        unimplemented!("not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails")
+        unimplemented!(
+            "not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails"
+        )
     }
     async fn update(&self, _: Uuid, _: Uuid, _: UpdateUser) -> AxiamResult<User> {
-        unimplemented!("not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails")
+        unimplemented!(
+            "not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails"
+        )
     }
     async fn delete(&self, _: Uuid, _: Uuid) -> AxiamResult<()> {
-        unimplemented!("not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails")
+        unimplemented!(
+            "not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails"
+        )
     }
     async fn update_totp_step(&self, _: Uuid, _: Uuid, _: u64) -> AxiamResult<bool> {
-        unimplemented!("not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails")
+        unimplemented!(
+            "not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails"
+        )
     }
     async fn list(&self, _: Uuid, _: Pagination) -> AxiamResult<PaginatedResult<User>> {
-        unimplemented!("not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails")
+        unimplemented!(
+            "not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails"
+        )
     }
     async fn increment_failed_logins(
         &self,
@@ -492,7 +523,9 @@ impl UserRepository for FailingAnonymizeUserRepo {
         _: f64,
         _: i64,
     ) -> AxiamResult<()> {
-        unimplemented!("not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails")
+        unimplemented!(
+            "not exercised by run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails"
+        )
     }
     async fn anonymize_user(&self, _: Uuid, _: Uuid, _: &str, _: &str) -> AxiamResult<()> {
         Err(AxiamError::Internal(
@@ -604,13 +637,17 @@ async fn run_erasure_pipeline_returns_err_when_erasure_proof_create_fails_after_
             tenant_id,
             username: "proof_fail_user".into(),
             email: "proof_fail@example.com".into(),
-            password: "ProofFail12345!".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
         .expect("create user");
     user_repo
-        .mark_deletion_pending(tenant_id, user.id, Utc::now() - chrono::Duration::seconds(1))
+        .mark_deletion_pending(
+            tenant_id,
+            user.id,
+            Utc::now() - chrono::Duration::seconds(1),
+        )
         .await
         .expect("mark deletion pending");
 
@@ -665,13 +702,17 @@ async fn run_erasure_pipeline_retry_after_success_is_rejected_idempotently() {
             tenant_id,
             username: "retry_user".into(),
             email: "retry@example.com".into(),
-            password: "RetryUser12345!".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await
         .expect("create user");
     user_repo
-        .mark_deletion_pending(tenant_id, user.id, Utc::now() - chrono::Duration::seconds(1))
+        .mark_deletion_pending(
+            tenant_id,
+            user.id,
+            Utc::now() - chrono::Duration::seconds(1),
+        )
         .await
         .expect("mark deletion pending");
 

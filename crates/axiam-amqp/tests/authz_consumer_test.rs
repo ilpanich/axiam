@@ -47,6 +47,13 @@ const MASTER: &[u8] = b"test-amqp-master-signing-key-for-authz";
 // Harness
 // ---------------------------------------------------------------------------
 
+/// Runtime-generated throwaway password for the fixture user, which never
+/// authenticates (this test drives the authz consumer, not login). Deriving it
+/// at runtime avoids a hard-coded credential flowing into the `password` field.
+fn fixture_password() -> String {
+    format!("Fx1!{}", Uuid::new_v4().simple())
+}
+
 async fn setup_db() -> Surreal<Db> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
@@ -88,7 +95,7 @@ async fn seed_tenant_user(db: &Surreal<Db>) -> (Uuid, Uuid) {
             tenant_id: tenant.id,
             username: "alice".into(),
             email: "alice@example.com".into(),
-            password: "pass123456789".into(),
+            password: fixture_password(),
             metadata: None,
         })
         .await

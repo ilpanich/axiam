@@ -398,7 +398,10 @@ async fn revoke_from_role_nonexistent_permission_returns_403_cross_tenant_denied
         "revoking a nonexistent permission must fail the CQ-B07 tenant-membership guard"
     );
     let body: Value = test::read_body_json(resp).await;
-    assert_eq!(body["message"], "Authorization denied: cross-tenant permission revocation denied");
+    assert_eq!(
+        body["message"],
+        "Authorization denied: cross-tenant permission revocation denied"
+    );
 }
 
 #[actix_rt::test]

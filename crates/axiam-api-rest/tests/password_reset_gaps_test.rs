@@ -436,7 +436,10 @@ async fn request_reset_rate_limited_after_max_per_day_still_returns_sent_true() 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(auth.clone()))
-            .app_data(web::Data::new(AppState::for_test(f.db.clone(), auth.clone())))
+            .app_data(web::Data::new(AppState::for_test(
+                f.db.clone(),
+                auth.clone(),
+            )))
             .app_data(web::Data::new(
                 Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
             ))

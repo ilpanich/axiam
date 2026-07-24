@@ -1075,8 +1075,12 @@ mod tests {
             .unwrap();
 
         let policy = relaxed_policy();
+        // Runtime-generated new password: its value is irrelevant here (the test
+        // asserts the federated-user rejection, which precedes any password use)
+        // and deriving it avoids a hard-coded credential in the password argument.
+        let new_password = format!("Nn1!{}", uuid::Uuid::new_v4().simple());
         let result = svc
-            .confirm_reset(tid, &raw_token, "NewStr0ngPassword", &policy, None, None)
+            .confirm_reset(tid, &raw_token, &new_password, &policy, None, None)
             .await;
 
         assert!(result.is_err());

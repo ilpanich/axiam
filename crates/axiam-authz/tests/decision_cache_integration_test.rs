@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axiam_authz::types::{AccessDecision, AccessRequest};
-use axiam_authz::{AuthorizationEngine, DecisionCache, DecisionCacheConfig};
+use axiam_authz::{AuthorizationEngine, BatchStrategy, DecisionCache, DecisionCacheConfig};
 use axiam_core::error::AxiamResult;
 use axiam_core::models::group::{CreateGroup, Group, UpdateGroup};
 use axiam_core::models::permission::{
@@ -659,5 +659,61 @@ async fn batch_path_caches_and_invalidates() {
             AccessDecision::Deny("no roles assigned".into()),
             AccessDecision::Deny("no roles assigned".into()),
         ]
+    );
+}
+
+/// The [`BatchStrategy::Coalesced`] batch path with a decision cache attached
+/// (`evaluate_coalesced_cached`'s cache-enabled branch, distinct from the D10
+/// default `Concurrent` strategy exercised by `batch_path_caches_and_invalidates`
+/// above): a batch mixing an already-cached item (hit) with a never-seen item
+/// (miss) must serve the hit without touching the DB, evaluate only the miss
+/// through the shared-lookup coalesced path, and backfill it into the cache so
+/// a follow-up batch for that same request is then also served from cache.
+#[tokio::test]
+async fn coalesced_batch_with_cache_serves_hits_and_backfills_misses() {
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, _repo, counters) = build_engine(tenant, subject, resource, "read");
+    let engine = engine
+        .with_batch_config(BatchStrategy::Coalesced, 16)
+        .with_decision_cache(cache(Duration::from_secs(60)));
+
+    let hit_request = req(tenant, subject, resource, "read");
+    // Prime the cache via a single check_access call — this becomes the
+    // batch's cache HIT.
+    assert_eq!(
+        engine.check_access(&hit_request).await.unwrap(),
+        AccessDecision::Allow
+    );
+    let grants_after_prime = Counters::get(&counters.grants);
+
+    // "delete" was never checked -> a cache MISS that must go through the
+    // coalesced `evaluate_batch` path.
+    let miss_request = req(tenant, subject, resource, "delete");
+    let batch = vec![hit_request.clone(), miss_request.clone()];
+
+    let decisions = engine.check_access_batch(&batch).await.unwrap();
+    assert_eq!(decisions[0], AccessDecision::Allow, "served from cache");
+    assert_eq!(
+        decisions[1],
+        AccessDecision::Deny("no permission grants action 'delete'".into())
+    );
+    assert_eq!(
+        Counters::get(&counters.grants),
+        grants_after_prime + 1,
+        "only the miss triggers a fresh coalesced grants round-trip"
+    );
+
+    // The miss is now backfilled: a follow-up batch containing only that
+    // request must be served entirely from the cache (no new DB round-trip).
+    let grants_before_second = Counters::get(&counters.grants);
+    let second = engine
+        .check_access_batch(&[miss_request])
+        .await
+        .unwrap();
+    assert_eq!(second, vec![decisions[1].clone()]);
+    assert_eq!(
+        Counters::get(&counters.grants),
+        grants_before_second,
+        "the backfilled miss is now served from cache"
     );
 }

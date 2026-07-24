@@ -436,19 +436,61 @@
 <a href=#436 id=436 data-nosnippet>436</a>        </span><span class="macro">assert!</span>(delay &lt;= cfg.backoff_ceiling_ms);
 <a href=#437 id=437 data-nosnippet>437</a>    }
 <a href=#438 id=438 data-nosnippet>438</a>
-<a href=#439 id=439 data-nosnippet>439</a>    <span class="attr">#[test]
-<a href=#440 id=440 data-nosnippet>440</a>    </span><span class="kw">fn </span>webhook_retry_config_defaults_resolve_when_env_unset() {
-<a href=#441 id=441 data-nosnippet>441</a>        <span class="comment">// AXIAM__WEBHOOK__* is unique to this module — no other test in this
-<a href=#442 id=442 data-nosnippet>442</a>        // crate reads or writes these vars, so removing them here cannot
-<a href=#443 id=443 data-nosnippet>443</a>        // race with unrelated tests running in parallel in the same binary.
-<a href=#444 id=444 data-nosnippet>444</a>        </span><span class="kw">unsafe </span>{
-<a href=#445 id=445 data-nosnippet>445</a>            std::env::remove_var(<span class="string">"AXIAM__WEBHOOK__MAX_ATTEMPTS"</span>);
-<a href=#446 id=446 data-nosnippet>446</a>            std::env::remove_var(<span class="string">"AXIAM__WEBHOOK__BACKOFF_BASE_MS"</span>);
-<a href=#447 id=447 data-nosnippet>447</a>            std::env::remove_var(<span class="string">"AXIAM__WEBHOOK__BACKOFF_CEILING_MS"</span>);
-<a href=#448 id=448 data-nosnippet>448</a>        }
-<a href=#449 id=449 data-nosnippet>449</a>        <span class="kw">let </span>cfg = WebhookRetryConfig::from_env();
-<a href=#450 id=450 data-nosnippet>450</a>        <span class="kw">let </span>defaults = WebhookRetryConfig::default();
-<a href=#451 id=451 data-nosnippet>451</a>        <span class="macro">assert_eq!</span>(cfg, defaults);
-<a href=#452 id=452 data-nosnippet>452</a>    }
-<a href=#453 id=453 data-nosnippet>453</a>}
+<a href=#439 id=439 data-nosnippet>439</a>    <span class="doccomment">/// Direct unit test for the private `build_audit_entry` helper (D-09):
+<a href=#440 id=440 data-nosnippet>440</a>    /// proves the system-actor convention (`Uuid::nil()` + `ActorType::System`)
+<a href=#441 id=441 data-nosnippet>441</a>    /// and that every field passed through is threaded into the resulting
+<a href=#442 id=442 data-nosnippet>442</a>    /// `CreateAuditLogEntry` unchanged. This is the only part of the
+<a href=#443 id=443 data-nosnippet>443</a>    /// AMQP-consumer module reachable without a live RabbitMQ broker — the
+<a href=#444 id=444 data-nosnippet>444</a>    /// surrounding `start_webhook_consumer`/`handle_delivery_failure` drive a
+<a href=#445 id=445 data-nosnippet>445</a>    /// real `lapin::Channel`/`Acker`/`WebhookPublisher` (concrete types wired
+<a href=#446 id=446 data-nosnippet>446</a>    /// to an actual broker connection, not trait objects), so they cannot be
+<a href=#447 id=447 data-nosnippet>447</a>    /// exercised here; the crate's own `#[ignore]`d
+<a href=#448 id=448 data-nosnippet>448</a>    /// `webhook_consumer_retries_then_dlqs_and_audits_end_to_end` integration
+<a href=#449 id=449 data-nosnippet>449</a>    /// test (run via `just dev-up`) is the intended coverage path for those.
+<a href=#450 id=450 data-nosnippet>450</a>    </span><span class="attr">#[test]
+<a href=#451 id=451 data-nosnippet>451</a>    </span><span class="kw">fn </span>build_audit_entry_builds_expected_entry() {
+<a href=#452 id=452 data-nosnippet>452</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#453 id=453 data-nosnippet>453</a>        <span class="kw">let </span>webhook_id = Uuid::new_v4();
+<a href=#454 id=454 data-nosnippet>454</a>        <span class="kw">let </span>metadata = <span class="macro">serde_json::json!</span>({<span class="string">"delivery_id"</span>: <span class="string">"abc"</span>, <span class="string">"attempt"</span>: <span class="number">2</span>});
+<a href=#455 id=455 data-nosnippet>455</a>
+<a href=#456 id=456 data-nosnippet>456</a>        <span class="kw">let </span>entry = build_audit_entry(
+<a href=#457 id=457 data-nosnippet>457</a>            tenant_id,
+<a href=#458 id=458 data-nosnippet>458</a>            webhook_id,
+<a href=#459 id=459 data-nosnippet>459</a>            <span class="string">"webhook.delivery_attempt"</span>,
+<a href=#460 id=460 data-nosnippet>460</a>            AuditOutcome::Failure,
+<a href=#461 id=461 data-nosnippet>461</a>            metadata.clone(),
+<a href=#462 id=462 data-nosnippet>462</a>        );
+<a href=#463 id=463 data-nosnippet>463</a>
+<a href=#464 id=464 data-nosnippet>464</a>        <span class="macro">assert_eq!</span>(entry.tenant_id, tenant_id);
+<a href=#465 id=465 data-nosnippet>465</a>        <span class="macro">assert_eq!</span>(
+<a href=#466 id=466 data-nosnippet>466</a>            entry.actor_id,
+<a href=#467 id=467 data-nosnippet>467</a>            Uuid::nil(),
+<a href=#468 id=468 data-nosnippet>468</a>            <span class="string">"webhook delivery is system-initiated, never attributed to a real actor"
+<a href=#469 id=469 data-nosnippet>469</a>        </span>);
+<a href=#470 id=470 data-nosnippet>470</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(entry.actor_type, ActorType::System));
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="macro">assert_eq!</span>(entry.action, <span class="string">"webhook.delivery_attempt"</span>);
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="macro">assert_eq!</span>(entry.resource_id, <span class="prelude-val">Some</span>(webhook_id));
+<a href=#473 id=473 data-nosnippet>473</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(entry.outcome, AuditOutcome::Failure));
+<a href=#474 id=474 data-nosnippet>474</a>        <span class="macro">assert!</span>(
+<a href=#475 id=475 data-nosnippet>475</a>            entry.ip_address.is_none(),
+<a href=#476 id=476 data-nosnippet>476</a>            <span class="string">"webhook delivery has no client IP to attribute"
+<a href=#477 id=477 data-nosnippet>477</a>        </span>);
+<a href=#478 id=478 data-nosnippet>478</a>        <span class="macro">assert_eq!</span>(entry.metadata, <span class="prelude-val">Some</span>(metadata));
+<a href=#479 id=479 data-nosnippet>479</a>    }
+<a href=#480 id=480 data-nosnippet>480</a>
+<a href=#481 id=481 data-nosnippet>481</a>    <span class="attr">#[test]
+<a href=#482 id=482 data-nosnippet>482</a>    </span><span class="kw">fn </span>webhook_retry_config_defaults_resolve_when_env_unset() {
+<a href=#483 id=483 data-nosnippet>483</a>        <span class="comment">// AXIAM__WEBHOOK__* is unique to this module — no other test in this
+<a href=#484 id=484 data-nosnippet>484</a>        // crate reads or writes these vars, so removing them here cannot
+<a href=#485 id=485 data-nosnippet>485</a>        // race with unrelated tests running in parallel in the same binary.
+<a href=#486 id=486 data-nosnippet>486</a>        </span><span class="kw">unsafe </span>{
+<a href=#487 id=487 data-nosnippet>487</a>            std::env::remove_var(<span class="string">"AXIAM__WEBHOOK__MAX_ATTEMPTS"</span>);
+<a href=#488 id=488 data-nosnippet>488</a>            std::env::remove_var(<span class="string">"AXIAM__WEBHOOK__BACKOFF_BASE_MS"</span>);
+<a href=#489 id=489 data-nosnippet>489</a>            std::env::remove_var(<span class="string">"AXIAM__WEBHOOK__BACKOFF_CEILING_MS"</span>);
+<a href=#490 id=490 data-nosnippet>490</a>        }
+<a href=#491 id=491 data-nosnippet>491</a>        <span class="kw">let </span>cfg = WebhookRetryConfig::from_env();
+<a href=#492 id=492 data-nosnippet>492</a>        <span class="kw">let </span>defaults = WebhookRetryConfig::default();
+<a href=#493 id=493 data-nosnippet>493</a>        <span class="macro">assert_eq!</span>(cfg, defaults);
+<a href=#494 id=494 data-nosnippet>494</a>    }
+<a href=#495 id=495 data-nosnippet>495</a>}
 </code></pre></div></section></main></body></html>

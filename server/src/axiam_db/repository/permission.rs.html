@@ -158,7 +158,7 @@
 <a href=#158 id=158 data-nosnippet>158</a>
 <a href=#159 id=159 data-nosnippet>159</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = result
 <a href=#160 id=160 data-nosnippet>160</a>            .check()
-<a href=#161 id=161 data-nosnippet>161</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#161 id=161 data-nosnippet>161</a>            .map_err(|e| classify_write_error(e.to_string(), <span class="string">"permission"</span>))<span class="question-mark">?</span>;
 <a href=#162 id=162 data-nosnippet>162</a>
 <a href=#163 id=163 data-nosnippet>163</a>        <span class="kw">let </span>rows: Vec&lt;PermissionRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#164 id=164 data-nosnippet>164</a>        <span class="kw">let </span>row = take_first_or_not_found(rows, <span class="string">"permission"</span>, <span class="kw-2">&amp;</span>id_str)<span class="question-mark">?</span>;
@@ -246,7 +246,7 @@
 <a href=#246 id=246 data-nosnippet>246</a>        <span class="kw">let </span>result = builder.<span class="kw">await</span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#247 id=247 data-nosnippet>247</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = result
 <a href=#248 id=248 data-nosnippet>248</a>            .check()
-<a href=#249 id=249 data-nosnippet>249</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#249 id=249 data-nosnippet>249</a>            .map_err(|e| classify_write_error(e.to_string(), <span class="string">"permission"</span>))<span class="question-mark">?</span>;
 <a href=#250 id=250 data-nosnippet>250</a>
 <a href=#251 id=251 data-nosnippet>251</a>        <span class="kw">let </span>rows: Vec&lt;PermissionRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#252 id=252 data-nosnippet>252</a>        <span class="kw">let </span>row = take_first_or_not_found(rows, <span class="string">"permission"</span>, <span class="kw-2">&amp;</span>id_str)<span class="question-mark">?</span>;

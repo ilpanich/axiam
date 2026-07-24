@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["start_audit_consumer"]};
+window.SIDEBAR_ITEMS = {"enum":["AuditIngestOutcome"],"fn":["process_audit_event","start_audit_consumer"]};

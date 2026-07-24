@@ -348,5 +348,162 @@
 <a href=#348 id=348 data-nosnippet>348</a>            <span class="string">"expected fetch error to propagate once stale window has also elapsed: {result:?}"
 <a href=#349 id=349 data-nosnippet>349</a>        </span>);
 <a href=#350 id=350 data-nosnippet>350</a>    }
-<a href=#351 id=351 data-nosnippet>351</a>}
+<a href=#351 id=351 data-nosnippet>351</a>
+<a href=#352 id=352 data-nosnippet>352</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#353 id=353 data-nosnippet>353</a>    // R5 additions — real-fetch happy path, TTL-expiry refetch, and the
+<a href=#354 id=354 data-nosnippet>354</a>    // `fetch_discovery_document` error arms (via wiremock + the
+<a href=#355 id=355 data-nosnippet>355</a>    // `allow_private_networks` seam so a loopback mock IdP is reachable).
+<a href=#356 id=356 data-nosnippet>356</a>    // -----------------------------------------------------------------------
+<a href=#357 id=357 data-nosnippet>357</a>
+<a href=#358 id=358 data-nosnippet>358</a>    </span><span class="kw">fn </span>doc_json(base: <span class="kw-2">&amp;</span>str) -&gt; serde_json::Value {
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="macro">serde_json::json!</span>({
+<a href=#360 id=360 data-nosnippet>360</a>            <span class="string">"issuer"</span>: base,
+<a href=#361 id=361 data-nosnippet>361</a>            <span class="string">"authorization_endpoint"</span>: <span class="macro">format!</span>(<span class="string">"{base}/authorize"</span>),
+<a href=#362 id=362 data-nosnippet>362</a>            <span class="string">"token_endpoint"</span>: <span class="macro">format!</span>(<span class="string">"{base}/token"</span>),
+<a href=#363 id=363 data-nosnippet>363</a>            <span class="string">"jwks_uri"</span>: <span class="macro">format!</span>(<span class="string">"{base}/jwks"</span>),
+<a href=#364 id=364 data-nosnippet>364</a>        })
+<a href=#365 id=365 data-nosnippet>365</a>    }
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a>    <span class="attr">#[tokio::test]
+<a href=#368 id=368 data-nosnippet>368</a>    </span><span class="kw">async fn </span>cold_fetch_populates_cache_then_serves_from_cache() {
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="kw">use </span>wiremock::matchers::{method, path};
+<a href=#370 id=370 data-nosnippet>370</a>        <span class="kw">use </span>wiremock::{Mock, MockServer, ResponseTemplate};
+<a href=#371 id=371 data-nosnippet>371</a>
+<a href=#372 id=372 data-nosnippet>372</a>        <span class="kw">let </span>server = MockServer::start().<span class="kw">await</span>;
+<a href=#373 id=373 data-nosnippet>373</a>        <span class="kw">let </span>base = server.uri();
+<a href=#374 id=374 data-nosnippet>374</a>        Mock::given(method(<span class="string">"GET"</span>))
+<a href=#375 id=375 data-nosnippet>375</a>            .and(path(<span class="string">"/.well-known/openid-configuration"</span>))
+<a href=#376 id=376 data-nosnippet>376</a>            .respond_with(ResponseTemplate::new(<span class="number">200</span>).set_body_json(doc_json(<span class="kw-2">&amp;</span>base)))
+<a href=#377 id=377 data-nosnippet>377</a>            <span class="comment">// Exactly one HTTP hit across both get_or_fetch calls.
+<a href=#378 id=378 data-nosnippet>378</a>            </span>.expect(<span class="number">1</span>)
+<a href=#379 id=379 data-nosnippet>379</a>            .mount(<span class="kw-2">&amp;</span>server)
+<a href=#380 id=380 data-nosnippet>380</a>            .<span class="kw">await</span>;
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>        <span class="kw">let </span>cache = DiscoveryCache::new_allow_private_networks();
+<a href=#383 id=383 data-nosnippet>383</a>        <span class="kw">let </span>http = reqwest::Client::new();
+<a href=#384 id=384 data-nosnippet>384</a>        <span class="kw">let </span>url = <span class="macro">format!</span>(<span class="string">"{base}/.well-known/openid-configuration"</span>);
+<a href=#385 id=385 data-nosnippet>385</a>
+<a href=#386 id=386 data-nosnippet>386</a>        <span class="kw">let </span>first = cache.get_or_fetch(<span class="kw-2">&amp;</span>http, <span class="kw-2">&amp;</span>url).<span class="kw">await</span>.expect(<span class="string">"cold fetch"</span>);
+<a href=#387 id=387 data-nosnippet>387</a>        <span class="macro">assert_eq!</span>(first.issuer, base);
+<a href=#388 id=388 data-nosnippet>388</a>        <span class="macro">assert_eq!</span>(first.jwks_uri, <span class="macro">format!</span>(<span class="string">"{base}/jwks"</span>));
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="comment">// Second call within TTL: served from cache, no second HTTP request.
+<a href=#391 id=391 data-nosnippet>391</a>        </span><span class="kw">let </span>second = cache.get_or_fetch(<span class="kw-2">&amp;</span>http, <span class="kw-2">&amp;</span>url).<span class="kw">await</span>.expect(<span class="string">"cache hit"</span>);
+<a href=#392 id=392 data-nosnippet>392</a>        <span class="macro">assert_eq!</span>(second.issuer, base);
+<a href=#393 id=393 data-nosnippet>393</a>
+<a href=#394 id=394 data-nosnippet>394</a>        server.verify().<span class="kw">await</span>;
+<a href=#395 id=395 data-nosnippet>395</a>    }
+<a href=#396 id=396 data-nosnippet>396</a>
+<a href=#397 id=397 data-nosnippet>397</a>    <span class="attr">#[tokio::test]
+<a href=#398 id=398 data-nosnippet>398</a>    </span><span class="kw">async fn </span>ttl_expired_entry_triggers_refetch() {
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">use </span>wiremock::matchers::{method, path};
+<a href=#400 id=400 data-nosnippet>400</a>        <span class="kw">use </span>wiremock::{Mock, MockServer, ResponseTemplate};
+<a href=#401 id=401 data-nosnippet>401</a>
+<a href=#402 id=402 data-nosnippet>402</a>        <span class="kw">let </span>server = MockServer::start().<span class="kw">await</span>;
+<a href=#403 id=403 data-nosnippet>403</a>        <span class="kw">let </span>base = server.uri();
+<a href=#404 id=404 data-nosnippet>404</a>        Mock::given(method(<span class="string">"GET"</span>))
+<a href=#405 id=405 data-nosnippet>405</a>            .and(path(<span class="string">"/.well-known/openid-configuration"</span>))
+<a href=#406 id=406 data-nosnippet>406</a>            .respond_with(ResponseTemplate::new(<span class="number">200</span>).set_body_json(doc_json(<span class="kw-2">&amp;</span>base)))
+<a href=#407 id=407 data-nosnippet>407</a>            <span class="comment">// Stale entry is past TTL → exactly one live refetch happens.
+<a href=#408 id=408 data-nosnippet>408</a>            </span>.expect(<span class="number">1</span>)
+<a href=#409 id=409 data-nosnippet>409</a>            .mount(<span class="kw-2">&amp;</span>server)
+<a href=#410 id=410 data-nosnippet>410</a>            .<span class="kw">await</span>;
+<a href=#411 id=411 data-nosnippet>411</a>
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="kw">let </span>cache = DiscoveryCache::new_allow_private_networks();
+<a href=#413 id=413 data-nosnippet>413</a>        <span class="kw">let </span>url = <span class="macro">format!</span>(<span class="string">"{base}/.well-known/openid-configuration"</span>);
+<a href=#414 id=414 data-nosnippet>414</a>
+<a href=#415 id=415 data-nosnippet>415</a>        <span class="comment">// Seed a stale entry (past 1-h TTL) with a distinguishable issuer.
+<a href=#416 id=416 data-nosnippet>416</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>stale = test_doc();
+<a href=#417 id=417 data-nosnippet>417</a>        stale.issuer = <span class="string">"https://stale-issuer.example.com"</span>.to_string();
+<a href=#418 id=418 data-nosnippet>418</a>        insert_entry(<span class="kw-2">&amp;</span>cache, <span class="kw-2">&amp;</span>url, Utc::now() - CDuration::minutes(<span class="number">90</span>), stale).<span class="kw">await</span>;
+<a href=#419 id=419 data-nosnippet>419</a>
+<a href=#420 id=420 data-nosnippet>420</a>        <span class="kw">let </span>http = reqwest::Client::new();
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="kw">let </span>refreshed = cache.get_or_fetch(<span class="kw-2">&amp;</span>http, <span class="kw-2">&amp;</span>url).<span class="kw">await</span>.expect(<span class="string">"refetch"</span>);
+<a href=#422 id=422 data-nosnippet>422</a>        <span class="comment">// The stale issuer must have been replaced by the freshly fetched one.
+<a href=#423 id=423 data-nosnippet>423</a>        </span><span class="macro">assert_eq!</span>(refreshed.issuer, base);
+<a href=#424 id=424 data-nosnippet>424</a>
+<a href=#425 id=425 data-nosnippet>425</a>        server.verify().<span class="kw">await</span>;
+<a href=#426 id=426 data-nosnippet>426</a>    }
+<a href=#427 id=427 data-nosnippet>427</a>
+<a href=#428 id=428 data-nosnippet>428</a>    <span class="attr">#[tokio::test]
+<a href=#429 id=429 data-nosnippet>429</a>    </span><span class="kw">async fn </span>fetch_non_success_status_propagates_error() {
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="kw">use </span>wiremock::matchers::{method, path};
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">use </span>wiremock::{Mock, MockServer, ResponseTemplate};
+<a href=#432 id=432 data-nosnippet>432</a>
+<a href=#433 id=433 data-nosnippet>433</a>        <span class="kw">let </span>server = MockServer::start().<span class="kw">await</span>;
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="kw">let </span>base = server.uri();
+<a href=#435 id=435 data-nosnippet>435</a>        Mock::given(method(<span class="string">"GET"</span>))
+<a href=#436 id=436 data-nosnippet>436</a>            .and(path(<span class="string">"/.well-known/openid-configuration"</span>))
+<a href=#437 id=437 data-nosnippet>437</a>            .respond_with(ResponseTemplate::new(<span class="number">404</span>))
+<a href=#438 id=438 data-nosnippet>438</a>            .mount(<span class="kw-2">&amp;</span>server)
+<a href=#439 id=439 data-nosnippet>439</a>            .<span class="kw">await</span>;
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="kw">let </span>cache = DiscoveryCache::new_allow_private_networks();
+<a href=#442 id=442 data-nosnippet>442</a>        <span class="kw">let </span>http = reqwest::Client::new();
+<a href=#443 id=443 data-nosnippet>443</a>        <span class="kw">let </span>url = <span class="macro">format!</span>(<span class="string">"{base}/.well-known/openid-configuration"</span>);
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="kw">let </span>err = cache
+<a href=#445 id=445 data-nosnippet>445</a>            .get_or_fetch(<span class="kw-2">&amp;</span>http, <span class="kw-2">&amp;</span>url)
+<a href=#446 id=446 data-nosnippet>446</a>            .<span class="kw">await
+<a href=#447 id=447 data-nosnippet>447</a>            </span>.expect_err(<span class="string">"404 with no cached entry must error"</span>);
+<a href=#448 id=448 data-nosnippet>448</a>        <span class="macro">assert!</span>(
+<a href=#449 id=449 data-nosnippet>449</a>            <span class="macro">matches!</span>(err, FederationError::DiscoveryFailed(<span class="kw-2">ref </span>m) <span class="kw">if </span>m.contains(<span class="string">"404"</span>)),
+<a href=#450 id=450 data-nosnippet>450</a>            <span class="string">"got: {err:?}"
+<a href=#451 id=451 data-nosnippet>451</a>        </span>);
+<a href=#452 id=452 data-nosnippet>452</a>    }
+<a href=#453 id=453 data-nosnippet>453</a>
+<a href=#454 id=454 data-nosnippet>454</a>    <span class="attr">#[tokio::test]
+<a href=#455 id=455 data-nosnippet>455</a>    </span><span class="kw">async fn </span>fetch_invalid_json_propagates_parse_error() {
+<a href=#456 id=456 data-nosnippet>456</a>        <span class="kw">use </span>wiremock::matchers::{method, path};
+<a href=#457 id=457 data-nosnippet>457</a>        <span class="kw">use </span>wiremock::{Mock, MockServer, ResponseTemplate};
+<a href=#458 id=458 data-nosnippet>458</a>
+<a href=#459 id=459 data-nosnippet>459</a>        <span class="kw">let </span>server = MockServer::start().<span class="kw">await</span>;
+<a href=#460 id=460 data-nosnippet>460</a>        <span class="kw">let </span>base = server.uri();
+<a href=#461 id=461 data-nosnippet>461</a>        Mock::given(method(<span class="string">"GET"</span>))
+<a href=#462 id=462 data-nosnippet>462</a>            .and(path(<span class="string">"/.well-known/openid-configuration"</span>))
+<a href=#463 id=463 data-nosnippet>463</a>            .respond_with(ResponseTemplate::new(<span class="number">200</span>).set_body_string(<span class="string">"&lt;&lt;not json&gt;&gt;"</span>))
+<a href=#464 id=464 data-nosnippet>464</a>            .mount(<span class="kw-2">&amp;</span>server)
+<a href=#465 id=465 data-nosnippet>465</a>            .<span class="kw">await</span>;
+<a href=#466 id=466 data-nosnippet>466</a>
+<a href=#467 id=467 data-nosnippet>467</a>        <span class="kw">let </span>cache = DiscoveryCache::new_allow_private_networks();
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="kw">let </span>http = reqwest::Client::new();
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="kw">let </span>url = <span class="macro">format!</span>(<span class="string">"{base}/.well-known/openid-configuration"</span>);
+<a href=#470 id=470 data-nosnippet>470</a>        <span class="kw">let </span>err = cache
+<a href=#471 id=471 data-nosnippet>471</a>            .get_or_fetch(<span class="kw-2">&amp;</span>http, <span class="kw-2">&amp;</span>url)
+<a href=#472 id=472 data-nosnippet>472</a>            .<span class="kw">await
+<a href=#473 id=473 data-nosnippet>473</a>            </span>.expect_err(<span class="string">"unparseable discovery document must error"</span>);
+<a href=#474 id=474 data-nosnippet>474</a>        <span class="macro">assert!</span>(
+<a href=#475 id=475 data-nosnippet>475</a>            <span class="macro">matches!</span>(err, FederationError::DiscoveryFailed(<span class="kw-2">ref </span>m) <span class="kw">if </span>m.contains(<span class="string">"parse"</span>)),
+<a href=#476 id=476 data-nosnippet>476</a>            <span class="string">"got: {err:?}"
+<a href=#477 id=477 data-nosnippet>477</a>        </span>);
+<a href=#478 id=478 data-nosnippet>478</a>    }
+<a href=#479 id=479 data-nosnippet>479</a>
+<a href=#480 id=480 data-nosnippet>480</a>    <span class="attr">#[tokio::test]
+<a href=#481 id=481 data-nosnippet>481</a>    </span><span class="kw">async fn </span>fetch_oversized_body_is_rejected() {
+<a href=#482 id=482 data-nosnippet>482</a>        <span class="kw">use </span>wiremock::matchers::{method, path};
+<a href=#483 id=483 data-nosnippet>483</a>        <span class="kw">use </span>wiremock::{Mock, MockServer, ResponseTemplate};
+<a href=#484 id=484 data-nosnippet>484</a>
+<a href=#485 id=485 data-nosnippet>485</a>        <span class="kw">let </span>server = MockServer::start().<span class="kw">await</span>;
+<a href=#486 id=486 data-nosnippet>486</a>        <span class="kw">let </span>base = server.uri();
+<a href=#487 id=487 data-nosnippet>487</a>        <span class="comment">// Body larger than MAX_DISCOVERY_SIZE (256 KiB) → capped read rejects it
+<a href=#488 id=488 data-nosnippet>488</a>        // before any parse is attempted.
+<a href=#489 id=489 data-nosnippet>489</a>        </span><span class="kw">let </span>big = <span class="string">"a"</span>.repeat(<span class="number">300 </span>* <span class="number">1024</span>);
+<a href=#490 id=490 data-nosnippet>490</a>        Mock::given(method(<span class="string">"GET"</span>))
+<a href=#491 id=491 data-nosnippet>491</a>            .and(path(<span class="string">"/.well-known/openid-configuration"</span>))
+<a href=#492 id=492 data-nosnippet>492</a>            .respond_with(ResponseTemplate::new(<span class="number">200</span>).set_body_string(big))
+<a href=#493 id=493 data-nosnippet>493</a>            .mount(<span class="kw-2">&amp;</span>server)
+<a href=#494 id=494 data-nosnippet>494</a>            .<span class="kw">await</span>;
+<a href=#495 id=495 data-nosnippet>495</a>
+<a href=#496 id=496 data-nosnippet>496</a>        <span class="kw">let </span>cache = DiscoveryCache::new_allow_private_networks();
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="kw">let </span>http = reqwest::Client::new();
+<a href=#498 id=498 data-nosnippet>498</a>        <span class="kw">let </span>url = <span class="macro">format!</span>(<span class="string">"{base}/.well-known/openid-configuration"</span>);
+<a href=#499 id=499 data-nosnippet>499</a>        <span class="kw">let </span>err = cache
+<a href=#500 id=500 data-nosnippet>500</a>            .get_or_fetch(<span class="kw-2">&amp;</span>http, <span class="kw-2">&amp;</span>url)
+<a href=#501 id=501 data-nosnippet>501</a>            .<span class="kw">await
+<a href=#502 id=502 data-nosnippet>502</a>            </span>.expect_err(<span class="string">"oversized body must be rejected"</span>);
+<a href=#503 id=503 data-nosnippet>503</a>        <span class="macro">assert!</span>(
+<a href=#504 id=504 data-nosnippet>504</a>            <span class="macro">matches!</span>(err, FederationError::DiscoveryFailed(<span class="kw-2">ref </span>m) <span class="kw">if </span>m.contains(<span class="string">"too large"</span>)),
+<a href=#505 id=505 data-nosnippet>505</a>            <span class="string">"got: {err:?}"
+<a href=#506 id=506 data-nosnippet>506</a>        </span>);
+<a href=#507 id=507 data-nosnippet>507</a>    }
+<a href=#508 id=508 data-nosnippet>508</a>}
 </code></pre></div></section></main></body></html>

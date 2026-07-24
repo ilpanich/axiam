@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha18] - 2026-07-24
+
+### Changed
+
+- Workspace coverage improvements toward >=90% (T2-T6), scanner-clean
+- Plan to push Coveralls badge over 90% with per-task model picks
+- Ratchet line-coverage floor 77 -> 80 and surface achieved total
+- Runtime-generate the new-password arg in confirm_reset test
+- Close residual gaps in password_reset and pgp
+- Satisfy rustfmt, clippy, and CodeQL on the new coverage tests
+- Exclude axiam-server binary composition root from coverage
+- Cover SAML/OIDC non-xmlsec logic and negative paths
+- Broker-free seams for authz/audit consumers + fix auth rand_core
+- Cover residual repository CRUD/error paths + seeder + nonce-replay
+- Cover cleanup.rs expiry sweeps and erasure pipeline branches
+- Cover federation/auth/webhook/password-reset/rbac error paths
+- Round-2 test-coverage plan for server + C SDK with per-task model picks
+- Bump docker/build-push-action from 6.15.0 to 7.3.0 (#213)
+- Bump @testing-library/jest-dom in /frontend (#216)
+- Bump actions/setup-node from 6.4.0 to 7.0.0 (#214)
+- Bump dtolnay/rust-toolchain (#212)
+- Test-coverage improvement plan for server + 11 SDKs (2026-07-23 baseline) (#227)
+- Bump the minor-patch group in /frontend with 8 updates (#215)
+- Bump actions/checkout from 7.0.0 to 7.0.1 (#211)
+- Bump actions/attest-build-provenance from 2.4.0 to 4.1.1 (#210)
+- Correct model attribution and add phase dates to roadmap (#226)
+- Rewrite laptop runbook for run 3 against released 1.0.0-alpha17
+
 ## [1.0.0-alpha17] - 2026-07-22
 
 ### Changed

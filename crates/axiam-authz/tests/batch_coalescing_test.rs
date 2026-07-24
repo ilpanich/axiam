@@ -737,3 +737,100 @@ async fn concurrent_batch_future_is_boxable_as_send_trait_object() {
     let decisions = fut.await.unwrap();
     assert_eq!(decisions, vec![AccessDecision::Allow]);
 }
+
+/// The coalesced batch path's own inline scope resolution (the shared
+/// `scopes_by_resource` lookup, distinct from the single-check `resolve_scope`
+/// method) must resolve a matching scope name to its ID and allow, and deny
+/// with the scope-not-found reason for a name that doesn't exist on the
+/// resource — exercised only via [`BatchStrategy::Coalesced`].
+#[tokio::test]
+async fn coalesced_batch_resolves_scope_allow_and_not_found() {
+    let tenant = Uuid::new_v4();
+    let subject = Uuid::new_v4();
+    let resource_id = Uuid::new_v4();
+    let counters = Counters::default();
+
+    let role_id = Uuid::new_v4();
+    let scope_id = Uuid::new_v4();
+
+    let mut by_subject = HashMap::new();
+    by_subject.insert(
+        subject,
+        vec![RoleAssignment {
+            role: role(role_id, tenant, false),
+            resource_id: Some(resource_id),
+        }],
+    );
+
+    let mut by_role = HashMap::new();
+    by_role.insert(
+        role_id,
+        vec![PermissionGrant {
+            permission: permission("read", tenant),
+            scope_ids: vec![scope_id],
+        }],
+    );
+
+    let mut by_resource_scopes = HashMap::new();
+    by_resource_scopes.insert(
+        resource_id,
+        vec![Scope {
+            id: scope_id,
+            tenant_id: tenant,
+            resource_id,
+            name: "svc:read".into(),
+            description: String::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }],
+    );
+
+    let engine = AuthorizationEngine::new(
+        MockRoleRepo {
+            counter: counters.role_assignments.clone(),
+            by_subject,
+        },
+        MockPermissionRepo {
+            counter: counters.grants.clone(),
+            by_role,
+        },
+        MockResourceRepo {
+            counter: counters.ancestors.clone(),
+            ancestors: HashMap::new(),
+        },
+        MockScopeRepo {
+            counter: counters.scopes.clone(),
+            by_resource: by_resource_scopes,
+        },
+        MockGroupRepo,
+    )
+    .with_batch_config(BatchStrategy::Coalesced, 16);
+
+    let requests = vec![
+        // Matching scope name -> resolves to scope_id -> grant covers it -> Allow.
+        AccessRequest {
+            tenant_id: tenant,
+            subject_id: subject,
+            action: "read".into(),
+            resource_id,
+            scope: Some("svc:read".into()),
+        },
+        // Unknown scope name on the same resource -> not-found deny.
+        AccessRequest {
+            tenant_id: tenant,
+            subject_id: subject,
+            action: "read".into(),
+            resource_id,
+            scope: Some("svc:unknown".into()),
+        },
+    ];
+
+    let decisions = engine.check_access_batch(&requests).await.unwrap();
+    assert_eq!(decisions[0], AccessDecision::Allow);
+    assert_eq!(
+        decisions[1],
+        AccessDecision::Deny("scope 'svc:unknown' not found on resource".into())
+    );
+    // Scope list shared across both items -> fetched exactly once.
+    assert_eq!(Counters::get(&counters.scopes), 1);
+}

@@ -362,6 +362,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn regex_lite_match_t_v1_rejects_malformed_strings() {
+        assert!(
+            !regex_lite_match_t_v1("no-t-prefix,v1=abc"),
+            "missing `t=` prefix must be rejected"
+        );
+        assert!(
+            !regex_lite_match_t_v1("t=1700000000-no-v1-marker"),
+            "missing `,v1=` marker must be rejected"
+        );
+    }
+
     /// Minimal hand-rolled matcher for `^t=\d+,v1=[0-9a-f]{64}$` — avoids
     /// pulling in a `regex` dependency for a single test assertion.
     fn regex_lite_match_t_v1(s: &str) -> bool {
@@ -491,6 +503,93 @@ mod tests {
     fn ssrf_error_blocked_maps_to_webhook_error_ssrf_blocked() {
         let err: WebhookError = SsrfError::Blocked.into();
         assert!(matches!(err, WebhookError::SsrfBlocked));
+    }
+
+    // ---- Remaining `From<SsrfError> for WebhookError` arms (D-01a) ----
+
+    #[test]
+    fn ssrf_error_invalid_url_maps_to_webhook_error_invalid_url() {
+        let err: WebhookError = SsrfError::InvalidUrl.into();
+        assert!(matches!(err, WebhookError::InvalidUrl));
+    }
+
+    #[test]
+    fn ssrf_error_resolve_failed_maps_to_webhook_error_resolve_failed() {
+        let err: WebhookError = SsrfError::ResolveFailed.into();
+        assert!(matches!(err, WebhookError::ResolveFailed));
+    }
+
+    #[test]
+    fn ssrf_error_insecure_scheme_maps_to_webhook_error_ssrf_blocked() {
+        // SEC-069: a non-HTTPS target is treated as a blocked delivery.
+        let err: WebhookError = SsrfError::InsecureScheme.into();
+        assert!(matches!(err, WebhookError::SsrfBlocked));
+    }
+
+    #[test]
+    fn ssrf_error_client_build_failed_maps_to_webhook_error_resolve_failed() {
+        let err: WebhookError = SsrfError::ClientBuildFailed.into();
+        assert!(matches!(err, WebhookError::ResolveFailed));
+    }
+
+    #[test]
+    fn ssrf_error_request_failed_maps_to_webhook_error_resolve_failed() {
+        let err: WebhookError = SsrfError::RequestFailed("connection reset".into()).into();
+        assert!(matches!(err, WebhookError::ResolveFailed));
+    }
+
+    #[test]
+    fn ssrf_error_too_many_redirects_maps_to_webhook_error_resolve_failed() {
+        let err: WebhookError = SsrfError::TooManyRedirects.into();
+        assert!(matches!(err, WebhookError::ResolveFailed));
+    }
+
+    #[test]
+    fn ssrf_error_response_too_large_maps_to_webhook_error_resolve_failed() {
+        let err: WebhookError = SsrfError::ResponseTooLarge(65536).into();
+        assert!(matches!(err, WebhookError::ResolveFailed));
+    }
+
+    // ---- `From<WebhookError> for AxiamApiError` status-code mapping ----
+    //
+    // `deliver_once`'s `Err(WebhookError)` is only ever converted through
+    // this `From` impl by a caller that turns it into an HTTP response (no
+    // existing test does so directly — the AMQP consumer only calls
+    // `.to_string()` on it, and the direct `deliver_once` tests just assert
+    // `is_err()`). These prove the mapping itself, independent of any
+    // particular caller.
+
+    #[test]
+    fn webhook_error_encryption_key_missing_maps_to_503() {
+        use actix_web::ResponseError;
+        use actix_web::http::StatusCode;
+        let api_err: crate::error::AxiamApiError = WebhookError::EncryptionKeyMissing.into();
+        assert_eq!(api_err.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn webhook_error_lookup_failed_maps_to_500() {
+        use actix_web::ResponseError;
+        use actix_web::http::StatusCode;
+        let api_err: crate::error::AxiamApiError =
+            WebhookError::WebhookLookupFailed("not found".into()).into();
+        assert_eq!(api_err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn webhook_error_other_variants_map_to_500() {
+        use actix_web::ResponseError;
+        use actix_web::http::StatusCode;
+        for err in [
+            WebhookError::InvalidUrl,
+            WebhookError::ResolveFailed,
+            WebhookError::SsrfBlocked,
+            WebhookError::SecretDecrypt("bad ciphertext".into()),
+            WebhookError::SecretEncrypt("key rejected".into()),
+        ] {
+            let api_err: crate::error::AxiamApiError = err.into();
+            assert_eq!(api_err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
     }
 
     // SEC-031: round-trip encrypt/decrypt of webhook secret

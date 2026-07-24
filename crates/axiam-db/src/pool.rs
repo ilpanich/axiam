@@ -544,6 +544,77 @@ mod tests {
             .expect("health_check must succeed when every handle is reachable");
     }
 
+    /// `DbCheckout` derefs to the underlying `Surreal<C>` handle so callers
+    /// can query directly through the guard (`checkout.query(..)`), exactly
+    /// like the owned handle it replaces.
+    #[tokio::test]
+    async fn checkout_derefs_to_the_underlying_handle_for_queries() {
+        let pool = DbPool::from_handles(vec![new_mem().await], 0, Duration::from_millis(20));
+        let checkout = pool.checkout().await.expect("checkout");
+
+        // Exercises `impl Deref for DbCheckout` — calling `.query(..)`
+        // directly on the guard rather than on `checkout.handle`.
+        let mut result = checkout.query("RETURN 1").await.expect("query via deref");
+        let value: Vec<i64> = result.take(0).expect("take");
+        assert_eq!(value, vec![1]);
+    }
+
+    /// Dropping a `DbPool` must abort every pooled handle's background
+    /// refresh/reconnect tasks (mirrors `DbManager::drop`) so no detached
+    /// task is leaked. Builds handles with real spawned tasks (bypassing
+    /// `from_handles`, which always sets these to `None` for `kv-mem` pools)
+    /// to prove the `Some(..)` abort branches actually run.
+    #[tokio::test]
+    async fn dropping_pool_aborts_background_tasks_on_every_handle() {
+        use tokio::sync::Notify;
+
+        let notify_a = Arc::new(Notify::new());
+        let notify_b = Arc::new(Notify::new());
+        let (na, nb) = (Arc::clone(&notify_a), Arc::clone(&notify_b));
+
+        let refresh_a = tokio::spawn(async move {
+            na.notified().await;
+        });
+        let reconnect_a = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+        });
+        let refresh_b = tokio::spawn(async move {
+            nb.notified().await;
+        });
+        let reconnect_b = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+        });
+
+        let pool = DbPool {
+            handles: vec![
+                PooledHandle {
+                    db: Arc::new(RwLock::new(new_mem().await)),
+                    in_flight: Arc::new(AtomicUsize::new(0)),
+                    refresh_handle: Some(refresh_a),
+                    reconnect_handle: Some(reconnect_a),
+                },
+                PooledHandle {
+                    db: Arc::new(RwLock::new(new_mem().await)),
+                    in_flight: Arc::new(AtomicUsize::new(0)),
+                    refresh_handle: Some(refresh_b),
+                    reconnect_handle: Some(reconnect_b),
+                },
+            ],
+            semaphore: None,
+            acquire_timeout: Duration::from_millis(20),
+            rr: AtomicUsize::new(0),
+        };
+
+        // Dropping the pool must call `.abort()` on every handle's
+        // refresh_handle/reconnect_handle (both `Some(..)` branches here).
+        // Two of the four tasks would otherwise run forever
+        // (`pending::<()>()`); if `Drop` failed to abort them the test
+        // binary would hang at process exit waiting on the tokio runtime.
+        // Reaching this point is itself proof the abort ran.
+        drop(pool);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     /// `handle_for_repo` round-robins across ALL pooled handles (not just the
     /// `pool_size = 1` case covered above) — each successive call advances
     /// the cursor and wraps back to the first handle after a full cycle.

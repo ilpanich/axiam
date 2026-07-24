@@ -39,6 +39,16 @@ jobs:
       AXIAM__DB__USERNAME: root
       AXIAM__DB__PASSWORD: root
       AXIAM__AMQP__URL: "amqp://localhost:5672"
+      # The instrumented `cargo llvm-cov --workspace` build links every test
+      # binary with full `debuginfo=2`, which grew past the runner's free disk
+      # once the coverage suite expanded — `ld` then SIGBUSes on a truncated
+      # output. Coverage mapping comes from LLVM's `-C instrument-coverage`
+      # region map, NOT from DWARF, so dropping to line tables shrinks the
+      # instrumented binaries several-fold with no effect on the reported
+      # numbers. `CARGO_INCREMENTAL=0` avoids incremental artifacts a clean CI
+      # build never reuses.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 

@@ -306,6 +306,28 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
+    /// The cert-file-unreadable case above always fails on the CERT open
+    /// (checked first), so the sibling `File::open(key_path)` error arm was
+    /// never separately reached. Use a valid, readable cert here so the
+    /// function gets past the cert stage and hits the key-file-unreadable
+    /// branch specifically.
+    #[test]
+    fn unreadable_key_file_fails_fast() {
+        let pki = gen_test_pki();
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(write_tmp("srv-cert-readable", &pki.server_cert_pem)),
+            key_path: Some("/nonexistent/axiam-test-key-only.pem".into()),
+            ..TlsConfig::default()
+        };
+        let err = build_rustls_server_config(&tls).expect_err("unreadable key file must error");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(
+            err.to_string().contains("failed to open TLS key file"),
+            "got: {err}"
+        );
+    }
+
     // ---------------------------------------------------------------------
     // D3 — native client-certificate (mTLS) support
     // ---------------------------------------------------------------------
@@ -450,6 +472,159 @@ mod tests {
             ..TlsConfig::default()
         };
         build_rustls_server_config(&tls).expect("server config with mTLS must build");
+    }
+
+    /// The common/default deployment shape: TLS enabled, `client_auth: Off`
+    /// (no mTLS). Every other test either fails fast before reaching the
+    /// `client_auth` match (missing/unreadable cert or key) or exercises
+    /// `Optional`/`Required`, so the plain server-auth-only success path
+    /// (`ClientAuth::Off => builder.with_no_client_auth()`) was never
+    /// actually driven to completion.
+    #[test]
+    fn server_config_builds_with_client_auth_off() {
+        let pki = gen_test_pki();
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(write_tmp("srv-cert-off", &pki.server_cert_pem)),
+            key_path: Some(write_tmp("srv-key-off", &pki.server_key_pem)),
+            client_auth: ClientAuth::Off,
+            ..TlsConfig::default()
+        };
+        let config =
+            build_rustls_server_config(&tls).expect("server config with client_auth off must build");
+        // Sanity: default ALPN (http2 defaults to true) is wired through.
+        assert_eq!(config.alpn_protocols, alpn_protocols(true));
+    }
+
+    /// A CA bundle file whose content isn't valid PEM at all (garbage bytes
+    /// where a base64 body is expected) must fail with `InvalidData` — the
+    /// `CertificateDer::pem_reader_iter(..).collect()` parse-error arm in
+    /// `build_client_cert_verifier`, distinct from "file unreadable" and
+    /// "well-formed PEM but zero certificates".
+    #[test]
+    fn malformed_ca_bundle_fails_fast() {
+        let ca_path = write_tmp(
+            "garbage-ca",
+            "-----BEGIN CERTIFICATE-----\nnot valid base64 !!!\n-----END CERTIFICATE-----\n",
+        );
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let tls = TlsConfig {
+            enabled: true,
+            client_auth: ClientAuth::Required,
+            client_ca_path: Some(ca_path),
+            ..TlsConfig::default()
+        };
+        let err = build_client_cert_verifier(&tls, &provider)
+            .expect_err("malformed CA bundle PEM must fail fast");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A CA bundle entry that is valid *PEM* (base64 decodes cleanly) but
+    /// whose decoded bytes are not a valid X.509 certificate must be rejected
+    /// by `RootCertStore::add` — the `roots.add(cert).map_err(...)` arm,
+    /// distinct from the PEM-parse failure above.
+    #[test]
+    fn ca_bundle_with_valid_pem_but_invalid_der_fails_fast() {
+        use base64::Engine as _;
+        // Valid base64 (decodes to plain text), but nowhere near a valid
+        // ASN.1 DER certificate structure.
+        let bogus_body = base64::engine::general_purpose::STANDARD
+            .encode(b"not a real certificate, just plain text padding to be long enough");
+        let ca_path = write_tmp(
+            "bogus-der-ca",
+            &format!("-----BEGIN CERTIFICATE-----\n{bogus_body}\n-----END CERTIFICATE-----\n"),
+        );
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let tls = TlsConfig {
+            enabled: true,
+            client_auth: ClientAuth::Required,
+            client_ca_path: Some(ca_path),
+            ..TlsConfig::default()
+        };
+        let err = build_client_cert_verifier(&tls, &provider)
+            .expect_err("PEM-valid but DER-invalid CA cert must fail fast");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A server cert file that isn't valid PEM must fail with `InvalidData` —
+    /// the main `CertificateDer::pem_reader_iter(cert_file).collect()`
+    /// parse-error arm (the cert-side sibling of the CA-bundle test above).
+    #[test]
+    fn malformed_cert_file_fails_fast() {
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(write_tmp(
+                "garbage-cert",
+                "-----BEGIN CERTIFICATE-----\nnot valid base64 !!!\n-----END CERTIFICATE-----\n",
+            )),
+            key_path: Some(write_tmp("some-key", "irrelevant, parsed after cert")),
+            ..TlsConfig::default()
+        };
+        let err = build_rustls_server_config(&tls).expect_err("malformed cert PEM must fail fast");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A cert file that IS well-formed (readable, and would parse as valid
+    /// PEM if it contained any `CERTIFICATE` blocks) but contains zero
+    /// certificates must be rejected with the "no certificates found"
+    /// `InvalidData` error, distinct from a parse failure.
+    #[test]
+    fn empty_cert_file_fails_fast() {
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(write_tmp("empty-cert", "# no certificates here\n")),
+            key_path: Some(write_tmp("some-key", "irrelevant, never reached")),
+            ..TlsConfig::default()
+        };
+        let err = build_rustls_server_config(&tls).expect_err("empty cert file must fail fast");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("no certificates found"),
+            "got: {err}"
+        );
+    }
+
+    /// A key file that isn't a parseable private key (valid cert supplied,
+    /// but the key file is garbage) must fail with `InvalidData` — the
+    /// `PrivateKeyDer::from_pem_reader(key_file)` parse-error arm.
+    #[test]
+    fn malformed_key_file_fails_fast() {
+        let pki = gen_test_pki();
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(write_tmp("srv-cert-badkey", &pki.server_cert_pem)),
+            key_path: Some(write_tmp(
+                "garbage-key",
+                "-----BEGIN PRIVATE KEY-----\nnot valid base64 !!!\n-----END PRIVATE KEY-----\n",
+            )),
+            ..TlsConfig::default()
+        };
+        let err = build_rustls_server_config(&tls).expect_err("malformed key PEM must fail fast");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A syntactically valid cert and a syntactically valid key that simply
+    /// don't belong together (different keypairs) must be rejected at
+    /// `with_single_cert` — the "invalid TLS certificate/key pair" arm, which
+    /// is only reached once every earlier parse step already succeeded.
+    #[test]
+    fn mismatched_cert_and_key_fails_fast() {
+        let pki_a = gen_test_pki();
+        let pki_b = gen_test_pki();
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(write_tmp("mismatch-cert", &pki_a.server_cert_pem)),
+            // A key from a completely different, unrelated PKI.
+            key_path: Some(write_tmp("mismatch-key", &pki_b.server_key_pem)),
+            ..TlsConfig::default()
+        };
+        let err =
+            build_rustls_server_config(&tls).expect_err("mismatched cert/key pair must fail fast");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("invalid TLS certificate/key pair"),
+            "got: {err}"
+        );
     }
 
     // --- In-process rustls handshake tests (no live socket needed) ---------

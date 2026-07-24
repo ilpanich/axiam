@@ -791,3 +791,57 @@ async fn tenant_isolation() {
 
     assert!(matches!(decision, AccessDecision::Deny(_)));
 }
+
+/// A subject can have two applicable roles where one has NO permissions
+/// granted at all (so it has no entry in the batched grants map) and the
+/// other grants the requested action. `grants_allow` must skip the
+/// grants-less role (its `grants_by_role.get` lookup misses) and still find
+/// the match on the second role, rather than short-circuiting on the first.
+#[tokio::test]
+async fn one_of_two_applicable_roles_has_no_grants_still_allows() {
+    let (db, tenant_id, user_id) = setup().await;
+    let resource_id = create_resource(&db, tenant_id, "svc-a", None).await;
+
+    // Role #1: assigned to the user on this resource, but never granted any
+    // permission — absent from `get_role_permission_grants_for_roles`'s map.
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let empty_role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "empty".into(),
+            description: "no grants".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_user(tenant_id, user_id, empty_role.id, Some(resource_id))
+        .await
+        .unwrap();
+
+    // Role #2: same resource, grants "read".
+    grant_user_role_permission(
+        &db,
+        tenant_id,
+        user_id,
+        "viewer",
+        false,
+        "read",
+        Some(resource_id),
+    )
+    .await;
+
+    let engine = make_engine(&db);
+    let decision = engine
+        .check_access(&AccessRequest {
+            tenant_id,
+            subject_id: user_id,
+            action: "read".into(),
+            resource_id,
+            scope: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(decision, AccessDecision::Allow);
+}

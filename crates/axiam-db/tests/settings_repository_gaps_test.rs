@@ -217,3 +217,19 @@ async fn set_org_settings_twice_upserts_same_row() {
     assert_eq!(first.id, second.id, "same deterministic row must be reused");
     assert_eq!(second.password.min_length, 9);
 }
+
+/// `get_tenant_override` looks up the tenant's organization via
+/// `lookup_org_id` before checking the override row — for a tenant_id that
+/// doesn't exist in the `tenant` table at all, this must surface a clear
+/// not-found error rather than panicking or silently defaulting.
+#[tokio::test]
+async fn get_tenant_override_for_unknown_tenant_id_is_not_found() {
+    let (db, _org_id, _tenant_id) = setup().await;
+    let repo = SurrealSettingsRepository::new(db);
+
+    let result = repo.get_tenant_override(uuid::Uuid::new_v4()).await;
+    assert!(
+        result.is_err(),
+        "a tenant_id with no tenant row must not resolve an org_id"
+    );
+}

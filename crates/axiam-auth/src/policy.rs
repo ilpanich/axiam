@@ -563,6 +563,53 @@ mod tests {
                 .to_string()
                 .contains("42")
         );
+
+        assert!(
+            PolicyViolation::MissingLowercase
+                .to_string()
+                .contains("lowercase")
+        );
+
+        assert!(
+            PolicyViolation::MissingDigit
+                .to_string()
+                .contains("digit")
+        );
+
+        assert!(
+            PolicyViolation::MissingSymbol
+                .to_string()
+                .contains("symbol")
+        );
+
+        assert!(
+            PolicyViolation::ReusedPassword { position: 2 }
+                .to_string()
+                .contains("position 2")
+        );
+    }
+
+    // --- HIBP circuit breaker short-circuit (no live network needed) ---
+
+    #[tokio::test]
+    async fn check_hibp_short_circuits_when_breaker_open() {
+        // Force the process-wide breaker open by recording enough
+        // consecutive failures (more than any reasonable threshold,
+        // including whatever another test in this binary may have
+        // initialized the global with). `should_attempt()` then returns
+        // `false` and `check_hibp` returns `Ok(None)` WITHOUT making any
+        // outbound HTTP request — this is the burst-protection
+        // short-circuit path, reachable without live network access.
+        for _ in 0..20 {
+            crate::hibp_breaker::global().record_failure();
+        }
+
+        let client = reqwest::Client::new();
+        let result = check_hibp("whatever-password", &client).await.unwrap();
+        assert!(
+            result.is_none(),
+            "breaker-open short-circuit must report not-breached without a network call"
+        );
     }
 
     // --- Integration: evaluate_password with in-memory DB ---
@@ -642,6 +689,35 @@ mod tests {
                     .unwrap();
 
             assert!(violations.is_empty());
+        }
+
+        #[tokio::test]
+        async fn history_check_skips_entry_with_malformed_hash() {
+            let repo = setup_db().await;
+            let tenant_id = Uuid::new_v4();
+            let user_id = Uuid::new_v4();
+
+            // Not a valid Argon2 PHC string — `verify_password` returns
+            // `Err`, exercising the "log and skip" branch rather than
+            // `Ok(true)`/`Ok(false)`.
+            repo.create(CreatePasswordHistoryEntry {
+                tenant_id,
+                user_id,
+                password_hash: "not-a-valid-argon2-hash".into(),
+            })
+            .await
+            .unwrap();
+
+            let violations =
+                check_history("SomeCandidatePassword1", None, tenant_id, user_id, 5, &repo)
+                    .await
+                    .unwrap();
+
+            assert!(
+                violations.is_empty(),
+                "an unparsable history entry must be skipped, not reported as reused, \
+                 nor propagate an error: {violations:?}"
+            );
         }
 
         #[tokio::test]
@@ -726,6 +802,47 @@ mod tests {
                 user_id,
                 &repo,
                 None,
+            )
+            .await
+            .unwrap();
+
+            assert!(result.is_ok(), "violations: {:?}", result.violations);
+        }
+
+        #[tokio::test]
+        async fn full_evaluate_hibp_enabled_but_breaker_open_adds_no_violation() {
+            // Exercises evaluate_password's `hibp_check_enabled` branch: the
+            // breaker is forced open first, so `check_hibp` short-circuits to
+            // `Ok(None)` without a live network call, and no breach
+            // violation is added even though `hibp_check_enabled` is true
+            // and an `http_client` was supplied.
+            for _ in 0..20 {
+                crate::hibp_breaker::global().record_failure();
+            }
+
+            let repo = setup_db().await;
+            let tenant_id = Uuid::new_v4();
+            let user_id = Uuid::new_v4();
+
+            let policy = PasswordPolicy {
+                min_length: 8,
+                require_uppercase: true,
+                require_lowercase: true,
+                require_digits: true,
+                require_symbols: false,
+                password_history_count: 0,
+                hibp_check_enabled: true,
+            };
+
+            let client = reqwest::Client::new();
+            let result = evaluate_password(
+                "MyG00dPassword",
+                None,
+                &policy,
+                tenant_id,
+                user_id,
+                &repo,
+                Some(&client),
             )
             .await
             .unwrap();

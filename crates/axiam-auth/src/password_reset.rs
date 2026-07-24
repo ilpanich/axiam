@@ -694,6 +694,64 @@ mod tests {
         assert!(consume_result.is_ok(), "latest token should be consumable");
     }
 
+    /// A `UserRepository` whose `get_by_email` always fails with a
+    /// non-`NotFound` error, used to prove `initiate_reset` propagates a
+    /// genuine DB outage rather than treating it as "unknown email"
+    /// (which would incorrectly return `Ok(None)`).
+    #[derive(Clone)]
+    struct ErroringUserRepo;
+
+    #[allow(clippy::type_complexity)]
+    impl UserRepository for ErroringUserRepo {
+        async fn create(&self, _i: axiam_core::models::user::CreateUser) -> AxiamResult<axiam_core::models::user::User> { unimplemented!() }
+        async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<axiam_core::models::user::User> { unimplemented!() }
+        async fn get_by_username(&self, _t: Uuid, _u: &str) -> AxiamResult<axiam_core::models::user::User> { unimplemented!() }
+        async fn get_by_email(&self, _t: Uuid, _e: &str) -> AxiamResult<axiam_core::models::user::User> {
+            Err(AxiamError::Database("simulated outage".into()))
+        }
+        async fn update(&self, _t: Uuid, _i: Uuid, _u: UpdateUser) -> AxiamResult<axiam_core::models::user::User> { unimplemented!() }
+        async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unimplemented!() }
+        async fn update_totp_step(&self, _t: Uuid, _i: Uuid, _s: u64) -> AxiamResult<bool> { unimplemented!() }
+        async fn list(&self, _t: Uuid, _p: axiam_core::repository::Pagination) -> AxiamResult<axiam_core::repository::PaginatedResult<axiam_core::models::user::User>> { unimplemented!() }
+        async fn increment_failed_logins(&self, _t: Uuid, _u: Uuid, _lt: u32, _b: i64, _bm: f64, _m: i64) -> AxiamResult<()> { unimplemented!() }
+        async fn anonymize_user(&self, _t: Uuid, _u: Uuid, _e: &str, _p: &str) -> AxiamResult<()> { unimplemented!() }
+    }
+
+    #[tokio::test]
+    async fn initiate_reset_propagates_non_not_found_user_repo_error() {
+        let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(())
+            .await
+            .unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        run_migrations(&db).await.unwrap();
+        let (_org_id, tid) = create_org_tenant(&db).await;
+
+        let token_repo = SurrealPasswordResetTokenRepository::new(db.clone());
+        let fed_repo = SurrealFederationLinkRepository::new(db.clone());
+        let hist_repo = SurrealPasswordHistoryRepository::new(db.clone());
+        let session_repo = SurrealSessionRepository::new(db.clone());
+        let refresh_token_repo = SurrealRefreshTokenRepository::new(db.clone());
+
+        let svc = PasswordResetService::new(
+            ErroringUserRepo,
+            token_repo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            Arc::new(Semaphore::new(4)),
+            5,
+        );
+
+        let result = svc
+            .initiate_reset(tid, "whoever@example.com", 1, None)
+            .await;
+        assert!(
+            matches!(result, Err(AxiamError::Database(_))),
+            "a genuine DB outage must propagate, not be swallowed as unknown-email, got: {result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn confirm_reset_succeeds_and_clears_lockout() {
         let (
@@ -782,6 +840,51 @@ mod tests {
         assert!(
             matches!(result, Err(AxiamError::Validation { .. })),
             "expected Validation error, got: {result:?}"
+        );
+    }
+
+    /// A `PasswordResetTokenRepository` whose `consume` always fails with a
+    /// non-`NotFound` error, used to prove `confirm_reset` propagates a
+    /// genuine DB outage rather than mapping every consume failure to
+    /// `AuthError::ResetTokenInvalid`.
+    #[derive(Clone)]
+    struct ErroringTokenRepo;
+
+    impl PasswordResetTokenRepository for ErroringTokenRepo {
+        async fn create(&self, _i: CreatePasswordResetToken) -> AxiamResult<axiam_core::models::password_reset::PasswordResetToken> { unimplemented!() }
+        async fn get_by_token_hash(&self, _t: Uuid, _h: &str) -> AxiamResult<axiam_core::models::password_reset::PasswordResetToken> { unimplemented!() }
+        async fn consume(&self, _t: Uuid, _h: &str) -> AxiamResult<axiam_core::models::password_reset::PasswordResetToken> {
+            Err(AxiamError::Database("simulated outage".into()))
+        }
+        async fn count_today(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unimplemented!() }
+        async fn delete_expired(&self) -> AxiamResult<u64> { unimplemented!() }
+        async fn delete_unconsumed_for_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unimplemented!() }
+    }
+
+    #[tokio::test]
+    async fn confirm_reset_propagates_non_not_found_consume_error() {
+        let (user_repo, _token_repo, fed_repo, hist_repo, session_repo, refresh_token_repo, tid, _user) =
+            full_setup().await;
+        let svc = PasswordResetService::new(
+            user_repo,
+            ErroringTokenRepo,
+            fed_repo,
+            hist_repo,
+            session_repo,
+            refresh_token_repo,
+            Arc::new(Semaphore::new(4)),
+            5,
+        );
+        let policy = relaxed_policy();
+
+        let result = svc
+            .confirm_reset(tid, "whatever-raw-token", "Nn1!SomeNewPass", &policy, None, None)
+            .await;
+
+        assert!(
+            matches!(result, Err(AxiamError::Database(_))),
+            "a genuine DB outage during consume must propagate, not be mapped to \
+             ResetTokenInvalid, got: {result:?}"
         );
     }
 

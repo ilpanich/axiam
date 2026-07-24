@@ -1009,4 +1009,123 @@ mod tests {
             "seeded history hash must match the user's initial password_hash"
         );
     }
+
+    /// Exercises the `update()` SET-clause branches not covered by
+    /// `user_repository_test.rs::update_user` or
+    /// `user_repository_gaps_test.rs`: email, password_hash,
+    /// failed_login_attempts, last_failed_login_at, locked_until, and
+    /// email_verified_at.
+    #[tokio::test]
+    async fn update_covers_remaining_scalar_and_datetime_fields() {
+        let db = setup_db().await;
+        let repo = SurrealUserRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+
+        let user = repo
+            .create(CreateUser {
+                tenant_id,
+                username: "gwen".into(),
+                email: "gwen@example.com".into(),
+                password: "InitialPassw0rd!".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+
+        let failed_at = Utc::now() - chrono::Duration::minutes(5);
+        let locked_at = Utc::now() + chrono::Duration::minutes(30);
+        let verified_at = Utc::now();
+
+        let updated = repo
+            .update(
+                tenant_id,
+                user.id,
+                UpdateUser {
+                    email: Some("gwen-new@example.com".into()),
+                    password_hash: Some("$argon2id$fake-hash".into()),
+                    failed_login_attempts: Some(2),
+                    last_failed_login_at: Some(Some(failed_at)),
+                    locked_until: Some(Some(locked_at)),
+                    email_verified_at: Some(Some(verified_at)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.email, "gwen-new@example.com");
+        assert_eq!(updated.password_hash, "$argon2id$fake-hash");
+        assert_eq!(updated.failed_login_attempts, 2);
+        assert!(updated.last_failed_login_at.is_some());
+        assert!(updated.locked_until.is_some());
+        assert!(updated.email_verified_at.is_some());
+    }
+
+    /// SEC-043: `UserRow`'s and `UserRowWithId`'s manual `Debug` impls must
+    /// redact `mfa_secret`/`totp_last_used_step` ciphertext rather than
+    /// leaking it via `{:?}` — proven directly since these row structs are
+    /// private to this module and never `Debug`-printed in production code.
+    #[tokio::test]
+    async fn user_row_debug_redacts_mfa_secret_and_totp_step() {
+        let db = setup_db().await;
+        let repo = SurrealUserRepository::new(db.clone());
+        let tenant_id = Uuid::new_v4();
+
+        let user = repo
+            .create(CreateUser {
+                tenant_id,
+                username: "debug-check".into(),
+                email: "debug-check@example.com".into(),
+                password: "InitialPassw0rd!".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        repo.update(
+            tenant_id,
+            user.id,
+            UpdateUser {
+                mfa_secret: Some(Some("super-secret-ciphertext".into())),
+                totp_last_used_step: Some(Some(42)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Re-fetch as UserRow (get_by_id path) and format it directly.
+        let mut result = db
+            .query("SELECT * FROM type::record('user', $id) WHERE tenant_id = $tenant_id")
+            .bind(("id", user.id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .unwrap();
+        let rows: Vec<UserRow> = result.take(0).unwrap();
+        let row = rows.into_iter().next().unwrap();
+        let debug_str = format!("{row:?}");
+        assert!(
+            !debug_str.contains("super-secret-ciphertext"),
+            "UserRow Debug must never leak the mfa_secret ciphertext: {debug_str}"
+        );
+        assert!(debug_str.contains("[REDACTED]"));
+
+        // Re-fetch as UserRowWithId (list path) and format it directly.
+        let mut result = db
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM user \
+                 WHERE tenant_id = $tenant_id AND username = $username",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("username", "debug-check".to_string()))
+            .await
+            .unwrap();
+        let rows: Vec<UserRowWithId> = result.take(0).unwrap();
+        let row = rows.into_iter().next().unwrap();
+        let debug_str = format!("{row:?}");
+        assert!(
+            !debug_str.contains("super-secret-ciphertext"),
+            "UserRowWithId Debug must never leak mfa_secret: {debug_str}"
+        );
+        assert!(debug_str.contains("REDACTED"));
+    }
 }

@@ -1440,6 +1440,199 @@ async fn introspect_unknown_token_inactive() {
 }
 
 // ---------------------------------------------------------------------------
+// Additional residual-branch coverage (T4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_code_success_empty_scopes_yields_none_scope() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+        MockCodeRepo::ok(make_auth_code(&[], None)),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None))
+        .await
+        .unwrap();
+    assert!(resp.scope.is_none());
+    assert!(resp.id_token.is_none());
+}
+
+#[tokio::test]
+async fn cc_client_db_outage_is_server_error() {
+    let svc = build(
+        ClientOutcome::Db,
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    assert_eq!(
+        svc.exchange(Uuid::new_v4(), base_req("client_credentials"))
+            .await
+            .unwrap_err()
+            .error_code(),
+        "server_error"
+    );
+}
+
+#[tokio::test]
+async fn cc_tenant_db_outage_is_server_error() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        dummy_code_repo(),
+        TenantOutcome::Db,
+        MockRefreshRepo::new(),
+    );
+    assert_eq!(
+        svc.exchange(Uuid::new_v4(), base_req("client_credentials"))
+            .await
+            .unwrap_err()
+            .error_code(),
+        "server_error"
+    );
+}
+
+#[tokio::test]
+async fn refresh_client_db_outage_is_server_error() {
+    let svc = build(
+        ClientOutcome::Db,
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    assert_eq!(
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+            .await
+            .unwrap_err()
+            .error_code(),
+        "server_error"
+    );
+}
+
+#[tokio::test]
+async fn refresh_tenant_not_found_is_invalid_request() {
+    let refresh =
+        MockRefreshRepo::new().with_get(make_refresh(Some(Uuid::new_v4()), "client-1", &[]));
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::NotFound,
+        refresh,
+    );
+    assert_eq!(
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_request"
+    );
+}
+
+#[tokio::test]
+async fn refresh_tenant_db_outage_is_server_error() {
+    let refresh =
+        MockRefreshRepo::new().with_get(make_refresh(Some(Uuid::new_v4()), "client-1", &[]));
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Db,
+        refresh,
+    );
+    assert_eq!(
+        svc.exchange(Uuid::new_v4(), refresh_req("tok"))
+            .await
+            .unwrap_err()
+            .error_code(),
+        "server_error"
+    );
+}
+
+#[tokio::test]
+async fn refresh_success_openid_scope_but_no_user_yields_no_id_token() {
+    // Defensive branch: a machine-token (no user_id) refresh token that
+    // somehow carries the `openid` scope must not attempt ID token issuance.
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(None, "client-1", &["openid"]));
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"))
+        .await
+        .unwrap();
+    assert!(resp.id_token.is_none());
+    assert_eq!(resp.scope.as_deref(), Some("openid"));
+}
+
+#[tokio::test]
+async fn refresh_success_empty_scopes_yields_none_scope() {
+    let refresh =
+        MockRefreshRepo::new().with_get(make_refresh(Some(Uuid::new_v4()), "client-1", &[]));
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"))
+        .await
+        .unwrap();
+    assert!(resp.scope.is_none());
+}
+
+#[tokio::test]
+async fn introspect_refresh_token_empty_scope_yields_none() {
+    let refresh =
+        MockRefreshRepo::new().with_get(make_refresh(Some(Uuid::new_v4()), "client-1", &[]));
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let raw = generate_refresh_token();
+    let resp = svc
+        .introspect_token(Uuid::new_v4(), introspect_req(&raw))
+        .await
+        .unwrap();
+    assert!(resp.active);
+    assert!(resp.scope.is_none());
+}
+
+#[tokio::test]
+async fn introspect_client_db_outage_is_server_error() {
+    let svc = build(
+        ClientOutcome::Db,
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let err = svc
+        .introspect_token(Uuid::new_v4(), introspect_req("t"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), "server_error");
+}
+
+#[tokio::test]
+async fn revoke_wrong_secret_is_invalid_client() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let mut req = revoke_req("t");
+    req.client_secret = "wrong".into();
+    let err = svc.revoke_token(Uuid::new_v4(), req).await.unwrap_err();
+    assert_eq!(err.error_code(), "invalid_client");
+}
+
+// ---------------------------------------------------------------------------
 // OAuth2Error helpers (error.rs)
 // ---------------------------------------------------------------------------
 

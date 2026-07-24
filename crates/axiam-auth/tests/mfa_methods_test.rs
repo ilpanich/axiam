@@ -1,12 +1,14 @@
 //! Integration tests for the MFA method listing and deletion service.
 
 use axiam_auth::MfaMethodService;
-use axiam_core::error::AxiamError;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::mfa_method::MfaMethodType;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
-use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredentialType};
+use axiam_core::models::webauthn_credential::{
+    CreateWebauthnCredential, WebauthnCredential, WebauthnCredentialType,
+};
 use axiam_core::repository::{
     OrganizationRepository, TenantRepository, UserRepository, WebauthnCredentialRepository,
 };
@@ -14,6 +16,8 @@ use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
     SurrealWebauthnCredentialRepository,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -339,5 +343,121 @@ async fn delete_method_refuses_last_method_when_mfa_enabled() {
     assert!(
         result.is_err(),
         "should refuse to remove the last method while MFA is enabled"
+    );
+}
+
+// ── Additional residual-branch coverage (T4) ───────────────────────────
+
+#[tokio::test]
+async fn delete_method_malformed_id_returns_not_found() {
+    let (user_repo, cred_repo, tenant_id, user_id) = setup().await;
+    // mfa_enabled stays false (default from `setup`), so the "cannot
+    // remove last method" guard never triggers and we reach the
+    // UUID-parse branch.
+    let svc = build_service(user_repo, cred_repo);
+
+    let result = svc.delete_method(tenant_id, user_id, "not-a-uuid").await;
+    assert!(
+        matches!(result, Err(AxiamError::NotFound { .. })),
+        "malformed method_id should map to NotFound, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn delete_method_wrong_user_credential_returns_not_found() {
+    let (user_repo, cred_repo, tenant_id, user_id) = setup().await;
+
+    // A second user in the same tenant owns the credential we'll try to
+    // delete via the first user's session.
+    let other_user = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "bob".into(),
+            email: "bob@example.com".into(),
+            password: "correct-horse-battery".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let other_cred_id = create_webauthn(
+        &cred_repo,
+        tenant_id,
+        other_user.id,
+        "Bob's Key",
+        WebauthnCredentialType::Passkey,
+    )
+    .await;
+
+    let svc = build_service(user_repo, cred_repo);
+
+    // `user_id` (alice) has zero MFA methods of her own and mfa_enabled is
+    // false, so the guard is skipped and we reach the ownership check.
+    let result = svc
+        .delete_method(tenant_id, user_id, &other_cred_id.to_string())
+        .await;
+    assert!(
+        matches!(result, Err(AxiamError::NotFound { .. })),
+        "deleting another user's credential should map to NotFound, got: {result:?}"
+    );
+}
+
+/// A `WebauthnCredentialRepository` whose `count_by_user` returns a
+/// different answer on each successive call, simulating the TOCTOU race
+/// `delete_method`'s post-delete safety check is meant to handle: a
+/// concurrent removal between the initial guard check and the recount.
+#[derive(Clone)]
+struct SequencedCountRepo {
+    calls: Arc<AtomicU32>,
+}
+
+impl WebauthnCredentialRepository for SequencedCountRepo {
+    async fn create(&self, _input: CreateWebauthnCredential) -> AxiamResult<WebauthnCredential> {
+        unimplemented!()
+    }
+    async fn get_by_id(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<WebauthnCredential> {
+        unimplemented!()
+    }
+    async fn list_by_user(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> AxiamResult<Vec<WebauthnCredential>> {
+        unimplemented!()
+    }
+    async fn update_last_used(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<()> {
+        unimplemented!()
+    }
+    async fn delete(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<()> {
+        unimplemented!()
+    }
+    async fn count_by_user(&self, _tenant_id: Uuid, _user_id: Uuid) -> AxiamResult<u64> {
+        // First call (pre-delete guard check): report 1 remaining webauthn
+        // credential, so combined with `has_totp` the total is 2 and the
+        // guard allows the deletion to proceed. Second call (post-delete
+        // recount): report 0, simulating a concurrent removal of that
+        // credential by another request in between.
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(if n == 0 { 1 } else { 0 })
+    }
+}
+
+#[tokio::test]
+async fn delete_method_totp_disables_mfa_when_concurrent_recount_finds_zero() {
+    let (user_repo, _cred_repo, tenant_id, user_id) = setup().await;
+    enable_totp(&user_repo, tenant_id, user_id).await;
+
+    let svc = MfaMethodService::new(
+        user_repo.clone(),
+        SequencedCountRepo {
+            calls: Arc::new(AtomicU32::new(0)),
+        },
+    );
+
+    svc.delete_method(tenant_id, user_id, "totp").await.unwrap();
+
+    let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert!(
+        !user.mfa_enabled,
+        "mfa_enabled should be cleared once the post-delete recount finds no methods left"
     );
 }

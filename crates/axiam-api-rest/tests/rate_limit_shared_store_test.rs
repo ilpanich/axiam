@@ -129,6 +129,73 @@ async fn rate_limit_shared_store_fails_open_on_db_error() {
     assert_eq!(resp.status(), 200);
 }
 
+/// Proves `RateLimitShared`'s `Clone` impl (only ever invoked by an
+/// explicit `.clone()` call — actix's `.wrap()` takes ownership, so no
+/// existing test calls it) produces a middleware that enforces the exact
+/// same limit as the original.
+#[actix_rt::test]
+async fn rate_limit_shared_clone_enforces_the_same_limit() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    let original = RateLimitShared::<TestDb>::new("shared_clone_test", LIMIT);
+    let cloned = original.clone();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::for_test(
+                db,
+                AuthConfig::default(),
+            )))
+            .service(
+                web::resource("/t")
+                    .wrap(cloned)
+                    .route(web::get().to(ok_handler)),
+            ),
+    )
+    .await;
+
+    let peer: std::net::SocketAddr = "203.0.113.222:1".parse().unwrap();
+    for i in 0..LIMIT {
+        let req = test::TestRequest::get().uri("/t").peer_addr(peer).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200, "request {i} via the cloned middleware should succeed");
+    }
+    let req = test::TestRequest::get().uri("/t").peer_addr(peer).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        429,
+        "the cloned middleware must enforce the same limit as the original"
+    );
+}
+
+/// `RateLimitSharedService::poll_ready` (delegates to the inner service) is
+/// never invoked by `actix_web::test::call_service` — actix's test harness
+/// calls `.call()` directly without polling readiness first. Call it
+/// directly on the assembled service to prove it delegates cleanly instead
+/// of panicking/erroring.
+#[actix_rt::test]
+async fn rate_limit_shared_service_poll_ready_delegates_to_inner() {
+    use actix_web::dev::Service;
+    use std::task::{Context, Waker};
+
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    let app = test::init_service(build_app(db)).await;
+
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let poll = app.poll_ready(&mut cx);
+    assert!(
+        poll.is_ready(),
+        "assembled service (including RateLimitShared) must report ready immediately"
+    );
+}
+
 #[actix_rt::test]
 async fn rate_limit_shared_store_fails_open_when_no_db_registered() {
     // No `web::Data<Surreal<TestDb>>` registered at all (e.g. a

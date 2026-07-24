@@ -645,3 +645,67 @@ enum ScopeResolution {
     /// the ready-made deny decision.
     NotFound(AccessDecision),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::grants_allow;
+    use axiam_core::models::permission::PermissionGrant;
+    use chrono::Utc;
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    fn grant(action: &str) -> PermissionGrant {
+        PermissionGrant {
+            permission: axiam_core::models::permission::Permission {
+                id: Uuid::new_v4(),
+                tenant_id: Uuid::new_v4(),
+                action: action.into(),
+                description: String::new(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            scope_ids: vec![],
+        }
+    }
+
+    /// `grants_allow` must skip over a role that has NO entry at all in the
+    /// grants-by-role map (its `grants_by_role.get(role_id)` lookup misses,
+    /// hitting the `continue` arm) rather than stopping there, and still find
+    /// a match on a later applicable role. Ordering is deliberately controlled
+    /// here (unlike a DB-backed integration test) so the grants-less role is
+    /// evaluated *before* the matching one, forcing the `continue` branch.
+    #[test]
+    fn grants_allow_skips_role_with_no_grants_entry_and_checks_the_next() {
+        let empty_role_id = Uuid::new_v4();
+        let matching_role_id = Uuid::new_v4();
+
+        let mut grants_by_role = HashMap::new();
+        // `empty_role_id` intentionally has NO entry in the map at all.
+        grants_by_role.insert(matching_role_id, vec![grant("read")]);
+
+        let unique_role_ids = vec![empty_role_id, matching_role_id];
+
+        assert!(grants_allow(&unique_role_ids, &grants_by_role, "read", None));
+    }
+
+    /// Same map shape, but no role grants the requested action at all — every
+    /// role_id either misses the map (`continue`) or has grants that don't
+    /// match the action — so the function falls through to `false`.
+    #[test]
+    fn grants_allow_denies_when_no_role_grants_the_action() {
+        let empty_role_id = Uuid::new_v4();
+        let other_role_id = Uuid::new_v4();
+
+        let mut grants_by_role = HashMap::new();
+        grants_by_role.insert(other_role_id, vec![grant("write")]);
+
+        let unique_role_ids = vec![empty_role_id, other_role_id];
+
+        assert!(!grants_allow(
+            &unique_role_ids,
+            &grants_by_role,
+            "read",
+            None
+        ));
+    }
+}

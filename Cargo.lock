@@ -851,6 +851,7 @@ dependencies = [
  "http 1.4.2",
  "http-body-util",
  "prost",
+ "rustls",
  "secrecy",
  "serde",
  "serde_json",

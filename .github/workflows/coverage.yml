@@ -90,8 +90,17 @@ jobs:
       - name: Collect coverage (gRPC client feature)
         run: cargo llvm-cov --no-report -p axiam-api-grpc --features client --test grpc_authz_test --test grpc_auth_test --test grpc_userinfo_test
 
+      # axiam-server/src/main.rs is the binary composition root (~1000 lines of
+      # process wiring: config load, DB/AMQP/HTTP/gRPC setup, task spawning,
+      # graceful shutdown). It has no unit-testable logic — it is exercised only
+      # end-to-end by the server integration tests, which llvm-cov does not
+      # instrument through the spawned binary — so it sat at 0% and dragged the
+      # workspace number down without reflecting real test quality. Exclude it
+      # from both the Coveralls report and the regression gate; the testable
+      # seams (cleanup::run_erasure_pipeline, tls::build_rustls_server_config)
+      # live in lib.rs and stay measured.
       - name: Generate lcov report
-        run: cargo llvm-cov report --lcov --output-path lcov.info
+        run: cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex 'crates/axiam-server/src/main\.rs'
 
       # Regression gate: fail the build if workspace line coverage drops below
       # the floor. Current raw cargo-llvm-cov line coverage is ~78.7% (this is
@@ -100,7 +109,7 @@ jobs:
       # false-fails; ratchet it upward as coverage rises (target: >=90%).
       # Reuses the profdata already collected above (no re-run).
       - name: Enforce coverage floor
-        run: cargo llvm-cov report --fail-under-lines 77
+        run: cargo llvm-cov report --fail-under-lines 77 --ignore-filename-regex 'crates/axiam-server/src/main\.rs'
 
       - name: Upload to Coveralls
         uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e  # v2.3.7

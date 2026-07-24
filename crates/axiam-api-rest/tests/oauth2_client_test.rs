@@ -571,3 +571,286 @@ async fn tenant_isolation_oauth2_clients() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["total"], 0);
 }
+
+// ---------------------------------------------------------------------------
+// Additional validation branches: empty grant_types, host-less / fragment
+// redirect_uris (create), and the update() validation/adding-auth-code paths.
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn create_oauth2_client_rejects_empty_grant_types() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "No Grants Client",
+            "redirect_uris": [],
+            "grant_types": [],
+            "scopes": []
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[actix_rt::test]
+async fn create_oauth2_client_rejects_redirect_uri_without_host() {
+    // "urn:isbn:..." parses as an absolute URL but has no authority/host, so
+    // `Url::host_str()` returns `None` -- the "must be an absolute URL with a
+    // host" branch, distinct from the scheme/fragment checks below it.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Hostless Client",
+            "redirect_uris": ["urn:isbn:0451450523"],
+            "grant_types": ["authorization_code"],
+            "scopes": []
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "a host-less redirect_uri must be rejected"
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let msg = body["error"]
+        .as_str()
+        .or_else(|| body["message"].as_str())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("absolute URL with a host") || !msg.is_empty(),
+        "got: {body}"
+    );
+}
+
+#[actix_rt::test]
+async fn create_oauth2_client_rejects_redirect_uri_with_fragment() {
+    // RFC 6749 §3.1.2: redirect URIs must not contain a fragment component.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Fragment Client",
+            "redirect_uris": ["https://app.example.com/callback#token"],
+            "grant_types": ["authorization_code"],
+            "scopes": []
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "a redirect_uri with a fragment must be rejected"
+    );
+}
+
+#[actix_rt::test]
+async fn update_oauth2_client_rejects_empty_name() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_client(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "name": "" }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+/// Updating `grant_types` alone (to another already-valid, non-redirect-
+/// requiring grant type) exercises `validate_grant_types` from inside
+/// `update` -- distinct from the `create`-path call already covered above.
+#[actix_rt::test]
+async fn update_oauth2_client_grant_types_returns_200() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_client(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "grant_types": ["client_credentials"] }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["grant_types"][0], "client_credentials");
+}
+
+/// Updating `redirect_uris` alone exercises the update-path
+/// `validate_redirect_uris` dispatch (`needs_redirects` computed from the
+/// request's own `grant_types`, which is `None` here so it defaults to
+/// `true` -- the created client already uses `authorization_code`).
+#[actix_rt::test]
+async fn update_oauth2_client_redirect_uris_returns_200() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let created = create_test_client(&app, &token).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "redirect_uris": ["https://app.example.com/new-callback"]
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        body["redirect_uris"][0],
+        "https://app.example.com/new-callback"
+    );
+}
+
+/// Adding `authorization_code` to `grant_types` in an update WITHOUT
+/// supplying `redirect_uris`, when the client's stored `redirect_uris` are
+/// already empty (it was created `client_credentials`-only), must be
+/// rejected -- the client would otherwise end up with an authorization_code
+/// grant and no redirect target.
+#[actix_rt::test]
+async fn update_oauth2_client_adding_auth_code_without_any_redirect_uris_returns_400() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // client_credentials-only client: redirect_uris not required at creation.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "M2M Client",
+            "redirect_uris": [],
+            "grant_types": ["client_credentials"],
+            "scopes": []
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    let id = created["id"].as_str().unwrap();
+
+    // Now add authorization_code without providing redirect_uris.
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "grant_types": ["client_credentials", "authorization_code"]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "enabling authorization_code with no stored redirect_uris must be rejected"
+    );
+}
+
+/// Same as above, but the client already HAS stored `redirect_uris` (supplied
+/// at creation even though not required for `client_credentials`) -- adding
+/// `authorization_code` without redirect_uris in the update body must succeed
+/// by falling back to and validating the EXISTING stored redirect_uris.
+#[actix_rt::test]
+async fn update_oauth2_client_adding_auth_code_with_existing_redirect_uris_returns_200() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "M2M Client With URIs",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["client_credentials"],
+            "scopes": []
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    let id = created["id"].as_str().unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "grant_types": ["client_credentials", "authorization_code"]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "existing stored redirect_uris satisfy the authorization_code requirement"
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["grant_types"][1], "authorization_code");
+}

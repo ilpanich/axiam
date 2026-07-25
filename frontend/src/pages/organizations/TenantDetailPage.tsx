@@ -1,4 +1,4 @@
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import { tenantService, orgService } from "@/services/organizations";
 import { PageHeader } from "@/components/PageHeader";

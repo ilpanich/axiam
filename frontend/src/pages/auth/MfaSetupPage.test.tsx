@@ -7,8 +7,8 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 const navigate = vi.fn();
 let searchParamsString = "setup_token=setup-tok-1";
-vi.mock("react-router-dom", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react-router-dom")>();
+vi.mock("react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router")>();
   return {
     ...actual,
     useNavigate: () => navigate,

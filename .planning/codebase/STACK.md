@@ -64,7 +64,7 @@
 
 **Critical (Frontend):**
 - `react 19.2` / `react-dom 19.2` - UI framework
-- `react-router-dom 7.13` - Client-side routing
+- `react-router 8.3` - Client-side routing (v8 removed the `react-router-dom` package: `RouterProvider` comes from `react-router/dom`, everything else from `react-router`)
 - `@tanstack/react-query 5.95` - Server state management
 - `zustand 5.0` - Client state management
 - `axios 1.13` - HTTP client

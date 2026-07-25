@@ -1,4 +1,4 @@
-import { Navigate, Outlet } from "react-router-dom";
+import { Navigate, Outlet } from "react-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePermissions } from "@/hooks/usePermissions";
 import { ForbiddenPage } from "@/components/ForbiddenPage";

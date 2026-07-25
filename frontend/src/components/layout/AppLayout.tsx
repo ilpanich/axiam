@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Outlet, Navigate } from "react-router-dom";
+import { Outlet, Navigate } from "react-router";
 import { useAuthStore } from "@/stores/auth";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";

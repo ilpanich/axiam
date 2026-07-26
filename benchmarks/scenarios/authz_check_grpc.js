@@ -65,7 +65,12 @@ export default function (data) {
   const ok = check(res, { 'grpc status OK': (r) => r && r.status === grpc.StatusOK });
   // D11: record the raw gRPC status code so the summary alone can show which
   // code dominates on a failing run (mirrors zitadel_userinfo_grpc.js).
-  m.grpcStatus.add(res && res.status != null ? res.status : -1);
+  // Number() is required: k6 hands `res.status` to JS as a wrapped Go value
+  // (typeof === "object"), and Trend.add() coerces any object to 1 rather than
+  // reading it — so the raw value silently recorded 1 for EVERY code, including
+  // StatusOK (0). `===` against grpc.StatusOK is unaffected, which is why the
+  // checks stayed correct while this metric was uniformly 1.
+  m.grpcStatus.add(res && res.status != null ? Number(res.status) : -1);
   m.latency.add(Date.now() - start);
   m.errorRate.add(!ok);
   if (ok) m.ok.add(1); else m.failed.add(1);

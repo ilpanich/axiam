@@ -1,0 +1,826 @@
+#!/usr/bin/env bash
+# run-improvement-tasks.sh — per-task data collection for the pre-MVP plan
+# (claude_dev/improvement-after-serious-benchmark.md).
+#
+# Every task in that plan that needs a LIVE benchmark run has a subcommand
+# here. Each subcommand is standalone: bring the stack up, collect exactly the
+# data that task's decision needs, tear the stack down, and write a
+# SUMMARY.md with the measured numbers plus the acceptance criterion, so the
+# task can be closed (or a follow-up opened) from the summary alone.
+#
+# Run them one at a time, in whatever spare time you have:
+#
+#   cd benchmarks
+#   ./run-improvement-tasks.sh list                # what exists + time estimates
+#   ./run-improvement-tasks.sh g1-timeline         # start here (blocks G2/G3/G8)
+#   ./run-improvement-tasks.sh g3-batch            # etc.
+#   ./run-improvement-tasks.sh pack                # shareable archive at the end
+#
+# Results land under results/tasks/<task>/ (own subtree per task, so nothing
+# collides with the matrix in results/run-*/). Each task prints its verdict at
+# the end and writes it to results/tasks/<task>/SUMMARY.md.
+#
+# Laptop prep (per docs/methodology.md §10) applies to every task: on AC power,
+# `sudo cpupower frequency-set -g performance`, background apps closed, and the
+# whole session in ONE turbo mode. The runner warns if the governor is wrong.
+set -euo pipefail
+cd "$(dirname "$0")"
+BENCH_DIR=$PWD
+
+TASKS_ROOT=$PWD/results/tasks
+PLAN=../claude_dev/improvement-after-serious-benchmark.md
+
+# Container names are fixed by the compose files (targets/axiam/docker-compose.yml).
+C_SERVER=bench-axiam-server
+C_DB=bench-axiam-surrealdb
+C_MQ=bench-axiam-rabbitmq
+
+# ---------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------
+
+log()  { printf '\n\033[1;36m[%s]\033[0m %s\n' "${TASK:-run}" "$*"; }
+warn() { printf '\033[1;33m[%s] WARNING: %s\033[0m\n' "${TASK:-run}" "$*" >&2; }
+die()  { printf '\033[1;31m[%s] ERROR: %s\033[0m\n' "${TASK:-run}" "$*" >&2; exit 1; }
+
+need() { command -v "$1" >/dev/null || die "$1 is required but not installed"; }
+need_base() { need docker; need just; need k6; need python3; }
+
+# Stack lifecycle. Any extra AXIAM__* knobs are passed as leading env assignments
+# by the caller (they reach the server through the compose pass-through).
+#
+# TASK_OUT (set by each task right after summary_open) is where seeding writes
+# its `<target>.seed.ok` marker. run-benchmark.sh REFUSES to start a cell unless
+# that marker exists in the cell's own BENCH_RESULTS_DIR (A2.3 fail-closed
+# gate), and every cell here gets its own directory so repeats don't overwrite
+# each other — so `cell` copies the marker in. Seeding once per stack and
+# reusing the marker is exactly right: it is a "this stack was provisioned and
+# smoke-checked" flag, not per-cell state.
+TASK_OUT=""
+
+bench_up_seed() { # $1=target [$2=profile] [$3.. extra just args]
+  local target=$1 profile=${2:-p0-plaintext}; shift 2 || shift $# || true
+  [ -n "$TASK_OUT" ] || die "internal: TASK_OUT not set before bench_up_seed"
+  mkdir -p "$TASK_OUT"
+  log "bringing up $target ($profile) and seeding"
+  BENCH_RESULTS_DIR="$TASK_OUT" just target="$target" profile="$profile" "$@" bench-up
+  BENCH_RESULTS_DIR="$TASK_OUT" just target="$target" profile="$profile" "$@" bench-seed
+  [ -f "$TASK_OUT/${target}.seed.ok" ] || \
+    warn "no seed-ok marker at $TASK_OUT/${target}.seed.ok — cells will refuse to start"
+}
+
+bench_down() { # $1=target [$2=profile]
+  just target="${1}" profile="${2:-p0-plaintext}" bench-down >/dev/null 2>&1 || true
+}
+
+# Run ONE k6 cell into its own results subtree.
+# usage: cell <target> <profile> <scenario.js> <outdir>
+# NOTE: run-benchmark.sh writes the cell files to <outdir>/<target>/<profile>/,
+# so always locate artifacts with k6_file/res_files (which recurse), never with
+# a flat <outdir>/*.k6.json glob.
+cell() {
+  local target=$1 profile=$2 scenario=$3 outdir=$4
+  mkdir -p "$outdir"
+  [ -f "$TASK_OUT/${target}.seed.ok" ] && cp "$TASK_OUT/${target}.seed.ok" "$outdir/"
+  BENCH_RESULTS_DIR="$outdir" just target="$target" profile="$profile" \
+    scenario="$scenario" bench-run
+}
+
+# Throughput (successful ops/s) + p50/p95 + fallback count from a k6 summary.
+# usage: k6_stat <file.k6.json> <thr|p50|p95|fallback|err>
+k6_stat() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+try:
+    m = json.load(open(sys.argv[1]))["metrics"]
+except Exception:
+    print("NA"); raise SystemExit
+what = sys.argv[2]
+lat = m.get("bench_op_latency_ms", {})
+vals = {
+    "thr": m.get("bench_ok", {}).get("rate"),
+    "p50": lat.get("med"),
+    "p95": lat.get("p(95)"),
+    "fallback": m.get("bench_fallback", {}).get("count", 0),
+    "err": m.get("bench_error_rate", {}).get("value"),
+}
+v = vals.get(what)
+print("NA" if v is None else (f"{v:.1f}" if isinstance(v, float) else v))
+PY
+}
+
+# Find the single .k6.json a cell produced (scenario name varies).
+k6_file() { find "$1" -name '*.k6.json' -print -quit 2>/dev/null; }
+
+# Continuous telemetry: per-container CPU/mem AND RabbitMQ queue depth, 1 Hz.
+# The queue depth is what distinguishes the "audit backlog" hypothesis (G1).
+sampler_start() { # $1=csv  -> echoes the pid
+  local out=$1
+  echo "epoch_s,container,cpu_cores,mem_mib,mq_messages" > "$out"
+  (
+    while :; do
+      local now; now=$(date +%s)
+      docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' 2>/dev/null \
+        | grep '^bench-' \
+        | while IFS=$'\t' read -r name cpu mem; do
+            local cores used
+            cores=$(printf '%s' "$cpu" | tr -d '%' | awk '{printf "%.4f", $1/100}')
+            used=$(printf '%s' "$mem" | awk -F'/' '{print $1}' | tr -d ' ' \
+              | awk '/GiB/{printf "%.1f", $1*1024; next} /MiB/{printf "%.1f", $1+0; next} /KiB/{printf "%.2f", $1/1024; next} {print 0}')
+            printf '%s,%s,%s,%s,\n' "$now" "$name" "$cores" "$used" >> "$out"
+          done
+      # Total ready+unacked messages across all queues (best effort: the broker
+      # may not be up, or rabbitmqctl may be slow — never fail the probe on it).
+      local depth
+      depth=$(docker exec "$C_MQ" rabbitmqctl list_queues messages --no-table-headers 2>/dev/null \
+              | awk '{s+=$1} END{print s+0}') || depth=""
+      [ -n "$depth" ] && printf '%s,%s,,,%s\n' "$(date +%s)" "$C_MQ-queues" "$depth" >> "$out"
+      sleep 1
+    done
+  ) &
+  echo $!
+}
+
+sampler_stop() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+
+# Mean CPU of one container over a time range in the sampler CSV.
+cpu_mean() { # $1=csv $2=container-substring [$3=from_epoch] [$4=to_epoch]
+  python3 - "$@" <<'PY'
+import csv, sys
+path, sub = sys.argv[1], sys.argv[2]
+lo = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else 0
+hi = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else 10**12
+vals = []
+for r in csv.DictReader(open(path)):
+    if sub in r["container"] and r["cpu_cores"] and lo <= int(r["epoch_s"]) <= hi:
+        vals.append(float(r["cpu_cores"]))
+print(f"{sum(vals)/len(vals):.2f}" if vals else "NA")
+PY
+}
+
+summary_open() { # $1=outdir $2=title
+  SUMMARY=$1/SUMMARY.md
+  TASK_OUT=$1
+  mkdir -p "$1"
+  {
+    echo "# $2"
+    echo
+    echo "- collected: $(date -Iseconds)"
+    echo "- host: $(uname -srm) · governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+    echo "- plan: \`claude_dev/improvement-after-serious-benchmark.md\`"
+    echo
+  } > "$SUMMARY"
+}
+s() { echo "$*" >> "$SUMMARY"; }          # write a summary line
+sp() { echo "$*" | tee -a "$SUMMARY"; }   # write AND print
+
+finish() {
+  echo
+  log "done — summary written to ${SUMMARY#$BENCH_DIR/}"
+  echo "----------------------------------------------------------------"
+  cat "$SUMMARY"
+  echo "----------------------------------------------------------------"
+}
+
+# ---------------------------------------------------------------------------
+# G1 — post-seed serialized-DB transient (Opus task; these are its probes)
+# ---------------------------------------------------------------------------
+# The plan's G1 asks: reproduce the window, then bisect the trigger. These three
+# probes answer, in order: WHEN does it end, is it TIME-based or TRAFFIC-based,
+# and is it the SERVER or the DATASTORE. Run g1-timeline first.
+
+task_g1_timeline() {
+  need_base
+  local out=$TASKS_ROOT/g1-timeline
+  rm -rf "$out"; summary_open "$out" "G1 — post-seed transient: recovery timeline"
+  local iters=${G1_ITERS:-20} dur=${G1_CELL_SECS:-20}
+
+  # The settle gate (G2) exists precisely to hide this window — turn it OFF here,
+  # measuring the window IS the point. Harmless if the knob isn't present yet.
+  export BENCH_SETTLE=0
+  export BENCH_WARMUP=5s BENCH_DURATION=${dur}s BENCH_VUS=${G1_VUS:-50}
+
+  bench_up_seed axiam
+  local t0; t0=$(date +%s)
+  local tel=$out/telemetry.csv pid; pid=$(sampler_start "$tel")
+  trap 'sampler_stop "$pid"; bench_down axiam' EXIT
+
+  s "Probe: immediately after \`bench-seed\`, run ${iters} short authz_check_rest cells"
+  s "(${dur}s measured each, ${BENCH_VUS} VUs) and watch when throughput recovers."
+  s
+  s "| # | minutes after seed | thr (ops/s) | p50 (ms) | DB CPU (cores) | server CPU |"
+  s "|---|---|---|---|---|---|"
+
+  local recovered_at=""
+  for i in $(seq 1 "$iters"); do
+    local d=$out/iter-$(printf '%02d' "$i") cs ce
+    cs=$(date +%s)
+    cell axiam p0-plaintext authz_check_rest.js "$d" >/dev/null 2>&1 || warn "cell $i failed"
+    ce=$(date +%s)
+    local f thr p50 dbcpu srvcpu mins
+    f=$(k6_file "$d"); thr=NA; p50=NA
+    [ -n "$f" ] && { thr=$(k6_stat "$f" thr); p50=$(k6_stat "$f" p50); }
+    dbcpu=$(cpu_mean "$tel" "$C_DB" "$cs" "$ce")
+    srvcpu=$(cpu_mean "$tel" "$C_SERVER" "$cs" "$ce")
+    mins=$(awk -v a="$cs" -v b="$t0" 'BEGIN{printf "%.1f", (a-b)/60}')
+    sp "| $i | $mins | $thr | $p50 | $dbcpu | $srvcpu |"
+    # First cell to clear 2x the clamped rate counts as recovery.
+    if [ -z "$recovered_at" ] && [ "$thr" != NA ] \
+       && awk -v t="$thr" 'BEGIN{exit !(t > 200)}'; then
+      recovered_at=$mins
+    fi
+  done
+
+  sampler_stop "$pid"; trap - EXIT; bench_down axiam
+  s
+  s "## Verdict"
+  if [ -n "$recovered_at" ]; then
+    s "- Transient REPRODUCED and ended at **~${recovered_at} min** after seed."
+  else
+    s "- No recovery within $(awk -v i="$iters" -v d="$dur" 'BEGIN{printf "%.0f", i*(d+35)/60}') min — either the window is longer than this probe, or it did not reproduce. Check the table: a sustained ~45 ops/s with DB ≈1.0 core IS the transient; a healthy stack reads ~740 ops/s with DB ≈2.0."
+  fi
+  s "- Queue-depth column of \`telemetry.csv\` (rows tagged \`$C_MQ-queues\`): if the"
+  s "  audit backlog drains to ~0 at the same minute throughput recovers, the AMQP"
+  s "  ingestion hypothesis is supported; if the queue is empty throughout, it is refuted."
+  s "- Next: \`g1-idle\` (time-based vs traffic-based) and \`g1-isolate\` (server vs datastore)."
+  finish
+}
+
+task_g1_idle() {
+  need_base
+  local out=$TASKS_ROOT/g1-idle
+  rm -rf "$out"; summary_open "$out" "G1 — is the window time-based or traffic-based?"
+  local wait_min=${G1_IDLE_MIN:-8}
+  export BENCH_SETTLE=0 BENCH_WARMUP=5s BENCH_DURATION=${G1_CELL_SECS:-20}s BENCH_VUS=${G1_VUS:-50}
+
+  bench_up_seed axiam
+  local tel=$out/telemetry.csv pid; pid=$(sampler_start "$tel")
+  trap 'sampler_stop "$pid"; bench_down axiam' EXIT
+
+  log "idling ${wait_min} min after seed with NO load (this is the whole experiment)"
+  s "The stack is seeded, then left **completely idle** for ${wait_min} minutes before"
+  s "the first request. If the first cell is then FAST, the window is background work"
+  s "that completes on wall-clock time (a cold-start/compaction class of cause). If it"
+  s "is still ~45 ops/s, the stack only warms up in response to TRAFFIC (a cache/"
+  s "connection/JIT-of-query-plan class of cause). This single bit splits G1's"
+  s "hypothesis space in half."
+  s
+  sleep $((wait_min * 60))
+
+  local d=$out/after-idle cs ce; cs=$(date +%s)
+  cell axiam p0-plaintext authz_check_rest.js "$d" >/dev/null 2>&1 || warn "cell failed"
+  ce=$(date +%s)
+  local f thr p50 dbcpu; f=$(k6_file "$d"); thr=NA; p50=NA
+  [ -n "$f" ] && { thr=$(k6_stat "$f" thr); p50=$(k6_stat "$f" p50); }
+  dbcpu=$(cpu_mean "$tel" "$C_DB" "$cs" "$ce")
+
+  # A second cell right after, to show whether traffic itself is what warms it.
+  local d2=$out/second-cell cs2 ce2; cs2=$(date +%s)
+  cell axiam p0-plaintext authz_check_rest.js "$d2" >/dev/null 2>&1 || true
+  ce2=$(date +%s)
+  local f2 thr2; f2=$(k6_file "$d2"); thr2=NA
+  [ -n "$f2" ] && thr2=$(k6_stat "$f2" thr)
+
+  sampler_stop "$pid"; trap - EXIT; bench_down axiam
+  sp "- first cell after ${wait_min} min idle: **${thr} ops/s** (p50 ${p50} ms, DB ${dbcpu} cores)"
+  sp "- immediately following cell:          **${thr2} ops/s**"
+  s
+  s "## Verdict"
+  s "- \`~740 ops/s\` on the first cell ⇒ **time-based**: idling through the window cures it."
+  s "- \`~45 ops/s\` on the first cell and faster on the second ⇒ **traffic-based** warm-up."
+  s "- Both slow ⇒ the window is longer than ${wait_min} min; re-run with G1_IDLE_MIN=15."
+  finish
+}
+
+task_g1_isolate() {
+  need_base
+  local out=$TASKS_ROOT/g1-isolate
+  rm -rf "$out"; summary_open "$out" "G1 — server or datastore?"
+  export BENCH_SETTLE=0 BENCH_WARMUP=5s BENCH_DURATION=${G1_CELL_SECS:-20}s BENCH_VUS=${G1_VUS:-50}
+
+  bench_up_seed axiam
+  local tel=$out/telemetry.csv pid; pid=$(sampler_start "$tel")
+  trap 'sampler_stop "$pid"; bench_down axiam' EXIT
+
+  probe() { # $1=label -> prints thr
+    local d=$out/$1
+    cell axiam p0-plaintext authz_check_rest.js "$d" >/dev/null 2>&1 || true
+    local f; f=$(k6_file "$d"); [ -n "$f" ] && k6_stat "$f" thr || echo NA
+  }
+
+  s "Restarting ONE container at a time inside the clamped window. Whatever state"
+  s "the transient lives in dies with the container that owns it."
+  s
+  local a b c
+  a=$(probe baseline);                     sp "- baseline (in-window):            **${a} ops/s**"
+  log "restarting $C_SERVER only"
+  docker restart "$C_SERVER" >/dev/null; sleep 20
+  b=$(probe after-server-restart);         sp "- after restarting the SERVER only: **${b} ops/s**"
+  log "restarting $C_DB only"
+  docker restart "$C_DB" >/dev/null; sleep 25
+  c=$(probe after-db-restart);             sp "- after restarting the DATASTORE:   **${c} ops/s**"
+
+  sampler_stop "$pid"; trap - EXIT; bench_down axiam
+  s
+  s "## Verdict"
+  s "- Clamp survives a server restart but clears on a datastore restart ⇒ the state is"
+  s "  **SurrealDB-side** (background compaction / index build / warm-up) — and is then a"
+  s "  candidate production cold-start defect, not just a bench artifact."
+  s "- Clamp clears on the server restart ⇒ it is **AXIAM-side** (DB pool/session warm-up)."
+  s "- Neither clears it ⇒ it is time-based background work; cross-check with \`g1-idle\`."
+  s "- Note a restart also drops caches, so read this together with \`g1-idle\`."
+  finish
+}
+
+task_g1_dbdirect() {
+  need_base
+  local out=$TASKS_ROOT/g1-dbdirect
+  rm -rf "$out"; summary_open "$out" "G1 — does the clamp exist without AXIAM in the path?"
+  export BENCH_SETTLE=0
+  bench_up_seed axiam
+  trap 'bench_down axiam' EXIT
+
+  # Same query shape the authz hot path uses, issued straight at SurrealDB from an
+  # ephemeral container on the bench network — no AXIAM server involved.
+  local net; net=$(docker inspect "$C_DB" -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null || echo "")
+  local img; img=$(docker inspect "$C_DB" -f '{{.Config.Image}}' 2>/dev/null || echo "surrealdb/surrealdb:v3")
+  local user=${AXIAM__DB__USERNAME:-bench} pass=${AXIAM__DB__PASSWORD:-}
+  [ -f ../docker/.secrets/env ] && . ../docker/.secrets/env || true
+  user=${AXIAM__DB__USERNAME:-$user}; pass=${AXIAM__DB__PASSWORD:-$pass}
+
+  s "Issues a repeated read straight at SurrealDB (no AXIAM server in the path) during"
+  s "the post-seed window. If the DB alone is slow, AXIAM is exonerated entirely."
+  s
+  if [ -z "$net" ] || [ -z "$pass" ]; then
+    warn "could not resolve the DB network or credentials automatically"
+    s "- **NOT RUN automatically.** Resolve manually and re-run the loop below:"
+    s '```bash'
+    s "docker run --rm --network $net $img sql \\"
+    s "  --endpoint http://$C_DB:8000 --username <user> --password <pass> \\"
+    s "  --namespace axiam --database axiam --pretty \\"
+    s "  --query 'SELECT count() FROM role_permission_grant GROUP ALL;'"
+    s '```'
+    trap - EXIT; bench_down axiam; finish; return
+  fi
+  {
+    echo "iteration,elapsed_ms"
+    for i in $(seq 1 30); do
+      local st et
+      st=$(date +%s%3N)
+      docker run --rm --network "$net" "$img" sql \
+        --endpoint "http://$C_DB:8000" --username "$user" --password "$pass" \
+        --namespace axiam --database axiam \
+        --query 'SELECT count() FROM role_permission_grant GROUP ALL;' >/dev/null 2>&1 || true
+      et=$(date +%s%3N)
+      echo "$i,$((et - st))"
+      sleep 2
+    done
+  } > "$out/db-direct.csv"
+  s "- raw timings: \`db-direct.csv\` (includes ~container-start overhead per row — compare"
+  s "  the TREND across rows, not the absolute value)."
+  s "- A flat, slow trend that improves at the same minute the k6 cells recover ⇒ the"
+  s "  serialization is inside SurrealDB."
+  trap - EXIT; bench_down axiam
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# G2 — prove the harness countermeasures work on a live stack
+# ---------------------------------------------------------------------------
+task_g2_verify() {
+  need_base
+  local out=$TASKS_ROOT/g2-verify
+  rm -rf "$out"; summary_open "$out" "G2 — settle gate, cell rotation, self-describing meta"
+  export BENCH_RESULTS_DIR=$out
+  export BENCH_WARMUP=5s BENCH_DURATION=30s
+
+  log "running a 2-repeat mini matrix (one target, one profile) to exercise the new machinery"
+  just target=axiam profiles="p0-plaintext" targets="axiam" repeat=2 bench-matrix || \
+    warn "mini matrix returned non-zero — inspect the output above"
+
+  s "## Checks"
+  python3 - "$out" >> "$SUMMARY" <<'PY'
+import glob, json, os, sys
+root = sys.argv[1]
+metas = sorted(glob.glob(os.path.join(root, "**", "*.meta.json"), recursive=True))
+if not metas:
+    print("- ❌ no meta.json produced — the mini matrix did not run"); raise SystemExit
+have_settle = [m for m in metas if "settle_wait_secs" in json.load(open(m))]
+have_order  = [m for m in metas if "cell_order_index" in json.load(open(m))]
+have_env    = [m for m in metas if json.load(open(m)).get("axiam_env")]
+print(f"- cells produced: {len(metas)}")
+print(f"- `settle_wait_secs` present: {len(have_settle)}/{len(metas)} "
+      + ("✅" if len(have_settle) == len(metas) else "❌"))
+print(f"- `cell_order_index` present: {len(have_order)}/{len(metas)} "
+      + ("✅" if len(have_order) == len(metas) else "❌"))
+print(f"- `axiam_env` knob dump present: {len(have_env)}/{len(metas)} "
+      + ("✅" if len(have_env) == len(metas) else "❌"))
+# rotation: the first-executed scenario must differ between run-1 and run-2
+first = {}
+for m in metas:
+    d = json.load(open(m))
+    run = next((p for p in m.split(os.sep) if p.startswith("run-")), "run-?")
+    idx = d.get("cell_order_index")
+    if idx is not None and (run not in first or idx < first[run][0]):
+        first[run] = (idx, d.get("scenario"))
+if len(first) >= 2:
+    names = {v[1] for v in first.values()}
+    print(f"- first-executed scenario per run: "
+          + ", ".join(f"{r}={v[1]}" for r, v in sorted(first.items()))
+          + ("  ✅ rotated" if len(names) > 1 else "  ❌ NOT rotated"))
+# secret hygiene of the new env dump
+leaks = []
+for m in metas:
+    for k, v in (json.load(open(m)).get("axiam_env") or {}).items():
+        if any(t in k.upper() for t in ("PASSWORD", "SECRET", "KEY", "PEPPER", "PEM", "TOKEN")):
+            if v != "<redacted>":
+                leaks.append(f"{os.path.basename(m)}:{k}")
+print(f"- secret redaction in `axiam_env`: " + ("✅ clean" if not leaks else f"❌ LEAKED {leaks[:5]}"))
+PY
+  s
+  s "Acceptance (plan G2): every cell carries the three new fields, the first-executed"
+  s "scenario differs between run-1 and run-2, and no secret value appears in \`axiam_env\`."
+  unset BENCH_RESULTS_DIR
+  bench_down axiam
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# G3 — the clean batch A/B (needs G2's settle gate merged)
+# ---------------------------------------------------------------------------
+task_g3_batch() {
+  need_base
+  local out=$TASKS_ROOT/g3-batch
+  rm -rf "$out"; summary_open "$out" "G3 — batch strategy A/B on a settled stack"
+  local reps=${G3_REPEAT:-3}
+
+  s "The four authz cells under both \`AXIAM__AUTHZ__BATCH_STRATEGY\` values, ${reps}×"
+  s "each, **on a settled stack** (this is what run 3 could not do — every historical"
+  s "batch cell was corrupted by the post-seed transient). A warm-up cell runs first"
+  s "in every pass so no measured cell is ever the first request after seeding."
+  s
+  s "| strategy | scenario | run | thr (ops/s) | p50 (ms) | p95 (ms) |"
+  s "|---|---|---|---|---|---|"
+
+  for strategy in concurrent coalesced; do
+    export AXIAM__AUTHZ__BATCH_STRATEGY=$strategy
+    bench_up_seed axiam
+    # Belt and braces: even with the settle gate, burn one throwaway cell.
+    BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam p0-plaintext authz_check_rest.js \
+      "$out/$strategy/warmup" >/dev/null 2>&1 || true
+    for r in $(seq 1 "$reps"); do
+      for sc in authz_check_rest authz_batch_rest authz_check_grpc authz_batch_grpc; do
+        local d=$out/$strategy/run-$r/$sc
+        cell axiam p0-plaintext "$sc.js" "$d" >/dev/null 2>&1 || warn "$strategy/$sc run $r failed"
+        local f; f=$(k6_file "$d")
+        [ -n "$f" ] && s "| $strategy | $sc | $r | $(k6_stat "$f" thr) | $(k6_stat "$f" p50) | $(k6_stat "$f" p95) |"
+      done
+    done
+    bench_down axiam
+    unset AXIAM__AUTHZ__BATCH_STRATEGY
+  done
+
+  s
+  s "## Decision inputs (plan G3 criterion)"
+  python3 - "$out" >> "$SUMMARY" <<'PY'
+import glob, json, os, statistics, sys
+root = sys.argv[1]
+def med(strategy, scen, key):
+    vals = []
+    for f in glob.glob(os.path.join(root, strategy, "run-*", scen, "**", "*.k6.json"),
+                       recursive=True):
+        m = json.load(open(f))["metrics"]
+        vals.append(m["bench_ok"]["rate"] if key == "thr"
+                    else m["bench_op_latency_ms"]["p(95)"])
+    return statistics.median(vals) if vals else None
+for strategy in ("concurrent", "coalesced"):
+    single = med(strategy, "authz_check_rest", "thr")
+    batch = med(strategy, "authz_batch_rest", "thr")
+    bg = med(strategy, "authz_batch_grpc", "thr")
+    bg95 = med(strategy, "authz_batch_grpc", "p95")
+    if not (single and batch):
+        print(f"- **{strategy}**: incomplete data"); continue
+    checks = batch * 5  # the bench batches 5 checks per request
+    print(f"- **{strategy}**: singles {single:.0f}/s · batch {batch:.0f} req/s "
+          f"= **{checks:.0f} checks/s** → batch/single = **{checks/single:.2f}×** "
+          + ("✅ beats singles" if checks > single else "❌ worse than singles"))
+    if bg95:
+        print(f"  - gRPC batch p95 {bg95:.0f} ms "
+              + ("✅ under the 2 s gate" if bg95 < 2000 else "❌ breaches the 2 s gate"))
+PY
+  s
+  s "Ship whichever strategy wins as the default (plan G3), keep the other selectable,"
+  s "and paste this table into \`claude_dev/authz-batch-investigation.md\`."
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# G4 — refresh-token cell must stop measuring a fallback
+# ---------------------------------------------------------------------------
+task_g4_refresh() {
+  need_base
+  local out=$TASKS_ROOT/g4-refresh
+  rm -rf "$out"; summary_open "$out" "G4 — token_refresh measures a real rotation"
+
+  s "| target | thr (ops/s) | p50 (ms) | bench_fallback | HTTP reqs / iteration | verdict |"
+  s "|---|---|---|---|---|---|"
+  for target in axiam keycloak; do
+    bench_up_seed "$target"
+    # A control cell: client_credentials, so we can check refresh is NOT ~½ of it.
+    cell "$target" p0-plaintext oauth2_client_credentials.js "$out/$target/cc" >/dev/null 2>&1 || true
+    cell "$target" p0-plaintext token_refresh.js "$out/$target/refresh" >/dev/null 2>&1 || true
+    bench_down "$target"
+    local fr; fr=$(k6_file "$out/$target/refresh")
+    if [ -z "$fr" ]; then s "| $target | — | — | — | — | ❌ cell did not run |"; continue; fi
+    local thr p50 fb rpi verdict
+    thr=$(k6_stat "$fr" thr); p50=$(k6_stat "$fr" p50); fb=$(k6_stat "$fr" fallback)
+    rpi=$(python3 -c "
+import json,sys
+m=json.load(open('$fr'))['metrics']
+it=m.get('iterations',{}).get('count',0); hr=m.get('http_reqs',{}).get('count',0)
+print(f'{hr/it:.2f}' if it else 'NA')")
+    verdict='❌ still a fallback'
+    [ "$fb" = "0" ] && verdict='✅ real rotation'
+    s "| $target | $thr | $p50 | $fb | $rpi | $verdict |"
+  done
+
+  s
+  s "## Acceptance (plan G4)"
+  s "- \`bench_fallback == 0\` for **both** AXIAM and Keycloak;"
+  s "- ~**1.0** HTTP request per iteration (2.0 is the client-credentials fallback signature);"
+  s "- AXIAM refresh throughput is **not** ≈ ½ × its client-credentials cell — compare"
+  s "  against the `<target>/cc` cell in this directory."
+  s "- If AXIAM still shows a fallback, the diagnosis in"
+  s "  \`claude_dev/refresh-harness-diagnosis.md\` lists what to check next."
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# G5 — decision-cache hit-rate sweep (does the 3× survive a realistic key space?)
+# ---------------------------------------------------------------------------
+task_g5_cache_sweep() {
+  need_base
+  local out=$TASKS_ROOT/g5-cache-sweep
+  rm -rf "$out"; summary_open "$out" "G5 — decision cache vs cache-key cardinality"
+  local scen=${G5_SCENARIO:-authz_check_rest.js}
+  local ks=${G5_KEYSPACES:-"1 100 10000"}
+
+  s "Run 3 measured the cache at K=1 (every VU hammering ONE subject/resource pair) —"
+  s "the friendliest possible hit rate. This sweeps the key space to bound the real"
+  s "win, and records the memory cost at the largest K."
+  s
+  s "| cache | K (distinct subject×resource pairs) | thr (ops/s) | p50 (ms) | server mem (MiB) |"
+  s "|---|---|---|---|---|"
+
+  for enabled in false true; do
+    export AXIAM__AUTHZ__DECISION_CACHE_ENABLED=$enabled
+    bench_up_seed axiam
+    BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam p0-plaintext authz_check_rest.js \
+      "$out/warmup-$enabled" >/dev/null 2>&1 || true
+    for k in $ks; do
+      local d=$out/cache-$enabled/k-$k
+      # BENCH_AUTHZ_KEYSPACE is read by the sweep-capable scenario (task G5's
+      # code change). With an older scenario it is simply ignored — the row then
+      # reads the same for every K, which is itself the signal that the scenario
+      # change has not landed yet.
+      BENCH_AUTHZ_KEYSPACE=$k cell axiam p0-plaintext "$scen" "$d" >/dev/null 2>&1 || true
+      local f mem; f=$(k6_file "$d")
+      mem=$(python3 - "$d" <<'PY'
+import csv, glob, os, sys
+vals = []
+for p in glob.glob(os.path.join(sys.argv[1], "**", "*.res.csv"), recursive=True):
+    for r in csv.DictReader(open(p)):
+        if r["container"].endswith("-server"):
+            vals.append(float(r["mem_mib"]))
+print(f"{sum(vals)/len(vals):.0f}" if vals else "NA")
+PY
+)
+      [ -n "$f" ] && s "| $enabled | $k | $(k6_stat "$f" thr) | $(k6_stat "$f" p50) | $mem |"
+    done
+    bench_down axiam
+    unset AXIAM__AUTHZ__DECISION_CACHE_ENABLED
+  done
+
+  s
+  s "## Decision inputs (plan G5)"
+  s "- The ship-decision needs the cache-ON/OFF ratio **at the largest K**, not at K=1."
+  s "- If the win collapses toward 1.0× as K grows, the default should stay opt-in and the"
+  s "  public doc's \"3×\" must be labeled as a best-case, small-key-space figure."
+  s "- Memory at K=10000 bounds \`DECISION_CACHE_MAX_ENTRIES\` guidance."
+  s "- Then run the revocation integration test against this live stack (plan G5 step 2)."
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# G6 — memory retention (delegates to the dedicated script)
+# ---------------------------------------------------------------------------
+task_g6_memory() {
+  [ -x ./run-memory-experiment.sh ] || die "run-memory-experiment.sh missing or not executable"
+  log "delegating to run-memory-experiment.sh (builds two images — allow ~1h)"
+  ./run-memory-experiment.sh "${1:-both}"
+  echo
+  log "when it finishes, paste results/d9-summary.md into:"
+  echo "  - claude_dev/memory-retention-experiment.md §6"
+  echo "  - $PLAN §G6 (replace the placeholder)"
+}
+
+# ---------------------------------------------------------------------------
+# G8 — B2 conviction: is HTTP/2 multiplexing the TLS token-issuance penalty?
+# ---------------------------------------------------------------------------
+task_g8_tls_h1() {
+  need_base
+  local out=$TASKS_ROOT/g8-tls-h1
+  rm -rf "$out"; summary_open "$out" "G8 — TLS 1.3 token issuance: h2 vs h1 vs plaintext"
+
+  s "Three cells of the SAME operation, each run **after a warm-up cell** so none of"
+  s "them is the first request after seeding (that is what invalidated run 3's"
+  s "conviction cell). If p2-h1 ≈ p0, HTTP/2 multiplexing is convicted."
+  s
+
+  run_cc_cell() { # $1=label $2=profile [$3=BENCH_NGINX_CONF]
+    local label=$1 profile=$2 nginx=${3:-}
+    [ -n "$nginx" ] && export BENCH_NGINX_CONF=$nginx || unset BENCH_NGINX_CONF
+    bench_up_seed axiam "$profile"
+    BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam "$profile" authz_check_rest.js \
+      "$out/$label/warmup" >/dev/null 2>&1 || true
+    cell axiam "$profile" oauth2_client_credentials.js "$out/$label/cc" >/dev/null 2>&1 || true
+    cell axiam "$profile" token_refresh.js "$out/$label/refresh" >/dev/null 2>&1 || true
+    bench_down axiam "$profile"
+    unset BENCH_NGINX_CONF
+  }
+
+  run_cc_cell p0-plaintext p0-plaintext
+  run_cc_cell p2-native    p2-tls13
+  run_cc_cell p2-h1        p2-tls13 tls13-h1.conf
+
+  s "| cell | negotiated HTTP | thr (ops/s) | p50 (ms) | Δ vs p0 |"
+  s "|---|---|---|---|---|"
+  python3 - "$out" >> "$SUMMARY" <<'PY'
+import glob, json, os, sys
+root = sys.argv[1]
+def stats(label):
+    f = glob.glob(os.path.join(root, label, "cc", "**", "*.k6.json"), recursive=True)
+    if not f: return None
+    m = json.load(open(f[0]))["metrics"]
+    # k6 tags http_req_duration by protocol when available; fall back to "?"
+    proto = "?"
+    for k in m:
+        if k.startswith("http_req_duration{") and "http_version" in k:
+            proto = k.split("http_version:")[1].rstrip("}")
+            break
+    return m["bench_ok"]["rate"], m["bench_op_latency_ms"]["med"], proto
+base = stats("p0-plaintext")
+for label in ("p0-plaintext", "p2-native", "p2-h1"):
+    st = stats(label)
+    if not st:
+        print(f"| {label} | — | — | — | cell missing |"); continue
+    thr, p50, proto = st
+    delta = "baseline" if label == "p0-plaintext" or not base else f"{100*(thr-base[0])/base[0]:+.1f}%"
+    print(f"| {label} | {proto} | {thr:.0f} | {p50:.1f} | {delta} |")
+PY
+  s
+  s "## Verdict (plan G8)"
+  s "- **p2-h1 within ~15% of p0** ⇒ HTTP/2 convicted. Next step is h2 tuning on the"
+  s "  actix listener (\`max_concurrent_streams\`, stream/connection window sizes), then"
+  s "  re-measure; if no setting recovers it, publish the documented position."
+  s "- **p2-h1 also ~−50%** ⇒ HTTP/2 acquitted; move to per-request server-side timing"
+  s "  at p2 vs p0 (TLS read/write vs handler) — the fallback path in the plan."
+  s "- Check the negotiated-protocol column: the h1 cell must NOT read \`2\`."
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# G9 — rate-limited cells must report coherent metrics
+# ---------------------------------------------------------------------------
+task_g9_rlprod() {
+  need_base
+  local out=$TASKS_ROOT/g9-rlprod
+  rm -rf "$out"; summary_open "$out" "G9 — metric coherence under a 429 storm"
+  export BENCH_RESULTS_DIR=$out
+  bench_up_seed axiam p0-plaintext rl=prod
+  for sc in oauth2_client_credentials token_introspection authz_check_rest; do
+    cell axiam p0-plaintext "$sc.js" "$out/$sc" >/dev/null 2>&1 || true
+  done
+  bench_down axiam
+  unset BENCH_RESULTS_DIR
+
+  s "With the production per-IP posture active, nearly every request is a 429. The"
+  s "cells must say so coherently: \`bench_ok\` counts ONLY successful ops, so a"
+  s "100%-error cell reports a throughput of ~0 rather than thousands of \"ops/s\" of"
+  s "rejections (the run-3 incoherence this task fixes)."
+  s
+  s "| scenario | bench_ok rate | error rate | coherent? |"
+  s "|---|---|---|---|"
+  for sc in oauth2_client_credentials token_introspection authz_check_rest; do
+    local f; f=$(k6_file "$out/$sc")
+    if [ -z "$f" ]; then s "| $sc | — | — | cell missing |"; continue; fi
+    local thr err ok
+    thr=$(k6_stat "$f" thr); err=$(k6_stat "$f" err)
+    ok=$(python3 -c "
+thr=float('$thr' if '$thr'!='NA' else 0); err=float('$err' if '$err'!='NA' else 0)
+print('✅' if (err < 0.99 or thr < 1.0) else '❌ ok-rate > 0 at ~100% errors')")
+    s "| $sc | $thr | $err | $ok |"
+  done
+  s
+  s "Acceptance: no row reports a meaningful \`bench_ok\` rate while its error rate is ~1.0."
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# G10 — SDK benches: first validated records
+# ---------------------------------------------------------------------------
+task_g10_sdk() {
+  need_base
+  local out=$TASKS_ROOT/g10-sdk
+  rm -rf "$out"; summary_open "$out" "G10 — SDK client-side benches against a live target"
+  local langs=${G10_LANGS:-"rust python typescript go java csharp php"}
+
+  s "Each SDK bench must emit ONE spec-conformant \`axiam.sdk-bench/v1\` record with"
+  s "\`status: \"ok\"\`, twice in a row, against a seeded p0 target (plan G10 / E1.1)."
+  s "Each language's sibling repo must be checked out next to this workspace."
+  s
+  bench_up_seed axiam
+  s "| sdk | attempt 1 | attempt 2 | notes |"
+  s "|---|---|---|---|"
+  for lang in $langs; do
+    local d=$out/$lang; mkdir -p "$d"
+    local r1 r2
+    just sdk="$lang" sdk-bench > "$d/attempt-1.log" 2>&1 && r1=ok || r1=fail
+    just sdk="$lang" sdk-bench > "$d/attempt-2.log" 2>&1 && r2=ok || r2=fail
+    local st1 st2
+    st1=$(grep -o '"status"[[:space:]]*:[[:space:]]*"[a-z]*"' "$d/attempt-1.log" | tail -1 | grep -o '[a-z]*"$' | tr -d '"' || echo "$r1")
+    st2=$(grep -o '"status"[[:space:]]*:[[:space:]]*"[a-z]*"' "$d/attempt-2.log" | tail -1 | grep -o '[a-z]*"$' | tr -d '"' || echo "$r2")
+    local note=""
+    grep -qi "no such file\|not found\|cannot find" "$d/attempt-1.log" && note="sibling SDK repo missing?"
+    s "| $lang | ${st1:-$r1} | ${st2:-$r2} | $note |"
+  done
+  bench_down axiam
+  s
+  s "For every non-\`ok\` row, fix per that language's \`sdk/<lang>/TODO.md\` and re-run"
+  s "just that language: \`G10_LANGS=python ./run-improvement-tasks.sh g10-sdk\`."
+  s "Once ≥7 are ok, run \`just sdk-bench-all\` and build the overhead-vs-wire table (E1.3)."
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# packaging
+# ---------------------------------------------------------------------------
+task_pack() {
+  log "packing shareable results (secret-scanned by the justfile recipe)"
+  just bench-pack
+  echo
+  log "task summaries collected so far:"
+  find "$TASKS_ROOT" -name SUMMARY.md 2>/dev/null | sort | sed 's|^|  |' || echo "  (none yet)"
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<EOF
+run-improvement-tasks.sh — per-task benchmark data collection for
+$PLAN
+
+Usage: ./run-improvement-tasks.sh <task>
+
+  Task            Plan  Est.    What it answers
+  --------------------------------------------------------------------------
+  g1-timeline     G1    ~15m    When does the post-seed window end? (run first)
+  g1-idle         G1    ~15m    Is it time-based or traffic-based?
+  g1-isolate      G1    ~10m    Does it live in the server or the datastore?
+  g1-dbdirect     G1    ~5m     Is it visible with AXIAM out of the path?
+  g2-verify       G2    ~10m    Do settle gate + rotation + meta dump work live?
+  g3-batch        G3    ~90m    Clean batch A/B: does batch beat singles?
+  g4-refresh      G4    ~15m    Is the refresh cell a real rotation now?
+  g5-cache-sweep  G5    ~60m    Does the cache 3x survive a realistic key space?
+  g6-memory       G6    ~90m    Does jemalloc fix the post-burst retention?
+  g8-tls-h1       G8    ~25m    Is HTTP/2 the TLS token-issuance penalty?
+  g9-rlprod       G9    ~10m    Are rate-limited cells' metrics coherent?
+  g10-sdk         G10   ~30m    Do the SDK benches emit valid records?
+  pack            —     ~1m     Build the shareable archive + list summaries
+
+Each task writes results/tasks/<task>/SUMMARY.md with its verdict.
+Knobs: G1_ITERS, G1_CELL_SECS, G1_VUS, G1_IDLE_MIN, G3_REPEAT, G5_KEYSPACES,
+G10_LANGS. Order that matters: g1-* before g3/g8 (they need the settle gate to
+be trustworthy), g2-verify after the G2 code lands.
+EOF
+}
+
+TASK=${1:-}
+case "$TASK" in
+  list|help|-h|--help|"") usage ;;
+  g1-timeline)    task_g1_timeline ;;
+  g1-idle)        task_g1_idle ;;
+  g1-isolate)     task_g1_isolate ;;
+  g1-dbdirect)    task_g1_dbdirect ;;
+  g2-verify)      task_g2_verify ;;
+  g3-batch)       task_g3_batch ;;
+  g4-refresh)     task_g4_refresh ;;
+  g5-cache-sweep) task_g5_cache_sweep ;;
+  g6-memory)      shift; task_g6_memory "$@" ;;
+  g8-tls-h1)      task_g8_tls_h1 ;;
+  g9-rlprod)      task_g9_rlprod ;;
+  g10-sdk)        task_g10_sdk ;;
+  pack)           task_pack ;;
+  *) die "unknown task '$TASK' — run './run-improvement-tasks.sh list'" ;;
+esac

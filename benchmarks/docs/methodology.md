@@ -503,3 +503,165 @@ Publish the `prod`-posture report *alongside* the neutralized matrix, not as
 a replacement for it — the framing is "AXIAM ships per-IP rate limits by
 default; Keycloak and Zitadel don't," turning what would otherwise read as a
 benchmark asterisk into a documented security-posture advantage.
+
+## 12. Post-seed settle gate & cell-order rotation (G2)
+
+**Why this exists.** Run 3's analysis (`PRIVATE_BENCH_ANALYSIS.md` §1, "THE
+run-3 discovery: a post-seed serialized-DB transient invalidates every
+'first cell after seed'") found a **~5–7 minute window right after
+`bench-seed`** in which the AXIAM
+stack serves everything at **~45 req/s**, with SurrealDB pinned at **~1.0–1.3
+cores** (never its 2.0 cap) and the server nearly idle — the signature of a
+~22 ms *serialized* unit of DB work queuing every request — before
+spontaneously recovering to normal throughput (~740 req/s) and DB CPU (~2.0
+cores). Because `run-benchmark.sh` always ran the scenario glob in the same
+(alphabetical) order, `authz_batch_grpc`/`authz_batch_rest` were **always**
+cells 1–2 right after seed, in every run collected so far — so every
+historical batch-scenario number measured this transient, not the batch
+authz path. The same signature was caught independently on a completely
+different scenario (the B2 `oauth2_client_credentials` h1-isolation cell,
+also first-after-seed). G1's root-cause note
+(`claude_dev/postseed-transient-investigation.md`) has the bisection; this
+section documents the two harness countermeasures G2 added so the artifact
+can't silently corrupt a cell again, whatever the root cause turns out to be.
+
+### 12.1 Settle gate
+
+`run-benchmark.sh` now gates the **first cell** of every `bench-run`
+invocation behind a settle check, run once (not per cell) immediately after
+the seed-ok marker is verified:
+
+1. Poll a cheap, target-appropriate, already-seeded **canary** once per
+   second:
+   * **axiam** — the same endpoint the transient was characterized against,
+     `POST /api/v1/authz/check` (authz-check-ish), authenticated as the
+     seeded bench user (one login, cookie jar reused for every tick).  Falls
+     back to the plaintext `/health` liveness probe if the seed didn't
+     provide enough to authenticate.
+   * **keycloak** — JWKS (`/realms/<realm>/protocol/openid-connect/certs`):
+     cheap, unauthenticated, needs only the seeded realm name.
+   * **zitadel** — JWKS (`/oauth/v2/keys`): cheap, unauthenticated, no seed
+     dependency at all.
+   * any other/future target — `/health`.
+
+   A canary tick that can't complete at all (connection refused/reset, or
+   the target genuinely lacks the endpoint) is treated as **no signal** —
+   it resets the stability counter but never fails the run.
+2. Require **`BENCH_SETTLE_STABLE_SECS`** (default **30**) *consecutive*
+   seconds where the canary's observed latency is under
+   **`BENCH_SETTLE_MAX_MS`** (default **100 ms**) before letting the first
+   cell start.
+3. If that never happens within **`BENCH_SETTLE_TIMEOUT_SECS`** (default
+   **600 s** / 10 min — comfortably above the ~5–7 min window G1 measured),
+   the gate **warns and proceeds anyway** rather than hanging the harness
+   forever; it never treats "still not settled" as a hard failure.
+
+Every cell this run produces — not just the first — records the wait in its
+`meta.json`:
+
+```json
+"settle_wait_secs": 47,
+"settle_timeout": false
+```
+
+(`settle_wait_secs` is the same value across every cell of one `bench-run`
+invocation, since the gate runs once per invocation; a median-of-N cell
+aggregated across `results/run-*/` takes the **max** wait and **any**
+timeout across its repeats — the worst case, not an average, since a settle
+timeout on even one repeat means that repeat's data may still be
+suspect.) `report.py` surfaces `settle_wait_secs`/`timeout` in a dedicated
+"Appendix: post-seed settle gate" table, and adds a `settle_timeout`
+`host_flags` entry (alongside `clock_variance`/`generator_saturated`) to the
+main "All results" table for any cell whose gate hit the hard timeout — a
+signal that cell may still be inside the transient even though the harness
+proceeded. Both degrade cleanly (simply absent) on `meta.json` files that
+predate G2, so the existing run-1/run-2/run-3 trees still render unchanged.
+
+Set **`BENCH_SETTLE=0`** to skip the gate entirely — useful for a quick
+manual `bench-run` against an already-settled (or already-known-warm)
+target where waiting is pure overhead.
+
+### 12.2 Cell-order rotation
+
+Independently of the settle gate (defense in depth — the gate should make
+this moot, but "first cell after seed" was silently wrong for months before
+anyone noticed), `run-benchmark.sh` now **rotates** the executed scenario
+order by the repeat's run index, so the corruption mechanism itself (always
+running the same scenario first) can't recur even if a future gate has a
+gap. `bench-matrix` (`justfile`) exports **`BENCH_RUN_INDEX=<i>`** for each
+of its `repeat` passes; `run-benchmark.sh`'s `rotate_scenarios()` left-shifts
+the (already target/profile-filtered) scenario list by
+`(BENCH_RUN_INDEX - 1) mod N`:
+
+* run-1 executes scenarios in their natural (alphabetical) order,
+* run-2 starts one scenario further along,
+* run-3 two further, and so on, wrapping around.
+
+This is a pure, deterministic function of the run index and scenario
+count — it changes only the *order* cells run in, never *which* scenarios
+run, and a manual single `bench-run` invocation (`BENCH_RUN_INDEX` unset,
+defaults to 1) is unaffected (natural order, same as before G2). Each cell
+records its position in the rotated order as **`cell_order_index`** in
+`meta.json`, so a report reader can always tell which cell was first (and
+therefore settle-gated) in a given run.
+
+### 12.3 Self-describing labeled passes (A7-safe)
+
+A sensitivity pass (e.g. `AXIAM__DB__POOL_SIZE=4`, a batch-strategy A/B, the
+decision cache on/off) previously left **no trace in `meta.json`** — only
+the results-directory name (`sens-pool-4/`, ...) said what the pass was
+(`PRIVATE_BENCH_ANALYSIS.md` §2.2). `run-benchmark.sh` now reads the AXIAM
+server container's **actual** environment (`docker inspect`, the same
+pattern `detect_rl_posture()` already used for `rate_limits`) and dumps
+every `AXIAM__*` variable it finds into each cell's `meta.json` under
+`"axiam_env"` — so pool size, batch strategy, decision cache, rate-limit
+posture, hash concurrency, or any other pass-through knob is identifiable
+from the metadata alone.
+
+**Secret redaction (A7 — shared archives contain no secret material) is
+mandatory and non-negotiable:** the *value* of any `AXIAM__*` key whose name
+matches `PASSWORD|SECRET|KEY|PEPPER|PEM|TOKEN` (case-insensitive) is never
+written — only the key **name** (so the setting's presence stays visible)
+with a literal `"<redacted>"` placeholder:
+
+```json
+"axiam_env": {
+  "AXIAM__AUTHZ__BATCH_STRATEGY": "coalesced",
+  "AXIAM__DB__POOL_SIZE": "4",
+  "AXIAM__DB__PASSWORD": "<redacted>",
+  "AXIAM__AUTH__JWT_PRIVATE_KEY_PEM": "<redacted>",
+  "AXIAM__AUTH__PEPPER": "<redacted>",
+  "AXIAM__AMQP__SIGNING_KEY": "<redacted>"
+}
+```
+
+Because those key **names** legitimately contain PASSWORD/SECRET/KEY/PEM-
+shaped substrings even fully redacted, `just bench-pack`'s leak check
+(`justfile`) now filters out every line already carrying the literal
+`<redacted>` placeholder *before* scanning packed content for
+`SECRET`/`PASSWORD` — an actual leaked value would never carry that
+placeholder, so this can't hide a real leak, only the expected, fully-
+redacted key names. `report.py` renders one representative cell's
+`axiam_env` per (target, profile) in a dedicated "Appendix: AXIAM env knobs
+(labeled passes)" section (every cell from the same `bench-up` shares one
+running server container, so the dump is identical across that
+target/profile's scenarios) — omitted entirely for results trees predating
+G2 or for non-AXIAM targets.
+
+### 12.4 New environment knobs (G2 summary)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BENCH_SETTLE` | `1` | `0` skips the post-seed settle gate entirely. |
+| `BENCH_SETTLE_STABLE_SECS` | `30` | Consecutive seconds of low canary latency required before the first cell starts. |
+| `BENCH_SETTLE_MAX_MS` | `100` | Canary latency threshold (ms) counted as "settled". |
+| `BENCH_SETTLE_TIMEOUT_SECS` | `600` | Hard cap on the settle wait; the gate then warns, proceeds, and records `settle_timeout: true`. |
+| `BENCH_RUN_INDEX` | `1` | Drives cell-order rotation; set per-repeat by `bench-matrix` (`BENCH_RUN_INDEX=$i`), defaults to 1 (natural order) for a manual `bench-run`. |
+
+None of these are `just` recipe variables (`target=`, `profile=`, ...) — set
+them as plain environment variables, e.g.:
+
+```bash
+BENCH_SETTLE_STABLE_SECS=10 BENCH_SETTLE_MAX_MS=150 \
+  just target=axiam profile=p0-plaintext bench-run
+```

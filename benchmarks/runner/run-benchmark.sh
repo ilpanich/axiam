@@ -84,6 +84,11 @@ export BENCH_TARGET="$TARGET"
 export BENCH_HOST="${BENCH_HOST:-localhost}"
 # BENCH_PORT is set by the profile env (8090 plaintext, 8443 TLS).
 
+# G2: base URL for the post-seed settle gate's canary probes (same
+# scheme/host/port the k6 scenarios below hit). Built here, once, since it's
+# only used for the cheap out-of-band canary requests, never by k6 itself.
+BASE="${BENCH_SCHEME:-http}://${BENCH_HOST}:${BENCH_PORT:-8090}"
+
 # Scenario set
 if [ "$SCENARIO" = "all" ]; then
   mapfile -t SCENARIOS < <(cd "$BENCH/scenarios" && ls ./*.js | sed 's#^\./##')
@@ -135,6 +140,32 @@ filter_scenarios() {
   SCENARIOS=("${out[@]}")
 }
 filter_scenarios
+
+# G2 item 2: cell-order rotation. Run 3 found EVERY historical batch cell was
+# corrupted because the matrix always ran scenarios in the same (alphabetical)
+# order and the batch scenarios always landed as cell 1-2, right after seed —
+# squarely inside the post-seed serialized-DB transient window (see the settle
+# gate below and PRIVATE_BENCH_ANALYSIS.md §1). Rotating the EXECUTED order
+# (i.e. after filter_scenarios, so it matches what actually runs and what
+# cell_order_index below counts) by the run index means no scenario is
+# systematically first across a median-of-N `bench-matrix` (repeat=N): run-1
+# starts at scenario 1, run-2 at scenario 2, etc. — a left-rotation by
+# (BENCH_RUN_INDEX - 1) mod N. Deterministic (pure function of run index +
+# scenario count) and changes only the ORDER, never WHICH scenarios run.
+# BENCH_RUN_INDEX is set by justfile's bench-matrix loop (BENCH_RUN_INDEX=$i,
+# one per repeat pass); a manual single `bench-run` invocation (no matrix)
+# defaults to 1 — no rotation, natural (alphabetical) order.
+BENCH_RUN_INDEX="${BENCH_RUN_INDEX:-1}"
+rotate_scenarios() {
+  local n=${#SCENARIOS[@]} idx="$BENCH_RUN_INDEX" shift_by
+  [ "$n" -gt 1 ] || return 0
+  case "$idx" in ''|*[!0-9]*) idx=1 ;; esac
+  shift_by=$(( (idx - 1) % n ))
+  [ "$shift_by" -gt 0 ] || return 0
+  SCENARIOS=( "${SCENARIOS[@]:$shift_by}" "${SCENARIOS[@]:0:$shift_by}" )
+  echo "[run] cell-order rotation: run index $idx -> shifted scenario order by $shift_by (BENCH_RUN_INDEX)"
+}
+rotate_scenarios
 
 command -v k6 >/dev/null || { echo "[run] k6 not installed — see https://k6.io/docs/get-started/installation/" >&2; exit 1; }
 
@@ -205,6 +236,171 @@ CELL_PAUSE="${BENCH_CELL_PAUSE:-60}"
 # Naive JSON string escaping (backslash + double-quote only — sufficient for
 # the plain ASCII strings embedded here: image names, kernel/cpu strings).
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# --- G2 item 1: post-seed settle gate ---------------------------------------
+# Run 3 found a ~5-7 min window right after `bench-seed` where the AXIAM stack
+# serves everything at ~45 req/s with SurrealDB pinned at ~1 core (~22 ms
+# serialized unit), then spontaneously recovers — see
+# claude_dev/postseed-transient-investigation.md and
+# PRIVATE_BENCH_ANALYSIS.md §1. Because the matrix always ran scenarios in the
+# same order, this window silently corrupted every "first cell after seed"
+# ever measured. Instead of trusting a fixed clock delay, this gate polls a
+# cheap, target-appropriate, already-seeded canary once per second and blocks
+# the FIRST cell of a `bench-run` invocation until the target looks settled
+# (N consecutive stable seconds) or a hard timeout is hit.
+BENCH_SETTLE="${BENCH_SETTLE:-1}"                            # 0 to skip entirely (quick manual runs)
+BENCH_SETTLE_STABLE_SECS="${BENCH_SETTLE_STABLE_SECS:-30}"    # consecutive stable seconds required
+BENCH_SETTLE_MAX_MS="${BENCH_SETTLE_MAX_MS:-100}"             # canary latency threshold
+BENCH_SETTLE_TIMEOUT_SECS="${BENCH_SETTLE_TIMEOUT_SECS:-600}" # hard cap, then warn + proceed
+SETTLE_WAIT_SECS=0     # recorded in every cell's meta.json this run produces
+SETTLE_TIMEOUT_HIT=0   # 1 -> meta.json's settle_timeout: true
+
+_CANARY_JAR=""
+
+# One request against a cheap, target-appropriate, already-seeded endpoint.
+# Echoes the observed latency in whole milliseconds and returns 0 on any
+# completed HTTP response (even non-2xx — that still proves the listener is up
+# and timed); returns 1 only on a hard failure (connection refused/reset,
+# curl error) so a target that lacks/can't reach the canary endpoint never
+# fails the run — the caller just treats that tick as "no signal".
+canary_probe() {
+  local resp code time_s
+  case "$TARGET" in
+    axiam)
+      # authz-check-ish: the SAME endpoint (POST /api/v1/authz/check) whose
+      # post-seed clamp G1 documented, authenticated as the seeded bench user.
+      # Log in once (lazily) and reuse the cookie jar for every tick — a fresh
+      # login every second would itself be an expensive, different signal.
+      # Falls back to the plaintext /health liveness probe when the seed
+      # didn't provide enough to authenticate (e.g. BENCH_SKIP_OAUTH2-style
+      # partial seed) — still a real "is the listener answering" signal.
+      if [ -z "$_CANARY_JAR" ] || [ ! -s "$_CANARY_JAR" ]; then
+        _CANARY_JAR="$(mktemp)"
+        if [ -n "${BENCH_USERNAME:-}" ] && [ -n "${BENCH_PASSWORD:-}" ] && [ -n "${BENCH_ORG_SLUG:-}" ]; then
+          curl -sSk --max-time 5 -c "$_CANARY_JAR" -o /dev/null -X POST "$BASE/api/v1/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"org_slug\":\"${BENCH_ORG_SLUG}\",\"tenant_slug\":\"${BENCH_TENANT_SLUG:-default}\",\"username_or_email\":\"${BENCH_USERNAME}\",\"password\":\"${BENCH_PASSWORD}\"}" \
+            2>/dev/null || true
+        fi
+      fi
+      if [ -s "$_CANARY_JAR" ] && [ -n "${BENCH_RESOURCE_ID:-}" ] \
+         && awk -F'\t' '$6=="axiam_csrf"{f=1} END{exit !f}' "$_CANARY_JAR" 2>/dev/null; then
+        local csrf; csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$_CANARY_JAR")"
+        resp="$(curl -sSk --max-time 5 -b "$_CANARY_JAR" -o /dev/null -w '%{http_code} %{time_total}' \
+          -X POST "$BASE/api/v1/authz/check" -H "Content-Type: application/json" \
+          -H "X-CSRF-Token: $csrf" -d "{\"action\":\"read\",\"resource_id\":\"${BENCH_RESOURCE_ID}\"}" 2>/dev/null)" || return 1
+      else
+        resp="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code} %{time_total}' "$BASE/health" 2>/dev/null)" || return 1
+      fi
+      ;;
+    keycloak)
+      # jwks — cheap, unauthenticated, needs only the seeded realm name.
+      resp="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code} %{time_total}' \
+        "$BASE/realms/${BENCH_REALM:-bench}/protocol/openid-connect/certs" 2>/dev/null)" || return 1
+      ;;
+    zitadel)
+      # jwks — cheap, unauthenticated, no seed dependency at all.
+      resp="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code} %{time_total}' \
+        "$BASE/oauth/v2/keys" 2>/dev/null)" || return 1
+      ;;
+    *)
+      resp="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code} %{time_total}' "$BASE/health" 2>/dev/null)" || return 1
+      ;;
+  esac
+  [ -n "$resp" ] || return 1
+  code="${resp%% *}"; time_s="${resp#* }"
+  [ "$code" != "000" ] || return 1  # curl couldn't even complete the request
+  awk -v t="$time_s" 'BEGIN{printf "%.0f", t*1000}'
+}
+
+# Blocks until BENCH_SETTLE_STABLE_SECS consecutive canary ticks are all under
+# BENCH_SETTLE_MAX_MS, or BENCH_SETTLE_TIMEOUT_SECS elapses (then warns and
+# proceeds anyway, setting SETTLE_TIMEOUT_HIT=1). Sets SETTLE_WAIT_SECS to the
+# wall-clock seconds actually waited either way. A no-signal tick (canary
+# unreachable / target lacks the endpoint) resets the stability counter but
+# never aborts the run.
+settle_gate() {
+  if [ "$BENCH_SETTLE" = "0" ]; then
+    echo "[run] BENCH_SETTLE=0 — skipping post-seed settle gate"
+    return 0
+  fi
+  echo "[run] post-seed settle gate: waiting for ${BENCH_SETTLE_STABLE_SECS}s of consecutive canary latency < ${BENCH_SETTLE_MAX_MS}ms (hard timeout ${BENCH_SETTLE_TIMEOUT_SECS}s)"
+  echo "      — see claude_dev/postseed-transient-investigation.md / PRIVATE_BENCH_ANALYSIS.md §1 (post-seed serialized-DB transient). Set BENCH_SETTLE=0 to skip."
+  local start_ts now_ts stable_count=0 lat
+  start_ts=$(date +%s)
+  while :; do
+    # Sleep BEFORE each probe (including the first) so N consecutive stable
+    # ticks always corresponds to N full wall-clock seconds of stability —
+    # not N-1 (a probe taken at t=0 before any sleep would otherwise let
+    # BENCH_SETTLE_STABLE_SECS=30 finish in 29s).
+    sleep 1
+    now_ts=$(date +%s)
+    SETTLE_WAIT_SECS=$(( now_ts - start_ts ))
+    if [ "$SETTLE_WAIT_SECS" -ge "$BENCH_SETTLE_TIMEOUT_SECS" ]; then
+      SETTLE_TIMEOUT_HIT=1
+      echo "[run] WARN: settle gate hit its ${BENCH_SETTLE_TIMEOUT_SECS}s timeout without ${BENCH_SETTLE_STABLE_SECS} consecutive stable seconds under ${BENCH_SETTLE_MAX_MS}ms — proceeding anyway (settle_timeout: true will be recorded in meta.json)" >&2
+      break
+    fi
+    if lat="$(canary_probe)"; then
+      if [ "$lat" -lt "$BENCH_SETTLE_MAX_MS" ]; then
+        stable_count=$((stable_count + 1))
+      else
+        stable_count=0
+      fi
+    else
+      stable_count=0
+    fi
+    if [ "$stable_count" -ge "$BENCH_SETTLE_STABLE_SECS" ]; then
+      SETTLE_WAIT_SECS=$(( $(date +%s) - start_ts ))
+      echo "[run] settle gate: stable for ${BENCH_SETTLE_STABLE_SECS}s straight — proceeding (waited ${SETTLE_WAIT_SECS}s total)"
+      break
+    fi
+  done
+  [ -z "$_CANARY_JAR" ] || rm -f "$_CANARY_JAR"
+}
+
+# --- G2 item 3: self-describing labeled passes ------------------------------
+# Dumps every AXIAM__* env var the server container actually received
+# (straight off `docker inspect`, like detect_rl_posture() above — what
+# ACTUALLY ran, not what the shell that called `bench-up` intended) into each
+# cell's meta.json under "axiam_env", so a labeled pass (pool size, batch
+# strategy, decision cache, rate-limit posture, hash concurrency, ...) is
+# identifiable from the metadata alone rather than the results-directory name
+# (PRIVATE_BENCH_ANALYSIS.md §2.2).
+#
+# CRITICAL (A7 — shared archives contain no secret material): the VALUE of any
+# key matching AXIAM_ENV_REDACT_RE (case-insensitive) is NEVER written — only
+# the key NAME (so the setting's presence stays visible) with a literal
+# "<redacted>" placeholder value. `just bench-pack`'s leak check (justfile)
+# filters out every line containing that literal string before scanning
+# packed content for SECRET/PASSWORD, specifically so these legitimately-named
+# (and fully redacted) keys don't trip it — see the comment there.
+AXIAM_ENV_REDACT_RE='PASSWORD|SECRET|KEY|PEPPER|PEM|TOKEN'
+axiam_env_json() {
+  [ "$TARGET" = "axiam" ] || { echo -n "{}"; return; }
+  command -v docker >/dev/null 2>&1 || { echo -n "{}"; return; }
+  local env_dump line k v first=1
+  env_dump="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-${TARGET}-server" 2>/dev/null)" || { echo -n "{}"; return; }
+  echo -n "{"
+  while IFS= read -r line; do
+    case "$line" in
+      AXIAM__*=*) : ;;
+      *) continue ;;
+    esac
+    k="${line%%=*}"
+    v="${line#*=}"
+    [ "$first" -eq 1 ] || echo -n ","
+    first=0
+    echo
+    if printf '%s' "$k" | grep -qiE "$AXIAM_ENV_REDACT_RE"; then
+      printf '    "%s": "<redacted>"' "$(json_escape "$k")"
+    else
+      printf '    "%s": "%s"' "$(json_escape "$k")" "$(json_escape "$v")"
+    fi
+  done <<< "$env_dump"
+  [ "$first" -eq 1 ] || echo
+  echo -n "}"
+}
 
 # Container names that make up each target's stack, with a role used to look
 # up its CPU cap default (mirrors targets/<name>/docker-compose.yml — see A4/A5
@@ -340,6 +536,7 @@ containers_json() {
 
 run_one() {
   local scenario="$1"
+  local cell_order_index="${2:-1}"
   local name="${scenario%.js}"
   local outdir="$RESULTS/$TARGET/$PROFILE"
   mkdir -p "$outdir"
@@ -408,17 +605,29 @@ run_one() {
   "cpu_governor": "$(json_escape "$CPU_GOVERNOR")",
   "build_ref": "$(json_escape "$BUILD_REF")",
   "k6_cpu_cores_avg": $k6_cpu_cores_avg,
-  "containers": $(containers_json)
+  "containers": $(containers_json),
+  "settle_wait_secs": $SETTLE_WAIT_SECS,
+  "settle_timeout": $([ "$SETTLE_TIMEOUT_HIT" = "1" ] && echo true || echo false),
+  "cell_order_index": $cell_order_index,
+  "axiam_env": $(axiam_env_json)
 }
 EOF
   echo "[run] wrote $k6sum, $rescsv, $hostcsv, $meta"
 }
 
 SCENARIO_COUNT=${#SCENARIOS[@]}
+
+# G2 item 1: gate the FIRST cell of this run behind the settle check (once —
+# not per cell; every cell in this run records the same settle_wait_secs /
+# settle_timeout since they all measure the same post-seed settle event).
+if [ "$SCENARIO_COUNT" -gt 0 ]; then
+  settle_gate
+fi
+
 scenario_idx=0
 for s in "${SCENARIOS[@]}"; do
   scenario_idx=$((scenario_idx + 1))
-  run_one "$s"
+  run_one "$s" "$scenario_idx"
   # C3: pause between cells (not after the last one) so heat dissipates and
   # allocations/caches from this cell settle before the next measurement.
   if [ "$scenario_idx" -lt "$SCENARIO_COUNT" ] && [ "$CELL_PAUSE" -gt 0 ] 2>/dev/null; then

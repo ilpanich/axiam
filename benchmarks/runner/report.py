@@ -364,11 +364,21 @@ def host_flags(meta, host):
     """A6: clock_variance (window mean MHz sagged >15% below the window max —
     i.e. the run was not at a flat sustained clock) and generator_saturated
     (k6 itself was eating too much of the host's non-stack CPU headroom to
-    trust it as a clean load generator)."""
+    trust it as a clean load generator).
+
+    G2: settle_timeout — the post-seed settle gate (run-benchmark.sh's
+    settle_gate()) hit its hard timeout without ever seeing
+    BENCH_SETTLE_STABLE_SECS consecutive stable canary ticks, so this cell may
+    still be inside (or just leaving) the post-seed serialized-DB transient
+    (PRIVATE_BENCH_ANALYSIS.md §1) even though the gate proceeded anyway.
+    meta.get() defaults to falsy for any meta.json predating G2, so old trees
+    render exactly as before (no flag)."""
     flags = []
     mhz_avg, mhz_max = host.get("mhz_avg", 0.0), host.get("mhz_max", 0.0)
     if mhz_max > 0 and mhz_avg < 0.85 * mhz_max:
         flags.append("clock_variance")
+    if meta.get("settle_timeout"):
+        flags.append("settle_timeout")
 
     containers = meta.get("containers") or []
     if containers:
@@ -527,7 +537,29 @@ def aggregate_cell(runs):
     thr_spread_pct = (((max(thr_vals) - min(thr_vals)) / 2.0) / thr_median * 100.0
                        if thr_vals and thr_median else 0.0)
 
-    meta = basis[0]["meta"]  # containers/caps/scenario_sha etc. are stable across runs
+    meta = dict(basis[0]["meta"])  # containers/caps/scenario_sha etc. are stable across runs
+    # G2: settle_wait_secs/settle_timeout are NOT stable across runs by design
+    # (cell-order rotation means this cell isn't the first cell — and doesn't
+    # necessarily hit the same settle wait — in every repeat), so unlike the
+    # rest of `meta` they're recombined across ALL raw runs rather than just
+    # taken from basis[0]: the worst-case (max) wait, and timeout if ANY run's
+    # gate hit its hard timeout. meta.get() on older per-run meta.json files
+    # (predating G2) returns None/falsy, so this degrades to "no data" rather
+    # than crashing on a mixed old/new results tree.
+    settle_waits = [r["meta"].get("settle_wait_secs") for r in runs
+                     if r["meta"].get("settle_wait_secs") is not None]
+    if settle_waits:
+        meta["settle_wait_secs"] = max(settle_waits)
+    if any("settle_timeout" in r["meta"] for r in runs):
+        meta["settle_timeout"] = any(r["meta"].get("settle_timeout") for r in runs)
+    # axiam_env should be identical across runs of the same labeled pass (same
+    # bench-up); basis[0] usually has it, but fall back to any run that does
+    # (e.g. basis[0] happened to predate G2 while a later repeat didn't).
+    if not meta.get("axiam_env"):
+        for r in runs:
+            if r["meta"].get("axiam_env"):
+                meta["axiam_env"] = r["meta"]["axiam_env"]
+                break
     der = derive(perf, res)
     der_server = derive_server_only(perf, res, target)
 
@@ -969,6 +1001,84 @@ def build_report(cells, multi_run=False):
             ])
         lines += [md_table(
             ["scenario", "profile", "target", "err", "status_avg", "status_max"],
+            rows), ""]
+
+    # 4c. Appendix: post-seed settle gate (G2). settle_wait_secs/settle_timeout
+    # come from run-benchmark.sh's settle_gate() (see docs/methodology.md
+    # "Post-seed settle gate & cell-order rotation"). Only rendered when at
+    # least one cell actually carries the field — meta.json files predating
+    # G2 have neither key, so a mixed-vintage results tree (e.g. the existing
+    # run-1/run-2/run-3 trees alongside a fresh G2 run) renders this section
+    # only for the cells that have the data and never crashes on the ones
+    # that don't (host_flags() above degrades the same way for the
+    # `settle_timeout` flag in the main results table).
+    settle_cells = [c for c in cells if c["meta"].get("settle_wait_secs") is not None]
+    if settle_cells:
+        lines += [
+            "## Appendix: post-seed settle gate", "",
+            "`settle_wait(s)` is how long run-benchmark.sh's settle gate "
+            "waited, before this run's FIRST cell, for "
+            "`BENCH_SETTLE_STABLE_SECS` consecutive seconds of canary "
+            "latency under `BENCH_SETTLE_MAX_MS` (defaults 30s / 100ms) — "
+            "every cell in the same run records the same wait, since the "
+            "gate runs once per `bench-run` invocation, not per cell. "
+            "`timeout` marks a cell whose gate hit its hard "
+            "`BENCH_SETTLE_TIMEOUT_SECS` (default 600s) without ever seeing "
+            "that many stable seconds — the run proceeded anyway (the gate "
+            "never fails the harness) but the cell may still be inside the "
+            "post-seed serialized-DB transient (PRIVATE_BENCH_ANALYSIS.md "
+            "§1); it's also surfaced as a `settle_timeout` host_flag in the "
+            "\"All results\" table above. For median-of-N cells, "
+            "`settle_wait(s)` is the MAX across the repeat's runs (worst "
+            "case) and `timeout` is set if ANY run's gate timed out.", "",
+        ]
+        rows = []
+        for c in sorted(settle_cells, key=lambda c: (c["scenario"], c["profile"], c["target"])):
+            rows.append([
+                c["scenario"], c["profile"], c["target"],
+                f"{c['meta'].get('settle_wait_secs', 0):.0f}",
+                "✓" if c["meta"].get("settle_timeout") else "·",
+            ])
+        lines += [md_table(
+            ["scenario", "profile", "target", "settle_wait(s)", "timeout"],
+            rows), ""]
+
+    # 4d. Appendix: AXIAM env knobs / labeled passes (G2). meta.json's
+    # "axiam_env" is every AXIAM__* env var the server container actually
+    # received, with secret-shaped values (PASSWORD/SECRET/KEY/PEPPER/PEM/
+    # TOKEN in the var name) redacted to the literal "<redacted>" — see
+    # run-benchmark.sh's axiam_env_json(). This makes a labeled sensitivity
+    # pass (pool size, batch strategy, decision cache, hash concurrency, ...)
+    # identifiable straight from the metadata rather than the results-
+    # directory name (PRIVATE_BENCH_ANALYSIS.md §2.2). Grouped by
+    # (target, profile), one representative cell per group, rather than
+    # repeated per scenario — every cell from the same `bench-up` shares one
+    # running server container, so its axiam_env is identical across that
+    # target/profile's scenarios. Absent entirely (section omitted) for any
+    # results tree predating G2, and for non-AXIAM targets (axiam_env_json()
+    # only inspects the AXIAM server container).
+    env_groups = {}
+    for c in cells:
+        env = c["meta"].get("axiam_env")
+        if not env:
+            continue
+        key = (c["target"], c["profile"])
+        if key not in env_groups or c["scenario"] < env_groups[key][0]:
+            env_groups[key] = (c["scenario"], env)
+    if env_groups:
+        lines += [
+            "## Appendix: AXIAM env knobs (labeled passes)", "",
+            "One representative cell's `axiam_env` per (target, profile) — "
+            "see the note above. `<redacted>` means the setting was present "
+            "but its value is a secret (never packed/shared — see "
+            "`just bench-pack`'s leak check in `justfile`).", "",
+        ]
+        rows = []
+        for (target, profile), (scenario, env) in sorted(env_groups.items()):
+            for k, v in sorted(env.items()):
+                rows.append([target, profile, scenario, k, v])
+        lines += [md_table(
+            ["target", "profile", "representative scenario", "AXIAM__ var", "value"],
             rows), ""]
 
     # 5. Excluded

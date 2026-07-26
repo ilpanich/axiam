@@ -151,54 +151,75 @@ const HEADLINES = [
   {
     label: "Token issuance",
     value: "4.3–5.2×",
-    sub: "more tokens/s than Zitadel / Keycloak",
+    sub: "more tokens/s than Zitadel / Keycloak — median of 3 runs, ±0.1%",
   },
   {
     label: "JWKS fetch",
-    value: "27,059",
+    value: "27,784",
     sub: "req/s — 7–13× the field (server not even saturated)",
   },
   {
-    label: "Password login",
-    value: "only one",
-    sub: "target under the 2 s p95 gate at 50 concurrent users",
+    label: "Native mTLS",
+    value: "≈ 0 cost",
+    sub: "client-certificate TLS 1.3 verified in-process, at parity with plain TLS on every scenario",
   },
 ];
 
 /* ---- environment facts ------------------------------------------------- */
 
 const TARGETS = [
-  ["AXIAM", "axiam-server 1.0.0-alpha15 (Rust)", "SurrealDB v3 + RabbitMQ 4"],
+  ["AXIAM", "axiam-server 1.0.0-alpha19 (Rust, pulled release image, digest-recorded)", "SurrealDB v3 + RabbitMQ 4"],
   ["Keycloak", "Keycloak 26.7.0 (JVM)", "PostgreSQL 16 (uniformly tuned)"],
   ["Zitadel", "Zitadel v4.15.2 (Go)", "PostgreSQL 16 (uniformly tuned)"],
 ];
 
+/* ---- sensitivity highlights -------------------------------------------- */
+
+const SENSITIVITY = [
+  {
+    title: "Native mTLS is free",
+    body: "The p3 profile terminates client-certificate TLS 1.3 inside the server process — no proxy in front, the verified peer certificate is the identity source — and lands at parity with plain TLS 1.3 across the entire matrix (token issuance 903.6 vs 903 req/s, userinfo 4,826 vs 4,822, …). For IoT and service-mesh fleets, certificate verification costs nothing measurable on top of TLS.",
+  },
+  {
+    title: "The decision cache is worth 3×",
+    body: "With the optional per-tenant authorization decision cache enabled (5 s TTL, event-driven invalidation), single checks go from 737 to 2,322 req/s over REST and 603 to 1,822 req/s over gRPC on the same capped hardware, and the database stops being saturated. The benchmark's hit rate is favorable; a hit-rate sweep is queued before the default changes.",
+  },
+  {
+    title: "Where each product hits its wall",
+    body: "With every database uncapped to 4 CPUs: Keycloak doesn't move at all (its server is the wall in every cell), Zitadel gains 70–85% on reads (Postgres saturates even at 4 cores), and AXIAM's authz/userinfo paths scale with DB CPU (+37% / +49%) while its token endpoints don't need the DB at all. AXIAM's server saturated for the first time at 7,457 userinfo req/s.",
+  },
+  {
+    title: "Shipped rate limits, measured",
+    body: "One pass ran AXIAM with its production per-IP rate limits active: a 50-user single-IP load generator is throttled to near-zero on every limited endpoint — the defaults do exactly what they ship for (blunting single-source abuse), and the competitors ship no equivalent defaults. It also showed those defaults must be re-keyed and resized for machine-to-machine fleets — see the new sizing guide in the docs.",
+  },
+];
+
 const CAVEATS = [
   {
-    title: "TLS 1.3 halves token issuance",
-    body: "Under this load generator, client-credentials throughput drops ~49% at p2. Telemetry shows the TLS handshake is ~free (resumption works); the cause is isolated to a connection-level ceiling — 50 users funnelled through one multiplexed HTTP/2 connection — not crypto. An HTTP/1.1 isolation run is queued. Introspection and JWKS are barely affected, and AXIAM's TLS token numbers still lead the field 2.2–2.7×.",
+    title: "TLS 1.3 still halves token issuance",
+    body: "Client-credentials throughput drops 50.5% at p2 (introspection −0.2%, userinfo −3.7%, login ~0%). Telemetry shows the handshake is ~free (resumption works); everything points at a connection-level ceiling — 50 users funnelled through multiplexed HTTP/2 — not crypto. The HTTP/1.1 isolation cell we queued for this run was invalidated by the measurement artifact below and is re-queued. Even with the penalty, AXIAM's TLS token numbers lead the field 2.2–2.6×.",
   },
   {
-    title: "The authz batch endpoints are slow",
-    body: "Batch checks are currently slower than repeated single checks and breach the p95 gate over gRPC. This is proven not to be a resource problem — it is identical with the database uncapped — and is narrowed to a serialized query pattern under investigation. Don't use batch in latency-sensitive paths yet.",
+    title: "Correction: the batch verdict was a measurement artifact",
+    body: "Earlier drafts reported the authz batch endpoints as slower than single checks. Run 3 found why: for ~5–7 minutes after a stack is seeded, the database serves everything through a ~45 req/s serialization window — and the batch cells had always run first. A batch cell measured on a settled stack reaches 852 batches/s (≈4,260 checks/s), i.e. batch outperforms singles as designed. All batch numbers are withdrawn until the corrected protocol re-measures them; the transient itself is under investigation, including whether it can affect production cold-starts.",
   },
   {
-    title: "The refresh comparison is withdrawn",
-    body: "New instrumentation revealed the refresh scenario falls back to plain token issuance on all three targets (none issues a refresh token on the grant the scenario minted). The head-to-head is withdrawn until the scenario is fixed to obtain its token via a real user login. This is exactly the kind of error the fallback tagging was built to catch — it caught us too.",
+    title: "The refresh comparison is partially restored",
+    body: "Keycloak's refresh cells now measure real single-use rotation (379 req/s at p0). AXIAM's own refresh cells still measure a fallback — a harness cookie-handling bug the fallback tagging keeps catching, fix queued — and stay excluded. Zitadel's refresh needs an offline_access flow the harness doesn't implement yet.",
   },
   {
-    title: "Single run, on a laptop",
-    body: "Every figure is a single run (the harness supports median-of-3, coming next); deltas under ~10% are noise. The hardware is a consumer laptop (Dell XPS 15, i7-8750H). Per-cell CPU-frequency and temperature telemetry is published with the raw data; the thermal envelope was identical for all targets, so cross-target fairness holds and absolute numbers are, if anything, conservative.",
+    title: "Median-of-3 now, but still a laptop",
+    body: "Every matrix cell is the median of three runs (observed spread ±0.1–2.8%, so deltas above ~5% are signal), on a digest-pinned release image. The hardware is still a consumer laptop (Dell XPS 15, i7-8750H) with per-cell CPU-frequency and temperature telemetry published; the thermal envelope was identical for all targets, so cross-target fairness holds and absolute numbers are, if anything, conservative. Memory figures for cells after the login burst include ~360 MiB of retained allocator memory (a scripted allocator experiment is scheduled).",
   },
 ];
 
 const NEXT = [
-  "Median-of-3 on every cell",
-  "The refresh-scenario fix (real user-login token)",
-  "The Zitadel gRPC audience fix",
-  "A TLS + HTTP/1.1 isolation cell to pin the token-issuance regression",
-  "A p3-mTLS profile (AXIAM now terminates mTLS natively)",
-  "A production-rate-limit-posture run",
+  "A post-seed settle gate + rotated cell order in the harness",
+  "Clean batch A/B (concurrent vs coalesced) under the corrected protocol",
+  "The TLS + HTTP/1.1 isolation cell, re-run on a settled stack",
+  "The AXIAM refresh-scenario harness fix",
+  "The allocator (jemalloc) A/B for post-burst memory retention",
+  "SDK client-side overhead tables (all 7 primary SDKs)",
   "A server-class re-run to replace the laptop numbers",
 ];
 
@@ -223,7 +244,8 @@ export default function Benchmarks() {
       <p style={{ margin: "0 0 24px", fontSize: 17, color: "#94a3b8", maxWidth: 720 }}>
         A vendor-neutral harness drives the identical logical workload through a
         per-target adapter, comparing AXIAM against Keycloak and Zitadel across
-        OAuth2/OIDC flows. Below are the first results.
+        OAuth2/OIDC flows. Below are the run-3 results — the first median-of-3
+        figures, on the digest-pinned release image.
       </p>
 
       {/* ---- Preliminary banner ---- */}
@@ -246,16 +268,19 @@ export default function Benchmarks() {
           <div
             style={{ fontSize: 15, fontWeight: 700, color: "#ffd98a", marginBottom: 4 }}
           >
-            Preliminary results — still being validated
+            Temporary results — the benchmark is still being improved
           </div>
           <p style={{ margin: 0, fontSize: 14, lineHeight: 1.65, color: "#e2e8f0" }}>
-            These are the first preliminary benchmark results (run of 2026-07-21,
-            AXIAM&nbsp;1.0.0-alpha15). The numbers are real and reproducible, but
-            still need validation: every figure is a <strong>single run</strong> on
-            a consumer laptop, so treat them as a credible early signal, not a
-            final verdict. Further benchmarks — median-of-3 and a server-class
-            re-run — will be carried out over the coming week, and this page will
-            be updated as they land.
+            These numbers come from run 3 (2026-07-25/26, AXIAM&nbsp;1.0.0-alpha19,
+            digest-pinned release image) and are the first{" "}
+            <strong>median-of-3</strong> figures — run-to-run spread was
+            ±0.1–2.8% per cell, so they are statistically solid. They are still
+            temporary: the harness is being improved (a measurement-order
+            artifact found this run forced us to withdraw the batch and one TLS
+            diagnosis cell — see the honesty section), and everything still runs
+            on a consumer laptop rather than server-class hardware. Treat them as
+            a strong, reproducible signal, not a final verdict; this page is
+            updated as each improved run lands.
           </p>
         </div>
       </div>
@@ -361,8 +386,8 @@ export default function Benchmarks() {
         </p>
         <div className="ax-grid-2" style={{ marginTop: 20, gap: 14 }}>
           {[
-            ["Load model", "Closed-loop, 50 virtual users. 30 s warm-up + 120 s measured window per scenario."],
-            ["Profiles", "p0-plaintext and p2-tls13 (TLS 1.3, terminated in-process by all three targets)."],
+            ["Load model", "Closed-loop, 50 virtual users. 30 s warm-up + 120 s measured window per scenario — repeated 3×, median reported."],
+            ["Profiles", "p0-plaintext and p2-tls13 (TLS 1.3, terminated in-process by all three targets, gRPC included) — plus a labeled p3-mTLS pass for AXIAM."],
             ["Validity gates", "A cell counts only if error rate ≤ 1% and p95 < 2000 ms. Failing cells are labelled, never charted as a head-to-head."],
             ["Container caps", "IAM server 2 CPU / 1 GiB · database 2 CPU / 1 GiB · RabbitMQ (AXIAM only) 1 CPU / 512 MiB."],
           ].map(([t, b]) => (
@@ -386,7 +411,14 @@ export default function Benchmarks() {
         <ul style={{ margin: 0, paddingLeft: 22, color: "#cbd5e1", lineHeight: 1.75, maxWidth: 760 }}>
           <li style={{ marginBottom: 8 }}>
             <strong>Identical envelope.</strong> Same host, same container caps,
-            same 50-VU closed loop and measurement window for every target.
+            same 50-VU closed loop and measurement window for every target —
+            and every matrix cell is the median of three runs.
+          </li>
+          <li style={{ marginBottom: 8 }}>
+            <strong>Provenance recorded.</strong> Every container in every cell
+            records its image digest; AXIAM ran from the published, digest-pinned
+            release image — so improvements between runs are attributable to a
+            known binary.
           </li>
           <li style={{ marginBottom: 8 }}>
             <strong>Competitors tuned, not hobbled.</strong> PostgreSQL is
@@ -412,8 +444,9 @@ export default function Benchmarks() {
       <section style={{ marginBottom: 52 }}>
         <SectionTitle kicker="Results" title="Head-to-head throughput" />
         <p style={{ fontSize: 14, color: "#64748b", lineHeight: 1.6, maxWidth: 760, marginBottom: 22 }}>
-          Plaintext (p0) profile, capped matrix. Higher is better. Each chart is a
-          single valid, comparable cell from the full result matrix.
+          Plaintext (p0) profile, capped matrix, median of three runs. Higher is
+          better. Each chart is a valid, comparable cell from the full result
+          matrix.
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           {BENCH_SCENARIOS.map((s) => (
@@ -505,17 +538,43 @@ export default function Benchmarks() {
         <p style={{ fontSize: 14, color: "#64748b", lineHeight: 1.6, maxWidth: 760, marginBottom: 22 }}>
           No head-to-head here — Keycloak and Zitadel expose no equivalent decision
           endpoint. Each check is a full RBAC evaluation (tenant-scoped roles,
-          resource hierarchy, scopes) against live data, over REST and gRPC.
+          resource hierarchy, scopes) against live data, over REST and gRPC. The
+          cache-ON rows are a labeled sensitivity pass, not the default
+          configuration; batch numbers are withdrawn pending re-measurement (see
+          the honesty section).
         </p>
         <BarChart scenario={BENCH_AUTHZ} />
+      </section>
+
+      {/* ---- Sensitivity ---- */}
+      <section style={{ marginBottom: 52 }}>
+        <SectionTitle kicker="Sensitivity" title="What the labeled passes showed" />
+        <p style={{ fontSize: 14, color: "#64748b", lineHeight: 1.6, maxWidth: 760, marginBottom: 20 }}>
+          Beyond the head-to-head matrix, run 3 added labeled single-variable
+          passes — never mixed into the comparison tables — to find each
+          system's walls and AXIAM's tuning levers.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {SENSITIVITY.map((s) => (
+            <div key={s.title} className="glass-card" style={{ padding: 22 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: "#67e8f9" }}>
+                {s.title}
+              </div>
+              <p style={{ margin: 0, fontSize: 13.5, color: "#94a3b8", lineHeight: 1.65 }}>
+                {s.body}
+              </p>
+            </div>
+          ))}
+        </div>
       </section>
 
       {/* ---- Caveats ---- */}
       <section style={{ marginBottom: 52 }}>
         <SectionTitle kicker="Honesty" title="Weaknesses & caveats" />
         <p style={{ fontSize: 15, color: "#cbd5e1", lineHeight: 1.7, maxWidth: 760, marginBottom: 20 }}>
-          The results are encouraging, but preliminary — and some scenarios are not
-          yet a fair or valid comparison. Stated plainly:
+          The results are encouraging, but still temporary — and where a
+          measurement was wrong, we say so and withdraw it, including when the
+          error was in our favor. Stated plainly:
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {CAVEATS.map((c) => (
@@ -571,7 +630,8 @@ export default function Benchmarks() {
             <code style={{ color: "#67e8f9", fontFamily: "ui-monospace,Menlo,monospace" }}>
               benchmarks/docs/methodology.md
             </code>
-            . Sources: benchmark runs of 2026-07-21.
+            . Sources: benchmark runs of 2026-07-25/26 (median-of-3 matrix +
+            labeled sensitivity passes).
           </p>
         </div>
       </section>

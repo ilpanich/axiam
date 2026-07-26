@@ -759,105 +759,111 @@ export const PHASES: Phase[] = [
 ];
 
 /**
- * Preliminary benchmark scenarios, transcribed from
- * `benchmarks/PUBLIC_BENCH_ANALYSIS.md` (draft 2, run of 2026-07-21, AXIAM
- * 1.0.0-alpha15 vs Keycloak 26.7.0 vs Zitadel v4.15.2). All figures are the
- * p0-plaintext profile from the capped matrix (§3/§7), single run — a credible
- * signal, not a final verdict. Only valid, comparable cells are charted.
+ * Benchmark scenarios, transcribed from
+ * `benchmarks/PUBLIC_BENCH_ANALYSIS.md` (third draft, run 3 of 2026-07-25/26,
+ * AXIAM 1.0.0-alpha19 pulled release image vs Keycloak 26.7.0 vs Zitadel
+ * v4.15.2). All figures are the p0-plaintext profile from the capped matrix
+ * (§3/§7), **median of 3 runs** (per-cell throughput spread ±0.1–2.8%). Only
+ * valid, comparable cells are charted.
  */
 export const BENCH_SCENARIOS: BenchScenario[] = [
   {
     id: "client_credentials",
     title: "Machine-to-machine token issuance",
-    unit: "throughput · requests/s · plaintext",
+    unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 1788, display: "1,788", axiam: true },
-      { target: "Zitadel", value: 419, display: "419" },
-      { target: "Keycloak", value: 346, display: "346" },
+      { target: "AXIAM", value: 1823, display: "1,823", axiam: true },
+      { target: "Zitadel", value: 423, display: "423" },
+      { target: "Keycloak", value: 351, display: "351" },
     ],
     takeaway:
-      "AXIAM issues 4.3× more tokens/s than Zitadel and 5.2× more than Keycloak, at a p99 of 36 ms.",
+      "AXIAM issues 4.3× more tokens/s than Zitadel and 5.2× more than Keycloak, at a p99 of 36 ms — reproduced within ±0.1% across three runs on the pinned release image.",
   },
   {
     id: "introspection",
     title: "Token introspection (RFC 7662)",
-    unit: "throughput · requests/s · plaintext",
+    unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 2229, display: "2,229", axiam: true },
-      { target: "Keycloak", value: 1765, display: "1,765" },
-      { target: "Zitadel", value: 923, display: "923" },
+      { target: "AXIAM", value: 2230, display: "2,230", axiam: true },
+      { target: "Keycloak", value: 1908, display: "1,908" },
+      { target: "Zitadel", value: 910, display: "910" },
     ],
     takeaway:
-      "The closest head-to-head: AXIAM leads Keycloak by 1.26× (2.4× vs Zitadel) with a 3× better p95 and zero TLS penalty.",
+      "The closest head-to-head: AXIAM leads Keycloak by 1.17× (2.45× vs Zitadel) with a 3× better p95 (27 vs 82 ms) and zero TLS penalty (−0.2%).",
   },
   {
     id: "jwks",
     title: "JWKS fetch (RFC 7517)",
-    unit: "throughput · requests/s · plaintext",
+    unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 27059, display: "27,059", axiam: true },
-      { target: "Keycloak", value: 3855, display: "3,855" },
-      { target: "Zitadel", value: 2034, display: "2,034" },
+      { target: "AXIAM", value: 27784, display: "27,784", axiam: true },
+      { target: "Keycloak", value: 3764, display: "3,764" },
+      { target: "Zitadel", value: 2071, display: "2,071" },
     ],
     takeaway:
-      "A 7–13× gap — and AXIAM's server sat under its CPU cap while the load generator saturated, so its true ceiling is higher still.",
+      "A 7–13× gap — and AXIAM's server sat under its CPU cap while the load generator neared its own limit, so its true ceiling is higher still.",
   },
   {
     id: "userinfo",
     title: "OIDC userinfo",
-    unit: "throughput · requests/s · plaintext",
+    unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 5457, display: "5,457", axiam: true },
-      { target: "Keycloak", value: 3561, display: "3,561" },
-      { target: "Zitadel", value: 967, display: "967" },
+      { target: "AXIAM", value: 5008, display: "5,008", axiam: true },
+      { target: "Keycloak", value: 3742, display: "3,742" },
+      { target: "Zitadel", value: 943, display: "943" },
     ],
     takeaway:
-      "AXIAM leads throughput (1.5× Keycloak, 5.6× Zitadel) even while DB-limited; on whole-stack CPU per request Keycloak is narrowly more efficient here.",
+      "AXIAM leads throughput (1.34× Keycloak, 5.3× Zitadel) while its database is saturated — with the DB uncapped it reaches 7,457 req/s. On whole-stack CPU per request Keycloak edges it here; on server-only CPU AXIAM's server is 2.1× cheaper.",
   },
   {
     id: "password_login",
     title: "Password login (real hashing)",
-    unit: "throughput · requests/s · plaintext",
+    unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 67.5, display: "67.5", axiam: true },
-      { target: "Keycloak", value: 22.3, display: "22.3" },
+      { target: "AXIAM", value: 69, display: "69", axiam: true },
+      { target: "Keycloak", value: 52, display: "52" },
       { target: "Zitadel", value: 2.0, display: "2.0" },
     ],
     takeaway:
-      "At 50 concurrent users on 2 CPUs, AXIAM is the only target under the 2 s p95 gate. Hash configuration dominates this cell — Zitadel's default bcrypt cost is simply very expensive.",
+      "Keycloak's plaintext login cell is valid for the first time (52 req/s) — and AXIAM still leads at 69 req/s with a 774 ms p95, the only target under the 2 s gate at both TLS profiles. Hash configuration dominates this cell — Zitadel's default bcrypt cost is simply very expensive.",
   },
 ];
 
 /**
- * Whole-stack efficiency, head-to-head (p0-plaintext). `req/s per core` is
- * higher-is-better; `cpu·ms/req` is lower-is-better. AXIAM's figures still
- * carry its audit broker and, on some cells, a saturated database inside them —
- * which is why Keycloak edges it on the userinfo cpu·ms/req cell.
+ * Whole-stack efficiency, head-to-head (p0-plaintext, median-of-3).
+ * `req/s per core` is higher-is-better; `cpu·ms/req` is lower-is-better.
+ * AXIAM's figures still carry its audit broker and, on some cells, a
+ * saturated database inside them — which is why Keycloak edges it on the
+ * userinfo cpu·ms/req cell (server-only, AXIAM's server is 2.1× cheaper
+ * there; both breakdowns are published in the raw report).
  */
 export const BENCH_EFFICIENCY: BenchEfficiencyRow[] = [
-  { scenario: "Client credentials", perCore: ["617", "167", "117"], cpuMs: ["1.62", "6.00", "8.53"] },
-  { scenario: "Token introspection", perCore: ["936", "753", "250"], cpuMs: ["1.07", "1.33", "4.01"] },
-  { scenario: "JWKS fetch", perCore: ["16,388", "1,922", "681"], cpuMs: ["0.061", "0.52", "1.47"] },
-  { scenario: "OIDC userinfo", perCore: ["1,453", "1,778", "340"], cpuMs: ["0.69", "0.56", "2.94"] },
+  { scenario: "Client credentials", perCore: ["637", "170", "115"], cpuMs: ["1.57", "5.89", "8.69"] },
+  { scenario: "Token introspection", perCore: ["907", "807", "248"], cpuMs: ["1.10", "1.24", "4.04"] },
+  { scenario: "JWKS fetch", perCore: ["16,850", "1,881", "698"], cpuMs: ["0.059", "0.53", "1.43"] },
+  { scenario: "OIDC userinfo", perCore: ["1,452", "1,873", "333"], cpuMs: ["0.69", "0.53", "3.00"] },
 ];
 
 /**
  * AXIAM-only authorization decisions (no head-to-head — Keycloak and Zitadel
  * expose no equivalent endpoint). Each check is a full RBAC evaluation against
- * live data. Values are p0-plaintext throughput (requests/s).
+ * live data. Values are p0-plaintext throughput (requests/s, median-of-3; the
+ * cache-ON rows are a labeled single-run sensitivity pass). The former batch
+ * bars are withdrawn: run 3 found a measurement-order artifact that had
+ * corrupted every batch cell (see the page's honesty section).
  */
 export const BENCH_AUTHZ: BenchScenario = {
   id: "authz",
   title: "Authorization decisions (AXIAM-only)",
   unit: "throughput · requests/s · plaintext",
   bars: [
-    { target: "REST · single", value: 745, display: "745", axiam: true },
-    { target: "gRPC · single", value: 722, display: "722", axiam: true },
-    { target: "REST · batch ×5", value: 46, display: "46" },
-    { target: "gRPC · batch ×5", value: 23, display: "23" },
+    { target: "REST · single", value: 737, display: "737", axiam: true },
+    { target: "gRPC · single", value: 603, display: "603", axiam: true },
+    { target: "REST · cache ON", value: 2322, display: "2,322", axiam: true },
+    { target: "gRPC · cache ON", value: 1822, display: "1,822", axiam: true },
   ],
   takeaway:
-    "Single checks improved 1.5–2.5× since draft 1 and now run at DB saturation (gRPC p99 tail collapsed 850 → 90 ms). The batch endpoints remain the known weak spot — currently slower than repeated single checks, and under investigation.",
+    "Single checks run at database saturation (~740/s on a 2-core DB; 1,013/s with 4 DB cores). Enabling the optional decision cache triples them on the same hardware. Batch numbers are withdrawn pending re-measurement — a measurement-order artifact corrupted every previous batch cell, and the one clean cell so far measured 852 batches/s (≈4,260 checks/s), i.e. batch outperforming singles as designed.",
 };
 
 export const GITHUB_URL = "https://github.com/ilpanich/axiam";

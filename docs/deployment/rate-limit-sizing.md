@@ -1,0 +1,246 @@
+# Sizing your rate limits
+
+AXIAM ships with rate limits **on by default**. That is deliberate — most
+IAM servers ship with none — but it means the shipped numbers are a
+*posture choice*, and the right posture depends on who is calling you.
+
+This page tells you which posture you are in, what the measured hardware
+envelope is, and how to move the limits without quietly turning the
+anti-abuse controls off.
+
+- Mechanism, layering and the `AXIAM__RATE_LIMIT__KEY` semantics:
+  [Deployment Guide § Rate limiting](README.md#rate-limiting).
+- Source of truth for the shipped values:
+  [`crates/axiam-api-rest/src/config/rate_limit.rs`](../../crates/axiam-api-rest/src/config/rate_limit.rs).
+  The table below is checked against that file by a unit test
+  (`cargo test -p axiam-api-rest --lib rate_limit`), so it cannot silently
+  drift from the code.
+
+---
+
+## 1. The one-line summary
+
+| You are… | Use | Why |
+|---|---|---|
+| A small internet-facing deployment; humans log in from many IPs | the shipped defaults (`internet`) | The defaults are sized to stop single-source credential-stuffing and token-probing floods. |
+| An M2M / microservice / IoT fleet reaching AXIAM through a shared NAT or egress gateway | `AXIAM__RATE_LIMIT__PROFILE=gateway` | Many distinct OAuth2 clients share one source IP; per-IP buckets collide and the fleet throttles itself. |
+| Reachable only on a private network / service mesh | `AXIAM__RATE_LIMIT__PROFILE=mesh` | Ceilings become runaway-loop guards; abuse control lives at the network edge. |
+
+Presets are **opt-in**. Setting no profile keeps the shipped defaults
+byte-for-byte. **No profile ever changes the human endpoints**
+(`login`, `register`, `password_reset`, `mfa`) — those stay strict and
+per-IP in every posture. Raise them only deliberately, one env var at a
+time, and read §5 first.
+
+---
+
+## 2. The evidence (why this page exists)
+
+From benchmark run 3 (2026-07-25/26, `1.0.0-alpha19`,
+[`benchmarks/PUBLIC_BENCH_ANALYSIS.md`](../../benchmarks/PUBLIC_BENCH_ANALYSIS.md)
+§4/§6):
+
+- With the **shipped defaults**, a 50-VU load generator on a **single
+  source IP** was flattened to ~0–14 req/s on every limited endpoint at
+  ~100% `429` (client-credentials 0.9/s, introspection 0.4/s). Unlimited
+  paths in the same pass were untouched — JWKS served 27 700/s. The limits
+  work exactly as designed.
+- The **same 2-core server** sustains ~1 800 token issuances/s and
+  ~740–2 300 authz checks/s when unthrottled.
+
+Both facts are true at once. A single IP producing 10 token requests per
+second is an attacker on a small public deployment and a perfectly normal
+Tuesday for a NAT'd device fleet. The defaults cannot serve both, so AXIAM
+keeps the strict posture as the default and makes the machine-scale
+posture an explicit, logged choice.
+
+### Measured envelope (what the hardware did)
+
+Reproduced from the public analysis §6. **These are laptop-class
+measurements** (Docker containers pinned to 2 cores / 1 GiB each, on a
+developer machine) and are **explicitly temporary** — they exist to give
+you a starting order of magnitude, not an SLA. Re-measure on your own
+hardware before committing to a number.
+
+| Envelope (server / DB) | Token issuance | Introspection | Authz checks (cache off / on) | Userinfo | Logins (Argon2id, OWASP params) |
+|---|---|---|---|---|---|
+| 2 cores / 2 cores | ~1 800/s | ~2 200/s | ~740 / ~2 300/s | ~5 000/s | ~69/s |
+| 2 cores / 4 cores | ~1 800/s | ~2 200/s | ~1 000 / higher | ~7 500/s (server-bound) | ~69/s |
+
+Two shape facts that matter more than the absolute numbers:
+
+1. **Authz checks and userinfo scale with database CPU**; token issuance
+   does not (it is server-CPU bound until ~1 800/s per 2 cores).
+2. **Logins are Argon2id-bound** at ~69/s per 2 cores. Login limits are a
+   password-guessing control, but they are also the one place where a
+   flood costs you real CPU — another reason not to raise them casually.
+
+---
+
+## 3. The postures
+
+`AXIAM__RATE_LIMIT__PROFILE` = `internet` (default) | `gateway` | `mesh`.
+It sets the whole machine-traffic family — key mode, token, introspect,
+revoke, REST authz, and the gRPC authz ceiling — coherently, so you cannot
+half-apply it.
+
+**Precedence: an explicit env var always beats the preset, which always
+beats the shipped default.** If you set `AXIAM__RATE_LIMIT__TOKEN_PER_MIN`
+yourself, the profile leaves it alone (and the startup log names it in
+`operator_overrides`).
+
+<!-- rate-limit-posture-table:begin -->
+| Env var | `internet` (shipped default) | `gateway` | `mesh` |
+|---|---|---|---|
+| `AXIAM__RATE_LIMIT__KEY` | `ip` | `client_id` | `client_id` |
+| `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` | 10 | 10 | 10 |
+| `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` | 5 | 5 | 5 |
+| `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | 3 | 3 | 3 |
+| `AXIAM__RATE_LIMIT__MFA_PER_MIN` | 5 | 5 | 5 |
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | 20 | 600 | 6000 |
+| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | 10 | 6000 | 60000 |
+| `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | 10 | 600 | 6000 |
+| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 300 | 6000 | 60000 |
+| `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100 | 1000 | 5000 |
+<!-- rate-limit-posture-table:end -->
+
+Per-minute values are **per bucket**, and the bucket is whatever
+`AXIAM__RATE_LIMIT__KEY` selects — per IP under `internet`, per OAuth2
+`client_id` under both presets (on `/oauth2/token`, `/oauth2/revoke`,
+`/oauth2/introspect` only; everything else is always per-IP).
+
+### Where the preset numbers come from
+
+Anchored to the measured envelope above, deliberately as a **small
+fraction of the whole-server ceiling** so that one bucket can never be the
+whole machine:
+
+| Preset value | Derivation |
+|---|---|
+| `gateway` token 600/min | 10/s per client ≈ 0.55% of the measured ~1 800/s server ceiling — ~180 clients running flat out to saturate, so one compromised credential is not a DoS engine. |
+| `gateway` introspect 6 000/min | 10× the token limit; resource servers introspect once per protected request (the public §6 rule of thumb). |
+| `gateway` revoke 600/min | Paired with issuance — revocation is per-token, so it tracks the token rate. |
+| `gateway` authz 6 000/min | 100/s per client, the **low** end of the 6 000–60 000 band in public §6; the server measured ~740/s cache-off in total. |
+| `mesh` token 6 000/min | 100/s per client ≈ 5.6% of the measured ceiling. |
+| `mesh` authz 60 000/min | 1 000/s per client — **above** the measured 740/s cache-off whole-server ceiling. On this hardware it stops a runaway retry loop, not an attacker. Sized honestly, not aspirationally. |
+| gRPC 1 000 / 5 000 per sec | The gRPC authz path measured ~603/s per 2 cores. These are coarse ceilings; see the keying caveat in §5. |
+
+### Turning it on
+
+```bash
+# docker-compose / k8s env
+AXIAM__RATE_LIMIT__PROFILE=gateway
+# …and if one client legitimately needs more than the preset:
+AXIAM__RATE_LIMIT__TOKEN_PER_MIN=2000     # wins over the preset
+```
+
+Behind a NAT/ingress also set `AXIAM__RATE_LIMIT__TRUSTED_HOPS` to the
+number of trusted proxy hops, otherwise every bucket keys on the proxy's
+IP (see [Deployment Guide § Rate limiting](README.md#rate-limiting)).
+
+---
+
+## 4. Sizing by hand
+
+If no preset fits, size from your own traffic rather than from ours:
+
+1. **Measure your per-client peak** over a 1-minute window in production
+   (or staging under load), per endpoint class.
+2. **Multiply by 2** for burst headroom — the limiter is a fixed 60 s
+   window, so a client that bunches its requests at a window boundary can
+   legitimately look 2× peak.
+3. **Sanity-check against the envelope**: the sum of your per-bucket
+   limits × expected concurrent buckets should not exceed what your
+   hardware measured (§2). A limit above the machine's capacity is not a
+   limit, it is documentation.
+4. **Introspection**: 10–20× your token limit if resource servers
+   introspect per request. Consider caching introspection results at the
+   resource server instead.
+5. **Authz checks**: enable `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true`
+   before raising the authz limit — the measured 3× on checks buys more
+   headroom than a bigger number does, and it cuts DB load 40–75%.
+6. **Never size the human endpoints from throughput.** 10 logins/min/IP is
+   not a capacity number; it is the number of password guesses you are
+   willing to let one source make per minute.
+
+---
+
+## 5. Security caveats — read before selecting a preset
+
+**1. `client_id` keying is not an anti-abuse control.** The `client_id` is
+read from the *unauthenticated* form body (`client_secret_post`,
+RFC 6749 §2.3.1) **before** any credential is verified. An attacker can
+rotate `client_id` values and mint a fresh bucket per value. Under
+`client_id` / `ip_client_id`, the token/introspect/revoke limits are a
+**fairness control between cooperating clients**, not a defence against a
+determined attacker — that job moves to your edge (WAF, API gateway,
+mTLS, or IP allow-listing). This is a property of the key modes
+themselves, not of the presets; the presets simply make it the active
+posture, which is why they are opt-in and logged.
+
+**2. A rotating `client_id` also grows the bucket keyspace.** Distinct
+keys accumulate in the in-memory governor and in the shared
+`rate_limit_bucket` table. Neither is unbounded in practice (windows
+expire and the cleanup task sweeps), but a sustained rotation flood is a
+resource-consumption vector, and each rejected request still costs one
+client lookup. Front an internet-exposed `client_id`-mode deployment with
+something that rate-limits by IP before AXIAM sees the request.
+
+**3. The gRPC authz limiter is per-IP only.** There is no client identity
+at the layer that keys it (the `tower` layer runs before tonic resolves
+per-RPC claims), so `AXIAM__GRPC__KEY` is reserved and currently a no-op.
+Behind a shared ingress IP, `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` is a
+**fleet-wide** ceiling, not a per-client one.
+
+**4. Requests with no parseable `client_id` fall back to the IP key.**
+That fallback is fail-safe (it never disables limiting), but note the
+consequence under a preset: an anonymous or malformed flood is then
+metered against the *preset's* larger per-IP number, not the strict
+default. Point 2's advice applies.
+
+**5. Presets cannot detect values set in `config/default.toml`.**
+"Explicitly set" means *an `AXIAM__…` environment variable is present*. A
+value coming from the optional TOML file source looks unset to the preset
+and will be overwritten. Pin it with an env var.
+
+**6. Human endpoints are excluded by construction.** No profile can raise
+`login`, `register`, `password_reset` or `mfa` — the preset struct has no
+field for them. If users arrive through a shared NAT and 10/min/IP is too
+tight, raise `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` explicitly, knowing you
+are widening a password-guessing budget (and remembering that logins cost
+~1/69th of a 2-core server each).
+
+---
+
+## 6. Confirming what you shipped
+
+At boot the server emits exactly one line describing the **active**
+posture — key mode, every per-minute value, the gRPC per-second ceiling,
+whether a preset was applied, and which env vars overrode it:
+
+```json
+{"level":"INFO","fields":{"message":"Rate-limit posture active",
+ "profile":"gateway","preset_applied":true,"key_mode":"client_id",
+ "login_per_min":10,"register_per_min":5,"password_reset_per_min":3,
+ "mfa_per_min":5,"token_per_min":2000,"introspect_per_min":6000,
+ "revoke_per_min":600,"authz_check_per_min":6000,
+ "grpc_authz_per_sec":1000,
+ "operator_overrides":"AXIAM__RATE_LIMIT__TOKEN_PER_MIN"}}
+```
+
+Grep for `Rate-limit posture active` in your startup logs. If
+`operator_overrides` is `none` and `preset_applied` is `false`, you are
+running the shipped internet-facing defaults.
+
+---
+
+## 7. Related
+
+- [Deployment Guide § Rate limiting](README.md#rate-limiting) — mechanism,
+  layers, `AXIAM__RATE_LIMIT__KEY` and `TRUSTED_HOPS` semantics.
+- [`benchmarks/PUBLIC_BENCH_ANALYSIS.md`](../../benchmarks/PUBLIC_BENCH_ANALYSIS.md)
+  §6 — the recommended-settings table these numbers derive from, plus every
+  other tuning knob.
+- [`claude_dev/rate-limit-posture-decision.md`](../../claude_dev/rate-limit-posture-decision.md)
+  — why the defaults were **not** moved, and the abuse-vector analysis
+  behind the preset values.

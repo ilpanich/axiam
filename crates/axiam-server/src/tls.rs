@@ -29,25 +29,214 @@ use rustls::{RootCertStore, ServerConfig};
 /// value is plenty for a benchmark/service workload and caps memory.
 const RESUMPTION_CACHE_SIZE: usize = 512;
 
-/// The ALPN protocol list the rustls listener is *built with*, given the
-/// `http2` knob.
+/// The ALPN protocol list the rustls listener is built with.
 ///
-/// **Important caveat (B2):** for the REST listener this list is only fully
-/// authoritative when the rustls `ServerConfig` is used directly. actix-web's
-/// `HttpServer::bind_rustls_0_23` path funnels through
-/// `actix_http::HttpService::rustls_0_23_with_config`, which unconditionally
-/// **prepends** `["h2", "http/1.1"]` to whatever `alpn_protocols` we set. So
-/// with the current actix bind, `http2 = false` narrows the config's list to
-/// `http/1.1` but h2 is re-added and still wins negotiation. A *true*
-/// http/1.1-only TLS listener therefore requires either fronting with the
-/// `tls13-h1` nginx edge (see the benchmarks) or an H1-only actix service.
-/// This helper is unit-tested and records operator intent; it is authoritative
-/// for any non-actix consumer of the config.
-fn alpn_protocols(http2: bool) -> Vec<Vec<u8>> {
-    if http2 {
-        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
-    } else {
-        vec![b"http/1.1".to_vec()]
+/// This is exactly what the actix-web rustls bind ends up advertising, and it
+/// is **not** configurable — see [`reject_unsupported_http2_knob`] for the
+/// source-level proof.
+fn alpn_protocols() -> Vec<Vec<u8>> {
+    vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+}
+
+/// Reject `server.tls.http2 = false`, which the native listener **cannot**
+/// honour.
+///
+/// # Why this is a hard error rather than a warning (G8)
+///
+/// The knob used to narrow the rustls `ServerConfig`'s ALPN list to
+/// `http/1.1`, log a warning, and then serve h2 anyway. That is the worst of
+/// both worlds: an operator (or a benchmark cell) can *believe* the listener is
+/// HTTP/1.1-only while every client still negotiates h2. Startup now fails, in
+/// the same fail-fast style as every other misconfiguration in this module.
+///
+/// The knob is unimplementable on this bind, verified against the exact
+/// versions in `Cargo.lock` (actix-web 4.14.0 / actix-http 3.13.1 /
+/// rustls 0.23.42):
+///
+/// * `actix_web::HttpServer::bind_rustls_0_23` (actix-web-4.14.0
+///   `src/server.rs:587`) delegates to `listen_rustls_0_23_inner`
+///   (`src/server.rs:1006`), which finishes with
+///   `.rustls_0_23_with_config(config, acceptor_config)`.
+/// * `actix_http::HttpService::rustls_0_23_with_config` (actix-http-3.13.1
+///   `src/service.rs:735`) then does, unconditionally:
+///
+///   ```text
+///   let mut protos = vec![b"h2".to_vec(), b"http/1.1".to_vec()];   // :747
+///   protos.extend_from_slice(&config.alpn_protocols);              // :748
+///   config.alpn_protocols = protos;                                // :749
+///   ```
+///
+///   so `h2` always lands at index 0 of the effective list. Every actix TLS
+///   bind documents this ("ALPN protocols "h2" and "http/1.1" are added to any
+///   configured ones") and every one of them shares the prepend.
+/// * rustls picks the ALPN protocol by **server** preference order —
+///   `our_protocols.iter().find(|ours| their_protocols.contains(ours))` in
+///   rustls-0.23.42 `src/server/hs.rs:99-108` — so index 0 wins for any client
+///   offering h2. Appending to the list can never outrank the prepended `h2`.
+/// * The h2 support cannot be compiled out either: actix-web's `rustls-0_23`
+///   feature *implies* `http2` (actix-web-4.14.0 `Cargo.toml`,
+///   `rustls-0_23 = ["__tls", "http2", ...]`), and the ALPN prepend lives in a
+///   module gated only on `rustls-0_23`, not on `http2`.
+///
+/// A genuinely `http/1.1`-only TLS 1.3 listener is therefore available only by:
+/// 1. fronting the plaintext bind with the `tls13-h1` nginx edge
+///    (`benchmarks/targets/axiam/tls/tls13-h1.conf`) — what the G8 conviction
+///    cell uses; or
+/// 2. abandoning `actix_web::HttpServer` for this bind and driving
+///    `actix_http::H1Service::rustls_0_23` (actix-http-3.13.1
+///    `src/h1/service.rs:371`) directly on an `actix_server::Server` — that
+///    constructor is the one rustls service factory in the tree that does
+///    **not** touch `alpn_protocols`. See
+///    `claude_dev/b2-tls-h2-investigation.md` for why that rewrite is not
+///    justified today.
+fn reject_unsupported_http2_knob(tls: &TlsConfig) -> io::Result<()> {
+    if tls.http2 {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "server.tls.http2=false is not supported by the native TLS listener: \
+         actix-web's rustls bind unconditionally prepends \"h2\" to the ALPN \
+         list (actix-http HttpService::rustls_0_23_with_config), and rustls \
+         selects by server preference, so h2 would still be negotiated. \
+         Refusing to start rather than silently serving the opposite of what \
+         was configured. For an http/1.1-only TLS 1.3 endpoint, leave \
+         server.tls disabled and terminate TLS at an edge that does not enable \
+         HTTP/2 (see benchmarks/targets/axiam/tls/tls13-h1.conf and \
+         docs/security-profiles.md).",
+    ))
+}
+
+/// Maximum legal HTTP/2 flow-control window, `2^31 - 1` (RFC 9113 §6.5.2;
+/// `h2::frame::settings::MAX_INITIAL_WINDOW_SIZE` in h2 0.4.15).
+const MAX_H2_WINDOW_SIZE: u32 = (1 << 31) - 1;
+
+/// actix-http 3.13.1's default initial **stream** window (`src/config.rs:19`,
+/// `DEFAULT_H2_STREAM_WINDOW_SIZE`). Recorded so operators can see what an
+/// unset knob means; never written into the builder.
+pub const ACTIX_DEFAULT_H2_STREAM_WINDOW: u32 = 1024 * 1024;
+
+/// actix-http 3.13.1's default initial **connection** window
+/// (`src/config.rs:14`, `DEFAULT_H2_CONN_WINDOW_SIZE`).
+pub const ACTIX_DEFAULT_H2_CONNECTION_WINDOW: u32 = 2 * 1024 * 1024;
+
+/// HTTP/2 tuning surface for the native TLS listener (G8/B2).
+///
+/// h2 is only ever negotiated on the rustls bind (the plaintext bind is served
+/// as HTTP/1.1 — `HttpServer::bind` never calls `listen_auto_h2c`), so these
+/// keys live next to the TLS ones and are a no-op when `server.tls.enabled` is
+/// false.
+///
+/// **Every field defaults to `None`, and `None` means "do not call the actix
+/// setter at all"** — an unset config reproduces today's behaviour byte for
+/// byte, because `actix_web::HttpServer` itself stores these as `Option`s and
+/// only forwards them to `HttpService` when `Some`
+/// (actix-web-4.14.0 `src/server.rs:1041-1048`).
+///
+/// | Env var | Type | Unset ⇒ actix default |
+/// |---|---|---|
+/// | `AXIAM__SERVER__H2__INITIAL_STREAM_WINDOW_SIZE` | `u32` bytes | 1 MiB |
+/// | `AXIAM__SERVER__H2__INITIAL_CONNECTION_WINDOW_SIZE` | `u32` bytes | 2 MiB |
+///
+/// # What is deliberately *not* exposed
+///
+/// * **`max_concurrent_streams`** — actix-http 3.13.1 never sets it. Its h2
+///   handshake builder (`src/h2/mod.rs:60-71`) calls only
+///   `initial_window_size` and `initial_connection_window_size`; the underlying
+///   `h2::server::Builder::max_concurrent_streams` (h2-0.4.15
+///   `src/server.rs:858`) exists but is unreachable, and neither
+///   `actix_http::HttpServiceBuilder` nor `actix_web::HttpServer` re-exports
+///   it. Because actix never sends `SETTINGS_MAX_CONCURRENT_STREAMS`
+///   (`h2::frame::Settings` derives `Default`, i.e. `None`), the server
+///   advertises *no* stream limit — so a stream cap is provably **not** the
+///   cause of the B2 concurrency ceiling, and inventing a knob for it here
+///   would be a lie.
+/// * **keep-alive** — `HttpServer::keep_alive` exists but is shared by h1 and
+///   h2 and does not bear on a multiplexed-connection ceiling: the single h2
+///   connection stays open for the whole run either way. Changing it would
+///   alter p0 and p2 alike, so it is not a B2 lever.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Http2Tuning {
+    /// `SETTINGS_INITIAL_WINDOW_SIZE` advertised per stream, in bytes.
+    pub initial_stream_window_size: Option<u32>,
+    /// Connection-level receive window, in bytes.
+    pub initial_connection_window_size: Option<u32>,
+}
+
+impl Http2Tuning {
+    /// Load the `server.h2` subtree using the same sources and idiom as the
+    /// main `AppConfig` loader (`config/default.toml` + `AXIAM__*` env with a
+    /// `__` separator).
+    ///
+    /// An absent subtree yields [`Self::default`] (all `None`).
+    pub fn load() -> io::Result<Self> {
+        let sources = config::Config::builder()
+            .add_source(config::File::with_name("config/default").required(false))
+            .add_source(config::Environment::with_prefix("AXIAM").separator("__"))
+            .build()
+            .map_err(|e| io::Error::other(format!("failed to load configuration: {e}")))?;
+
+        let tuning = match sources.get::<Self>("server.h2") {
+            Ok(t) => t,
+            // Nothing configured at all — keep actix's defaults.
+            Err(config::ConfigError::NotFound(_)) => Self::default(),
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid server.h2 configuration: {e}"),
+                ));
+            }
+        };
+        tuning.validate()?;
+        Ok(tuning)
+    }
+
+    /// Reject window sizes HTTP/2 cannot express, so a typo fails at startup
+    /// rather than at the first h2 handshake (`h2::server::Builder` asserts
+    /// `size <= MAX_WINDOW_SIZE` and would panic inside a worker).
+    fn validate(&self) -> io::Result<()> {
+        for (name, value) in [
+            (
+                "initial_stream_window_size",
+                self.initial_stream_window_size,
+            ),
+            (
+                "initial_connection_window_size",
+                self.initial_connection_window_size,
+            ),
+        ] {
+            let Some(v) = value else { continue };
+            if v == 0 || v > MAX_H2_WINDOW_SIZE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "server.h2.{name} must be between 1 and {MAX_H2_WINDOW_SIZE} \
+                         bytes (RFC 9113 §6.5.2); got {v}"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// True when nothing is configured, i.e. actix's defaults are untouched.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The window actix will actually use per stream (configured or default) —
+    /// for the startup log line only.
+    pub fn effective_stream_window(&self) -> u32 {
+        self.initial_stream_window_size
+            .unwrap_or(ACTIX_DEFAULT_H2_STREAM_WINDOW)
+    }
+
+    /// The window actix will actually use per connection (configured or
+    /// default) — for the startup log line only.
+    pub fn effective_connection_window(&self) -> u32 {
+        self.initial_connection_window_size
+            .unwrap_or(ACTIX_DEFAULT_H2_CONNECTION_WINDOW)
     }
 }
 
@@ -132,8 +321,13 @@ fn build_client_cert_verifier(
 ///
 /// Fails fast (returning an `io::Error` that aborts startup) when TLS is enabled
 /// but misconfigured: a missing `cert_path`/`key_path`, an unreadable or
-/// malformed PEM file, an empty cert chain, or a cert/key mismatch.
+/// malformed PEM file, an empty cert chain, a cert/key mismatch, or an
+/// unsatisfiable `http2 = false` request (see [`reject_unsupported_http2_knob`]).
 pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
+    // Checked before any file IO: an unsatisfiable ALPN request is a config
+    // error regardless of whether the cert/key happen to be readable.
+    reject_unsupported_http2_knob(tls)?;
+
     let cert_path = tls.cert_path.as_ref().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -218,9 +412,9 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
         )
     })?;
 
-    // ALPN (B2): advertise h2+http/1.1 by default, or http/1.1-only when the
-    // operator disables h2. See `alpn_protocols` for the actix-bind caveat.
-    config.alpn_protocols = alpn_protocols(tls.http2);
+    // ALPN (B2/G8): h2 + http/1.1. This is not configurable — `http2 = false`
+    // was rejected above because actix re-prepends h2 regardless.
+    config.alpn_protocols = alpn_protocols();
 
     // TLS 1.3 session resumption (B2). Without a ticketer + session store a
     // rustls server does a *full* handshake on every connection; k6 opens many
@@ -256,18 +450,125 @@ mod tests {
         assert!(tls.key_path.is_none());
     }
 
+    /// The advertised list is fixed: `h2` then `http/1.1`, matching exactly
+    /// what actix-http prepends, so the rustls config and the effective
+    /// listener agree.
     #[test]
-    fn alpn_list_reflects_http2_knob() {
-        assert_eq!(
-            alpn_protocols(true),
-            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
-        );
-        assert_eq!(alpn_protocols(false), vec![b"http/1.1".to_vec()]);
+    fn alpn_list_is_h2_then_http11() {
+        assert_eq!(alpn_protocols(), vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
     }
 
     #[test]
     fn default_offers_http2() {
         assert!(TlsConfig::default().http2);
+        reject_unsupported_http2_knob(&TlsConfig::default())
+            .expect("the default (http2=true) must be accepted");
+    }
+
+    /// G8: `http2=false` is unsatisfiable on the actix rustls bind, so it must
+    /// abort startup instead of quietly serving h2.
+    #[test]
+    fn http2_false_is_rejected_at_startup() {
+        let tls = TlsConfig {
+            enabled: true,
+            http2: false,
+            ..TlsConfig::default()
+        };
+        let err = reject_unsupported_http2_knob(&tls)
+            .expect_err("http2=false must be rejected, not silently ignored");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("not supported"), "got: {err}");
+    }
+
+    /// The rejection must fire before any cert/key IO, so the operator sees the
+    /// real problem even on an otherwise-valid TLS config.
+    #[test]
+    fn http2_false_rejected_even_with_valid_cert_and_key() {
+        let pki = gen_test_pki();
+        let tls = TlsConfig {
+            enabled: true,
+            http2: false,
+            cert_path: Some(write_tmp("h2knob-cert", &pki.server_cert_pem)),
+            key_path: Some(write_tmp("h2knob-key", &pki.server_key_pem)),
+            ..TlsConfig::default()
+        };
+        let err = build_rustls_server_config(&tls)
+            .expect_err("http2=false must abort the build even with a good keypair");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+    }
+
+    // ---------------------------------------------------------------------
+    // G8 — HTTP/2 tuning surface
+    // ---------------------------------------------------------------------
+
+    /// Unset means "never call the actix setter", i.e. today's behaviour.
+    #[test]
+    fn h2_tuning_defaults_to_untouched_actix_behaviour() {
+        let t = Http2Tuning::default();
+        assert!(t.is_default());
+        assert_eq!(t.initial_stream_window_size, None);
+        assert_eq!(t.initial_connection_window_size, None);
+        assert_eq!(t.effective_stream_window(), ACTIX_DEFAULT_H2_STREAM_WINDOW);
+        assert_eq!(
+            t.effective_connection_window(),
+            ACTIX_DEFAULT_H2_CONNECTION_WINDOW
+        );
+        t.validate().expect("the default must validate");
+    }
+
+    /// The recorded actix defaults must match actix-http 3.13.1's constants
+    /// (`DEFAULT_H2_STREAM_WINDOW_SIZE` = 1 MiB,
+    /// `DEFAULT_H2_CONN_WINDOW_SIZE` = 2 MiB).
+    #[test]
+    fn recorded_actix_h2_defaults_match_upstream() {
+        assert_eq!(ACTIX_DEFAULT_H2_STREAM_WINDOW, 1_048_576);
+        assert_eq!(ACTIX_DEFAULT_H2_CONNECTION_WINDOW, 2_097_152);
+    }
+
+    #[test]
+    fn h2_tuning_accepts_the_legal_window_range() {
+        for v in [1u32, 65_535, 1 << 20, MAX_H2_WINDOW_SIZE] {
+            let t = Http2Tuning {
+                initial_stream_window_size: Some(v),
+                initial_connection_window_size: Some(v),
+            };
+            t.validate()
+                .unwrap_or_else(|e| panic!("{v} must be legal: {e}"));
+            assert!(!t.is_default());
+            assert_eq!(t.effective_stream_window(), v);
+            assert_eq!(t.effective_connection_window(), v);
+        }
+    }
+
+    #[test]
+    fn h2_tuning_rejects_zero_and_oversized_windows() {
+        for bad in [0u32, MAX_H2_WINDOW_SIZE + 1] {
+            let stream = Http2Tuning {
+                initial_stream_window_size: Some(bad),
+                initial_connection_window_size: None,
+            };
+            let err = stream
+                .validate()
+                .expect_err("illegal stream window must fail fast");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                err.to_string().contains("initial_stream_window_size"),
+                "got: {err}"
+            );
+
+            let conn = Http2Tuning {
+                initial_stream_window_size: None,
+                initial_connection_window_size: Some(bad),
+            };
+            let err = conn
+                .validate()
+                .expect_err("illegal connection window must fail fast");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                err.to_string().contains("initial_connection_window_size"),
+                "got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -492,8 +793,8 @@ mod tests {
         };
         let config = build_rustls_server_config(&tls)
             .expect("server config with client_auth off must build");
-        // Sanity: default ALPN (http2 defaults to true) is wired through.
-        assert_eq!(config.alpn_protocols, alpn_protocols(true));
+        // Sanity: the fixed h2 + http/1.1 ALPN list is wired through.
+        assert_eq!(config.alpn_protocols, alpn_protocols());
     }
 
     /// A CA bundle file whose content isn't valid PEM at all (garbage bytes

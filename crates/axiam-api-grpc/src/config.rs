@@ -70,7 +70,47 @@ impl Default for GrpcConfig {
     }
 }
 
+/// `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` — presence pins
+/// [`GrpcConfig::grpc_authz_per_sec`] against a posture preset.
+pub const ENV_GRPC_AUTHZ_PER_SEC: &str = "AXIAM__GRPC__GRPC_AUTHZ_PER_SEC";
+
 impl GrpcConfig {
+    /// G7: applies the deployment rate-limit posture preset's gRPC authz
+    /// ceiling, reading the process environment.
+    ///
+    /// The preset values live in ONE place —
+    /// `axiam_api_rest::config::rate_limit::RateLimitProfile::preset()` — and
+    /// are handed here by the composition root (`axiam-server::main`) so the
+    /// whole `AXIAM__RATE_LIMIT__PROFILE` family (REST + gRPC) moves
+    /// coherently from a single operator-facing env var. This crate
+    /// deliberately does not own a second copy of the numbers.
+    ///
+    /// Returns `true` when the preset was applied, `false` when the operator
+    /// pinned [`ENV_GRPC_AUTHZ_PER_SEC`] explicitly (explicit env always wins).
+    ///
+    /// **Keying caveat:** the gRPC limiter is per-IP only — there is no
+    /// client identity at the layer that keys it (see
+    /// [`GrpcRateLimitKeyMode`]). Behind a shared NAT/ingress IP this is a
+    /// *fleet-wide* ceiling, not a per-client one; that is exactly why the
+    /// M2M presets raise it.
+    pub fn apply_rate_limit_preset_from_env(&mut self, per_sec: u32) -> bool {
+        self.apply_rate_limit_preset(per_sec, |name| std::env::var_os(name).is_some())
+    }
+
+    /// [`GrpcConfig::apply_rate_limit_preset_from_env`] with the environment
+    /// lookup injected, for tests.
+    pub fn apply_rate_limit_preset<F>(&mut self, per_sec: u32, is_set: F) -> bool
+    where
+        F: Fn(&str) -> bool,
+    {
+        if is_set(ENV_GRPC_AUTHZ_PER_SEC) {
+            false
+        } else {
+            self.grpc_authz_per_sec = per_sec;
+            true
+        }
+    }
+
     pub fn bind_address(&self) -> SocketAddr {
         let addr = format!("{}:{}", self.host, self.port);
         addr.parse()
@@ -103,6 +143,54 @@ mod tests {
     fn default_key_mode_is_ip() {
         assert_eq!(GrpcConfig::default().key, GrpcRateLimitKeyMode::Ip);
         assert_eq!(GrpcRateLimitKeyMode::default(), GrpcRateLimitKeyMode::Ip);
+    }
+
+    /// G7 single-source-of-truth guard: the gRPC shipped default written
+    /// down in `docs/deployment/rate-limit-sizing.md` must equal
+    /// [`GrpcConfig::default`]. (The `gateway`/`mesh` columns of the same
+    /// row are checked against the preset table on the REST side, which
+    /// owns the numbers — see
+    /// `axiam_api_rest::config::rate_limit::tests::documented_presets_match_applied_profiles`.)
+    #[test]
+    fn documented_grpc_default_matches_shipped_config() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("docs/deployment/rate-limit-sizing.md");
+        let md = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+        let row = md
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with(&format!("| `{ENV_GRPC_AUTHZ_PER_SEC}`")))
+            .unwrap_or_else(|| panic!("{} must document {ENV_GRPC_AUTHZ_PER_SEC}", path.display()));
+        let documented: u32 = row
+            .trim_matches('|')
+            .split('|')
+            .nth(1)
+            .expect("posture row has an `internet` column")
+            .trim()
+            .parse()
+            .expect("`internet` column is a plain integer");
+        assert_eq!(
+            documented,
+            GrpcConfig::default().grpc_authz_per_sec,
+            "docs/deployment/rate-limit-sizing.md disagrees with GrpcConfig::default()"
+        );
+    }
+
+    /// G7: the preset only lands when the operator has NOT pinned
+    /// `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` — explicit env always wins.
+    #[test]
+    fn rate_limit_preset_applies_only_when_env_unset() {
+        let mut cfg = GrpcConfig::default();
+        assert_eq!(cfg.grpc_authz_per_sec, 100);
+        assert!(cfg.apply_rate_limit_preset(1_000, |_| false));
+        assert_eq!(cfg.grpc_authz_per_sec, 1_000);
+
+        let mut pinned = GrpcConfig::default();
+        assert!(!pinned.apply_rate_limit_preset(1_000, |n| n == ENV_GRPC_AUTHZ_PER_SEC));
+        assert_eq!(pinned.grpc_authz_per_sec, 100);
     }
 
     #[test]

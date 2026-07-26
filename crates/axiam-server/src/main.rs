@@ -665,7 +665,44 @@ async fn main() -> std::io::Result<()> {
         http_client.clone(),
     );
 
+    // G7: resolve the deployment rate-limit posture BEFORE validation and
+    // before `config.rate_limit` / `config.grpc` are cloned into the App
+    // factory and the gRPC task. `AXIAM__RATE_LIMIT__PROFILE` (default
+    // `internet`) presets the machine-traffic family — key mode, token,
+    // introspect, revoke, REST authz and the gRPC authz ceiling — as one
+    // coherent unit; any `AXIAM__RATE_LIMIT__*` / `AXIAM__GRPC__*` env var the
+    // operator set explicitly still wins. Human endpoints (login, register,
+    // password reset, MFA) are never preset — see `RateLimitProfile`.
+    let mut rate_limit_posture = config.rate_limit.apply_profile_from_env();
+    if let Some(per_sec) = rate_limit_posture.grpc_authz_per_sec_preset
+        && !config.grpc.apply_rate_limit_preset_from_env(per_sec)
+    {
+        rate_limit_posture
+            .operator_overrides
+            .push(axiam_api_grpc::config::ENV_GRPC_AUTHZ_PER_SEC);
+    }
+
     config.rate_limit.validate();
+
+    // G7: one non-secret line stating the posture this process is actually
+    // enforcing, so an operator can see what they shipped (all values are
+    // configuration, never credentials).
+    tracing::info!(
+        profile = config.rate_limit.profile.as_str(),
+        preset_applied = rate_limit_posture.preset_applied,
+        key_mode = config.rate_limit.key.as_str(),
+        login_per_min = config.rate_limit.login_per_min,
+        register_per_min = config.rate_limit.register_per_min,
+        password_reset_per_min = config.rate_limit.password_reset_per_min,
+        mfa_per_min = config.rate_limit.mfa_per_min,
+        token_per_min = config.rate_limit.token_per_min,
+        introspect_per_min = config.rate_limit.introspect_per_min,
+        revoke_per_min = config.rate_limit.revoke_per_min,
+        authz_check_per_min = config.rate_limit.authz_check_per_min,
+        grpc_authz_per_sec = config.grpc.grpc_authz_per_sec,
+        operator_overrides = %rate_limit_posture.overrides_display(),
+        "Rate-limit posture active"
+    );
 
     let bind_addr = config.server.bind_address();
     let server_config = config.server.clone();
@@ -1105,32 +1142,36 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
+    // G8/B2: optional HTTP/2 window tuning for the TLS bind. Unset keys are
+    // never forwarded to actix, so the default build is bit-identical to
+    // before. See `axiam_server::tls::Http2Tuning`.
+    let h2_tuning = axiam_server::tls::Http2Tuning::load()?;
+    let mut http_server = http_server;
+    if let Some(size) = h2_tuning.initial_stream_window_size {
+        http_server = http_server.h2_initial_window_size(size);
+    }
+    if let Some(size) = h2_tuning.initial_connection_window_size {
+        http_server = http_server.h2_initial_connection_window_size(size);
+    }
+
     // Bind plaintext (proxy-terminated TLS, the default) or, when
     // `server.tls.enabled`, bind with rustls restricted to TLS 1.3 (F-04 /
     // ASVS V9.1.2). `build_rustls_server_config` fails fast on any cert/key
     // misconfiguration, so a misconfigured TLS server never starts insecurely.
     let http_server = if tls_config.enabled {
+        // Also fails fast on `http2=false`, which the actix rustls bind cannot
+        // honour (it re-prepends h2 to ALPN) — see `axiam_server::tls`.
         let rustls_config = axiam_server::tls::build_rustls_server_config(&tls_config)?;
         tracing::info!(
             bind = %bind_addr,
-            http2_offered = tls_config.http2,
+            alpn = "h2,http/1.1",
             resumption = "tls1.3-tickets",
             early_data = false,
+            h2_stream_window = h2_tuning.effective_stream_window(),
+            h2_connection_window = h2_tuning.effective_connection_window(),
+            h2_tuning_default = h2_tuning.is_default(),
             "Direct TLS enabled — negotiating TLS 1.3 only"
         );
-        // B2 honesty: the http2=false knob narrows the rustls config's ALPN to
-        // http/1.1, but actix-web's rustls HttpService re-adds h2 to ALPN, so
-        // h2 still wins negotiation on this bind. Warn so an operator expecting
-        // a true http/1.1-only listener is not misled.
-        if !tls_config.http2 {
-            tracing::warn!(
-                "server.tls.http2=false requested: the rustls config advertises http/1.1 only, \
-                 but the actix-web rustls HttpServer bind unconditionally re-adds h2 to ALPN, so \
-                 h2 remains offered and preferred. For a genuine http/1.1-only TLS listener (e.g. \
-                 the p2 h2-isolation benchmark cell) front the server with the tls13-h1 nginx edge. \
-                 See docs/security-profiles.md."
-            );
-        }
         http_server.bind_rustls_0_23(&bind_addr, rustls_config)?
     } else {
         http_server.bind(&bind_addr)?

@@ -704,25 +704,42 @@ task_g9_rlprod() {
   bench_down axiam
   unset BENCH_RESULTS_DIR
 
-  s "With the production per-IP posture active, nearly every request is a 429. The"
-  s "cells must say so coherently: \`bench_ok\` counts ONLY successful ops, so a"
-  s "100%-error cell reports a throughput of ~0 rather than thousands of \"ops/s\" of"
-  s "rejections (the run-3 incoherence this task fixes)."
+  s "With the production per-IP posture active, nearly every request is a 429."
   s
-  s "| scenario | bench_ok rate | error rate | coherent? |"
-  s "|---|---|---|---|"
-  for sc in oauth2_client_credentials token_introspection authz_check_rest; do
+  s "G9 established that run-3's apparently contradictory cell (\`bench_ok\` 13.6/s at"
+  s "a 1.00 error rate) was **not** a counting bug: \`doOp()\` only ever counts a"
+  s "status-match as ok, and the rate limiters start with a full burst, so a genuine"
+  s "handful of successes lands at test start while the retry storm that follows"
+  s "drives the *fraction* to ~1.00. The two metrics were each correct and together"
+  s "illegible. The fix is the \`bench_throttled\` counter, so a posture pass can be"
+  s "read directly: \`bench_failed ≈ bench_throttled\` means \"purely rate-limited\","
+  s "\`bench_failed >> bench_throttled\` means something else is also broken."
+  s
+  s "| scenario | ok ops | throttled (429/RESOURCE_EXHAUSTED) | other failures | reads as |"
+  s "|---|---|---|---|---|"
+  for sc in oauth2_client_credentials token_introspection authz_check_rest authz_check_grpc; do
     local f; f=$(k6_file "$out/$sc")
-    if [ -z "$f" ]; then s "| $sc | — | — | cell missing |"; continue; fi
-    local thr err ok
-    thr=$(k6_stat "$f" thr); err=$(k6_stat "$f" err)
-    ok=$(python3 -c "
-thr=float('$thr' if '$thr'!='NA' else 0); err=float('$err' if '$err'!='NA' else 0)
-print('✅' if (err < 0.99 or thr < 1.0) else '❌ ok-rate > 0 at ~100% errors')")
-    s "| $sc | $thr | $err | $ok |"
+    if [ -z "$f" ]; then s "| $sc | — | — | — | cell missing |"; continue; fi
+    python3 - "$f" "$sc" >> "$SUMMARY" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))["metrics"]
+ok = m.get("bench_ok", {}).get("count", 0)
+failed = m.get("bench_failed", {}).get("count", 0)
+thr = m.get("bench_throttled", {}).get("count")
+if thr is None:
+    verdict = "⚠ bench_throttled absent — scenario not yet wired to the shared classifier"
+    thr = "—"; other = "—"
+else:
+    other = failed - thr
+    verdict = ("✅ purely rate-limited" if failed and other <= 0.02 * failed
+               else f"❌ {other} failures beyond throttling — investigate")
+print(f"| {sys.argv[2]} | {ok} | {thr} | {other} | {verdict} |")
+PY
   done
   s
-  s "Acceptance: no row reports a meaningful \`bench_ok\` rate while its error rate is ~1.0."
+  s "Acceptance (plan G9.3): every rate-limited cell resolves to \"purely rate-limited\","
+  s "and \`bench_throttled\` is present on **gRPC** cells too (they use the shared"
+  s "\`recordGrpcResult()\` classifier rather than their own copy)."
   finish
 }
 

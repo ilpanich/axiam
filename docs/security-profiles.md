@@ -61,23 +61,89 @@ verified peer certificate is present on the connection (i.e. TLS was terminated
 upstream) — so with native mTLS enabled a spoofed header can never assert an
 identity.
 
-### ALPN / HTTP-version (`AXIAM__SERVER__TLS__HTTP2`, default `true`)
+### ALPN / HTTP version — the listener is always `h2` + `http/1.1`
 
-The rustls config is built advertising `h2` + `http/1.1` by default. Setting
-`AXIAM__SERVER__TLS__HTTP2=false` narrows the config's ALPN list to
-`http/1.1` only.
+The native TLS listener advertises `h2` then `http/1.1`, and **this is not
+configurable**.
 
-**Caveat — actix-web re-adds h2.** The REST listener is served through
-actix-web's `HttpServer::bind_rustls_0_23`, whose service factory
-(`actix_http::HttpService::rustls_0_23_with_config`) unconditionally
-**prepends** `["h2", "http/1.1"]` to whatever ALPN we configure. As a result,
-on the actix bind the `http2=false` knob is an *intent signal* — h2 is re-added
-and still wins negotiation. A genuinely `http/1.1`-only TLS 1.3 listener is
-obtained by fronting with the `tls13-h1` nginx edge
-(`benchmarks/targets/axiam/tls/tls13-h1.conf`). The rustls-level list is still
-authoritative for any non-actix consumer of the config and is unit-tested. See
-`benchmarks/PRIVATE_BENCH_ANALYSIS.md` §4.3 for why this matters (the p2 TLS
-throughput asymmetry is primarily an h2-vs-h1.1 effect).
+`AXIAM__SERVER__TLS__HTTP2=false` used to narrow the rustls config's ALPN list,
+log a warning, and then serve h2 anyway. **It now aborts startup** with an
+`Unsupported` error. A setting that silently does the opposite of what it says
+is worse than no setting — especially in a benchmark, where it can manufacture a
+fake "HTTP/1.1 cell".
+
+Why it cannot work (verified against actix-web 4.14.0 / actix-http 3.13.1 /
+rustls 0.23.42, the versions in `Cargo.lock`):
+
+- `HttpServer::bind_rustls_0_23` (actix-web `src/server.rs:587`) routes through
+  `actix_http::HttpService::rustls_0_23_with_config` (actix-http
+  `src/service.rs:735`), which unconditionally **prepends** `["h2",
+  "http/1.1"]` to whatever ALPN list we configure (`src/service.rs:747-749`) —
+  our list is appended, so `h2` is always first.
+- rustls selects ALPN by **server preference order**
+  (rustls `src/server/hs.rs:99-108`), so the prepended `h2` wins for every
+  client that offers it. Appending can never outrank it.
+- h2 cannot be compiled out either: actix-web's `rustls-0_23` feature implies
+  `http2`, and the prepend is gated on `rustls-0_23` alone.
+
+**To serve TLS 1.3 without HTTP/2**, leave `server.tls` disabled and terminate
+TLS at an edge that does not enable HTTP/2 — e.g.
+`benchmarks/targets/axiam/tls/tls13-h1.conf`. There is no in-process option
+short of replacing `HttpServer` with a hand-built `H1Service` listener, which
+AXIAM deliberately does not do.
+
+### HTTP/2 tuning (`AXIAM__SERVER__H2__*`)
+
+Two HTTP/2 flow-control settings are exposed. Both are **unset by default**, and
+unset means the corresponding actix setter is never called — a default
+deployment behaves exactly as it did before these keys existed.
+
+| Env var | Type | Unset ⇒ actix default |
+|---------|------|-----------------------|
+| `AXIAM__SERVER__H2__INITIAL_STREAM_WINDOW_SIZE` | bytes (`u32`) | 1 MiB |
+| `AXIAM__SERVER__H2__INITIAL_CONNECTION_WINDOW_SIZE` | bytes (`u32`) | 2 MiB |
+
+Values outside `1 … 2147483647` (RFC 9113 §6.5.2) are rejected at startup rather
+than panicking inside a worker at the first handshake. These only affect the TLS
+bind — the plaintext bind is HTTP/1.1.
+
+`max_concurrent_streams` is **not** exposed, because actix-http 3.13.1 provides
+no way to set it: its h2 handshake builder configures only the two windows
+(`src/h2/mod.rs:60-71`), and neither `HttpServiceBuilder` nor `HttpServer`
+surfaces the underlying `h2::server::Builder::max_concurrent_streams`. AXIAM
+therefore never sends `SETTINGS_MAX_CONCURRENT_STREAMS`, i.e. it advertises no
+stream limit. Keep-alive is not exposed here either: it is shared by HTTP/1.1
+and HTTP/2 and is not an HTTP/2-specific lever.
+
+### Operational note — one HTTP/2 connection is served by one core
+
+actix pins each accepted TCP connection to a single worker thread
+(actix-server `src/accept.rs:432-438`) and spawns every HTTP/2 stream onto that
+worker's single-threaded runtime (actix-http `src/h2/dispatcher.rs:134-135`;
+`actix_rt::spawn` is `tokio::task::spawn_local`). HTTP/2 multiplexing therefore
+buys header compression and ordering, **not** parallelism: all streams of one
+connection share one core.
+
+Consequences for high-volume callers:
+
+- A single client process holding **one** pooled HTTP/2 connection cannot
+  saturate a multi-core AXIAM instance, no matter how many concurrent requests
+  it multiplexes.
+- Spread high-volume token traffic across **several connections** (client-side
+  pooling, or a stream cap per connection) and across **replicas**. Adding CPUs
+  to one replica only helps when the number of inbound connections is at least
+  the number of workers.
+- AXIAM cannot induce this from the server side: with no advertised
+  `SETTINGS_MAX_CONCURRENT_STREAMS`, a client is never obliged to open a second
+  connection.
+
+This is a property of the actix listener, not of TLS: TLS crypto cost is already
+ruled out by `http_req_tls_handshaking ≈ 0` in the benchmark (session resumption
+works). Whether it materially explains the p2 token-endpoint throughput gap is
+the open question tracked in
+[`claude_dev/b2-tls-h2-investigation.md`](../claude_dev/b2-tls-h2-investigation.md)
+and `benchmarks/PRIVATE_BENCH_ANALYSIS.md` §4.3; the deciding measurement
+(`./run-improvement-tasks.sh g8-tls-h1`) is pending real hardware.
 
 ### Session resumption
 
@@ -119,7 +185,7 @@ override is applied.
 |-----------|------------------------------|---------------|-------|
 | p0        | plaintext HTTP/1.1           | yes           | baseline |
 | p1-tls12  | TLS 1.2                      | **no — N/A-by-policy** | AXIAM is **TLS 1.3-only natively** (per the security standards; ASVS V9.1.2). TLS 1.2 is never offered in-process; a legacy TLS 1.2 endpoint, if ever needed, is an nginx-edge concern outside AXIAM. This profile stays nginx-fronted when run. |
-| p2-tls13  | TLS 1.3 (h2 by default)      | yes (native overlay) | h1-isolation via `tls13-h1.conf` edge |
+| p2-tls13  | TLS 1.3 (always h2 when the client offers it) | yes (native overlay) | h1-isolation is only obtainable via the `tls13-h1.conf` edge — the native listener cannot be made h1-only (see ALPN above) |
 | p3-mtls   | TLS 1.3 + client cert        | **yes (native overlay, D3)** | native mTLS: `docker-compose.native-mtls.yml` sets `CLIENT_AUTH=required` + `CLIENT_CA_PATH=/certs/ca.crt`; no nginx edge. Identity from the verified cert, not a header. |
 
 ### Why p1-tls12 is N/A-by-policy (not "not yet implemented")

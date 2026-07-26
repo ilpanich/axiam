@@ -23,6 +23,10 @@ gRPC (Protocol Buffers), and AMQP (AsyncAPI).
 - [`deployment/README.md`](./deployment/README.md) — Docker Compose and
   Kubernetes deployment guide: required environment variables, secrets, and
   NetworkPolicies
+- [`deployment/rate-limit-sizing.md`](./deployment/rate-limit-sizing.md) —
+  sizing your rate limits: the measured hardware envelope, the
+  `internet`/`gateway`/`mesh` posture presets, and the security caveats of
+  per-client keying
 
 ## Admin & PKI guides
 

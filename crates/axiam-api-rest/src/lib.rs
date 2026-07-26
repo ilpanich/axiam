@@ -16,7 +16,7 @@ pub mod webhook;
 pub mod webhook_consumer;
 
 pub use authz::{AuthzChecker, AuthzData, RequirePermission};
-pub use config::{RateLimitConfig, ServerConfig};
+pub use config::{RateLimitConfig, RateLimitPosture, RateLimitProfile, ServerConfig};
 pub use error::AxiamApiError;
 pub use extractors::auth::{AuthenticatedUser, SessionValidator};
 pub use extractors::cert_auth::{CertificateAuthenticated, VerifiedClientCert};

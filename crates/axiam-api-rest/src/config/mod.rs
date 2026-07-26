@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 pub mod rate_limit;
 
-pub use rate_limit::RateLimitConfig;
+pub use rate_limit::{RateLimitConfig, RateLimitPosture, RateLimitProfile};
 
 /// Configuration for the Actix-Web REST API server.
 #[derive(Debug, Clone, Deserialize)]

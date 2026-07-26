@@ -1,16 +1,18 @@
-# AXIAM Benchmark Analysis — Second Draft (preliminary run 2)
+# AXIAM Benchmark Analysis — Third Draft (run 3, median-of-3)
 
-> **Status: second benchmark draft, preliminary.** This updates the first
-> draft (run of 2026-07-19) with a new full run of 2026-07-21 against **AXIAM
-> 1.0.0-alpha15**, after a round of benchmark-harness fixes and AXIAM
-> performance work. Most of draft 1's invalid cells are now valid — password
-> login and userinfo are real three-way comparisons for the first time — and
-> every cell now records CPU-frequency and temperature telemetry. Two
-> limitations keep the "preliminary" label: every figure is still a **single
-> run** (the harness supports median-of-3; it will be used for the next full
-> matrix), and the hardware is still a consumer laptop. Where this draft
-> *corrects* draft 1, it says so explicitly (§2). Numbers are real and
-> reproducible; treat them as a credible signal, not a final verdict.
+> **Status: third benchmark draft — the first statistically grounded one.**
+> This updates draft 2 (single-run, 2026-07-21) with a full run of 2026-07-25/26
+> against the released **AXIAM 1.0.0-alpha19** container image (digest-pinned,
+> pulled from the public registry — not a local build), with **every matrix
+> cell measured three times and reported as the median**, plus seven labeled
+> sensitivity passes (DB-uncapped for all targets, decision-cache ON, DB-pool
+> A/B, native mTLS, production rate-limit posture, batch-strategy A/B, and a
+> TLS/HTTP-version isolation cell). Observed run-to-run throughput spread was
+> **±0.1–2.8%** per cell, so differences above ~5% are signal on this
+> hardware. The remaining limitation is the hardware itself: a consumer
+> laptop. Where this draft *corrects* earlier drafts it says so explicitly
+> (§2) — including one correction in AXIAM's favor that we held ourselves to
+> the same standard on. Numbers are reproducible from the published raw data.
 
 ## 1. What was measured
 
@@ -21,390 +23,391 @@ differences; see [`docs/methodology.md`](docs/methodology.md)):
 
 | Target | Server | Datastore | Extra services |
 |---|---|---|---|
-| **AXIAM** | `axiam-server` **1.0.0-alpha15** (Rust / Actix-Web / Tonic, built from source) | SurrealDB v3 (SurrealKV backend) | RabbitMQ 4 (audit/event broker) |
-| **Keycloak** | Keycloak 26.7.0 (JVM) | PostgreSQL 16 (uniformly tuned, see below) | — |
-| **Zitadel** | Zitadel v4.15.2 (Go) | PostgreSQL 16 (uniformly tuned, see below) | — |
+| **AXIAM** | `axiam-server` **1.0.0-alpha19** (Rust / Actix-Web / Tonic; pulled ghcr image, digest recorded) | SurrealDB v3 (SurrealKV backend) | RabbitMQ 4 (audit/event broker) |
+| **Keycloak** | Keycloak 26.7.0 (JVM) | PostgreSQL 16 (uniformly tuned) | — |
+| **Zitadel** | Zitadel v4.15.2 (Go) | PostgreSQL 16 (uniformly tuned) | — |
 
 ### Test environment
 
-Everything ran on the same single **Dell XPS 15 9570 laptop** as draft 1
-(i7-8750H, 12 logical CPUs, ~31 GiB RAM, Linux 7.1, Docker 29.6), targets
-benchmarked sequentially, never concurrently, CPU governor pinned to
-`performance`. Two configurations were run:
+Same single **Dell XPS 15 9570** (i7-8750H, 12 logical CPUs, ~31 GiB RAM,
+Linux 7.1, Docker 29.6) as previous drafts; targets benchmarked sequentially;
+CPU governor `performance`; per-cell CPU-frequency/temperature/generator
+telemetry recorded and published (hot cells sustained ~3.7–3.9 GHz at
+95–100 °C; a few competitor cells carry a `clock_variance` flag in the raw
+data where clocks sagged — none of the headline AXIAM cells do).
 
-**Main (capped) matrix** — all three targets, both profiles:
+Caps (main matrix): every IAM server 2 CPUs / 1024 MiB; every database
+2 CPUs / 1024 MiB; RabbitMQ (AXIAM only) 1 CPU / 512 MiB. Load model:
+closed-loop **50 VUs**, 30 s warm-up + 120 s measured window, **×3 repeats,
+median reported**. Validity gates: error rate ≤ 1%, p95 < 2 s, ≥ 2 valid
+runs per cell. Profiles: **p0-plaintext** and **p2-tls13** (TLS 1.3
+terminated in-process by all three targets, gRPC included). AXIAM's default
+per-IP rate limits are neutralized in head-to-head cells (k6 is a single
+source IP; competitors ship no equivalent defaults) — the *production*
+posture gets its own labeled pass and a tuning guide in §6.
 
-| Container | CPU cap | Memory cap |
-|---|---|---|
-| IAM server (all three) | 2 CPUs | 1024 MiB |
-| Database (SurrealDB / PostgreSQL) | 2 CPUs | 1024 MiB |
-| RabbitMQ (AXIAM only) | 1 CPU | 512 MiB |
+## 2. What changed since draft 2 (corrections included)
 
-**DB-uncapped sensitivity pass** (AXIAM and Zitadel only, §5): identical
-except the database gets **4 CPUs / 2048 MiB** — servers stay capped at 2 —
-to measure how far each *server* scales when its database isn't the wall.
+**Correction in AXIAM's favor — the "slow batch endpoint" caveat is
+withdrawn as unproven.** Drafts 1 and 2 reported AXIAM's authorization
+*batch* endpoints as a known weak spot (~46 batches/s, slower than single
+checks). Run 3's expanded sensitivity set revealed a **measurement-order
+artifact**: for roughly 5–7 minutes after a stack is seeded, the database
+serves queries through what appears to be a serialization bottleneck
+(~45 req/s regardless of scenario), and the batch cells had *always* run
+first in the matrix order. When a batch cell runs on a settled stack it
+measures **852 batches/s (≈ 4 260 checks/s, p50 49 ms)** — i.e. batch is
+*more* efficient than single checks, as designed. We are re-measuring all
+batch cells under a corrected protocol before publishing final batch
+numbers; the same artifact also invalidated one TLS-diagnosis cell (§5).
+The transient itself is under investigation (it may affect cold-start
+behavior, which is why we're publishing it rather than quietly fixing the
+cell order).
 
-Load model (unchanged): closed-loop **50 VUs**, 30 s warm-up + 120 s measured
-window per scenario, k6 v2.1.0 on the host outside the caps. Validity gates:
-error rate ≤ 1%, p95 < 2000 ms. Profiles: **p0-plaintext** and **p2-tls13**
-(TLS 1.3, terminated in-process by all three targets; AXIAM's gRPC listener
-now also serves TLS at p2, closing a draft-1 inconsistency). PostgreSQL is
-minimally and **uniformly** tuned for both competitors
-(`shared_buffers=256MB`, `effective_cache_size=512MB`, `max_connections=200`);
-SurrealDB runs stock. AXIAM's default per-IP rate limits remain neutralized
-(k6 is a single source IP; competitors ship no equivalent default limits).
+**Refresh-token comparison — partially restored.** Keycloak's refresh cells
+now measure real single-use rotation (the draft-2 fallback is fixed:
+379 req/s at p0). AXIAM's own refresh cells **still measure a fallback** (a
+harness cookie-handling bug, being fixed) and remain excluded. Zitadel's
+refresh needs an `offline_access` flow the harness doesn't implement yet.
 
-**New in this run:** every cell records host CPU frequency, package
-temperature, and load-generator CPU at 1 s resolution, published with the raw
-data. Summary: on CPU-saturated cells the sustained clock held ~3.7–3.9 GHz;
-on the generator-heavy JWKS cells it sat ~3.2 GHz; package temperature reached
-95–100 °C on hot cells. So absolute numbers from this laptop are, if anything,
-conservative, and all targets ran under the same thermal envelope.
+**Zitadel gRPC is now measured for real** (draft 2: 100% auth errors): its
+gRPC userinfo runs at 183 req/s vs 943 req/s for its REST equivalent.
 
-## 2. What changed since draft 1 (corrections included)
+**Provenance is now airtight:** every container in every cell records an
+image digest; AXIAM ran from the published, digest-pinned release image.
+The draft-2 "Keycloak got faster between runs" ambiguity can't recur.
 
-**Harness fixes (this run's cells are valid where draft 1's were not):**
-- `userinfo` now uses a real user token → valid for all three targets
-  (draft 1: 100% errors on AXIAM and Keycloak).
-- Keycloak password login (ROPC) seeding fixed → valid hash-bound login cell
-  (draft 1: 100% errors).
-- Zitadel password login now drives Zitadel's session API with a real
-  password check (draft 1: a no-hashing client-credentials fallback that was
-  flagged as non-comparable).
+## 3. Headline results (capped matrix, median-of-3, valid cells)
 
-**Correction to draft 1 — refresh-token cells.** New instrumentation that
-tags fallback operations revealed that the `token_refresh` scenario falls back
-to plain token issuance on **all three targets** (no target issues a refresh
-token on the client-credentials grant the scenario minted with). This also
-applies retroactively to draft 1's AXIAM refresh figures, which we presented
-as refresh-rotation measurements: they were the same fallback. The refresh
-comparison is therefore **withdrawn until the scenario is fixed** to obtain
-its token via a real user login; run-2 refresh cells appear in the full matrix
-(§7) clearly labeled `fallback-op` and are excluded from all head-to-head
-claims. This is exactly the kind of error the fallback tagging was built to
-catch; it caught us too, and we're reporting it.
-
-**Keycloak got significantly faster between the two runs** (e.g.
-introspection 337 → 1765 req/s) with the same image tag and caps. Likely
-contributors: the seeding fixes (a correctly-configured realm), the uniform
-PostgreSQL tuning, and the removal of draft 1's error-storm cells from the
-session; image digests were not recorded in draft 1, so drift under the
-mutable `26.7.0` tag can't be excluded. We treat run 2 as the honest baseline
-and have **retired all draft-1 comparison multiples** — the current numbers
-below supersede them, and several head-to-heads are now closer than draft 1
-suggested.
-
-**AXIAM improvements measured this run** (1.0.0-alpha vs 1.0.0-alpha15):
-- Password login: 35 → **67.5 req/s**, p95 2127 → **907 ms** — concurrent
-  Argon2id verification is now bounded (a fix that is simultaneously a
-  memory-DoS hardening: peak server memory during the login storm dropped
-  from ~970 MiB — at the edge of its 1 GiB cap — to ~478 MiB).
-- Authorization single checks: REST 290 → **745 req/s**, gRPC p99 tail
-  850 → **90 ms**.
-- gRPC now serves TLS 1.3 at p2 with no measurable penalty vs plaintext.
-
-## 3. Headline results (capped matrix, valid comparable cells)
-
-Full data in §7. Higher throughput / lower latency / lower `cpu·ms per
-request` is better. CPU/memory figures are whole-stack (AXIAM's include
-SurrealDB **and** RabbitMQ).
+Full matrix in §7. CPU/memory figures are whole-stack (AXIAM's include
+SurrealDB **and** RabbitMQ); `server-only` efficiency is also published in
+the raw report.
 
 ### Machine-to-machine token issuance (`oauth2_client_credentials`)
 
-| profile | target | throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | CPU (cores, stack) | req/s per core | cpu·ms/req |
-|---|---|---|---|---|---|---|---|---|
-| p0-plaintext | **AXIAM** | **1788** | 25.9 | **32.3** | 36.2 | 2.90 | **617** | **1.62** |
-| p0-plaintext | Zitadel | 419 | 109.4 | 138.7 | 211.7 | 3.58 | 117 | 8.53 |
-| p0-plaintext | Keycloak | 346 | 103.9 | 210.4 | 301.5 | 2.07 | 167 | 6.00 |
-| p2-tls13 | **AXIAM** | **908** | 53.8 | **62.8** | 65.2 | 1.65 | **551** | **1.81** |
-| p2-tls13 | Zitadel | 405 | 112.2 | 143.5 | 234.5 | 3.59 | 113 | 8.85 |
-| p2-tls13 | Keycloak | 340 | 104.6 | 210.6 | 301.0 | 2.07 | 165 | 6.08 |
+| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | req/s per stack core | server-only req/s per core |
+|---|---|---|---|---|---|---|
+| p0 | **AXIAM** | **1823** | 25.4 | **31.9** | **637** | **1880** |
+| p0 | Zitadel | 423 | 110.0 | 134.2 | 115 | 235 |
+| p0 | Keycloak | 351 | 103.6 | 208.1 | 170 | 176 |
+| p2 | **AXIAM** | **903** | 54.2 | **62.8** | 567 | 1624 |
+| p2 | Zitadel | 415 | 113.1 | 137.5 | 111 | 226 |
+| p2 | Keycloak | 346 | 104.0 | 209.1 | 167 | 173 |
 
-AXIAM issues **4.3× more tokens/s than Zitadel and 5.2× more than Keycloak**
-at plaintext, with a p99 of 36 ms, and stays 2.2–2.7× ahead under TLS 1.3
-(see the TLS caveat in §6 — the TLS gap is a known connection-behavior issue
-under investigation, not crypto cost).
+AXIAM issues **5.2× more tokens/s than Keycloak and 4.3× more than
+Zitadel** at plaintext and stays 2.2–2.6× ahead under TLS 1.3 (the TLS gap
+is a connection-behavior issue under investigation, §5 — not crypto cost).
 
 ### Token introspection (RFC 7662)
 
-| profile | target | throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | CPU (cores) | req/s per core | cpu·ms/req |
-|---|---|---|---|---|---|---|---|---|
-| p0-plaintext | **AXIAM** | **2229** | 20.4 | **27.1** | 30.0 | 2.38 | **936** | **1.07** |
-| p0-plaintext | Keycloak | 1765 | 7.8 | 82.8 | 86.8 | 2.34 | 753 | 1.33 |
-| p0-plaintext | Zitadel | 923 | 47.3 | 67.1 | 73.8 | 3.70 | 250 | 4.01 |
-| p2-tls13 | **AXIAM** | **2219** | 20.5 | **27.3** | 30.2 | 2.64 | **841** | **1.19** |
-| p2-tls13 | Keycloak | 1794 | 7.7 | 82.2 | 86.2 | 2.35 | 764 | 1.31 |
-| p2-tls13 | Zitadel | 891 | 50.3 | 68.3 | 77.4 | 3.75 | 238 | 4.21 |
+| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | req/s per stack core | cpu·ms/req |
+|---|---|---|---|---|---|---|
+| p0 | **AXIAM** | **2230** | 20.4 | **27.1** | **907** | **1.10** |
+| p0 | Keycloak | 1908 | 7.2 | 81.7 | 807 | 1.24 |
+| p0 | Zitadel | 910 | 47.8 | 68.7 | 248 | 4.04 |
+| p2 | **AXIAM** | **2225** | 20.4 | **27.2** | 839 | 1.19 |
+| p2 | Keycloak | 1758 | 7.9 | 82.5 | 748 | 1.34 |
+| p2 | Zitadel | 899 | 50.1 | 67.7 | 238 | 4.19 |
 
-This is now the closest head-to-head: AXIAM leads Keycloak by 1.26× on
-throughput (2.4× vs Zitadel) with a 3× better p95 (27 vs 83 ms) and the best
-CPU efficiency — and, notably, **zero TLS penalty** (−0.4%). Keycloak's p50
-is actually the lowest of the three; its tail (p95/p99 ≈ 82–87 ms under a
-fully pegged JVM) is what separates them.
+The closest head-to-head: AXIAM leads Keycloak 1.17× on throughput with a
+3× better p95 and **zero TLS penalty** (−0.2%). Keycloak's p50 is the
+lowest of the field; its JVM tail is what separates them.
 
 ### JWKS fetch (RFC 7517)
 
-| profile | target | throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | CPU (cores) | req/s per core | cpu·ms/req |
-|---|---|---|---|---|---|---|---|---|
-| p0-plaintext | **AXIAM** | **27059** | 1.3 | **3.0** | 4.3 | 1.65 | **16388** | **0.061** |
-| p0-plaintext | Keycloak | 3855 | 3.0 | 74.4 | 79.1 | 2.01 | 1922 | 0.52 |
-| p0-plaintext | Zitadel | 2034 | 11.5 | 65.0 | 67.6 | 2.99 | 681 | 1.47 |
-| p2-tls13 | **AXIAM** | **24118** | 1.6 | **3.0** | 4.1 | 1.98 | **12171** | **0.082** |
-| p2-tls13 | Keycloak | 3098 | 3.8 | 77.2 | 82.9 | 2.01 | 1544 | 0.65 |
-| p2-tls13 | Zitadel | 2023 | 12.7 | 61.3 | 64.3 | 3.11 | 651 | 1.54 |
-
-A 7–13× gap. As in draft 1, AXIAM's server sat well under its CPU cap
-(~1.3/2 cores) while the load generator itself neared its limit — AXIAM's
-true JWKS ceiling is **above** what a 50-VU closed loop can measure.
-
-### OIDC userinfo — new this round (valid three-way for the first time)
-
-| profile | target | throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | CPU (cores) | req/s per core | cpu·ms/req |
-|---|---|---|---|---|---|---|---|---|
-| p0-plaintext | **AXIAM** | **5457** | 4.6 | **46.4** | 53.9 | 3.76 | 1453 | 0.69 |
-| p0-plaintext | Keycloak | 3561 | 3.1 | 77.6 | 81.2 | 2.00 | 1778 | **0.56** |
-| p0-plaintext | Zitadel | 967 | 23.6 | 81.8 | 86.0 | 2.84 | 340 | 2.94 |
-| p2-tls13 | **AXIAM** | **4924** | 5.1 | **48.8** | 53.6 | 3.64 | 1351 | 0.74 |
-| p2-tls13 | Keycloak | 3529 | 3.2 | 77.7 | 81.3 | 2.00 | 1761 | **0.57** |
-| p2-tls13 | Zitadel | 942 | 29.6 | 81.7 | 91.5 | 2.91 | 323 | 3.09 |
-
-AXIAM leads throughput (1.5× Keycloak, 5.6× Zitadel) and p95 — while
-DB-limited: SurrealDB was pegged at its 2-core cap in this cell (uncapped it
-reaches 7261 req/s at p95 11 ms, §5). Honesty note: on *whole-stack* CPU per
-request, Keycloak is the most efficient here (0.56 vs 0.69 cpu·ms/req) —
-AXIAM's stack figure includes its saturated DB and its audit broker.
-(Zitadel's cells use a machine-user token — its user-login flow returns a
-session token the harness can't yet convert; the measured endpoint and
-semantics are the same.)
-
-### Password login — new this round (all three targets hash for real)
-
-Password hashing at each vendor's shipped defaults: AXIAM **Argon2id**
-(OWASP parameters), Keycloak 26 **Argon2id** (default), Zitadel **bcrypt**
-(default cost). This is the only scenario where the vendors intentionally do
-different amounts of work per request — hash configuration dominates it, so
-compare with that in mind:
-
-| profile | target | throughput (req/s) | p50 (ms) | p95 (ms) | valid (p95 < 2 s) |
+| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | req/s per stack core |
 |---|---|---|---|---|---|
-| p0-plaintext | **AXIAM** | **67.5** | 694 | **907** | ✓ |
-| p0-plaintext | Keycloak | 22.3 | 2139 | 2380 | ✗ gate breach |
-| p0-plaintext | Zitadel | 2.0 | 21992 | 25605 | ✗ gate breach |
-| p2-tls13 | **AXIAM** | **67.8** | 695 | **946** | ✓ |
-| p2-tls13 | Keycloak | 22.8 | 2114 | 2273 | ✗ gate breach |
-| p2-tls13 | Zitadel | 2.0 | 22465 | 25397 | ✗ gate breach |
+| p0 | **AXIAM** | **27 784** | 1.3 | **2.9** | **16 850** |
+| p0 | Keycloak | 3764 | 3.1 | 75.2 | 1881 |
+| p0 | Zitadel | 2071 | 11.2 | 65.1 | 698 |
+| p2 | **AXIAM** | **24 309** | 1.6 | **2.9** | 12 349 |
+| p2 | Keycloak | 3042 | 3.8 | 77.6 | 1514 |
+| p2 | Zitadel | 2023 | 12.8 | 61.1 | 650 |
 
-At 50 concurrent users on 2 CPUs, **AXIAM is the only target that stays under
-the 2-second p95 gate**, at 3× Keycloak's login rate with the same hash
-algorithm class. Zitadel's number is not a defect — its default bcrypt cost
-is simply very expensive (~1 CPU-second per verification), which at this
-concurrency yields ~22 s median waits; operators can tune it down. The
-architectural point this cell demonstrates: AXIAM **bounds concurrent hash
-verifications** (new in alpha15), converting overload into bounded latency
-instead of memory exhaustion — draft 1 showed what happens without that bound
-(AXIAM itself breached the gate and approached its memory cap).
+A 7–13× gap, still limited by the load generator, not by AXIAM (server at
+~1.3/2 cores while k6 neared its own budget).
 
-## 4. AXIAM-only capability: authorization decisions (REST + gRPC)
+### OIDC userinfo
 
-No head-to-head (Keycloak and Zitadel expose no equivalent decision
-endpoint). Each check performs a full RBAC evaluation (tenant-scoped roles,
-resource hierarchy, scopes) against live data:
-
-| scenario | profile | throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | valid |
+| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | req/s per stack core | server-only cpu·ms/req |
 |---|---|---|---|---|---|---|
-| authz_check_rest | p0 | 745 | 67.0 | 84.6 | 94.5 | ✓ |
-| authz_check_rest | p2 | 747 | 67.4 | 84.2 | 93.7 | ✓ |
-| authz_check_grpc | p0 | 722 | 61.0 | 73.0 | 90.0 | ✓ |
-| authz_check_grpc | p2 | 746 | 60.0 | 73.0 | 88.0 | ✓ |
-| authz_batch_rest (5 checks/req) | p0 | 46 | 1060 | 1276 | 1359 | ✓ |
-| authz_batch_rest (5 checks/req) | p2 | 46 | 1042 | 1280 | 1368 | ✓ |
-| authz_batch_grpc (5 checks/req) | p0 | 23 | 2153 | 2309 | 2370 | ✗ p95 > 2 s |
-| authz_batch_grpc (5 checks/req) | p2 | 23 | 2139 | 2305 | 2396 | ✗ p95 > 2 s |
+| p0 | **AXIAM** | **5008** | 4.8 | **50.2** | 1452 | **0.25** |
+| p0 | Keycloak | 3742 | 3.0 | 77.0 | **1873** | 0.53 |
+| p0 | Zitadel* | 943 | 25.7 | 82.6 | 333 | 0.87 |
+| p2 | **AXIAM** | **4822** | 5.2 | **49.2** | 1345 | 0.28 |
+| p2 | Keycloak | 3489 | 3.2 | 77.9 | **1740** | 0.57 |
+| p2 | Zitadel* | 950 | 27.4 | 80.8 | 324 | 0.96 |
 
-Single checks improved 1.5–2.5× since draft 1 (REST 290→745/s; the gRPC p99
-tail collapsed from 850 to 90 ms) and now run at DB saturation. The **batch
-endpoints remain the known weak spot** — unchanged since draft 1 despite a
-round-trip-coalescing fix, and unchanged even with the DB uncapped, which
-narrows the cause to a serialized database query pattern rather than
-resources; the investigation continues with a specific suspect. Batch is
-currently *slower* than repeated single checks; don't use it in
-latency-sensitive paths until this is fixed.
+*\* Zitadel's cells use a machine-user token (its user-login flow returns a
+session token the harness can't yet convert); measured endpoint and
+semantics are the same.*
 
-## 5. DB-uncapped sensitivity pass (AXIAM & Zitadel)
+AXIAM leads throughput (1.34× Keycloak, 5.3× Zitadel) while its DB is
+saturated (uncapped it reaches **7457 req/s**, §4). On whole-stack req/s
+per core Keycloak wins this cell (AXIAM's figure carries a pegged SurrealDB
+plus RabbitMQ); on the **server-only** measure AXIAM's server is 2.1×
+cheaper per request — both facts published.
 
-Same envelope, database raised to 4 CPUs / 2048 MiB (servers still 2/1024).
-What happens when the DB isn't the wall (p0 numbers):
+### Password login (all targets hash for real)
 
-| scenario | target | capped → uncapped (req/s) | Δ | limit after uncapping |
+AXIAM **Argon2id** (OWASP params), Keycloak 26 **Argon2id** (default),
+Zitadel **bcrypt** (default cost — much more expensive per verification;
+tunable). Hash configuration dominates this scenario; compare accordingly.
+
+| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | valid (p95 < 2 s) |
+|---|---|---|---|---|---|
+| p0 | **AXIAM** | **69** | 695 | **774** | ✓ (3/3 runs) |
+| p0 | Keycloak | 52 | 919 | 1070 | ✓ (2/3 runs) |
+| p0 | Zitadel | 2 | 22 605 | 25 388 | ✗ gate breach |
+| p2 | **AXIAM** | **69** | 692 | **816** | ✓ (3/3 runs) |
+| p2 | Keycloak | 23 | 2115 | 2249 | ✗ gate breach |
+| p2 | Zitadel | 2 | 21 823 | 25 529 | ✗ gate breach |
+
+Keycloak's plaintext login cell is valid for the first time (52 req/s —
+notably better than its own draft-2 number; its TLS login cell still
+breaches the gate, an asymmetry we can't yet explain and therefore flag).
+AXIAM remains the fastest and the only target valid at both profiles,
+with **bounded memory** during the burst (the alpha15 concurrency bound).
+
+### AXIAM-only: authorization decisions
+
+No head-to-head exists (competitors expose no equivalent decision
+endpoint). Full RBAC evaluation (tenant-scoped roles, resource hierarchy,
+scopes) against live data, median-of-3:
+
+| scenario | profile | thr (req/s) | p50 (ms) | p95 (ms) | p99 (ms) |
+|---|---|---|---|---|---|
+| authz_check_rest | p0 | 737 | 68.4 | 85.2 | 94.1 |
+| authz_check_rest | p2 | 747 | 67.1 | 84.5 | 94.1 |
+| authz_check_grpc | p0 | 603 | 62.0 | 75.0 | 217.0 |
+| authz_check_grpc | p2 | 622 | 61.0 | 74.0 | 112.0 |
+
+Single checks are DB-saturated at ~740/s on a 2-core DB and scale to
+1013/s with 4 DB cores (§4). **Batch numbers are intentionally absent**:
+see the §2 correction — the only clean batch cell so far measured
+852 batches/s (≈4 260 checks/s), and full re-measured batch tables will
+ship in the next draft rather than repeating an artifact. With the
+**decision cache** enabled (§4) single checks reach **2322 req/s REST /
+1822 gRPC** on the same capped hardware.
+
+## 4. Sensitivity passes (labeled, never mixed into head-to-heads)
+
+**DB-uncapped (4 CPUs / 2 GiB for every DB; servers stay at 2):**
+
+| cell | capped → uncapped | what limits it now |
+|---|---|---|
+| AXIAM authz_check_rest | 737 → **1013** (+37%) | round-trip latency; nothing saturated |
+| AXIAM userinfo | 5008 → **7457** (+49%) | **AXIAM server itself, for the first time** |
+| AXIAM tokens/jwks | ±1% | not DB-bound at all |
+| Keycloak (every cell) | ±2% | Keycloak server (pegged in every cell) |
+| Zitadel jwks / userinfo | +70% / +85% | Postgres, even at 4 cores |
+| Zitadel introspection | +13% | Zitadel server |
+
+**Decision cache ON** (`AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true`,
+TTL 5 s): authz checks **3.0–3.15×** (REST 2322/s, gRPC 1822/s), DB no
+longer saturated, all non-authz cells unchanged. Caveat: the benchmark's
+cache hit rate is favorable (small key space); revocations are bounded by
+the 5 s TTL plus event-driven invalidation (integration-tested).
+
+**DB connection pool** (`AXIAM__DB__POOL_SIZE=4`): token issuance +7%
+(1823→1955); everything else within noise at this concurrency. A further
+in-flight cap (64) changes nothing. Default stays 1.
+
+**Native mTLS (p3)** — AXIAM terminates **client-certificate TLS 1.3
+in-process** (no proxy in front; the verified peer certificate is the
+identity source). Result: **parity with plain TLS 1.3 across the entire
+matrix** (CC 903.6 vs 903, introspection 2201 vs 2225, userinfo 4826 vs
+4822, jwks 24 146 vs 24 309…). For IoT/mTLS fleets: client-cert
+verification is free on top of TLS.
+
+**Production rate-limit posture:** with AXIAM's shipped per-IP limits
+active (token 20/min/IP, introspect 10/min/IP, …) a 50-VU single-IP
+generator is throttled to near-zero on every limited endpoint — the
+defaults do exactly what they're for (blunt single-source abuse), and this
+pass is the measured evidence that AXIAM ships enforcing limits by default
+while the competitors ship none. It is **not** a performance measurement,
+and it shows the shipped defaults are sized for internet-facing human
+traffic, not machine fleets — see §6 for what to set instead.
+
+## 5. Weaknesses and caveats (the honest section)
+
+**TLS 1.3 still halves token issuance** (−50.5% on client_credentials;
+introspection −0.2%, userinfo −3.7%, jwks −12.5%, login ~0%). Everything
+still points at HTTP/2 single-connection multiplexing in the load path
+rather than crypto (handshake time per request ≈ 0; server and DB CPU halve
+in lockstep with throughput). The HTTP/1.1-over-TLS isolation cell we
+queued for this run was unfortunately invalidated by the §2 measurement
+artifact (it ran inside the post-seed window) — it is re-queued under the
+corrected protocol. Even with the penalty, AXIAM's TLS token numbers lead
+the field 2.2–2.6×.
+
+**A post-seed database transient exists** (§2): for ~5–7 minutes after bulk
+seeding, throughput on the AXIAM stack is clamped at ~45 req/s. We found it
+because it corrupted our own cells; we're investigating whether it can
+affect production cold-starts or bulk imports, and the harness now gets a
+settle gate + randomized cell order. Numbers in this draft come from cells
+outside that window except where explicitly withdrawn (batch, TLS-h1).
+
+**AXIAM's refresh-token cells are still excluded** (harness cookie bug —
+the fallback tagging keeps catching it, including on us). Keycloak's
+refresh is now measured for real (379/s). Zitadel refresh/login cells
+remain gate-invalid at its default bcrypt cost.
+
+**Other caveats, stated plainly:** consumer-laptop hardware (server-class
+re-run still pending budget); AXIAM stack figures include RabbitMQ
+(~0.1–0.3 cores) and, for cells after the login burst, ~360 MiB of retained
+allocator memory (reproduced on alpha19; an allocator A/B experiment is
+scripted and scheduled — it inflates AXIAM's memory column, not its
+latency); k6 skips cert verification at p2/p3 (throwaway CA; handshake and
+record crypto are real); closed-loop 50 VUs floors the fastest endpoints
+(JWKS) and measures latency, not capacity, when nothing saturates; SDK
+client-side overhead benchmarks exist in the harness but have not yet
+produced validated runs — client-side numbers will come in a future draft.
+
+## 6. Recommended settings by deployment (measured, not guessed)
+
+The production-posture pass (§4) showed the shipped defaults are tuned for
+one thing: stopping single-source abuse on a small internet-facing
+deployment. Every knob below is a runtime environment variable; the
+recommendations derive directly from this run's measurements on
+2-core/1-GiB-per-container hardware — scale linearly with your envelope
+where the data says the path scales (authz/userinfo with DB CPU; login
+with server CPU; token issuance with neither until ~1.8k/s per 2 cores).
+
+### Sizing quick reference (what a given envelope measured)
+
+| Envelope (server / DB) | Token issuance | Introspection | Authz checks (cache off / on) | Userinfo | Logins (Argon2id, OWASP) |
+|---|---|---|---|---|---|
+| 2 cores / 2 cores | ~1 800/s | ~2 200/s | ~740 / ~2 300/s | ~5 000/s | ~69/s |
+| 2 cores / 4 cores | ~1 800/s | ~2 200/s | ~1 000 / higher | ~7 500/s (server-bound) | ~69/s |
+
+### Knob-by-knob
+
+| Setting (env var) | Shipped default | Small internet-facing (2c/1GiB) | M2M / microservices / IoT fleet | Large multi-tenant (8c+) |
 |---|---|---|---|---|
-| authz_check_rest | AXIAM | 745 → **1017** | +37% | round-trip latency (nothing saturated) |
-| authz_check_grpc | AXIAM | 722 → **867** | +20% | round-trip latency |
-| userinfo | AXIAM | 5457 → **7261** | +33% | **AXIAM server pegged (first time outside login)** |
-| oauth2_client_credentials | AXIAM | 1788 → 1817 | +1.6% | latency-structured; DB cap was never the wall |
-| token_introspection | AXIAM | 2229 → 2209 | ~0% | latency-structured |
-| jwks_fetch | AXIAM | 27059 → 27397 | +1.2% | load generator |
-| jwks_fetch | Zitadel | 2034 → **3520** | +73% | Postgres **still pegged at 3.9/4 cores** |
-| userinfo | Zitadel | 967 → **1718** | +78% | Postgres pegged at 4.0/4 cores |
-| token_introspection | Zitadel | 923 → 1027 | +11% | Zitadel server pegged |
-| oauth2_client_credentials | Zitadel | 419 → 414 | ~0% | mixed |
+| `AXIAM__RATE_LIMIT__KEY` | `ip` | `ip` | **`client_id`** (or `ip_client_id`) — per-IP buckets collide behind NAT/gateways | `ip_client_id` |
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | 20 | 60–120 | **per-client peak × 60 × 2** (a 2-core server sustains ~108k issuances/min total) | budget per tenant SLA |
+| `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | 10 | 60 | 10–20× your token limit (resource servers introspect per request) | same rule |
+| `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 300 | 600 | **6 000–60 000** per client (checks are cheap reads; 300/min starves any real service) | size to cache-on ceiling |
+| `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` | 10 (per IP) | keep 10 | 60+ if users arrive through a shared NAT/proxy (always per-IP by design) | 60+, front with WAF |
+| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | `false` | `true` | **`true`** — measured 3× on checks, DB load −40–75% | `true` |
+| `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | 5 | 5 | 5 (raise only if a ≤TTL revocation delay is acceptable) | 5 |
+| `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | 10 000/tenant | default | default | raise with RAM (entries are small) |
+| `AXIAM__AUTHZ__BATCH_STRATEGY` | `concurrent` | default | default for now — re-measurement in progress; `coalesced` showed 852 batches/s on a settled stack | follow next draft |
+| `AXIAM__DB__POOL_SIZE` | 1 | 1 | **4** if token-issuance-heavy (+7% measured); otherwise 1 | 4 |
+| `AXIAM__DB__POOL_MAX_IN_FLIGHT` | 0 (off) | 0 | 0 (never bound in tests at 50 VUs) | set only with evidence |
+| `AXIAM__AUTH__MAX_CONCURRENT_HASHES` | 0 = auto (min(cpus, 4)) | auto | auto | ≈ physical cores reserved for auth; keeps login RAM bounded (~19 MiB per concurrent hash) |
+| DB CPU allocation | — | DB ≥ server cores | DB ≥ server cores if authz/userinfo-heavy (they scale with DB CPU; tokens don't) | 2× server cores for read-heavy |
 
-Takeaways: AXIAM's authorization and userinfo paths scale directly with DB
-CPU (its server still has headroom at 2 cores except on userinfo); its token
-endpoints are *not* DB-capped at all in this envelope. Zitadel is profoundly
-Postgres-bound — even with double the DB CPU of anyone's server, Postgres
-saturates first on its read paths. In the uncapped configuration the
-cross-target gaps at p0 are: JWKS 7.8×, userinfo 4.2×, client-credentials
-4.4×, introspection 2.2× — all in AXIAM's favor.
+Two rules of thumb the data supports: (1) if your traffic is
+authorization-check-heavy, spend hardware on the **database** and turn the
+**decision cache on** before anything else; (2) if it's token-heavy, the
+limits — not the hardware — are what you'll hit first: switch rate-limit
+keying to `client_id` and size `TOKEN_PER_MIN` from your real per-client
+peak, keeping the defaults only on genuinely internet-exposed endpoints
+(login, register, password-reset, MFA).
 
-## 6. Weaknesses and caveats (the honest section)
+## 7. Full result matrix (capped run, median-of-3, graph-ready)
 
-**TLS 1.3 still halves AXIAM's token-issuance throughput** (−49% on
-client-credentials; introspection −0.4%, JWKS −10.9%). This did *not* get
-fixed by the session-resumption work shipped in alpha15 — and this run's new
-telemetry proves resumption *is* working (TLS handshake time per request ≈ 0
-in the degraded cells), which eliminates handshakes as the cause. What
-remains: under TLS the load generator negotiates HTTP/2 and funnels all 50
-users through one multiplexed connection, while plaintext uses HTTP/1.1 with
-a per-connection pool — everything (latency, server CPU, DB CPU) halves in
-lockstep, the signature of a connection-level ceiling, not crypto. The
-isolation experiment (TLS 1.3 with HTTP/1.1 only) is queued for the next run.
-Even with the penalty, AXIAM's TLS token numbers lead the field 2.2–2.7×.
+One row per (scenario, profile, target); `±` is the throughput spread
+across the three runs. Rows failing a validity gate or measuring a
+fallback are labeled and **must not be charted as head-to-head**.
 
-**The authz batch endpoints are still slow** (§4) — now proven not to be a
-resource problem (identical with DB uncapped). Under investigation.
+| scenario | profile | target | thr (req/s) | ± | p50 | p95 | p99 | cpu (cores) | mem (MiB) | valid |
+|---|---|---|---|---|---|---|---|---|---|---|
+| oauth2_client_credentials | p0 | axiam | 1823 | 0.1% | 25.4 | 31.9 | 35.8 | 2.86 | 516 | ✓ |
+| oauth2_client_credentials | p0 | keycloak | 351 | 1.4% | 103.6 | 208.1 | 301.4 | 2.07 | 764 | ✓ |
+| oauth2_client_credentials | p0 | zitadel | 423 | 0.3% | 110.0 | 134.2 | 171.3 | 3.68 | 362 | ✓ |
+| oauth2_client_credentials | p2 | axiam | 903 | 0.1% | 54.2 | 62.8 | 65.0 | 1.59 | 523 | ✓ |
+| oauth2_client_credentials | p2 | keycloak | 346 | 0.9% | 104.0 | 209.1 | 300.4 | 2.07 | 804 | ✓ |
+| oauth2_client_credentials | p2 | zitadel | 415 | 0.6% | 113.1 | 137.5 | 168.7 | 3.73 | 356 | ✓ |
+| token_introspection | p0 | axiam | 2230 | 0.3% | 20.4 | 27.1 | 29.8 | 2.46 | 922 | ✓ |
+| token_introspection | p0 | keycloak | 1908 | 2.0% | 7.2 | 81.7 | 85.5 | 2.36 | 973 | ✓ |
+| token_introspection | p0 | zitadel | 910 | 1.2% | 47.8 | 68.7 | 76.2 | 3.67 | 441 | ✓ |
+| token_introspection | p2 | axiam | 2225 | 0.5% | 20.4 | 27.2 | 30.2 | 2.65 | 927 | ✓ |
+| token_introspection | p2 | keycloak | 1758 | 2.4% | 7.9 | 82.5 | 86.8 | 2.35 | 873 | ✓ |
+| token_introspection | p2 | zitadel | 899 | 0.9% | 50.1 | 67.7 | 76.8 | 3.77 | 424 | ✓ |
+| token_refresh | p0 | keycloak | 379 | 2.0% | 101.5 | 204.6 | 299.5 | 2.05 | 983 | ✓ real rotation |
+| token_refresh | p2 | keycloak | 367 | 1.1% | 102.3 | 205.2 | 298.5 | 2.05 | 881 | ✓ real rotation |
+| token_refresh | p0/p2 | axiam | — | — | — | — | — | — | — | ⚠ fallback-op (harness bug, excluded) |
+| token_refresh | p0/p2 | zitadel | — | — | — | — | — | — | — | ✗ fallback + gate |
+| jwks_fetch | p0 | axiam | 27784 | 0.3% | 1.3 | 2.9 | 4.2 | 1.65 | 503 | ✓ |
+| jwks_fetch | p0 | keycloak | 3764 | 2.0% | 3.1 | 75.2 | 79.9 | 2.00 | 631 | ✓ |
+| jwks_fetch | p0 | zitadel | 2071 | 0.6% | 11.2 | 65.1 | 67.4 | 2.97 | 261 | ✓ |
+| jwks_fetch | p2 | axiam | 24309 | 0.9% | 1.6 | 2.9 | 4.0 | 1.97 | 502 | ✓ |
+| jwks_fetch | p2 | keycloak | 3042 | 1.5% | 3.8 | 77.6 | 82.9 | 2.01 | 681 | ✓ |
+| jwks_fetch | p2 | zitadel | 2023 | 0.8% | 12.8 | 61.1 | 64.1 | 3.11 | 258 | ✓ |
+| oauth2_password_login | p0 | axiam | 69 | 1.0% | 694.7 | 774.1 | 1055.5 | 2.09 | 897 | ✓ |
+| oauth2_password_login | p0 | keycloak | 52 | 7.8% | 919.3 | 1069.7 | 1161.6 | 2.05 | 911 | ✓ (2/3 runs) |
+| oauth2_password_login | p0 | zitadel | 2 | 1.0% | 22604.7 | 25388.0 | 27052.2 | 2.02 | 418 | ✗ p95>2s |
+| oauth2_password_login | p2 | axiam | 69 | 0.6% | 691.5 | 815.8 | 1116.5 | 2.30 | 918 | ✓ |
+| oauth2_password_login | p2 | keycloak | 23 | 0.4% | 2115.1 | 2248.6 | 2315.0 | 2.03 | 854 | ✗ p95>2s |
+| oauth2_password_login | p2 | zitadel | 2 | 1.5% | 21822.6 | 25529.0 | 27744.6 | 2.02 | 411 | ✗ p95>2s |
+| userinfo | p0 | axiam | 5008 | 0.6% | 4.8 | 50.2 | 54.4 | 3.45 | 765 | ✓ |
+| userinfo | p0 | keycloak | 3742 | 1.9% | 3.0 | 77.0 | 80.6 | 2.00 | 961 | ✓ |
+| userinfo | p0 | zitadel | 943 | 1.4% | 25.7 | 82.6 | 88.7 | 2.83 | 451 | ✓ (machine-user token) |
+| userinfo | p2 | axiam | 4822 | 0.2% | 5.2 | 49.2 | 54.0 | 3.59 | 638 | ✓ |
+| userinfo | p2 | keycloak | 3489 | 1.1% | 3.2 | 77.9 | 81.4 | 2.01 | 858 | ✓ |
+| userinfo | p2 | zitadel | 950 | 1.8% | 27.4 | 80.8 | 89.0 | 2.93 | 443 | ✓ (machine-user token) |
+| userinfo_grpc (AXIAM-only) | p0 | axiam | 3294 | 0.2% | 14.0 | 22.0 | 25.0 | 1.61 | 757 | ✓ |
+| userinfo_grpc (AXIAM-only) | p2 | axiam | 3254 | 0.3% | 14.0 | 22.0 | 25.0 | 1.51 | 606 | ✓ |
+| zitadel_userinfo_grpc | p0 | zitadel | 183 | 1.2% | 233.0 | 503.0 | 887.0 | 1.16 | 445 | ✓ (machine-user token) |
+| zitadel_userinfo_grpc | p2 | zitadel | 187 | 1.7% | 232.0 | 328.0 | 843.0 | 1.19 | 440 | ✓ (machine-user token) |
+| authz_check_rest (AXIAM-only) | p0 | axiam | 737 | 0.9% | 68.4 | 85.2 | 94.1 | 2.92 | 481 | ✓ |
+| authz_check_rest (AXIAM-only) | p2 | axiam | 747 | 0.0% | 67.1 | 84.5 | 94.1 | 2.86 | 474 | ✓ |
+| authz_check_grpc (AXIAM-only) | p0 | axiam | 603 | 2.8% | 62.0 | 75.0 | 217.0 | 2.55 | 468 | ✓ |
+| authz_check_grpc (AXIAM-only) | p2 | axiam | 622 | 1.1% | 61.0 | 74.0 | 112.0 | 2.47 | 465 | ✓ |
+| authz_batch_* (AXIAM-only) | p0/p2 | axiam | — | — | — | — | — | — | — | ⚠ withdrawn — order artifact (§2); re-measurement in progress |
 
-**The refresh-token comparison is withdrawn** pending a harness fix (§2) —
-the run-2 cells measure token issuance via a fallback on all three targets
-and are labeled as such in the matrix.
-
-**Zitadel's gRPC scenario produced no valid cell** (100% gRPC-level errors:
-the benchmark's service-account token lacks the audience Zitadel's gRPC API
-requires). The protocol-efficiency comparison (Zitadel REST vs gRPC) waits
-for the next run. No AXIAM/Keycloak claim is affected.
-
-**Other comparability caveats, stated plainly:**
-
-- Single run per cell (median-of-3 next time); deltas ≲ 10% are noise.
-- Same laptop as draft 1, now with telemetry: governor `performance`, package
-  temperature hit 95–100 °C on hot cells, sustained clocks ~3.7–3.9 GHz on
-  CPU-pegged cells (~3.2 GHz on generator-heavy ones). Cross-target fairness
-  is unaffected (identical envelope); absolute numbers are conservative.
-- Keycloak improved 2–5× vs draft 1 on the same version tag (§2) — we treat
-  the new, better numbers as the baseline and have discarded draft-1
-  multiples.
-- AXIAM's stack figures still include RabbitMQ (~0.1–0.4 cores) which
-  competitors don't run; its memory figures for cells that ran *after* the
-  login scenario include ~360 MiB of retained allocator memory from the
-  login burst (a known, benign retention behavior under investigation —
-  visible as the step from ~470 to ~880 MiB stack memory in the matrix).
-- k6 skipped certificate verification at p2 (throwaway private CA; handshake
-  and record crypto are real). Zitadel's userinfo cells use a machine-user
-  token (§3). The closed-loop 50-VU model floors fast endpoints (JWKS) and
-  turns into pure latency-measurement when nothing saturates.
-
-## 7. Full result matrix (capped run, graph-ready)
-
-One row per (scenario, profile, target). `thr` = successful requests/s over
-the 120 s window; latencies ms; `cpu`/`mem` = stack-wide averages;
-`thr/core` = throughput per core consumed; `cpu·ms/req` = CPU-milliseconds
-per request. Rows failing a validity gate, or measuring a fallback operation,
-are labeled and **must not be charted as head-to-head performance**.
-
-| scenario | profile | target | thr (req/s) | p50 | p95 | p99 | err % | cpu (cores) | mem (MiB) | thr/core | cpu·ms/req | valid |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| oauth2_client_credentials | p0 | axiam | 1788 | 25.9 | 32.3 | 36.2 | 0.00 | 2.90 | 470 | 617 | 1.62 | ✓ |
-| oauth2_client_credentials | p0 | keycloak | 346 | 103.9 | 210.4 | 301.5 | 0.00 | 2.07 | 834 | 167 | 6.00 | ✓ |
-| oauth2_client_credentials | p0 | zitadel | 419 | 109.4 | 138.7 | 211.7 | 0.00 | 3.58 | 352 | 117 | 8.53 | ✓ |
-| oauth2_client_credentials | p2 | axiam | 908 | 53.8 | 62.8 | 65.2 | 0.00 | 1.65 | 487 | 551 | 1.81 | ✓ |
-| oauth2_client_credentials | p2 | keycloak | 340 | 104.6 | 210.6 | 301.0 | 0.00 | 2.07 | 917 | 165 | 6.08 | ✓ |
-| oauth2_client_credentials | p2 | zitadel | 405 | 112.2 | 143.5 | 234.5 | 0.00 | 3.59 | 351 | 113 | 8.85 | ✓ |
-| token_introspection | p0 | axiam | 2229 | 20.4 | 27.1 | 30.0 | 0.00 | 2.38 | 883 | 936 | 1.07 | ✓ |
-| token_introspection | p0 | keycloak | 1765 | 7.8 | 82.8 | 86.8 | 0.00 | 2.34 | 945 | 753 | 1.33 | ✓ |
-| token_introspection | p0 | zitadel | 923 | 47.3 | 67.1 | 73.8 | 0.00 | 3.70 | 425 | 250 | 4.01 | ✓ |
-| token_introspection | p2 | axiam | 2219 | 20.5 | 27.3 | 30.2 | 0.00 | 2.64 | 905 | 841 | 1.19 | ✓ |
-| token_introspection | p2 | keycloak | 1794 | 7.7 | 82.2 | 86.2 | 0.00 | 2.35 | 949 | 764 | 1.31 | ✓ |
-| token_introspection | p2 | zitadel | 891 | 50.3 | 68.3 | 77.4 | 0.00 | 3.75 | 427 | 238 | 4.21 | ✓ |
-| token_refresh | p0 | axiam | 910 | 25.4 | 32.2 | 36.2 | 0.00 | 3.06 | 915 | 298 | 3.36 | ⚠ fallback-op |
-| token_refresh | p0 | keycloak | 204 | 100.3 | 200.8 | 291.3 | 0.00 | 2.07 | 947 | 98 | 10.19 | ⚠ fallback-op |
-| token_refresh | p0 | zitadel | 215 | 107.6 | 137.0 | 174.8 | 0.00 | 3.50 | 504 | 62 | 16.26 | ⚠ fallback-op |
-| token_refresh | p2 | axiam | 453 | 53.6 | 63.6 | 66.8 | 0.00 | 1.80 | 877 | 252 | 3.97 | ⚠ fallback-op |
-| token_refresh | p2 | keycloak | 202 | 100.6 | 200.7 | 291.4 | 0.00 | 2.07 | 950 | 98 | 10.23 | ⚠ fallback-op |
-| token_refresh | p2 | zitadel | 208 | 110.3 | 146.4 | 194.4 | 0.00 | 3.52 | 498 | 59 | 16.90 | ⚠ fallback-op |
-| jwks_fetch | p0 | axiam | 27059 | 1.3 | 3.0 | 4.3 | 0.00 | 1.65 | 456 | 16388 | 0.061 | ✓ |
-| jwks_fetch | p0 | keycloak | 3855 | 3.0 | 74.4 | 79.1 | 0.00 | 2.01 | 714 | 1922 | 0.52 | ✓ |
-| jwks_fetch | p0 | zitadel | 2034 | 11.5 | 65.0 | 67.6 | 0.00 | 2.99 | 348 | 681 | 1.47 | ✓ |
-| jwks_fetch | p2 | axiam | 24118 | 1.6 | 3.0 | 4.1 | 0.00 | 1.98 | 474 | 12171 | 0.082 | ✓ |
-| jwks_fetch | p2 | keycloak | 3098 | 3.8 | 77.2 | 82.9 | 0.00 | 2.01 | 783 | 1544 | 0.65 | ✓ |
-| jwks_fetch | p2 | zitadel | 2023 | 12.7 | 61.3 | 64.3 | 0.00 | 3.11 | 257 | 651 | 1.54 | ✓ |
-| oauth2_password_login | p0 | axiam | 68 | 694.2 | 907.5 | 1194.8 | 0.00 | 2.16 | 865 | 31 | 31.98 | ✓ |
-| oauth2_password_login | p0 | keycloak | 22 | 2139.0 | 2380.2 | 2487.4 | 0.00 | 2.02 | 896 | 11 | 90.77 | ✗ p95>2s |
-| oauth2_password_login | p0 | zitadel | 2 | 21991.6 | 25605.2 | 27835.6 | 0.00 | 2.02 | 405 | 1 | 986.80 | ✗ p95>2s |
-| oauth2_password_login | p2 | axiam | 68 | 694.6 | 945.7 | 1100.7 | 0.00 | 2.33 | 905 | 29 | 34.31 | ✓ |
-| oauth2_password_login | p2 | keycloak | 23 | 2113.9 | 2272.8 | 2344.1 | 0.00 | 2.03 | 932 | 11 | 89.02 | ✗ p95>2s |
-| oauth2_password_login | p2 | zitadel | 2 | 22465.2 | 25396.8 | 27434.1 | 0.30 | 2.02 | 401 | 1 | 996.56 | ✗ p95>2s |
-| userinfo | p0 | axiam | 5457 | 4.6 | 46.4 | 53.9 | 0.00 | 3.76 | 800 | 1453 | 0.69 | ✓ |
-| userinfo | p0 | keycloak | 3561 | 3.1 | 77.6 | 81.2 | 0.00 | 2.00 | 944 | 1778 | 0.56 | ✓ |
-| userinfo | p0 | zitadel | 967 | 23.6 | 81.8 | 86.0 | 0.00 | 2.84 | 542 | 340 | 2.94 | ✓ (machine-user token) |
-| userinfo | p2 | axiam | 4924 | 5.1 | 48.8 | 53.6 | 0.00 | 3.64 | 775 | 1351 | 0.74 | ✓ |
-| userinfo | p2 | keycloak | 3529 | 3.2 | 77.7 | 81.3 | 0.00 | 2.00 | 946 | 1761 | 0.57 | ✓ |
-| userinfo | p2 | zitadel | 942 | 29.6 | 81.7 | 91.5 | 0.00 | 2.91 | 540 | 323 | 3.09 | ✓ (machine-user token) |
-| zitadel_userinfo_grpc | p0 | zitadel | — | — | — | — | 100.00 | 3.53 | 551 | — | — | ✗ harness bug (audience) |
-| zitadel_userinfo_grpc | p2 | zitadel | — | — | — | — | 100.00 | 3.50 | 546 | — | — | ✗ harness bug (audience) |
-| authz_check_rest (AXIAM-only) | p0 | axiam | 745 | 67.0 | 84.6 | 94.5 | 0.00 | 2.74 | 425 | 272 | 3.68 | ✓ |
-| authz_check_rest (AXIAM-only) | p2 | axiam | 747 | 67.4 | 84.2 | 93.7 | 0.00 | 2.80 | 438 | 267 | 3.75 | ✓ |
-| authz_check_grpc (AXIAM-only) | p0 | axiam | 722 | 61.0 | 73.0 | 90.0 | 0.00 | 3.01 | 419 | 240 | 4.17 | ✓ |
-| authz_check_grpc (AXIAM-only) | p2 | axiam | 746 | 60.0 | 73.0 | 88.0 | 0.00 | 2.69 | 440 | 277 | 3.61 | ✓ |
-| authz_batch_rest (AXIAM-only) | p0 | axiam | 46 | 1060.3 | 1275.9 | 1359.2 | 0.00 | 1.30 | 425 | 35 | 28.58 | ✓ |
-| authz_batch_rest (AXIAM-only) | p2 | axiam | 46 | 1041.8 | 1280.0 | 1368.0 | 0.00 | 1.30 | 440 | 35 | 28.28 | ✓ |
-| authz_batch_grpc (AXIAM-only) | p0 | axiam | 23 | 2153.0 | 2309.0 | 2370.0 | 0.00 | 1.26 | 380 | 18 | 54.30 | ✗ p95>2s |
-| authz_batch_grpc (AXIAM-only) | p2 | axiam | 23 | 2139.0 | 2305.0 | 2396.0 | 0.00 | 1.21 | 386 | 19 | 51.83 | ✗ p95>2s |
-
-### Security cost of TLS 1.3 (p2 vs p0, valid cells)
+### Security cost of TLS 1.3 (p2 vs p0, valid cells, median-of-3)
 
 | target / scenario | Δ throughput |
 |---|---|
-| axiam / token_introspection | −0.4% |
-| axiam / jwks_fetch | −10.9% |
-| axiam / userinfo | −9.8% |
-| axiam / oauth2_password_login | +0.4% |
-| axiam / oauth2_client_credentials | **−49.2%** (see §6) |
-| keycloak / oauth2_client_credentials | −1.6% |
-| keycloak / token_introspection | +1.6% |
-| keycloak / jwks_fetch | −19.6% |
-| keycloak / userinfo | −0.9% |
-| zitadel / oauth2_client_credentials | −3.3% |
-| zitadel / token_introspection | −3.5% |
-| zitadel / jwks_fetch | −0.6% |
-| zitadel / userinfo | −2.6% |
+| axiam / token_introspection | −0.2% |
+| axiam / userinfo | −3.7% |
+| axiam / userinfo_grpc | −1.2% |
+| axiam / authz_check_rest / _grpc | +1.3% / +3.1% |
+| axiam / oauth2_password_login | −0.5% |
+| axiam / jwks_fetch | −12.5% |
+| axiam / oauth2_client_credentials | **−50.5%** (see §5) |
+| keycloak / oauth2_client_credentials | −1.5% |
+| keycloak / token_introspection | −7.9% |
+| keycloak / jwks_fetch | −19.2% |
+| keycloak / userinfo | −6.8% |
+| keycloak / token_refresh | −3.3% |
+| zitadel / all scenarios | −2.3% … +2.0% |
 
-(|Δ| ≲ 10% is within single-run noise.)
+And the p3 result in one line: **mTLS (client certificates, verified
+in-process) ≈ p2 within noise on every scenario.**
 
 ## 8. Summary and what happens next
 
-**Strengths shown by this run.** On every scenario with a valid head-to-head,
-AXIAM 1.0.0-alpha15 leads throughput and p95 latency: token issuance 4.3–5.2×,
-introspection 1.3–2.4×, JWKS 7–13×, userinfo 1.5–5.6×, and it is the only
-target that passes the latency gate on password login at 50 concurrent users
-(3× Keycloak's rate at the same hash-algorithm class, with bounded memory).
-Efficiency (cpu·ms/req) leads in every valid comparison except Keycloak's
-userinfo cell — and AXIAM's figures still carry its audit broker and a
-saturated DB inside them. The DB-uncapped pass shows AXIAM's server has
-headroom left in almost every cell.
+**Strengths.** Median-of-3 confirms every draft-2 lead on the pinned
+release binary: token issuance 4.3–5.2×, introspection 1.17–2.45×, JWKS
+7–13×, userinfo 1.34–5.3×; the only login that stays under 2 s p95 at both
+profiles; native mTLS at zero measured cost (unique in this field —
+Zitadel's built-in listener has no client-cert mode, Keycloak's typical
+deployments front it with a proxy); a decision cache worth 3× on
+authorization checks; and run-to-run spreads tight enough (±0.1–2.8%) to
+trust the deltas.
 
-**Weaknesses shown by this run.** The TLS 1.3 connection-behavior issue still
-halves token issuance under this load generator (root cause isolated, fix in
-validation); the authz batch endpoints remain slower than single checks
-(proven non-resource-bound, investigation narrowed); the refresh comparison
-had to be withdrawn as a fallback measurement — on all targets, including
-ours in draft 1; and the Zitadel gRPC comparison cell is still invalid.
+**Weaknesses.** The TLS token-issuance halving persists (isolation cell
+re-queued after being invalidated by the measurement artifact); AXIAM's
+refresh cell is still harness-blocked; batch numbers are withdrawn pending
+re-measurement under the corrected protocol — with early evidence they'll
+come back *better* than singles; memory retention after login bursts
+(~360 MiB) awaits the scripted allocator experiment; and everything is
+still laptop-hosted.
 
-**Next round:** median-of-3 on every cell, the refresh-scenario fix, the
-Zitadel gRPC audience fix, the TLS HTTP/1.1 isolation cell, p3-mtls (AXIAM
-now terminates mTLS natively), a production-rate-limit-posture run, and — when
-hardware allows — a server-class re-run to replace the laptop numbers.
+**Next round:** corrected cell ordering + post-seed settle gate; clean
+batch A/B and TLS-h1 cells; the refresh harness fix; the allocator A/B;
+SDK client-overhead tables; and — when hardware allows — the server-class
+re-run.
 
 ---
-*Sources: benchmark runs of 2026-07-21 (capped full matrix + DB-uncapped
-sensitivity pass; per-cell k6 summaries, 1 s `docker stats` samples, 1 s host
-CPU-frequency/temperature telemetry, and run metadata), aggregated by
+*Sources: benchmark runs of 2026-07-25/26 (median-of-3 capped matrix ×
+p0/p2 × 3 targets; labeled sensitivity passes: DB-uncapped ×3 targets,
+decision-cache ON, pool A/B ×2, native-mTLS p3, prod rate-limit posture,
+batch-strategy A/B, TLS-h1 isolation; per-cell k6 summaries, 1 s container
++ host telemetry, digest-recorded metadata), aggregated by
 `runner/report.py`. Metric definitions: [`docs/methodology.md`](docs/methodology.md).*

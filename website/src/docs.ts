@@ -752,10 +752,17 @@ export const DOC_PAGES: DocPage[] = [
         headers: ["Variable", "Default", "Small internet-facing", "M2M / microservices / IoT", "Large multi-tenant"],
         rows: [
           [
+            "AXIAM__RATE_LIMIT__PROFILE",
+            "internet",
+            "internet",
+            "gateway — one variable moves the whole machine-traffic family coherently (key mode + token/introspect/revoke/authz), leaving the human endpoints untouched",
+            "mesh",
+          ],
+          [
             "AXIAM__RATE_LIMIT__KEY",
             "ip",
             "ip",
-            "client_id (or ip_client_id) — per-IP buckets collide behind NAT/gateways",
+            "client_id (or ip_client_id) — per-IP buckets collide behind NAT/gateways — see the security caveat below",
             "ip_client_id",
           ],
           [
@@ -831,8 +838,12 @@ export const DOC_PAGES: DocPage[] = [
         ],
       },
       {
+        type: "warn",
+        text: "Security caveat on `client_id` keying — read before changing the key mode. The `client_id` a request is bucketed by is read from the request body before the client credential is verified (that is what the OAuth2 spec puts there), so an attacker who simply varies the `client_id` string gets a fresh bucket each time and is effectively unlimited on the token, revoke and introspect endpoints. `client_id` keying is a fairness control between well-behaved clients, not an abuse control. `ip` is the only mode whose key an attacker cannot mint at will, which is why it stays the shipped default. Use `client_id`/`ip_client_id` only where something else already authenticates callers at the edge — mTLS, an API gateway, a WAF, or an IP allow-list — which is exactly the topology the M2M column assumes.",
+      },
+      {
         type: "note",
-        text: "Two rules of thumb the data supports: if your traffic is authorization-check-heavy, spend hardware on the database and enable the decision cache before anything else; if it's token-heavy, the limits — not the hardware — are what you'll hit first, so switch the rate-limit key to `client_id` and size TOKEN_PER_MIN from your real per-client peak, keeping the strict per-IP defaults only on the genuinely internet-exposed endpoints (login, register, password-reset, MFA).",
+        text: "Two rules of thumb the data supports: if your traffic is authorization-check-heavy, spend hardware on the database and enable the decision cache before anything else; if it's token-heavy, the limits — not the hardware — are what you'll hit first, so raise TOKEN_PER_MIN from your real per-client peak and — if and only if you have edge authentication per the caveat above — switch the key mode. The genuinely internet-exposed endpoints (login, register, password-reset, MFA) stay strict per-IP in every configuration, including under the gateway and mesh profiles.",
       },
       { type: "h", id: "tls", text: "Direct TLS termination (opt-in)" },
       {

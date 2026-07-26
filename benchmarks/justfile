@@ -314,6 +314,13 @@ bench-seed:
     fi
 
 # Run the scenario suite (load + resource sampling) for a target/profile.
+# G2: run-benchmark.sh gates its first cell behind a post-seed settle check
+# and rotates the scenario order by BENCH_RUN_INDEX (set to `i` per repeat
+# pass by bench-matrix below; defaults to 1 — natural order — for a manual
+# invocation). Tunables (env, not `just` vars — see docs/methodology.md "Post-
+# seed settle gate & cell-order rotation"): BENCH_SETTLE (default 1, set 0 to
+# skip), BENCH_SETTLE_STABLE_SECS (30), BENCH_SETTLE_MAX_MS (100),
+# BENCH_SETTLE_TIMEOUT_SECS (600), BENCH_RUN_INDEX (1).
 bench-run:
     bash runner/run-benchmark.sh --target {{target}} --profile {{profile}} --scenario {{scenario}}
 
@@ -355,6 +362,13 @@ bench-matrix:
       echo "### repeat $i/{{repeat}} -> $RUN_DIR ###"
       mkdir -p "$RUN_DIR"
       export BENCH_RESULTS_DIR="$PWD/$RUN_DIR"
+      # G2 item 2: BENCH_RUN_INDEX drives run-benchmark.sh's cell-order
+      # rotation (rotate_scenarios()) — run-1 executes scenarios in their
+      # natural order, run-2 starts one scenario further along, etc., so no
+      # scenario is systematically first (and therefore corrupted by the
+      # post-seed settle window) across the repeat set. See docs/methodology.md
+      # "Post-seed settle gate & cell-order rotation".
+      export BENCH_RUN_INDEX="$i"
       for t in {{targets}}; do
         for p in {{profiles}}; do
           echo "=== run $i: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
@@ -365,7 +379,7 @@ bench-matrix:
         done
       done
     done
-    unset BENCH_RESULTS_DIR
+    unset BENCH_RESULTS_DIR BENCH_RUN_INDEX
     just bench-report
 
 # --- SDK client benchmarks --- (pass the language as sdk=, e.g. sdk=python)
@@ -404,7 +418,17 @@ bench-pack:
     if tar -tJf "$OUT" | grep -qiE '\.seed/|seed\.env'; then
       echo "[bench-pack] ERROR: a .seed/ path made it into the archive" >&2; exit 1
     fi
-    if tar -xJOf "$OUT" | grep -qiE 'SECRET|PASSWORD'; then
+    # G2 item 3: meta.json's "axiam_env" (the AXIAM__* pass-through knob dump,
+    # run-benchmark.sh's axiam_env_json()) legitimately writes the NAME of
+    # every redacted key — e.g. "AXIAM__DB__PASSWORD": "<redacted>" — so the
+    # setting's presence stays visible even though its value never is. Those
+    # key names themselves contain PASSWORD/SECRET-shaped substrings, so
+    # strip out every already-redacted line (identified by the literal
+    # "<redacted>" placeholder value axiam_env_json() always writes) BEFORE
+    # scanning for leaked content — an actual leaked value would never carry
+    # that placeholder, so this can't hide a real leak, only the expected,
+    # fully-redacted key names.
+    if tar -xJOf "$OUT" | grep -vi '<redacted>' | grep -qiE 'SECRET|PASSWORD'; then
       echo "[bench-pack] ERROR: SECRET/PASSWORD text found in packed content — investigate before sharing" >&2
       exit 1
     fi

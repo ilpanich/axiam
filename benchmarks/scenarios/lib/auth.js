@@ -3,6 +3,7 @@
 import http from 'k6/http';
 import encoding from 'k6/encoding';
 import { adapter } from './targets.js';
+import { cfg, baseUrl } from './config.js';
 
 // Obtain an access (+ refresh) token once, for scenarios that operate on a token.
 // Tries client_credentials first (works for every target); falls back to login.
@@ -39,12 +40,33 @@ export function mintToken() {
 // Used by both `loginSession()` (authz scenarios) and `mintUserToken()`
 // (token-holding scenarios like userinfo) so the cookie-reading logic lives in
 // exactly one place.
+//
+// G4: `axiam_refresh` is Path-scoped to `/api/v1/auth/refresh`
+// (crates/axiam-api-rest/src/middleware/csrf.rs `refresh_cookie()`,
+// `.path("/api/v1/auth/refresh")`) — unlike `axiam_access`/`axiam_csrf`, which
+// are Path=`/` (same file, `access_cookie()`/`csrf_cookie()`). A jar read
+// scoped to the *login* URL (`/api/v1/auth/login`) therefore never returns it
+// (RFC 6265 path-matching: "/api/v1/auth/refresh" is not a prefix of
+// "/api/v1/auth/login") — this was the entire root cause of the AXIAM
+// `token_refresh` cell measuring 100% `bench_fallback`: `refresh_token` came
+// back `undefined` on every call, so callers always fell through to the
+// client_credentials fallback branch. Fix: also probe the jar against the
+// refresh endpoint's own path so the narrowly-scoped cookie is found. This is
+// a pure jar read (no extra HTTP request) and is a harmless no-op for targets
+// that never set an `axiam_refresh`-named cookie (Keycloak/Zitadel deliver
+// their refresh token in the JSON body instead, via the fallback below).
 export function readAccessFromLogin(built, res, jar) {
   const cookies = jar.cookiesForURL(built.url);
   let body = null;
   try { body = res.json(); } catch (_e) { /* cookie-only response, no JSON body */ }
   const access = (cookies.axiam_access && cookies.axiam_access[0]) || (body && (body.access_token || body.token));
-  const refresh = (cookies.axiam_refresh && cookies.axiam_refresh[0]) || (body && body.refresh_token);
+  const originMatch = /^(https?:\/\/[^/]+)/.exec(built.url);
+  const origin = originMatch ? originMatch[1] : '';
+  const refreshScopeCookies = origin ? jar.cookiesForURL(`${origin}/api/v1/auth/refresh`) : {};
+  const refresh =
+    (cookies.axiam_refresh && cookies.axiam_refresh[0]) ||
+    (refreshScopeCookies.axiam_refresh && refreshScopeCookies.axiam_refresh[0]) ||
+    (body && body.refresh_token);
   const csrf = cookies.axiam_csrf && cookies.axiam_csrf[0];
   return { access_token: access, refresh_token: refresh, csrf_token: csrf };
 }
@@ -83,9 +105,9 @@ export function mintUserToken() {
   if (!built.fallback) {
     const res = http.request(built.method, built.url, built.body || null, built.params || {});
     if (res.status === (built.expect || 200)) {
-      const { access_token, refresh_token } = readAccessFromLogin(built, res, jar);
+      const { access_token, refresh_token, csrf_token } = readAccessFromLogin(built, res, jar);
       if (access_token) {
-        return { access_token, refresh_token, is_user_token: true };
+        return { access_token, refresh_token, csrf_token, is_user_token: true };
       }
     }
   }
@@ -100,7 +122,68 @@ export function mintUserToken() {
   try { body = ccRes.json(); } catch (_e) { body = {}; }
   const access = body.access_token || body.token;
   if (!access) throw new Error('auth.mintUserToken: client_credentials fallback returned no token');
-  return { access_token: access, refresh_token: body.refresh_token, is_user_token: false };
+  return { access_token: access, refresh_token: body.refresh_token, csrf_token: undefined, is_user_token: false };
+}
+
+// G4: AXIAM's user-login-issued refresh token is redeemed at the *session*
+// refresh endpoint `POST /api/v1/auth/refresh` — NOT the generic OAuth2
+// `POST /oauth2/token?grant_type=refresh_token` grant that `targets.js`'s
+// `axiam.refresh()` builder sends every refresh request to today. These are
+// two different token stores server-side:
+//   - `/api/v1/auth/login` mints its refresh token via axiam-auth's
+//     SessionRepository (crates/axiam-auth/src/service.rs, `login()` ~L604-634).
+//   - `/oauth2/token`'s `refresh_token` grant looks the presented token up in
+//     axiam-oauth2's RefreshTokenRepository instead
+//     (crates/axiam-oauth2/src/token.rs `handle_refresh_token`, ~L502-514) and
+//     returns `invalid_grant` ("refresh token is invalid, expired, or
+//     revoked") for anything not issued by an OAuth2-flow grant — a
+//     session-login refresh token is never in that table, so this call
+//     always 401s once the cookie-extraction bug above is fixed.
+// The correct redemption target, `/api/v1/auth/refresh`
+// (crates/axiam-api-rest/src/handlers/auth.rs `refresh()`, ~L421-480),
+// requires:
+//   - the `axiam_refresh` cookie (read from the httpOnly cookie, L429-434 —
+//     there is no body/header alternative),
+//   - the CSRF double-submit header `X-CSRF-Token` matching the `axiam_csrf`
+//     cookie (this path is NOT in `CSRF_EXEMPT_SUFFIXES`, middleware/csrf.rs),
+//   - a JSON body `{ tenant_id, org_id }` (`RefreshRequest`, handlers/auth.rs)
+//     — `org_id` is required to deserialize but is not actually trusted
+//     (the handler re-derives it from `tenant_id`, L449-451), so any
+//     well-formed UUID satisfies it.
+// The response rotates all three cookies (new access/refresh/csrf) but its
+// JSON body carries only `{ expires_in }` — no tokens — so the new
+// refresh/csrf values must be read back out of the jar (see
+// `readAxiamRefreshCookies` below), not out of `doOp()`'s return value.
+//
+// This belongs in targets.js's `axiam.refresh()` long-term so every target
+// goes through the same `a.refresh()` call shape; implemented here because
+// targets.js is out of scope for this change (see
+// claude_dev/refresh-harness-diagnosis.md for the exact diff to make there).
+export function axiamRefreshOp(refreshToken, csrfToken) {
+  return {
+    method: 'POST',
+    url: `${baseUrl()}/api/v1/auth/refresh`,
+    body: JSON.stringify({ tenant_id: cfg.tenantId, org_id: cfg.orgId }),
+    params: {
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken || '' },
+      cookies: { axiam_refresh: refreshToken, axiam_csrf: csrfToken || '' },
+    },
+    expect: 200,
+  };
+}
+
+// Read the rotated `axiam_refresh`/`axiam_csrf` cookies out of the jar after
+// an `axiamRefreshOp` redemption. k6 stores a response's Set-Cookie headers
+// into the VU's jar automatically regardless of how the request's own
+// cookies were supplied, so this works whether or not the prior request also
+// happened to hit the jar. Scoped to the refresh endpoint's own path/origin
+// for the same Path-scoping reason documented on `readAccessFromLogin` above.
+export function readAxiamRefreshCookies(jar) {
+  const cookies = jar.cookiesForURL(`${baseUrl()}/api/v1/auth/refresh`);
+  return {
+    refresh_token: cookies.axiam_refresh && cookies.axiam_refresh[0],
+    csrf_token: cookies.axiam_csrf && cookies.axiam_csrf[0],
+  };
 }
 
 // Decode the (unverified) claims from a JWT payload segment. Used only to read

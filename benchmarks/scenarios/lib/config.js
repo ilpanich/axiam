@@ -75,6 +75,60 @@ export const cfg = {
   // --- validity gates ---
   maxErrorRate: num('BENCH_MAX_ERROR', 0.01),
   maxP95: num('BENCH_MAX_P95_MS', 2000),
+
+  // --- G5: decision-cache key-space sweep (authz_check_rest.js only) ---
+  //
+  // Run 3 measured the D7 decision cache at an effective cardinality of ONE:
+  // 50 VUs all sending the same (subject, resource, action, scope) tuple, i.e.
+  // the friendliest hit rate that exists. `BENCH_AUTHZ_KEYSPACE=K` spreads each
+  // request over K distinct cache keys so the ship-decision can be made against
+  // a realistic hit rate instead of a best case. K=1 (the default) reproduces
+  // run 3 exactly and leaves every other cell that runs authz_check_rest.js
+  // completely unchanged.
+  //
+  // The cache key is `(tenant_id, subject_id, resource_id, action, scope)` —
+  // verified against crates/axiam-authz/src/decision_cache.rs `SubKey`, NOT
+  // taken from the design doc.
+  authzKeyspace: num('BENCH_AUTHZ_KEYSPACE', 1),
+
+  // How the K distinct keys are generated. Both modes keep the request a REAL
+  // authorization evaluation returning HTTP 200 with a real decision — never a
+  // 400/404 error path, which would make the sweep meaningless.
+  //
+  //   'resource' (default) — provision K-1 CHILD resources of the seeded
+  //       `bench-resource` in setup() via the admin REST API, and vary
+  //       `resource_id`. The seeded `bench-reader` role is assigned scoped to
+  //       `bench-resource`, so hierarchy inheritance
+  //       (crates/axiam-authz/src/engine.rs `applicable_role_ids`) makes every
+  //       child ALLOW, on the same 3-round-trip evaluation path as K=1. This is
+  //       the mode the G5 plan asks for (K distinct subject x resource pairs).
+  //   'action' — zero-provisioning fallback: keep the seeded resource and vary
+  //       the `action` string. Index 0 is literally "read" (ALLOW); every other
+  //       index is an action no grant covers, so the engine runs the FULL
+  //       assignments -> ancestors -> grants path and returns
+  //       DENY("no permission grants action '<x>'"). Denies are cached verbatim
+  //       (decision_cache.rs / engine.rs `check_access` caches the full
+  //       AccessDecision), so the cache is exercised identically. Use this when
+  //       the admin credentials for provisioning are unavailable, or as a
+  //       control that isolates pure key cardinality from DB row diversity.
+  authzKeyspaceMode: str('BENCH_AUTHZ_KEYSPACE_MODE', 'resource'),
+
+  // Parallelism of the setup()-time resource provisioning (http.batch size).
+  // Only used by 'resource' mode with K > 1.
+  authzKeyspaceBatch: num('BENCH_AUTHZ_KEYSPACE_BATCH', 20),
+
+  // k6 setup() ceiling. Provisioning ~10 000 resources over REST needs more
+  // than k6's 60s default. Pure ceiling — it changes no request the VUs send.
+  setupTimeout: str('BENCH_SETUP_TIMEOUT', '900s'),
+
+  // Bootstrap admin session used ONLY by the G5 keyspace provisioning in
+  // setup(). Defaults deliberately mirror runner/seed.sh's `admin` /
+  // BENCH_ADMIN_PASSWORD so no new secret has to be plumbed through: seed.sh
+  // bootstraps the org with username `admin` and password `Bench@Admin123!`
+  // unless BENCH_ADMIN_PASSWORD was overridden there. These are throwaway
+  // benchmark-fixture credentials for a disposable container; never log them.
+  adminUsername: str('BENCH_ADMIN_USERNAME', 'admin'),
+  adminPassword: str('BENCH_ADMIN_PASSWORD', 'Bench@Admin123!'),
 };
 
 export function baseUrl() {

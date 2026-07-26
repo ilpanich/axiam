@@ -1,11 +1,12 @@
 // Scenario: refresh-token grant. AXIAM rotates refresh tokens single-use, so each
 // VU mints its own token in setup-per-VU style and chains rotations. For targets
 // without rotation the same refresh token is reusable; both are handled.
+import http from 'k6/http';
 import { sleep } from 'k6';
-import { loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
+import { cfg, loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
 import { adapter } from './lib/targets.js';
 import { doOp, m } from './lib/metrics.js';
-import { mintUserToken } from './lib/auth.js';
+import { mintUserToken, axiamRefreshOp, readAxiamRefreshCookies } from './lib/auth.js';
 
 export const options = Object.assign(
   {
@@ -18,8 +19,11 @@ export const options = Object.assign(
   tlsOptions(),
 );
 
-// Per-VU refresh token, so single-use rotation does not invalidate other VUs.
+// Per-VU refresh token (+ CSRF token, needed only for AXIAM's cookie-based
+// grant — see axiamRefreshOp), so single-use rotation does not invalidate
+// other VUs.
 let vuRefresh = null;
+let vuCsrf = null;
 
 export function setup() {
   requireSeed();
@@ -27,6 +31,7 @@ export function setup() {
 
 export default function () {
   const a = adapter();
+  const isAxiam = cfg.target === 'axiam';
   if (!vuRefresh) {
     let tok;
     try {
@@ -51,21 +56,45 @@ export default function () {
       return;
     }
     vuRefresh = tok.refresh_token;
+    vuCsrf = tok.csrf_token;
     if (!vuRefresh) {
       // Target issued no refresh token off a user login either (e.g. Zitadel:
       // mintUserToken() falls back to client_credentials because its login()
       // returns a session-API `sessionToken`, not an OIDC token — a real
       // refresh token would require driving a full OIDC auth-code flow with
-      // `offline_access`, which this harness cannot easily do). Nothing to
-      // measure; mint again as the closest comparable token-issuance op. This
-      // is not a refresh, so tag + count it as a fallback
-      // (comparability: fallback-op). For AXIAM/Keycloak this branch should
-      // no longer be reached.
+      // `offline_access` against Zitadel's hosted login UI, which this
+      // protocol-level k6 harness cannot do — see
+      // claude_dev/refresh-harness-diagnosis.md). Nothing to measure; mint
+      // again as the closest comparable token-issuance op. This is not a
+      // refresh, so tag + count it as a fallback (comparability:
+      // fallback-op). For AXIAM/Keycloak this branch should no longer be
+      // reached (G4).
       m.fallback.add(1);
       doOp(a.clientCredentials());
       return;
     }
   }
+
+  if (isAxiam) {
+    // AXIAM's user-session refresh token is redeemed at the session endpoint
+    // `POST /api/v1/auth/refresh`, not the OAuth2 `POST /oauth2/token`
+    // grant `targets.js`'s generic `a.refresh()` builds — see the extensive
+    // citation on `axiamRefreshOp` in lib/auth.js for why the two are not
+    // interchangeable (different server-side token stores).
+    const body = doOp(axiamRefreshOp(vuRefresh, vuCsrf));
+    if (body !== null) {
+      // Success: the rotated refresh/csrf pair arrives only via Set-Cookie
+      // (the JSON body carries just `expires_in`), so read it back out of
+      // the jar rather than out of `body`.
+      const rotated = readAxiamRefreshCookies(http.cookieJar());
+      vuRefresh = rotated.refresh_token || null;
+      vuCsrf = rotated.csrf_token || vuCsrf;
+    } else {
+      vuRefresh = null; // failed → re-mint next iteration
+    }
+    return;
+  }
+
   const body = doOp(a.refresh(vuRefresh));
   // Follow rotation: adopt the new refresh token if one was returned.
   if (body && body.refresh_token) vuRefresh = body.refresh_token;

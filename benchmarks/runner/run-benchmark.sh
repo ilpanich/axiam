@@ -35,6 +35,16 @@ while [ $# -gt 0 ]; do
 done
 
 # --- profile + seed wiring -------------------------------------------------
+# Anchor the cert dir to an ABSOLUTE path before sourcing the profile. The
+# profile derives BENCH_CLIENT_CERT/KEY/CA_CERT from ${BENCH_CERTS_DIR:-profiles/certs},
+# a path relative to the benchmarks root. But run_one() launches k6 with
+# CWD=$BENCH/scenarios, so a relative cert path resolves to the non-existent
+# $BENCH/scenarios/profiles/certs/... and k6's open() fails at init time
+# ("can't find the client certificate") — the p3-mtls instant-fail. Making the
+# dir absolute here fixes every consumer at once: k6's tlsAuth open(), seed.sh's
+# curl --cert, and the justfile readiness probe all resolve the same files
+# regardless of their working directory.
+export BENCH_CERTS_DIR="${BENCH_CERTS_DIR:-$BENCH/profiles/certs}"
 PROFILE_ENV="$BENCH/profiles/${PROFILE}.env"
 [ -f "$PROFILE_ENV" ] || { echo "no such profile: $PROFILE_ENV" >&2; exit 1; }
 # shellcheck disable=SC1090

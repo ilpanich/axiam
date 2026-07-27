@@ -112,6 +112,36 @@ PY
 # Find the single .k6.json a cell produced (scenario name varies).
 k6_file() { find "$1" -name '*.k6.json' -print -quit 2>/dev/null; }
 
+# --- reading the running stack's own configuration ---------------------------
+# `just bench-up` bootstraps throwaway DB credentials inside its own recipe
+# shell (AXIAM__DB__USERNAME=bench / AXIAM__DB__PASSWORD=bench-local-only-pw)
+# and writes them to no file, so neither this script's environment nor
+# docker/.secrets/env knows them on a machine that never supplied real ones.
+# The containers are the source of truth, whatever the credentials came from.
+
+# Value of one env var inside a running container ("" if absent/not running).
+container_env() { # $1=container $2=VAR
+  docker inspect "$1" -f '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | sed -n "s/^$2=//p" | head -1 || true
+}
+
+# Value following a flag on a running container's command line ("" if absent) —
+# the datastore takes its credentials as `start --user X --pass Y ...`.
+container_cmd_flag() { # $1=container $2=flag (e.g. --pass)
+  docker inspect "$1" -f '{{json .Config.Cmd}}' 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    argv = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+if not isinstance(argv, list):
+    raise SystemExit
+flag = sys.argv[1]
+print(next((argv[i + 1] for i, v in enumerate(argv) if v == flag and i + 1 < len(argv)), ""))
+' "$2" || true
+}
+
 # Continuous telemetry: per-container CPU/mem AND RabbitMQ queue depth, 1 Hz.
 # The queue depth is what distinguishes the "audit backlog" hypothesis (G1).
 #
@@ -396,24 +426,65 @@ task_g1_dbdirect() {
   # ephemeral container on the bench network — no AXIAM server involved.
   local net; net=$(docker inspect "$C_DB" -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null || echo "")
   local img; img=$(docker inspect "$C_DB" -f '{{.Config.Image}}' 2>/dev/null || echo "surrealdb/surrealdb:v3")
-  local user=${AXIAM__DB__USERNAME:-bench} pass=${AXIAM__DB__PASSWORD:-}
-  [ -f ../docker/.secrets/env ] && . ../docker/.secrets/env || true
-  user=${AXIAM__DB__USERNAME:-$user}; pass=${AXIAM__DB__PASSWORD:-$pass}
+  # Credential resolution, most-authoritative-last so an operator override still
+  # wins: this shell's environment, then docker/.secrets/env, then the running
+  # containers (see container_env — bench-up's bootstrapped defaults exist
+  # nowhere else, which is what used to make this task bail out on a perfectly
+  # healthy stack).
+  local user=${AXIAM__DB__USERNAME:-} pass=${AXIAM__DB__PASSWORD:-}
+  if [ -f ../docker/.secrets/env ]; then . ../docker/.secrets/env || true; fi
+  user=${user:-${AXIAM__DB__USERNAME:-}}; pass=${pass:-${AXIAM__DB__PASSWORD:-}}
+  [ -n "$user" ] || user=$(container_env "$C_SERVER" AXIAM__DB__USERNAME)
+  [ -n "$pass" ] || pass=$(container_env "$C_SERVER" AXIAM__DB__PASSWORD)
+  [ -n "$user" ] || user=$(container_cmd_flag "$C_DB" --user)
+  [ -n "$pass" ] || pass=$(container_cmd_flag "$C_DB" --pass)
 
   s "Issues a repeated read straight at SurrealDB (no AXIAM server in the path) during"
   s "the post-seed window. If the DB alone is slow, AXIAM is exonerated entirely."
   s
   if [ -z "$net" ] || [ -z "$pass" ]; then
-    warn "could not resolve the DB network or credentials automatically"
-    s "- **NOT RUN automatically.** Resolve manually and re-run the loop below:"
+    # Say WHICH lookup failed — they have different fixes.
+    local missing="the DB network"
+    [ -n "$net" ] && missing="the DB credentials"
+    [ -z "$net" ] && [ -z "$pass" ] && missing="the DB network or credentials"
+    warn "could not resolve $missing from the running stack — is it up?"
+    s "- **NOT RUN automatically** (could not resolve $missing). Resolve manually"
+    s "  and re-run the loop below:"
     s '```bash'
-    s "docker run --rm --network $net $img sql \\"
-    s "  --endpoint http://$C_DB:8000 --username <user> --password <pass> \\"
+    s "docker run --rm --network ${net:-<network>} $img sql \\"
+    s "  --endpoint http://$C_DB:8000 --username ${user:-<user>} --password <pass> \\"
     s "  --namespace axiam --database axiam --pretty \\"
     s "  --query 'SELECT count() FROM role_permission_grant GROUP ALL;'"
     s '```'
+    s
+    s "The credentials are whatever \`just bench-up\` used: your exported"
+    s "\`AXIAM__DB__USERNAME\`/\`AXIAM__DB__PASSWORD\` if you set them, otherwise its"
+    s "throwaway local defaults. Read them back off the running stack with:"
+    s '```bash'
+    s "docker inspect $C_SERVER -f '{{range .Config.Env}}{{println .}}{{end}}' | grep AXIAM__DB__"
+    s '```'
     disarm_cleanup; bench_down axiam; finish; return
   fi
+  # Pre-flight the query once before timing 30 of them. The timing loop discards
+  # every error, so a wrong credential (or a renamed table) would otherwise fill
+  # db-direct.csv with 30 rows of pure container-start overhead that read like
+  # plausible timings — the worst possible failure for a task whose whole output
+  # is a trend line.
+  if ! docker run --rm --network "$net" "$img" sql \
+       --endpoint "http://$C_DB:8000" --username "$user" --password "$pass" \
+       --namespace axiam --database axiam \
+       --query 'SELECT count() FROM role_permission_grant GROUP ALL;' \
+       > "$out/preflight.log" 2>&1; then
+    warn "the direct SurrealDB query failed as user '$user' — not timing it; see preflight.log"
+    s "- **NOT RUN.** The credentials resolved, but the probe query itself failed as"
+    s "  user \`$user\`. First lines of \`preflight.log\`:"
+    s '```'
+    head -5 "$out/preflight.log" 2>/dev/null | sed 's/^/  /' >> "$SUMMARY" || true
+    s '```'
+    disarm_cleanup; bench_down axiam; finish; return
+  fi
+  log "pre-flight query OK as user '$user' — timing 30 iterations"
+
   {
     echo "iteration,elapsed_ms"
     for i in $(seq 1 30); do

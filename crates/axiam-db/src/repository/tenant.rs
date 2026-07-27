@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`TenantRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::tenant::{CreateTenant, Tenant, TenantStatus, UpdateTenant};
 use axiam_core::repository::{PaginatedResult, Pagination, TenantRepository};
 use chrono::{DateTime, Utc};
@@ -103,7 +104,7 @@ impl<C: Connection> SurrealTenantRepository<C> {
 
 impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     async fn create(&self, input: CreateTenant) -> AxiamResult<Tenant> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
         let org_id_str = input.organization_id.to_string();
         let metadata = input

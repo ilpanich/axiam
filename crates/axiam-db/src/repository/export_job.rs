@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`ExportJobRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{CreateExportJob, ExportJob, ExportJobStatus};
 use axiam_core::repository::ExportJobRepository;
 use chrono::{DateTime, Utc};
@@ -126,7 +127,7 @@ impl<C: Connection> SurrealExportJobRepository<C> {
 
 impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
     async fn create(&self, input: CreateExportJob) -> AxiamResult<ExportJob> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let result = self
             .db
             .query(

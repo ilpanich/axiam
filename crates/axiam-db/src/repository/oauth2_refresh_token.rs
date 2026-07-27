@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`RefreshTokenRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{CreateRefreshToken, RefreshToken};
 use axiam_core::repository::RefreshTokenRepository;
 use chrono::{DateTime, Utc};
@@ -87,7 +88,7 @@ impl<C: Connection> SurrealRefreshTokenRepository<C> {
 
 impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> {
     async fn create(&self, input: CreateRefreshToken) -> AxiamResult<RefreshToken> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
 
         let user_id_str = input.user_id.map(|u| u.to_string());

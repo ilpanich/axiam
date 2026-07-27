@@ -276,6 +276,7 @@ FROM user:$uid;
 - **MFA**: TOTP (RFC 6238) with encrypted secret storage; extensible for WebAuthn later
 - **Audit logs**: Append-only table, no UPDATE/DELETE allowed (enforced at SurrealDB permission level)
 - **Resource hierarchy**: Computed at query time via graph traversal, not materialized, to keep writes simple and consistent
+- **Record identifiers**: UUIDv7 (`axiam_core::id::new_id`) for every persisted entity id. Record ids are the primary key in SurrealDB's ordered KV engine (`surrealkv:`/`file:`), so v7's leading 48-bit millisecond timestamp keeps time-adjacent inserts physically adjacent instead of scattering them across the keyspace as v4 does. Ids are stored as hyphenated strings, whose lexicographic order matches the byte order, so the locality survives the encoding. **Secrets never use v7**: session/download/reset/cancel tokens and generated passwords stay on a CSPRNG, because v7 spends 48 bits on a timestamp and its per-millisecond monotonic counter leaves same-millisecond ids sharing a long common prefix — ample for uniqueness, useless for secrecy.
 
 ---
 

@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`PgpKeyRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::pgp_key::{
     PgpKey, PgpKeyAlgorithm, PgpKeyPurpose, PgpKeyStatus, StorePgpKey,
 };
@@ -157,7 +158,7 @@ impl<C: Connection> SurrealPgpKeyRepository<C> {
 
 impl<C: Connection> PgpKeyRepository for SurrealPgpKeyRepository<C> {
     async fn create(&self, input: StorePgpKey) -> AxiamResult<PgpKey> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let result = self
             .db
             .query(

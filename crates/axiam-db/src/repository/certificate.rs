@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`CertificateRepository`].
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::id::new_id;
 use axiam_core::models::certificate::{
     Certificate, CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
 };
@@ -185,7 +186,7 @@ impl<C: Connection> SurrealCertificateRepository<C> {
 
 impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
     async fn create(&self, input: StoreCertificate) -> AxiamResult<Certificate> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
 
         let result = self

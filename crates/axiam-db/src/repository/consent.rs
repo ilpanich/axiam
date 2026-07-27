@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`ConsentRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{Consent, CreateConsent};
 use axiam_core::repository::ConsentRepository;
 use chrono::{DateTime, Utc};
@@ -82,7 +83,7 @@ impl<C: Connection> SurrealConsentRepository<C> {
 
 impl<C: Connection> ConsentRepository for SurrealConsentRepository<C> {
     async fn create(&self, input: CreateConsent) -> AxiamResult<Consent> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let result = self
             .db
             .query(

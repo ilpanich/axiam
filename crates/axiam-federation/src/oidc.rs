@@ -557,6 +557,9 @@ where
             .clone()
             .unwrap_or_else(|| format!("{}.{}@federated.local", claims.sub, config_id));
 
+        // Deliberately v4, not `new_id()`: a non-usable password must still be
+        // unguessable, and v7 trades randomness for a sortable timestamp.
+        // See `axiam_core::id` — v7 is for identifiers, never for secrets.
         let random_password = Uuid::new_v4().to_string();
 
         let create_user = CreateUser {

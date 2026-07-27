@@ -26,6 +26,7 @@
 use actix_web::{HttpResponse, web};
 use axiam_auth::password;
 use axiam_core::error::AxiamError;
+use axiam_core::id::new_id;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::CreateTenant;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
@@ -361,11 +362,11 @@ pub async fn bootstrap<C: Connection + Clone>(
     //
     // SurrealDB v3 quirk: BEGIN TRANSACTION occupies result slot 0;
     // the first statement result is at .take(1). (See MEMORY.md)
-    let user_id = Uuid::new_v4();
+    let user_id = new_id();
     let user_id_str = user_id.to_string();
     let role_id_str = seed_result.super_admin_role_id.to_string();
     let tenant_id_str = tenant_id.to_string();
-    let ph_id_str = Uuid::new_v4().to_string();
+    let ph_id_str = new_id().to_string();
 
     // Apply the server-configured password pepper (REQ-14 AC-1) — the same
     // pepper the user repository uses at login-time verification. Previously

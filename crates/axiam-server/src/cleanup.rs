@@ -575,6 +575,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             .map_err(|e| AxiamError::Internal(format!("export encrypt failed: {e}")))?;
 
         // (d) Generate single-use 24h download token (D-13).
+        //
+        // Deliberately v4, not `new_id()`: this token is the sole bearer
+        // credential for the export download, so it must stay maximally random.
+        // See `axiam_core::id` — v7 is for identifiers, never for secrets.
         let raw_download_token = Uuid::new_v4().to_string();
         let token_hash = {
             use sha2::{Digest, Sha256};

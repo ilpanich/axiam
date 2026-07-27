@@ -34,6 +34,7 @@
 //! to update for this format change.
 
 use axiam_auth::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
+use axiam_core::id::new_id;
 use axiam_core::repository::WebhookRepository;
 use axiam_federation::ssrf::{self, SsrfError};
 use chrono::Utc;
@@ -182,7 +183,7 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
         for webhook in webhooks {
             let msg = axiam_amqp::WebhookMessage {
                 webhook_id: webhook.id,
-                delivery_id: Uuid::new_v4(),
+                delivery_id: new_id(),
                 tenant_id,
                 event_type: event_type.clone(),
                 payload: payload.clone(),

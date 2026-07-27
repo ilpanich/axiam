@@ -6,6 +6,7 @@
 
 use axiam_auth::password;
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
 use chrono::{DateTime, Utc};
@@ -244,7 +245,7 @@ impl<C: Connection> SurrealUserRepository<C> {
 
 impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     async fn create(&self, input: CreateUser) -> AxiamResult<User> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
 
@@ -719,9 +720,9 @@ impl<C: Connection> SurrealUserRepository<C> {
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<User> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
-        let consent_id = Uuid::new_v4().to_string();
+        let consent_id = new_id().to_string();
         let tenant_id_str = input.tenant_id.to_string();
         // SECHRD-12/T-24-93 (RESEARCH Pitfall 5): admin-created users go
         // through this write path, so their initial password must be seeded
@@ -731,7 +732,7 @@ impl<C: Connection> SurrealUserRepository<C> {
         // work against for these users. Federated-user creation paths
         // (oidc.rs/saml.rs) have no local password and are intentionally
         // left untouched.
-        let ph_id_str = Uuid::new_v4().to_string();
+        let ph_id_str = new_id().to_string();
 
         let password_hash = password::hash_password(&input.password, self.pepper.as_deref())
             .map_err(|e| classify_write_error(e, "user"))?;

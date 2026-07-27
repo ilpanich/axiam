@@ -6,6 +6,7 @@
 //! replayed assertions (D-09).
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::id::new_id;
 use axiam_core::repository::AssertionReplayRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::{Connection, Surreal};
@@ -46,7 +47,7 @@ impl<C: Connection> AssertionReplayRepository for SurrealAssertionReplayReposito
         assertion_id: &str,
         expires_at: DateTime<Utc>,
     ) -> AxiamResult<()> {
-        let row_id = Uuid::new_v4().to_string();
+        let row_id = new_id().to_string();
         let assertion_id_owned = assertion_id.to_string();
 
         let result = self

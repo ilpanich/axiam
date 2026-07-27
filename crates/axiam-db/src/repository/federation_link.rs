@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`FederationLinkRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::federation::{CreateFederationLink, FederationLink};
 use axiam_core::repository::FederationLinkRepository;
 use chrono::{DateTime, Utc};
@@ -97,7 +98,7 @@ impl<C: Connection> SurrealFederationLinkRepository<C> {
 
 impl<C: Connection> FederationLinkRepository for SurrealFederationLinkRepository<C> {
     async fn create(&self, input: CreateFederationLink) -> AxiamResult<FederationLink> {
-        let id = Uuid::new_v4();
+        let id = new_id();
 
         let result = self
             .db

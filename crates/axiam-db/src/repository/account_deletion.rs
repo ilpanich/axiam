@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`AccountDeletionRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{AccountDeletion, AccountDeletionStatus, CreateAccountDeletion};
 use axiam_core::repository::AccountDeletionRepository;
 use chrono::{DateTime, Utc};
@@ -178,7 +179,7 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
         scheduled_purge_at: DateTime<Utc>,
         cancel_token_hash: String,
     ) -> AxiamResult<AccountDeletion> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let created_at = Utc::now();
 
         let query = "BEGIN TRANSACTION; \
@@ -233,7 +234,7 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
 
 impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionRepository<C> {
     async fn create(&self, input: CreateAccountDeletion) -> AxiamResult<AccountDeletion> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let result = self
             .db
             .query(

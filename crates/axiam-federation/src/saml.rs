@@ -264,6 +264,9 @@ where
 
         let idp = self.fetch_idp_metadata(metadata_url).await?;
 
+        // Deliberately v4, not `new_id()`: the AuthnRequest ID is echoed back
+        // in `InResponseTo` and gates replay detection, so it must not be
+        // predictable from the request's timing.
         let authn_request_id = format!("_{}", Uuid::new_v4());
         let authn_request = AuthnRequest {
             id: authn_request_id.clone(),
@@ -711,6 +714,11 @@ where
 
         // Federated users get a random non-usable password since they
         // authenticate through the external IdP.
+        //
+        // Deliberately v4, not `new_id()`: this value must be unguessable, and
+        // a v7 id spends 48 bits on a timestamp that an attacker can bound from
+        // the user's creation time. See `axiam_core::id` — v7 is for
+        // identifiers, never for secrets.
         let random_password = Uuid::new_v4().to_string();
 
         let create_user = CreateUser {

@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`NotificationRuleRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::notification_rule::{
     CreateNotificationRule, NotificationEventType, NotificationRule, UpdateNotificationRule,
 };
@@ -114,7 +115,7 @@ impl<C: Connection> SurrealNotificationRuleRepository<C> {
 
 impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleRepository<C> {
     async fn create(&self, input: CreateNotificationRule) -> AxiamResult<NotificationRule> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let events_str: Vec<String> = input.events.iter().map(|e| e.to_db_string()).collect();
 
         let result = self

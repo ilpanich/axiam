@@ -4,6 +4,7 @@
 //! `FOR update NONE` and `FOR delete NONE`.
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -229,7 +230,7 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
 
 impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
 
         let metadata = input

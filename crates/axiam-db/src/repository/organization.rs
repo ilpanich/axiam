@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`OrganizationRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::organization::{CreateOrganization, Organization, UpdateOrganization};
 use axiam_core::repository::{OrganizationRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -61,7 +62,7 @@ impl<C: Connection> SurrealOrganizationRepository<C> {
 
 impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> {
     async fn create(&self, input: CreateOrganization) -> AxiamResult<Organization> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
 
         let metadata = input

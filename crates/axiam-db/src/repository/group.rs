@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`GroupRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::group::{CreateGroup, Group, UpdateGroup};
 use axiam_core::models::user::{User, UserStatus};
 use axiam_core::repository::{GroupRepository, PaginatedResult, Pagination};
@@ -129,7 +130,7 @@ impl<C: Connection> SurrealGroupRepository<C> {
 
 impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
     async fn create(&self, input: CreateGroup) -> AxiamResult<Group> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
 

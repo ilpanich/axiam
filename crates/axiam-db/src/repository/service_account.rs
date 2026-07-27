@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`ServiceAccountRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::service_account::{
     CreateServiceAccount, ServiceAccount, UpdateServiceAccount,
 };
@@ -116,7 +117,7 @@ impl<C: Connection> SurrealServiceAccountRepository<C> {
 
 impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository<C> {
     async fn create(&self, input: CreateServiceAccount) -> AxiamResult<(ServiceAccount, String)> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
 

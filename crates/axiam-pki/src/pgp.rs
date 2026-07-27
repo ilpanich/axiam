@@ -1,6 +1,7 @@
 //! OpenPGP key management — generation, audit signing, and encryption.
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::id::new_id;
 use axiam_core::models::audit::AuditLogEntry;
 use axiam_core::models::pgp_key::{
     CreatePgpKey, EncryptedExport, GeneratedPgpKey, PgpKey, PgpKeyAlgorithm, PgpKeyPurpose,
@@ -187,7 +188,7 @@ impl<R: PgpKeyRepository> PgpService<R> {
         .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??;
 
         Ok(SignedAuditBatch {
-            batch_id: Uuid::new_v4(),
+            batch_id: new_id(),
             tenant_id,
             signing_key_id: signing_key.id,
             entry_ids: entry_ids_clone,

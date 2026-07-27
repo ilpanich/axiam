@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`EmailVerificationTokenRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::email_verification::{
     CreateEmailVerificationToken, EmailVerificationToken,
 };
@@ -98,7 +99,7 @@ impl<C: Connection> EmailVerificationTokenRepository
         &self,
         input: CreateEmailVerificationToken,
     ) -> AxiamResult<EmailVerificationToken> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
 
         let result = self

@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`PasswordHistoryRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry};
 use axiam_core::repository::PasswordHistoryRepository;
 use chrono::{DateTime, Utc};
@@ -74,7 +75,7 @@ impl<C: Connection> SurrealPasswordHistoryRepository<C> {
 
 impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryRepository<C> {
     async fn create(&self, input: CreatePasswordHistoryEntry) -> AxiamResult<PasswordHistoryEntry> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
 
         let result = self

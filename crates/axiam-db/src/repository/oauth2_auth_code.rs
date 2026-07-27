@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`AuthorizationCodeRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{AuthorizationCode, CreateAuthorizationCode};
 use axiam_core::repository::AuthorizationCodeRepository;
 use chrono::{DateTime, Utc};
@@ -84,7 +85,7 @@ impl<C: Connection> SurrealAuthorizationCodeRepository<C> {
 
 impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepository<C> {
     async fn create(&self, input: CreateAuthorizationCode) -> AxiamResult<AuthorizationCode> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
 
         let result = self

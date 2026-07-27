@@ -791,6 +791,8 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         let override_cfg = self.get_tenant_override(tenant_id).await?;
         let effective = match override_cfg {
             None => org_cfg,
+            // Not `new_id()`: the merged view is computed, never persisted, so
+            // this id names no record and gains nothing from being sortable.
             Some(ov) => axiam_core::models::email::effective_email_config(
                 &org_cfg,
                 &ov,

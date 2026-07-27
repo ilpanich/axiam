@@ -114,7 +114,19 @@ k6_file() { find "$1" -name '*.k6.json' -print -quit 2>/dev/null; }
 
 # Continuous telemetry: per-container CPU/mem AND RabbitMQ queue depth, 1 Hz.
 # The queue depth is what distinguishes the "audit backlog" hypothesis (G1).
-sampler_start() { # $1=csv  -> echoes the pid
+#
+# The PID comes back in the global SAMPLER_PID rather than on stdout, and it is
+# deliberately NOT called as `pid=$(sampler_start ...)`. Command substitution
+# reads its child's stdout until EOF, and this function backgrounds a subshell
+# that never exits — the subshell inherits the substitution pipe as fd 1 and
+# holds it open forever, so EOF never arrives and the caller blocks in read()
+# for good. Worse, an async command in a non-interactive shell has SIGINT set
+# to ignore (POSIX, job control off), so the sampler survives Ctrl-C while the
+# parent stays blocked on it: the run becomes uninterruptible and only SIGTERM
+# ends it. Keeping the PID off stdout also makes the sampler a direct child of
+# this shell, so `wait` in sampler_stop actually reaps it.
+SAMPLER_PID=""
+sampler_start() { # $1=csv  -> sets SAMPLER_PID
   local out=$1
   echo "epoch_s,container,cpu_cores,mem_mib,mq_messages" > "$out"
   (
@@ -137,11 +149,40 @@ sampler_start() { # $1=csv  -> echoes the pid
       [ -n "$depth" ] && printf '%s,%s,,,%s\n' "$(date +%s)" "$C_MQ-queues" "$depth" >> "$out"
       sleep 1
     done
-  ) &
-  echo $!
+  ) >/dev/null 2>&1 &
+  SAMPLER_PID=$!
 }
 
-sampler_stop() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+sampler_stop() { # $1=pid
+  [ -n "${1:-}" ] || return 0
+  kill "$1" 2>/dev/null || true
+  # The subshell's in-flight `sleep` / `docker exec` child outlives the kill;
+  # take the whole family down so nothing keeps writing telemetry.csv.
+  pkill -P "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+# Cleanup must be ARMED BEFORE the first long-running child of a task starts,
+# not after — a trap installed on the line below a hang never runs at all, which
+# is how interrupted G1 tasks used to leave their bench containers up. INT/TERM
+# are trapped alongside EXIT so Ctrl-C tears the stack down instead of orphaning
+# it.
+CLEANUP_TARGET=""
+cleanup() {
+  local rc=$?
+  trap - EXIT INT TERM
+  if [ -n "${SAMPLER_PID:-}" ]; then sampler_stop "$SAMPLER_PID"; SAMPLER_PID=""; fi
+  if [ -n "$CLEANUP_TARGET" ]; then bench_down "$CLEANUP_TARGET"; CLEANUP_TARGET=""; fi
+  return $rc
+}
+arm_cleanup() { # $1=target to bench-down on the way out
+  CLEANUP_TARGET=$1
+  # `|| true` keeps `set -e` from aborting cleanup half-way when the task is
+  # dying on a non-zero status — teardown must always run to completion.
+  trap 'cleanup || true; exit 130' INT TERM
+  trap 'cleanup || true' EXIT
+}
+disarm_cleanup() { trap - EXIT INT TERM; CLEANUP_TARGET=""; }
 
 # Mean CPU of one container over a time range in the sampler CSV.
 cpu_mean() { # $1=csv $2=container-substring [$3=from_epoch] [$4=to_epoch]
@@ -200,10 +241,10 @@ task_g1_timeline() {
   export BENCH_SETTLE=0
   export BENCH_WARMUP=5s BENCH_DURATION=${dur}s BENCH_VUS=${G1_VUS:-50}
 
+  arm_cleanup axiam
   bench_up_seed axiam
   local t0; t0=$(date +%s)
-  local tel=$out/telemetry.csv pid; pid=$(sampler_start "$tel")
-  trap 'sampler_stop "$pid"; bench_down axiam' EXIT
+  local tel=$out/telemetry.csv; sampler_start "$tel"
 
   s "Probe: immediately after \`bench-seed\`, run ${iters} short authz_check_rest cells"
   s "(${dur}s measured each, ${BENCH_VUS} VUs) and watch when throughput recovers."
@@ -231,7 +272,7 @@ task_g1_timeline() {
     fi
   done
 
-  sampler_stop "$pid"; trap - EXIT; bench_down axiam
+  sampler_stop "$SAMPLER_PID"; SAMPLER_PID=""; disarm_cleanup; bench_down axiam
   s
   s "## Verdict"
   if [ -n "$recovered_at" ]; then
@@ -253,9 +294,9 @@ task_g1_idle() {
   local wait_min=${G1_IDLE_MIN:-8}
   export BENCH_SETTLE=0 BENCH_WARMUP=5s BENCH_DURATION=${G1_CELL_SECS:-20}s BENCH_VUS=${G1_VUS:-50}
 
+  arm_cleanup axiam
   bench_up_seed axiam
-  local tel=$out/telemetry.csv pid; pid=$(sampler_start "$tel")
-  trap 'sampler_stop "$pid"; bench_down axiam' EXIT
+  local tel=$out/telemetry.csv; sampler_start "$tel"
 
   log "idling ${wait_min} min after seed with NO load (this is the whole experiment)"
   s "The stack is seeded, then left **completely idle** for ${wait_min} minutes before"
@@ -281,7 +322,7 @@ task_g1_idle() {
   local f2 thr2; f2=$(k6_file "$d2"); thr2=NA
   [ -n "$f2" ] && thr2=$(k6_stat "$f2" thr)
 
-  sampler_stop "$pid"; trap - EXIT; bench_down axiam
+  sampler_stop "$SAMPLER_PID"; SAMPLER_PID=""; disarm_cleanup; bench_down axiam
   sp "- first cell after ${wait_min} min idle: **${thr} ops/s** (p50 ${p50} ms, DB ${dbcpu} cores)"
   sp "- immediately following cell:          **${thr2} ops/s**"
   s
@@ -298,9 +339,9 @@ task_g1_isolate() {
   rm -rf "$out"; summary_open "$out" "G1 — server or datastore?"
   export BENCH_SETTLE=0 BENCH_WARMUP=5s BENCH_DURATION=${G1_CELL_SECS:-20}s BENCH_VUS=${G1_VUS:-50}
 
+  arm_cleanup axiam
   bench_up_seed axiam
-  local tel=$out/telemetry.csv pid; pid=$(sampler_start "$tel")
-  trap 'sampler_stop "$pid"; bench_down axiam' EXIT
+  local tel=$out/telemetry.csv; sampler_start "$tel"
 
   probe() { # $1=label -> prints thr
     local d=$out/$1
@@ -320,7 +361,7 @@ task_g1_isolate() {
   docker restart "$C_DB" >/dev/null; sleep 25
   c=$(probe after-db-restart);             sp "- after restarting the DATASTORE:   **${c} ops/s**"
 
-  sampler_stop "$pid"; trap - EXIT; bench_down axiam
+  sampler_stop "$SAMPLER_PID"; SAMPLER_PID=""; disarm_cleanup; bench_down axiam
   s
   s "## Verdict"
   s "- Clamp survives a server restart but clears on a datastore restart ⇒ the state is"
@@ -337,8 +378,8 @@ task_g1_dbdirect() {
   local out=$TASKS_ROOT/g1-dbdirect
   rm -rf "$out"; summary_open "$out" "G1 — does the clamp exist without AXIAM in the path?"
   export BENCH_SETTLE=0
+  arm_cleanup axiam
   bench_up_seed axiam
-  trap 'bench_down axiam' EXIT
 
   # Same query shape the authz hot path uses, issued straight at SurrealDB from an
   # ephemeral container on the bench network — no AXIAM server involved.
@@ -360,7 +401,7 @@ task_g1_dbdirect() {
     s "  --namespace axiam --database axiam --pretty \\"
     s "  --query 'SELECT count() FROM role_permission_grant GROUP ALL;'"
     s '```'
-    trap - EXIT; bench_down axiam; finish; return
+    disarm_cleanup; bench_down axiam; finish; return
   fi
   {
     echo "iteration,elapsed_ms"
@@ -380,7 +421,7 @@ task_g1_dbdirect() {
   s "  the TREND across rows, not the absolute value)."
   s "- A flat, slow trend that improves at the same minute the k6 cells recover ⇒ the"
   s "  serialization is inside SurrealDB."
-  trap - EXIT; bench_down axiam
+  disarm_cleanup; bench_down axiam
   finish
 }
 
@@ -802,7 +843,7 @@ Usage: ./run-improvement-tasks.sh <task>
 
   Task            Plan  Est.    What it answers
   --------------------------------------------------------------------------
-  g1-timeline     G1    ~15m    When does the post-seed window end? (run first)
+  g1-timeline     G1    ~25m    When does the post-seed window end? (run first)
   g1-idle         G1    ~15m    Is it time-based or traffic-based?
   g1-isolate      G1    ~10m    Does it live in the server or the datastore?
   g1-dbdirect     G1    ~5m     Is it visible with AXIAM out of the path?
@@ -817,6 +858,10 @@ Usage: ./run-improvement-tasks.sh <task>
   pack            —     ~1m     Build the shareable archive + list summaries
 
 Each task writes results/tasks/<task>/SUMMARY.md with its verdict.
+Estimates include bring-up + seed. g1-timeline is ~55s per iteration, so
+G1_ITERS=8 gives a ~12m first look; the default 20 iterations is ~25m.
+Ctrl-C at any point tears the bench stack down before exiting.
+
 Knobs: G1_ITERS, G1_CELL_SECS, G1_VUS, G1_IDLE_MIN, G3_REPEAT, G5_KEYSPACES,
 G10_LANGS. Order that matters: g1-* before g3/g8 (they need the settle gate to
 be trustworthy), g2-verify after the G2 code lands.

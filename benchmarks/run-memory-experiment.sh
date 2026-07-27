@@ -64,13 +64,48 @@ rss_mib() {
 }
 
 # Background sampler: appends "epoch_s,mem_mib" until the stopfile appears.
-start_sampler() { # $1=csv $2=stopfile
+#
+# The PID comes back in the global SAMPLER_PID, never on stdout: called as
+# `pid=$(start_sampler ...)` the backgrounded subshell inherits the command
+# substitution's pipe as fd 1 and — with the stopfile not yet created — holds it
+# open indefinitely, so the caller blocks in read() waiting for an EOF that
+# cannot arrive. Ctrl-C does not recover it either, because an async command in
+# a non-interactive shell has SIGINT set to ignore. Same defect as the G1
+# telemetry sampler in run-improvement-tasks.sh.
+SAMPLER_PID=""
+start_sampler() { # $1=csv $2=stopfile  -> sets SAMPLER_PID
   ( while [ ! -e "$2" ]; do
       printf '%s,%s\n' "$(date +%s)" "$(rss_mib)" >> "$1"
       sleep "$SAMPLE_SECS"
-    done ) &
-  echo $!
+    done ) >/dev/null 2>&1 &
+  SAMPLER_PID=$!
 }
+
+# Interrupt safety: a variant run holds a bench stack up for 10+ minutes, so
+# Ctrl-C must stop the sampler and tear the stack down rather than orphan both.
+STOPFILE=""
+cleanup() {
+  local rc=$?
+  trap - EXIT INT TERM
+  if [ -n "$STOPFILE" ]; then touch "$STOPFILE" 2>/dev/null || true; STOPFILE=""; fi
+  if [ -n "${SAMPLER_PID:-}" ]; then
+    kill "$SAMPLER_PID" 2>/dev/null || true
+    pkill -P "$SAMPLER_PID" 2>/dev/null || true
+    wait "$SAMPLER_PID" 2>/dev/null || true
+    SAMPLER_PID=""
+  fi
+  # Only reached when a variant did NOT finish normally (the clean path disarms
+  # first), so announce the teardown — bench-down is silenced here.
+  echo "[d9] interrupted — tearing down the bench stack" >&2
+  just target=axiam bench-down >/dev/null 2>&1 || true
+  return $rc
+}
+arm_cleanup() { # $1=stopfile
+  STOPFILE=$1
+  trap 'cleanup || true; exit 130' INT TERM
+  trap 'cleanup || true' EXIT
+}
+disarm_cleanup() { trap - EXIT INT TERM; STOPFILE=""; }
 
 mark_phase() { # $1=phases.csv $2=phase-name
   printf '%s,%s\n' "$(date +%s)" "$2" >> "$1"
@@ -114,13 +149,11 @@ run_variant() { # $1=variant(a|b) $2=tag $3=resultsdir
   echo "[d9] === variant $variant ($tag) → $outdir ==="
   export BENCH_AXIAM_IMAGE=$tag
   export BENCH_RESULTS_DIR=$outdir
+  arm_cleanup "$stopfile"
   just target=axiam bench-up
   just target=axiam bench-seed
 
-  local sampler_pid
-  sampler_pid=$(start_sampler "$rss_csv" "$stopfile")
-  # shellcheck disable=SC2064
-  trap "touch '$stopfile'; wait $sampler_pid 2>/dev/null || true" RETURN
+  start_sampler "$rss_csv" "$stopfile"
 
   # 1. idle baseline (~60 s post-seed; the note expects ~90–130 MiB)
   mark_phase "$phases" baseline
@@ -139,8 +172,8 @@ run_variant() { # $1=variant(a|b) $2=tag $3=resultsdir
   sleep $(( WATCH_MIN * 60 ))
   mark_phase "$phases" end
 
-  touch "$stopfile"; wait "$sampler_pid" 2>/dev/null || true
-  trap - RETURN
+  touch "$stopfile"; wait "$SAMPLER_PID" 2>/dev/null || true; SAMPLER_PID=""
+  disarm_cleanup
   just target=axiam bench-down
   unset BENCH_AXIAM_IMAGE BENCH_RESULTS_DIR
   echo "[d9] variant $variant done"

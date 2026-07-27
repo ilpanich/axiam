@@ -168,21 +168,32 @@ sampler_stop() { # $1=pid
 # are trapped alongside EXIT so Ctrl-C tears the stack down instead of orphaning
 # it.
 CLEANUP_TARGET=""
+CLEANUP_PROFILE=""
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   if [ -n "${SAMPLER_PID:-}" ]; then sampler_stop "$SAMPLER_PID"; SAMPLER_PID=""; fi
-  if [ -n "$CLEANUP_TARGET" ]; then bench_down "$CLEANUP_TARGET"; CLEANUP_TARGET=""; fi
+  if [ -n "$CLEANUP_TARGET" ]; then
+    # Only reached when a task did NOT finish normally (the clean paths disarm
+    # first), so say so — bench_down itself is silent.
+    warn "interrupted — tearing down the $CLEANUP_TARGET stack"
+    bench_down "$CLEANUP_TARGET" "$CLEANUP_PROFILE"
+    CLEANUP_TARGET=""; CLEANUP_PROFILE=""
+  fi
   return $rc
 }
-arm_cleanup() { # $1=target to bench-down on the way out
+# Re-arming is cheap and idempotent: tasks that cycle several stacks (g3/g4/g5/
+# g8) call this again before each bench_up_seed so the trap always names the
+# stack that is actually up. An empty profile falls back to bench_down's default.
+arm_cleanup() { # $1=target [$2=profile]
   CLEANUP_TARGET=$1
+  CLEANUP_PROFILE=${2:-}
   # `|| true` keeps `set -e` from aborting cleanup half-way when the task is
   # dying on a non-zero status — teardown must always run to completion.
   trap 'cleanup || true; exit 130' INT TERM
   trap 'cleanup || true' EXIT
 }
-disarm_cleanup() { trap - EXIT INT TERM; CLEANUP_TARGET=""; }
+disarm_cleanup() { trap - EXIT INT TERM; CLEANUP_TARGET=""; CLEANUP_PROFILE=""; }
 
 # Mean CPU of one container over a time range in the sampler CSV.
 cpu_mean() { # $1=csv $2=container-substring [$3=from_epoch] [$4=to_epoch]
@@ -436,6 +447,7 @@ task_g2_verify() {
   export BENCH_WARMUP=5s BENCH_DURATION=30s
 
   log "running a 2-repeat mini matrix (one target, one profile) to exercise the new machinery"
+  arm_cleanup axiam p0-plaintext
   just target=axiam profiles="p0-plaintext" targets="axiam" repeat=2 bench-matrix || \
     warn "mini matrix returned non-zero — inspect the output above"
 
@@ -482,7 +494,7 @@ PY
   s "Acceptance (plan G2): every cell carries the three new fields, the first-executed"
   s "scenario differs between run-1 and run-2, and no secret value appears in \`axiam_env\`."
   unset BENCH_RESULTS_DIR
-  bench_down axiam
+  disarm_cleanup; bench_down axiam
   finish
 }
 
@@ -505,6 +517,7 @@ task_g3_batch() {
 
   for strategy in concurrent coalesced; do
     export AXIAM__AUTHZ__BATCH_STRATEGY=$strategy
+    arm_cleanup axiam p0-plaintext
     bench_up_seed axiam
     # Belt and braces: even with the settle gate, burn one throwaway cell.
     BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam p0-plaintext authz_check_rest.js \
@@ -517,7 +530,7 @@ task_g3_batch() {
         [ -n "$f" ] && s "| $strategy | $sc | $r | $(k6_stat "$f" thr) | $(k6_stat "$f" p50) | $(k6_stat "$f" p95) |"
       done
     done
-    bench_down axiam
+    disarm_cleanup; bench_down axiam
     unset AXIAM__AUTHZ__BATCH_STRATEGY
   done
 
@@ -566,11 +579,12 @@ task_g4_refresh() {
   s "| target | thr (ops/s) | p50 (ms) | bench_fallback | HTTP reqs / iteration | verdict |"
   s "|---|---|---|---|---|---|"
   for target in axiam keycloak; do
+    arm_cleanup "$target" p0-plaintext
     bench_up_seed "$target"
     # A control cell: client_credentials, so we can check refresh is NOT ~½ of it.
     cell "$target" p0-plaintext oauth2_client_credentials.js "$out/$target/cc" >/dev/null 2>&1 || true
     cell "$target" p0-plaintext token_refresh.js "$out/$target/refresh" >/dev/null 2>&1 || true
-    bench_down "$target"
+    disarm_cleanup; bench_down "$target"
     local fr; fr=$(k6_file "$out/$target/refresh")
     if [ -z "$fr" ]; then s "| $target | — | — | — | — | ❌ cell did not run |"; continue; fi
     local thr p50 fb rpi verdict
@@ -615,6 +629,7 @@ task_g5_cache_sweep() {
 
   for enabled in false true; do
     export AXIAM__AUTHZ__DECISION_CACHE_ENABLED=$enabled
+    arm_cleanup axiam p0-plaintext
     bench_up_seed axiam
     BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam p0-plaintext authz_check_rest.js \
       "$out/warmup-$enabled" >/dev/null 2>&1 || true
@@ -638,7 +653,7 @@ PY
 )
       [ -n "$f" ] && s "| $enabled | $k | $(k6_stat "$f" thr) | $(k6_stat "$f" p50) | $mem |"
     done
-    bench_down axiam
+    disarm_cleanup; bench_down axiam
     unset AXIAM__AUTHZ__DECISION_CACHE_ENABLED
   done
 
@@ -681,12 +696,13 @@ task_g8_tls_h1() {
   run_cc_cell() { # $1=label $2=profile [$3=BENCH_NGINX_CONF]
     local label=$1 profile=$2 nginx=${3:-}
     [ -n "$nginx" ] && export BENCH_NGINX_CONF=$nginx || unset BENCH_NGINX_CONF
+    arm_cleanup axiam "$profile"
     bench_up_seed axiam "$profile"
     BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam "$profile" authz_check_rest.js \
       "$out/$label/warmup" >/dev/null 2>&1 || true
     cell axiam "$profile" oauth2_client_credentials.js "$out/$label/cc" >/dev/null 2>&1 || true
     cell axiam "$profile" token_refresh.js "$out/$label/refresh" >/dev/null 2>&1 || true
-    bench_down axiam "$profile"
+    disarm_cleanup; bench_down axiam "$profile"
     unset BENCH_NGINX_CONF
   }
 
@@ -738,11 +754,12 @@ task_g9_rlprod() {
   local out=$TASKS_ROOT/g9-rlprod
   rm -rf "$out"; summary_open "$out" "G9 — metric coherence under a 429 storm"
   export BENCH_RESULTS_DIR=$out
+  arm_cleanup axiam p0-plaintext
   bench_up_seed axiam p0-plaintext rl=prod
   for sc in oauth2_client_credentials token_introspection authz_check_rest; do
     cell axiam p0-plaintext "$sc.js" "$out/$sc" >/dev/null 2>&1 || true
   done
-  bench_down axiam
+  disarm_cleanup; bench_down axiam
   unset BENCH_RESULTS_DIR
 
   s "With the production per-IP posture active, nearly every request is a 429."
@@ -797,6 +814,7 @@ task_g10_sdk() {
   s "\`status: \"ok\"\`, twice in a row, against a seeded p0 target (plan G10 / E1.1)."
   s "Each language's sibling repo must be checked out next to this workspace."
   s
+  arm_cleanup axiam p0-plaintext
   bench_up_seed axiam
   s "| sdk | attempt 1 | attempt 2 | notes |"
   s "|---|---|---|---|"
@@ -812,7 +830,7 @@ task_g10_sdk() {
     grep -qi "no such file\|not found\|cannot find" "$d/attempt-1.log" && note="sibling SDK repo missing?"
     s "| $lang | ${st1:-$r1} | ${st2:-$r2} | $note |"
   done
-  bench_down axiam
+  disarm_cleanup; bench_down axiam
   s
   s "For every non-\`ok\` row, fix per that language's \`sdk/<lang>/TODO.md\` and re-run"
   s "just that language: \`G10_LANGS=python ./run-improvement-tasks.sh g10-sdk\`."

@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`OAuth2ClientRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client};
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -88,7 +89,7 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
 
 impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> {
     async fn create(&self, input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
 

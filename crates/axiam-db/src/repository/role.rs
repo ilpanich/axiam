@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`RoleRepository`].
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::id::new_id;
 use axiam_core::models::role::{CreateRole, Role, RoleAssignment, UpdateRole};
 use axiam_core::repository::{PaginatedResult, Pagination, RoleRepository};
 use chrono::{DateTime, Utc};
@@ -120,7 +121,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
 
 impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
     async fn create(&self, input: CreateRole) -> AxiamResult<Role> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
 

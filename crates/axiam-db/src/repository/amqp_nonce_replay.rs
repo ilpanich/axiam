@@ -6,6 +6,7 @@
 //! reject replayed messages (NEW-4). Mirrors [`super::saml_replay`].
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::id::new_id;
 use axiam_core::repository::AmqpNonceRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::{Connection, Surreal};
@@ -47,7 +48,7 @@ impl<C: Connection> AmqpNonceRepository for SurrealAmqpNonceRepository<C> {
         nonce: Uuid,
         expires_at: DateTime<Utc>,
     ) -> AxiamResult<()> {
-        let row_id = Uuid::new_v4().to_string();
+        let row_id = new_id().to_string();
 
         let result = self
             .db

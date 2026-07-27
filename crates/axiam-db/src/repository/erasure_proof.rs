@@ -4,6 +4,7 @@
 //! erasure occurred. They contain no PII — only a pseudonym and timestamp.
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{CreateErasureProof, ErasureProof};
 use axiam_core::repository::ErasureProofRepository;
 use chrono::{DateTime, Utc};
@@ -49,7 +50,7 @@ impl<C: Connection> SurrealErasureProofRepository<C> {
 
 impl<C: Connection> ErasureProofRepository for SurrealErasureProofRepository<C> {
     async fn create(&self, input: CreateErasureProof) -> AxiamResult<ErasureProof> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let result = self
             .db
             .query(

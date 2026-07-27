@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`PermissionRepository`].
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::id::new_id;
 use axiam_core::models::permission::{
     CreatePermission, Permission, PermissionGrant, UpdatePermission,
 };
@@ -138,7 +139,7 @@ impl<C: Connection> SurrealPermissionRepository<C> {
 
 impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
     async fn create(&self, input: CreatePermission) -> AxiamResult<Permission> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
 

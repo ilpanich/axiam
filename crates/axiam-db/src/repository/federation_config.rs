@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`FederationConfigRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::federation::{
     CreateFederationConfig, FederationConfig, FederationProtocol, UpdateFederationConfig,
 };
@@ -202,7 +203,7 @@ impl<C: Connection> SurrealFederationConfigRepository<C> {
 
 impl<C: Connection> FederationConfigRepository for SurrealFederationConfigRepository<C> {
     async fn create(&self, input: CreateFederationConfig) -> AxiamResult<FederationConfig> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let protocol = protocol_to_string(&input.protocol);
         let attribute_map = input.attribute_map.unwrap_or_else(|| serde_json::json!({}));
 

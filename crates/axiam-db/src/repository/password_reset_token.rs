@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`PasswordResetTokenRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::password_reset::{CreatePasswordResetToken, PasswordResetToken};
 use axiam_core::repository::PasswordResetTokenRepository;
 use chrono::{DateTime, Utc};
@@ -91,7 +92,7 @@ impl<C: Connection> SurrealPasswordResetTokenRepository<C> {
 
 impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRepository<C> {
     async fn create(&self, input: CreatePasswordResetToken) -> AxiamResult<PasswordResetToken> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
 
         let result = self

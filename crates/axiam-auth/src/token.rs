@@ -165,6 +165,8 @@ pub fn issue_client_credentials_token(
         iss: config.effective_issuer().to_owned(),
         iat: now,
         exp: now + config.access_token_lifetime_secs as i64,
+        // Not `new_id()`: a jti is a uniqueness marker inside an already-signed
+        // JWT, not a record id, so key locality is irrelevant here.
         jti: Uuid::new_v4().to_string(),
         aud: Some(AUD_M2M.to_string()),
         scope,

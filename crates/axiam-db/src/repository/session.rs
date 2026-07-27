@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`SessionRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::session::{CreateSession, Session};
 use axiam_core::repository::SessionRepository;
 use chrono::{DateTime, Utc};
@@ -96,7 +97,7 @@ impl<C: Connection> SurrealSessionRepository<C> {
 
 impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
     async fn create(&self, input: CreateSession) -> AxiamResult<Session> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
 
         let result = self

@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`ResourceRepository`].
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::id::new_id;
 use axiam_core::models::resource::{CreateResource, Resource, UpdateResource};
 use axiam_core::repository::{PaginatedResult, Pagination, ResourceRepository};
 use chrono::{DateTime, Utc};
@@ -95,7 +96,7 @@ impl<C: Connection> SurrealResourceRepository<C> {
 
 impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
     async fn create(&self, input: CreateResource) -> AxiamResult<Resource> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
         let parent_id_str = input.parent_id.map(|p| p.to_string());

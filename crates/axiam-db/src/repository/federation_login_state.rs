@@ -6,6 +6,7 @@
 //! caller check and can be swept by `cleanup_expired`.
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::id::new_id;
 use axiam_core::repository::{FederationLoginState, FederationLoginStateRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::{Connection, Surreal};
@@ -50,7 +51,7 @@ impl<C: Connection> SurrealFederationLoginStateRepository<C> {
 
 impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginStateRepository<C> {
     async fn insert(&self, row: &FederationLoginState) -> AxiamResult<()> {
-        let row_id = Uuid::new_v4().to_string();
+        let row_id = new_id().to_string();
 
         let result = self
             .db

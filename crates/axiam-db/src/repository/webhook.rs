@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`WebhookRepository`].
 
 use axiam_core::error::AxiamResult;
+use axiam_core::id::new_id;
 use axiam_core::models::webhook::{CreateWebhook, RetryPolicy, UpdateWebhook, Webhook};
 use axiam_core::repository::{PaginatedResult, Pagination, WebhookRepository};
 use chrono::{DateTime, Utc};
@@ -108,7 +109,7 @@ impl<C: Connection> SurrealWebhookRepository<C> {
 
 impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
     async fn create(&self, input: CreateWebhook) -> AxiamResult<Webhook> {
-        let id = Uuid::new_v4();
+        let id = new_id();
         let retry = input.retry_policy.unwrap_or_default();
         let result = self
             .db

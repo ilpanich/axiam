@@ -184,6 +184,16 @@ wins.
 - `AuthzError` MUST carry a `message` field and SHOULD carry the denied `action` and `resource_id` if available from the response body.
 - `NetworkError` MUST carry the underlying OS/transport error as a `cause` (or equivalent chained exception).
 - `OAuthProtocolError`, being an `AuthError` sub-type, MUST satisfy the `AuthError` rule above: its `message` field MUST be present and MUST be `"<error>: <error_description>"`, built from the two `OAuth2ErrorResponse` fields it also exposes individually.
+  - Clarified in contract 1.5: the exactness requirement is on the `message` **field/property**.
+    A language whose error-*rendering* convention prefixes that field (Go `Error()` →
+    `"authentication failed: <message>"`, Rust `Display` via `#[error("authentication failed:
+    {message}")]`) MAY keep the prefix in the rendered string, provided the field itself is
+    exactly `"<error>: <error_description>"`.
+  - Also clarified in contract 1.5: the two individually-exposed field names follow each
+    language's **public-API casing** (`error_description` → `errorDescription` /
+    `ErrorDescription`). Go exports the first as `ErrorCode` rather than `Error`, because a
+    struct field named `Error` would collide with the promoted `Error()` method that satisfies
+    the `error` interface; that rename is conformant.
 - Errors MUST NOT expose raw token strings in their messages, context fields, or stack traces.
 
 ---
@@ -422,10 +432,36 @@ Rules (normative):
 
 All token-carrying fields in all SDKs MUST suppress the token value from any debug, logging, or display output (T-15-09).
 
-**Required behavior:**
-- The raw token string MUST NOT be exposed via any public getter API.
-- Debug/logging representations (`Debug`, `Display` in Rust; `toString`, JSON serialization in JS/TS; `__repr__`, `__str__` in Python; `toString` in Java/Go; `ToString` in C#; `__toString` in PHP) MUST emit a redacted placeholder such as `[SENSITIVE]` or `Sensitive<String>`.
-- SDK internal code THAT NEEDS the raw value accesses it via a crate/module-private method or friend function, not a public API.
+**Required behavior** (restructured in contract 1.5 — see the rationale note below):
+
+1. **Redaction — unconditional MUST.** Debug/logging representations (`Debug`, `Display` in
+   Rust; `toString`, JSON serialization in JS/TS; `__repr__`, `__str__` in Python; `toString`
+   in Java/Go; `ToString` in C#; `__toString` in PHP) MUST emit a redacted placeholder such as
+   `[SENSITIVE]` or `Sensitive<String>`. This covers **every** stringification and
+   structured-serialization sink the language offers, including the ones a naive wrapper
+   misses: Go `%#v`/`fmt.Formatter`/`MarshalJSON`, Node `util.inspect`, Java and C#
+   compiler-generated `record` `toString`, Jackson / `System.Text.Json` /
+   `kotlinx.serialization` writers, and PHP `var_dump`/`print_r`/`var_export`. No other
+   section of this contract relaxes this rule.
+2. **No implicit reachability — MUST.** The raw value MUST NOT be reachable without an
+   explicit, named call: no public field or property, no `Deref`/`AsRef`/implicit conversion
+   operator, no auto-unboxing accessor, and no inherited structural equality that compares the
+   raw value. (A Go named-type conversion — `string(s)` on a `type Sensitive string` — is an
+   *explicit* conversion and is accepted as that language's equivalent of calling the
+   accessor; it is the shape the Go row below prescribes.)
+3. **One explicit accessor — MAY, and RECOMMENDED for §12.** An SDK MAY expose exactly one
+   clearly-named public accessor (`expose`, `reveal`, `get_secret_value`, `Expose`, …)
+   returning the raw value. Where the SDK implements
+   [§12](#§12-oidc--sso-relying-party-helpers) this accessor is RECOMMENDED, because §12 hands
+   `access_token`/`refresh_token`/`id_token` to the **calling application** in the
+   `/oauth2/token` response body rather than to a `Set-Cookie` jar, and the application must be
+   able to read them in order to persist, forward, or later revoke them. An SDK whose accessor
+   stays module-private remains conformant to §7 — but the §12 token set it returns is then
+   unreadable by its own callers, so it SHOULD widen the accessor. Widening a module-private
+   accessor to public is a non-breaking, additive change.
+4. **Point-of-use discipline — MUST.** SDK internal code that needs the raw value calls that
+   accessor (or a module-private equivalent) explicitly, at the point of use, and MUST NOT pass
+   the returned value to any log/trace/serialize sink.
 
 Per-language implementation guidance:
 | Language   | Mechanism                                                         |
@@ -441,6 +477,25 @@ Per-language implementation guidance:
 | Swift      | `struct Sensitive<T>: CustomStringConvertible` whose `description` returns `"[SENSITIVE]"`; not `Encodable` in a way that emits the value |
 | C          | Opaque `axiam_sensitive_t` handle; there is no public accessor returning the raw string, and it is never written to logs/`printf` output |
 | C++        | `class Sensitive<T>` with `operator<<`/`to_string` returning `"[SENSITIVE]"`; raw value only via a private/friend accessor |
+
+The **C** and **C++** rows keep their "no public accessor" wording deliberately: both SDKs defer
+§12 in its entirety ([§12.6](#§126-deferred-sdks-swift-c-c)), so no token material is ever handed
+to their callers outside the §4 cookie jar and rule 3 above has nothing to enable there. Should a
+later §12 port land in either, rule 3 applies to it unchanged.
+
+**Why §7 reads this way (contract 1.5, non-breaking clarification).** Contract 1.4's §7 said
+flatly that "the raw token string MUST NOT be exposed via any public getter API". That was written
+when every token lived only in the §1/§4 `httpOnly` cookie jar, where no caller ever needed one.
+§12 changed the premise: it returns tokens *to* the caller. Read literally, §7 and §12 were
+mutually unsatisfiable, and the eight implementing SDKs resolved it three different ways —
+accessor already public (TypeScript `expose()`, Python `SecretStr.get_secret_value()`, PHP
+`reveal()`, Go's named-type conversion), accessor widened for §12 (Rust `Sensitive::expose()`
+`pub(crate)` → `pub`; C# a new public `Sensitive<T>.Expose()`), or accessor left module-private
+(Java package-private `expose()`, Kotlin `internal expose()`). The rules above separate the
+non-negotiable half — redaction, rule 1 — from the half §12 legitimately needs — an explicit
+accessor, rule 3 — so that all three resolutions are conformant. The point of the wrapper was
+never to make reading a token impossible; it is to make *leaking* one require a deliberate,
+greppable call.
 
 **The token MUST NOT appear in:**
 - Log files (structured or unstructured)
@@ -536,8 +591,29 @@ All SDKs that manage token state (access + refresh tokens) MUST implement a sing
 2. **Result sharing.** After the single in-flight refresh resolves (success or failure), all waiting requesters receive the outcome simultaneously:
    - On success: all waiting requests are retried with the new tokens.
    - On failure: all waiting requests fail with `AuthError`.
+
+   **Observable requirement (clarified in contract 1.5; not a new obligation).** A burst of N
+   concurrent refresh-triggering callers MUST produce exactly **one** refresh wire call, and all
+   N callers MUST receive *that one call's* outcome. Merely serializing the N callers behind a
+   mutex so that each then issues its **own** refresh call is **not** conformant: AXIAM refresh
+   tokens are opaque, server-stored, and **single-use with rotation**, so callers 2..N would
+   replay an already-consumed token and fail with `invalid_grant`. "Exactly one in-flight"
+   (rule 1) and "result sharing" (rule 2) are two halves of one requirement, not alternatives.
 3. **No retry on refresh failure.** A 401 response to the refresh call itself is `AuthError` — the user must re-authenticate. The SDK MUST NOT attempt to refresh again (no retry loop).
 4. **Thread/concurrency safety.** The guard MUST be safe across concurrent goroutines (Go), async tasks (Rust/TS/Python), threads (Java/C#/PHP-Swoole).
+5. **Mechanism is free; a dedicated guard instance is permitted** (added in contract 1.5).
+   Rules 1–4 constrain observable behaviour only. The per-language table below is guidance, not
+   a mandate: an own coalescer holding a shared future/promise/`Deferred`/`Task`, a channel
+   broadcast, a condition variable publishing a shared result, and a semaphore guarding a cached
+   task are all conformant, provided rule 2's observable requirement holds. An operation that
+   needs its own guard because the shared guard's API is specialized to a different token
+   namespace — e.g. the §1 cookie-session access-token freshness comparison, which is
+   meaningless for an OAuth2 `refresh_token` grant — MAY use a **dedicated instance of an
+   equally strong mechanism**; it MUST NOT substitute a weaker one. Where an implementation
+   composes an operation-specific coalescer *with* the shared guard, a **bounded** (never
+   unbounded) wait to acquire the shared guard is permitted, and exhausting that bound MUST
+   raise `AuthError` rather than return a stale token set; the specific bound is an
+   implementation detail and is deliberately **not** part of this contract.
 
 Per-language implementation guidance:
 | Language   | Mechanism                                                         |
@@ -554,7 +630,13 @@ Per-language implementation guidance:
 | C          | `pthread_mutex_t` guarding an in-flight flag + condition variable; waiters block until the single refresh completes |
 | C++        | `std::mutex` + `std::shared_future<TokenPair>` held under the lock   |
 
-**Test requirement:** Each SDK MUST include a test that fires N (≥5) concurrent requests against an expired token and asserts exactly 1 refresh call is made. (See Phase 18 success criterion #2 for Go reference.)
+**Test requirement:** Each SDK MUST include a test that fires N (≥5) concurrent requests against
+an expired token and asserts exactly 1 refresh call is made. (See Phase 18 success criterion #2
+for Go reference.) Clarified in contract 1.5: the test MUST also assert that **all N callers
+received that one call's outcome** (rule 2), and the requirement applies **per refresh
+operation** — an SDK that ships both the §1 `refresh` and the
+[§12](#§12-oidc--sso-relying-party-helpers) `oidc_refresh` needs the test for each, because they
+run on different token namespaces and (per rule 5) may use different guard instances.
 
 ---
 
@@ -722,6 +804,26 @@ verifier, at the `jwks_uri` the discovery document advertises.
    require `?tenant_id=<uuid>` because the client is authenticating *itself* there. The §5
    `X-Tenant-ID` header is still emitted on these requests (§5 rule 2 is unconditional) — the
    header and the query parameter are **not** substitutes for one another.
+
+   **The header and the query parameter may legitimately disagree in form** (documented in
+   contract 1.5). §5 rule 2 emits `X-Tenant-ID` carrying whichever identifier the client was
+   constructed with, which may be a **slug**, while these three endpoints require a **UUID**
+   in `?tenant_id=`. A slug-configured client therefore sends a slug header alongside a UUID
+   query parameter on the same request. This is correct and accepted: the `/oauth2/*` handlers
+   are public paths that read the tenant **only** from the query parameter
+   (`crates/axiam-api-rest/src/handlers/oauth2.rs`, `web::Query<TenantQuery>`) and never
+   inspect `X-Tenant-ID`, so the header is inert there. It is still emitted because §5 rule 2
+   admits no exceptions and because request logging/tracing relies on it.
+
+   **Consequence — a slug-only client cannot call five of the nine operations.** A client
+   constructed with `tenant_slug` and with no prior login to resolve the UUID from cannot call
+   `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, or `revoke`: per
+   [§12.3](#§123-cross-cutting-rules-normative-identical-in-all-sdks) rule 4 the SDK MUST raise
+   its taxonomy error client-side rather than send a slug in `tenant_id`. Applications needing
+   those five operations SHOULD construct the client in UUID form, or pass `tenant_id`
+   explicitly per call. `oidc_discover`, `oidc_begin`, `sso_start`, and `sso_complete` are
+   unaffected — the first two touch no tenant-scoped endpoint, and the federation pair carries
+   slug forms in its JSON body (§5.1).
 3. **Client authentication is `client_secret_post`.** `client_id`/`client_secret` travel in the
    form body. The server documents no HTTP Basic (`client_secret_basic`) alternative, so SDKs
    MUST NOT send an `Authorization: Basic` header to `/oauth2/*`.
@@ -729,8 +831,19 @@ verifier, at the `jwks_uri` the discovery document advertises.
    and `RevokeRequest` both mark `token`, `client_id`, and `client_secret` as required
    (non-nullable); `token_type_hint` is optional. A public client cannot call them.
 5. **`revoke` returns no body.** Per RFC 7009 the server answers `200` for unknown, expired,
-   or already-revoked tokens. `revoke` therefore returns void/`Unit`/`nil` and MUST treat any
-   `200` as success. Only `401` (client authentication failed) is an error.
+   or already-revoked tokens. `revoke` therefore returns void/`Unit`/`nil` and MUST treat a
+   `200` as success — including for a token it has never issued (idempotence is the point of
+   RFC 7009), and every implementing SDK MUST carry a test for that idempotent case.
+
+   **Corrected in contract 1.5.** Contract 1.4 added "Only `401` (client authentication failed)
+   is an error", which contradicted the §2 `5xx → NetworkError` row and would have turned a
+   server failure into a silent success. The rule is: a `200` MUST be success; treating **any
+   other `2xx`** as success is permitted and RECOMMENDED (six of the eight implementing SDKs
+   accept any 2xx, which is what their HTTP clients report natively); a `5xx` MUST **not** be
+   treated as success and remains a `NetworkError` per §2; a `401` carrying an
+   `OAuth2ErrorResponse` body is an `OAuthProtocolError` per
+   [§12.3](#§123-cross-cutting-rules-normative-identical-in-all-sdks) rule 3. `revoke`
+   returning void does not make a server error a success.
 6. **`sso_complete` delivers the session as `Set-Cookie`.** `SsoLoginSuccessResponse` carries
    `user_id`, `session_id`, `expires_in`, and `redirect_uri` and **no token material**; the
    §4 cookie-jar requirement therefore applies verbatim, and an SDK without a persistent
@@ -764,9 +877,29 @@ further claims the server sends in a language-idiomatic open map — the ID toke
 set is not enumerated by `openapi.json` (the field is typed as an opaque string there), so SDKs
 MUST NOT reject unknown claims.
 
+**`AuthorizationRequest` carries no `redirect_uri` — the caller owns it** (documented in
+contract 1.5). The four fields above are the complete shape, and all eight implementing SDKs
+match it exactly. `oidc_exchange` must nevertheless replay the `redirect_uri` **byte-identically**
+(RFC 6749 §4.1.3), so the caller MUST remember it alongside `state`, `nonce`, and `code_verifier`
+between `oidc_begin` and `oidc_exchange` — this is a real footgun and is called out here
+deliberately. Where an SDK offers the optional `OidcStateStore`
+([§12.3](#§123-cross-cutting-rules-normative-identical-in-all-sdks) rule 1), the store **entry**
+does carry a `redirect_uri` field and is where every SDK's framework glue parks it. Adding
+`redirect_uri` to `AuthorizationRequest` itself is a candidate for a future revision; it is
+explicitly *not* part of contract 1.5, because doing so now would change a type all eight SDKs
+have already shipped.
+
 **`oidc_begin` inputs and construction (normative).** `oidc_begin` performs **no network I/O**
-— it takes an already-fetched `OidcConfiguration` (from `oidc_discover`), `client_id`,
-`redirect_uri`, and the requested scope, and returns `AuthorizationRequest`:
+— it takes an already-fetched `OidcConfiguration` (from `oidc_discover`), the `redirect_uri`, and
+the requested scope, and returns `AuthorizationRequest`. **`client_id` is not a per-call
+argument** (corrected in contract 1.5 — contract 1.4 listed it here in error): it comes from
+client configuration, because [§12.4](#§124-id-token-validation-checklist-normative-for-oidc_exchange)
+rule 4 must compare the ID token's `aud` against the *same* value and two sources could disagree.
+All eight implementing SDKs read it from client configuration. When no `client_id` is configured
+an SDK MUST fail fast with **no wire call** — either its §2 taxonomy error or its language's
+programming-error type is acceptable, since a missing client configuration is a deployment
+mistake, not an authentication outcome. Given that, the returned `AuthorizationRequest` is built
+as follows:
 
 1. `state` and `nonce` are independently generated from a cryptographically secure RNG, at
    least 16 bytes (128 bits) each — 32 bytes RECOMMENDED — encoded base64url **without**
@@ -798,8 +931,14 @@ MUST omit (rather than send empty/null) any optional field the caller did not su
 **`oidc_refresh` vs `refresh`.** `oidc_refresh` operates on an `OidcTokenSet` obtained from
 the OAuth2 token endpoint. It is a **distinct operation** from the §1 `refresh`, which drives
 the cookie/opaque-token session path at `POST /api/v1/auth/refresh` (§5.1). The two MUST NOT
-be merged, aliased, or made to fall back to one another. `oidc_refresh` MUST run under the §9
-single-flight refresh guard.
+be merged, aliased, or made to fall back to one another. `oidc_refresh` MUST be governed by a
+§9-conformant single-flight guard — including §9 rule 2's observable requirement (one wire call
+per burst, that one outcome shared with every concurrent caller) and §9's test requirement in its
+own right. Clarified in contract 1.5: §9 rule 5 permits a **dedicated guard instance** for the
+OAuth2 token namespace rather than literally reusing the §1 cookie-session guard object, and five
+of the eight implementing SDKs deliberately do exactly that because the §1 guard's API is
+specialized to comparing the cookie access token's freshness — a comparison with no meaning for a
+`refresh_token` grant. The mechanism is free; the observable behaviour is not.
 
 **`login_client_credentials` as a credential source.** After a successful
 `login_client_credentials` an SDK MAY adopt the returned `access_token` as the client's bearer
@@ -851,6 +990,16 @@ above; **C** snake_case with the mandatory `axiam_` prefix — `axiam_oidc_disco
 `axiam_sso_complete`. No login/auth/authz method names beyond this map and the §1 map are
 permitted in any SDK.
 
+**Which object hosts the nine methods** (added in contract 1.5 — §12 was previously silent). They
+SHOULD live directly on the SDK's existing client type, and do in seven of the eight implementing
+SDKs. An SDK MAY instead place them on a separate, additionally-exported host object where a
+**packaging constraint** requires it: the TypeScript SDK uses a Node-only `OidcClient` because its
+CI forbids `node:crypto` and `jose` from reaching the browser bundle, and §12 has no browser
+persona to serve (a browser relying party performs the redirect; it holds no `client_secret` and
+never calls `/oauth2/token`). The method **names** in the map above are fixed either way — only the
+host is free. An SDK that uses a separate host MUST say so in its README's §12 section, and MUST
+NOT split the nine across two hosts.
+
 ### §12.3 Cross-cutting rules (normative, identical in all SDKs)
 
 1. **Stateless by default.** `oidc_begin` and `oidc_exchange` MUST NOT store `state`, `nonce`,
@@ -861,7 +1010,14 @@ permitted in any SDK.
    where offered it MUST have a 10-minute TTL and a **single-use** `consume(state)` operation
    that returns the stored tuple and atomically deletes it (mirroring the server's
    `federation_login_state` semantics). The store MUST be opt-in: the core operations MUST
-   remain usable without one.
+   remain usable without one. Clarified in contract 1.5: a store **entry** carries `state`,
+   `nonce`, `code_verifier` (wrapped per rule 2), and `redirect_uri` — the last because
+   `oidc_exchange` must replay it byte-identically and `AuthorizationRequest` does not carry it
+   — plus, optionally, a caller-supplied `return_to`. The 10-minute TTL is a **maximum**: a
+   constructor-configurable TTL MUST be clamped down to it so no caller can exceed the
+   contract, while a shorter TTL (for tests, or a tighter deployment) is honoured. Expiry
+   sweeping MUST be **lazy** — performed on write and/or on a size query — and MUST NOT use a
+   background timer, thread, or task: a library must not keep its host process alive.
 2. **Sensitive wrapping (§7).** `access_token`, `refresh_token`, `id_token`, `client_secret`,
    and `code_verifier` MUST each be held behind the SDK's `Sensitive<T>` equivalent (§7). They
    MUST NOT appear in `Debug`/`toString`/`__repr__`/`ToString`/`String()` output, log records,
@@ -880,6 +1036,24 @@ permitted in any SDK.
    `token_expired`, or `nonce_mismatch` — matching the [§12.4](#§124-id-token-validation-checklist-normative-for-oidc_exchange)
    rule that failed. Per §2's construction rules, no error raised by this section may embed a
    token, client secret, or code verifier in its message or context fields.
+
+   **The seven reason codes are a closed vocabulary** (clarified in contract 1.5). No SDK may
+   add an eighth, so several distinct failures deliberately share one code, and the following
+   mappings are normative rather than incidental:
+   - `token_expired` is the code for **every** §12.4 rule-5 time failure — a past `exp`, an
+     **absent** `exp`, an absent or future `iat`, and a future `nbf` all report `token_expired`.
+     (There is no `token_not_yet_valid`, `iat_in_future`, or `missing_exp` code, and contract 1.4
+     enumerated three time conditions against a single code without saying so.)
+   - `unknown_kid` covers "the JOSE header carries no `kid` at all" as well as "no key matches
+     the `kid`", and a JWKS transport failure during the rule-2 re-fetch MAY surface as
+     `unknown_kid` rather than `invalid_signature`.
+   - `invalid_alg` covers a JOSE header that cannot be parsed or decoded at all, since the
+     algorithm cannot then be established.
+   - `invalid_signature` is the catch-all for any other verification failure, so no SDK needs to
+     invent a code for an unclassified case.
+
+   A future contract revision MAY widen the vocabulary; until then a caller needing finer
+   granularity reads the error message, not the code.
 4. **Tenant context (§5).** `oidc_exchange`, `oidc_refresh`, `login_client_credentials`,
    `introspect`, and `revoke` all require a `tenant_id` **UUID** for the query parameter. An SDK
    MUST accept it as an explicit argument, and MAY default to the client-level `tenant_id` when
@@ -901,9 +1075,25 @@ permitted in any SDK.
    unchanged, and §6.1 client identities apply if configured. The discovery cache MUST be keyed
    on the normalized **scheme + host + port** of the base URL used to fetch the document
    (lowercased scheme and host, default port made explicit), so a document fetched from one
-   origin can never be served for another — cross-issuer cache poisoning. The cache MUST NOT be
-   keyed on, or shared across, tenants, and MUST NOT be process-global unless the key includes
-   the origin as specified. TTL MUST be at least 5 minutes, MAY be configurable, and concurrent
+   origin can never be served for another — cross-issuer cache poisoning.
+
+   **Rewritten in contract 1.5** — contract 1.4 said the cache "MUST NOT be keyed on, or shared
+   across, tenants", which is self-contradictory (not keying on the tenant *is* sharing across
+   tenants). The rule is:
+   - The cache MUST NOT be keyed on the tenant, and sharing one document across tenants of the
+     same origin is **correct and intended**: the discovery document is a per-origin protocol
+     artifact and carries no tenant-specific content. (JWKS likewise: it is a single global key
+     set, so per-tenant JWKS caches MUST NOT be built.)
+   - The cache MUST NOT serve a document fetched from one origin to a request against another.
+     A **per-client-instance** cache satisfies this by construction where the client is bound to
+     a single base URL for its lifetime, and four of the eight implementing SDKs rely on exactly
+     that invariant rather than on an explicit key; the other four key on the normalized origin
+     explicitly. Both are conformant.
+   - A **process-global** cache, or any cache shared between clients that may target different
+     origins, MUST key on the normalized origin exactly as specified above.
+
+   TTL MUST be at least 5 minutes, MAY be configurable (a smaller configured value MUST be
+   raised to the 5-minute floor), and concurrent
    callers MUST share a single in-flight fetch (single-flight, using the same mechanism §9
    prescribes for that language). The document's own `issuer` value is the authoritative issuer
    for [§12.4](#§124-id-token-validation-checklist-normative-for-oidc_exchange) rule 3; because
@@ -928,13 +1118,31 @@ requirement:
    `JwksDocument`) selected by the header's `kid`. On an unknown `kid` the SDK performs **one**
    JWKS re-fetch and then fails — the same rule the §10 middleware already implements. A token
    with no `kid`, or whose `kid` is still unknown after the single re-fetch, MUST be rejected.
+
+   **"One re-fetch" is normative per cooldown window, not per token** (corrected in contract
+   1.5). Taken literally against a *warm* JWKS cache, "one re-fetch then fail" is
+   unimplementable without defeating the fetch rate-limiting that makes an unknown-`kid` path
+   safe in the first place: an attacker who can present arbitrary `kid` values would otherwise
+   drive one JWKS fetch per forged token. Every real implementation — the §10 middleware, and
+   the libraries the SDKs build on (`jose`'s `createRemoteJWKSet`, Nimbus `RemoteJWKSet`, and the
+   hand-rolled equivalents) — therefore enforces a **cooldown window** (30–60 s is typical):
+   the first unknown `kid` triggers exactly one re-fetch and opens the window; a further unknown
+   `kid` inside that window re-consults the cached set with **no** network call and fails
+   immediately. The observable requirements are that an unknown `kid` MUST NOT cause unbounded
+   JWKS fetching, MUST NOT be accepted, and MUST cause at most one re-fetch per window. An SDK
+   MUST NOT weaken this into "never re-fetch" (key rotation would break) or "always re-fetch"
+   (a fetch-amplification vector).
 3. **Issuer.** The `iss` claim MUST equal the discovery document's `issuer` by exact string
    comparison — no normalization, no trailing-slash tolerance, no substring or prefix matching.
 4. **Audience.** The `aud` claim MUST contain the RP's own `client_id`. When `aud` holds more
    than one audience, an `azp` claim MUST be present and MUST equal that `client_id`.
 5. **Time.** `exp` MUST be in the future and `iat` MUST NOT be in the future; `nbf` MUST be
    honored when present. Permitted clock skew is at most 60 seconds in either direction and
-   MUST NOT be configurable above that bound.
+   MUST NOT be configurable above that bound (a larger configured value MUST be clamped down,
+   not rejected). Clarified in contract 1.5: `exp` and `iat` are both treated as **required** —
+   an ID token missing either is rejected — and every failure of this rule reports the single
+   reason code `token_expired`, per the closed-vocabulary note in
+   [§12.3](#§123-cross-cutting-rules-normative-identical-in-all-sdks) rule 3.
 6. **Nonce.** The `nonce` claim MUST be present and MUST equal, by constant-time comparison,
    the nonce the caller received from `oidc_begin` and passed into `oidc_exchange`. This is
    mandatory for `oidc_exchange` — the helper always requests the `openid` scope, so the server
@@ -1015,6 +1223,28 @@ Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conf
 verified." (and §1–§11 where the §11 helpers are shipped, §1–§12 where the §12 helpers are
 shipped).
 
+**Conformance state as of contract 1.5** (2026-07). Eight SDKs implement §12 and state §1–§12;
+three defer it and are unchanged:
+
+| SDK | Statement | Notes |
+|-----|-----------|-------|
+| Rust | §1–§12 | §12 host: existing `AxiamClient` |
+| TypeScript | §1–§12 | §12 host: Node-only `OidcClient` (§12.2 packaging carve-out) |
+| Python | §1–§12 | nine identical names on `AxiamClient` and `AsyncAxiamClient` |
+| Java | §1–§12 | plus the permitted `*Async` companion twins (no `oidcBeginAsync`) |
+| Kotlin | §1–§7, §9–§12 | §8 AMQP deferred (pre-existing, documented carve-out); `suspend` functions, no `*Async` twins |
+| C# | §1–§12 | `*Async` throughout except the deliberate synchronous `OidcBegin` |
+| PHP | §1–§12 | — |
+| Go | §1–§12 | — |
+| Swift | unchanged (no §12) | [§12.6](#§126-deferred-sdks-swift-c-c) deferral |
+| C | unchanged (no §12) | [§12.6](#§126-deferred-sdks-swift-c-c) deferral |
+| C++ | unchanged (no §12) | [§12.6](#§126-deferred-sdks-swift-c-c) deferral |
+
+`login_client_credentials` credential adoption is a §12.1 **MAY**: TypeScript, PHP, and Go
+implement it as an opt-in flag; Rust, Python, Java, and Kotlin skip it; C# exposes the flag and
+throws `NotSupportedException` when it is set. All five positions are conformant — divergence on a
+MAY is not a defect.
+
 ### C# `Grpc.Tools` Exception
 
 C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK uses `Grpc.Tools` MSBuild integration (via a `<Protobuf Include=... GrpcServices="Client" />` entry in the `.csproj`, pointed at the `proto/` copy vendored in its repo) to generate gRPC client stubs at build time, rather than a `buf generate` plugin entry. This is intentional (D-01 in `15-CONTEXT.md`) and does not affect behavioral conformance with §1–§10. All other SDKs (Rust, TypeScript, Go, Python, Java, PHP) run `buf generate` as their codegen step.
@@ -1023,6 +1253,60 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
+
+- **2026-07 (§12 cross-SDK conformance review, contract 1.5)** — **non-breaking / clarifying.**
+  No new obligations, no signature changes, no vocabulary changes. Contract 1.4's §12 was
+  implemented independently in eight SDKs; the cross-SDK review
+  (`claude_dev/sdk-oidc-sso-conformance-review.md`) found ten places where the contract text was
+  self-contradictory, unimplementable as literally worded, or silent on a point the eight ports
+  had to resolve for themselves. This revision makes the contract describe the behaviour the eight
+  already share:
+  - **§7 restructured** into four numbered rules that separate the unconditional redaction MUST
+    (rule 1) from the explicit-accessor MAY (rule 3). §7's flat "the raw token string MUST NOT be
+    exposed via any public getter API" and §12's requirement to hand tokens to the caller were
+    mutually unsatisfiable; six of the eight SDKs have a publicly reachable accessor and two do
+    not, and all eight are now conformant. Redaction is unchanged and non-negotiable. The C/C++
+    "no public accessor" rows are unchanged (both defer §12).
+  - **§9 gains rule 5** (mechanism is free; a dedicated guard instance for a second token
+    namespace is permitted; a bounded wait for a shared guard is permitted and its bound is not
+    contract-worthy), and rule 2 now states the observable requirement — one wire call per burst,
+    that one outcome shared with all N callers — explicitly, because serialize-without-sharing
+    fails against single-use rotating refresh tokens. The §9 test requirement is clarified to
+    apply per refresh operation, so `oidc_refresh` needs its own burst test.
+  - **§12.1 note 2** documents that a slug `X-Tenant-ID` header legitimately accompanies a UUID
+    `?tenant_id=` query parameter (the `/oauth2/*` handlers read only the query parameter), and
+    that a slug-only client with no resolved UUID cannot call five of the nine operations.
+  - **§12.1 note 5** corrected: a `200` MUST be success, any other `2xx` MAY be, a `5xx` MUST NOT
+    be — removing the contradiction with the §2 `5xx → NetworkError` row.
+  - **§12.1** now states that `client_id` is **not** a per-call `oidc_begin` argument (it comes
+    from client configuration, as all eight SDKs implement it), and documents that
+    `AuthorizationRequest` deliberately carries no `redirect_uri` and that the caller must carry
+    it between `oidc_begin` and `oidc_exchange`.
+  - **§12.1** `oidc_refresh` paragraph: "MUST run under the §9 guard" → "MUST be governed by a
+    §9-conformant single-flight guard", pointing at the new §9 rule 5.
+  - **§12.2** gains one normative paragraph permitting either host object for the nine methods,
+    with the browser-bundle rationale; the method names remain fixed.
+  - **§12.3 rule 1** now enumerates the state-store entry fields (including `redirect_uri`),
+    states that the 10-minute TTL is a clamped maximum, and requires lazy sweeping with no
+    background timer/thread.
+  - **§12.3 rule 3** declares the seven ID-token reason codes a **closed** vocabulary and pins
+    the many-to-one mappings that follow from it — notably that every rule-5 time failure
+    (past `exp`, absent `exp`, absent or future `iat`, future `nbf`) reports `token_expired`.
+  - **§12.3 rule 6** rewritten: contract 1.4's "MUST NOT be keyed on, or shared across, tenants"
+    was self-contradictory. Sharing one discovery document across tenants of an origin is correct;
+    a per-client-instance cache satisfies the origin requirement by construction; a process-global
+    or cross-client cache MUST key on the normalized origin.
+  - **§12.4 rule 2** corrected: "one JWKS re-fetch then fail" is normative **per cooldown
+    window**, not per token — the literal reading is unimplementable on a warm cache without
+    creating a fetch-amplification vector.
+  - **§12.4 rule 5** states that `exp` and `iat` are both required and that skew above 60 s is
+    clamped, not rejected.
+  - **§2** construction rules clarify that the `"<error>: <error_description>"` requirement binds
+    the `message` *field* (a language may still prefix its rendered form) and that the two
+    exposed field names follow per-language casing, with Go's `ErrorCode` rename accepted.
+  - **Conformance Statement** gains a per-SDK table for the eight §12 implementers (including
+    Kotlin's pre-existing §8 carve-out) and records that `login_client_credentials` credential
+    adoption is a MAY on which divergence is legal.
 
 - **2026-07 (§12 OIDC / SSO relying-party helpers, contract 1.4)** — **non-breaking / additive.**
   Added §12 "OIDC / SSO Relying-Party Helpers" (SHOULD-level for v1.0): nine new canonical
@@ -1085,6 +1369,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.4 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07*
+*Contract version: 1.5 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

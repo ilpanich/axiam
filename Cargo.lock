@@ -888,7 +888,7 @@ dependencies = [
  "axiam-federation",
  "axiam-oauth2",
  "axiam-pki",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "futures",
  "futures-lite",
@@ -947,7 +947,7 @@ dependencies = [
  "argon2",
  "axiam-core",
  "axiam-db",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "criterion",
  "hex",
@@ -1012,7 +1012,7 @@ dependencies = [
  "argon2",
  "axiam-auth",
  "axiam-core",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "hex",
  "rand 0.10.2",
@@ -1053,7 +1053,7 @@ dependencies = [
  "axiam-auth",
  "axiam-core",
  "axiam-db",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "flate2",
  "jsonwebtoken",
@@ -1081,7 +1081,7 @@ dependencies = [
  "axiam-auth",
  "axiam-core",
  "axiam-db",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "hex",
  "jsonwebtoken",
@@ -1104,7 +1104,7 @@ dependencies = [
  "aes-gcm 0.11.0",
  "axiam-core",
  "axiam-db",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "criterion",
  "hex",
@@ -1145,7 +1145,7 @@ dependencies = [
  "axiam-federation",
  "axiam-oauth2",
  "axiam-pki",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "config",
  "hex",
@@ -1257,6 +1257,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
 
 [[package]]
 name = "base64ct"
@@ -5041,7 +5047,7 @@ dependencies = [
  "aes-gcm 0.10.3",
  "aes-kw",
  "argon2",
- "base64 0.22.1",
+ "base64 0.21.7",
  "bitfields",
  "block-padding",
  "blowfish",

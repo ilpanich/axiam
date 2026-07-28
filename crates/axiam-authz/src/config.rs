@@ -15,19 +15,24 @@ use crate::decision_cache::{DecisionCache, DecisionCacheConfig};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchStrategy {
-    /// **D1 path.** Coalesce the shared role-assignment, ancestor and grant
-    /// lookups across same-subject/same-resource items into a minimal set of DB
-    /// round-trips (3 for the benchmark's 5-item shape). Minimizes round-trips,
-    /// but the whole batch resolves on a single task: the run-2 benchmark showed
-    /// this serializes on the database (DB pinned at ~1 core while idle, ~1 s
-    /// p50) and did **not** beat repeated single checks.
+    /// **D1 path (default since H3/G3).** Coalesce the shared role-assignment,
+    /// ancestor and grant lookups across same-subject/same-resource items into
+    /// a minimal set of DB round-trips (3 for the benchmark's 5-item shape).
+    /// The run-2 benchmark measured this serializing on the database under
+    /// contamination (DB pinned at ~1 core while idle, ~1 s p50); re-measured
+    /// on the G3 **settled** protocol (runs 2-3) it is the clear winner:
+    /// 744 batch ops/s = 3 721 checks/s = **4.98×** repeated single checks
+    /// (748/s) over REST, and 866-872 gRPC batch ops/s ≈ 4 330 checks/s with
+    /// p95 74 ms (well inside the ≤2 s gate). See
+    /// `claude_dev/authz-batch-investigation.md` for the closing verdict.
     Coalesced,
-    /// **D10 path (default).** Evaluate each item as an independent
-    /// `check_access`, **concurrently**, bounded by `batch_max_concurrency`.
-    /// Issues more DB round-trips (one set per item) but recovers the
-    /// parallelism that lets single checks saturate the DB — the run-2 data
-    /// showed single checks pegging the DB at 745 req/s while the coalesced
-    /// batch left it idle. Decisions and result order are identical to the
+    /// **D10 path.** Evaluate each item as an independent `check_access`,
+    /// **concurrently**, bounded by `batch_max_concurrency`. Issues more DB
+    /// round-trips (one set per item) than `Coalesced`. On the G3 settled
+    /// protocol it also beats repeated single checks, but by a smaller margin
+    /// than `Coalesced`: 200 batch ops/s = 1 000 checks/s = 1.37× singles over
+    /// REST, gRPC batch 216 ops/s at p95 282 ms. Retained as an opt-in
+    /// A/B/fallback strategy. Decisions and result order are identical to the
     /// coalesced path (the cache is consulted per item, exactly as for a plain
     /// `check_access`).
     Concurrent,
@@ -47,13 +52,15 @@ pub struct AuthzConfig {
     /// Configure via `AXIAM__AUTHZ__BATCH_MAX_CONCURRENCY` env var.
     pub batch_max_concurrency: usize,
 
-    /// How a `BatchCheckAccess` is evaluated (D10). Defaults to
-    /// [`BatchStrategy::Concurrent`] — per-item parallel evaluation, which the
-    /// run-2 benchmark analysis identified as the fix for the coalesced path's
-    /// DB serialization. Set to `coalesced` to restore the D1 round-trip-
-    /// minimizing behavior for an apples-to-apples laptop A/B.
+    /// How a `BatchCheckAccess` is evaluated (D10/G3/H3). Defaults to
+    /// [`BatchStrategy::Coalesced`] — round-trip-minimizing evaluation, which
+    /// the G3 re-measurement on the settled benchmark protocol showed winning
+    /// decisively over `concurrent` (4.98× vs 1.37× repeated single checks;
+    /// gRPC batch p95 74 ms vs 282 ms). Set to `concurrent` to restore the
+    /// D10 per-item-parallel behavior (still selectable for an
+    /// apples-to-apples A/B).
     ///
-    /// Configure via `AXIAM__AUTHZ__BATCH_STRATEGY` (`concurrent` | `coalesced`).
+    /// Configure via `AXIAM__AUTHZ__BATCH_STRATEGY` (`coalesced` | `concurrent`).
     pub batch_strategy: BatchStrategy,
 
     /// Enable the per-tenant authorization **decision cache** (D7). When
@@ -90,7 +97,7 @@ impl Default for AuthzConfig {
     fn default() -> Self {
         Self {
             batch_max_concurrency: 16,
-            batch_strategy: BatchStrategy::Concurrent,
+            batch_strategy: BatchStrategy::Coalesced,
             decision_cache_enabled: false,
             decision_cache_ttl_secs: 5,
             decision_cache_max_entries: 10_000,
@@ -144,11 +151,13 @@ mod tests {
     }
 
     #[test]
-    fn default_batch_strategy_is_concurrent() {
-        // D10: per-item parallel evaluation is the shipped default (the fix for
-        // the coalesced path's DB serialization); `coalesced` is opt-in.
+    fn default_batch_strategy_is_coalesced() {
+        // H3/G3: coalesced round-trip-minimizing evaluation is the shipped
+        // default — the settled-protocol re-measurement showed it winning
+        // decisively (4.98x vs 1.37x repeated single checks); `concurrent`
+        // remains selectable as an opt-in A/B strategy.
         let cfg = AuthzConfig::default();
-        assert_eq!(cfg.batch_strategy, BatchStrategy::Concurrent);
+        assert_eq!(cfg.batch_strategy, BatchStrategy::Coalesced);
     }
 
     #[test]
@@ -162,9 +171,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_object_defaults_batch_strategy_to_concurrent() {
+    fn empty_object_defaults_batch_strategy_to_coalesced() {
         let cfg: AuthzConfig = serde_json::from_str("{}").expect("empty object must deserialize");
-        assert_eq!(cfg.batch_strategy, BatchStrategy::Concurrent);
+        assert_eq!(cfg.batch_strategy, BatchStrategy::Coalesced);
     }
 
     #[test]

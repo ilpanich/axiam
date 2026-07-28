@@ -294,7 +294,7 @@ with server CPU; token issuance with neither until ~1.8k/s per 2 cores).
 | `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | `false` | `true` | **`true`** — measured 3× on checks, DB load −40–75% | `true` |
 | `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | 5 | 5 | 5 (raise only if a ≤TTL revocation delay is acceptable) | 5 |
 | `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | 10 000/tenant | default | default | raise with RAM (entries are small) |
-| `AXIAM__AUTHZ__BATCH_STRATEGY` | `concurrent` | default | default for now — re-measurement in progress; `coalesced` showed 852 batches/s on a settled stack | follow next draft |
+| `AXIAM__AUTHZ__BATCH_STRATEGY` | `coalesced` (shipped default as of H3, decided on G3's settled-protocol re-measurement) | default | default — `coalesced` measured 744 REST batch ops/s (3 721 checks/s, 4.98× singles) and 866–872 gRPC batch ops/s (≈4 330 checks/s, p95 74 ms) vs `concurrent`'s 1.37× / 282 ms p95 | default |
 | `AXIAM__DB__POOL_SIZE` | 1 | 1 | **4** if token-issuance-heavy (+7% measured); otherwise 1 | 4 |
 | `AXIAM__DB__POOL_MAX_IN_FLIGHT` | 0 (off) | 0 | 0 (never bound in tests at 50 VUs) | set only with evidence |
 | `AXIAM__AUTH__MAX_CONCURRENT_HASHES` | 0 = auto (min(cpus, 4)) | auto | auto | ≈ physical cores reserved for auth; keeps login RAM bounded (~19 MiB per concurrent hash) |

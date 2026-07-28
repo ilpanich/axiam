@@ -255,14 +255,20 @@ remain gate-invalid at its default bcrypt cost.
 
 **Other caveats, stated plainly:** consumer-laptop hardware (server-class
 re-run still pending budget); AXIAM stack figures include RabbitMQ
-(~0.1–0.3 cores) and, for cells after the login burst, ~360 MiB of retained
-allocator memory (reproduced on alpha19; an allocator A/B experiment is
-scripted and scheduled — it inflates AXIAM's memory column, not its
-latency); k6 skips cert verification at p2/p3 (throwaway CA; handshake and
-record crypto are real); closed-loop 50 VUs floors the fastest endpoints
-(JWKS) and measures latency, not capacity, when nothing saturates; SDK
-client-side overhead benchmarks exist in the harness but have not yet
-produced validated runs — client-side numbers will come in a future draft.
+(~0.1–0.3 cores); **fixed since draft 3 (allocator)** — the ~360 MiB of
+retained memory reported for cells after the login burst in earlier drafts
+was traced to the platform allocator (glibc malloc) not returning freed
+Argon2id hashing arenas to the OS. A measured A/B (jemalloc vs default,
+same load, same seed) closed 94% of that retention gap (peak 491→126 MiB,
+retained 376→86 MiB above baseline) with no throughput or latency cost, so
+the released image now links jemalloc as its global allocator by default —
+this no longer inflates AXIAM's memory column in this or any future draft
+(full numbers: `claude_dev/memory-retention-experiment.md` §6); k6 skips
+cert verification at p2/p3 (throwaway CA; handshake and record crypto are
+real); closed-loop 50 VUs floors the fastest endpoints (JWKS) and measures
+latency, not capacity, when nothing saturates; SDK client-side overhead
+benchmarks exist in the harness but have not yet produced validated runs —
+client-side numbers will come in a future draft.
 
 ## 6. Recommended settings by deployment (measured, not guessed)
 

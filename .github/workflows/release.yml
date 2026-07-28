@@ -93,6 +93,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # H4: no build-args are passed here on purpose — docker/Dockerfile.server
+      # defaults its CARGO_FEATURES build ARG to `jemalloc`, so every released
+      # server image (both architectures) ships with jemalloc as the global
+      # allocator without this workflow needing to know about it. Escape
+      # hatch for a future musl/platform edge case where jemalloc-sys won't
+      # build for one of these targets: add
+      #   build-args: |
+      #     CARGO_FEATURES=
+      # to the server leg only (the frontend image has no such ARG and must
+      # not receive it). See claude_dev/memory-retention-experiment.md §6 and
+      # crates/axiam-server/Cargo.toml's `jemalloc` feature comment.
       # D-06 Step 1: build locally (load: true, no push) for scanning. The
       # runner is native for this arch, so `load` works — no QEMU needed.
       - name: Build image (scan target)

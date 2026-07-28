@@ -1,7 +1,7 @@
 # AXIAM Deployment Guide
 
 **Milestone:** v1.2 (MVP Release Hardening) — Beta
-**Last verified:** 2026-07-06
+**Last verified:** 2026-07-28
 
 This guide gets an operator from zero to a running AXIAM stack, for both a
 local Docker Compose setup and a Kubernetes deployment. It documents the
@@ -156,6 +156,65 @@ The 503 path preserves the SEC-026 username-enumeration defence: the login
 "user not found" branch is subject to the same permit acquisition and timeout
 as the real password-verify branch, so the two remain timing- and
 status-indistinguishable under both normal and saturated load.
+
+## Memory allocator (jemalloc, H4)
+
+The released server image (`docker/Dockerfile.server`) links **jemalloc**
+(via `tikv-jemallocator`) as the process-wide global allocator instead of the
+platform default (glibc malloc). This is a build-time choice, not a runtime
+setting — there is nothing to configure to get it; it ships this way.
+
+**Why:** the platform default allocator does not return freed memory from a
+burst of concurrent Argon2id login hashing (see **Argon2id hash concurrency**
+above) back to the OS — retained RSS plateaus well above baseline and stays
+there. The G6/D9 memory-retention experiment measured, on identical
+workloads (a 50-VU login burst, 10-minute post-burst observation window):
+
+| Variant | Baseline RSS | Peak RSS (during burst) | Retained RSS (post-burst plateau) | Retained above baseline |
+|---|---|---|---|---|
+| Default allocator (glibc malloc) | 68 MiB | 491 MiB | 376 MiB | +309 MiB |
+| jemalloc | 69 MiB | 126 MiB | 86 MiB | +17 MiB |
+
+jemalloc closed **94%** of the 309 MiB retention gap (ship threshold was
+≥30%), also cutting the in-burst peak by ~74%, and with **no throughput or
+latency regression** recorded against the default-allocator run. Full
+numbers and methodology: [`claude_dev/memory-retention-experiment.md`](../../claude_dev/memory-retention-experiment.md) §6.
+
+**`MALLOC_CONF` tuning: not needed.** jemalloc's out-of-the-box decay
+settings (dirty pages purged back to the OS on jemalloc's default ~10s decay
+timer) were sufficient to produce the numbers above — no
+`MALLOC_CONF`/`_RJEM_MALLOC_CONF` environment variable is set in the image or
+recommended for a default deployment. If a workload's retention profile ever
+warrants tighter decay (e.g. `dirty_decay_ms:1000,muzzy_decay_ms:0` to purge
+freed pages within ~1s of a burst subsiding, trading a few more `madvise`
+syscalls and next-burst page-fault cost for faster reclaim), it can be set at
+container-start time without a rebuild — see
+`claude_dev/memory-retention-experiment.md` §5 for the trade-off — but treat
+that as a measured opt-in, not a default recommendation.
+
+**Escape hatch (musl/platform edge cases):** the Dockerfile's
+`CARGO_FEATURES` build ARG defaults to `jemalloc`; build with
+`--build-arg CARGO_FEATURES=` (empty) to fall back to the platform allocator
+for a target where `tikv-jemallocator`/`jemalloc-sys` doesn't build or link
+cleanly (SAML support is unaffected either way — it comes from the crate's
+own `default = ["saml"]` feature, not this ARG):
+
+```bash
+docker build --build-arg CARGO_FEATURES= -f docker/Dockerfile.server -t axiam-server .
+```
+
+For a native (non-container) build, the crate feature itself stays opt-in
+either way:
+
+```bash
+cargo build --release -p axiam-server                     # platform default allocator
+cargo build --release -p axiam-server --features jemalloc  # jemalloc
+```
+
+A running server logs which allocator is active at startup
+(`allocator=jemalloc` or `allocator=system` in the structured JSON log line
+"Global allocator: ...") — check `docker logs`/`kubectl logs` to confirm
+which one a given image was built with.
 
 ## Authorization decision cache (optional, D7)
 

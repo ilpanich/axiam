@@ -185,6 +185,16 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     tracing::info!("Starting AXIAM server...");
+    // H4: log which global allocator is active so `jemalloc` can be verified
+    // in a running container's logs (`docker logs` / `kubectl logs`) without
+    // needing binary introspection. Release container images build with the
+    // `jemalloc` feature on by default (see docker/Dockerfile.server); a
+    // build without it (e.g. `--build-arg CARGO_FEATURES=`, or a plain
+    // `cargo build --release -p axiam-server`) logs the platform default.
+    #[cfg(feature = "jemalloc")]
+    tracing::info!(allocator = "jemalloc", "Global allocator: jemalloc");
+    #[cfg(not(feature = "jemalloc"))]
+    tracing::info!(allocator = "system", "Global allocator: platform default (glibc malloc)");
 
     // REQ-15 AC-1: install the process-level rustls CryptoProvider.
     // rustls 0.23 links BOTH `ring` and `aws-lc-rs` in this build (transitively —

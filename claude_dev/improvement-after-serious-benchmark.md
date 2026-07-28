@@ -1,5 +1,17 @@
 # Improvements After the Serious Benchmark (run 3) — Pre-MVP Plan
 
+> **Status update 2026-07-28:** the G1–G10 tasks were executed on the laptop
+> (`results-20260728.tar.xz`), using the harness/implementation from branch
+> `claude/benchmark-results-analysis-hynzr8` (unmerged at the time — merging
+> it is Phase H's step H0). Per-task verdicts and the follow-up plan (Phase
+> **H**) live in
+> [`improvement-after-g-benchmark.md`](improvement-after-g-benchmark.md).
+> Headlines: G3 decided (`coalesced` wins 4.98×), G4 PASS, G6 PASS
+> (jemalloc, 94%), G1 narrowed (traffic-cured DB-side clamp; AMQP refuted);
+> G5/G8 data partially invalidated by the still-undetected post-seed
+> transient (the G2 settle gate passes in ~34 s inside a ~6 min window);
+> G10 0/7 with per-language causes identified.
+
 **Created 2026-07-26** from the run-3 analysis
 ([`benchmarks/PRIVATE_BENCH_ANALYSIS.md`](../benchmarks/PRIVATE_BENCH_ANALYSIS.md),
 run-3 rewrite). This document is the executable task list for the **final
@@ -232,8 +244,18 @@ retention doesn't reproduce).
    the in-process retainer instead (that outcome would mean the memory is
    *held*, not fragmented — a different bug class).
 
-> **⟨PLACEHOLDER — integrate `results/d9-summary.md` here when the
-> experiment has run.⟩**
+> **Experiment run 2026-07-28 (results integrated per the placeholder):**
+>
+> | variant | baseline RSS | burst peak | post-burst plateau (10 min) | retained above baseline |
+> |---|---|---|---|---|
+> | A — default malloc | 68 MiB | 491 MiB | 376 MiB | **309 MiB** |
+> | B — jemalloc (default decay) | 69 MiB | **126 MiB** | 86 MiB | **17 MiB** |
+>
+> jemalloc closes **291 MiB = 94%** of the retention gap (threshold ≥30%) at
+> default `MALLOC_CONF` — no decay tuning needed — and also cuts the burst
+> peak ~4×. **Verdict: PASS — propose jemalloc as the release default.**
+> The follow-up PR is task **H4** in
+> [`improvement-after-g-benchmark.md`](improvement-after-g-benchmark.md).
 
 *Acceptance:* numbers in both docs; a PR or a documented "not worth it";
 public doc's retained-memory caveat updated either way.

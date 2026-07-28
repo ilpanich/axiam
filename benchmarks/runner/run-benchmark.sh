@@ -272,6 +272,7 @@ BENCH_SETTLE_PROBE_THR="${BENCH_SETTLE_PROBE_THR:-400}"           # ops/s pass t
 BENCH_SETTLE_PROBE_P50_MS="${BENCH_SETTLE_PROBE_P50_MS:-150}"     # p50-under-load pass threshold (ms)
 BENCH_SETTLE_RETRY_SECS="${BENCH_SETTLE_RETRY_SECS:-30}"          # gap between failed probe attempts
 BENCH_SETTLE_TIMEOUT_SECS="${BENCH_SETTLE_TIMEOUT_SECS:-600}"     # hard cap, then warn + proceed
+BENCH_SETTLE_DRAIN_SECS="${BENCH_SETTLE_DRAIN_SECS:-5}"           # post-burst drain pause (see settle_gate() tail)
 # Legacy G2 tunables — no longer consulted by the v2 burst probe (kept so a
 # script exporting them doesn't fail; BENCH_SETTLE_STABLE_SECS/MAX_MS were the
 # serial-canary knobs this gate replaces).
@@ -395,6 +396,23 @@ settle_gate() {
     sleep "$BENCH_SETTLE_RETRY_SECS"
   done
   [ -z "$_CANARY_JAR" ] || rm -f "$_CANARY_JAR"
+  # H1 follow-up (found live): a burst_probe() worker that's still mid-request
+  # when its BENCH_SETTLE_BURST_SECS window ends gets killed by `wait` above
+  # without waiting for its in-flight curl to finish — under the clamp, a
+  # request queued behind the shared single DB connection
+  # (AXIAM__DB__POOL_SIZE=1) can still be executing server-side seconds after
+  # the client gave up on it. Observed live: the scenario's own setup() login
+  # — issued immediately after the LAST burst probe, whether it passed or hit
+  # BENCH_SETTLE_TIMEOUT_SECS — landed behind that straggler traffic on the
+  # same connection and came back 200 but missing its auth cookie twice in a
+  # row; a login retried moments later (once the queue had drained) always
+  # succeeded cleanly. A short drain pause here — after the LAST burst
+  # regardless of pass/timeout, before handing control to the scenario —
+  # gives any still-in-flight requests from that burst time to actually
+  # finish server-side instead of leaking into the very first request of the
+  # cell the gate was supposed to protect.
+  echo "[run] settle gate: draining ${BENCH_SETTLE_DRAIN_SECS}s for any straggler burst traffic to finish server-side before the cell starts"
+  sleep "$BENCH_SETTLE_DRAIN_SECS"
 }
 
 # --- G2 item 3: self-describing labeled passes ------------------------------

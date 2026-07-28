@@ -683,6 +683,7 @@ G2 or for non-AXIAM targets.
 | `BENCH_SETTLE_PROBE_P50_MS` | `150` | Pass threshold, p50 latency (ms) under the burst concurrency. |
 | `BENCH_SETTLE_RETRY_SECS` | `30` | Gap between failed probe attempts. |
 | `BENCH_SETTLE_TIMEOUT_SECS` | `600` | Hard cap on the settle wait; the gate then warns, proceeds, and records `settle_timeout: true` (as of H1, `report.py` also refuses any such cell). |
+| `BENCH_SETTLE_DRAIN_SECS` | `5` | Pause after the LAST burst probe (pass or timeout) before the cell starts. Found live: a burst worker still mid-request when its window ends can still be executing server-side behind the shared single DB connection; without this drain, the very first request of the next cell (the scenario's own login) can land behind that straggler traffic and come back malformed. |
 | `BENCH_SETTLE_STABLE_SECS` / `BENCH_SETTLE_MAX_MS` | `30` / `100` | Superseded G2 serial-canary knobs — still parse without error, no longer consulted by the v2 burst gate. |
 | `BENCH_RUN_INDEX` | `1` | Drives cell-order rotation; set per-repeat by `bench-matrix` (`BENCH_RUN_INDEX=$i`), defaults to 1 (natural order) for a manual `bench-run`. |
 

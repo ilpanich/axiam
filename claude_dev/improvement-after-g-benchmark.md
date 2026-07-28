@@ -14,6 +14,24 @@ open-ended debugging, design judgment, or security-relevant default changes.
 Same discipline as before: feature branch, signed commits, PR per phase,
 every Opus task ends by writing its findings into `claude_dev/`.
 
+> **Where the code is (H0 — merge first).** The entire G implementation is
+> **not on `main`**: the task driver
+> (`benchmarks/run-improvement-tasks.sh`), the G2 settle gate + rotation +
+> env dump, the G4 refresh fix (cookie `Path` root cause), the G5 K-sweep
+> scenario + `decision-cache-decision.md` (decision left OPEN behind seven
+> pre-agreed criteria), the G7 rate-limit posture presets
+> (`AXIAM__RATE_LIMIT__PROFILE`, defaults unchanged) + decision record, the
+> G8 ALPN analysis (`HTTP2=false` proven a no-op and turned into a hard
+> startup error) and the G9 `bench_throttled` classifier all live on branch
+> **`claude/g1-timeline-hanging-l0mqd0`** (the tip adds four runner fixes:
+> telemetry sampler, interrupt-safe teardown, g1-dbdirect credentials +
+> probe). The 2026-07-28 results were collected with **that branch's**
+> harness. **H0: PR and merge that branch before starting any H task**; all
+> file references below are to its state. (Merge note: that branch and this
+> one both touch `improvement-after-serious-benchmark.md` — keep its
+> implementation-status appendix *and* this branch's G6 fill + status
+> pointer.)
+
 ---
 
 ## §1 What the G run established (verdicts)
@@ -23,11 +41,12 @@ every Opus task ends by writing its findings into `claude_dev/`.
 | G1 transient | **Partially resolved** | Window reproduced: **~6.0 min** at ~44 ops/s (p50 ~1.0 s), DB pinned ~1.05 cores, server idle; sharp cliff recovery to ~715 ops/s between minute 5.4 and 6.0. **8 min of idle does NOT cure it** (first cell after idle: 44.5 ops/s) ⇒ warm-up is **traffic-driven**, not wall-clock. **Survives a server restart** (44.3 ops/s after) ⇒ state is not in the AXIAM process. **RabbitMQ queue depth is 0 for the whole window** ⇒ audit-backlog hypothesis **refuted**. The two remaining probes were faulty: the datastore-restart cell recorded only **1 request** (server needed pool re-signin after the DB restart; cell unusable), and the db-direct probe has per-row container-start overhead (~500 ms flat, 31 rows, no post-window baseline) — inconclusive. |
 | G2 settle gate + rotation + meta | **Implemented and working — but the gate does not work against THIS transient** | `settle_wait_secs` (34/35 s), `settle_timeout:false`, `cell_order_index` rotates between runs, `axiam_env` dumped with secrets `<redacted>` — all present in `tasks/g2-verify/run-*` meta.json. The SUMMARY's "❌ no meta.json" is a **checker bug** (it looked in the un-redirected default results dir). Critically: the gate passed in ~34 s while the clamp lasts ~6 min — a 1 rps serial canary sees the ~22 ms serialized unit as a *fast* response; the clamp is only visible **under concurrency** (closed-loop queueing: 50 VUs / 45 ops/s ≈ 1 s p50). Consequence: G3 run-1 cells, G5's K=1/K=100 cells, G8's CC cells and both G4/G8 CC comparison cells all ran inside the window despite gate + warm-up cell. |
 | G3 batch A/B | **DECIDED — `coalesced` wins, ship it as default** | On settled cells (runs 2–3): coalesced batch REST 744 ops/s = **3 721 checks/s = 4.98×** singles (748/s); coalesced batch gRPC 866–872 ops/s ≈ **4 330 checks/s**, p95 74 ms (gate ≤2 s ✅). Concurrent: batch REST 200 ops/s = 1 000 checks/s = 1.37× singles, gRPC batch 216 ops/s p95 282 ms. Both beat singles, coalesced wins by 3.7×. |
-| G4 refresh harness | **PASS** | AXIAM 910 ops/s, Keycloak 323 ops/s, `bench_fallback == 0`, **1.00 HTTP req/iteration** on both. (AXIAM refresh ≈ ½ × its CC cell — but with 1 req/iter and rotation doing revoke+issue writes, that is real work, not the fallback signature. The in-task CC comparison cell was clamped (46 ops/s) and unusable; compare against the matrix CC 1823/s.) |
-| G5 cache K-sweep | **Contaminated — decision deferred** | Only K=10 000 is trustworthy: cache ON 712 vs OFF 541 ops/s = **+32%**, memory cost ≈ 0 (196 vs 207 MiB). K=1 rows (both 45 ops/s, p50 >1 s) and the K=100 OFF row (60 ops/s, p50 954 ms) ran inside the transient. K=1 truth from run-3 `sens-cache-on`: **3.0–3.15×** (authz REST 2322 vs 737; gRPC 1822 vs 603). The revocation live test was not run. |
+| G4 refresh harness | **PASS — with a comparability caveat** | AXIAM 910 ops/s, Keycloak 323 ops/s, `bench_fallback == 0`, **1.00 HTTP req/iteration** on both. (AXIAM refresh ≈ ½ × its CC cell — but with 1 req/iter and rotation doing revoke+issue writes, that is real work, not the fallback signature. The in-task CC comparison cell was clamped (46 ops/s) and unusable.) ⚠ Per `refresh-harness-diagnosis.md`: AXIAM deliberately has no ROPC/password grant, so its cell measures **session refresh**, Keycloak's the **OAuth2 refresh grant** — `report.py` needs a `protocol-variant` label and the pair must not be published as a like-for-like head-to-head (→ H7). |
+| G5 cache K-sweep | **Contaminated — decision stays OPEN** | Only K=10 000 is trustworthy: cache ON 712 vs OFF 541 ops/s = **+32%**, memory cost ≈ 0 (196 vs 207 MiB). K=1 rows (both 45 ops/s, p50 >1 s) and the K=100 OFF row (60 ops/s, p50 954 ms) ran inside the transient. K=1 truth from run-3 `sens-cache-on`: **3.0–3.15×** (authz REST 2322 vs 737; gRPC 1822 vs 603). The revocation live test was not run. The branch's `decision-cache-decision.md` gates the flip behind seven criteria and surfaced **three cache defects** that must be fixed before any default change (unbounded `order` growth below the cap; process-local cache ⇒ multi-replica revocation ≤ TTL; `invalidate_subject` O(shard) under the global mutex) — all folded into H5. |
 | G6 memory retention | **PASS — jemalloc convincingly** | Default malloc: 68 → peak 491 → retained **376 MiB** (+309 over baseline). jemalloc: 69 → peak **126** → retained **86 MiB** (+17). Closes **94%** of the gap (threshold ≥30%) with no throughput caveat recorded. Go: make jemalloc the release default. |
 | G8 TLS h1 vs h2 | **Inconclusive for CC — all three CC cells clamped (~45 ops/s)**; valuable side-signal from refresh | The SUMMARY table's "p2-h1 within 15% of p0 ⇒ h2 convicted" reading is wrong — all three cells measured the transient, not TLS. The **refresh** cells in the same session escaped the window and say something new: p0 914 ops/s, **p2-native 893 (−2.3% — no native-TLS penalty)**, p2-h1 (nginx) 443 (−51%, plus ~2 100 request failures). Also: negotiated-protocol capture never landed (column reads `?`). B2 remains open. |
-| G9 metric coherence | **1 of 3 sub-tasks done** | `bench_throttled` verdict landed for `oauth2_client_credentials` (145 ok vs 7 145 throttled — "purely rate-limited" now legible); `token_introspection` and `authz_check_rest` are **not wired** to the shared classifier. G9.1 (gRPC −16%) and G9.2 (Keycloak p2 login asymmetry) were not attempted. |
+| G7 rate-limit posture | **Implemented on the branch — two residuals** | Shipped defaults byte-for-byte unchanged; relaxation is an opt-in `AXIAM__RATE_LIMIT__PROFILE` = `internet`\|`gateway`\|`mesh` preset touching only machine-to-machine buckets (switches them to `client_id` keying); human endpoints strict per-IP by construction. Residuals per `rate-limit-posture-decision.md`: §7.1 maintainer sign-off, §7.2 a laptop re-measurement of the gateway preset (→ H7). |
+| G9 metric coherence | **Mostly done; REST wiring missing** | Root cause written up (`grpc-vs-rest-authz-analysis.md`): the run-3 incoherence was burst-then-storm, not a counting bug. `bench_throttled` + the shared `recordGrpcResult()` classifier are wired into the **gRPC** scenarios and the CC path (145 ok vs 7 145 throttled — legible), but the REST scenarios `token_introspection` and `authz_check_rest` still lack it (confirmed by the g9 run). G9.1 (gRPC −16%) is documented as **accepted overhead** (no cheap fix; gRPC still wins p95). G9.2 (Keycloak login asymmetry) has a written procedure but no diagnostic run yet. |
 | G10 SDK benches | **0 / 7 validated — every failure now has a known, small cause** | rust: bench runs but `BENCH_RESOURCE_ID` arrived empty (env plumbing). python: `axiam_sdk` not installed (no local-path install step). typescript: `axiam-sdk` package unresolved (sibling repo not linked). go: `go.mod` needs `go mod tidy`. java: `ClassNotFoundException: io.axiam.bench.Bench` (bench not compiled before `exec:java`). csharp/php: host toolchain missing (honest `pending` records). |
 | Pool sensitivity (run-3 leftover, new `inflight-64` pass) | **pool_size=4 = +7% on CC only; in-flight cap 64 changes nothing** | CC 1955 (pool 4) and 1954 (pool 4 + inflight 64) vs 1823 matrix baseline; every other scenario within noise. |
 
@@ -39,10 +58,15 @@ matrix batch rows (`authz_batch_rest` 41/s, `authz_batch_grpc` invalid 0/3) and
 the report's batch verdicts are artifacts of the same contamination and must
 not be published as-is.
 
-**Stray data:** `results/axiam/p2-tls13/` at the results root (CC 44.7/s
+**Stray data — root cause found in the harness:** the `bench-matrix` recipe
+unconditionally re-exports `BENCH_RESULTS_DIR="$PWD/results/run-$i"`
+(justfile, repeat loop), clobbering any redirect a caller set — which is why
+`g2-verify`'s mini matrix wrote into the default results root (its SUMMARY
+"❌ no meta.json" is that leak, not a missing implementation) and had to be
+moved by hand. `results/axiam/p2-tls13/` at the results root (CC 44.7/s
 clamped; refresh with the old 2-req/iter fallback signature) is a stale
-pre-G4 leftover that leaked to the default results dir — delete it; it must
-not enter any report.
+pre-G4 leftover of the same class — delete it; it must not enter any
+report. Fixed by H1.
 
 ---
 
@@ -51,46 +75,51 @@ not enter any report.
 ### H1. A settle gate that actually detects the clamp + runner-fault fixes — **Sonnet 5**
 
 *Why Sonnet:* every fix is precisely specified below with a reproducible
-failure in hand; no open-ended judgment.
+failure in hand and the offending lines identified; no open-ended judgment.
 
-*Files:* `benchmarks/run-improvement-tasks.sh` (**note: this script exists
-only on the laptop today — commit it to `benchmarks/` first, it is the
-artifact several of these fixes patch**), `benchmarks/runner/run-benchmark.sh`,
-`benchmarks/runner/seed.sh`, `benchmarks/docs/methodology.md`,
-`benchmarks/runner/report.py`.
+*Files (all on the H0 branch):* `benchmarks/justfile` (`bench-matrix`),
+`benchmarks/runner/run-benchmark.sh` (`settle_gate()` / `canary_probe()`,
+`BENCH_SETTLE_*` tunables), `benchmarks/run-improvement-tasks.sh`,
+`benchmarks/docs/methodology.md`, `benchmarks/runner/report.py`.
 
-1. **Settle gate v2 (concurrent canary).** Replace the 1 rps serial canary:
-   after seed, run a short concurrent probe (k6, `authz_check_rest`, 20 VUs,
-   15 s) and require **probe throughput ≥ 400 ops/s** (in-window it reads
-   ~44; settled it reads ~730 — the threshold sits far from both) OR p50
-   < 150 ms *under those 20 VUs*. Repeat every 30 s until pass; hard timeout
-   12 min → warn + `settle_timeout: true` in meta. Record
-   `settle_probe_thr` and total `settle_wait_secs` in every cell's meta.
-   Keep the old fields. Document in methodology §"post-seed settle" why the
-   serial canary was blind (the ~22 ms serialized unit is only visible under
-   concurrency).
-2. **Fix the g2-verify SUMMARY checker** to look for meta.json under the
-   task's own `BENCH_RESULTS_DIR` (it declared "mini matrix did not run"
-   while `tasks/g2-verify/run-*/…/meta.json` exist and carry all three new
-   fields).
-3. **Fix the results-dir leak** that produced `results/axiam/p2-tls13/` at
-   the results root: audit every step of `run-improvement-tasks.sh` for
-   cells that run without `BENCH_RESULTS_DIR` exported (the G8 step-3 CC/
-   refresh re-measure is the known offender pattern); make the script fail
-   fast if a cell would write outside `results/tasks/<task-id>/`. Delete the
-   stale stray tree.
-4. **Fix the g1-isolate datastore-restart probe:** after restarting the DB
+1. **Settle gate v2 (concurrent canary).** `settle_gate()` today is a
+   serial 1 rps `canary_probe()` requiring `BENCH_SETTLE_STABLE_SECS=30`
+   consecutive seconds under `BENCH_SETTLE_MAX_MS=100` — measured result:
+   it passes ~34 s into the ~6-min clamp, because a lone request against
+   the ~22 ms serialized unit *is* fast; the clamp only exists under
+   concurrency. Replace the probe with a short concurrent burst (k6,
+   `authz_check_rest`, 20 VUs, 15 s — or a curl-parallel equivalent to keep
+   k6 out of the gate) and require **probe throughput ≥ 400 ops/s**
+   (in-window ~44, settled ~730 — the threshold is far from both) OR p50
+   < 150 ms *under those 20 VUs*. Repeat every 30 s until pass; keep the
+   existing hard-timeout/`settle_timeout` machinery and meta fields, add
+   `settle_probe_thr`. Update methodology §"post-seed settle" with why the
+   serial canary was blind.
+2. **Fix the `bench-matrix` results-dir clobber (the wrong-directory
+   fault):** the repeat loop unconditionally
+   `export BENCH_RESULTS_DIR="$PWD/results/run-$i"`, discarding any
+   redirect the caller set — this is exactly why `g2-verify`'s mini matrix
+   wrote to the results root and its SUMMARY checker (which globs under the
+   task's own dir, correctly) reported "no meta.json". Change it to nest:
+   `RUN_DIR="${BENCH_RESULTS_DIR:-$PWD/results}/run-$i"`. Then audit every
+   `run-improvement-tasks.sh` step for the same pattern and make the script
+   fail fast if a cell would write outside `results/tasks/<task-id>/`.
+   Re-run `g2-verify` afterwards to get a green SUMMARY (the fields
+   themselves are already proven present: `settle_wait_secs` 34/35 s,
+   `cell_order_index` rotated, `axiam_env` redacted). Delete the stale
+   stray `results/axiam/p2-tls13/` tree.
+3. **Fix the g1-isolate datastore-restart probe:** after restarting the DB
    container, wait for the server's pool to re-sign-in (poll `/health` or
    one authenticated request until 200, with a timeout) before measuring,
    and run a full-length cell. The current data point is n=1 request and
    unusable.
-5. **Fix the g1-dbdirect probe:** keep one long-lived client (exec into a
+4. **Fix the g1-dbdirect probe:** keep one long-lived client (exec into a
    persistent container or a single process with a session), not one
    `docker run` per query; timestamp every row; run the *same* query the
    authz path issues (take it from the D6 report); and always collect a
    post-window baseline segment so in-window vs settled is a within-file
    comparison.
-6. `report.py`: refuse (or loudly flag) cells whose meta records
+5. `report.py`: refuse (or loudly flag) cells whose meta records
    `settle_timeout: true`.
 
 *Acceptance:* a deliberately-immediate cell after a fresh seed is held by
@@ -190,27 +219,41 @@ both notes updated; CI green.
 on evidence that is currently one-third contaminated needs the adversarial
 read; the re-measurement itself is prescribed.
 
-*Files:* `crates/axiam-authz` (default + docs), `benchmarks/scenarios/`
-(K-sweep variant already exists), `docs/` security notes,
-`claude_dev/decision-cache-decision.md` (new).
+*Files:* `crates/axiam-authz` (`decision_cache.rs`, default + docs),
+`benchmarks/scenarios/authz_check_rest.js` (`BENCH_AUTHZ_KEYSPACE` exists),
+`docs/` security notes, `claude_dev/decision-cache-decision.md` (**exists on
+the H0 branch, decision OPEN behind seven pre-agreed criteria — fill it, do
+not fork a new note**).
 
-1. Re-run the K-sweep **on the H1 settled protocol**: cache ON/OFF at
+1. **Fix the three cache defects the G5 analysis surfaced — before any
+   measurement counts toward the flip** (criterion C5): (a) the `order`
+   vector grows unbounded while the working set stays *below*
+   `max_entries_per_tenant` (TTL-expired keys leave `entries` but stay in
+   `order`; re-access pushes a duplicate) — fix + a regression test for the
+   expired-then-reaccessed path; (b) `invalidate_subject` is O(shard) under
+   the single global mutex every check needs — bound or shard the lock;
+   (c) the cache is process-local: document "revocation immediate" as a
+   single-process property and the multi-replica worst case ≤ TTL, next to
+   the default.
+2. Re-run the K-sweep **on the H1 settled protocol**: cache ON/OFF at
    K ∈ {1, 100, 10 000}, median-of-3, warm-up + gate before every pass.
-   Current anchors to reconcile: K=1 → 3.0–3.15× (run-3 sens), K=10 000 →
-   +32% (G5), K=100 → unknown (contaminated).
-2. Run the revocation integration test against the live stack (immediate
-   invalidation) and the suppressed-event worst case (stale-allow ≤ TTL).
-3. Memory bound at K=10 000 with the real entry count inspected (G5's
+   Anchors to reconcile: K=1 → 3.0–3.15× (run-3 sens), K=10 000 → +32%
+   (G5), K=100 → unknown (contaminated).
+3. Add the missing **live-stack revocation test** (the existing integration
+   test drives mocks; the decision note carries a manual curl procedure —
+   automate it): immediate invalidation on the live stack, and the
+   suppressed-event worst case (stale-allow ≤ TTL).
+4. Memory bound at K=10 000 with the real entry count inspected (G5's
    server-RSS delta was ≈ 0 — verify the cache actually held 10 000
    entries rather than silently evicting).
-4. Decide default ON (TTL 5 s) vs opt-in; write the decision note with the
-   full sweep table and the security rationale; if ON: config default,
-   deployment docs, public §6, and the ≤TTL staleness statement in the
-   security docs next to the default. One combined cache+pool4 labeled cell.
+5. Walk the note's seven criteria with the clean data and decide default ON
+   (TTL 5 s) vs opt-in; if ON: config default, deployment docs, public §6,
+   and the ≤TTL staleness statement in the security docs next to the
+   default. One combined cache+pool4 labeled cell.
 
-*Acceptance:* clean K-sweep table; revocation tests pass against the live
-stack; decision note committed; if the default flips, all four doc
-locations updated.
+*Acceptance:* cache defects fixed with tests; clean K-sweep table; live
+revocation tests pass; the decision note's criteria table is filled and the
+verdict recorded; if the default flips, all four doc locations updated.
 
 ### H6. B2 endgame v2: settled CC cells + protocol capture — **Opus 5**
 
@@ -218,8 +261,17 @@ locations updated.
 added a genuinely confusing new fact that needs careful discrimination.
 
 *Files:* `benchmarks/scenarios/lib/*` (protocol capture),
-`crates/axiam-server` (listener/h2 tuning if convicted),
+`crates/axiam-server/src/tls.rs` (per `b2-tls-h2-investigation.md`),
 `docs/security-profiles.md`, `benchmarks/PRIVATE_BENCH_ANALYSIS.md`.
+
+Constraints already proven by the branch's source analysis — do not re-try
+them: `AXIAM__SERVER__TLS__HTTP2=false` was a no-op (actix-http
+unconditionally prepends `h2` to ALPN) and is now a **hard startup error**;
+actix-http exposes **no** `max_concurrent_streams`/window knobs, so "tune
+the native h2 listener" is not an available move. If h2 is convicted, the
+outcome is the documented-position path (topology artifact: one client
+host = few h2 connections; real clients pool connections) unless a
+listener-level fix exists outside actix's h2 surface.
 
 1. **Protocol capture first (the `?` column):** record each response's
    negotiated protocol (k6 `res.proto`) into a `bench_http_proto` metric
@@ -255,21 +307,30 @@ control cell is error-free.
 
 ### H7. Metric & small-investigation batch — **Sonnet 5**
 
-*Files:* `benchmarks/scenarios/lib/metrics.js` + the two scenarios,
-`benchmarks/runner/report.py`, notes in `claude_dev/` / private doc.
+*Files:* `benchmarks/scenarios/lib/metrics.js` + the REST scenarios,
+`benchmarks/runner/report.py`, `claude_dev/rate-limit-posture-decision.md`,
+notes in `claude_dev/` / private doc.
 
-1. **Finish the G9 classifier wiring:** `token_introspection` and
-   `authz_check_rest` must route failures through the shared
-   ok/throttled/other classifier so `bench_throttled` exists in every
-   scenario (audit all scenarios while there — the fix is one shared
-   helper). Acceptance: a `rl=prod` mini-pass shows all three probed
-   scenarios reading "purely rate-limited" or naming the real failure.
-2. **G9.1 gRPC single-check −16% vs REST:** one profiling pass over the
-   tonic path (UUID parse, metadata auth, per-call span); fix if ≤ ~20
-   lines, else document as accepted overhead (gRPC still wins p95).
-3. **G9.2 Keycloak p0-vs-p2 login asymmetry** (52/s valid vs 23/s invalid
-   0/3 in the matrix): one diagnostic run each way, note the finding in
-   the private doc; fairness hygiene only, no KC fixes.
+1. **Finish the G9 classifier wiring for REST:** the shared classifier
+   (`recordGrpcResult()` + the CC path) exists but `token_introspection`
+   and `authz_check_rest` still bypass it (confirmed live by the g9 run:
+   `bench_throttled` absent) — add the REST-side equivalent so
+   `bench_throttled` exists in every scenario. Acceptance: a `rl=prod`
+   mini-pass shows all three probed scenarios reading "purely
+   rate-limited" or naming the real failure.
+2. **`protocol-variant` comparability label in `report.py`** (G4 caveat):
+   AXIAM's refresh cell measures session refresh, Keycloak's the OAuth2
+   refresh grant — label the pair so head-to-head tables carry the caveat
+   the same way `fallback-op`/`cc-token-setup` are carried today.
+3. **G7 residuals:** surface `rate-limit-posture-decision.md` §7.1 to the
+   maintainer for sign-off, and run the §7.2 laptop re-measurement of the
+   `gateway` preset (one labeled pass), pasting the numbers into the
+   decision record and the sizing docs.
+4. **G9.2 Keycloak p0-vs-p2 login asymmetry** (52/s valid vs 23/s invalid
+   0/3 in the matrix): one diagnostic run each way per the written
+   procedure in `grpc-vs-rest-authz-analysis.md`; note the finding in the
+   private doc; fairness hygiene only, no KC fixes. (G9.1 is closed —
+   documented as accepted overhead.)
 
 ### H8. SDK benches round 2 — one fix per language, then the overhead table — **Sonnet 5**
 
@@ -326,8 +387,10 @@ outcomes landed; H9 decided.
 1. Full median-of-3 matrix (all targets, p0 + p2) on the settled protocol
    with cell rotation active — the first matrix whose batch rows are
    trustworthy. Expect: `authz_batch_rest`/`_grpc` valid and ~5× singles
-   (coalesced default); AXIAM `token_refresh` a real head-to-head vs
-   Keycloak's 379/s (G4); no `fallback-op` rows for AXIAM.
+   (coalesced default); AXIAM `token_refresh` valid with 0 fallback,
+   published next to Keycloak's cell under the H7 `protocol-variant` label
+   (session refresh vs OAuth2 refresh grant — not like-for-like); no
+   `fallback-op` rows for AXIAM.
 2. Sensitivity passes per the standing list (uncapped DB, rl=prod, p3-mtls
    spot-check, cache/pool per H5/H9 defaults — a labeled OFF pass for
    whichever default flipped, so the delta stays visible).
@@ -346,6 +409,7 @@ known-labeled ones; public doc fourth draft published from run-4 medians.
 ## §5 Execution order & model summary
 
 ```
+H0: PR + merge claude/g1-timeline-hanging-l0mqd0 (the G implementation + harness)
 H1 (Sonnet) ─→ H2 (Opus)                       # gate first, then the transient verdict
 H3, H4 (Sonnet, parallel — no new data needed) # decided wins, ship now
 H5 (Opus, needs H1), H6 (Opus, needs H1)       # the two open performance verdicts

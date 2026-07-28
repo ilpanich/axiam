@@ -1,8 +1,10 @@
 # Improvements After the Serious Benchmark (run 3) — Pre-MVP Plan
 
 > **Status update 2026-07-28:** the G1–G10 tasks were executed on the laptop
-> (`results-20260728.tar.xz`). Per-task verdicts and the follow-up plan
-> (Phase **H**) live in
+> (`results-20260728.tar.xz`), using the harness/implementation from branch
+> `claude/g1-timeline-hanging-l0mqd0` (unmerged at the time — merging it is
+> Phase H's step H0). Per-task verdicts and the follow-up plan (Phase **H**)
+> live in
 > [`improvement-after-g-benchmark.md`](improvement-after-g-benchmark.md).
 > Headlines: G3 decided (`coalesced` wins 4.98×), G4 PASS, G6 PASS
 > (jemalloc, 94%), G1 narrowed (traffic-cured DB-side clamp; AMQP refuted);

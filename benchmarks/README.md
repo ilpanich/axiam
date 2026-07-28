@@ -45,6 +45,8 @@ system-under-test of the CPU we are trying to measure.
 benchmarks/
 ├── README.md                 # this file
 ├── justfile                  # convenience commands (bench-up, bench-run, bench-report…)
+├── run-improvement-tasks.sh  # per-task data collection for the pre-MVP plan (see below)
+├── run-memory-experiment.sh  # B1/D9 allocator A/B (default malloc vs jemalloc)
 ├── docs/
 │   ├── methodology.md        # how a fair run is defined; metric definitions
 │   ├── security-profiles.md  # the TLS/cert profile matrix
@@ -170,7 +172,28 @@ just repeat=3 targets="axiam keycloak" profiles="p0-plaintext p2-tls13" bench-ma
 > Every SDK bench builds against its sibling `ilpanich/axiam-<lang>-sdk` checkout
 > via a local path/replace/project reference until the alpha package is published —
 > see each language's `sdk/<lang>/TODO.md`. `sdk/HARNESS-SPEC.md` documents the
-> shared result contract every bench emits.
+> shared result contract every bench emits. As of run 3 no SDK bench has yet
+> produced a validated `status: "ok"` record against a live target — that is
+> tracked as task G10 below.
+
+## Targeted investigation runs
+
+Two standalone scripts sit alongside the matrix for the open questions from
+run 3. They are separate from `bench-matrix` on purpose: each answers ONE
+question, writes its own verdict, and can be run in isolation.
+
+| Script | Use it for |
+|---|---|
+| `./run-improvement-tasks.sh <task>` | One subcommand per task in [`claude_dev/improvement-after-serious-benchmark.md`](../claude_dev/improvement-after-serious-benchmark.md) that needs a live run. `./run-improvement-tasks.sh list` prints the tasks with time estimates. |
+| `./run-memory-experiment.sh [a\|b\|both]` | The B1/D9 memory-retention A/B: builds a default-allocator and a jemalloc image, drives a login burst, watches RSS for 10 minutes per variant, and writes `results/d9-summary.md`. |
+
+Each `run-improvement-tasks.sh` task writes `results/tasks/<task>/SUMMARY.md`
+containing the measured numbers **and** the plan's acceptance criterion, so a
+task can be closed (or a follow-up opened) from its summary alone. Start with
+`g1-timeline`: run 3 found that for ~5–7 minutes after seeding, the AXIAM stack
+serves everything at ~45 req/s with the datastore pinned at ~1 core, which
+silently corrupted every cell that ran first after a seed — see
+[`PRIVATE_BENCH_ANALYSIS.md`](PRIVATE_BENCH_ANALYSIS.md) §1.
 
 ## Out of scope (v1.0-beta)
 

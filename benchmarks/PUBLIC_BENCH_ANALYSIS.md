@@ -285,7 +285,8 @@ with server CPU; token issuance with neither until ~1.8k/s per 2 cores).
 
 | Setting (env var) | Shipped default | Small internet-facing (2c/1GiB) | M2M / microservices / IoT fleet | Large multi-tenant (8c+) |
 |---|---|---|---|---|
-| `AXIAM__RATE_LIMIT__KEY` | `ip` | `ip` | **`client_id`** (or `ip_client_id`) — per-IP buckets collide behind NAT/gateways | `ip_client_id` |
+| `AXIAM__RATE_LIMIT__PROFILE` | `internet` | `internet` | **`gateway`** — moves the whole machine-traffic family coherently from one variable | `mesh` |
+| `AXIAM__RATE_LIMIT__KEY` | `ip` | `ip` | **`client_id`** (or `ip_client_id`) — per-IP buckets collide behind NAT/gateways — **but read the security caveat below first** | `ip_client_id` |
 | `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | 20 | 60–120 | **per-client peak × 60 × 2** (a 2-core server sustains ~108k issuances/min total) | budget per tenant SLA |
 | `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | 10 | 60 | 10–20× your token limit (resource servers introspect per request) | same rule |
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 300 | 600 | **6 000–60 000** per client (checks are cheap reads; 300/min starves any real service) | size to cache-on ceiling |
@@ -299,13 +300,26 @@ with server CPU; token issuance with neither until ~1.8k/s per 2 cores).
 | `AXIAM__AUTH__MAX_CONCURRENT_HASHES` | 0 = auto (min(cpus, 4)) | auto | auto | ≈ physical cores reserved for auth; keeps login RAM bounded (~19 MiB per concurrent hash) |
 | DB CPU allocation | — | DB ≥ server cores | DB ≥ server cores if authz/userinfo-heavy (they scale with DB CPU; tokens don't) | 2× server cores for read-heavy |
 
+**Security caveat on `client_id` keying — read before changing the key mode.**
+The `client_id` a request is bucketed by is read from the request body
+*before* the client credential is verified (that is what the OAuth2 spec puts
+there). So an attacker who simply varies the `client_id` string gets a fresh
+bucket each time and is effectively unlimited on the token, revoke and
+introspect endpoints. **`client_id` keying is a fairness control between
+well-behaved clients, not an abuse control.** `ip` is the only mode whose key
+an attacker cannot mint at will, which is why it stays the shipped default.
+Use `client_id`/`ip_client_id` only where something else is already
+authenticating callers at the edge — mTLS, an API gateway, a WAF, or an IP
+allow-list — which is exactly the topology the M2M column assumes.
+
 Two rules of thumb the data supports: (1) if your traffic is
 authorization-check-heavy, spend hardware on the **database** and turn the
 **decision cache on** before anything else; (2) if it's token-heavy, the
-limits — not the hardware — are what you'll hit first: switch rate-limit
-keying to `client_id` and size `TOKEN_PER_MIN` from your real per-client
-peak, keeping the defaults only on genuinely internet-exposed endpoints
-(login, register, password-reset, MFA).
+limits — not the hardware — are what you'll hit first: raise
+`TOKEN_PER_MIN` from your real per-client peak and, *if and only if* you have
+edge authentication per the caveat above, switch the key mode; keep the
+defaults on genuinely internet-exposed endpoints (login, register,
+password-reset, MFA), which stay per-IP in every configuration.
 
 ## 7. Full result matrix (capped run, median-of-3, graph-ready)
 

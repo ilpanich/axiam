@@ -6,7 +6,7 @@
 import grpc from 'k6/net/grpc';
 import { check } from 'k6';
 import { cfg, loadStages, thresholds, tlsOptions, grpcConnectParams, requireSeed } from './lib/config.js';
-import { m } from './lib/metrics.js';
+import { recordGrpcResult } from './lib/metrics.js';
 import { loginSession, jwtClaims } from './lib/auth.js';
 
 const client = new grpc.Client();
@@ -70,8 +70,8 @@ export default function (data) {
   // reading it — so the raw value silently recorded 1 for EVERY code, including
   // StatusOK (0). `===` against grpc.StatusOK is unaffected, which is why the
   // checks stayed correct while this metric was uniformly 1.
-  m.grpcStatus.add(res && res.status != null ? Number(res.status) : -1);
-  m.latency.add(Date.now() - start);
-  m.errorRate.add(!ok);
-  if (ok) m.ok.add(1); else m.failed.add(1);
+  // G9: one shared classifier for every gRPC scenario — also splits out
+  // RESOURCE_EXHAUSTED into bench_throttled so a rate-limited cell is
+  // legible (see claude_dev/grpc-vs-rest-authz-analysis.md).
+  recordGrpcResult(res, Date.now() - start, ok);
 }

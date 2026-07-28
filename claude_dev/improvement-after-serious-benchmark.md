@@ -1,5 +1,17 @@
 # Improvements After the Serious Benchmark (run 3) — Pre-MVP Plan
 
+> **Status update 2026-07-28:** the G1–G10 tasks were executed on the laptop
+> (`results-20260728.tar.xz`), using the harness/implementation from branch
+> `claude/benchmark-results-analysis-hynzr8` (unmerged at the time — merging
+> it is Phase H's step H0). Per-task verdicts and the follow-up plan (Phase
+> **H**) live in
+> [`improvement-after-g-benchmark.md`](improvement-after-g-benchmark.md).
+> Headlines: G3 decided (`coalesced` wins 4.98×), G4 PASS, G6 PASS
+> (jemalloc, 94%), G1 narrowed (traffic-cured DB-side clamp; AMQP refuted);
+> G5/G8 data partially invalidated by the still-undetected post-seed
+> transient (the G2 settle gate passes in ~34 s inside a ~6 min window);
+> G10 0/7 with per-language causes identified.
+
 **Created 2026-07-26** from the run-3 analysis
 ([`benchmarks/PRIVATE_BENCH_ANALYSIS.md`](../benchmarks/PRIVATE_BENCH_ANALYSIS.md),
 run-3 rewrite). This document is the executable task list for the **final
@@ -232,8 +244,18 @@ retention doesn't reproduce).
    the in-process retainer instead (that outcome would mean the memory is
    *held*, not fragmented — a different bug class).
 
-> **⟨PLACEHOLDER — integrate `results/d9-summary.md` here when the
-> experiment has run.⟩**
+> **Experiment run 2026-07-28 (results integrated per the placeholder):**
+>
+> | variant | baseline RSS | burst peak | post-burst plateau (10 min) | retained above baseline |
+> |---|---|---|---|---|
+> | A — default malloc | 68 MiB | 491 MiB | 376 MiB | **309 MiB** |
+> | B — jemalloc (default decay) | 69 MiB | **126 MiB** | 86 MiB | **17 MiB** |
+>
+> jemalloc closes **291 MiB = 94%** of the retention gap (threshold ≥30%) at
+> default `MALLOC_CONF` — no decay tuning needed — and also cuts the burst
+> peak ~4×. **Verdict: PASS — propose jemalloc as the release default.**
+> The follow-up PR is task **H4** in
+> [`improvement-after-g-benchmark.md`](improvement-after-g-benchmark.md).
 
 *Acceptance:* numbers in both docs; a PR or a documented "not worth it";
 public doc's retained-memory caveat updated either way.
@@ -378,3 +400,78 @@ G9 (Sonnet), G10 (Sonnet)                      # anytime; G10 before run 4
 MVP gate: G1–G7 done (G8 may land as a documented position rather than a
 fix; G9 is non-blocking; G10 required only for the SDK section of the
 public page, not for the server MVP itself).
+
+---
+
+## Implementation status (updated 2026-07-26)
+
+Implemented on branch `claude/benchmark-analysis-reporting-yo7gh5`, **each task
+with the model this plan assigns it** (G5/G7/G8 via Opus 5 agents; G2/G4/G9 via
+Sonnet 5 agents).
+
+**One environment constraint governs the whole table:** this sandbox has
+`cargo`, `node` and `python3` but **no `k6`, no Docker target stacks, and no
+live server** — and container-image egress is blocked, so no stack can be
+brought up. Every acceptance criterion that is a *measured benchmark number* is
+therefore collected on the maintainer's laptop via the new driver script rather
+than here. No benchmark number was fabricated.
+
+### The data-collection driver
+
+`benchmarks/run-improvement-tasks.sh` — one subcommand per task that needs a
+live run, each independently runnable in a spare slot, each writing
+`results/tasks/<task>/SUMMARY.md` with the measured numbers **and** this plan's
+acceptance criterion so the task can be closed from its summary alone:
+
+| Subcommand | Task | Answers |
+|---|---|---|
+| `g1-timeline` | G1 | When does the post-seed window end? (**run this first**) |
+| `g1-idle` | G1 | Time-based background work, or traffic-driven warm-up? |
+| `g1-isolate` | G1 | Does the state live in the server or the datastore? |
+| `g1-dbdirect` | G1 | Is the clamp visible with AXIAM out of the path? |
+| `g2-verify` | G2 | Do settle gate + rotation + env dump work live (incl. a secret-leak check)? |
+| `g3-batch` | G3 | Clean batch A/B — does batch finally beat single checks? |
+| `g4-refresh` | G4 | Is the refresh cell a real rotation now (`bench_fallback == 0`)? |
+| `g5-cache-sweep` | G5 | Does the cache's 3× survive a realistic key space? |
+| `g6-memory` | G6 | Does jemalloc fix the post-burst retention? (wraps `run-memory-experiment.sh`) |
+| `g8-tls-h1` | G8 | Is HTTP/2 multiplexing the TLS token-issuance penalty? |
+| `g9-rlprod` | G9 | Are rate-limited cells legible (`bench_failed ≈ bench_throttled`)? |
+| `g10-sdk` | G10 | Do the SDK benches emit valid records? |
+
+### Per-task status
+
+| Task | Model | Status | Notes |
+|------|-------|--------|-------|
+| G1 transient root-cause | Opus 5 | ⛔ laptop | Four probes scripted. The `g1-idle` probe is the decisive one: it splits "background work on a timer" from "warm-up that needs traffic" in a single cell. |
+| G2 harness countermeasures | Sonnet 5 | ✅ / ⏳ | Settle gate (`BENCH_SETTLE*`, canary-probes the target's real endpoint), per-run scenario rotation (`cell_order_index`), `axiam_env` knob dump with secret redaction. Found and fixed a real `bench-pack` bug: the leak grep false-positived on redacted key *names*. Live verification ⏳ `g2-verify`. |
+| G3 batch default | Sonnet 5 | ⛔ laptop | Blocked on G2's settle gate — this is the A/B run 3 could not do. |
+| G4 refresh fix | Sonnet 5 | ✅ / ⏳ | Root-caused from source: the `axiam_refresh` cookie is scoped `Path=/api/v1/auth/refresh` (jar read at the login URL could never see it), **and** login-issued refresh tokens live in `axiam-auth`'s `SessionRepository`, so they can never validate at the OAuth2 token endpoint. See `refresh-harness-diagnosis.md`. ⚠ **Comparability**: AXIAM has no password grant (deliberately — OAuth 2.1 drops ROPC), so this cell measures *session refresh* while Keycloak's measures the *OAuth2 refresh grant*. The two need a `protocol-variant` label in `report.py`; do not publish as a like-for-like head-to-head. |
+| G5 cache sweep | Opus 5 | ✅ / ⏳ | `BENCH_AUTHZ_KEYSPACE=K` spreads checks over K distinct cache keys; K=1 byte-identical to before; `setup()` self-provisions and fails closed if a key yields the wrong decision. Decision left **open** behind seven pre-agreed criteria. Surfaced three `axiam-authz` findings — see below. |
+| G6 allocator | Sonnet 5 | ⛔ laptop | Fully scripted (`run-memory-experiment.sh`); §G6's placeholder awaits the numbers. |
+| G7 rate-limit posture | Opus 5 | ✅ / ⏳ | Shipped defaults **unchanged** (login 10/min, token 20, introspect 10, authz 300, key `ip`); relaxation is an opt-in `Internet`/`Gateway`/`Mesh` posture that touches only machine-to-machine buckets and switches them to `client_id` keying. Human endpoints stay strict per-IP under every posture. Preset values justified against measured ceilings; where a value sits *above* the measured ceiling (Mesh authz) it is documented as a runaway-loop guard, not an attacker guard. |
+| G8 B2 endgame | Opus 5 | ✅ / ⏳ | **`AXIAM__SERVER__TLS__HTTP2=false` was a proven no-op** — actix-http's `rustls_0_23_with_config` unconditionally prepends `h2` to ALPN and rustls selects by server preference, so h2 always won regardless of the setting. Now a hard startup error (`ErrorKind::Unsupported`) rather than a silent lie — an operator relying on it was previously wrong without knowing, and it also made faking an h1 cell via the env var impossible. G8 deliberately did NOT ship an h2 `max_concurrent_streams` knob: actix-http never exposes it, so the knob could not have affected the outcome, and shipping it would repeat the exact mistake this task existed to correct. Conviction cell ⏳ `g8-tls-h1`. See `b2-tls-h2-investigation.md`. |
+| G9 small investigations | Sonnet 5 | ✅ / ⏳ | The rate-limit "metric incoherence" was **not** a counting bug: limiters start with a full burst, so genuine successes land at test start while the retry storm drives the *fraction* to ~1.00. Both metrics were correct and jointly illegible. Fixed with `bench_throttled` + a shared `recordGrpcResult()` classifier now wired into all three gRPC scenarios. gRPC-vs-REST authz gap documented as accepted overhead (no cheap fix found; gRPC still wins p95). |
+| G10 SDK benches | Sonnet 5 | ⛔ laptop | Needs a live seeded target; `g10-sdk` validates two consecutive `status: "ok"` records per language. |
+
+### Findings that became new work (not in the original plan)
+
+1. **Decision-cache `order` vector grows unbounded** when the working set stays
+   *below* `max_entries_per_tenant` — the FIFO trim only runs when the cap is
+   exceeded, while TTL-expired keys are removed from `entries` but left in
+   `order`, so a re-access pushes a duplicate. Growth tracks the miss rate. The
+   existing test only covers a *live* re-insert, so this is untested. This
+   matters precisely because it is the code G5 may default to ON — **fix before
+   any default flip** (it is criterion C5 in the cache decision note).
+2. **The decision cache is process-local with no cross-replica invalidation**,
+   so "revocation is immediate" is a single-process property; a multi-replica
+   deployment's actual revocation latency is ≤ TTL. This must appear next to the
+   default wherever the default is documented, not in a footnote.
+3. **`invalidate_subject` is O(shard) under the single global mutex** — a role
+   unassignment scans up to 10 000 entries while holding the lock every authz
+   check needs.
+4. **No live-stack revocation test exists.** The "existing integration test"
+   G5 was to run against the live stack drives the engine with mock
+   repositories; there is no REST-level or live-DB invalidation test anywhere.
+   The cache note carries a manual curl procedure and recommends two issues.
+5. **`report.py` needs a `protocol-variant` comparability label** for the G4
+   refresh cell (see the G4 row above).

@@ -197,6 +197,14 @@ layers derive their bucket key the same way.
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | Max authz-check requests per minute per key (default `300`). |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy hops to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0` — set to `1` behind a single ingress/nginx). |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
+| `AXIAM__RATE_LIMIT__PROFILE` | Deployment posture preset: `internet` (default — the shipped values above, unchanged) \| `gateway` \| `mesh`. Sets the machine-traffic family (key mode, token/introspect/revoke/authz, and the gRPC authz ceiling) coherently in one variable; never changes the human endpoints. See [Sizing your rate limits](rate-limit-sizing.md). |
+
+> **Which numbers should you actually run?** See
+> **[Sizing your rate limits](rate-limit-sizing.md)** — the measured hardware
+> envelope, the `gateway`/`mesh` presets, how to size by hand, and the
+> security caveats that come with per-client keying. The shipped defaults are
+> tuned for a small internet-facing deployment and are known to be too strict
+> for a NAT'd M2M fleet.
 
 ### `AXIAM__RATE_LIMIT__KEY` — NAT'd-fleet key configurability (D8)
 

@@ -231,10 +231,24 @@ performance only, never the decision an endpoint returns.
 **Security posture (safe under AXIAM's additive allow-wins / default-deny
 model):** every access-*narrowing* mutation (role/grant/group/resource change)
 invalidates the affected cache entries immediately, wired into the mutation
-handlers — so **no revocation can leave a stale allow**. The TTL is only a
-bounded-staleness backstop: even a missed invalidation self-heals within
-`AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Full rationale and the per-mutation
-invalidation table are in the [Admin Guide](../admin/README.md#authorization-decision-cache-optional-d7).
+handlers — so on the replica that handled the mutation **no revocation leaves a
+stale allow**. The TTL is the bounded-staleness backstop: a missed invalidation
+self-heals within `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Full rationale and
+the per-mutation invalidation table are in the
+[Admin Guide](../admin/README.md#authorization-decision-cache-optional-d7).
+
+> **⚠ Multi-replica caveat — read before enabling.** The cache and its
+> invalidation are **process-local**; there is no cross-replica invalidation
+> channel. "Revocation is immediate" is a **single-process** property. Run two
+> or more replicas and a revocation handled by one replica leaves the others
+> serving the pre-revocation decision until their entries expire, so the
+> **deployment's worst-case revocation latency becomes
+> `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` (default 5 s)** — on every read path,
+> including the `RequirePermission` guard on the admin endpoints, and with no
+> audit signal distinguishing a cached allow from a fresh one. In the
+> Kubernetes manifests under `k8s/` (multi-replica by default) leave
+> `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false` unless a ≤ TTL revocation window
+> is an accepted risk.
 
 ## Rate limiting
 

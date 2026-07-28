@@ -194,7 +194,9 @@ see the §2 correction — the only clean batch cell so far measured
 852 batches/s (≈4 260 checks/s), and full re-measured batch tables will
 ship in the next draft rather than repeating an artifact. With the
 **decision cache** enabled (§4) single checks reach **2322 req/s REST /
-1822 gRPC** on the same capped hardware.
+1822 gRPC** on the same capped hardware — a best case measured at cache-key
+cardinality K = 1 (one hot tuple, ~100% hit rate); see §4 for what happens
+at a realistic key space.
 
 ## 4. Sensitivity passes (labeled, never mixed into head-to-heads)
 
@@ -211,9 +213,25 @@ ship in the next draft rather than repeating an artifact. With the
 
 **Decision cache ON** (`AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true`,
 TTL 5 s): authz checks **3.0–3.15×** (REST 2322/s, gRPC 1822/s), DB no
-longer saturated, all non-authz cells unchanged. Caveat: the benchmark's
-cache hit rate is favorable (small key space); revocations are bounded by
-the 5 s TTL plus event-driven invalidation (integration-tested).
+longer saturated, all non-authz cells unchanged.
+
+**Read that 3× as a ceiling, not an expectation.** Every VU in that cell
+sent the *same* `(subject, resource, action, scope)` tuple, i.e. a
+cache-key cardinality of **K = 1** and a steady-state hit rate of ~100% —
+the most favourable key space that can exist. The one trustworthy
+larger-K measurement so far (K = 10 000, exceeding the per-tenant entry
+cap) is **+32%**, not +200%. A deployment's actual win sits between those
+two numbers and is set by its own hot-key-space size versus request rate;
+the cache's own `AuthZ decision cache stats (D7)` log line reports the
+live `hit_rate_pct` so you can measure it rather than assume it.
+
+Two caveats that belong with the number: revocation is enforced by
+event-driven invalidation on the mutation path plus the 5 s TTL backstop
+(integration-tested) — but the cache is **process-local**, so with more
+than one replica a revocation only invalidates the replica that handled
+it and the deployment's worst-case revocation latency is the TTL. The
+default is therefore **off**, and this feature is a labeled sensitivity
+pass, never part of a head-to-head number.
 
 **DB connection pool** (`AXIAM__DB__POOL_SIZE=4`): token issuance +7%
 (1823→1955); everything else within noise at this concurrency. A further
@@ -433,9 +451,10 @@ release binary: token issuance 4.3–5.2×, introspection 1.17–2.45×, JWKS
 7–13×, userinfo 1.34–5.3×; the only login that stays under 2 s p95 at both
 profiles; native mTLS at zero measured cost (unique in this field —
 Zitadel's built-in listener has no client-cert mode, Keycloak's typical
-deployments front it with a proxy); a decision cache worth 3× on
-authorization checks; and run-to-run spreads tight enough (±0.1–2.8%) to
-trust the deltas.
+deployments front it with a proxy); an optional decision cache worth up to
+3× on authorization checks at a small key space (+32% measured at K=10 000
+— see §4); and run-to-run spreads tight enough (±0.1–2.8%) to trust the
+deltas.
 
 **Weaknesses.** The TLS token-issuance halving persists (isolation cell
 re-queued after being invalidated by the measurement artifact); AXIAM's

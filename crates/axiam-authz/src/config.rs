@@ -76,11 +76,24 @@ pub struct AuthzConfig {
     /// invalidates the affected entries immediately (see
     /// `decision_cache` module docs). A stale allow can outlive a revocation
     /// by at most `decision_cache_ttl_secs` even if an invalidation is missed.
+    ///
+    /// SECURITY — **multi-replica caveat, read before enabling**: the cache and
+    /// its invalidation are **process-local**. "Revocation is immediate" is a
+    /// *single-process* property. With two or more replicas, a revocation
+    /// handled by replica A does not reach replicas B…N, which keep serving the
+    /// pre-revocation decision until their own entries expire — so the
+    /// deployment's **worst-case revocation latency is
+    /// `decision_cache_ttl_secs` (default 5 s)**, on every read path including
+    /// the `RequirePermission` guard that protects the admin endpoints. Enable
+    /// this only on a single replica, or where a ≤ TTL revocation window is
+    /// acceptable.
     pub decision_cache_enabled: bool,
 
     /// TTL, in seconds, for a cached decision (D7). Bounds worst-case
-    /// revocation latency if an invalidation event is ever missed. Short by
-    /// design.
+    /// revocation latency if an invalidation event is ever missed — and, on a
+    /// multi-replica deployment, bounds the *actual* revocation latency on
+    /// every replica that did not handle the mutation (the cache is
+    /// process-local; see `decision_cache_enabled`). Short by design.
     ///
     /// Configure via `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` (default `5`).
     pub decision_cache_ttl_secs: u64,

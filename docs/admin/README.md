@@ -208,9 +208,48 @@ directly into the mutation handlers:
 | Unassign role from group; revoke grant from role; delete/update role or permission; assign role to group or grant to role; create/update/delete resource; rename/delete scope; delete group | Per-tenant flush (affected-subject set not known without a query) |
 
 A per-tenant flush is the conservative fallback for coarse mutations; it can
-never leave a stale allow. **The security guarantee is: no revocation leaves a
-stale allow** — the cache entry is dropped in the same request that performs
-the revocation, before the response returns.
+never leave a stale allow. **The security guarantee is: on the replica that
+handled the mutation, no revocation leaves a stale allow** — the cache entry is
+dropped in the same request that performs the revocation, before the response
+returns. On *other* replicas the guarantee is the ≤ TTL bound below; read the
+next section before enabling this in a scaled deployment.
+
+### The cache is process-local — what that means with more than one replica
+
+The cache lives in the server process and there is **no cross-replica
+invalidation** (no AMQP fan-out, no shared store, no webhook). So:
+
+| Deployment | Revocation latency for the decision cache |
+| --- | --- |
+| **Single replica** | **Immediate** — the invalidation hook drops the entry in the revoking request. The TTL is only the backstop for a missed hook. |
+| **Two or more replicas** | **Up to `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` (default 5 s).** The revocation is handled by one replica and invalidates only that replica's cache; the others keep serving their cached decision until it expires. |
+
+Three consequences worth stating plainly:
+
+- It applies to **every** read path — REST `/api/v1/authz/check`, gRPC
+  `CheckAccess`, AMQP async authz, *and* the internal `RequirePermission` guard
+  on the admin endpoints — because one cache instance is shared by all engines
+  in the process. Revoking an **administrator's** own privileges is subject to
+  the same window on the other replicas.
+- The window is **silent and unobservable**: a hit is byte-identical to a miss
+  and the audit log records the decision, not its provenance. After an incident
+  you cannot tell from the logs whether a given allow came from cache.
+- Therefore: enable the cache on a single replica, or only where a ≤ TTL
+  revocation window is an accepted risk. If you need immediate revocation
+  across replicas, leave `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false` (the
+  default) until a cross-replica invalidation channel exists.
+
+### Observing what the cache is doing
+
+With the cache enabled the server logs a
+`AuthZ decision cache stats (D7)` line every 60 s
+(`AXIAM__AUTHZ__DECISION_CACHE_STATS_SECS=0` disables it, any other positive
+value changes the period) carrying `entries`, `tenants`, `queue_slots`, `hits`,
+`misses` and `hit_rate_pct`. Use `entries` to check whether the working set is
+actually hitting `DECISION_CACHE_MAX_ENTRIES` (i.e. whether FIFO eviction is
+running and depressing the hit rate) and `hit_rate_pct` to decide whether the
+cache is earning its staleness window at all — a low hit rate means a large key
+space and no benefit.
 
 ### Bounded-staleness backstop
 

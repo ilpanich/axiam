@@ -893,6 +893,12 @@ task_g5_cache_sweep() {
   rm -rf "$out"; summary_open "$out" "G5 — decision cache vs cache-key cardinality"
   local scen=${G5_SCENARIO:-authz_check_rest.js}
   local ks=${G5_KEYSPACES:-"1 100 10000"}
+  # H5: p2-tls13, NOT p0-plaintext. On p0 the login cookies are marked `Secure`
+  # and k6's jar refuses to replay them over http://, so every cookie-session
+  # scenario (this one included) dies in setup() — see
+  # claude_dev/postseed-transient-investigation.md §8.3. Override with
+  # G5_PROFILE only if that has been fixed.
+  local prof=${G5_PROFILE:-p2-tls13}
 
   s "Run 3 measured the cache at K=1 (every VU hammering ONE subject/resource pair) —"
   s "the friendliest possible hit rate. This sweeps the key space to bound the real"
@@ -903,9 +909,9 @@ task_g5_cache_sweep() {
 
   for enabled in false true; do
     export AXIAM__AUTHZ__DECISION_CACHE_ENABLED=$enabled
-    arm_cleanup axiam p0-plaintext
+    arm_cleanup axiam "$prof"
     bench_up_seed axiam
-    BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam p0-plaintext authz_check_rest.js \
+    BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam "$prof" authz_check_rest.js \
       "$out/warmup-$enabled" >/dev/null 2>&1 || true
     for k in $ks; do
       local d=$out/cache-$enabled/k-$k
@@ -913,7 +919,7 @@ task_g5_cache_sweep() {
       # code change). With an older scenario it is simply ignored — the row then
       # reads the same for every K, which is itself the signal that the scenario
       # change has not landed yet.
-      BENCH_AUTHZ_KEYSPACE=$k cell axiam p0-plaintext "$scen" "$d" >/dev/null 2>&1 || true
+      BENCH_AUTHZ_KEYSPACE=$k cell axiam "$prof" "$scen" "$d" >/dev/null 2>&1 || true
       local f mem; f=$(k6_file "$d")
       mem=$(python3 - "$d" <<'PY'
 import csv, glob, os, sys
@@ -937,7 +943,12 @@ PY
   s "- If the win collapses toward 1.0× as K grows, the default should stay opt-in and the"
   s "  public doc's \"3×\" must be labeled as a best-case, small-key-space figure."
   s "- Memory at K=10000 bounds \`DECISION_CACHE_MAX_ENTRIES\` guidance."
-  s "- Then run the revocation integration test against this live stack (plan G5 step 2)."
+  s "- The live-stack revocation check is now automated: \`runner/h5-revocation-check.sh\`"
+  s "  (run it against BOTH a cache-ON and a cache-OFF stack — the OFF run is the control)."
+  s "- On a host where the shared rate-limit counter clamps the authz endpoint to ~20 ops/s"
+  s "  (see \`claude_dev/postseed-transient-investigation.md\`), these cells measure the clamp,"
+  s "  not the cache: the ~40 ms counter write sits OUTSIDE the cache and dominates. Report the"
+  s "  ON/OFF RATIO with that caveat and never the absolute level."
   finish
 }
 

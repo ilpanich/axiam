@@ -60,9 +60,15 @@ measures **852 batches/s (≈ 4 260 checks/s, p50 49 ms)** — i.e. batch is
 *more* efficient than single checks, as designed. We are re-measuring all
 batch cells under a corrected protocol before publishing final batch
 numbers; the same artifact also invalidated one TLS-diagnosis cell (§5).
-The transient itself is under investigation (it may affect cold-start
-behavior, which is why we're publishing it rather than quietly fixing the
-cell order).
+**Update — the "transient" has since been identified** and it is neither
+post-seed nor reliably transient: it is one synchronous datastore write
+(the shared rate-limit counter) that six AXIAM endpoints perform before
+their handler runs. See the honest write-up in §5 and the full
+investigation in `claude_dev/postseed-transient-investigation.md`. The
+"~45 req/s regardless of scenario" wording above is wrong in one respect
+worth correcting here: it is not *regardless of scenario* — only the
+rate-limited endpoints are affected, which is exactly how the cause was
+found.
 
 **Refresh-token comparison — partially restored.** Keycloak's refresh cells
 now measure real single-use rotation (the draft-2 fallback is fixed:
@@ -241,12 +247,32 @@ artifact (it ran inside the post-seed window) — it is re-queued under the
 corrected protocol. Even with the penalty, AXIAM's TLS token numbers lead
 the field 2.2–2.6×.
 
-**A post-seed database transient exists** (§2): for ~5–7 minutes after bulk
-seeding, throughput on the AXIAM stack is clamped at ~45 req/s. We found it
-because it corrupted our own cells; we're investigating whether it can
-affect production cold-starts or bulk imports, and the harness now gets a
-settle gate + randomized cell order. Numbers in this draft come from cells
-outside that window except where explicitly withdrawn (batch, TLS-h1).
+**What we called a "post-seed database transient" is not post-seed, and on
+some hosts it is not transient** (§2). The follow-up investigation
+(`claude_dev/postseed-transient-investigation.md`) traced it to a real
+design property of AXIAM, not to the datastore or to the benchmark: six
+endpoints — `POST /api/v1/authz/check`, `POST /oauth2/token`,
+`POST /oauth2/introspect`, `POST /oauth2/revoke`,
+`POST /api/v1/auth/login` and `GET /api/v1/users` — perform **one
+synchronous SurrealDB write (the shared rate-limit counter) before the
+handler runs**. That single round trip is the throughput ceiling for those
+endpoints: on one reproduction host it cost ~40 ms and pinned all six at
+**16–21 ops/s at any concurrency from 1 to 40 clients**, while structurally
+identical endpoints without it ran at 68–4 248 ops/s. On the gRPC listener the same
+write is applied server-wide, so **every** gRPC call pays it. It is
+unaffected by
+seeding, data volume, uptime, traffic, server or datastore restarts,
+connection-pool size, or even swapping the datastore to an in-memory
+backend. Readers should treat every AXIAM number on those six endpoints as
+**capped by the cost of one datastore write in your environment**, not by
+AXIAM's request handling. A fix is queued (get the counter off the
+synchronous path; also `GET /api/v1/users` is currently charged to the user
+*registration* rate-limit bucket, which is a bug). The ~45 req/s figure the
+previous draft attributed to a 5–7 minute post-seed window was this same
+effect; the recovery cliff we observed on the original benchmark host has
+not been reproduced and is not currently explained. Numbers in this draft
+come from cells outside that window except where explicitly withdrawn
+(batch, TLS-h1).
 
 **AXIAM's refresh-token cells are still excluded** (harness cookie bug —
 the fallback tagging keeps catching it, including on us). Keycloak's

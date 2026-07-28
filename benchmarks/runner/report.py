@@ -366,13 +366,17 @@ def host_flags(meta, host):
     (k6 itself was eating too much of the host's non-stack CPU headroom to
     trust it as a clean load generator).
 
-    G2: settle_timeout — the post-seed settle gate (run-benchmark.sh's
-    settle_gate()) hit its hard timeout without ever seeing
-    BENCH_SETTLE_STABLE_SECS consecutive stable canary ticks, so this cell may
-    still be inside (or just leaving) the post-seed serialized-DB transient
-    (PRIVATE_BENCH_ANALYSIS.md §1) even though the gate proceeded anyway.
-    meta.get() defaults to falsy for any meta.json predating G2, so old trees
-    render exactly as before (no flag)."""
+    G2/H1: settle_timeout — the post-seed settle gate (run-benchmark.sh's
+    settle_gate(), a concurrent burst probe as of H1) hit its hard timeout
+    without ever clearing BENCH_SETTLE_PROBE_THR ops/s (or
+    BENCH_SETTLE_PROBE_P50_MS p50) under BENCH_SETTLE_BURST_VUS concurrency,
+    so this cell may still be inside (or just leaving) the post-seed
+    serialized-DB transient (PRIVATE_BENCH_ANALYSIS.md §1) even though the
+    gate proceeded anyway. As of H1 this also makes the cell invalid (see
+    collect_dir()/aggregate_cell()) — kept here too so it's visible directly
+    in the "All results" table's host_flags column, not just the "Excluded"
+    one. meta.get() defaults to falsy for any meta.json predating G2, so old
+    trees render exactly as before (no flag)."""
     flags = []
     mhz_avg, mhz_max = host.get("mhz_avg", 0.0), host.get("mhz_max", 0.0)
     if mhz_max > 0 and mhz_avg < 0.85 * mhz_max:
@@ -437,6 +441,20 @@ def collect_dir(results_dir, max_error, min_samples):
                     reasons.append(f"only {res['samples']} resource samples")
                 if meta.get("k6_exit_code", 0) != 0:
                     reasons.append("k6 threshold breach")
+                # H1 item 5: settle_timeout:true means the post-seed settle
+                # gate (run-benchmark.sh's settle_gate()) never cleared its
+                # BENCH_SETTLE_PROBE_THR/BENCH_SETTLE_PROBE_P50_MS bar before
+                # hitting BENCH_SETTLE_TIMEOUT_SECS — this cell may still be
+                # inside (or just leaving) the post-seed clamp even though the
+                # gate proceeded anyway. REFUSE it (excluded from `valid`,
+                # same as any other invalid cell) rather than only flagging it
+                # in host_flags — a contaminated cell silently entering a
+                # median/head-to-head table is exactly the G run's
+                # cross-cutting data-quality failure (PRIVATE_BENCH_ANALYSIS.md
+                # §1) this task exists to stop repeating.
+                if meta.get("settle_timeout"):
+                    reasons.append("settle_timeout: true (post-seed settle gate hit its hard "
+                                    "timeout — cell may still be inside the post-seed clamp)")
                 cells.append({
                     "target": meta["target"], "profile": meta["profile"],
                     "scenario": meta["scenario"], "meta": meta,
@@ -566,6 +584,13 @@ def aggregate_cell(runs):
     reasons = []
     if n_valid < 2:
         reasons.append(f"only {n_valid}/{n_total} valid run(s) (need >=2 for a median)")
+    # H1 item 5: same refusal as collect_dir() above, recombined across ALL
+    # raw runs (not just `basis`) the same way settle_wait_secs/settle_timeout
+    # themselves are recombined a few lines up — one run hitting the settle
+    # timeout is enough to distrust the whole aggregated cell.
+    if meta.get("settle_timeout"):
+        reasons.append("settle_timeout: true on at least one run (post-seed settle gate hit "
+                        "its hard timeout — cell may still be inside the post-seed clamp)")
 
     return {
         "target": target, "profile": profile, "scenario": scenario, "meta": meta,
@@ -1017,20 +1042,27 @@ def build_report(cells, multi_run=False):
         lines += [
             "## Appendix: post-seed settle gate", "",
             "`settle_wait(s)` is how long run-benchmark.sh's settle gate "
-            "waited, before this run's FIRST cell, for "
-            "`BENCH_SETTLE_STABLE_SECS` consecutive seconds of canary "
-            "latency under `BENCH_SETTLE_MAX_MS` (defaults 30s / 100ms) — "
-            "every cell in the same run records the same wait, since the "
-            "gate runs once per `bench-run` invocation, not per cell. "
-            "`timeout` marks a cell whose gate hit its hard "
-            "`BENCH_SETTLE_TIMEOUT_SECS` (default 600s) without ever seeing "
-            "that many stable seconds — the run proceeded anyway (the gate "
-            "never fails the harness) but the cell may still be inside the "
-            "post-seed serialized-DB transient (PRIVATE_BENCH_ANALYSIS.md "
-            "§1); it's also surfaced as a `settle_timeout` host_flag in the "
-            "\"All results\" table above. For median-of-N cells, "
-            "`settle_wait(s)` is the MAX across the repeat's runs (worst "
-            "case) and `timeout` is set if ANY run's gate timed out.", "",
+            "waited, before this run's FIRST cell, for a concurrent burst "
+            "probe (`BENCH_SETTLE_BURST_VUS` workers, default 20, for "
+            "`BENCH_SETTLE_BURST_SECS` seconds, default 15) to clear "
+            "`BENCH_SETTLE_PROBE_THR` ops/s (default 400) OR "
+            "`BENCH_SETTLE_PROBE_P50_MS` p50 (default 150ms) under that "
+            "concurrency (H1 — a serial 1 rps canary could not detect the "
+            "post-seed clamp: the ~22ms serialized unit reads as \"fast\" at "
+            "1 rps whether the server can sustain ~44 ops/s or ~730-750 "
+            "ops/s; only a concurrent burst can see the difference — see "
+            "\"Post-seed settle gate v2\" in docs/methodology.md). Every "
+            "cell in the same run records the same wait, since the gate "
+            "runs once per `bench-run` invocation, not per cell. `timeout` "
+            "marks a cell whose gate hit its hard `BENCH_SETTLE_TIMEOUT_SECS` "
+            "(default 600s) without ever clearing the threshold — the run "
+            "proceeded anyway (the gate never fails the harness) but the "
+            "cell may still be inside the post-seed serialized-DB transient "
+            "(PRIVATE_BENCH_ANALYSIS.md §1); such cells are REFUSED (marked "
+            "invalid — see \"Excluded (invalid) cells\") as of H1, not just "
+            "flagged. For median-of-N cells, `settle_wait(s)` is the MAX "
+            "across the repeat's runs (worst case) and `timeout` is set if "
+            "ANY run's gate timed out.", "",
         ]
         rows = []
         for c in sorted(settle_cells, key=lambda c: (c["scenario"], c["profile"], c["target"])):
@@ -1110,6 +1142,18 @@ def main():
         sys.exit(1)
     if multi_run:
         print(f"[report] median-of-N layout detected ({len(cells)} aggregated cells)")
+    # H1 item 5: loudly flag settle_timeout cells at the CLI too, not just in
+    # the "Excluded (invalid) cells" table buried in the generated report —
+    # this is the failure mode that let contaminated post-seed cells enter
+    # the G run's published numbers.
+    settle_timeout_cells = [c for c in cells
+                             if any("settle_timeout" in r for r in c.get("reasons", []))]
+    if settle_timeout_cells:
+        print(f"[report] WARN: {len(settle_timeout_cells)} cell(s) REFUSED — "
+              f"settle_timeout:true (post-seed settle gate hit its hard timeout):",
+              file=sys.stderr)
+        for c in settle_timeout_cells:
+            print(f"[report]   - {c['target']}/{c['profile']}/{c['scenario']}", file=sys.stderr)
     report = build_report(cells, multi_run=multi_run)
     out = args.out or os.path.join(args.results, "report.md")
     with open(out, "w") as f:

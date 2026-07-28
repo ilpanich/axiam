@@ -314,13 +314,16 @@ bench-seed:
     fi
 
 # Run the scenario suite (load + resource sampling) for a target/profile.
-# G2: run-benchmark.sh gates its first cell behind a post-seed settle check
-# and rotates the scenario order by BENCH_RUN_INDEX (set to `i` per repeat
-# pass by bench-matrix below; defaults to 1 — natural order — for a manual
-# invocation). Tunables (env, not `just` vars — see docs/methodology.md "Post-
-# seed settle gate & cell-order rotation"): BENCH_SETTLE (default 1, set 0 to
-# skip), BENCH_SETTLE_STABLE_SECS (30), BENCH_SETTLE_MAX_MS (100),
-# BENCH_SETTLE_TIMEOUT_SECS (600), BENCH_RUN_INDEX (1).
+# G2/H1: run-benchmark.sh gates its first cell behind a post-seed settle check
+# (a concurrent burst probe as of H1 — see docs/methodology.md "Post-seed
+# settle gate v2") and rotates the scenario order by BENCH_RUN_INDEX (set to
+# `i` per repeat pass by bench-matrix below; defaults to 1 — natural order —
+# for a manual invocation). Tunables (env, not `just` vars): BENCH_SETTLE
+# (default 1, set 0 to skip), BENCH_SETTLE_BURST_VUS (20), BENCH_SETTLE_BURST_SECS
+# (15), BENCH_SETTLE_PROBE_THR (400 ops/s), BENCH_SETTLE_PROBE_P50_MS (150),
+# BENCH_SETTLE_RETRY_SECS (30), BENCH_SETTLE_TIMEOUT_SECS (600), BENCH_RUN_INDEX
+# (1). BENCH_SETTLE_STABLE_SECS/BENCH_SETTLE_MAX_MS were the superseded serial-
+# canary knobs and are no longer consulted.
 bench-run:
     bash runner/run-benchmark.sh --target {{target}} --profile {{profile}} --scenario {{scenario}}
 
@@ -357,11 +360,24 @@ bench-report:
 bench-matrix:
     #!/usr/bin/env bash
     set -euo pipefail
+    # H1 item 2: nest under whatever BENCH_RESULTS_DIR the CALLER already set
+    # (e.g. run-improvement-tasks.sh redirecting a task into its own
+    # results/tasks/<task-id>/ subtree), instead of unconditionally
+    # overwriting it with "$PWD/results/run-$i" every iteration — that
+    # clobber is exactly why g2-verify's mini matrix used to write into the
+    # results ROOT (its own SUMMARY checker globs under the task's own dir
+    # and correctly reported "no meta.json" for a leak it didn't cause).
+    # Captured ONCE, before the loop below starts re-exporting
+    # BENCH_RESULTS_DIR per repeat — otherwise run-2 would nest under run-1's
+    # directory instead of alongside it. Only when the caller left
+    # BENCH_RESULTS_DIR unset do we fall back to the plain results/ root,
+    # same as before.
+    BASE_RESULTS_DIR="${BENCH_RESULTS_DIR:-$PWD/results}"
     for i in $(seq 1 {{repeat}}); do
-      RUN_DIR="results/run-$i"
+      RUN_DIR="$BASE_RESULTS_DIR/run-$i"
       echo "### repeat $i/{{repeat}} -> $RUN_DIR ###"
       mkdir -p "$RUN_DIR"
-      export BENCH_RESULTS_DIR="$PWD/$RUN_DIR"
+      export BENCH_RESULTS_DIR="$RUN_DIR"
       # G2 item 2: BENCH_RUN_INDEX drives run-benchmark.sh's cell-order
       # rotation (rotate_scenarios()) — run-1 executes scenarios in their
       # natural order, run-2 starts one scenario further along, etc., so no
@@ -380,7 +396,11 @@ bench-matrix:
       done
     done
     unset BENCH_RESULTS_DIR BENCH_RUN_INDEX
-    just bench-report
+    # H1 item 2 (same clobber family): aggregate from wherever this matrix
+    # actually wrote (BASE_RESULTS_DIR), not the hardcoded "results" root —
+    # a caller-redirected matrix (e.g. a task's results/tasks/<id>/ subtree)
+    # must not spill its report.md into the shared results/ root either.
+    python3 runner/report.py --results "$BASE_RESULTS_DIR"
 
 # --- SDK client benchmarks --- (pass the language as sdk=, e.g. sdk=python)
 sdk-bench:

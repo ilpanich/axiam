@@ -46,6 +46,22 @@ die()  { printf '\033[1;31m[%s] ERROR: %s\033[0m\n' "${TASK:-run}" "$*" >&2; exi
 need() { command -v "$1" >/dev/null || die "$1 is required but not installed"; }
 need_base() { need docker; need just; need k6; need python3; }
 
+# H1 item 2: fail-fast guard against the same "wrong results dir" fault class
+# as the bench-matrix clobber bug (benchmarks/justfile) — every artifact this
+# script writes must land under results/tasks/<task-id>/, nothing else. $1
+# must already exist (callers `mkdir -p` first) so `cd .. && pwd` can resolve
+# it to a real absolute path; compared as a real path prefix (not a string
+# prefix) so e.g. "results/tasks/g2-verify-evil" cannot falsely match
+# "results/tasks/g2-verify".
+assert_within_tasks_root() { # $1=dir (already created)
+  local dir="$1" abs
+  abs="$(cd "$dir" && pwd)" || die "internal: cannot resolve results dir '$dir'"
+  case "$abs" in
+    "$TASKS_ROOT"|"$TASKS_ROOT"/*) : ;;
+    *) die "internal: refusing to write outside $TASKS_ROOT (resolved '$dir' -> '$abs') — results-dir clobber guard" ;;
+  esac
+}
+
 # Stack lifecycle. Any extra AXIAM__* knobs are passed as leading env assignments
 # by the caller (they reach the server through the compose pass-through).
 #
@@ -62,6 +78,7 @@ bench_up_seed() { # $1=target [$2=profile] [$3.. extra just args]
   local target=$1 profile=${2:-p0-plaintext}; shift 2 || shift $# || true
   [ -n "$TASK_OUT" ] || die "internal: TASK_OUT not set before bench_up_seed"
   mkdir -p "$TASK_OUT"
+  assert_within_tasks_root "$TASK_OUT"
   log "bringing up $target ($profile) and seeding"
   BENCH_RESULTS_DIR="$TASK_OUT" just target="$target" profile="$profile" "$@" bench-up
   BENCH_RESULTS_DIR="$TASK_OUT" just target="$target" profile="$profile" "$@" bench-seed
@@ -81,6 +98,7 @@ bench_down() { # $1=target [$2=profile]
 cell() {
   local target=$1 profile=$2 scenario=$3 outdir=$4
   mkdir -p "$outdir"
+  assert_within_tasks_root "$outdir"
   [ -f "$TASK_OUT/${target}.seed.ok" ] && cp "$TASK_OUT/${target}.seed.ok" "$outdir/"
   BENCH_RESULTS_DIR="$outdir" just target="$target" profile="$profile" \
     scenario="$scenario" bench-run
@@ -150,25 +168,70 @@ print(next((argv[i + 1] for i, v in enumerate(argv) if v == flag and i + 1 < len
 # stack's own connection details.
 DBD_NET=""; DBD_IMG=""; DBD_USER=""; DBD_PASS=""
 
-# The probe statement, in ONE place so the pre-flight, the timing loop and the
-# manual-fallback snippet in the summary cannot drift apart.
+# H1 item 4: the probe statement, in ONE place so the pre-flight, the timing
+# loop and the manual-fallback snippet in the summary cannot drift apart.
 #
-# It mirrors the authz hot path's own shape (see
-# `SurrealPermissionRepository::get_role_permission_grants`): a traversal of the
-# `grants` edge that dereferences the permission record on the far side
-# (`out.*`), which is where that query's real work happens — but with no bound
-# parameters, so it needs no tenant/role UUID from the seed.
-#
-# The table is `grants` (`RELATE role -> grants -> permission`). There is NO
-# `role_permission_grant` table — that is the name of the Rust *method*, and an
-# earlier revision of this probe used it as a table name; every iteration then
-# measured a "table does not exist" error path instead of the datastore.
-DBD_QUERY='SELECT count() FROM grants WHERE out.tenant_id != NONE GROUP ALL;'
+# This is the ACTUAL query the authz hot path issues — copied from
+# `SurrealPermissionRepository::get_role_permission_grants_for_roles`
+# (crates/axiam-db/src/repository/permission.rs, the query D6
+# `claude_dev/surrealdb-tuning-report.md` §2 names as round-trip 4, the last
+# of the 3-4 serial round-trips `axiam-authz::engine::check_access` makes per
+# check), same SELECT list and the same `out.*` dereference of every `grants`
+# edge — the only change is dropping `AND meta::id(in) IN $role_ids`, since a
+# bare `surreal sql` session run from this script (no AXIAM code, no seed
+# lookup) has no bound role UUIDs to hand it; `out.tenant_id != NONE` keeps
+# the same "every edge must dereference `out`" cost shape without needing
+# one. The table is `grants` (`RELATE role -> grants -> permission`); there
+# is NO `role_permission_grant` table — that is the Rust *method* name.
+DBD_QUERY='SELECT meta::id(in) AS role_id, meta::id(out.id) AS record_id, out.tenant_id AS tenant_id, out.action AS action, out.description AS description, out.created_at AS created_at, out.updated_at AS updated_at, scope_ids FROM grants WHERE out.tenant_id != NONE;'
 
 surreal_direct() { # $1=statement -> JSON result on stdout, diagnostics on stderr
   printf '%s\n' "$1" | docker run --rm -i --network "$DBD_NET" "$DBD_IMG" sql \
     --endpoint "http://$C_DB:8000" --username "$DBD_USER" --password "$DBD_PASS" \
     --namespace axiam --database axiam --hide-welcome --json
+}
+
+# H1 item 4: a single long-lived `surreal sql` session shared across the
+# whole timing loop, instead of one `docker run` PER QUERY (the old
+# surreal_direct() above — kept only for the pre-flight and the manual
+# fallback snippet, both one-shot). A fresh `docker run` pays container-start
+# overhead (~500 ms, measured) on every iteration, which used to swamp the
+# actual query latency the probe exists to measure. Started with bash
+# `coproc` so this script can write one statement to its stdin and read
+# exactly one result back per round trip, same shape as the real hot path's
+# "await one query, get one result" pattern. `surreal sql --json` prints
+# each result as one compact JSON line followed by ONE blank separator line
+# (verified empirically — `DEFINE TABLE ...` -> `[null]\n\n`, a SELECT ->
+# `[[{...}]]\n\n`); dbd_read_result skips blank lines to land on the next
+# real result.
+DBD_COPROC_PID=""
+dbd_session_start() { # sets DBD_COPROC[0]/[1] (bash coproc fds) + DBD_COPROC_PID
+  coproc DBD_COPROC { docker run --rm -i --network "$DBD_NET" "$DBD_IMG" sql \
+    --endpoint "http://$C_DB:8000" --username "$DBD_USER" --password "$DBD_PASS" \
+    --namespace axiam --database axiam --hide-welcome --json ; }
+  # `coproc NAME { ... }` makes bash set NAME_PID (DBD_COPROC_PID) itself —
+  # no manual assignment needed (and $COPROC_PID only exists for the
+  # anonymous `coproc { ... }` form, not this named one).
+  sleep 1  # let the container's TCP handshake + auth land before the first send
+}
+
+dbd_session_stop() {
+  [ -n "$DBD_COPROC_PID" ] || return 0
+  exec {DBD_COPROC[1]}>&- 2>/dev/null || true   # close stdin -> surreal sql exits
+  wait "$DBD_COPROC_PID" 2>/dev/null || true
+  DBD_COPROC_PID=""
+}
+
+# Sends one statement on the open session and reads back its one result line
+# (skipping the blank separator line(s) surreal sql --json emits). Returns 1
+# (result on stdout is empty) if the session's stdout closed / errored.
+dbd_session_query() { # $1=statement -> result JSON line on stdout
+  printf '%s\n' "$1" >&"${DBD_COPROC[1]}" || return 1
+  local line
+  while IFS= read -r -u "${DBD_COPROC[0]}" line; do
+    [ -n "$line" ] && { printf '%s\n' "$line"; return 0; }
+  done
+  return 1
 }
 
 # Did that statement actually succeed? The exit status alone cannot tell you:
@@ -296,6 +359,7 @@ summary_open() { # $1=outdir $2=title
   SUMMARY=$1/SUMMARY.md
   TASK_OUT=$1
   mkdir -p "$1"
+  assert_within_tasks_root "$1"
   {
     echo "# $2"
     echo
@@ -442,6 +506,30 @@ task_g1_isolate() {
     local f; f=$(k6_file "$d"); [ -n "$f" ] && k6_stat "$f" thr || echo NA
   }
 
+  # H1 item 3: after a DB restart, the server's connection/pool needs to
+  # re-sign-in before it can serve anything real — hitting it with a k6 cell
+  # immediately (the old behavior) measured that re-signin failure itself
+  # (recorded n=1 request, unusable) rather than the post-restart clamp.
+  # `/ready` (crates/axiam-api-rest/src/health.rs) exists exactly for this:
+  # unlike `/health` (always 200, a pure liveness probe), it re-checks DB
+  # connectivity through the same pool the authz path uses and returns 503
+  # until that succeeds — so polling it to 200 is a direct signal the pool
+  # has re-signed in, not a fixed guess at a sleep duration.
+  wait_for_ready() { # $1=base_url $2=timeout_secs -> 0 once /ready is 200
+    local base="$1" timeout="${2:-90}" start now code
+    start=$(date +%s)
+    while :; do
+      code="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code}' "$base/ready" 2>/dev/null || echo 000)"
+      [ "$code" = "200" ] && { log "$base/ready is 200 — pool re-signed in"; return 0; }
+      now=$(date +%s)
+      if [ $((now - start)) -ge "$timeout" ]; then
+        warn "timed out after ${timeout}s waiting for $base/ready to return 200 (last code: $code) — proceeding anyway"
+        return 1
+      fi
+      sleep 1
+    done
+  }
+
   s "Restarting ONE container at a time inside the clamped window. Whatever state"
   s "the transient lives in dies with the container that owns it."
   s
@@ -452,7 +540,16 @@ task_g1_isolate() {
   b=$(probe after-server-restart);         sp "- after restarting the SERVER only: **${b} ops/s**"
   log "restarting $C_DB only"
   docker restart "$C_DB" >/dev/null; sleep 25
-  c=$(probe after-db-restart);             sp "- after restarting the DATASTORE:   **${c} ops/s**"
+  wait_for_ready "http://localhost:${BENCH_APP_PORT:-8090}" "${G1_ISOLATE_READY_TIMEOUT:-90}"
+  # H1 item 3: also run this probe as a FULL-length cell (not the 20s G1
+  # micro-cell used everywhere else in this task) — a longer measured window
+  # gives it enough samples to be statistically usable even if the pool is
+  # still settling right as measurement starts.
+  local saved_warmup=$BENCH_WARMUP saved_duration=$BENCH_DURATION
+  export BENCH_WARMUP="${G1_ISOLATE_FULL_WARMUP:-30s}" BENCH_DURATION="${G1_ISOLATE_FULL_DURATION:-120s}"
+  c=$(probe after-db-restart)
+  export BENCH_WARMUP="$saved_warmup" BENCH_DURATION="$saved_duration"
+  sp "- after restarting the DATASTORE:   **${c} ops/s** (full-length cell, after /ready wait)"
 
   sampler_stop "$SAMPLER_PID"; SAMPLER_PID=""; disarm_cleanup; bench_down axiam
   s
@@ -520,12 +617,16 @@ task_g1_dbdirect() {
     s '```'
     disarm_cleanup; bench_down axiam; finish; return
   fi
-  # Pre-flight the query once before timing 30 of them. A wrong credential (or a
-  # renamed table) would otherwise fill db-direct.csv with 30 rows of pure
+  # Pre-flight the query once before timing anything. A wrong credential (or a
+  # renamed table) would otherwise fill db-direct.csv with rows of pure
   # container-start overhead that read like plausible timings — the worst
   # possible failure for a task whose whole output is a trend line. Both gates
   # are needed: the exit status catches an unusable connection, surreal_result_ok
-  # catches a statement that was rejected while still exiting 0.
+  # catches a statement that was rejected while still exiting 0. This one-shot
+  # preflight still uses surreal_direct() (fresh docker run) deliberately —
+  # it's cheap to pay container-start overhead exactly once, and doing it
+  # this way keeps the preflight independent of the persistent session's own
+  # health (a good sanity check before committing to it).
   if ! surreal_direct "$DBD_QUERY" \
         > "$out/preflight.log" 2>&1 \
      || ! surreal_result_ok < "$out/preflight.log"; then
@@ -537,30 +638,74 @@ task_g1_dbdirect() {
     s '```'
     disarm_cleanup; bench_down axiam; finish; return
   fi
-  log "pre-flight query OK as user '$user' — timing 30 iterations"
+  log "pre-flight query OK as user '$user' — opening one long-lived session for the timing loop"
 
-  # Each row carries its own ok flag: the pre-flight proves the query worked
-  # ONCE, but a mid-run failure (the stack going away, a restart) would still
-  # time a fast error path and read as "the clamp cleared". A row is only
-  # evidence if ok=1.
+  # H1 item 4: ONE persistent `surreal sql` session (dbd_session_start/query/
+  # stop, defined above) for the ENTIRE timing loop below — not a fresh
+  # `docker run` per query (the old behavior: ~500 ms flat container-start
+  # overhead added to every one of 30 rows, which is most of what those rows
+  # measured). Two segments in the SAME file/session so "in-window" vs
+  # "settled" is a within-file comparison rather than two separate runs that
+  # could differ for unrelated reasons:
+  #   - "window": DBD_ITERS rows starting immediately (same cadence as
+  #     before: DBD_INTERVAL_SECS apart, default 2s) — this is the segment
+  #     that used to be the whole probe.
+  #   - "baseline": after waiting DBD_BASELINE_WAIT_SECS (default 420s = 7min,
+  #     comfortably past the ~5-7min window G1 measured — see
+  #     PRIVATE_BENCH_ANALYSIS.md §1), DBD_BASELINE_ITERS more rows at the
+  #     same cadence. Without this segment the probe is inconclusive by
+  #     construction: a flat trend across ONLY in-window rows cannot
+  #     distinguish "the DB is slow throughout, unrelated to the window" from
+  #     "the DB would be fast if measured after the window" — G1's original
+  #     verdict on this probe.
+  # Every row is individually timestamped (epoch_ms) and carries its own ok
+  # flag: a mid-run failure (the stack going away, a restart) would otherwise
+  # time a fast error path and read as "the clamp cleared".
+  local dbd_iters=${G1_DBDIRECT_ITERS:-30}
+  local dbd_interval=${G1_DBDIRECT_INTERVAL_SECS:-2}
+  local dbd_baseline_wait=${G1_DBDIRECT_BASELINE_WAIT_SECS:-420}
+  local dbd_baseline_iters=${G1_DBDIRECT_BASELINE_ITERS:-15}
+
+  dbd_session_start
   {
-    echo "iteration,elapsed_ms,ok"
-    for i in $(seq 1 30); do
-      local st et ok=1
+    echo "iteration,epoch_ms,elapsed_ms,ok,segment"
+    local i st et ok line
+    for i in $(seq 1 "$dbd_iters"); do
       st=$(date +%s%3N)
-      surreal_direct "$DBD_QUERY" > "$out/.iter.out" 2>&1 || ok=0
+      ok=1
+      line="$(dbd_session_query "$DBD_QUERY")" || ok=0
       et=$(date +%s%3N)
-      surreal_result_ok < "$out/.iter.out" || ok=0
-      echo "$i,$((et - st)),$ok"
-      sleep 2
+      [ "$ok" -eq 1 ] && { surreal_result_ok <<<"$line" || ok=0; }
+      echo "$i,$st,$((et - st)),$ok,window"
+      sleep "$dbd_interval"
     done
   } > "$out/db-direct.csv"
-  rm -f "$out/.iter.out"
-  s "- raw timings: \`db-direct.csv\` (includes ~container-start overhead per row — compare"
-  s "  the TREND across rows, not the absolute value). Ignore any row with \`ok=0\`: the"
-  s "  query failed there, so its timing measures an error path, not the datastore."
-  s "- A flat, slow trend that improves at the same minute the k6 cells recover ⇒ the"
-  s "  serialization is inside SurrealDB."
+  log "window segment done — waiting ${dbd_baseline_wait}s (same session) before the baseline segment"
+  sleep "$dbd_baseline_wait"
+  {
+    local i st et ok line
+    for i in $(seq 1 "$dbd_baseline_iters"); do
+      st=$(date +%s%3N)
+      ok=1
+      line="$(dbd_session_query "$DBD_QUERY")" || ok=0
+      et=$(date +%s%3N)
+      [ "$ok" -eq 1 ] && { surreal_result_ok <<<"$line" || ok=0; }
+      echo "$i,$st,$((et - st)),$ok,baseline"
+      sleep "$dbd_interval"
+    done
+  } >> "$out/db-direct.csv"
+  dbd_session_stop
+
+  s "- raw timings: \`db-direct.csv\` — ONE long-lived session for the whole probe (no"
+  s "  per-row container-start overhead). \`segment\` is \`window\` (the ${dbd_iters} rows"
+  s "  starting immediately after seed) or \`baseline\` (${dbd_baseline_iters} rows collected"
+  s "  after an additional ${dbd_baseline_wait}s wait, same session — the post-window"
+  s "  comparison segment the old probe never collected). Ignore any row with \`ok=0\`:"
+  s "  the query failed there, so its timing measures an error path, not the datastore."
+  s "- \`window\` flat/slow and \`baseline\` fast in the SAME file/session ⇒ the"
+  s "  serialization is inside SurrealDB and cleared on its own by the time the"
+  s "  baseline segment ran. Both segments flat/slow ⇒ either the wait wasn't long"
+  s "  enough (bump \`G1_DBDIRECT_BASELINE_WAIT_SECS\`) or the DB isn't the bottleneck."
   disarm_cleanup; bench_down axiam
   finish
 }
@@ -993,7 +1138,7 @@ Usage: ./run-improvement-tasks.sh <task>
   g1-timeline     G1    ~25m    When does the post-seed window end? (run first)
   g1-idle         G1    ~15m    Is it time-based or traffic-based?
   g1-isolate      G1    ~10m    Does it live in the server or the datastore?
-  g1-dbdirect     G1    ~5m     Is it visible with AXIAM out of the path?
+  g1-dbdirect     G1    ~14m    Is it visible with AXIAM out of the path? (H1: now includes a post-window baseline segment)
   g2-verify       G2    ~10m    Do settle gate + rotation + meta dump work live?
   g3-batch        G3    ~90m    Clean batch A/B: does batch beat singles?
   g4-refresh      G4    ~15m    Is the refresh cell a real rotation now?
@@ -1009,9 +1154,12 @@ Estimates include bring-up + seed. g1-timeline is ~55s per iteration, so
 G1_ITERS=8 gives a ~12m first look; the default 20 iterations is ~25m.
 Ctrl-C at any point tears the bench stack down before exiting.
 
-Knobs: G1_ITERS, G1_CELL_SECS, G1_VUS, G1_IDLE_MIN, G3_REPEAT, G5_KEYSPACES,
-G10_LANGS. Order that matters: g1-* before g3/g8 (they need the settle gate to
-be trustworthy), g2-verify after the G2 code lands.
+Knobs: G1_ITERS, G1_CELL_SECS, G1_VUS, G1_IDLE_MIN, G1_ISOLATE_READY_TIMEOUT,
+G1_ISOLATE_FULL_WARMUP, G1_ISOLATE_FULL_DURATION, G1_DBDIRECT_ITERS,
+G1_DBDIRECT_INTERVAL_SECS, G1_DBDIRECT_BASELINE_WAIT_SECS,
+G1_DBDIRECT_BASELINE_ITERS, G3_REPEAT, G5_KEYSPACES, G10_LANGS. Order that
+matters: g1-* before g3/g8 (they need the settle gate to be trustworthy),
+g2-verify after the G2/H1 code lands.
 EOF
 }
 

@@ -142,6 +142,58 @@ print(next((argv[i + 1] for i, v in enumerate(argv) if v == flag and i + 1 < len
 ' "$2" || true
 }
 
+# --- talking to SurrealDB with no AXIAM in the path (g1-dbdirect) ------------
+# `surreal sql` is an SQL REPL "with pipe support" — it has NO --query flag
+# (passing one aborts with "unexpected argument '--query' found" before it ever
+# connects). The statement goes in on STDIN, which is why the container needs
+# `docker run -i`. Set by task_g1_dbdirect once it has resolved the running
+# stack's own connection details.
+DBD_NET=""; DBD_IMG=""; DBD_USER=""; DBD_PASS=""
+
+# The probe statement, in ONE place so the pre-flight, the timing loop and the
+# manual-fallback snippet in the summary cannot drift apart.
+#
+# It mirrors the authz hot path's own shape (see
+# `SurrealPermissionRepository::get_role_permission_grants`): a traversal of the
+# `grants` edge that dereferences the permission record on the far side
+# (`out.*`), which is where that query's real work happens — but with no bound
+# parameters, so it needs no tenant/role UUID from the seed.
+#
+# The table is `grants` (`RELATE role -> grants -> permission`). There is NO
+# `role_permission_grant` table — that is the name of the Rust *method*, and an
+# earlier revision of this probe used it as a table name; every iteration then
+# measured a "table does not exist" error path instead of the datastore.
+DBD_QUERY='SELECT count() FROM grants WHERE out.tenant_id != NONE GROUP ALL;'
+
+surreal_direct() { # $1=statement -> JSON result on stdout, diagnostics on stderr
+  printf '%s\n' "$1" | docker run --rm -i --network "$DBD_NET" "$DBD_IMG" sql \
+    --endpoint "http://$C_DB:8000" --username "$DBD_USER" --password "$DBD_PASS" \
+    --namespace axiam --database axiam --hide-welcome --json
+}
+
+# Did that statement actually succeed? The exit status alone cannot tell you:
+# ONLY connection/auth failures exit non-zero. A missing or renamed table exits
+# 0 and reports `["The table 'x' does not exist"]` on stdout; a parse error
+# exits 0 having printed nothing at all on stdout. So judge the SHAPE of the
+# result instead — a statement that ran returns a list of ROWS
+# (`[[{"count":N}]]`), a rejected one returns a bare string — scanning from the
+# last line up so a trailing diagnostic cannot fool it.
+surreal_result_ok() { # stdin = combined output of ONE surreal_direct call
+  python3 -c '
+import json, sys
+for line in reversed(sys.stdin.read().splitlines()):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        res = json.loads(line)
+    except ValueError:
+        continue          # a stderr diagnostic, not the result — keep looking
+    sys.exit(0 if isinstance(res, list) and res and not isinstance(res[0], str) else 1)
+sys.exit(1)                # no JSON at all (parse error / never connected)
+'
+}
+
 # Continuous telemetry: per-container CPU/mem AND RabbitMQ queue depth, 1 Hz.
 # The queue depth is what distinguishes the "audit backlog" hypothesis (G1).
 #
@@ -438,6 +490,7 @@ task_g1_dbdirect() {
   [ -n "$pass" ] || pass=$(container_env "$C_SERVER" AXIAM__DB__PASSWORD)
   [ -n "$user" ] || user=$(container_cmd_flag "$C_DB" --user)
   [ -n "$pass" ] || pass=$(container_cmd_flag "$C_DB" --pass)
+  DBD_NET=$net; DBD_IMG=$img; DBD_USER=$user; DBD_PASS=$pass
 
   s "Issues a repeated read straight at SurrealDB (no AXIAM server in the path) during"
   s "the post-seed window. If the DB alone is slow, AXIAM is exonerated entirely."
@@ -451,11 +504,13 @@ task_g1_dbdirect() {
     s "- **NOT RUN automatically** (could not resolve $missing). Resolve manually"
     s "  and re-run the loop below:"
     s '```bash'
-    s "docker run --rm --network ${net:-<network>} $img sql \\"
+    s "echo '$DBD_QUERY' \\"
+    s "| docker run --rm -i --network ${net:-<network>} $img sql \\"
     s "  --endpoint http://$C_DB:8000 --username ${user:-<user>} --password <pass> \\"
-    s "  --namespace axiam --database axiam --pretty \\"
-    s "  --query 'SELECT count() FROM role_permission_grant GROUP ALL;'"
+    s "  --namespace axiam --database axiam --hide-welcome --pretty"
     s '```'
+    s "(\`surreal sql\` is a REPL with pipe support — it has no \`--query\` flag, so the"
+    s "statement goes on stdin and \`docker run\` needs \`-i\`.)"
     s
     s "The credentials are whatever \`just bench-up\` used: your exported"
     s "\`AXIAM__DB__USERNAME\`/\`AXIAM__DB__PASSWORD\` if you set them, otherwise its"
@@ -465,16 +520,15 @@ task_g1_dbdirect() {
     s '```'
     disarm_cleanup; bench_down axiam; finish; return
   fi
-  # Pre-flight the query once before timing 30 of them. The timing loop discards
-  # every error, so a wrong credential (or a renamed table) would otherwise fill
-  # db-direct.csv with 30 rows of pure container-start overhead that read like
-  # plausible timings — the worst possible failure for a task whose whole output
-  # is a trend line.
-  if ! docker run --rm --network "$net" "$img" sql \
-       --endpoint "http://$C_DB:8000" --username "$user" --password "$pass" \
-       --namespace axiam --database axiam \
-       --query 'SELECT count() FROM role_permission_grant GROUP ALL;' \
-       > "$out/preflight.log" 2>&1; then
+  # Pre-flight the query once before timing 30 of them. A wrong credential (or a
+  # renamed table) would otherwise fill db-direct.csv with 30 rows of pure
+  # container-start overhead that read like plausible timings — the worst
+  # possible failure for a task whose whole output is a trend line. Both gates
+  # are needed: the exit status catches an unusable connection, surreal_result_ok
+  # catches a statement that was rejected while still exiting 0.
+  if ! surreal_direct "$DBD_QUERY" \
+        > "$out/preflight.log" 2>&1 \
+     || ! surreal_result_ok < "$out/preflight.log"; then
     warn "the direct SurrealDB query failed as user '$user' — not timing it; see preflight.log"
     s "- **NOT RUN.** The credentials resolved, but the probe query itself failed as"
     s "  user \`$user\`. First lines of \`preflight.log\`:"
@@ -485,22 +539,26 @@ task_g1_dbdirect() {
   fi
   log "pre-flight query OK as user '$user' — timing 30 iterations"
 
+  # Each row carries its own ok flag: the pre-flight proves the query worked
+  # ONCE, but a mid-run failure (the stack going away, a restart) would still
+  # time a fast error path and read as "the clamp cleared". A row is only
+  # evidence if ok=1.
   {
-    echo "iteration,elapsed_ms"
+    echo "iteration,elapsed_ms,ok"
     for i in $(seq 1 30); do
-      local st et
+      local st et ok=1
       st=$(date +%s%3N)
-      docker run --rm --network "$net" "$img" sql \
-        --endpoint "http://$C_DB:8000" --username "$user" --password "$pass" \
-        --namespace axiam --database axiam \
-        --query 'SELECT count() FROM role_permission_grant GROUP ALL;' >/dev/null 2>&1 || true
+      surreal_direct "$DBD_QUERY" > "$out/.iter.out" 2>&1 || ok=0
       et=$(date +%s%3N)
-      echo "$i,$((et - st))"
+      surreal_result_ok < "$out/.iter.out" || ok=0
+      echo "$i,$((et - st)),$ok"
       sleep 2
     done
   } > "$out/db-direct.csv"
+  rm -f "$out/.iter.out"
   s "- raw timings: \`db-direct.csv\` (includes ~container-start overhead per row — compare"
-  s "  the TREND across rows, not the absolute value)."
+  s "  the TREND across rows, not the absolute value). Ignore any row with \`ok=0\`: the"
+  s "  query failed there, so its timing measures an error path, not the datastore."
   s "- A flat, slow trend that improves at the same minute the k6 cells recover ⇒ the"
   s "  serialization is inside SurrealDB."
   disarm_cleanup; bench_down axiam

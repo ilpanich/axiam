@@ -475,3 +475,131 @@ from the sizing doc's §7.2 pointer below instead of overwriting §2's table.
    default* column is already correct and now CI-guarded against drift
    (§5.5). Someone should add a `PROFILE` row and point the M2M column at
    the preset when the public doc is next revised (E4 / fourth draft).
+
+---
+
+## 8. H2 follow-up: both `postseed-transient-investigation.md` §7.1 asks are now implemented
+
+**Not part of G7's original scope** — this section closes the loop on a
+*different* follow-up issue text (§7.1 of
+[`postseed-transient-investigation.md`](postseed-transient-investigation.md),
+written up by task H2) that names this same branch,
+`claude/g-benchmark-improvements-n5mjmj`. It is recorded here, rather than in
+that file (which is frozen as the investigation record), because this is the
+decision-record file for rate-limit changes on this branch.
+
+That issue text asked for two things. Both are now implemented, in commits
+`5212912`, `69109db`, `0fbbd5e`, `1f3da2f`, `7167c18`:
+
+1. **Bug — `GET /api/v1/users` charged to `users_create`.** Fixed
+   (`69109db`): `web::resource("/users")` is now two method-guarded
+   resources instead of one, so the `GET` list no longer inherits the `POST`
+   registration limiter (`register_per_min`, 5/min/IP in the shipped
+   posture). `GET /api/v1/users` is now unlimited by the shared/governor
+   layers, matching its siblings `GET /roles` and `GET /resources`. Regression
+   test: `crates/axiam-api-rest/tests/users_rate_limit_split_test.rs`.
+2. **Design — the shared-store round trip on the synchronous critical
+   path.** Fixed (`5212912`, `0fbbd5e`, `1f3da2f`, `7167c18`): a new
+   write-behind `SharedRateLimitCounter`
+   (`crates/axiam-db/src/rate_limit_counter.rs`) replaces the per-request
+   synchronous `UPSERT` in both `RateLimitShared` (REST) and
+   `GrpcSharedRateLimitLayer` (gRPC) with a synchronous in-memory decision
+   plus a background flusher that coalesces one datastore write per bucket
+   per `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` (default 1000 ms, clamped
+   50–60000). A new `AXIAM__RATE_LIMIT__SHARED` (`on`/`off`, default `on`)
+   gives single-replica deployments an escape hatch. No shipped *limit*
+   default changed.
+
+### What was chosen, and why
+
+The issue text (§7.1 ask 2) listed four options worth measuring: an
+in-process TTL cache of the bucket count with periodic write-back;
+fire-and-forget the UPSERT and decide on the previous read; an explicit
+`AXIAM__RATE_LIMIT__SHARED=off` for single-replica deployments; or moving the
+counter out of the datastore entirely.
+
+**The shipped design is a combination of the first and third options**, not
+a selection of one: `SharedRateLimitCounter` *is* an in-process cache of the
+bucket count (the "TTL" is the write-behind `sync_interval` rather than a
+read-side expiry) with periodic write-back — matching option 1 — **and**
+ships the `AXIAM__RATE_LIMIT__SHARED=off` escape hatch from option 3
+alongside it, so a single-replica deployment can drop the shared layer
+entirely rather than merely tolerate its now-much-cheaper write-behind
+overhead.
+
+Rationale for combining rather than picking one option outright:
+
+- **Plain fire-and-forget (option 2) was rejected as strictly worse than
+  write-behind for the same cost.** A fire-and-forget UPSERT deciding on the
+  *previous* read still requires one asynchronous datastore call per request
+  (just not awaited before the decision) and gives no coalescing — N requests
+  in a window still cost N writes, just off the latency-critical path rather
+  than off the write-count path. Write-behind coalesces N requests into one
+  write per `sync_interval`, which is strictly fewer datastore operations for
+  the same or better staleness bound, at no extra design cost.
+- **An off-switch alone (option 3) was rejected as insufficient by itself.**
+  It solves the problem only for single-replica deployments; anyone running
+  behind an HPA (the topology the shared layer exists for) would still pay
+  the full synchronous cost. Shipping it as an *addition* to write-behind,
+  not a replacement, keeps the multi-replica case fixed while still giving
+  single-replica operators the option to remove even the write-behind
+  overhead entirely.
+- **Moving the counter out of the datastore entirely (option 4) was rejected
+  for this fix** — it would mean introducing a new piece of shared
+  infrastructure (e.g. Redis) as a hard dependency purely for rate-limit
+  bucket counts, which is a bigger architectural commitment than the
+  performance problem calls for. `SurrealDB` remains the store of record;
+  write-behind reduces the *frequency* of writes to it by roughly
+  `arrival_rate × sync_interval` per bucket instead of replacing it.
+- **Net effect:** cross-replica enforcement is preserved (the property the
+  shared layer exists for — N independent per-replica in-memory buckets
+  would otherwise multiply the effective limit by N), the synchronous
+  datastore write is off the request path entirely, and the trade made
+  explicit is eventual rather than immediate cross-replica convergence,
+  bounded by `(replicas - 1) × arrival_rate_per_replica × sync_interval` and
+  zero on a single replica. Full derivation and a worked example (limit
+  100/min, 4 replicas, 1 s sync interval, 40 req/s aggregate ⇒ ~30 requests
+  of overshoot) are in the
+  [`axiam_db::rate_limit_counter`](../crates/axiam-db/src/rate_limit_counter.rs)
+  module docs, quoted in
+  [`docs/deployment/README.md` § Shared-store consistency model](../docs/deployment/README.md#shared-store-consistency-model-write-behind).
+
+### A behavioral delta the implementer flagged, not part of the original ask
+
+Fixing the design ask surfaced one change in fail-open behavior worth
+recording here even though it wasn't one of the two things asked for: a
+store outage used to be discovered *by the request* (the awaited UPSERT
+itself failing), which made the middleware fail open for that request
+regardless of the configured limit. It is now discovered *by the background
+flusher*, so a request during a store outage is evaluated against the (still
+valid) local count instead of being blanket-allowed. Concretely, `limit = 0`
+plus an unreachable store now **denies**, where the pre-fix code would have
+**allowed** — a correctness improvement (an outage must not read as "the
+limit is disabled"), not a new fail-open surface. Fail-open on store errors
+during the flush remains, exactly as before.
+
+### What still needs the maintainer
+
+**Nothing from §7.1 of `postseed-transient-investigation.md` is still open**
+— both asks are implemented as described above and are ready for the same
+PR review as the rest of this branch.
+
+**§7.1 of *this* file (the sign-off items above, added by H7) is a
+completely separate list and is unaffected by this section** — those three
+items are about the `gateway`/`mesh` **preset values** and the `client_id`
+keying bypass, none of which this H2 follow-up touches (no shipped limit or
+preset value changed here either). They remain open and still need a named
+human decision:
+
+1. Do the `gateway`/`mesh` preset numbers match the fleet sizes the
+   maintainer intends to support?
+2. Is `mesh` authz = 60 000/min (a documented not-really-a-limit) acceptable
+   under that profile name, or should it drop to 30 000?
+3. Is the documentation-plus-opt-in treatment of the `client_id` keying
+   bypass sufficient for v1.0-beta, or does it need to become a blocking
+   issue?
+
+Post-fix throughput re-measurement is tracked separately and is not this
+file's job to produce — see `claude_dev/rate-limit-fix-verification.md` (not
+yet present at the time of writing — produced by a separate, concurrent
+verification task) for where it lands.

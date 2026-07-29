@@ -154,13 +154,26 @@ preset itself wasn't, until now. One labeled laptop-class pass, single
 switching key mode + raising the per-bucket limits is what stopped this
 single-`client_id` generator from being throttled — that's the preset doing
 exactly what §3 says. It did **not** raise the ~20–24 ops/s the server
-actually admits per second on these three endpoints; that number is set by a
-synchronous per-request datastore write on the critical path
-(`claude_dev/postseed-transient-investigation.md`), which every posture pays
-identically. Full numbers, the harness workaround needed to test a preset at
-all (the bench compose's `neutralized` defaults otherwise always outrank the
-preset — see precedence above), and the arithmetic behind the one non-zero
-throttled row: `claude_dev/rate-limit-posture-decision.md` §7.2.
+actually admitted per second on these three endpoints at the time of this
+measurement; that number was set by a synchronous per-request datastore
+write on the critical path (`claude_dev/postseed-transient-investigation.md`),
+which every posture paid identically. Full numbers, the harness workaround
+needed to test a preset at all (the bench compose's `neutralized` defaults
+otherwise always outrank the preset — see precedence above), and the
+arithmetic behind the one non-zero throttled row:
+`claude_dev/rate-limit-posture-decision.md` §7.2.
+
+**Fixed since this measurement.** The synchronous per-request write named
+above has been replaced by a write-behind design
+(`axiam_db::rate_limit_counter::SharedRateLimitCounter`) — see
+[Deployment Guide § Shared-store consistency model](README.md#shared-store-consistency-model-write-behind)
+for the mechanism and the new cross-replica overshoot bound this trades in.
+The H7 numbers directly above remain a faithful pre-fix measurement and are
+left as-is; they describe a ceiling that no longer exists in the current
+code. Post-fix throughput has not been re-measured yet — the numbers will
+land in `claude_dev/rate-limit-fix-verification.md` (not yet present at the
+time of writing — produced by a separate, concurrent verification task) when
+that run completes.
 
 ---
 

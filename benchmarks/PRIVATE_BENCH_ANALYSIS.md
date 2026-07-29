@@ -69,6 +69,29 @@ conclusions (D1/D10 batch slowness, and the B2 h1 cell).**
 > which remains only partially explained. The G-box's "recovers after ~6 min"
 > and this host's "never recovers" are two datastores paying a different
 > price for the same synchronous write, not two different bugs.
+>
+> **UPDATE (2026-07-29, `claude/g-benchmark-improvements-n5mjmj`): both asks
+> from `postseed-transient-investigation.md` §7.1 are now FIXED, not just
+> root-caused.** `GET /api/v1/users`'s registration-bucket bug is fixed
+> (method-guarded resource split). The synchronous per-request UPSERT is
+> replaced by a write-behind design
+> (`axiam_db::rate_limit_counter::SharedRateLimitCounter`, commits `5212912`,
+> `0fbbd5e`, `1f3da2f`, `7167c18`): the request path decides synchronously
+> in-memory and a background flusher coalesces one datastore write per
+> bucket per `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` (default 1000 ms) instead of
+> one per request. What this buys and what it costs is written up in full in
+> `claude_dev/rate-limit-posture-decision.md` §8 (chosen design, alternatives
+> considered, and why) and quoted precisely in the
+> `axiam_db::rate_limit_counter` module docs: cross-replica enforcement
+> becomes eventual, bounded by `(replicas − 1) × arrival_rate_per_replica ×
+> sync_interval` and zero on a single replica, instead of the old design's
+> zero-overshoot-at-any-replica-count bound. **This has NOT yet been
+> re-measured on the H2 investigation host or any other host** — no throughput
+> number anywhere in this document has changed. The re-measurement is tracked
+> as its own artifact, `claude_dev/rate-limit-fix-verification.md`, produced
+> by a separate concurrent task; do not fold numbers from that file into this
+> one without also updating the run/commit provenance this document is keyed
+> on.
 
 ### 1.1 The signature
 
@@ -396,7 +419,10 @@ Ranked summary:
 
 1. **G1 — Root-cause the post-seed serialized-DB transient** (§1). Biggest
    validity issue *and* a potential production cold-start defect. Everything
-   batch- and B2-related is downstream of it.
+   batch- and B2-related is downstream of it. **Root-caused: DONE (H2).
+   Fixed: DONE (`claude/g-benchmark-improvements-n5mjmj`, see the §1 UPDATE
+   above and `claude_dev/rate-limit-posture-decision.md` §8) — not yet
+   re-measured (`claude_dev/rate-limit-fix-verification.md`).**
 2. **G2 — Harness countermeasures + self-describing meta**: settle gate
    before the first cell, cell-order rotation per run, record `AXIAM__*`
    knobs in meta.json, re-run the four batch cells clean (both strategies)
@@ -463,6 +489,24 @@ Ranked summary:
   > are still clamped by the `RateLimitShared` write and must be published as
   > refused, same as every other clamped cell — that is a host limitation,
   > not a reopening of the G3 decision.
+  > **UPDATE (2026-07-29, `claude/g-benchmark-improvements-n5mjmj`): the
+  > `RateLimitShared` write named above is fixed** (write-behind counter, §1
+  > UPDATE). Any *new* H2-host pass run against this branch is no longer
+  > expected to hit that specific clamp on these six endpoints, but this
+  > document's own H2/H10 numbers above were captured pre-fix and are
+  > unchanged — do not retroactively read them as un-clamped. Whether a
+  > future pass on this host settles cleanly is an open question for
+  > `claude_dev/rate-limit-fix-verification.md`, not asserted here.
+- **Publish the shared rate-limit fix as a closed product item, not a
+  performance number.** `claude_dev/postseed-transient-investigation.md`
+  §7.1's two asks (the `GET /api/v1/users` bucket bug and the synchronous
+  shared-store write) are both implemented on
+  `claude/g-benchmark-improvements-n5mjmj` — see the §1 UPDATE above and
+  `claude_dev/rate-limit-posture-decision.md` §8 for the design rationale.
+  **Do NOT publish any post-fix throughput number yet** — none has been
+  measured; it lands in `claude_dev/rate-limit-fix-verification.md` first,
+  produced by a separate task, and only then flows into a future draft of
+  the public matrix.
 - Do NOT chart: AXIAM/Zitadel refresh (fallback), Zitadel/KC-p2 login
   (gate), any first-cell-after-seed number (§1), the B2 h1 cell.
 - The new "recommended production settings" section (public §6) is the

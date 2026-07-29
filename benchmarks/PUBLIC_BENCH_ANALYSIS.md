@@ -75,6 +75,17 @@ run on a host where it isn't (the G-box, or any host after the tracked fix
 lands — see §5's "moved to fixed" list for what's already shipped and what
 remains open).
 
+**Status: the design fix has since shipped**, on branch
+`claude/g-benchmark-improvements-n5mjmj` — the synchronous per-request write
+described above is replaced by a write-behind counter
+(`axiam_db::rate_limit_counter::SharedRateLimitCounter`; §5 "moved to fixed"
+has the details and the security trade it makes). **The numbers in §3, §4
+and §7 below remain the pre-fix G-box measurements and are not updated by
+this note** — the fix has not yet been re-measured end-to-end on any host.
+When that re-measurement runs, its numbers land in
+`claude_dev/rate-limit-fix-verification.md`, not in this file, until a future
+draft folds them into a published matrix.
+
 ### 1.2 What *was* run this round: a harness-validation matrix (sandbox, bounded)
 
 To validate the new settle gate (§5), the `report.py` refusal machinery, the
@@ -416,8 +427,10 @@ does exactly what §6 recommends it for. It does **not** touch the
 per-request shared-rate-limit write from §1/§5: admitted throughput under
 `gateway` landed at 22–24 ops/s on that host, the same band H2 measured for
 those endpoints under every other posture — a rate-limit *policy* change
-cannot make a synchronous datastore write cheaper. See §6 for what to set
-instead.
+cannot make a synchronous datastore write cheaper. (That write is itself
+fixed as of `claude/g-benchmark-improvements-n5mjmj`, per §1/§5 — this
+measurement predates the fix and is left as the honest pre-fix record.) See
+§6 for what to set instead.
 
 ## 5. Weaknesses and caveats (the honest section)
 
@@ -444,14 +457,22 @@ six endpoints (client_credentials, introspection, authz_check, login,
 revoke) as bounded by the cost of one datastore write in your deployment's
 environment, not by AXIAM's request handling** — on a fast datastore that
 ceiling is high (hundreds to low thousands of ops/s, as this draft's own
-G-box numbers show); on a slow one it is the whole story. Two fixes are
-tracked and neither has shipped yet: `GET /api/v1/users` is a separate,
-already-understood bug (it inherits the *registration* rate-limit bucket,
-not a read bucket — 5/min/IP in the production posture), and getting the
-shared-store round trip off the synchronous critical path (a TTL cache with
-write-back, a fire-and-forget write with a previous-read decision, or an
-explicit single-replica off-switch) is written up as a maintainer issue in
-`claude_dev/postseed-transient-investigation.md` §7.1. **What remains
+G-box numbers show); on a slow one it is the whole story. **Both fixes
+written up as a maintainer issue in
+`claude_dev/postseed-transient-investigation.md` §7.1 have since shipped**,
+on branch `claude/g-benchmark-improvements-n5mjmj`: `GET /api/v1/users` no
+longer inherits the *registration* rate-limit bucket (it was the separate,
+already-understood bug — 5/min/IP in the production posture, now unlimited
+like its sibling list endpoints), and the shared-store round trip is off the
+synchronous critical path — a write-behind counter
+(`axiam_db::rate_limit_counter::SharedRateLimitCounter`) now decides
+in-memory and coalesces one datastore write per bucket per sync interval
+instead of one per request. See the "Moved to fixed" list below for what
+that trades: cross-replica enforcement becomes eventual rather than
+synchronous, bounded by a stated, quotable overshoot formula. **Neither fix
+changes the numbers in this draft** — they were measured before the fix
+existed, and no post-fix run has happened yet; that measurement will land in
+`claude_dev/rate-limit-fix-verification.md`, not here. **What remains
 genuinely unresolved, stated plainly:** the G-box's specific recovery
 pattern — a ~5–7 minute window that ends in a sharp cliff back to full
 throughput — has not been reproduced on the second host, which never
@@ -483,6 +504,17 @@ token numbers lead the field 2.2–2.6×.
 - **p0-plaintext `Secure`-cookie bug** — every cookie-based p0 scenario used
   to die in harness `setup()`; fixed for the bench profile only, production
   default unchanged (§2, task H6).
+- **The shared rate-limit write named above** — `GET /api/v1/users`'s
+  rate-limit bucket bug and the synchronous shared-store write on the six
+  hottest endpoints are both fixed on `claude/g-benchmark-improvements-n5mjmj`
+  (write-behind `SharedRateLimitCounter`; `AXIAM__RATE_LIMIT__SHARED`/
+  `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` env knobs). Cross-replica enforcement is
+  now eventual (bounded by `(replicas − 1) × arrival_rate_per_replica ×
+  sync_interval`, zero on a single replica) instead of synchronous — a
+  deliberate, documented trade, not a regression. **Not yet re-measured**:
+  the numbers in this draft predate the fix; post-fix throughput lands in
+  `claude_dev/rate-limit-fix-verification.md` when that run completes, not in
+  this file.
 
 **Other caveats, stated plainly:** consumer-laptop hardware (server-class
 re-run still pending budget — see "next round" below); AXIAM stack figures
@@ -699,21 +731,23 @@ explained — one open mechanism question remains. The decision cache and the
 DB connection pool were both evaluated against pre-agreed criteria and both
 stay at their conservative defaults — real, useful knobs for the right
 workload, not blanket wins. And the most consequential finding of this
-round is a limitation, not a feature: **the "post-seed transient" is a
+round was a limitation, not a feature: **the "post-seed transient" was a
 permanent, product-relevant synchronous datastore write in front of six
-hot endpoints, whose cost sets those endpoints' ceiling on any given
+hot endpoints, whose cost set those endpoints' ceiling on any given
 deployment's hardware** (§1/§5) — this draft's own numbers show that ceiling
-is high on a fast datastore (the G-box), but a fix to get the write off the
-synchronous path is tracked and has not shipped. Everything here remains
-laptop-hosted.
+was high on a fast datastore (the G-box), and the fix to get the write off
+the synchronous path (plus the separate `GET /api/v1/users` bucket bug) has
+now **shipped** on `claude/g-benchmark-improvements-n5mjmj`, though it has
+not yet been re-measured end-to-end. Everything here remains laptop-hosted.
 
-**Next round (E3/E5):** the tracked fix for the shared rate-limit write,
-then a true run-4 median-of-3 matrix — on the G-box, on a server-class
-host, or on a sandbox host after the fix lands, whichever comes first —
-covering the full protocol including a repeated (not single-pass) SDK
-overhead table; the `GET /api/v1/users` rate-limit-bucket bug fix; and, if
-budget allows, the server-class re-run that has been tracked and deferred
-since draft 2.
+**Next round (E3/E5):** re-measure the shared rate-limit write's fix
+end-to-end (numbers land in `claude_dev/rate-limit-fix-verification.md`
+first, then fold into a future draft's matrix here), then a true run-4
+median-of-3 matrix — on the G-box, on a server-class host, or on the
+sandbox host now that the fix has landed, whichever comes first — covering
+the full protocol including a repeated (not single-pass) SDK overhead
+table; and, if budget allows, the server-class re-run that has been tracked
+and deferred since draft 2.
 
 ---
 *Sources: G-box benchmark runs of 2026-07-25/26 (median-of-3 capped matrix ×

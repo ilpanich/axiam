@@ -722,7 +722,21 @@ export const DOC_PAGES: DocPage[] = [
             "Bucket-key mode for token/introspect/revoke: ip | client_id | ip_client_id.",
             "ip",
           ],
+          [
+            "AXIAM__RATE_LIMIT__SHARED",
+            "Enables (on) or disables (off) the cross-replica write-behind shared counter. off is a single-replica escape hatch — the per-replica in-memory governor becomes the sole limiter.",
+            "on",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__SHARED_SYNC_MS",
+            "Write-behind flush interval (ms) for the shared counter, clamped 50-60000. Scales the cross-replica overshoot bound.",
+            "1000",
+          ],
         ],
+      },
+      {
+        type: "note",
+        text: "The shared counter behind AXIAM__RATE_LIMIT__SHARED no longer performs a synchronous datastore write on the request path (write-behind design): it decides in-memory and flushes one coalesced write per bucket per AXIAM__RATE_LIMIT__SHARED_SYNC_MS. Cross-replica enforcement is therefore eventual, not synchronous — worst-case overshoot beyond the configured limit is bounded by roughly (replicas - 1) x arrival_rate_per_replica x sync_interval, and is zero on a single replica. The per-replica in-memory governor is unchanged and still caps overshoot independently. See the Deployment Guide's rate-limiting section for the full bound, the store-outage semantics (a store outage is now detected by the background flusher rather than the request, so limit=0 plus an unreachable store denies rather than allows), and the observability log lines.",
       },
       { type: "h", id: "sizing", text: "Suggested settings by deployment (benchmark-derived)" },
       {

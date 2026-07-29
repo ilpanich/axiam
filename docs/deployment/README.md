@@ -254,9 +254,13 @@ the per-mutation invalidation table are in the
 
 Every authentication/OAuth2 endpoint is rate-limited (see
 `crates/axiam-api-rest/src/config/rate_limit.rs`) by two cooperating layers:
-a per-replica in-memory `Governor` and a `SurrealDB`-backed shared counter
-that closes the multi-replica gap (`middleware::rate_limit_shared`). Both
-layers derive their bucket key the same way.
+a per-replica in-memory `Governor`, and a process-wide, write-behind shared
+counter (`axiam_db::rate_limit_counter::SharedRateLimitCounter`,
+`middleware::rate_limit_shared`) that closes the multi-replica gap. Both
+layers derive their bucket key the same way. `GET /api/v1/users` is **not**
+wrapped by either limiter — it was fixed to stop inheriting the `/users`
+registration bucket (see the note at the end of this section) and now sits
+unlimited, matching its siblings `GET /roles` and `GET /resources`.
 
 | Key | Purpose |
 |---|---|
@@ -271,6 +275,8 @@ layers derive their bucket key the same way.
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy hops to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0` — set to `1` behind a single ingress/nginx). |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
 | `AXIAM__RATE_LIMIT__PROFILE` | Deployment posture preset: `internet` (default — the shipped values above, unchanged) \| `gateway` \| `mesh`. Sets the machine-traffic family (key mode, token/introspect/revoke/authz, and the gRPC authz ceiling) coherently in one variable; never changes the human endpoints. See [Sizing your rate limits](rate-limit-sizing.md). |
+| `AXIAM__RATE_LIMIT__SHARED` | Enables (`on`, default) or disables (`off`) the cross-replica shared counter. `off` is a **single-replica escape hatch**: it skips the shared layer entirely (no state, no store call, no flusher) and leaves the per-replica in-memory `Governor` as the sole limiter. Do not set `off` behind an HPA/multiple replicas — it re-opens the N× effective-limit multiplication the shared counter exists to close. |
+| `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` | Write-behind flush interval for the shared counter, in milliseconds (default `1000`, clamped `50`–`60000`). Directly scales the cross-replica overshoot bound — see [Shared-store consistency model](#shared-store-consistency-model-write-behind) below. |
 
 > **Which numbers should you actually run?** See
 > **[Sizing your rate limits](rate-limit-sizing.md)** — the measured hardware
@@ -317,6 +323,120 @@ When a `client_id`/`ip_client_id`-mode request has no parseable `client_id`
 (malformed body, wrong content type, etc.), the rate limiter fails **safe**
 by falling back to the IP key for that request — it never disables rate
 limiting outright.
+
+### Shared-store consistency model (write-behind)
+
+The shared counter used to perform one synchronous SurrealDB `UPSERT` per
+request, awaited **before** the handler ran, on every request to the six
+wrapped endpoints (`POST /api/v1/authz/check`, `/oauth2/token`,
+`/oauth2/introspect`, `/oauth2/revoke`, `/auth/login`, and — until fixed, see
+below — `GET /api/v1/users`). That write put the datastore's own write
+latency directly on the request path: measured at **16–21 ops/s at any
+concurrency from 1 to 40 clients** against a ~40 ms write on the
+investigation host, while structurally identical unwrapped endpoints ran at
+68–4 248 ops/s (`claude_dev/postseed-transient-investigation.md`, task H2).
+That per-request write is gone. `SharedRateLimitCounter`
+(`axiam_db::rate_limit_counter`) now decides synchronously from an in-process
+sharded count (`shared_count + pending > limit`, no datastore round trip, no
+`await`) and a single background flusher coalesces every bucket's
+accumulated increments into **one** datastore write per `(bucket, window)`
+per `AXIAM__RATE_LIMIT__SHARED_SYNC_MS`.
+
+**Security bound.** Cross-replica enforcement is therefore **eventual**
+rather than synchronous. Quoting the module docs verbatim, the worst-case
+overshoot beyond the configured limit, before the counts converge, is
+bounded by approximately
+
+```text
+(replicas - 1) × arrival_rate_per_replica × sync_interval
+```
+
+and is **zero on a single replica** (`replicas - 1 = 0`, so local counting is
+exact and this layer is as strict as the previous synchronous
+implementation). Worked example from the module docs: limit 100/min, 4
+replicas, `sync_interval` 1 s, aggregate arrival 40 req/s ⇒ worst case ≈
+`3 × 10 × 1 s` = **~30 requests of overshoot** inside a 60 s window (≈30% of
+the limit), shrinking linearly as `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` is
+lowered. Overshoot is additionally capped by the **per-replica in-memory
+`Governor` on the same endpoint**, which is completely unchanged by this
+design: it still runs on every wrapped endpoint and still makes a full,
+independent per-replica decision — the shared layer's job is only to stop
+the *aggregate* across replicas from reaching `replicas × limit`, and after
+one `sync_interval` it does.
+
+**Store-outage semantics changed.** Before this change, a store error on the
+per-request write made the middleware fail open for that one request (warn,
+forward to the in-memory governor) — so a request during an outage was
+allowed regardless of the configured limit. Now the request path never talks
+to the store at all; an outage is discovered by the background flusher, and
+`check()` keeps deciding from the (still valid) local count against the
+*same* configured limit. Concretely: **`limit = 0` plus an unreachable store
+now denies**, where the previous design would have allowed — "the store is
+unreachable" must not be read as "the limit is disabled." This is the one
+behavioral delta in an otherwise unchanged fail-open posture: fail-open on
+store errors remains the **one deliberate fail-open exception** in the
+codebase (D-01b / T-24-42 accepted risk); every other control still fails
+closed, and the in-memory governor still guarantees an outage never
+hard-blocks auth traffic or surfaces a 5xx.
+
+**Upgrade note.** The bucket key (`{endpoint}:{key_part}`) and the
+`rate_limit_bucket` table are byte-for-byte unchanged, so an in-place upgrade
+keeps counting against the same rows — no migration, no reset of in-flight
+windows.
+
+**The gRPC listener holds its own counter, not a shared one.** The gRPC
+`GrpcSharedRateLimitLayer` (server-wide tower layer) and the REST
+`RateLimitShared` middleware each own an independent
+`SharedRateLimitCounter` instance in the same process, both reading the same
+`AXIAM__RATE_LIMIT__SHARED*` env vars. This is intentional, not two competing
+counters: gRPC only ever writes `grpc_authz:<ip>` keys while REST writes
+`<rest_endpoint>:<key_part>` keys, so the two keyspaces never overlap and
+neither instance can fragment the other's local count.
+
+**Observability.** At startup the server logs one of:
+
+```
+shared rate-limit counter ACTIVE (write-behind); one datastore write per
+bucket per sync interval instead of one per request
+  sync_interval_ms=1000 shards=16
+```
+
+or, with `AXIAM__RATE_LIMIT__SHARED=off`:
+
+```
+shared rate-limit counter DISABLED (AXIAM__RATE_LIMIT__SHARED=off); the
+per-replica in-memory governor is the sole rate limiter
+```
+
+Two `warn`-level alarms can fire afterward (each logged **once**, latched,
+never per request, and never with the raw bucket key — T-24-43, since the
+key embeds a client IP/`client_id`):
+
+- the flusher's datastore write failed during a flush pass ("shared
+  rate-limit store unreachable during write-behind flush") — cross-replica
+  convergence is paused, decisions keep being served from local counts;
+- the flusher has fallen behind its own `sync_interval` ("write-behind
+  flusher is falling behind") — a bucket with pending work has gone
+  unflushed for 5+ sync intervals, meaning the overshoot bound above no
+  longer holds until it clears.
+
+**Sizing implication.** Before this change, the synchronous per-request
+write made each wrapped endpoint's throughput ceiling equal to the
+datastore's own write latency, not the server's request-handling capacity —
+measured on the investigation host at **16–21 ops/s against a ~40 ms
+write**, regardless of concurrency, replicas, or connection-pool size. That
+ceiling no longer applies: the request path performs no datastore I/O for
+the rate-limit decision at all. Post-fix throughput has not yet been
+re-measured end-to-end; when it is, the numbers will land in
+`claude_dev/rate-limit-fix-verification.md` (not yet present at the time of
+writing — produced by a separate, concurrent verification task).
+
+**`GET /api/v1/users` fixed.** This endpoint used to be wrapped by the same
+actix resource as `POST /users` and so inherited the `users_create`
+registration bucket (`AXIAM__RATE_LIMIT__REGISTER_PER_MIN`, 5/min/IP in the
+shipped posture) for a plain list read. It is now registered as a separate,
+unlimited resource, matching the posture of its siblings `GET /roles` and
+`GET /resources`.
 
 ## TLS termination
 

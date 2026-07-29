@@ -91,8 +91,20 @@ the AXIAM stack serves requests with:
   therefore still unfinished — but the prior is now inverted: nothing is
   wrong with batch; `coalesced` looks excellent.
 - **The B2 h1-isolation cell.** It ran first-after-seed and measured the
-  transient, not HTTP/1.1-over-TLS. **B2 remains open**; the native p2 CC
+  transient, not HTTP/1.1-over-TLS. ~~**B2 remains open**~~; the native p2 CC
   halving (1823→903, −50.5%) is confirmed real by the clean matrix cells.
+  **UPDATE (H6, 2026-07-29): B2 is closed as framed — the −50.5% is real but
+  is not a transport cost.** HTTP/2 is acquitted by direct measurement (the
+  "all clients collapse onto one h2 connection" premise never held: 10/50/100
+  concurrent clients open 10/50/100 connections over h2, and both actix
+  workers stay balanced), and h1-vs-h2 over an otherwise identical TLS edge is
+  a wash. TLS 1.3 itself is priced at −13%/−2% on jwks and −8%/−13% on
+  userinfo depending on load. That leaves the CC penalty endpoint-specific,
+  not transport-specific. Full evidence and the one remaining follow-up in
+  `claude_dev/b2-tls-h2-investigation.md`. Note also that the G8 h1 cell's
+  1 059 failed ops had a mundane cause found in H6: **none** of the nginx edge
+  confs declared an `upstream ... keepalive`, so the edge opened and closed a
+  fresh backend TCP connection per proxied request.
 - Probably the low `authz_check_grpc` in `sens-pool-4*` (537 vs 603 —
   it was cell 3, the recovery window).
 
@@ -284,9 +296,17 @@ Ranked summary:
    before the first cell, cell-order rotation per run, record `AXIAM__*`
    knobs in meta.json, re-run the four batch cells clean (both strategies)
    and the B2 h1 cell mid-session.
-3. **G3 — B2**: still −50.5% on CC at p2. Clean h1 cell first; then h2
+3. ~~**G3 — B2**: still −50.5% on CC at p2. Clean h1 cell first; then h2
    stream/flow-control tuning on the actix listener or an accepted,
-   documented position.
+   documented position.~~ **DONE (H6) — documented position published, and it
+   is not the position this line anticipated: the transport is exonerated
+   entirely, so there is no listener tuning to do.** What replaces it is one
+   narrow follow-up for the server-class re-run (E3): on a host where
+   `/oauth2/token` is **not** clamped, sweep VUs at p0 and p2 on CC. A cost
+   that scales with VU count is per-request; a throughput that stays pinned
+   regardless of VU count is a serialization point (and `RateLimitShared`'s
+   bucket write is the only one known on that path). See
+   `claude_dev/b2-tls-h2-investigation.md` §6.
 4. **G4 — A8 residual**: AXIAM refresh cookie extraction (harness) — last
    invalid AXIAM-controlled cell.
 5. **G5 — D7 ship-decision**: default-ON proposal + combined cache+pool

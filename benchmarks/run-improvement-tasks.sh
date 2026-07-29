@@ -1035,6 +1035,230 @@ PY
   s "- **p2-h1 also ~−50%** ⇒ HTTP/2 acquitted; move to per-request server-side timing"
   s "  at p2 vs p0 (TLS read/write vs handler) — the fallback path in the plan."
   s "- Check the negotiated-protocol column: the h1 cell must NOT read \`2\`."
+  s
+  s "**Superseded by \`h6-tls-proto\` (H6).** All three CC cells above measure the"
+  s "shared rate-limit write, not TLS (claude_dev/postseed-transient-investigation.md),"
+  s "and the protocol column here is derived from a k6 tag that is never emitted."
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# H6 — B2 endgame v2: TLS/h1/h2 on endpoints that are NOT rate-limit clamped
+# ---------------------------------------------------------------------------
+# Why this replaces g8-tls-h1's CC cells:
+#
+#   * Every `RateLimitShared`-wrapped endpoint — /oauth2/token (CC), authz
+#     check, introspect, revoke, login and GET /api/v1/users — pays one
+#     synchronous SurrealDB bucket write before the handler runs, which on some
+#     hosts costs 40-50 ms and pins the endpoint at ~20 ops/s at ANY
+#     concurrency (claude_dev/postseed-transient-investigation.md §2). A TLS or
+#     protocol delta of a few hundred microseconds per request is invisible
+#     under a 50 ms floor. CC therefore cannot discriminate anything about the
+#     transport on such a host, no matter how carefully the cell is run.
+#   * `GET /oauth2/jwks` and `GET /oauth2/userinfo` are NOT wrapped and run at
+#     ~3 000 and ~1 700 ops/s. They are the only vehicles on such a host in
+#     which a per-request transport cost is a large fraction of the total.
+#
+# Four stacks, each measured with the SAME scenarios at the SAME VU levels:
+#
+#   p0-plaintext   direct :8090, no TLS                       (protocol: 1.1)
+#   p2-native      direct :8443, AXIAM's own rustls listener   (protocol: 2.0)
+#   p2-nginx-h2    nginx edge, TLS 1.3, `http2 on`             (protocol: 2.0)
+#   p2-nginx-h1    nginx edge, TLS 1.3, no `http2`             (protocol: 1.1)
+#
+# and, inside each nginx stack, a cleartext control through the SAME edge
+# (tls/_plain-control.inc on :8080). That yields four one-variable comparisons
+# instead of the one many-variable comparison G8 made:
+#
+#   nginx-plain vs p0            = the proxy hop, alone
+#   nginx-tls-h1 vs nginx-plain  = TLS at the edge, alone
+#   nginx-tls-h2 vs nginx-tls-h1 = h2 vs h1, alone   <-- the B2 discriminator
+#   p2-native   vs p0            = what the security-cost matrix actually
+#                                  reports for p2 (TLS + h2 + a different TLS
+#                                  implementation, all at once)
+#
+# Knobs: H6_VUS (default "10 50 100"), H6_DURATION, H6_WARMUP, H6_SCENARIOS.
+task_h6_tls_proto() {
+  need_base
+  local out=$TASKS_ROOT/h6-tls-proto
+  rm -rf "$out"; summary_open "$out" "H6 — B2 endgame v2: TLS, h1 and h2 on unclamped endpoints"
+
+  local vus_list=${H6_VUS:-"10 50 100"}
+  local dur=${H6_DURATION:-60s}
+  local warm=${H6_WARMUP:-10s}
+  local scen=${H6_SCENARIOS:-"jwks_fetch.js userinfo.js"}
+
+  # The settle gate bursts POST /api/v1/authz/check and requires >=400 ops/s or
+  # p50 < 150 ms. On a host where that endpoint is clamped at ~20 ops/s by the
+  # shared rate-limit write, the gate can NEVER pass: it burns its full
+  # BENCH_SETTLE_TIMEOUT_SECS (600 s) per stack and stamps settle_timeout, which
+  # H1.5 correctly teaches report.py to refuse — every cell of this task would
+  # be thrown away. It is disabled here and replaced by an explicit per-stack
+  # warm-up cell below. This is sound for THIS task specifically because none of
+  # its scenarios touch a clamped endpoint: jwks and userinfo have no
+  # RateLimitShared wrap, so there is no transient for the gate to gate on. Do
+  # not copy this into a task that measures authz or CC.
+  export BENCH_SETTLE=0
+  # Both nginx stacks get the same edge budget, so the h1/h2 comparison is not
+  # decided by nginx's CPU cap. 2 CPUs matches the server's cap.
+  export BENCH_EDGE_CPUS=${BENCH_EDGE_CPUS:-2}
+  local plain_port=${BENCH_EDGE_PLAIN_PORT:-18080}
+  export BENCH_EDGE_PLAIN_PORT=$plain_port
+
+  s "Vehicles: \`$scen\` at VUs \`$vus_list\`, ${dur} per cell (${warm} warm-up)."
+  s "Rate-limit-clamped endpoints (CC, authz, introspect, login) are deliberately"
+  s "NOT used — see the header comment in this script and"
+  s "\`claude_dev/postseed-transient-investigation.md\`."
+  s
+
+  # One k6 cell straight at a URL, bypassing profile env (used only for the
+  # cleartext-through-the-edge control, which no profile describes). Writes a
+  # k6 summary JSON in the same shape every other cell produces so k6_stat and
+  # h6_proto read it unchanged.
+  h6_plain_cell() { # $1=outdir $2=scenario $3=vus
+    local odir=$1 scenario=$2 vus=$3
+    mkdir -p "$odir"; assert_within_tasks_root "$odir"
+    ( cd "$BENCH_DIR/scenarios" \
+      && set -a && . "$BENCH_DIR/.seed/axiam.seed.env" && set +a \
+      && BENCH_TARGET=axiam BENCH_PROFILE=p0-plaintext \
+         BENCH_SCHEME=http BENCH_HOST=localhost BENCH_PORT="$plain_port" \
+         BENCH_VUS="$vus" BENCH_WARMUP="$warm" BENCH_DURATION="$dur" BENCH_COOLDOWN=2s \
+         BENCH_PROTO_ROOT="$BENCH_DIR/../proto" \
+         k6 run --quiet --summary-export "$odir/${scenario%.js}.k6.json" "$scenario" \
+    ) >/dev/null 2>&1 || true
+  }
+
+  h6_stack() { # $1=label $2=profile [$3=BENCH_NGINX_CONF]
+    local label=$1 profile=$2 nginx=${3:-}
+    if [ -n "$nginx" ]; then export BENCH_NGINX_CONF=$nginx; else unset BENCH_NGINX_CONF; fi
+    log "=== stack $label (profile=$profile nginx=${nginx:-none}) ==="
+    arm_cleanup axiam "$profile"
+    bench_up_seed axiam "$profile"
+    # Explicit warm-up cell (replaces the disabled settle gate): one short cell
+    # on the same endpoint so no measured cell is the first traffic after seed.
+    BENCH_VUS=20 BENCH_WARMUP=3s BENCH_DURATION=15s BENCH_COOLDOWN=2s \
+      cell axiam "$profile" jwks_fetch.js "$out/$label/warmup" >/dev/null 2>&1 || true
+    local sc v
+    for sc in $scen; do
+      for v in $vus_list; do
+        log "$label · ${sc%.js} · ${v} VUs"
+        BENCH_VUS=$v BENCH_WARMUP=$warm BENCH_DURATION=$dur BENCH_COOLDOWN=5s \
+          cell axiam "$profile" "$sc" "$out/$label/${sc%.js}-vu$v" >/dev/null 2>&1 || true
+      done
+    done
+    # Cleartext control through the SAME edge, only for the nginx stacks.
+    if [ -n "$nginx" ]; then
+      for v in $vus_list; do
+        log "$label · plain-edge control · ${v} VUs"
+        h6_plain_cell "$out/$label/plain-jwks-vu$v" jwks_fetch.js "$v"
+      done
+    fi
+    disarm_cleanup; bench_down axiam "$profile"
+    unset BENCH_NGINX_CONF
+  }
+
+  h6_stack p0            p0-plaintext
+  h6_stack p2-native     p2-tls13
+  h6_stack p2-nginx-h2   p2-tls13 tls13.conf
+  h6_stack p2-nginx-h1   p2-tls13 tls13-h1.conf
+
+  s "## Results"
+  s
+  python3 - "$out" "$vus_list" "$scen" >> "$SUMMARY" <<'PY'
+import glob, json, os, sys
+root, vus_list, scen = sys.argv[1], sys.argv[2].split(), sys.argv[3].split()
+PROTO = {10: "1.0", 11: "1.1", 20: "2.0", 30: "3"}
+
+def read(pattern):
+    f = sorted(glob.glob(pattern, recursive=True))
+    if not f:
+        return None
+    m = json.load(open(f[0]))["metrics"]
+    if "bench_ok" not in m:
+        return None
+    p = m.get("bench_http_proto")
+    if not p:
+        proto = "—"
+    elif p["min"] == p["max"]:
+        proto = PROTO.get(int(p["min"]), "?%d" % p["min"])
+    else:
+        proto = "mixed(%s,%s)" % (PROTO.get(int(p["min"]), "?"), PROTO.get(int(p["max"]), "?"))
+    return {
+        "thr": m["bench_ok"]["rate"],
+        "p50": m["bench_op_latency_ms"]["med"],
+        "p95": m["bench_op_latency_ms"]["p(95)"],
+        "err": m.get("bench_error_rate", {}).get("value", 0.0),
+        "failed": m.get("bench_failed", {}).get("count", 0),
+        "proto": proto,
+    }
+
+def cell(label, sc, v):
+    return read(os.path.join(root, label, "%s-vu%s" % (sc, v), "**", "*.k6.json"))
+
+def plain(label, v):
+    return read(os.path.join(root, label, "plain-jwks-vu%s" % v, "*.k6.json"))
+
+LABELS = [("p0", "direct :8090, no TLS"),
+          ("p2-native", "AXIAM rustls listener"),
+          ("p2-nginx-h2", "nginx edge, http2 on"),
+          ("p2-nginx-h1", "nginx edge, http2 off")]
+
+for sc in [s[:-3] for s in scen]:
+    print("### %s\n" % sc)
+    print("| cell | what | VUs | http | thr (ops/s) | p50 (ms) | p95 (ms) | err | failed ops | Δ thr vs p0 |")
+    print("|---|---|---:|:--:|---:|---:|---:|---:|---:|---:|")
+    for v in vus_list:
+        base = cell("p0", sc, v)
+        for label, what in LABELS:
+            c = cell(label, sc, v)
+            if not c:
+                print("| %s | %s | %s | — | — | — | — | — | — | cell missing |" % (label, what, v)); continue
+            d = "baseline" if label == "p0" else (
+                "%+.1f%%" % (100 * (c["thr"] - base["thr"]) / base["thr"]) if base and base["thr"] else "n/a")
+            print("| %s | %s | %s | %s | %.0f | %.1f | %.1f | %.2f%% | %d | %s |"
+                  % (label, what, v, c["proto"], c["thr"], c["p50"], c["p95"],
+                     100 * c["err"], c["failed"], d))
+        if sc == "jwks_fetch":
+            for label, _ in (("p2-nginx-h2", ""), ("p2-nginx-h1", "")):
+                c = plain(label, v)
+                if not c:
+                    continue
+                d = ("%+.1f%%" % (100 * (c["thr"] - base["thr"]) / base["thr"])
+                     if base and base["thr"] else "n/a")
+                print("| %s (plain edge) | same nginx, NO TLS | %s | %s | %.0f | %.1f | %.1f | %.2f%% | %d | %s |"
+                      % (label, v, c["proto"], c["thr"], c["p50"], c["p95"],
+                         100 * c["err"], c["failed"], d))
+    print()
+
+print("### One-variable decompositions (jwks_fetch)\n")
+print("| comparison | isolates | VUs | Δ throughput | Δ p50 (ms) |")
+print("|---|---|---:|---:|---:|")
+for v in vus_list:
+    p0 = cell("p0", "jwks_fetch", v)
+    ph2 = cell("p2-nginx-h2", "jwks_fetch", v)
+    ph1 = cell("p2-nginx-h1", "jwks_fetch", v)
+    pl = plain("p2-nginx-h1", v) or plain("p2-nginx-h2", v)
+    nat = cell("p2-native", "jwks_fetch", v)
+    def row(name, iso, a, b):
+        if not a or not b or not b["thr"]:
+            print("| %s | %s | %s | — | — |" % (name, iso, v)); return
+        print("| %s | %s | %s | %+.1f%% | %+.2f |"
+              % (name, iso, v, 100 * (a["thr"] - b["thr"]) / b["thr"], a["p50"] - b["p50"]))
+    row("nginx-plain vs p0", "the proxy hop", pl, p0)
+    row("nginx-tls-h1 vs nginx-plain", "TLS at the edge", ph1, pl)
+    row("nginx-tls-h2 vs nginx-tls-h1", "**h2 vs h1**", ph2, ph1)
+    row("p2-native vs p0", "what the matrix reports", nat, p0)
+PY
+  s
+  s "## How to read this"
+  s "- The \`http\` column is \`bench_http_proto\` (k6 \`res.proto\`), i.e. what the"
+  s "  connection ACTUALLY negotiated. If \`p2-nginx-h1\` does not read \`1.1\` and"
+  s "  \`p2-nginx-h2\` does not read \`2.0\`, the pair is void — fix the edge, do not"
+  s "  interpret the numbers."
+  s "- \`nginx-tls-h2 vs nginx-tls-h1\` is the ONLY row in which h1-vs-h2 is the"
+  s "  single variable. Everything else in the table bundles it with a proxy hop,"
+  s "  a TLS implementation change, or both."
+  s "- \`failed ops\` must be 0 for the h1 control to be usable as evidence at all."
   finish
 }
 
@@ -1162,7 +1386,8 @@ Usage: ./run-improvement-tasks.sh <task>
   g4-refresh      G4    ~15m    Is the refresh cell a real rotation now?
   g5-cache-sweep  G5    ~60m    Does the cache 3x survive a realistic key space?
   g6-memory       G6    ~90m    Does jemalloc fix the post-burst retention?
-  g8-tls-h1       G8    ~25m    Is HTTP/2 the TLS token-issuance penalty?
+  g8-tls-h1       G8    ~25m    Is HTTP/2 the TLS token-issuance penalty? (SUPERSEDED by h6-tls-proto)
+  h6-tls-proto    H6    ~45m    TLS/h1/h2 on UNCLAMPED endpoints, with real protocol capture
   g9-rlprod       G9    ~10m    Are rate-limited cells' metrics coherent?
   g10-sdk         G10   ~30m    Do the SDK benches emit valid records?
   pack            —     ~1m     Build the shareable archive + list summaries
@@ -1175,7 +1400,8 @@ Ctrl-C at any point tears the bench stack down before exiting.
 Knobs: G1_ITERS, G1_CELL_SECS, G1_VUS, G1_IDLE_MIN, G1_ISOLATE_READY_TIMEOUT,
 G1_ISOLATE_FULL_WARMUP, G1_ISOLATE_FULL_DURATION, G1_DBDIRECT_ITERS,
 G1_DBDIRECT_INTERVAL_SECS, G1_DBDIRECT_BASELINE_WAIT_SECS,
-G1_DBDIRECT_BASELINE_ITERS, G3_REPEAT, G5_KEYSPACES, G10_LANGS. Order that
+G1_DBDIRECT_BASELINE_ITERS, G3_REPEAT, G5_KEYSPACES, G10_LANGS,
+H6_VUS, H6_DURATION, H6_WARMUP, H6_SCENARIOS. Order that
 matters: g1-* before g3/g8 (they need the settle gate to be trustworthy),
 g2-verify after the G2/H1 code lands.
 EOF
@@ -1194,6 +1420,7 @@ case "$TASK" in
   g5-cache-sweep) task_g5_cache_sweep ;;
   g6-memory)      shift; task_g6_memory "$@" ;;
   g8-tls-h1)      task_g8_tls_h1 ;;
+  h6-tls-proto)   task_h6_tls_proto ;;
   g9-rlprod)      task_g9_rlprod ;;
   g10-sdk)        task_g10_sdk ;;
   pack)           task_pack ;;

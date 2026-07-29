@@ -1009,6 +1009,14 @@ async fn main() -> std::io::Result<()> {
     // rate-limit pre-check can enforce the multi-replica bucket store
     // (GrpcSharedRateLimitLayer), not just the per-replica in-memory
     // governor.
+    //
+    // `start_grpc_server` builds its OWN `SharedRateLimitCounter` from this
+    // handle (see `shared_rate_limit_counter` below for the REST one). Two
+    // counters in one process is correct, not a bug: their bucket keys never
+    // overlap — the gRPC layer only ever writes `grpc_authz:<ip>`, while the
+    // REST middleware writes `<rest_endpoint>:<key_part>` — so neither can
+    // fragment the other's local count. Both read the same
+    // `AXIAM__RATE_LIMIT__SHARED*` env knobs, so they behave identically.
     let grpc_db = db_handle.clone();
     let grpc_batch_max_concurrency = config.authz.batch_max_concurrency;
     tokio::spawn(async move {

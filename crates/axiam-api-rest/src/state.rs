@@ -53,18 +53,16 @@ use axiam_auth::{
 use axiam_authz::AuthzConfig;
 use axiam_db::{
     SharedRateLimitCounter, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
-    SurrealAuditLogRepository,
-    SurrealAuthorizationCodeRepository, SurrealCertificateRepository, SurrealConsentRepository,
-    SurrealEmailConfigRepository, SurrealErasureProofRepository, SurrealExportJobRepository,
-    SurrealFederationConfigRepository, SurrealFederationLinkRepository,
+    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCertificateRepository,
+    SurrealConsentRepository, SurrealEmailConfigRepository, SurrealErasureProofRepository,
+    SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
     SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
     SurrealRateLimitBucketRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
-    SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebhookRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;

@@ -1294,6 +1294,10 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
             state.auth_config.access_token_lifetime_secs,
             state.auth_config.cookie_secure,
         ))
+        // See the matching comment on handlers/auth.rs's login handler —
+        // non-browser SDKs capture the CSRF token from this header (the
+        // same value already exposed via the non-httpOnly cookie above).
+        .insert_header((crate::middleware::csrf::HEADER_CSRF, csrf_token.clone()))
         .json(SsoLoginSuccessResponse {
             user_id: user_detail.id,
             session_id: auth_out.session_id,
@@ -1517,6 +1521,10 @@ pub async fn saml_acs_public<C: Connection + Clone>(
             state.auth_config.access_token_lifetime_secs,
             state.auth_config.cookie_secure,
         ))
+        // See the matching comment on handlers/auth.rs's login handler —
+        // non-browser SDKs capture the CSRF token from this header (the
+        // same value already exposed via the non-httpOnly cookie above).
+        .insert_header((crate::middleware::csrf::HEADER_CSRF, csrf_token.clone()))
         .json(SsoLoginSuccessResponse {
             user_id: user_detail.id,
             session_id: auth_out.session_id,

@@ -45,6 +45,12 @@ struct Cfg {
     concurrency: usize,
     target: String,
     profile: String,
+    /// H8 fix: HARNESS-SPEC.md documents BENCH_CA_CERT (a PEM file path) as
+    /// an input every SDK bench should honor under the TLS profiles (p2),
+    /// but this bench never read it before — every p2 run failed at the
+    /// first HTTPS call with a certificate-verification error against the
+    /// profile's throwaway CA. `None` under p0/plaintext (unset).
+    custom_ca_pem: Option<Vec<u8>>,
 }
 
 impl Cfg {
@@ -74,6 +80,15 @@ impl Cfg {
             })
         };
 
+        let ca_path = env("BENCH_CA_CERT", "");
+        let custom_ca_pem = if ca_path.is_empty() {
+            None
+        } else {
+            Some(std::fs::read(&ca_path).map_err(|e| {
+                format!("BENCH_CA_CERT={ca_path:?} could not be read: {e}")
+            })?)
+        };
+
         Ok(Cfg {
             base_url,
             tenant_slug: env("BENCH_TENANT_SLUG", "default"),
@@ -87,6 +102,7 @@ impl Cfg {
             concurrency: parse_usize("SDK_BENCH_CONCURRENCY", "16"),
             target: env("BENCH_TARGET", "axiam"),
             profile: env("BENCH_PROFILE", "p0-plaintext"),
+            custom_ca_pem,
         })
     }
 }
@@ -107,11 +123,15 @@ enum Op {
 /// http on loopback) and returns a `Result`; the tenant slug is required, and
 /// the org slug is required for login/refresh (CONTRACT.md §5.1).
 fn build_client(cfg: &Cfg) -> Result<AxiamClient, AxiamError> {
-    AxiamClient::builder()
+    let mut builder = AxiamClient::builder()
         .base_url(cfg.base_url.as_str())?
         .tenant_slug(cfg.tenant_slug.as_str())
-        .org_slug(cfg.org_slug.as_str())
-        .build()
+        .org_slug(cfg.org_slug.as_str());
+    // H8 fix: trust BENCH_CA_CERT (the p2 profile's throwaway CA) when set.
+    if let Some(pem) = &cfg.custom_ca_pem {
+        builder = builder.with_custom_ca(pem)?;
+    }
+    builder.build()
 }
 
 /// Execute one op invocation, discarding the success payload. `shared` is the

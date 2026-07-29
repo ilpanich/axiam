@@ -45,8 +45,11 @@ where
     /// build without the cache.
     decision_cache: Option<Arc<DecisionCache>>,
     /// How `check_access_batch` schedules its work (D10). Defaults to
-    /// [`BatchStrategy::Concurrent`]; `axiam-server` overrides from
-    /// `AXIAM__AUTHZ__BATCH_STRATEGY`. Never affects decisions or their order.
+    /// [`BatchStrategy::Concurrent`] when an engine is constructed directly via
+    /// `new()`; `axiam-server` always overrides this from `AuthzConfig` via
+    /// `with_batch_config` (see `AXIAM__AUTHZ__BATCH_STRATEGY`), whose own
+    /// default is [`BatchStrategy::Coalesced`] as of H3/G3 — that is the
+    /// shipped default in production. Never affects decisions or their order.
     batch_strategy: BatchStrategy,
     /// Bound on in-flight per-item evaluations under
     /// [`BatchStrategy::Concurrent`] (D-07 pool-safety). Ignored by
@@ -322,13 +325,18 @@ where
     /// holds for **both** [`BatchStrategy`] variants, which differ only in how
     /// the DB work is scheduled:
     ///
-    /// - [`BatchStrategy::Concurrent`] (default, D10) — each item is an
-    ///   independent cache-aware [`Self::check_access`], run concurrently
-    ///   (bounded by `batch_max_concurrency`). Recovers per-item DB parallelism.
-    /// - [`BatchStrategy::Coalesced`] (D1) — shared role-assignment/ancestor/
-    ///   grant lookups resolved once per (tenant, subject|resource): 15
-    ///   round-trips → 3 for the benchmark's 5-item shape. Fewer round-trips,
-    ///   but serializes on the DB under load (see run-2 analysis).
+    /// - [`BatchStrategy::Coalesced`] (default since H3/G3, D1) — shared
+    ///   role-assignment/ancestor/grant lookups resolved once per (tenant,
+    ///   subject|resource): 15 round-trips → 3 for the benchmark's 5-item
+    ///   shape. On the G3 settled-protocol re-measurement this wins decisively
+    ///   (4.98× repeated single checks over REST; gRPC batch p95 74 ms) —
+    ///   the run-2 serialization concern only applied to the contaminated
+    ///   cells (see `claude_dev/authz-batch-investigation.md`).
+    /// - [`BatchStrategy::Concurrent`] (D10) — each item is an independent
+    ///   cache-aware [`Self::check_access`], run concurrently (bounded by
+    ///   `batch_max_concurrency`). Recovers per-item DB parallelism; still
+    ///   beats repeated single checks (1.37×) but by a smaller margin than
+    ///   `Coalesced`. Retained as a selectable opt-in strategy.
     pub async fn check_access_batch(
         &self,
         requests: &[AccessRequest],
@@ -339,20 +347,24 @@ where
         }
     }
 
-    /// **D10 default** — evaluate each item as an independent, cache-aware
-    /// [`Self::check_access`], run **concurrently** with a bound of
+    /// **D10 opt-in strategy** — evaluate each item as an independent,
+    /// cache-aware [`Self::check_access`], run **concurrently** with a bound of
     /// `batch_max_concurrency` in-flight, preserving input order.
     ///
-    /// Why this is the default (run-2 evidence): the coalesced path
+    /// This was the run-2-era default (run-2 evidence): the coalesced path
     /// ([`Self::evaluate_batch`]) minimizes round-trips but resolves the whole
-    /// batch on a single task, which serialized on the database (DB pinned at
-    /// ~1 core, ~1 s p50, everything else idle) and did not beat repeated
-    /// single checks. Single `check_access` calls, by contrast, saturated the
-    /// DB (2 cores, 745 req/s) precisely because 50 of them ran concurrently.
-    /// Evaluating a batch's items the same way recovers that parallelism.
-    /// `check_access` is reused verbatim, so every item's decision, deny reason,
-    /// cache lookup and cache insert are identical to a standalone call —
-    /// `buffered` keeps results in request order.
+    /// batch on a single task, which appeared to serialize on the database (DB
+    /// pinned at ~1 core, ~1 s p50, everything else idle) and did not beat
+    /// repeated single checks. Single `check_access` calls, by contrast,
+    /// saturated the DB (2 cores, 745 req/s) precisely because 50 of them ran
+    /// concurrently. Evaluating a batch's items the same way recovers that
+    /// parallelism. **G3 re-measured both strategies on the settled protocol**
+    /// and found the run-2 coalesced numbers were contaminated by the post-seed
+    /// clamp: `Coalesced` in fact wins decisively (4.98× vs this strategy's
+    /// 1.37×), so `Coalesced` is the default as of H3 and this strategy is now
+    /// opt-in. `check_access` is reused verbatim, so every item's decision,
+    /// deny reason, cache lookup and cache insert are identical to a standalone
+    /// call — `buffered` keeps results in request order.
     async fn evaluate_concurrent(
         &self,
         requests: &[AccessRequest],
@@ -377,10 +389,11 @@ where
             .await
     }
 
-    /// **D1 path** (opt-in via `AXIAM__AUTHZ__BATCH_STRATEGY=coalesced`) —
-    /// coalesced evaluation with the D7 decision cache layered on top: serve
-    /// hits from the cache, evaluate only the misses through the shared-lookup
-    /// batch path, then backfill. Input order is preserved.
+    /// **D1 path** (default since H3/G3; `AXIAM__AUTHZ__BATCH_STRATEGY=coalesced`,
+    /// or the unset default) — coalesced evaluation with the D7 decision cache
+    /// layered on top: serve hits from the cache, evaluate only the misses
+    /// through the shared-lookup batch path, then backfill. Input order is
+    /// preserved.
     async fn evaluate_coalesced_cached(
         &self,
         requests: &[AccessRequest],

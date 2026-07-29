@@ -47,6 +47,29 @@ provable thanks to A9.
 **This is the most important finding of the run and rewrites two long-standing
 conclusions (D1/D10 batch slowness, and the B2 h1 cell).**
 
+> **UPDATE (H2, 2026-07-28): this was never post-seed, and "transient" is
+> wrong too.** `claude_dev/postseed-transient-investigation.md` traced the
+> effect to a permanent, product-relevant design property: six endpoints
+> (`POST /api/v1/authz/check`, `POST /oauth2/token`, `POST /oauth2/introspect`,
+> `POST /oauth2/revoke`, `POST /api/v1/auth/login`, and — as a bug —
+> `GET /api/v1/users`) are wrapped with `RateLimitShared`, which performs one
+> synchronous SurrealDB write (the shared rate-limit bucket) before the
+> handler runs. That single round trip — not seeding, not compaction, not
+> data volume — is the "~22 ms serialized unit": it survives idle time,
+> server restarts, datastore restarts, `POOL_SIZE` changes, and even swapping
+> the storage backend to pure in-memory. Structurally identical endpoints
+> without the wrap are unaffected. §1.1–§1.4 below are kept as the *run-3*
+> observation (accurate to what run 3 saw and how the harness was built in
+> response — the settle gate + rotation in §2 of methodology.md are still
+> exactly the right countermeasure), but read "post-seed window" throughout
+> as "the window this particular host's write-cost happened to clear in
+> during run 3", not a seeding effect. On the H2 investigation host the
+> effect never clears at all (16–21 ops/s at any concurrency, indefinitely) —
+> see that document §6 for the reconciliation with run 3's recovery cliff,
+> which remains only partially explained. The G-box's "recovers after ~6 min"
+> and this host's "never recovers" are two datastores paying a different
+> price for the same synchronous write, not two different bugs.
+
 ### 1.1 The signature
 
 A window of roughly **5–7 minutes after `bench-up` + `bench-seed`** in which
@@ -91,8 +114,20 @@ the AXIAM stack serves requests with:
   therefore still unfinished — but the prior is now inverted: nothing is
   wrong with batch; `coalesced` looks excellent.
 - **The B2 h1-isolation cell.** It ran first-after-seed and measured the
-  transient, not HTTP/1.1-over-TLS. **B2 remains open**; the native p2 CC
+  transient, not HTTP/1.1-over-TLS. ~~**B2 remains open**~~; the native p2 CC
   halving (1823→903, −50.5%) is confirmed real by the clean matrix cells.
+  **UPDATE (H6, 2026-07-29): B2 is closed as framed — the −50.5% is real but
+  is not a transport cost.** HTTP/2 is acquitted by direct measurement (the
+  "all clients collapse onto one h2 connection" premise never held: 10/50/100
+  concurrent clients open 10/50/100 connections over h2, and both actix
+  workers stay balanced), and h1-vs-h2 over an otherwise identical TLS edge is
+  a wash. TLS 1.3 itself is priced at −13%/−2% on jwks and −8%/−13% on
+  userinfo depending on load. That leaves the CC penalty endpoint-specific,
+  not transport-specific. Full evidence and the one remaining follow-up in
+  `claude_dev/b2-tls-h2-investigation.md`. Note also that the G8 h1 cell's
+  1 059 failed ops had a mundane cause found in H6: **none** of the nginx edge
+  confs declared an `upstream ... keepalive`, so the edge opened and closed a
+  fresh backend TCP connection per proxied request.
 - Probably the low `authz_check_grpc` in `sens-pool-4*` (537 vs 603 —
   it was cell 3, the recovery window).
 
@@ -152,6 +187,57 @@ interacting with run order, possibly a real TLS interaction. Don't publish a
 KC-login-got-faster claim; publish p0 as measured (valid) and p2 as
 gate-invalid, and note the asymmetry. Worth one diagnostic run if time
 permits; not AXIAM work.
+
+#### 2.4.1 H7 diagnostic run (2026-07-29, `claude/g-benchmark-improvements-n5mjmj`) — fairness hygiene only, no KC fixes
+
+One `oauth2_password_login.js` pass each way, per the written procedure in
+`claude_dev/grpc-vs-rest-authz-analysis.md` §2 (single repro run each way,
+per that section's own acceptance bar). `BENCH_MEM` raised from the target's
+compose default (1024m) to **4096m** for this diagnostic only (env override,
+no compose file change) — see why below; `docker stats` sampled every 3 s
+throughout each measured window.
+
+| profile | result | throughput | p50 | p95 | error | KC CPU (2-core cap) | KC mem peak |
+|---|---|---:|---:|---:|---:|---|---|
+| p0-plaintext | ✅ 100% valid | **27.93 req/s** | 1.63 s | 2.28 s | 0.00% | ~195–200% (saturated) | 3.28 GiB / 4 GiB (82%) |
+| p2-tls13 | ✅ 100% valid | **13.55 req/s** (−51%) | 3.45 s | 4.00 s | 0.00% | ~197–202% (saturated) | 1.48 GiB / 4 GiB (37%) |
+
+Both cells are clean 0%-error, 100%-`checks` passes — **not gate-invalid** —
+answering procedure item 3 directly: on this box, with adequate memory
+headroom, p2 is not failing the validity gate at all; it is legitimately
+slower. That reframes the original matrix's "p0 52/s valid vs p2 23/s,
+0/3 valid": **at the target's own compose default of `BENCH_MEM=1024m`, this
+diagnostic reproduced an outright `OOMKilled: true` on `bench-keycloak` twice**
+(once at 1024m, once again at 2560m) before a 4096m cap let the container
+survive a full 50-VU sustained-login window — Keycloak 26 on Quarkus simply
+needs more headroom than the shared 1 GiB per-container default under
+sustained Argon2/PBKDF2-class hashing load. The original run's "0/3 valid"
+for p2 is therefore plausibly **OOM-driven instability**, not a TLS-specific
+gate failure — a harness sizing gap, not a Keycloak or TLS defect. (Not
+re-verified against the original run's exact `BENCH_MEM`; flagged as the
+most likely explanation, not confirmed root cause — the original run's
+containers are gone.)
+
+Procedure item 2 (isolate TLS overhead from KC's own request handling): KC's
+CPU is pegged at the **same** ~195–202% (i.e., the full 2-core cap) in
+**both** profiles, not "idle at p0, pegged at p2" — Argon2/PBKDF2 password
+hashing already saturates the CPU budget at p0 by itself. p2's TLS
+handshake/cipher cost is therefore not new, unused headroom being consumed;
+it is **additional CPU work landing on an already-fully-booked budget**,
+directly cannibalizing hashing throughput — consistent with the −51%
+measured, and a cleaner mechanism than "TLS is expensive in the abstract."
+Procedure item 1 (run-order/warm-up): only one order was run (p0 then p2,
+per the "one diagnostic run each way is sufficient" bar) — not re-tested in
+the opposite order; if the 30% budget affords it, a p2→p0 repeat would
+further separate order effects from the CPU-contention mechanism above, but
+was not required to close this item.
+
+**Verdict:** fairness hygiene closed. No AXIAM or Keycloak code was touched.
+Recommendation for any future publication of this pair: size the Keycloak
+container's memory to at least ~3.5–4 GiB before trusting *any* sustained-load
+login cell from it (current target compose default of `BENCH_MEM=1024m` is
+too small and risks silently reporting an OOM-churn number as a TLS
+penalty).
 
 ### 2.5 ✅ D11 Zitadel gRPC — fixed, but the run-2 magnitude prediction was wrong
 
@@ -214,6 +300,15 @@ Caveats for the ship-decision (G5): the bench's hit rate is optimistic
 revocation-tested. Recommendation to take to the plan: **default ON for
 v1.0-beta with TTL 5 s**, prominently documented, off-switch retained.
 
+> **UPDATE (H5, 2026-07-29): decision recorded — stays opt-in (`false`).**
+> `claude_dev/decision-cache-decision.md` walked the clean K-sweep (K=1
+> 3.0–3.15×, K=10 000 +32%, K=100 now measured) against the seven pre-agreed
+> criteria after fixing the three defects the run-3/G5 data had surfaced
+> (unbounded `order` growth, O(shard) `invalidate_subject` under a global
+> mutex, and documenting the process-local revocation bound). The flip is
+> blocked on C1/C2/C4 — see that document for the full criteria table. The
+> recommendation written here (default ON) is superseded.
+
 ### 3.3 DB pool A/B (F2/F3)
 
 `pool_size=4`: CC **1823 → 1955 (+7.2%)**; `+ max_in_flight=64` changes
@@ -225,6 +320,19 @@ rollout), document `pool_size=4` as a token-issuance-heavy tuning
 (it buys ~7% there and nothing else at this concurrency), revisit after G1
 removes the transient and an open-loop harness exists (§5.3 of run-2 doc —
 still true).
+
+> **UPDATE (H9, 2026-07-29): closed negative — default stays `pool_size=1`.**
+> The pre-agreed ≥5%-on-CC confirm cell turned out to be **unsatisfiable on
+> this host**: H2 found `POST /oauth2/token` permanently clamped to
+> 16–21 ops/s by the `RateLimitShared` write, so there is no settled CC cell
+> to confirm against here. Two independent lines of evidence say the G-box
+> G-run's "+7%" (1955 vs 1823) was noise rather than a `pool_size` effect
+> anyway: `AXIAM__DB__POOL_SIZE` 1→8 changed authz throughput by 0 ops/s at
+> both 1 and 20 VUs (H2 §5.2 — the shared-router mechanism means more pooled
+> handles buy no DB concurrency), and the G-run CC cells were never proven
+> to run outside the settle-gate-blind window in the first place. No code
+> change needed — `pool_size=1` was already the default.
+> `claude_dev/db-pool-design.md` §11 records the full verdict.
 
 ### 3.4 Native mTLS (D3) — acceptance PASSED
 
@@ -248,6 +356,15 @@ vs `--features jemalloc`), runs baseline → burst → 10-min watch per variant,
 and emits `results/d9-summary.md` with the ≥30%-gap-closure verdict. Run it
 (G6); until then AXIAM's published mem column for post-login cells stays
 inflated and the doc says so.
+
+> **UPDATE (H4/G6, 2026-07-28/29): fixed — jemalloc is the release default.**
+> The A/B ran: default malloc retained 376 MiB above baseline (peak 491);
+> jemalloc retained 86 MiB (peak 126) — **94% of the gap closed**, no
+> throughput or latency cost recorded. `crates/axiam-server` ships jemalloc
+> as the release-container default allocator as of H4 (a
+> `--no-default-features` escape hatch stays documented for musl/platform
+> edge cases). The "stays inflated" line above is stale — see
+> `claude_dev/memory-retention-experiment.md` §6 for the full numbers.
 
 ### 3.6 gRPC-vs-REST authz gap (new, now that both are clean)
 
@@ -284,9 +401,17 @@ Ranked summary:
    before the first cell, cell-order rotation per run, record `AXIAM__*`
    knobs in meta.json, re-run the four batch cells clean (both strategies)
    and the B2 h1 cell mid-session.
-3. **G3 — B2**: still −50.5% on CC at p2. Clean h1 cell first; then h2
+3. ~~**G3 — B2**: still −50.5% on CC at p2. Clean h1 cell first; then h2
    stream/flow-control tuning on the actix listener or an accepted,
-   documented position.
+   documented position.~~ **DONE (H6) — documented position published, and it
+   is not the position this line anticipated: the transport is exonerated
+   entirely, so there is no listener tuning to do.** What replaces it is one
+   narrow follow-up for the server-class re-run (E3): on a host where
+   `/oauth2/token` is **not** clamped, sweep VUs at p0 and p2 on CC. A cost
+   that scales with VU count is per-request; a throughput that stays pinned
+   regardless of VU count is a serialization point (and `RateLimitShared`'s
+   bucket write is the only one known on that path). See
+   `claude_dev/b2-tls-h2-investigation.md` §6.
 4. **G4 — A8 residual**: AXIAM refresh cookie extraction (harness) — last
    invalid AXIAM-controlled cell.
 5. **G5 — D7 ship-decision**: default-ON proposal + combined cache+pool
@@ -327,6 +452,17 @@ Ranked summary:
   discovery + the one clean 852-batches/s cell as "measurement corrected,
   full re-measurement in progress". This *retracts* the draft-1/2 "batch is
   slow" caveat in the honest direction.
+  > **UPDATE (H3/G3, 2026-07-28): superseded — the re-measurement happened
+  > and the verdict shipped.** On settled cells (G3 run 2–3), `coalesced`
+  > batch REST measured **744 ops/s = 3 721 checks/s = 4.98× singles**;
+  > gRPC coalesced **866–872 ops/s ≈ 4 330 checks/s**, p95 74 ms. `coalesced`
+  > is now the shipped default (`crates/axiam-authz/src/config.rs`,
+  > `concurrent` stays selectable). Publish the G3 table as the batch
+  > verdict, not as "in progress" — see `claude_dev/authz-batch-investigation.md`
+  > for the closing data. On *this* investigation host (H2/H10) batch cells
+  > are still clamped by the `RateLimitShared` write and must be published as
+  > refused, same as every other clamped cell — that is a host limitation,
+  > not a reopening of the G3 decision.
 - Do NOT chart: AXIAM/Zitadel refresh (fallback), Zitadel/KC-p2 login
   (gate), any first-cell-after-seed number (§1), the B2 h1 cell.
 - The new "recommended production settings" section (public §6) is the

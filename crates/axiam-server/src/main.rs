@@ -185,6 +185,19 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     tracing::info!("Starting AXIAM server...");
+    // H4: log which global allocator is active so `jemalloc` can be verified
+    // in a running container's logs (`docker logs` / `kubectl logs`) without
+    // needing binary introspection. Release container images build with the
+    // `jemalloc` feature on by default (see docker/Dockerfile.server); a
+    // build without it (e.g. `--build-arg CARGO_FEATURES=`, or a plain
+    // `cargo build --release -p axiam-server`) logs the platform default.
+    #[cfg(feature = "jemalloc")]
+    tracing::info!(allocator = "jemalloc", "Global allocator: jemalloc");
+    #[cfg(not(feature = "jemalloc"))]
+    tracing::info!(
+        allocator = "system",
+        "Global allocator: platform default (glibc malloc)"
+    );
 
     // REQ-15 AC-1: install the process-level rustls CryptoProvider.
     // rustls 0.23 links BOTH `ring` and `aws-lc-rs` in this build (transitively —
@@ -732,12 +745,52 @@ async fn main() -> std::io::Result<()> {
     // observed on every read path (all role/permission/resource mutations are
     // REST endpoints).
     let decision_cache = config.authz.build_decision_cache();
-    if decision_cache.is_some() {
+    if let Some(cache) = decision_cache.as_ref() {
         tracing::info!(
             ttl_secs = config.authz.decision_cache_ttl_secs,
             max_entries = config.authz.decision_cache_max_entries,
+            // Multi-replica caveat stated at the point of enablement, not only
+            // in the docs: invalidation is process-local, so on any deployment
+            // with more than one replica the worst-case revocation latency for
+            // the deployment is the TTL. See the `decision_cache` module docs.
+            revocation_scope = "process-local: other replicas stay stale up to ttl_secs",
             "AuthZ decision cache ENABLED (D7)"
         );
+        // Observability for the cache's own bounds (plan H5 item 4): without
+        // this there is no way to tell a cache holding its full
+        // `max_entries` from one that is silently evicting, nor to see the
+        // FIFO queue length that used to grow without bound. Cheap: one
+        // snapshot per interval, off the request path.
+        let cache = Arc::clone(cache);
+        let interval_secs = std::env::var("AXIAM__AUTHZ__DECISION_CACHE_STATS_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60);
+        if interval_secs > 0 {
+            tokio::spawn(async move {
+                let mut ticker =
+                    tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+                ticker.tick().await; // the first tick fires immediately
+                loop {
+                    ticker.tick().await;
+                    let s = cache.snapshot();
+                    let total = s.hits + s.misses;
+                    tracing::info!(
+                        entries = s.entries,
+                        tenants = s.tenants,
+                        queue_slots = s.queue_slots,
+                        hits = s.hits,
+                        misses = s.misses,
+                        hit_rate_pct = if total == 0 {
+                            0.0
+                        } else {
+                            (s.hits as f64 / total as f64) * 100.0
+                        },
+                        "AuthZ decision cache stats (D7)"
+                    );
+                }
+            });
+        }
     }
 
     // Build REST-facing authorization checker (D-01, D-02).

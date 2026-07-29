@@ -97,6 +97,34 @@ def classify_fallback(fallback_count, iteration_count):
     return "cc-token-setup" if fallback_count <= threshold else "fallback-op"
 
 
+# H6: decode `bench_http_proto` (scenarios/lib/metrics.js) back to a human
+# label. The metric is a Trend of 10/11/20/30 (= HTTP/1.0, 1.1, 2.0, 3), so a
+# cell whose min and max disagree ran over MORE THAN ONE protocol and must not
+# be read as an h1 or an h2 cell at all.
+PROTO_NAMES = {10: "1.0", 11: "1.1", 20: "2.0", 30: "3"}
+
+
+def proto_label(perf):
+    """Render one cell's negotiated-protocol column.
+
+    "—"                 the scenario recorded no sample (pre-H6 results tree,
+                        a gRPC scenario that still hand-rolls its metrics, or a
+                        cell in which every request failed at the transport
+                        level before any protocol was negotiated).
+    "1.1" / "2.0"       every measured response used that protocol.
+    "mixed(1.1,2.0)"    the cell is NOT a single-protocol cell — void as a
+                        controlled h1-vs-h2 comparison.
+    "?<n>"              k6 reported a protocol string this table doesn't know.
+    """
+    if not perf.get("proto_samples"):
+        return "—"
+    lo, hi = int(round(perf["proto_min"])), int(round(perf["proto_max"]))
+    if lo == hi:
+        return PROTO_NAMES.get(lo, f"?{lo}")
+    return "mixed({},{})".format(PROTO_NAMES.get(lo, f"?{lo}"),
+                                 PROTO_NAMES.get(hi, f"?{hi}"))
+
+
 def load_k6_summary(path):
     """Extract throughput, latency percentiles, error rate from a k6 summary."""
     with open(path) as f:
@@ -159,6 +187,15 @@ def load_k6_summary(path):
         "has_grpc_status": "bench_grpc_status" in metrics,
         "grpc_status_avg": trend("bench_grpc_status", "avg"),
         "grpc_status_max": trend("bench_grpc_status", "max"),
+        # H6: negotiated wire protocol (scenarios/lib/metrics.js's
+        # bench_http_proto). k6's summary export gives a Trend only its
+        # statistics — there is no `count` key — so presence of the metric
+        # itself is the "was anything recorded" flag. Absent for any results
+        # tree predating H6, in which case proto_label() renders "—" rather
+        # than claiming a protocol the run never measured.
+        "proto_min": trend("bench_http_proto", "min"),
+        "proto_max": trend("bench_http_proto", "max"),
+        "proto_samples": 1.0 if "bench_http_proto" in metrics else 0.0,
     }
 
 
@@ -335,6 +372,80 @@ PROTOCOL_EFFICIENCY_PAIRS = {
     ],
 }
 
+# H7/G4 residual (claude_dev/refresh-harness-diagnosis.md §6): scenarios where
+# every target's cell IS a real, non-fallback measurement of "renew an access
+# credential without re-authenticating" at the PRODUCT level, but the targets
+# do NOT all hit the same protocol-level operation — unlike fallback-op (a
+# per-iteration accident, see classify_fallback()), this is a permanent,
+# structural fact about the scenario itself, so it can't be derived from
+# bench_fallback and is instead a static per-scenario label. Distinct from
+# cc-token-setup (a one-time setup() provenance caveat) and from fallback-op
+# (the wrong op measured, excluded from head-to-head tables): a
+# protocol-variant cell measures the RIGHT (labelled) op for its own target,
+# it's just not the SAME op as its row-mates, so it stays in the table
+# (never excluded, like cc-token-setup) with a caveat naming the divergence.
+PROTOCOL_VARIANT_SCENARIOS = {"token_refresh"}
+
+# Per-scenario, per-target prose naming exactly what that target's cell
+# measures, for the caveat rendered next to PROTOCOL_VARIANT_SCENARIOS rows.
+# token_refresh: AXIAM deliberately ships no OAuth 2.1 ROPC/password grant
+# (refresh-harness-diagnosis.md §6), so its refresh cell is a SESSION refresh
+# (cookie + CSRF double-submit against axiam-auth's SessionRepository), while
+# Keycloak's/Zitadel's is the OAuth2 refresh_token grant. Both renew an access
+# credential without re-authenticating, so the row stays comparable at that
+# level, but never at the protocol level.
+PROTOCOL_VARIANT_NOTES = {
+    "token_refresh": {
+        "axiam": "session refresh (POST /api/v1/auth/refresh, cookie + CSRF "
+                 "double-submit, axiam-auth SessionRepository — no OAuth2 "
+                 "ROPC/password grant exists to seed an OAuth2 refresh token)",
+        "keycloak": "OAuth2 refresh grant (grant_type=refresh_token against "
+                    "the realm token endpoint)",
+        "zitadel": "OAuth2 refresh grant (via a Session-API-v2-seeded login; "
+                   "see the fallback flag if this cell also reads fallback-op)",
+    },
+}
+
+# H10: which AXIAM scenarios can actually be affected by the settle gate's
+# clamp. The settle gate (settle_gate() in run-benchmark.sh) runs ONCE per
+# run-benchmark.sh invocation and stamps its settle_timeout verdict into
+# EVERY cell of that session (methodology.md §12.1 — "the same value across
+# every cell of one bench-run invocation, since the gate runs once per
+# invocation"). That was the right design when the transient was believed to
+# be a global post-seed effect. H2's investigation
+# (claude_dev/postseed-transient-investigation.md §2) reframed it: the clamp
+# is architecturally scoped to exactly six endpoints wrapped by
+# `RateLimitShared` (POST /api/v1/authz/check, POST /oauth2/token,
+# POST /oauth2/introspect, POST /oauth2/revoke, POST /api/v1/auth/login, and
+# GET /api/v1/users — no scenario in this harness drives that last one).
+# Blanket-refusing every cell in a clamped session — including jwks_fetch,
+# userinfo, userinfo_grpc and token_refresh, none of which touch that
+# middleware and none of which the H2 clamp map ever found slow — is a false
+# positive the harness can now avoid, since which scenarios are affected is
+# no longer a guess. Scenario -> wrapped-endpoint mapping: authz_check_rest/
+# _grpc and authz_batch_rest/_grpc -> /api/v1/authz/check (batch coalesces
+# into the same checked path); oauth2_client_credentials -> /oauth2/token;
+# token_introspection -> /oauth2/introspect; oauth2_password_login ->
+# /api/v1/auth/login. jwks_fetch (/oauth2/jwks), userinfo/userinfo_grpc
+# (/oauth2/userinfo, unwrapped) and token_refresh (/api/v1/auth/refresh, not
+# in the wrapped set per the H2 map) are deliberately absent — a
+# settle_timeout in the same session must NOT refuse them.
+CLAMP_SENSITIVE_SCENARIOS = {
+    "authz_check_rest", "authz_check_grpc",
+    "authz_batch_rest", "authz_batch_grpc",
+    "oauth2_client_credentials", "token_introspection",
+    "oauth2_password_login",
+}
+
+
+def settle_timeout_applies(meta):
+    """True only when settle_timeout:true AND this scenario is one the H2
+    clamp map actually implicates (see CLAMP_SENSITIVE_SCENARIOS above).
+    Non-AXIAM targets have no RateLimitShared-equivalent clamp documented,
+    so this only ever suppresses the refusal for AXIAM scenarios outside the
+    six-endpoint map; Keycloak/Zitadel cells are unaffected either way."""
+    return bool(meta.get("settle_timeout")) and meta.get("scenario") in CLAMP_SENSITIVE_SCENARIOS
+
 
 def derive(perf, res):
     thr = perf["throughput"]
@@ -366,18 +477,22 @@ def host_flags(meta, host):
     (k6 itself was eating too much of the host's non-stack CPU headroom to
     trust it as a clean load generator).
 
-    G2: settle_timeout — the post-seed settle gate (run-benchmark.sh's
-    settle_gate()) hit its hard timeout without ever seeing
-    BENCH_SETTLE_STABLE_SECS consecutive stable canary ticks, so this cell may
-    still be inside (or just leaving) the post-seed serialized-DB transient
-    (PRIVATE_BENCH_ANALYSIS.md §1) even though the gate proceeded anyway.
-    meta.get() defaults to falsy for any meta.json predating G2, so old trees
-    render exactly as before (no flag)."""
+    G2/H1: settle_timeout — the post-seed settle gate (run-benchmark.sh's
+    settle_gate(), a concurrent burst probe as of H1) hit its hard timeout
+    without ever clearing BENCH_SETTLE_PROBE_THR ops/s (or
+    BENCH_SETTLE_PROBE_P50_MS p50) under BENCH_SETTLE_BURST_VUS concurrency,
+    so this cell may still be inside (or just leaving) the post-seed
+    serialized-DB transient (PRIVATE_BENCH_ANALYSIS.md §1) even though the
+    gate proceeded anyway. As of H1 this also makes the cell invalid (see
+    collect_dir()/aggregate_cell()) — kept here too so it's visible directly
+    in the "All results" table's host_flags column, not just the "Excluded"
+    one. meta.get() defaults to falsy for any meta.json predating G2, so old
+    trees render exactly as before (no flag)."""
     flags = []
     mhz_avg, mhz_max = host.get("mhz_avg", 0.0), host.get("mhz_max", 0.0)
     if mhz_max > 0 and mhz_avg < 0.85 * mhz_max:
         flags.append("clock_variance")
-    if meta.get("settle_timeout"):
+    if settle_timeout_applies(meta):
         flags.append("settle_timeout")
 
     containers = meta.get("containers") or []
@@ -437,6 +552,20 @@ def collect_dir(results_dir, max_error, min_samples):
                     reasons.append(f"only {res['samples']} resource samples")
                 if meta.get("k6_exit_code", 0) != 0:
                     reasons.append("k6 threshold breach")
+                # H1 item 5: settle_timeout:true means the post-seed settle
+                # gate (run-benchmark.sh's settle_gate()) never cleared its
+                # BENCH_SETTLE_PROBE_THR/BENCH_SETTLE_PROBE_P50_MS bar before
+                # hitting BENCH_SETTLE_TIMEOUT_SECS — this cell may still be
+                # inside (or just leaving) the post-seed clamp even though the
+                # gate proceeded anyway. REFUSE it (excluded from `valid`,
+                # same as any other invalid cell) rather than only flagging it
+                # in host_flags — a contaminated cell silently entering a
+                # median/head-to-head table is exactly the G run's
+                # cross-cutting data-quality failure (PRIVATE_BENCH_ANALYSIS.md
+                # §1) this task exists to stop repeating.
+                if settle_timeout_applies(meta):
+                    reasons.append("settle_timeout: true (post-seed settle gate hit its hard "
+                                    "timeout — cell may still be inside the post-seed clamp)")
                 cells.append({
                     "target": meta["target"], "profile": meta["profile"],
                     "scenario": meta["scenario"], "meta": meta,
@@ -532,6 +661,16 @@ def aggregate_cell(runs):
         perf["fallback_class"] = "none"
     perf["has_grpc_status"] = any(r["perf"].get("has_grpc_status") for r in basis)
 
+    # H6: the protocol column must NOT be medianed — the question it answers is
+    # "did every request in every run of this cell use one protocol?", so take
+    # the min of mins and the max of maxes across the runs. If two runs of the
+    # same cell negotiated different protocols (e.g. one run raced a
+    # BENCH_NGINX_CONF change), the aggregated cell correctly reads "mixed".
+    proto_runs = [r["perf"] for r in basis if r["perf"].get("proto_samples")]
+    perf["proto_samples"] = 1.0 if proto_runs else 0.0
+    perf["proto_min"] = min((p["proto_min"] for p in proto_runs), default=0.0)
+    perf["proto_max"] = max((p["proto_max"] for p in proto_runs), default=0.0)
+
     thr_vals = [r["perf"]["throughput"] for r in basis]
     thr_median = perf["throughput"]
     thr_spread_pct = (((max(thr_vals) - min(thr_vals)) / 2.0) / thr_median * 100.0
@@ -566,6 +705,13 @@ def aggregate_cell(runs):
     reasons = []
     if n_valid < 2:
         reasons.append(f"only {n_valid}/{n_total} valid run(s) (need >=2 for a median)")
+    # H1 item 5: same refusal as collect_dir() above, recombined across ALL
+    # raw runs (not just `basis`) the same way settle_wait_secs/settle_timeout
+    # themselves are recombined a few lines up — one run hitting the settle
+    # timeout is enough to distrust the whole aggregated cell.
+    if settle_timeout_applies(meta):
+        reasons.append("settle_timeout: true on at least one run (post-seed settle gate hit "
+                        "its hard timeout — cell may still be inside the post-seed clamp)")
 
     return {
         "target": target, "profile": profile, "scenario": scenario, "meta": meta,
@@ -653,6 +799,14 @@ def build_report(cells, multi_run=False):
         "**cpu_ms_per_request** answer *can AXIAM match competitors at lower cost?* "
         "Compare across targets at equal profile + latency.",
         "",
+        "> `http` = the wire protocol every measured response actually "
+        "negotiated (`bench_http_proto`, k6's `res.proto`), **not** what the "
+        "profile or the nginx conf was supposed to serve. `mixed(a,b)` means "
+        "the cell spanned two protocols and is void as a controlled "
+        "h1-vs-h2 comparison; `—` means the cell predates H6 or recorded no "
+        "response. Added in H6 because the G8 TLS conviction attempt could "
+        "not state which protocol its cells had used.",
+        "",
         "> `fallback` = `fallback-op` when the cell measured a fallback "
         "operation instead of the labelled logical op (e.g. Zitadel's "
         "login() falling back to client_credentials — see "
@@ -711,14 +865,22 @@ def build_report(cells, multi_run=False):
         flags = list(c["host_flags"])
         if fb_class == "fallback-op":
             flags.append("fallback-op")
+        fb_label = fb_class if fb_class != "none" else "no"
+        # H7: protocol-variant is a static per-scenario label (see
+        # PROTOCOL_VARIANT_SCENARIOS above), orthogonal to bench_fallback —
+        # append rather than replace so a cell that's ALSO fallback-op (e.g.
+        # Zitadel's token_refresh) still shows both.
+        if c["scenario"] in PROTOCOL_VARIANT_SCENARIOS:
+            fb_label = (fb_label + "+protocol-variant") if fb_label != "no" else "protocol-variant"
         row = [
             c["scenario"], c["profile"], c["target"], c["rate_limits"],
+            proto_label(p),
             dash(thr, ".0f"), dash(p50, ".1f"), dash(p95, ".1f"), dash(p99, ".1f"),
             f"{p['error_rate']*100:.2f}%",
             f"{r['cpu_cores_avg']:.2f}", f"{r['mem_mib_avg']:.0f}",
             dash(thr_core, ".0f"), dash(cpu_ms, ".3f"),
             c["bottleneck"],
-            fb_class if fb_class != "none" else "no",
+            fb_label,
             f"{h['mhz_avg']:.0f}", f"{mhz_ratio:.2f}", f"{h['temp_max']:.0f}",
             f"{h['k6_cores_avg']:.2f}",
             ";".join(flags) or "-",
@@ -728,7 +890,7 @@ def build_report(cells, multi_run=False):
             row += [f"{c.get('n_valid_runs', 0)}/{c.get('n_runs', 1)}",
                     f"±{c.get('thr_spread_pct', 0.0):.1f}%"]
         rows.append(row)
-    headers = ["scenario", "profile", "target", "rate_limits", "thr(req/s)", "p50(ms)",
+    headers = ["scenario", "profile", "target", "rate_limits", "http", "thr(req/s)", "p50(ms)",
                "p95(ms)", "p99(ms)", "err", "cpu(cores)", "mem(MiB)", "thr/core",
                "cpu_ms/req", "bottleneck", "fallback", "mhz_avg", "mhz_min/max",
                "temp_max(C)", "k6_cores", "host_flags", "valid"]
@@ -818,6 +980,21 @@ def build_report(cells, multi_run=False):
                     "token used to reach it was minted via client_credentials "
                     "once in setup() (comparability: cc-token-setup).", "",
                 ]
+            if sc in PROTOCOL_VARIANT_SCENARIOS:
+                notes = PROTOCOL_VARIANT_NOTES.get(sc, {})
+                desc = "; ".join(
+                    f"**{c['target']}** = {notes.get(c['target'], 'operation shape not documented')}"
+                    for c in sorted(group, key=lambda c: c["target"])
+                )
+                lines += [
+                    "> ⚠️ **comparability: protocol-variant** (kept in this "
+                    "head-to-head, never excluded — each target's cell is a "
+                    "real, correct measurement of ITS OWN op, they're just not "
+                    f"the same op): {desc}. Read this table as each target's own "
+                    "capability at renewing a credential without "
+                    "re-authenticating, never as \"target A is Nx target B\" "
+                    "(see claude_dev/refresh-harness-diagnosis.md §6).", "",
+                ]
             if len(group) < 2:
                 lines += ["_Fewer than 2 non-fallback targets — nothing to compare._", ""]
                 continue
@@ -844,6 +1021,8 @@ def build_report(cells, multi_run=False):
                 d, ds, p = c["der"], c["der_server"], c["perf"]
                 marker = " 🏆" if c is best else ""
                 note = " (cc-token-setup)" if p.get("fallback_class") == "cc-token-setup" else ""
+                if sc in PROTOCOL_VARIANT_SCENARIOS:
+                    note += " (protocol-variant)"
                 rows.append([c["target"] + marker + note, f"{p['throughput']:.0f}",
                              f"{p['p50']:.1f}", f"{p['p95']:.1f}",
                              f"{d['throughput_per_core']:.0f}", f"{d['throughput_per_gib']:.0f}",
@@ -918,7 +1097,8 @@ def build_report(cells, multi_run=False):
             if not base or not others:
                 continue
             lines += [f"### {tg} / {sc}", ""]
-            rows = [["p0-plaintext (base)", f"{base['perf']['throughput']:.0f}",
+            rows = [["p0-plaintext (base)", proto_label(base["perf"]),
+                     f"{base['perf']['throughput']:.0f}",
                      f"{base['perf']['p50']:.1f}", f"{base['perf']['p95']:.1f}",
                      "baseline", "baseline"]]
             for c in sorted(others, key=lambda c: PROFILE_RANK.get(c["profile"], 99)):
@@ -926,11 +1106,27 @@ def build_report(cells, multi_run=False):
                 t, p = c["perf"]["throughput"], c["perf"]["p95"]
                 d_thr = (1 - t / tb) * 100 if tb else 0.0
                 d_p95 = p - pb
-                rows.append([c["profile"], f"{t:.0f}", f"{c['perf']['p50']:.1f}", f"{p:.1f}",
+                rows.append([c["profile"], proto_label(c["perf"]),
+                             f"{t:.0f}", f"{c['perf']['p50']:.1f}", f"{p:.1f}",
                              f"{-d_thr:+.1f}%", f"{d_p95:+.1f}"])
             lines += [md_table(
-                ["profile", "thr(req/s)", "p50(ms)", "p95(ms)", "Δ-throughput", "Δ-p95(ms)"],
+                ["profile", "http", "thr(req/s)", "p50(ms)", "p95(ms)",
+                 "Δ-throughput", "Δ-p95(ms)"],
                 rows), ""]
+            # H6: a security-cost row compares p0 against p2 — but if the two
+            # cells did not run over the same wire protocol, the delta bundles
+            # "TLS" together with "h1 vs h2" and is not a TLS cost at all. Say
+            # so in the table rather than leaving the reader to notice.
+            protos = {proto_label(c["perf"]) for c in [base] + others}
+            protos.discard("—")
+            if len(protos) > 1:
+                lines += [
+                    "> **Protocol confound (H6):** the rows above did not all "
+                    "negotiate the same HTTP version (`" + ", ".join(sorted(protos))
+                    + "`). Each Δ therefore measures TLS **and** the protocol "
+                      "change together. See `claude_dev/b2-tls-h2-investigation.md`.",
+                    "",
+                ]
 
     # 4. Appendix: per-container resource breakdown (A5.3)
     lines += ["## Appendix: per-container resource breakdown", "",
@@ -1017,20 +1213,36 @@ def build_report(cells, multi_run=False):
         lines += [
             "## Appendix: post-seed settle gate", "",
             "`settle_wait(s)` is how long run-benchmark.sh's settle gate "
-            "waited, before this run's FIRST cell, for "
-            "`BENCH_SETTLE_STABLE_SECS` consecutive seconds of canary "
-            "latency under `BENCH_SETTLE_MAX_MS` (defaults 30s / 100ms) — "
-            "every cell in the same run records the same wait, since the "
-            "gate runs once per `bench-run` invocation, not per cell. "
-            "`timeout` marks a cell whose gate hit its hard "
-            "`BENCH_SETTLE_TIMEOUT_SECS` (default 600s) without ever seeing "
-            "that many stable seconds — the run proceeded anyway (the gate "
-            "never fails the harness) but the cell may still be inside the "
-            "post-seed serialized-DB transient (PRIVATE_BENCH_ANALYSIS.md "
-            "§1); it's also surfaced as a `settle_timeout` host_flag in the "
-            "\"All results\" table above. For median-of-N cells, "
-            "`settle_wait(s)` is the MAX across the repeat's runs (worst "
-            "case) and `timeout` is set if ANY run's gate timed out.", "",
+            "waited, before this run's FIRST cell, for a concurrent burst "
+            "probe (`BENCH_SETTLE_BURST_VUS` workers, default 20, for "
+            "`BENCH_SETTLE_BURST_SECS` seconds, default 15) to clear "
+            "`BENCH_SETTLE_PROBE_THR` ops/s (default 400) OR "
+            "`BENCH_SETTLE_PROBE_P50_MS` p50 (default 150ms) under that "
+            "concurrency (H1 — a serial 1 rps canary could not detect the "
+            "post-seed clamp: the ~22ms serialized unit reads as \"fast\" at "
+            "1 rps whether the server can sustain ~44 ops/s or ~730-750 "
+            "ops/s; only a concurrent burst can see the difference — see "
+            "\"Post-seed settle gate v2\" in docs/methodology.md). Every "
+            "cell in the same run records the same wait, since the gate "
+            "runs once per `bench-run` invocation, not per cell. `timeout` "
+            "marks a cell whose gate hit its hard `BENCH_SETTLE_TIMEOUT_SECS` "
+            "(default 600s) without ever clearing the threshold — the run "
+            "proceeded anyway (the gate never fails the harness) but the "
+            "cell may still be inside the post-seed serialized-DB transient "
+            "(PRIVATE_BENCH_ANALYSIS.md §1). As of H1 a `timeout` cell was "
+            "REFUSED outright (marked invalid). **As of H10**, refusal is "
+            "narrowed to the scenarios H2's clamp map actually implicates "
+            "(`RateLimitShared`-wrapped endpoints — authz_check/_batch "
+            "rest+grpc, oauth2_client_credentials, token_introspection, "
+            "oauth2_password_login): a `timeout` this session no longer "
+            "refuses jwks_fetch, userinfo(_grpc) or token_refresh, since the "
+            "H2 investigation found those endpoints structurally immune to "
+            "the clamp regardless of what the session-wide gate probe saw "
+            "(`postseed-transient-investigation.md` §2). The `refused` "
+            "column below shows which of the two applied to THIS cell. For "
+            "median-of-N cells, `settle_wait(s)` is the MAX across the "
+            "repeat's runs (worst case) and `timeout` is set if ANY run's "
+            "gate timed out.", "",
         ]
         rows = []
         for c in sorted(settle_cells, key=lambda c: (c["scenario"], c["profile"], c["target"])):
@@ -1038,9 +1250,10 @@ def build_report(cells, multi_run=False):
                 c["scenario"], c["profile"], c["target"],
                 f"{c['meta'].get('settle_wait_secs', 0):.0f}",
                 "✓" if c["meta"].get("settle_timeout") else "·",
+                "✓" if settle_timeout_applies(c["meta"]) else "·",
             ])
         lines += [md_table(
-            ["scenario", "profile", "target", "settle_wait(s)", "timeout"],
+            ["scenario", "profile", "target", "settle_wait(s)", "timeout", "refused"],
             rows), ""]
 
     # 4d. Appendix: AXIAM env knobs / labeled passes (G2). meta.json's
@@ -1093,6 +1306,31 @@ def build_report(cells, multi_run=False):
     return "\n".join(lines)
 
 
+def append_sdk_section(report_text, results_dir):
+    """H8/E1.3: fold sdk/collect.py's SDK-client-overhead section into the
+    main report so a single `report.py` run publishes both the server-side
+    matrix and the SDK overhead table together, instead of leaving the two
+    as separate files a reader has to know to cross-reference. Best-effort:
+    if sdk/collect.py can't be imported (e.g. this script run from outside
+    the benchmarks/ tree) or there are no SDK records yet, the main report
+    is still written unchanged — this is additive, never load-bearing for
+    the server-side report."""
+    sdk_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sdk")
+    try:
+        sys.path.insert(0, sdk_dir)
+        import collect as sdk_collect  # sdk/collect.py
+    except ImportError:
+        return report_text
+    finally:
+        if sdk_dir in sys.path:
+            sys.path.remove(sdk_dir)
+    recs = sdk_collect.load_sdk_records(results_dir)
+    if not recs:
+        return report_text
+    sdk_section = sdk_collect.build(results_dir, recs)
+    return report_text + "\n\n---\n\n" + sdk_section + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True)
@@ -1110,7 +1348,22 @@ def main():
         sys.exit(1)
     if multi_run:
         print(f"[report] median-of-N layout detected ({len(cells)} aggregated cells)")
+    # H1 item 5: loudly flag settle_timeout cells at the CLI too, not just in
+    # the "Excluded (invalid) cells" table buried in the generated report —
+    # this is the failure mode that let contaminated post-seed cells enter
+    # the G run's published numbers.
+    settle_timeout_cells = [c for c in cells
+                             if any("settle_timeout" in r for r in c.get("reasons", []))]
+    if settle_timeout_cells:
+        print(f"[report] WARN: {len(settle_timeout_cells)} cell(s) REFUSED — "
+              f"settle_timeout:true (post-seed settle gate hit its hard timeout):",
+              file=sys.stderr)
+        for c in settle_timeout_cells:
+            print(f"[report]   - {c['target']}/{c['profile']}/{c['scenario']}", file=sys.stderr)
     report = build_report(cells, multi_run=multi_run)
+    # H8/E1.3: append the SDK client-overhead table (sdk/collect.py) so the
+    # published report carries both halves of the harness in one file.
+    report = append_sdk_section(report, args.results)
     out = args.out or os.path.join(args.results, "report.md")
     with open(out, "w") as f:
         f.write(report)

@@ -43,8 +43,80 @@
 //! `decision_cache_ttl_secs` (default 5 s) before TTL eviction forces a fresh
 //! evaluation. The short default TTL is the belt to the invalidation hooks'
 //! braces.
+//!
+//! # SCOPE OF "IMMEDIATE": this cache is PROCESS-LOCAL (multi-replica caveat)
+//!
+//! `axiam-server` builds **one in-process** `Arc<DecisionCache>` and shares it
+//! across the REST, gRPC and AMQP engines of *that process*. There is no
+//! cross-replica invalidation channel: no AMQP fan-out, no webhook, no shared
+//! store. Consequently:
+//!
+//! - **Single replica:** the invalidation hooks above make revocation
+//!   *immediate*; the TTL is only the fallback for a missed event.
+//! - **Two or more replicas** (the Kubernetes deployment AXIAM targets): a
+//!   revocation handled by replica A invalidates **only replica A**. Replicas
+//!   B…N keep serving the pre-revocation decision from their own caches until
+//!   their entry TTL-expires. The **worst-case revocation latency for the
+//!   deployment is therefore `decision_cache_ttl_secs` (default 5 s)**, not
+//!   zero — and it applies uniformly to `/api/v1/authz/check`, the gRPC
+//!   `CheckAccess`, AMQP async authz *and* the internal `RequirePermission`
+//!   guard on every admin endpoint, so an administrator's own privileges can
+//!   also outlive their revocation by up to the TTL on other replicas.
+//! - The failure is **silent**: a hit is byte-identical to a miss (same
+//!   decision, same deny reason) and the audit log records the decision, not
+//!   its provenance. Post-incident it is not possible to tell from the logs
+//!   whether a given allow was served from cache.
+//!
+//! Operators running more than one replica must either accept a ≤ TTL
+//! revocation window or leave the cache off. This is stated next to the default
+//! in `docs/deployment/README.md`, `docs/admin/README.md`, the
+//! [`crate::config::AuthzConfig`] docstrings and
+//! `benchmarks/PUBLIC_BENCH_ANALYSIS.md`.
+//!
+//! # Internal structure (and why)
+//!
+//! ```text
+//! stripes: [Mutex<HashMap<TenantId, TenantShard>>; STRIPE_COUNT]   // lock striping
+//!                                     │
+//!                                     ├── entries:    HashMap<Arc<SubKey>, Entry>
+//!                                     ├── order:      VecDeque<(seq, Arc<SubKey>)>  // FIFO cap
+//!                                     └── by_subject: HashMap<SubjectId, HashSet<Arc<SubKey>>>
+//! ```
+//!
+//! Three properties this layout buys, each fixing a defect found in the G5
+//! decision review (`claude_dev/decision-cache-decision.md` §2.5):
+//!
+//! 1. **`order` is bounded** (§2.5 finding *a*). A TTL-expired key is removed
+//!    from `entries` on read but its `order` slot cannot be found and removed
+//!    in O(1); the pre-fix code therefore appended a *second* slot when the key
+//!    was re-inserted, and only ever popped slots when `entries.len()` exceeded
+//!    the per-tenant cap — so a working set *below* the cap grew `order`
+//!    without limit at the miss rate. Each slot now carries the entry's
+//!    monotonic `seq`, which makes a superseded slot recognisable, and
+//!    [`TenantShard::compact_if_needed`] rebuilds the queue whenever it exceeds
+//!    `max(2 × entries.len(), COMPACT_FLOOR)`. That bounds `order` at ~2× the
+//!    live set (and ≤ ~2× `max_entries_per_tenant`) while staying O(1)
+//!    amortised: each compaction halves the queue, so the O(n) pass is paid at
+//!    most once per n inserts.
+//! 2. **`invalidate_subject` is O(entries for that subject)** (§2.5 finding
+//!    *c*), not O(shard). The `by_subject` index gives the affected keys
+//!    directly, so a role unassignment no longer scans up to
+//!    `max_entries_per_tenant` entries while holding a lock the authz hot path
+//!    needs. The index shares its keys with `entries` via `Arc<SubKey>`, so it
+//!    costs one pointer per entry, not a second copy of the key.
+//! 3. **Lock striping**: the map of tenants is split over `STRIPE_COUNT`
+//!    independent mutexes keyed by `tenant_id`, so one tenant's invalidation or
+//!    eviction no longer blocks *every* other tenant's checks — the pre-fix
+//!    code took a single global mutex on every `get`/`insert`. A tenant's shard
+//!    lives entirely within one stripe, which keeps the per-tenant FIFO cap
+//!    exact (an intra-tenant striping would only be able to enforce the cap
+//!    approximately). Contention *within* one tenant is therefore unchanged and
+//!    remains the honest limit of this design: a single-tenant deployment still
+//!    serialises its cache accesses, which is why the K-sweep in the decision
+//!    note measures cache-ON/OFF rather than assuming a win.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -53,12 +125,22 @@ use uuid::Uuid;
 
 use crate::types::{AccessDecision, AccessRequest};
 
+/// Number of independent tenant-map mutexes. Fixed (not CPU-derived) so the
+/// structure is deterministic across hosts and reproducible in benchmarks.
+const STRIPE_COUNT: usize = 16;
+
+/// Minimum queue length below which compaction is not worth its O(n) pass.
+/// Keeps tiny tenants from compacting on every other insert.
+const COMPACT_FLOOR: usize = 64;
+
 /// Runtime configuration for the decision cache.
 #[derive(Debug, Clone)]
 pub struct DecisionCacheConfig {
     /// Time-to-live for a cached decision. After this elapses the entry is
     /// treated as a miss and re-evaluated. Bounds worst-case revocation
-    /// latency if an invalidation event is ever missed.
+    /// latency if an invalidation event is ever missed — and, in a
+    /// multi-replica deployment, bounds it on every replica that did not
+    /// handle the mutation (see the module docs).
     pub ttl: Duration,
     /// Maximum number of live entries retained **per tenant**. When exceeded,
     /// the oldest entry (FIFO) for that tenant is evicted. Bounds memory so a
@@ -78,7 +160,7 @@ impl Default for DecisionCacheConfig {
 /// The intra-tenant portion of the cache key: everything except `tenant_id`
 /// (which selects the shard). Ordering mirrors the design-doc key
 /// `(subject, resource, action, scope)`.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct SubKey {
     subject_id: Uuid,
     resource_id: Uuid,
@@ -97,26 +179,191 @@ impl SubKey {
     }
 }
 
-/// Per-tenant shard: the entry map plus a FIFO order queue used only for
-/// the size-cap eviction. Keeping tenants in separate shards makes a
-/// per-tenant flush O(1) (drop the shard) and keeps one tenant's churn from
-/// evicting another tenant's entries.
+/// A cached decision plus the metadata needed for TTL and FIFO bookkeeping.
+struct Entry {
+    decision: AccessDecision,
+    inserted_at: Instant,
+    /// Monotonic per-tenant insertion sequence. A queue slot is *live* only if
+    /// its `seq` still matches the entry's; anything else is a superseded slot
+    /// left behind by TTL expiry or invalidation and is dropped on compaction.
+    seq: u64,
+}
+
+/// Observable counters for one point in time. Cheap to produce; intended for a
+/// periodic log line or a metrics gauge, and used by the tests that assert the
+/// cache really holds `max_entries_per_tenant` entries rather than silently
+/// evicting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionCacheStats {
+    /// Cumulative hits since construction.
+    pub hits: u64,
+    /// Cumulative misses since construction (includes TTL-expired reads).
+    pub misses: u64,
+    /// Live entries across every tenant (counts expired-but-not-yet-reaped
+    /// entries, which are never *returned*).
+    pub entries: usize,
+    /// Tenants with at least one shard allocated.
+    pub tenants: usize,
+    /// Total FIFO queue slots across every tenant — the quantity that used to
+    /// grow without bound. Expect ≤ ~2× `entries` (or `COMPACT_FLOOR`).
+    pub queue_slots: usize,
+}
+
+/// Per-tenant shard: the entry map, the FIFO order queue used for the size-cap
+/// eviction, and the subject index used for targeted invalidation. Keeping
+/// tenants in separate shards makes a per-tenant flush O(1) (drop the shard)
+/// and keeps one tenant's churn from evicting another tenant's entries.
 #[derive(Default)]
 struct TenantShard {
-    entries: HashMap<SubKey, (AccessDecision, Instant)>,
+    entries: HashMap<Arc<SubKey>, Entry>,
     /// Insertion order of *new* keys, for the bounded-size FIFO eviction. May
-    /// contain keys already removed by TTL/invalidation; such stragglers are
-    /// skipped when popping (they're simply absent from `entries`).
-    order: VecDeque<SubKey>,
+    /// hold superseded slots (TTL-expired or invalidated keys); those are
+    /// recognised by a `seq` mismatch and dropped when popping or compacting.
+    order: VecDeque<(u64, Arc<SubKey>)>,
+    /// subject_id → its keys. Makes `invalidate_subject` proportional to the
+    /// subject's own entries instead of the whole shard.
+    by_subject: HashMap<Uuid, HashSet<Arc<SubKey>>>,
+    next_seq: u64,
+}
+
+impl TenantShard {
+    /// Read, honouring TTL. An expired entry is reaped in passing so it cannot
+    /// be returned again.
+    fn get(&mut self, key: &SubKey, now: Instant, ttl: Duration) -> Option<AccessDecision> {
+        match self.entries.get(key) {
+            Some(entry) if now.duration_since(entry.inserted_at) < ttl => {
+                Some(entry.decision.clone())
+            }
+            Some(_) => {
+                self.remove_entry(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Remove a key from `entries` and the subject index. Its FIFO slot is left
+    /// behind (it cannot be located in O(1)) and is reclaimed by compaction.
+    fn remove_entry(&mut self, key: &SubKey) {
+        if let Some((arc, _)) = self.entries.remove_entry(key) {
+            self.unindex(&arc);
+        }
+    }
+
+    fn unindex(&mut self, key: &Arc<SubKey>) {
+        if let Some(set) = self.by_subject.get_mut(&key.subject_id) {
+            set.remove(key);
+            if set.is_empty() {
+                self.by_subject.remove(&key.subject_id);
+            }
+        }
+    }
+
+    fn insert(
+        &mut self,
+        key: &SubKey,
+        decision: AccessDecision,
+        now: Instant,
+        cfg: &DecisionCacheConfig,
+    ) {
+        // Re-insert of a still-present key: refresh value and timestamp in
+        // place. It keeps its FIFO slot and `seq`, so no new slot is pushed —
+        // this is the case the pre-fix code already handled correctly.
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.decision = decision;
+            entry.inserted_at = now;
+            return;
+        }
+
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        let arc: Arc<SubKey> = Arc::new(key.clone());
+        self.entries.insert(
+            Arc::clone(&arc),
+            Entry {
+                decision,
+                inserted_at: now,
+                seq,
+            },
+        );
+        self.by_subject
+            .entry(arc.subject_id)
+            .or_default()
+            .insert(Arc::clone(&arc));
+        self.order.push_back((seq, arc));
+
+        // Enforce the per-tenant size cap: pop FIFO, skipping superseded slots,
+        // until one *live* entry has been dropped or the queue drains.
+        while self.entries.len() > cfg.max_entries_per_tenant {
+            match self.order.pop_front() {
+                Some((slot_seq, victim)) => {
+                    if self.entries.get(&*victim).map(|e| e.seq) == Some(slot_seq) {
+                        self.entries.remove(&*victim);
+                        self.unindex(&victim);
+                        break;
+                    }
+                    // else: superseded slot, keep popping.
+                }
+                None => break,
+            }
+        }
+
+        self.compact_if_needed(now, cfg);
+    }
+
+    /// Reclaim superseded FIFO slots (and TTL-expired entries) once the queue
+    /// has grown past ~2× the live set. Amortised O(1) per insert: a compaction
+    /// leaves `order.len() == entries.len()`, so the next one cannot trigger
+    /// until roughly `entries.len()` further inserts.
+    ///
+    /// This is the fix for the unbounded-`order` growth described in the module
+    /// docs; without it a working set below `max_entries_per_tenant` never runs
+    /// the cap loop and the queue grows at the miss rate, forever.
+    fn compact_if_needed(&mut self, now: Instant, cfg: &DecisionCacheConfig) {
+        let threshold = COMPACT_FLOOR.max(self.entries.len().saturating_mul(2));
+        if self.order.len() <= threshold {
+            return;
+        }
+
+        // Expired entries are already logically absent (a read would reap
+        // them); drop them here so the live set — and therefore the queue
+        // bound — reflects reality even for keys never read again.
+        let expired: Vec<Arc<SubKey>> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| now.duration_since(e.inserted_at) >= cfg.ttl)
+            .map(|(k, _)| Arc::clone(k))
+            .collect();
+        for key in expired {
+            self.entries.remove(&*key);
+            self.unindex(&key);
+        }
+
+        let Self { entries, order, .. } = self;
+        order.retain(|(slot_seq, key)| entries.get(&**key).map(|e| e.seq) == Some(*slot_seq));
+    }
+
+    /// Drop every entry for one subject. O(that subject's entries).
+    fn invalidate_subject(&mut self, subject_id: Uuid) {
+        if let Some(keys) = self.by_subject.remove(&subject_id) {
+            for key in keys {
+                self.entries.remove(&*key);
+                // FIFO slots become superseded; compaction reclaims them.
+            }
+        }
+    }
 }
 
 /// A concurrent, per-tenant, TTL + size-bounded cache of authorization
 /// decisions. Cheap to clone-share behind an `Arc`.
 ///
-/// See the [module docs](self) for the security rationale.
+/// See the [module docs](self) for the security rationale, the multi-replica
+/// caveat and the internal structure.
 pub struct DecisionCache {
     config: DecisionCacheConfig,
-    shards: Mutex<HashMap<Uuid, TenantShard>>,
+    /// Tenants split over independent mutexes; a tenant always lives in
+    /// `stripes[stripe_index(tenant_id)]`.
+    stripes: Vec<Mutex<HashMap<Uuid, TenantShard>>>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -126,10 +373,27 @@ impl DecisionCache {
     pub fn new(config: DecisionCacheConfig) -> Self {
         Self {
             config,
-            shards: Mutex::new(HashMap::new()),
+            stripes: (0..STRIPE_COUNT)
+                .map(|_| Mutex::new(HashMap::new()))
+                .collect(),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
+    }
+
+    /// Which mutex owns a tenant. UUIDv4 bytes are already uniformly
+    /// distributed, so folding the halves is sufficient dispersion and costs
+    /// nothing on the hot path.
+    fn stripe_index(&self, tenant_id: Uuid) -> usize {
+        let bits = tenant_id.as_u128();
+        let folded = (bits as u64) ^ ((bits >> 64) as u64);
+        (folded % STRIPE_COUNT as u64) as usize
+    }
+
+    fn stripe(&self, tenant_id: Uuid) -> std::sync::MutexGuard<'_, HashMap<Uuid, TenantShard>> {
+        self.stripes[self.stripe_index(tenant_id)]
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
     }
 
     /// Look up a cached decision for `request`. Returns `None` on a miss or an
@@ -137,21 +401,12 @@ impl DecisionCache {
     pub fn get(&self, request: &AccessRequest) -> Option<AccessDecision> {
         let key = SubKey::from_request(request);
         let now = Instant::now();
-        let mut shards = self.shards.lock().unwrap_or_else(|p| p.into_inner());
-        let decision = shards.get_mut(&request.tenant_id).and_then(|shard| {
-            match shard.entries.get(&key) {
-                Some((decision, inserted_at)) => {
-                    if now.duration_since(*inserted_at) >= self.config.ttl {
-                        // Expired: evict now so we don't keep returning it.
-                        shard.entries.remove(&key);
-                        None
-                    } else {
-                        Some(decision.clone())
-                    }
-                }
-                None => None,
-            }
-        });
+        let decision = {
+            let mut stripe = self.stripe(request.tenant_id);
+            stripe
+                .get_mut(&request.tenant_id)
+                .and_then(|shard| shard.get(&key, now, self.config.ttl))
+        };
         if decision.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -164,27 +419,11 @@ impl DecisionCache {
     pub fn insert(&self, request: &AccessRequest, decision: AccessDecision) {
         let key = SubKey::from_request(request);
         let now = Instant::now();
-        let mut shards = self.shards.lock().unwrap_or_else(|p| p.into_inner());
-        let shard = shards.entry(request.tenant_id).or_default();
-        let is_new = !shard.entries.contains_key(&key);
-        shard.entries.insert(key.clone(), (decision, now));
-        if is_new {
-            shard.order.push_back(key);
-            // Enforce the per-tenant size cap. Pop FIFO, skipping keys already
-            // gone (expired/invalidated), until we've dropped one live entry
-            // or the queue drains.
-            while shard.entries.len() > self.config.max_entries_per_tenant {
-                match shard.order.pop_front() {
-                    Some(old) => {
-                        if shard.entries.remove(&old).is_some() {
-                            break;
-                        }
-                        // else: stale order entry, keep popping.
-                    }
-                    None => break,
-                }
-            }
-        }
+        let mut stripe = self.stripe(request.tenant_id);
+        stripe
+            .entry(request.tenant_id)
+            .or_default()
+            .insert(&key, decision, now, &self.config);
     }
 
     /// Drop **every** cached decision for a tenant. The conservative,
@@ -194,27 +433,31 @@ impl DecisionCache {
     /// delete, role/permission update, group-role unassignment, resource
     /// reparent/delete).
     pub fn invalidate_tenant(&self, tenant_id: Uuid) {
-        let mut shards = self.shards.lock().unwrap_or_else(|p| p.into_inner());
-        shards.remove(&tenant_id);
+        let mut stripe = self.stripe(tenant_id);
+        stripe.remove(&tenant_id);
     }
 
     /// Drop every cached decision for a single subject within a tenant. The
     /// targeted invalidation used when a mutation changes exactly one
     /// subject's effective permissions (user role unassignment, group
     /// membership removal) — see the module security note.
+    ///
+    /// Cost is proportional to **that subject's** cached entries (via the
+    /// `by_subject` index), not to the tenant shard, and it holds only the
+    /// stripe that owns `tenant_id` — other tenants' checks are unaffected.
     pub fn invalidate_subject(&self, tenant_id: Uuid, subject_id: Uuid) {
-        let mut shards = self.shards.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(shard) = shards.get_mut(&tenant_id) {
-            shard.entries.retain(|k, _| k.subject_id != subject_id);
-            // `order` may now hold stragglers; they're skipped on pop.
+        let mut stripe = self.stripe(tenant_id);
+        if let Some(shard) = stripe.get_mut(&tenant_id) {
+            shard.invalidate_subject(subject_id);
         }
     }
 
     /// Drop the entire cache (all tenants). Provided for completeness /
     /// administrative flush; not on any hot path.
     pub fn invalidate_all(&self) {
-        let mut shards = self.shards.lock().unwrap_or_else(|p| p.into_inner());
-        shards.clear();
+        for stripe in &self.stripes {
+            stripe.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        }
     }
 
     /// Cumulative (hits, misses) since construction — for observability/tests.
@@ -225,11 +468,45 @@ impl DecisionCache {
         )
     }
 
+    /// A full counter snapshot, including the live entry count and the FIFO
+    /// queue length. `axiam-server` logs this periodically when the cache is
+    /// enabled so an operator (or a benchmark) can verify how many entries the
+    /// cache actually holds — the pre-fix code exposed no way to tell a full
+    /// cache from one that was silently evicting.
+    pub fn snapshot(&self) -> DecisionCacheStats {
+        let (hits, misses) = self.stats();
+        let mut entries = 0usize;
+        let mut tenants = 0usize;
+        let mut queue_slots = 0usize;
+        for stripe in &self.stripes {
+            let guard = stripe.lock().unwrap_or_else(|p| p.into_inner());
+            tenants += guard.len();
+            for shard in guard.values() {
+                entries += shard.entries.len();
+                queue_slots += shard.order.len();
+            }
+        }
+        DecisionCacheStats {
+            hits,
+            misses,
+            entries,
+            tenants,
+            queue_slots,
+        }
+    }
+
     /// Total live entries across all tenants (test/observability helper; also
-    /// counts not-yet-evicted expired entries).
+    /// counts not-yet-reaped expired entries).
     pub fn len(&self) -> usize {
-        let shards = self.shards.lock().unwrap_or_else(|p| p.into_inner());
-        shards.values().map(|s| s.entries.len()).sum()
+        self.snapshot().entries
+    }
+
+    /// Live entries for one tenant.
+    pub fn tenant_len(&self, tenant_id: Uuid) -> usize {
+        self.stripe(tenant_id)
+            .get(&tenant_id)
+            .map(|s| s.entries.len())
+            .unwrap_or(0)
     }
 
     /// Whether the cache holds no entries.
@@ -388,5 +665,338 @@ mod tests {
         assert_eq!(cache.get(&r1), Some(AccessDecision::Deny("changed".into())));
         assert_eq!(cache.get(&r2), Some(AccessDecision::Allow));
         assert!(cache.len() <= 2);
+        assert_eq!(cache.snapshot().queue_slots, 2, "no duplicate FIFO slots");
+    }
+
+    // ---------------------------------------------------------------------
+    // Regression tests for the three G5 defects
+    // (claude_dev/decision-cache-decision.md §2.5)
+    // ---------------------------------------------------------------------
+
+    /// Defect (a), the exact reported path: a key that TTL-expires, is read
+    /// (which reaps it from `entries`) and is then re-inserted used to push a
+    /// **second** FIFO slot, and the cap loop never ran because the working set
+    /// stayed below `max_entries_per_tenant`. `order` therefore grew at the
+    /// miss rate forever. It must now stay bounded.
+    #[test]
+    fn expired_then_reaccessed_key_does_not_grow_the_fifo_queue() {
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            ttl: Duration::from_millis(2),
+            max_entries_per_tenant: 10_000, // the DEFAULT: far above the working set
+        });
+        let t = Uuid::new_v4();
+        let s = Uuid::new_v4();
+        let request = req(t, s, Uuid::new_v4(), "read");
+
+        for _ in 0..200 {
+            cache.insert(&request, AccessDecision::Allow);
+            std::thread::sleep(Duration::from_millis(3));
+            // Read after expiry: reaps the entry, leaving a superseded slot.
+            assert!(cache.get(&request).is_none());
+        }
+
+        let snap = cache.snapshot();
+        assert!(
+            snap.entries <= 1,
+            "working set is one key; got {} entries",
+            snap.entries
+        );
+        assert!(
+            snap.queue_slots <= COMPACT_FLOOR * 2,
+            "FIFO queue must stay bounded for a working set below the cap \
+             (200 expire/re-insert cycles left {} slots)",
+            snap.queue_slots
+        );
+    }
+
+    /// The same leak reached by a second route: a long-lived key pins the front
+    /// of the queue (so front-only cleanup could never make progress) while a
+    /// small working set churns behind it. Compaction must still bound the
+    /// queue.
+    #[test]
+    fn churn_behind_a_pinned_front_entry_stays_bounded() {
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            ttl: Duration::from_millis(50),
+            max_entries_per_tenant: 10_000,
+        });
+        let t = Uuid::new_v4();
+        let pinned_subject = Uuid::new_v4();
+        let churn_subject = Uuid::new_v4();
+        // Inserted first, refreshed forever: never expires, never leaves the
+        // front of the queue.
+        let pinned = req(t, pinned_subject, Uuid::new_v4(), "pinned");
+        cache.insert(&pinned, AccessDecision::Allow);
+
+        // 40 keys, each re-inserted 20 times after being invalidated — every
+        // re-insert is a fresh slot, exactly like a TTL-expiry cycle.
+        let churn: Vec<AccessRequest> = (0..40)
+            .map(|i| req(t, churn_subject, Uuid::new_v4(), &format!("act-{i}")))
+            .collect();
+        for _ in 0..20 {
+            for r in &churn {
+                cache.insert(r, AccessDecision::Allow);
+            }
+            cache.insert(&pinned, AccessDecision::Allow); // refresh, keeps it live
+            cache.invalidate_subject(t, churn_subject); // leaves 40 slots behind
+        }
+
+        let snap = cache.snapshot();
+        // 800 pushes happened; without compaction the queue would hold them all.
+        assert!(
+            snap.queue_slots <= 2 * COMPACT_FLOOR,
+            "queue ({} slots) must stay bounded after 800 re-insert cycles \
+             (live set: {} entries)",
+            snap.queue_slots,
+            snap.entries
+        );
+        assert_eq!(
+            cache.get(&pinned),
+            Some(AccessDecision::Allow),
+            "the pinned entry must survive the churn"
+        );
+    }
+
+    /// Defect (c): `invalidate_subject` must touch only the target subject's
+    /// entries. The index is the mechanism; the observable proof is that a
+    /// large shard survives intact apart from that subject, and that the
+    /// operation is fast enough to be obviously not-O(shard).
+    #[test]
+    fn invalidate_subject_is_proportional_to_that_subject_only() {
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            ttl: Duration::from_secs(60),
+            max_entries_per_tenant: 20_000,
+        });
+        let t = Uuid::new_v4();
+        let victim = Uuid::new_v4();
+        let others: Vec<Uuid> = (0..99).map(|_| Uuid::new_v4()).collect();
+
+        for i in 0..100 {
+            cache.insert(
+                &req(t, victim, Uuid::new_v4(), &format!("a{i}")),
+                AccessDecision::Allow,
+            );
+        }
+        for s in &others {
+            for i in 0..100 {
+                cache.insert(
+                    &req(t, *s, Uuid::new_v4(), &format!("a{i}")),
+                    AccessDecision::Allow,
+                );
+            }
+        }
+        assert_eq!(cache.tenant_len(t), 10_000);
+
+        let started = Instant::now();
+        cache.invalidate_subject(t, victim);
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            cache.tenant_len(t),
+            9_900,
+            "exactly the victim's 100 entries must go"
+        );
+        // Generous bound: a full 10k-entry retain() scan is orders of magnitude
+        // slower than removing 100 indexed keys, but the assertion stays loose
+        // so it cannot flake on a loaded CI box.
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "invalidate_subject took {elapsed:?} — expected O(subject entries)"
+        );
+    }
+
+    /// Memory bound, measured (plan H5 item 4): what a full cache actually
+    /// costs in RSS, isolated from any server-level noise.
+    ///
+    /// The RSS figure is only meaningful when this test runs **alone** —
+    /// `cargo test -p axiam-authz --lib
+    /// decision_cache::tests::memory_footprint_at_the_default_cap_is_bounded
+    /// -- --exact --nocapture` — because RSS never shrinks when an earlier
+    /// test frees its heap, so a shared run reports a near-zero delta against
+    /// an already-grown heap. The assertions below are order-independent; only
+    /// the printed number needs isolation. Measured 2026-07-29:
+    /// **+2 704 KiB for 10 000 entries ≈ 276 bytes/entry**.
+    #[test]
+    fn memory_footprint_at_the_default_cap_is_bounded() {
+        // Plan H5 item 4, the in-process half: the K=10 000 server-RSS column
+        // of a benchmark cannot separate the cache's own footprint from the
+        // request path's, and on a rate-limit-clamped host it never reaches a
+        // steady state at all. This measures the cache alone: RSS delta across
+        // filling one tenant to the default 10 000-entry cap, with the request
+        // objects created and dropped inside the loop so only what the cache
+        // retains is counted.
+        fn rss_kib() -> Option<u64> {
+            let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+            let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+            Some(resident_pages * 4) // 4 KiB pages on every supported target
+        }
+        let Some(before) = rss_kib() else {
+            eprintln!("skipping: /proc/self/statm unavailable on this platform");
+            return;
+        };
+
+        let cfg = DecisionCacheConfig::default();
+        let cap = cfg.max_entries_per_tenant;
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            ttl: Duration::from_secs(600),
+            ..cfg
+        });
+        let t = Uuid::new_v4();
+        let s = Uuid::new_v4();
+        for i in 0..cap {
+            cache.insert(
+                &req(t, s, Uuid::new_v4(), &format!("action-{i}")),
+                AccessDecision::Allow,
+            );
+        }
+        let after = rss_kib().expect("statm readable a second time");
+        let snap = cache.snapshot();
+        // Order-independent invariants — these are what the K=10 000 memory
+        // column was supposed to establish and could not: the cache really
+        // holds its full cap (no silent eviction), and the FIFO queue carries
+        // no duplicate slots.
+        assert_eq!(snap.entries, cap, "the cap must be genuinely held");
+        assert_eq!(
+            snap.queue_slots, cap,
+            "one queue slot per live entry, no duplicates"
+        );
+
+        let delta_kib = after.saturating_sub(before);
+        eprintln!(
+            "decision cache @ cap={cap}: RSS +{} KiB (~{} bytes/entry), \
+             entries={}, queue_slots={}",
+            delta_kib,
+            (delta_kib * 1024) / cap as u64,
+            snap.entries,
+            snap.queue_slots
+        );
+        // Loose ceiling — this is a measurement, not a micro-benchmark; it only
+        // has to refute "10 000 cached decisions cost hundreds of MiB". The
+        // observed value is ~2-4 MiB.
+        assert!(
+            delta_kib < 32 * 1024,
+            "10 000 cached decisions must not cost 32 MiB (measured {delta_kib} KiB)"
+        );
+    }
+
+    /// Memory bound (plan H5 item 4): at the default cap the cache must really
+    /// hold `max_entries_per_tenant` entries — a silent eviction would make the
+    /// K=10 000 memory column meaningless.
+    #[test]
+    fn holds_the_full_default_cap_without_silent_eviction() {
+        let cfg = DecisionCacheConfig::default();
+        let cap = cfg.max_entries_per_tenant;
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            ttl: Duration::from_secs(600), // no expiry during the test
+            ..cfg
+        });
+        let t = Uuid::new_v4();
+        let s = Uuid::new_v4();
+        let keys: Vec<AccessRequest> = (0..cap)
+            .map(|i| req(t, s, Uuid::new_v4(), &format!("act-{i}")))
+            .collect();
+        for k in &keys {
+            cache.insert(k, AccessDecision::Allow);
+        }
+
+        let snap = cache.snapshot();
+        assert_eq!(snap.entries, cap, "cache must hold the full cap");
+        assert_eq!(cache.tenant_len(t), cap);
+        assert!(
+            snap.queue_slots <= 2 * cap,
+            "queue slots {} exceed the 2x bound",
+            snap.queue_slots
+        );
+        // Every key still readable — i.e. nothing was evicted behind our back.
+        for k in &keys {
+            assert_eq!(cache.get(k), Some(AccessDecision::Allow));
+        }
+
+        // One more distinct key must now evict exactly one (FIFO), never grow.
+        cache.insert(
+            &req(t, s, Uuid::new_v4(), "overflow"),
+            AccessDecision::Allow,
+        );
+        assert_eq!(cache.tenant_len(t), cap, "cap must hold at cap+1 inserts");
+    }
+
+    /// Tenants must not collide across the lock stripes: distinct tenants keep
+    /// independent entries and independent caps.
+    #[test]
+    fn tenants_are_isolated_across_stripes() {
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            ttl: Duration::from_secs(60),
+            max_entries_per_tenant: 2,
+        });
+        let subject = Uuid::new_v4();
+        let resource = Uuid::new_v4();
+        let tenants: Vec<Uuid> = (0..64).map(|_| Uuid::new_v4()).collect();
+        for t in &tenants {
+            cache.insert(&req(*t, subject, resource, "read"), AccessDecision::Allow);
+        }
+        for t in &tenants {
+            assert_eq!(
+                cache.get(&req(*t, subject, resource, "read")),
+                Some(AccessDecision::Allow),
+                "every tenant keeps its own entry"
+            );
+            assert_eq!(cache.tenant_len(*t), 1);
+        }
+        assert_eq!(cache.len(), tenants.len());
+
+        // A flush of one tenant leaves the others alone even when they share a
+        // stripe.
+        cache.invalidate_tenant(tenants[0]);
+        assert_eq!(cache.len(), tenants.len() - 1);
+    }
+
+    /// Concurrency smoke test: the striped structure must stay consistent under
+    /// simultaneous readers, writers and invalidators.
+    #[test]
+    fn concurrent_access_is_consistent() {
+        let cache = Arc::new(DecisionCache::new(DecisionCacheConfig {
+            ttl: Duration::from_millis(20),
+            max_entries_per_tenant: 500,
+        }));
+        let tenants: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        let subjects: Vec<Uuid> = (0..8).map(|_| Uuid::new_v4()).collect();
+
+        let handles: Vec<_> = (0..8)
+            .map(|worker| {
+                let cache = Arc::clone(&cache);
+                let tenants = tenants.clone();
+                let subjects = subjects.clone();
+                std::thread::spawn(move || {
+                    for i in 0..500 {
+                        let t = tenants[i % tenants.len()];
+                        let s = subjects[(i + worker) % subjects.len()];
+                        let r = req(t, s, Uuid::new_v4(), "read");
+                        cache.insert(&r, AccessDecision::Allow);
+                        let _ = cache.get(&r);
+                        if i % 97 == 0 {
+                            cache.invalidate_subject(t, s);
+                        }
+                        if i % 251 == 0 {
+                            cache.invalidate_tenant(t);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("worker panicked");
+        }
+
+        let snap = cache.snapshot();
+        for t in &tenants {
+            assert!(cache.tenant_len(*t) <= 500, "per-tenant cap must hold");
+        }
+        // Per tenant the queue is bounded by ~2x the cap (plus the floor);
+        // 8 workers x 500 iterations = 4 000 inserts would otherwise pile up.
+        assert!(
+            snap.queue_slots <= tenants.len() * (2 * 500 + COMPACT_FLOOR),
+            "queue slots {} unbounded relative to {} entries",
+            snap.queue_slots,
+            snap.entries
+        );
     }
 }

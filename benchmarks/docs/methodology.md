@@ -117,6 +117,18 @@ record the last passing point.
 * **error_rate** — fraction of iterations that failed a check or returned an
   unexpected status. A run with `error_rate > BENCH_MAX_ERROR` (default 1%) is
   marked **invalid**.
+* **`bench_http_proto` → the report's `http` column** — the wire protocol every
+  measured response actually negotiated (k6's `res.proto`), recorded per
+  response by `scenarios/lib/metrics.js` as `10`/`11`/`20`/`30` = HTTP/1.0 /
+  1.1 / 2.0 / 3, and decoded by `report.py`. It is a Trend, not a counter, so a
+  cell whose min and max disagree renders as `mixed(1.1,2.0)` — such a cell
+  spanned two protocols and is **void as a controlled protocol comparison**.
+  `—` means the cell predates this metric or never got a response. Any
+  security-cost table whose rows did not all negotiate the same protocol gets
+  an explicit "protocol confound" warning, because its Δ then measures TLS and
+  the protocol change together. Added in H6 after a TLS h1-vs-h2 conviction
+  attempt turned out to have no record of which protocol its cells had used —
+  do not interpret an h1/h2 comparison whose `http` column you have not read.
 
 ### Resource (from the sampler)
 Sampled every `BENCH_SAMPLE_INTERVAL` (default 1s) over the measure stage via
@@ -231,6 +243,31 @@ table, and **excluded from head-to-head efficiency/winner tables** — a
 fallback op measures a different (usually cheaper) operation than its label,
 so ranking it against a real login/refresh would be comparing different
 things under the same name.
+
+### Comparability flags (protocol variant)
+A third comparability class, orthogonal to both of the above: some scenarios
+are structurally guaranteed to measure a **different underlying operation per
+target**, even though every cell is a real, correct, non-fallback measurement
+of the operation its own label names. Today that's `token_refresh.js`: AXIAM
+ships no OAuth 2.1 ROPC/password grant (the grant is removed in OAuth 2.1),
+so it has no way to seed an OAuth2 refresh token from a password login — its
+cell measures a **session refresh** (`POST /api/v1/auth/refresh`, cookie +
+CSRF double-submit, `axiam-auth`'s `SessionRepository`), while Keycloak's and
+Zitadel's cells measure the **OAuth2 `refresh_token` grant**. Both renew an
+access credential without re-authenticating — comparable at the product
+level — but never at the protocol level (see
+`claude_dev/refresh-harness-diagnosis.md` §6 for the full derivation).
+
+Unlike `fallback-op`, this is a **static, per-scenario property** — it can't
+be derived from `bench_fallback` (a cell can read `fallback_count: 0` and
+still be a protocol-variant cell), so `report.py` carries it as a fixed
+`PROTOCOL_VARIANT_SCENARIOS` set rather than a per-run classification. Unlike
+`fallback-op`, a protocol-variant cell is **never excluded** from head-to-head
+tables — the measured operation IS the labelled one, for every target — it is
+annotated `comparability: protocol-variant` (visible as `protocol-variant` in
+the "All results" table's `fallback` column, and as a per-target caveat in
+the "Efficiency comparison" section) so a reader sees the operations diverge
+before reading the numbers as "AXIAM is Nx Keycloak at refresh".
 
 ### Security cost (derived across profiles)
 For a fixed (target, scenario), the report computes the **relative cost** of each
@@ -525,43 +562,88 @@ also first-after-seed). G1's root-cause note
 section documents the two harness countermeasures G2 added so the artifact
 can't silently corrupt a cell again, whatever the root cause turns out to be.
 
-### 12.1 Settle gate
+> **UPDATE (H2, 2026-07-28): the root cause is now known, and "post-seed
+> transient" is not an accurate name for it.** `postseed-transient-investigation.md`
+> found the effect is a **permanent, per-request cost**, not a post-seed
+> warm-up: six endpoints (`POST /api/v1/authz/check`, `POST /oauth2/token`,
+> `POST /oauth2/introspect`, `POST /oauth2/revoke`, `POST /api/v1/auth/login`,
+> and — a separate bug — `GET /api/v1/users`) perform one synchronous
+> SurrealDB write (the shared rate-limit bucket `UPSERT`) before the handler
+> runs, on every request, indefinitely. What varies by host is only how
+> expensive that one write is: on the G-box (the run-3 host this section's
+> numbers above describe) it is cheap enough (~22 ms) that the endpoints
+> still clear hundreds of req/s once whatever makes it briefly pricier right
+> after a fresh seed subsides; on the H2 investigation host it costs ~40 ms
+> and **never subsides** — 16–21 ops/s at any concurrency, unaffected by
+> idle time, restarts, pool size, or even an in-memory storage backend. The
+> settle gate below is still exactly the right countermeasure (it protects
+> against exactly this shape of clamp, whatever causes it, on whatever host
+> is running), and everything in §12.1–§12.4 remains accurate to what it
+> does — but do not read "post-seed window" as implying the effect is caused
+> by seeding, or that it always clears. On a host where the write is
+> expensive, the settle gate will correctly spend its full
+> `BENCH_SETTLE_TIMEOUT_SECS` and stamp `settle_timeout: true` on every
+> session that touches one of the six endpoints — that is the gate
+> reporting a real, permanent property of that host, not a flaky probe (see
+> `postseed-transient-investigation.md` §8.1).
 
-`run-benchmark.sh` now gates the **first cell** of every `bench-run`
-invocation behind a settle check, run once (not per cell) immediately after
-the seed-ok marker is verified:
+### 12.1 Settle gate v2 (H1) — why the serial canary was blind
 
-1. Poll a cheap, target-appropriate, already-seeded **canary** once per
-   second:
-   * **axiam** — the same endpoint the transient was characterized against,
-     `POST /api/v1/authz/check` (authz-check-ish), authenticated as the
-     seeded bench user (one login, cookie jar reused for every tick).  Falls
-     back to the plaintext `/health` liveness probe if the seed didn't
-     provide enough to authenticate.
-   * **keycloak** — JWKS (`/realms/<realm>/protocol/openid-connect/certs`):
-     cheap, unauthenticated, needs only the seeded realm name.
-   * **zitadel** — JWKS (`/oauth/v2/keys`): cheap, unauthenticated, no seed
-     dependency at all.
-   * any other/future target — `/health`.
+G2's original gate polled a **single** already-seeded canary request **once
+per second** and required `BENCH_SETTLE_STABLE_SECS` (30) consecutive ticks
+under `BENCH_SETTLE_MAX_MS` (100 ms) before releasing the first cell.
+Measured against a live run, it **passed in ~34 seconds** — deep inside the
+~6-minute clamp G1 reproduced (§1 above; `PRIVATE_BENCH_ANALYSIS.md` §1).
+That is not a threshold-tuning bug; it is structural. The post-seed clamp is
+a **concurrency ceiling** — the stack sustains ~44 ops/s in-window vs
+~730–750 ops/s settled — not a per-request latency problem. The clamp's own
+signature is a **~22 ms serialized unit of DB work queuing every request**:
+at one request per second, that 22 ms *is* fast, whether the server behind
+it can actually sustain 44 ops/s or 730 ops/s. Asking one question a second
+can never distinguish "this server can only do 44 of these per second" from
+"this server can do 730 of these per second" — both answer a single lonely
+request in about the same ~22 ms. Only asking for **more concurrent
+throughput than the clamp allows at once** can reveal the difference, and a
+1 rps canary structurally never does that. (The consequence, from the G run:
+G3 run-1 cells, G5's K=1/K=100 cells, G8's CC cells, and both G4/G8 CC
+comparison cells all measured inside this window despite the gate + a
+warm-up cell — see §1 above.)
 
-   A canary tick that can't complete at all (connection refused/reset, or
-   the target genuinely lacks the endpoint) is treated as **no signal** —
-   it resets the stability counter but never fails the run.
-2. Require **`BENCH_SETTLE_STABLE_SECS`** (default **30**) *consecutive*
-   seconds where the canary's observed latency is under
-   **`BENCH_SETTLE_MAX_MS`** (default **100 ms**) before letting the first
-   cell start.
-3. If that never happens within **`BENCH_SETTLE_TIMEOUT_SECS`** (default
+H1 replaces the serial canary with a **short concurrent burst probe**,
+implemented in curl (no k6 dependency for the gate itself — k6 is reserved
+for the scenarios the gate protects):
+
+1. Fire **`BENCH_SETTLE_BURST_VUS`** (default **20**) concurrent,
+   closed-loop workers (no think time — this is deliberately a *concurrency*
+   probe) against the same clamp-sensitive, target-appropriate endpoint the
+   old canary used (axiam: `POST /api/v1/authz/check`, authenticated as the
+   seeded bench user, cookie jar + CSRF token established once and shared;
+   falls back to `/health`/JWKS if the seed didn't provide enough to
+   authenticate — same fallback ladder as before) for
+   **`BENCH_SETTLE_BURST_SECS`** (default **15 s**).
+2. Require either **`BENCH_SETTLE_PROBE_THR`** (default **400** ops/s) *or*
+   p50 latency under **`BENCH_SETTLE_PROBE_P50_MS`** (default **150 ms**)
+   *under that concurrency*. In-window measured ~44 ops/s, settled
+   ~730–750 ops/s — 400 sits far from both, so there is no realistic
+   false-pass/false-fail case at the threshold.
+3. If a probe attempt fails, retry after **`BENCH_SETTLE_RETRY_SECS`**
+   (default **30 s**) — a fresh burst, not a continuation of the failed one.
+4. If nothing clears the bar within **`BENCH_SETTLE_TIMEOUT_SECS`** (default
    **600 s** / 10 min — comfortably above the ~5–7 min window G1 measured),
-   the gate **warns and proceeds anyway** rather than hanging the harness
-   forever; it never treats "still not settled" as a hard failure.
+   the gate **warns and proceeds anyway**, exactly as before; it never
+   treats "still not settled" as a hard failure.
+
+`BENCH_SETTLE_STABLE_SECS`/`BENCH_SETTLE_MAX_MS` (the old serial-canary
+knobs) still parse without error if a script exports them, but the v2 gate
+no longer consults them.
 
 Every cell this run produces — not just the first — records the wait in its
 `meta.json`:
 
 ```json
 "settle_wait_secs": 47,
-"settle_timeout": false
+"settle_timeout": false,
+"settle_probe_thr": 400
 ```
 
 (`settle_wait_secs` is the same value across every cell of one `bench-run`
@@ -572,10 +654,14 @@ timeout on even one repeat means that repeat's data may still be
 suspect.) `report.py` surfaces `settle_wait_secs`/`timeout` in a dedicated
 "Appendix: post-seed settle gate" table, and adds a `settle_timeout`
 `host_flags` entry (alongside `clock_variance`/`generator_saturated`) to the
-main "All results" table for any cell whose gate hit the hard timeout — a
-signal that cell may still be inside the transient even though the harness
-proceeded. Both degrade cleanly (simply absent) on `meta.json` files that
-predate G2, so the existing run-1/run-2/run-3 trees still render unchanged.
+main "All results" table for any cell whose gate hit the hard timeout. As of
+H1, `report.py` also **refuses** any such cell outright (excludes it from
+`valid`, listed under "Excluded (invalid) cells" with the reason spelled
+out, and printed as a loud `WARN` to stderr) rather than only flagging it —
+a contaminated cell silently entering a median/head-to-head table is exactly
+the data-quality failure this gate exists to prevent. All of the above
+degrades cleanly (simply absent/not triggered) on `meta.json` files that
+predate G2/H1, so older trees still render unchanged.
 
 Set **`BENCH_SETTLE=0`** to skip the gate entirely — useful for a quick
 manual `bench-run` against an already-settled (or already-known-warm)
@@ -648,20 +734,25 @@ running server container, so the dump is identical across that
 target/profile's scenarios) — omitted entirely for results trees predating
 G2 or for non-AXIAM targets.
 
-### 12.4 New environment knobs (G2 summary)
+### 12.4 New environment knobs (G2/H1 summary)
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `BENCH_SETTLE` | `1` | `0` skips the post-seed settle gate entirely. |
-| `BENCH_SETTLE_STABLE_SECS` | `30` | Consecutive seconds of low canary latency required before the first cell starts. |
-| `BENCH_SETTLE_MAX_MS` | `100` | Canary latency threshold (ms) counted as "settled". |
-| `BENCH_SETTLE_TIMEOUT_SECS` | `600` | Hard cap on the settle wait; the gate then warns, proceeds, and records `settle_timeout: true`. |
+| `BENCH_SETTLE_BURST_VUS` | `20` | Concurrent workers in each settle-gate burst probe (H1). |
+| `BENCH_SETTLE_BURST_SECS` | `15` | Seconds each burst probe attempt runs. |
+| `BENCH_SETTLE_PROBE_THR` | `400` | Pass threshold, ops/s, under the burst concurrency (OR'd with the p50 threshold below). Also recorded per cell as `settle_probe_thr`. |
+| `BENCH_SETTLE_PROBE_P50_MS` | `150` | Pass threshold, p50 latency (ms) under the burst concurrency. |
+| `BENCH_SETTLE_RETRY_SECS` | `30` | Gap between failed probe attempts. |
+| `BENCH_SETTLE_TIMEOUT_SECS` | `600` | Hard cap on the settle wait; the gate then warns, proceeds, and records `settle_timeout: true` (as of H1, `report.py` also refuses any such cell). |
+| `BENCH_SETTLE_DRAIN_SECS` | `5` | Pause after the LAST burst probe (pass or timeout) before the cell starts. Found live: a burst worker still mid-request when its window ends can still be executing server-side behind the shared single DB connection; without this drain, the very first request of the next cell (the scenario's own login) can land behind that straggler traffic and come back malformed. |
+| `BENCH_SETTLE_STABLE_SECS` / `BENCH_SETTLE_MAX_MS` | `30` / `100` | Superseded G2 serial-canary knobs — still parse without error, no longer consulted by the v2 burst gate. |
 | `BENCH_RUN_INDEX` | `1` | Drives cell-order rotation; set per-repeat by `bench-matrix` (`BENCH_RUN_INDEX=$i`), defaults to 1 (natural order) for a manual `bench-run`. |
 
 None of these are `just` recipe variables (`target=`, `profile=`, ...) — set
 them as plain environment variables, e.g.:
 
 ```bash
-BENCH_SETTLE_STABLE_SECS=10 BENCH_SETTLE_MAX_MS=150 \
+BENCH_SETTLE_BURST_VUS=30 BENCH_SETTLE_PROBE_THR=500 \
   just target=axiam profile=p0-plaintext bench-run
 ```

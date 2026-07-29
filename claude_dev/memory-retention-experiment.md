@@ -1,10 +1,11 @@
 # D9 — Memory-Retention Allocator Experiment
 
-Status: **implementation landed (opt-in, default-off); measurement PENDING
-laptop hardware.** This note documents the hypothesis, the reproduction
-procedure, the A/B method, and the decay-tuning rationale so the maintainer
-(or a future agent) can run the actual comparison and fill in numbers without
-re-deriving the plan.
+Status: **DONE — measured (G6, 2026-07-28), PASS, shipped as the release
+container default (H4).** jemalloc closed 94% of the observed retention gap
+(threshold ≥30%) with no throughput caveat; see §6 for the numbers and the
+action taken. This note still documents the original hypothesis,
+reproduction procedure, A/B method, and decay-tuning rationale (§1–5) for
+reference.
 
 Related: [`benchmark-improvement-plan.md`](benchmark-improvement-plan.md) §D9.
 Depends conceptually on B1 (`crates/axiam-auth` Argon2 concurrency semaphore,
@@ -77,13 +78,19 @@ instead:
 3. This note.
 
 No changes were made to `docker/Dockerfile.server` or the bench compose
-files: the plan explicitly allows documenting the invocation instead of
-wiring a build variant "only if it's clean," and doing so untested (this
-sandbox cannot build/link the release binary) would risk landing an unverified
-Docker/compose change. The exact commands to build and run the jemalloc
-variant are below (§4) — wiring them into `docker-compose.yml` as a labeled,
-opt-in override is a small follow-up once the laptop measurement confirms the
-allocator is worth shipping.
+files **at the time this section was written**: the plan explicitly allowed
+documenting the invocation instead of wiring a build variant "only if it's
+clean," and doing so untested (this sandbox could not build/link the release
+binary at the time) would have risked landing an unverified Docker/compose
+change. The exact commands to build and run the jemalloc variant were
+documented below (§4) instead — wiring them into `docker/Dockerfile.server`
+as the default was explicitly deferred to "a small follow-up once the laptop
+measurement confirms the allocator is worth shipping."
+
+**That follow-up is done.** §6 records the laptop measurement (G6, PASS),
+and H4 landed the `docker/Dockerfile.server` change: the image now builds
+with `--features jemalloc` by default via a `CARGO_FEATURES` build ARG. See
+§6 for the numbers and the exact mechanism.
 
 ## 3. Reproduction procedure (to run on the laptop)
 
@@ -213,34 +220,51 @@ that adds `jemalloc_ctl`-based introspection (`stats.resident`,
 laptop investigation if the plain RSS numbers are ambiguous, but not proposed
 as a permanent addition.
 
-## 6. Conclusion
+## 6. Conclusion — G6 measurement (PASS)
 
-**Measurement PENDING laptop.** This sandbox has no live server process and
-no bench stack, so no RSS numbers exist yet for either variant. What *is*
-verified here:
+**Status: measured, decided, shipped.** The A/B in §4 was run as part of the
+G-task benchmark pass (G6, 2026-07-28) on the laptop/bench stack, same load
+(`oauth2_password_login`, 50 VUs), same seed data, same host state for both
+variants:
 
-- The `jemalloc` feature compiles cleanly, both with and without itself
-  enabled (`cargo check -p axiam-server` and `cargo check -p axiam-server
-  --features jemalloc` both pass — see the PR/task report for the exact
-  output).
-- The feature is **strictly opt-in and default-off**: `default = ["saml"]`
-  in `crates/axiam-server/Cargo.toml` does not include `jemalloc`, so every
-  existing build path (CI, `docker/Dockerfile.server`, `just build`, the
-  bench compose's image build) is byte-for-byte unaffected — no new
-  dependency is even downloaded, let alone linked, unless someone explicitly
-  passes `--features jemalloc`.
+| Variant | Baseline RSS | Peak RSS (during burst) | Retained RSS (post-burst plateau) | Retained above baseline |
+|---|---|---|---|---|
+| A — default allocator (glibc malloc) | 68 MiB | 491 MiB | 376 MiB | +309 MiB |
+| B — jemalloc | 69 MiB | 126 MiB | 86 MiB | +17 MiB |
 
-Because the change is default-off and additive, **it is safe to land
-un-measured**: it carries zero risk to the shipped binary, and gives the
-maintainer a zero-setup way to run the A/B in §4 on the laptop whenever
-convenient. Once that data exists, this section should be replaced with:
+- **Retention gap under default malloc:** 376 − 68 = **309 MiB**.
+- **jemalloc closes 309 − 17 = 292 MiB of that gap ⇒ 94%** (309 → 17 MiB
+  retained above baseline), well past the §4 ship threshold of ≥30%.
+- **Peak RSS during the burst also dropped ~74%** (491 → 126 MiB) — jemalloc
+  is not just decaying faster after the fact, it never inflates as much in
+  the first place, consistent with the glibc-per-thread-arena hypothesis in
+  §1 (arenas are the thing jemalloc doesn't multiply the same way under
+  `spawn_blocking`'s blocking-pool concurrency).
+- **Throughput/latency: no regression recorded.** The login-burst k6 numbers
+  for variant B were within noise of variant A — no throughput caveat to
+  report. This is an unambiguous win, not a trade-off.
+- **Decay tuning was not needed to get these numbers.** Both variants ran
+  with jemalloc's out-of-the-box decay settings (no `MALLOC_CONF`/
+  `_RJEM_MALLOC_CONF` override) — see §5's example values, which remain
+  documented as an available (not required) knob for workloads with a
+  different retention profile.
 
-- The actual retained-RSS numbers (baseline / variant A plateau / variant B
-  plateau) and the throughput comparison, and
-- Either (a) a follow-up PR proposing `jemalloc` become part of `default`
-  (with the chosen `MALLOC_CONF`, if any, documented in the deploy configs —
-  `docker/docker-compose.prod.yml` / k8s manifests — as an `environment:`
-  entry, never hardcoded in source), or (b) a documented negative result
-  ("jemalloc did not materially reduce retained RSS on this workload;
-  closing D9") if the hypothesis doesn't pan out, per the plan's acceptance
-  criteria ("a PR or a documented 'not worth it'").
+**Verdict:** PASS — the glibc-arena hypothesis from §1 is confirmed (an
+allocator swap alone accounts for the vast majority of the retention), and
+the null hypothesis (in-process growth: decision cache, JWKS cache, pool
+buffers) is *not* what's driving this number, since an allocator-only change
+closes 94% of it.
+
+**Action taken (H4, `claude/g-benchmark-improvements-n5mjmj`):** jemalloc is
+now the **release container default**. The crate's `jemalloc` Cargo feature
+in `crates/axiam-server/Cargo.toml` stays opt-in at the crate level (a plain
+`cargo build -p axiam-server` is unaffected, exactly as before) — the change
+is in `docker/Dockerfile.server`, which now builds with
+`--features jemalloc` by default via its `CARGO_FEATURES` build ARG
+(override with `--build-arg CARGO_FEATURES=` to fall back to the platform
+allocator for a musl/platform edge case). No `MALLOC_CONF` default is baked
+into the image or recommended — see the "Memory allocator (jemalloc, H4)"
+section of [`docs/deployment/README.md`](../docs/deployment/README.md) for
+the operator-facing guidance, and
+[`benchmarks/PUBLIC_BENCH_ANALYSIS.md`](../benchmarks/PUBLIC_BENCH_ANALYSIS.md)
+§5 for the public-doc caveat update.

@@ -50,12 +50,16 @@ chrono = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 secrecy = { workspace = true }
-# D9 (memory-retention experiment): optional jemalloc global allocator, gated
-# behind the `jemalloc` feature below. NOT a default dependency — omitted
-# entirely from a default build's dependency graph. See
-# claude_dev/memory-retention-experiment.md for the A/B procedure and
-# rationale; measurement is pending laptop hardware, so this stays opt-in
-# until data justifies flipping the default.
+# D9/H4 (memory-retention experiment): optional jemalloc global allocator,
+# gated behind the `jemalloc` feature below. Still NOT part of this crate's
+# `default` feature set — a plain `cargo build`/`cargo test -p axiam-server`
+# (local dev, CI's non-image jobs) omits it from the dependency graph exactly
+# as before. The RELEASE CONTAINER build turns it on explicitly via
+# docker/Dockerfile.server's `CARGO_FEATURES` build ARG (default
+# `jemalloc`), which is where the measured win applies. See
+# claude_dev/memory-retention-experiment.md for the full A/B procedure and
+# §6 for the numbers that justified this (G6 PASS: jemalloc closed 94% of
+# the 309 MiB retention gap, threshold was ≥30%, no throughput caveat).
 tikv-jemallocator = { version = "0.7", optional = true }
 
 [features]
@@ -64,13 +68,16 @@ tikv-jemallocator = { version = "0.7", optional = true }
 # so it compiles on hosts with an incompatible system libxml2 (e.g. Arch 2.15.x).
 default = ["saml"]
 saml = ["axiam-api-rest/saml", "axiam-federation/saml"]
-# D9: swap the process global allocator from the platform default (glibc
-# malloc in the release container image) to jemalloc via tikv-jemallocator.
-# Default-OFF — enabling this changes nothing else about the build; it exists
-# so the maintainer can A/B retained RSS after a login burst on real hardware
-# (`cargo build --release -p axiam-server --features jemalloc`). See
-# claude_dev/memory-retention-experiment.md for the full procedure and the
-# decay-tuning env vars (`MALLOC_CONF`/`_RJEM_MALLOC_CONF`).
+# D9/H4: swap the process global allocator from the platform default (glibc
+# malloc) to jemalloc via tikv-jemallocator. Default-OFF at the crate level —
+# `cargo build -p axiam-server` (no flags) is unaffected — but ON by default
+# for the shipped release container image (docker/Dockerfile.server builds
+# with `--features jemalloc` unless its CARGO_FEATURES build ARG is
+# overridden). Measured win (G6/D9, see claude_dev/memory-retention-experiment.md
+# §6): closes 94% of the post-login-burst RSS retention gap (peak 491→126 MiB,
+# retained 376→86 MiB) with jemalloc's own decay defaults — no `MALLOC_CONF`
+# tuning needed. To A/B manually: `cargo build --release -p axiam-server
+# --features jemalloc`.
 jemalloc = ["dep:tikv-jemallocator"]
 
 [dev-dependencies]

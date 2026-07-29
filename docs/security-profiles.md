@@ -121,7 +121,7 @@ actix pins each accepted TCP connection to a single worker thread
 (actix-server `src/accept.rs:432-438`) and spawns every HTTP/2 stream onto that
 worker's single-threaded runtime (actix-http `src/h2/dispatcher.rs:134-135`;
 `actix_rt::spawn` is `tokio::task::spawn_local`). HTTP/2 multiplexing therefore
-buys header compression and ordering, **not** parallelism: all streams of one
+buys header compression and ordering, **not** parallelism: all streams of *one*
 connection share one core.
 
 Consequences for high-volume callers:
@@ -137,13 +137,31 @@ Consequences for high-volume callers:
   `SETTINGS_MAX_CONCURRENT_STREAMS`, a client is never obliged to open a second
   connection.
 
-This is a property of the actix listener, not of TLS: TLS crypto cost is already
-ruled out by `http_req_tls_handshaking ≈ 0` in the benchmark (session resumption
-works). Whether it materially explains the p2 token-endpoint throughput gap is
-the open question tracked in
+**How much this actually costs you depends entirely on your client's connection
+count, and most clients are fine.** The paragraph above is a real property of
+the listener, but it only bites a caller that funnels all of its concurrency
+through one connection. Measured (H6, 2026-07-29, `server:1.0.0-alpha19`,
+2 CPU / 2 actix workers, TLS 1.3 + h2 on the native listener): a load generator
+running 10 / 50 / 100 concurrent clients opened **10 / 50 / 100** TCP
+connections, and the two `actix-server wo` threads stayed within ~5% of each
+other's CPU at every level — i.e. no affinity imbalance occurred at all, and the
+h2 penalty on throughput was **0%** relative to the same load over HTTP/1.1 on
+the same TLS endpoint. Treat this section as *sizing guidance for a
+single-connection caller*, not as a general HTTP/2 tax.
+
+TLS crypto cost is separately small and is not a handshake cost: with session
+resumption working (`http_req_tls_handshaking ≈ 0`), TLS 1.3 termination in
+process costs roughly **10-15% of throughput on a trivially cheap endpoint**
+(JWKS: −12.8% measured on the H6 host, −12.5% on the earlier benchmark host —
+two different machines agreeing) and proportionally less as the endpoint does
+more work per request (userinfo −3.7%, introspection −0.2%). A *larger* p2
+penalty than that on any single endpoint is evidence about that endpoint, not
+about TLS.
+
+Full evidence and the closing of the "does TLS/HTTP2 halve token issuance?"
+question:
 [`claude_dev/b2-tls-h2-investigation.md`](../claude_dev/b2-tls-h2-investigation.md)
-and `benchmarks/PRIVATE_BENCH_ANALYSIS.md` §4.3; the deciding measurement
-(`./run-improvement-tasks.sh g8-tls-h1`) is pending real hardware.
+(reproduce with `benchmarks/run-improvement-tasks.sh h6-tls-proto`).
 
 ### Session resumption
 
@@ -185,7 +203,7 @@ override is applied.
 |-----------|------------------------------|---------------|-------|
 | p0        | plaintext HTTP/1.1           | yes           | baseline |
 | p1-tls12  | TLS 1.2                      | **no — N/A-by-policy** | AXIAM is **TLS 1.3-only natively** (per the security standards; ASVS V9.1.2). TLS 1.2 is never offered in-process; a legacy TLS 1.2 endpoint, if ever needed, is an nginx-edge concern outside AXIAM. This profile stays nginx-fronted when run. |
-| p2-tls13  | TLS 1.3 (always h2 when the client offers it) | yes (native overlay) | h1-isolation is only obtainable via the `tls13-h1.conf` edge — the native listener cannot be made h1-only (see ALPN above) |
+| p2-tls13  | TLS 1.3 (always h2 when the client offers it) | yes (native overlay) | h1-isolation is only obtainable via the `tls13-h1.conf` edge — the native listener cannot be made h1-only (see ALPN above). That edge and `tls13.conf` are a matched pair differing only in `http2 on;`, so they are the only controlled h1-vs-h2 comparison in the harness |
 | p3-mtls   | TLS 1.3 + client cert        | **yes (native overlay, D3)** | native mTLS: `docker-compose.native-mtls.yml` sets `CLIENT_AUTH=required` + `CLIENT_CA_PATH=/certs/ca.crt`; no nginx edge. Identity from the verified cert, not a header. |
 
 ### Why p1-tls12 is N/A-by-policy (not "not yet implemented")

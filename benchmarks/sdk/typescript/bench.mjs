@@ -10,10 +10,20 @@
 //
 // Run: node bench.mjs   (or: just sdk=typescript sdk-bench)
 
+import { readFileSync } from "node:fs";
+
 const env = (k, d) => process.env[k] ?? d;
 const ITER = Number(env("SDK_BENCH_ITERATIONS", "2000"));
 const WARMUP = Number(env("SDK_BENCH_WARMUP", "200"));
 const CONC = Number(env("SDK_BENCH_CONCURRENCY", "16"));
+
+// H8 fix: HARNESS-SPEC.md documents BENCH_CA_CERT (a PEM file path) as an
+// input every SDK bench should honor under the TLS profiles (p2), but this
+// bench never read it — every p2 run failed at the first HTTPS call against
+// the profile's throwaway CA. AxiamClientOptions.customCa wants inline PEM
+// *content*, not a path, so read the file here.
+const caCertPath = env("BENCH_CA_CERT", "");
+const customCa = caCertPath ? readFileSync(caCertPath, "utf8") : undefined;
 
 const cfg = {
   scheme: env("BENCH_SCHEME", "http"),
@@ -25,6 +35,7 @@ const cfg = {
   password: env("BENCH_PASSWORD", "Bench@User123!"),
   action: env("BENCH_ACTION", "read"),
   resourceId: env("BENCH_RESOURCE_ID", "bench-resource"),
+  customCa,
 };
 
 const OP_KEYS = ["login", "refresh", "check_access", "batch_check"];
@@ -66,7 +77,7 @@ async function buildOps() {
   const { createNodeClient } = await import("axiam-sdk/node");
   const baseUrl = `${cfg.scheme}://${cfg.host}:${cfg.port}`;
 
-  const client = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug });
+  const client = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug, customCa: cfg.customCa });
   await client.login(cfg.username, cfg.password);
 
   // Every check reuses the one seeded resource UUID: the server rejects
@@ -87,7 +98,7 @@ async function buildOps() {
 
   return {
     login: async () => {
-      const fresh = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug });
+      const fresh = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug, customCa: cfg.customCa });
       await fresh.login(cfg.username, cfg.password);
     },
     refresh: () => client.refresh(),
@@ -96,7 +107,15 @@ async function buildOps() {
   };
 }
 
-async function timeOp(fn) {
+// HARNESS-SPEC.md requires `refresh` to be measured at concurrency 1: every
+// SDK guards refresh() with a single-flight lock, but the underlying
+// refresh_token is single-use/rotating (opaque, server-stored, rotated on
+// every use per CLAUDE.md) — genuinely concurrent callers race on which
+// wire call wins, and the loser reusing an already-rotated token can trip
+// reuse-detection and revoke the whole session, cascading into 100% errors
+// on every op measured after refresh in the same run (H8 fix — this used to
+// pass CONC unconditionally for every op, including refresh).
+async function timeOp(fn, conc = CONC) {
   const lat = [];
   let errors = 0;
   // warm-up (uncounted)
@@ -112,7 +131,7 @@ async function timeOp(fn) {
       catch { errors++; }
     }
   }
-  await Promise.all(Array.from({ length: CONC }, worker));
+  await Promise.all(Array.from({ length: conc }, worker));
   const secs = (performance.now() - start) / 1000;
   return {
     p50_ms: pct(lat, 50), p95_ms: pct(lat, 95), p99_ms: pct(lat, 99),
@@ -137,7 +156,7 @@ async function main() {
   }
 
   const ops = {};
-  for (const k of OP_KEYS) ops[k] = await timeOp(opsFns[k]);
+  for (const k of OP_KEYS) ops[k] = await timeOp(opsFns[k], k === "refresh" ? 1 : CONC);
   emit("ok", ops, ITER, CONC, "");
 }
 

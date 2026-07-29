@@ -21,6 +21,24 @@ export const m = {
   // hint why. A Trend (not a Counter) so the summary's percentile/avg stats
   // surface which code dominates. Recorded by the gRPC scenarios only.
   grpcStatus: new Trend('bench_grpc_status'),
+  // H6: the negotiated wire protocol of every measured response, so a TLS
+  // h1-vs-h2 cell can be read as evidence instead of assumed. G8's summary
+  // tried to recover this from k6's `http_version` tag on http_req_duration,
+  // but k6 only emits that tag into the *summary* metric key when the metric
+  // is explicitly tagged in options — it is not by default — so the column
+  // read "?" for every cell and the whole conviction rested on which conf
+  // file we believed nginx had loaded.
+  //
+  // Encoding (a Trend, not a Counter, so min/max/avg expose a MIXED cell —
+  // exactly the failure mode that silently voids an h1 control):
+  //     10 = HTTP/1.0   11 = HTTP/1.1   20 = HTTP/2.0   30 = HTTP/3
+  //      0 = k6 reported no/unrecognized proto (never seen in practice; kept
+  //          so an unknown string is loud rather than silently absent)
+  // report.py decodes min/max back to a label and prints "mixed(1.1,2.0)"
+  // when they disagree. gRPC scenarios record 20 via recordGrpcResult():
+  // gRPC is HTTP/2 by definition, which makes the column total rather than
+  // REST-only.
+  httpProto: new Trend('bench_http_proto'),
   // G9/item-3: rate-limit rejections counted DISTINCTLY from other failures
   // (REST 429 / gRPC RESOURCE_EXHAUSTED=8 — the status both
   // crates/axiam-api-rest's shared+in-memory limiters and
@@ -45,6 +63,23 @@ export const m = {
   throttled: new Counter('bench_throttled'),
 };
 
+// H6: map k6's res.proto string ("HTTP/1.1", "HTTP/2.0", …) to the numeric
+// encoding documented on m.httpProto above. Exported for unit-testability and
+// for any scenario that needs to record a response outside doOp().
+export function protoCode(proto) {
+  switch (proto) {
+    case 'HTTP/1.0': return 10;
+    case 'HTTP/1.1': return 11;
+    case 'HTTP/2.0': return 20;
+    // k6 (Go net/http) reports h2 as "HTTP/2.0"; accept the short form too in
+    // case a future k6 changes it, rather than silently reporting 0.
+    case 'HTTP/2': return 20;
+    case 'HTTP/3.0':
+    case 'HTTP/3': return 30;
+    default: return 0;
+  }
+}
+
 // Execute one built request (from targets.js) and record uniform metrics.
 // Returns the parsed JSON body on success, or null on failure.
 export function doOp(built, params) {
@@ -52,6 +87,15 @@ export function doOp(built, params) {
   const res = http.request(built.method, built.url, built.body || null, reqParams);
 
   if (built.fallback) m.fallback.add(1);
+
+  // H6: record the negotiated protocol for EVERY response, pass or fail — a
+  // failing p2-h1 cell's protocol is exactly the datum that says whether the
+  // edge was really speaking http/1.1 while it failed. Only skip the sample
+  // when k6 reports no proto at all (transport-level error: connection
+  // refused/reset, so no protocol was ever negotiated); a *present but
+  // unrecognized* string still records as 0 so it shows up loudly rather than
+  // vanishing.
+  if (res.proto) m.httpProto.add(protoCode(res.proto));
 
   const expected = built.expect || 200;
   const passed = check(res, {
@@ -104,6 +148,10 @@ export function recordGrpcResult(res, latencyMs, ok) {
   // the gRPC scenarios already document for the OK-code case).
   const statusCode = res && res.status != null ? Number(res.status) : -1;
   m.grpcStatus.add(statusCode);
+  // H6: gRPC is HTTP/2 by definition (RFC-level requirement of the gRPC wire
+  // protocol), and k6/net/grpc exposes no proto field, so record it as such
+  // rather than leaving the column empty for gRPC cells.
+  m.httpProto.add(20);
   m.latency.add(latencyMs);
   m.errorRate.add(!ok);
   if (ok) {

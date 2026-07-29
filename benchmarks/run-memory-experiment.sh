@@ -118,7 +118,17 @@ build_image() { # $1=variant(a|b) $2=tag
   fi
   local tmpdir; tmpdir=$(mktemp -d)
   cp "$REPO_ROOT/docker/Dockerfile.server" "$tmpdir/Dockerfile.server"
-  if [ "$variant" = b ]; then
+  # H4 flagged fix: docker/Dockerfile.server now defaults `ARG CARGO_FEATURES`
+  # to `jemalloc` (H4 made jemalloc the release default), so variant A
+  # (the "default allocator" control) is no longer a true control if built
+  # with no override — it would silently inherit jemalloc too, and the whole
+  # A-vs-B comparison this experiment exists to run would measure jemalloc vs
+  # jemalloc. Force the system allocator back for variant A specifically via
+  # the same --build-arg the Dockerfile documents at its own top (line ~53).
+  local build_args=()
+  if [ "$variant" = a ]; then
+    build_args+=(--build-arg "CARGO_FEATURES=")
+  elif [ "$variant" = b ]; then
     # Patch BOTH cargo build lines (dep pre-build + real build) so the feature
     # is consistent across layers. Temp copy only — the tracked file is untouched.
     sed -i 's/cargo build --release -p axiam-server/cargo build --release -p axiam-server --features jemalloc/g' \
@@ -129,7 +139,7 @@ build_image() { # $1=variant(a|b) $2=tag
     fi
   fi
   echo "[d9] building $tag (variant $variant) — this is a full release build, be patient"
-  docker build -f "$tmpdir/Dockerfile.server" -t "$tag" "$REPO_ROOT"
+  docker build "${build_args[@]}" -f "$tmpdir/Dockerfile.server" -t "$tag" "$REPO_ROOT"
   rm -rf "$tmpdir"
 }
 

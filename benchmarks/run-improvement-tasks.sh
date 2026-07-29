@@ -46,6 +46,22 @@ die()  { printf '\033[1;31m[%s] ERROR: %s\033[0m\n' "${TASK:-run}" "$*" >&2; exi
 need() { command -v "$1" >/dev/null || die "$1 is required but not installed"; }
 need_base() { need docker; need just; need k6; need python3; }
 
+# H1 item 2: fail-fast guard against the same "wrong results dir" fault class
+# as the bench-matrix clobber bug (benchmarks/justfile) — every artifact this
+# script writes must land under results/tasks/<task-id>/, nothing else. $1
+# must already exist (callers `mkdir -p` first) so `cd .. && pwd` can resolve
+# it to a real absolute path; compared as a real path prefix (not a string
+# prefix) so e.g. "results/tasks/g2-verify-evil" cannot falsely match
+# "results/tasks/g2-verify".
+assert_within_tasks_root() { # $1=dir (already created)
+  local dir="$1" abs
+  abs="$(cd "$dir" && pwd)" || die "internal: cannot resolve results dir '$dir'"
+  case "$abs" in
+    "$TASKS_ROOT"|"$TASKS_ROOT"/*) : ;;
+    *) die "internal: refusing to write outside $TASKS_ROOT (resolved '$dir' -> '$abs') — results-dir clobber guard" ;;
+  esac
+}
+
 # Stack lifecycle. Any extra AXIAM__* knobs are passed as leading env assignments
 # by the caller (they reach the server through the compose pass-through).
 #
@@ -62,6 +78,7 @@ bench_up_seed() { # $1=target [$2=profile] [$3.. extra just args]
   local target=$1 profile=${2:-p0-plaintext}; shift 2 || shift $# || true
   [ -n "$TASK_OUT" ] || die "internal: TASK_OUT not set before bench_up_seed"
   mkdir -p "$TASK_OUT"
+  assert_within_tasks_root "$TASK_OUT"
   log "bringing up $target ($profile) and seeding"
   BENCH_RESULTS_DIR="$TASK_OUT" just target="$target" profile="$profile" "$@" bench-up
   BENCH_RESULTS_DIR="$TASK_OUT" just target="$target" profile="$profile" "$@" bench-seed
@@ -81,6 +98,7 @@ bench_down() { # $1=target [$2=profile]
 cell() {
   local target=$1 profile=$2 scenario=$3 outdir=$4
   mkdir -p "$outdir"
+  assert_within_tasks_root "$outdir"
   [ -f "$TASK_OUT/${target}.seed.ok" ] && cp "$TASK_OUT/${target}.seed.ok" "$outdir/"
   BENCH_RESULTS_DIR="$outdir" just target="$target" profile="$profile" \
     scenario="$scenario" bench-run
@@ -150,25 +168,70 @@ print(next((argv[i + 1] for i, v in enumerate(argv) if v == flag and i + 1 < len
 # stack's own connection details.
 DBD_NET=""; DBD_IMG=""; DBD_USER=""; DBD_PASS=""
 
-# The probe statement, in ONE place so the pre-flight, the timing loop and the
-# manual-fallback snippet in the summary cannot drift apart.
+# H1 item 4: the probe statement, in ONE place so the pre-flight, the timing
+# loop and the manual-fallback snippet in the summary cannot drift apart.
 #
-# It mirrors the authz hot path's own shape (see
-# `SurrealPermissionRepository::get_role_permission_grants`): a traversal of the
-# `grants` edge that dereferences the permission record on the far side
-# (`out.*`), which is where that query's real work happens — but with no bound
-# parameters, so it needs no tenant/role UUID from the seed.
-#
-# The table is `grants` (`RELATE role -> grants -> permission`). There is NO
-# `role_permission_grant` table — that is the name of the Rust *method*, and an
-# earlier revision of this probe used it as a table name; every iteration then
-# measured a "table does not exist" error path instead of the datastore.
-DBD_QUERY='SELECT count() FROM grants WHERE out.tenant_id != NONE GROUP ALL;'
+# This is the ACTUAL query the authz hot path issues — copied from
+# `SurrealPermissionRepository::get_role_permission_grants_for_roles`
+# (crates/axiam-db/src/repository/permission.rs, the query D6
+# `claude_dev/surrealdb-tuning-report.md` §2 names as round-trip 4, the last
+# of the 3-4 serial round-trips `axiam-authz::engine::check_access` makes per
+# check), same SELECT list and the same `out.*` dereference of every `grants`
+# edge — the only change is dropping `AND meta::id(in) IN $role_ids`, since a
+# bare `surreal sql` session run from this script (no AXIAM code, no seed
+# lookup) has no bound role UUIDs to hand it; `out.tenant_id != NONE` keeps
+# the same "every edge must dereference `out`" cost shape without needing
+# one. The table is `grants` (`RELATE role -> grants -> permission`); there
+# is NO `role_permission_grant` table — that is the Rust *method* name.
+DBD_QUERY='SELECT meta::id(in) AS role_id, meta::id(out.id) AS record_id, out.tenant_id AS tenant_id, out.action AS action, out.description AS description, out.created_at AS created_at, out.updated_at AS updated_at, scope_ids FROM grants WHERE out.tenant_id != NONE;'
 
 surreal_direct() { # $1=statement -> JSON result on stdout, diagnostics on stderr
   printf '%s\n' "$1" | docker run --rm -i --network "$DBD_NET" "$DBD_IMG" sql \
     --endpoint "http://$C_DB:8000" --username "$DBD_USER" --password "$DBD_PASS" \
     --namespace axiam --database axiam --hide-welcome --json
+}
+
+# H1 item 4: a single long-lived `surreal sql` session shared across the
+# whole timing loop, instead of one `docker run` PER QUERY (the old
+# surreal_direct() above — kept only for the pre-flight and the manual
+# fallback snippet, both one-shot). A fresh `docker run` pays container-start
+# overhead (~500 ms, measured) on every iteration, which used to swamp the
+# actual query latency the probe exists to measure. Started with bash
+# `coproc` so this script can write one statement to its stdin and read
+# exactly one result back per round trip, same shape as the real hot path's
+# "await one query, get one result" pattern. `surreal sql --json` prints
+# each result as one compact JSON line followed by ONE blank separator line
+# (verified empirically — `DEFINE TABLE ...` -> `[null]\n\n`, a SELECT ->
+# `[[{...}]]\n\n`); dbd_read_result skips blank lines to land on the next
+# real result.
+DBD_COPROC_PID=""
+dbd_session_start() { # sets DBD_COPROC[0]/[1] (bash coproc fds) + DBD_COPROC_PID
+  coproc DBD_COPROC { docker run --rm -i --network "$DBD_NET" "$DBD_IMG" sql \
+    --endpoint "http://$C_DB:8000" --username "$DBD_USER" --password "$DBD_PASS" \
+    --namespace axiam --database axiam --hide-welcome --json ; }
+  # `coproc NAME { ... }` makes bash set NAME_PID (DBD_COPROC_PID) itself —
+  # no manual assignment needed (and $COPROC_PID only exists for the
+  # anonymous `coproc { ... }` form, not this named one).
+  sleep 1  # let the container's TCP handshake + auth land before the first send
+}
+
+dbd_session_stop() {
+  [ -n "$DBD_COPROC_PID" ] || return 0
+  exec {DBD_COPROC[1]}>&- 2>/dev/null || true   # close stdin -> surreal sql exits
+  wait "$DBD_COPROC_PID" 2>/dev/null || true
+  DBD_COPROC_PID=""
+}
+
+# Sends one statement on the open session and reads back its one result line
+# (skipping the blank separator line(s) surreal sql --json emits). Returns 1
+# (result on stdout is empty) if the session's stdout closed / errored.
+dbd_session_query() { # $1=statement -> result JSON line on stdout
+  printf '%s\n' "$1" >&"${DBD_COPROC[1]}" || return 1
+  local line
+  while IFS= read -r -u "${DBD_COPROC[0]}" line; do
+    [ -n "$line" ] && { printf '%s\n' "$line"; return 0; }
+  done
+  return 1
 }
 
 # Did that statement actually succeed? The exit status alone cannot tell you:
@@ -296,6 +359,7 @@ summary_open() { # $1=outdir $2=title
   SUMMARY=$1/SUMMARY.md
   TASK_OUT=$1
   mkdir -p "$1"
+  assert_within_tasks_root "$1"
   {
     echo "# $2"
     echo
@@ -442,6 +506,30 @@ task_g1_isolate() {
     local f; f=$(k6_file "$d"); [ -n "$f" ] && k6_stat "$f" thr || echo NA
   }
 
+  # H1 item 3: after a DB restart, the server's connection/pool needs to
+  # re-sign-in before it can serve anything real — hitting it with a k6 cell
+  # immediately (the old behavior) measured that re-signin failure itself
+  # (recorded n=1 request, unusable) rather than the post-restart clamp.
+  # `/ready` (crates/axiam-api-rest/src/health.rs) exists exactly for this:
+  # unlike `/health` (always 200, a pure liveness probe), it re-checks DB
+  # connectivity through the same pool the authz path uses and returns 503
+  # until that succeeds — so polling it to 200 is a direct signal the pool
+  # has re-signed in, not a fixed guess at a sleep duration.
+  wait_for_ready() { # $1=base_url $2=timeout_secs -> 0 once /ready is 200
+    local base="$1" timeout="${2:-90}" start now code
+    start=$(date +%s)
+    while :; do
+      code="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code}' "$base/ready" 2>/dev/null || echo 000)"
+      [ "$code" = "200" ] && { log "$base/ready is 200 — pool re-signed in"; return 0; }
+      now=$(date +%s)
+      if [ $((now - start)) -ge "$timeout" ]; then
+        warn "timed out after ${timeout}s waiting for $base/ready to return 200 (last code: $code) — proceeding anyway"
+        return 1
+      fi
+      sleep 1
+    done
+  }
+
   s "Restarting ONE container at a time inside the clamped window. Whatever state"
   s "the transient lives in dies with the container that owns it."
   s
@@ -452,7 +540,16 @@ task_g1_isolate() {
   b=$(probe after-server-restart);         sp "- after restarting the SERVER only: **${b} ops/s**"
   log "restarting $C_DB only"
   docker restart "$C_DB" >/dev/null; sleep 25
-  c=$(probe after-db-restart);             sp "- after restarting the DATASTORE:   **${c} ops/s**"
+  wait_for_ready "http://localhost:${BENCH_APP_PORT:-8090}" "${G1_ISOLATE_READY_TIMEOUT:-90}"
+  # H1 item 3: also run this probe as a FULL-length cell (not the 20s G1
+  # micro-cell used everywhere else in this task) — a longer measured window
+  # gives it enough samples to be statistically usable even if the pool is
+  # still settling right as measurement starts.
+  local saved_warmup=$BENCH_WARMUP saved_duration=$BENCH_DURATION
+  export BENCH_WARMUP="${G1_ISOLATE_FULL_WARMUP:-30s}" BENCH_DURATION="${G1_ISOLATE_FULL_DURATION:-120s}"
+  c=$(probe after-db-restart)
+  export BENCH_WARMUP="$saved_warmup" BENCH_DURATION="$saved_duration"
+  sp "- after restarting the DATASTORE:   **${c} ops/s** (full-length cell, after /ready wait)"
 
   sampler_stop "$SAMPLER_PID"; SAMPLER_PID=""; disarm_cleanup; bench_down axiam
   s
@@ -520,12 +617,16 @@ task_g1_dbdirect() {
     s '```'
     disarm_cleanup; bench_down axiam; finish; return
   fi
-  # Pre-flight the query once before timing 30 of them. A wrong credential (or a
-  # renamed table) would otherwise fill db-direct.csv with 30 rows of pure
+  # Pre-flight the query once before timing anything. A wrong credential (or a
+  # renamed table) would otherwise fill db-direct.csv with rows of pure
   # container-start overhead that read like plausible timings — the worst
   # possible failure for a task whose whole output is a trend line. Both gates
   # are needed: the exit status catches an unusable connection, surreal_result_ok
-  # catches a statement that was rejected while still exiting 0.
+  # catches a statement that was rejected while still exiting 0. This one-shot
+  # preflight still uses surreal_direct() (fresh docker run) deliberately —
+  # it's cheap to pay container-start overhead exactly once, and doing it
+  # this way keeps the preflight independent of the persistent session's own
+  # health (a good sanity check before committing to it).
   if ! surreal_direct "$DBD_QUERY" \
         > "$out/preflight.log" 2>&1 \
      || ! surreal_result_ok < "$out/preflight.log"; then
@@ -537,30 +638,74 @@ task_g1_dbdirect() {
     s '```'
     disarm_cleanup; bench_down axiam; finish; return
   fi
-  log "pre-flight query OK as user '$user' — timing 30 iterations"
+  log "pre-flight query OK as user '$user' — opening one long-lived session for the timing loop"
 
-  # Each row carries its own ok flag: the pre-flight proves the query worked
-  # ONCE, but a mid-run failure (the stack going away, a restart) would still
-  # time a fast error path and read as "the clamp cleared". A row is only
-  # evidence if ok=1.
+  # H1 item 4: ONE persistent `surreal sql` session (dbd_session_start/query/
+  # stop, defined above) for the ENTIRE timing loop below — not a fresh
+  # `docker run` per query (the old behavior: ~500 ms flat container-start
+  # overhead added to every one of 30 rows, which is most of what those rows
+  # measured). Two segments in the SAME file/session so "in-window" vs
+  # "settled" is a within-file comparison rather than two separate runs that
+  # could differ for unrelated reasons:
+  #   - "window": DBD_ITERS rows starting immediately (same cadence as
+  #     before: DBD_INTERVAL_SECS apart, default 2s) — this is the segment
+  #     that used to be the whole probe.
+  #   - "baseline": after waiting DBD_BASELINE_WAIT_SECS (default 420s = 7min,
+  #     comfortably past the ~5-7min window G1 measured — see
+  #     PRIVATE_BENCH_ANALYSIS.md §1), DBD_BASELINE_ITERS more rows at the
+  #     same cadence. Without this segment the probe is inconclusive by
+  #     construction: a flat trend across ONLY in-window rows cannot
+  #     distinguish "the DB is slow throughout, unrelated to the window" from
+  #     "the DB would be fast if measured after the window" — G1's original
+  #     verdict on this probe.
+  # Every row is individually timestamped (epoch_ms) and carries its own ok
+  # flag: a mid-run failure (the stack going away, a restart) would otherwise
+  # time a fast error path and read as "the clamp cleared".
+  local dbd_iters=${G1_DBDIRECT_ITERS:-30}
+  local dbd_interval=${G1_DBDIRECT_INTERVAL_SECS:-2}
+  local dbd_baseline_wait=${G1_DBDIRECT_BASELINE_WAIT_SECS:-420}
+  local dbd_baseline_iters=${G1_DBDIRECT_BASELINE_ITERS:-15}
+
+  dbd_session_start
   {
-    echo "iteration,elapsed_ms,ok"
-    for i in $(seq 1 30); do
-      local st et ok=1
+    echo "iteration,epoch_ms,elapsed_ms,ok,segment"
+    local i st et ok line
+    for i in $(seq 1 "$dbd_iters"); do
       st=$(date +%s%3N)
-      surreal_direct "$DBD_QUERY" > "$out/.iter.out" 2>&1 || ok=0
+      ok=1
+      line="$(dbd_session_query "$DBD_QUERY")" || ok=0
       et=$(date +%s%3N)
-      surreal_result_ok < "$out/.iter.out" || ok=0
-      echo "$i,$((et - st)),$ok"
-      sleep 2
+      [ "$ok" -eq 1 ] && { surreal_result_ok <<<"$line" || ok=0; }
+      echo "$i,$st,$((et - st)),$ok,window"
+      sleep "$dbd_interval"
     done
   } > "$out/db-direct.csv"
-  rm -f "$out/.iter.out"
-  s "- raw timings: \`db-direct.csv\` (includes ~container-start overhead per row — compare"
-  s "  the TREND across rows, not the absolute value). Ignore any row with \`ok=0\`: the"
-  s "  query failed there, so its timing measures an error path, not the datastore."
-  s "- A flat, slow trend that improves at the same minute the k6 cells recover ⇒ the"
-  s "  serialization is inside SurrealDB."
+  log "window segment done — waiting ${dbd_baseline_wait}s (same session) before the baseline segment"
+  sleep "$dbd_baseline_wait"
+  {
+    local i st et ok line
+    for i in $(seq 1 "$dbd_baseline_iters"); do
+      st=$(date +%s%3N)
+      ok=1
+      line="$(dbd_session_query "$DBD_QUERY")" || ok=0
+      et=$(date +%s%3N)
+      [ "$ok" -eq 1 ] && { surreal_result_ok <<<"$line" || ok=0; }
+      echo "$i,$st,$((et - st)),$ok,baseline"
+      sleep "$dbd_interval"
+    done
+  } >> "$out/db-direct.csv"
+  dbd_session_stop
+
+  s "- raw timings: \`db-direct.csv\` — ONE long-lived session for the whole probe (no"
+  s "  per-row container-start overhead). \`segment\` is \`window\` (the ${dbd_iters} rows"
+  s "  starting immediately after seed) or \`baseline\` (${dbd_baseline_iters} rows collected"
+  s "  after an additional ${dbd_baseline_wait}s wait, same session — the post-window"
+  s "  comparison segment the old probe never collected). Ignore any row with \`ok=0\`:"
+  s "  the query failed there, so its timing measures an error path, not the datastore."
+  s "- \`window\` flat/slow and \`baseline\` fast in the SAME file/session ⇒ the"
+  s "  serialization is inside SurrealDB and cleared on its own by the time the"
+  s "  baseline segment ran. Both segments flat/slow ⇒ either the wait wasn't long"
+  s "  enough (bump \`G1_DBDIRECT_BASELINE_WAIT_SECS\`) or the DB isn't the bottleneck."
   disarm_cleanup; bench_down axiam
   finish
 }
@@ -748,6 +893,12 @@ task_g5_cache_sweep() {
   rm -rf "$out"; summary_open "$out" "G5 — decision cache vs cache-key cardinality"
   local scen=${G5_SCENARIO:-authz_check_rest.js}
   local ks=${G5_KEYSPACES:-"1 100 10000"}
+  # H5: p2-tls13, NOT p0-plaintext. On p0 the login cookies are marked `Secure`
+  # and k6's jar refuses to replay them over http://, so every cookie-session
+  # scenario (this one included) dies in setup() — see
+  # claude_dev/postseed-transient-investigation.md §8.3. Override with
+  # G5_PROFILE only if that has been fixed.
+  local prof=${G5_PROFILE:-p2-tls13}
 
   s "Run 3 measured the cache at K=1 (every VU hammering ONE subject/resource pair) —"
   s "the friendliest possible hit rate. This sweeps the key space to bound the real"
@@ -758,9 +909,16 @@ task_g5_cache_sweep() {
 
   for enabled in false true; do
     export AXIAM__AUTHZ__DECISION_CACHE_ENABLED=$enabled
-    arm_cleanup axiam p0-plaintext
-    bench_up_seed axiam
-    BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam p0-plaintext authz_check_rest.js \
+    arm_cleanup axiam "$prof"
+    # The profile must reach bench_up_seed too, not just the cells: for
+    # p1/p2/p3 it is what brings up the TLS listener the cells dial (the
+    # native-TLS compose overlay for axiam, the nginx edge for the
+    # competitors) and publishes :8443. Bringing the stack up as p0 and then
+    # pointing p2 cells at :8443 gives ONE refused connection per cell and a
+    # silently empty result file — which is exactly what the first attempt at
+    # this sweep produced.
+    bench_up_seed axiam "$prof"
+    BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam "$prof" authz_check_rest.js \
       "$out/warmup-$enabled" >/dev/null 2>&1 || true
     for k in $ks; do
       local d=$out/cache-$enabled/k-$k
@@ -768,7 +926,7 @@ task_g5_cache_sweep() {
       # code change). With an older scenario it is simply ignored — the row then
       # reads the same for every K, which is itself the signal that the scenario
       # change has not landed yet.
-      BENCH_AUTHZ_KEYSPACE=$k cell axiam p0-plaintext "$scen" "$d" >/dev/null 2>&1 || true
+      BENCH_AUTHZ_KEYSPACE=$k cell axiam "$prof" "$scen" "$d" >/dev/null 2>&1 || true
       local f mem; f=$(k6_file "$d")
       mem=$(python3 - "$d" <<'PY'
 import csv, glob, os, sys
@@ -792,7 +950,12 @@ PY
   s "- If the win collapses toward 1.0× as K grows, the default should stay opt-in and the"
   s "  public doc's \"3×\" must be labeled as a best-case, small-key-space figure."
   s "- Memory at K=10000 bounds \`DECISION_CACHE_MAX_ENTRIES\` guidance."
-  s "- Then run the revocation integration test against this live stack (plan G5 step 2)."
+  s "- The live-stack revocation check is now automated: \`runner/h5-revocation-check.sh\`"
+  s "  (run it against BOTH a cache-ON and a cache-OFF stack — the OFF run is the control)."
+  s "- On a host where the shared rate-limit counter clamps the authz endpoint to ~20 ops/s"
+  s "  (see \`claude_dev/postseed-transient-investigation.md\`), these cells measure the clamp,"
+  s "  not the cache: the ~40 ms counter write sits OUTSIDE the cache and dominates. Report the"
+  s "  ON/OFF RATIO with that caveat and never the absolute level."
   finish
 }
 
@@ -872,6 +1035,230 @@ PY
   s "- **p2-h1 also ~−50%** ⇒ HTTP/2 acquitted; move to per-request server-side timing"
   s "  at p2 vs p0 (TLS read/write vs handler) — the fallback path in the plan."
   s "- Check the negotiated-protocol column: the h1 cell must NOT read \`2\`."
+  s
+  s "**Superseded by \`h6-tls-proto\` (H6).** All three CC cells above measure the"
+  s "shared rate-limit write, not TLS (claude_dev/postseed-transient-investigation.md),"
+  s "and the protocol column here is derived from a k6 tag that is never emitted."
+  finish
+}
+
+# ---------------------------------------------------------------------------
+# H6 — B2 endgame v2: TLS/h1/h2 on endpoints that are NOT rate-limit clamped
+# ---------------------------------------------------------------------------
+# Why this replaces g8-tls-h1's CC cells:
+#
+#   * Every `RateLimitShared`-wrapped endpoint — /oauth2/token (CC), authz
+#     check, introspect, revoke, login and GET /api/v1/users — pays one
+#     synchronous SurrealDB bucket write before the handler runs, which on some
+#     hosts costs 40-50 ms and pins the endpoint at ~20 ops/s at ANY
+#     concurrency (claude_dev/postseed-transient-investigation.md §2). A TLS or
+#     protocol delta of a few hundred microseconds per request is invisible
+#     under a 50 ms floor. CC therefore cannot discriminate anything about the
+#     transport on such a host, no matter how carefully the cell is run.
+#   * `GET /oauth2/jwks` and `GET /oauth2/userinfo` are NOT wrapped and run at
+#     ~3 000 and ~1 700 ops/s. They are the only vehicles on such a host in
+#     which a per-request transport cost is a large fraction of the total.
+#
+# Four stacks, each measured with the SAME scenarios at the SAME VU levels:
+#
+#   p0-plaintext   direct :8090, no TLS                       (protocol: 1.1)
+#   p2-native      direct :8443, AXIAM's own rustls listener   (protocol: 2.0)
+#   p2-nginx-h2    nginx edge, TLS 1.3, `http2 on`             (protocol: 2.0)
+#   p2-nginx-h1    nginx edge, TLS 1.3, no `http2`             (protocol: 1.1)
+#
+# and, inside each nginx stack, a cleartext control through the SAME edge
+# (tls/_plain-control.inc on :8080). That yields four one-variable comparisons
+# instead of the one many-variable comparison G8 made:
+#
+#   nginx-plain vs p0            = the proxy hop, alone
+#   nginx-tls-h1 vs nginx-plain  = TLS at the edge, alone
+#   nginx-tls-h2 vs nginx-tls-h1 = h2 vs h1, alone   <-- the B2 discriminator
+#   p2-native   vs p0            = what the security-cost matrix actually
+#                                  reports for p2 (TLS + h2 + a different TLS
+#                                  implementation, all at once)
+#
+# Knobs: H6_VUS (default "10 50 100"), H6_DURATION, H6_WARMUP, H6_SCENARIOS.
+task_h6_tls_proto() {
+  need_base
+  local out=$TASKS_ROOT/h6-tls-proto
+  rm -rf "$out"; summary_open "$out" "H6 — B2 endgame v2: TLS, h1 and h2 on unclamped endpoints"
+
+  local vus_list=${H6_VUS:-"10 50 100"}
+  local dur=${H6_DURATION:-60s}
+  local warm=${H6_WARMUP:-10s}
+  local scen=${H6_SCENARIOS:-"jwks_fetch.js userinfo.js"}
+
+  # The settle gate bursts POST /api/v1/authz/check and requires >=400 ops/s or
+  # p50 < 150 ms. On a host where that endpoint is clamped at ~20 ops/s by the
+  # shared rate-limit write, the gate can NEVER pass: it burns its full
+  # BENCH_SETTLE_TIMEOUT_SECS (600 s) per stack and stamps settle_timeout, which
+  # H1.5 correctly teaches report.py to refuse — every cell of this task would
+  # be thrown away. It is disabled here and replaced by an explicit per-stack
+  # warm-up cell below. This is sound for THIS task specifically because none of
+  # its scenarios touch a clamped endpoint: jwks and userinfo have no
+  # RateLimitShared wrap, so there is no transient for the gate to gate on. Do
+  # not copy this into a task that measures authz or CC.
+  export BENCH_SETTLE=0
+  # Both nginx stacks get the same edge budget, so the h1/h2 comparison is not
+  # decided by nginx's CPU cap. 2 CPUs matches the server's cap.
+  export BENCH_EDGE_CPUS=${BENCH_EDGE_CPUS:-2}
+  local plain_port=${BENCH_EDGE_PLAIN_PORT:-18080}
+  export BENCH_EDGE_PLAIN_PORT=$plain_port
+
+  s "Vehicles: \`$scen\` at VUs \`$vus_list\`, ${dur} per cell (${warm} warm-up)."
+  s "Rate-limit-clamped endpoints (CC, authz, introspect, login) are deliberately"
+  s "NOT used — see the header comment in this script and"
+  s "\`claude_dev/postseed-transient-investigation.md\`."
+  s
+
+  # One k6 cell straight at a URL, bypassing profile env (used only for the
+  # cleartext-through-the-edge control, which no profile describes). Writes a
+  # k6 summary JSON in the same shape every other cell produces so k6_stat and
+  # h6_proto read it unchanged.
+  h6_plain_cell() { # $1=outdir $2=scenario $3=vus
+    local odir=$1 scenario=$2 vus=$3
+    mkdir -p "$odir"; assert_within_tasks_root "$odir"
+    ( cd "$BENCH_DIR/scenarios" \
+      && set -a && . "$BENCH_DIR/.seed/axiam.seed.env" && set +a \
+      && BENCH_TARGET=axiam BENCH_PROFILE=p0-plaintext \
+         BENCH_SCHEME=http BENCH_HOST=localhost BENCH_PORT="$plain_port" \
+         BENCH_VUS="$vus" BENCH_WARMUP="$warm" BENCH_DURATION="$dur" BENCH_COOLDOWN=2s \
+         BENCH_PROTO_ROOT="$BENCH_DIR/../proto" \
+         k6 run --quiet --summary-export "$odir/${scenario%.js}.k6.json" "$scenario" \
+    ) >/dev/null 2>&1 || true
+  }
+
+  h6_stack() { # $1=label $2=profile [$3=BENCH_NGINX_CONF]
+    local label=$1 profile=$2 nginx=${3:-}
+    if [ -n "$nginx" ]; then export BENCH_NGINX_CONF=$nginx; else unset BENCH_NGINX_CONF; fi
+    log "=== stack $label (profile=$profile nginx=${nginx:-none}) ==="
+    arm_cleanup axiam "$profile"
+    bench_up_seed axiam "$profile"
+    # Explicit warm-up cell (replaces the disabled settle gate): one short cell
+    # on the same endpoint so no measured cell is the first traffic after seed.
+    BENCH_VUS=20 BENCH_WARMUP=3s BENCH_DURATION=15s BENCH_COOLDOWN=2s \
+      cell axiam "$profile" jwks_fetch.js "$out/$label/warmup" >/dev/null 2>&1 || true
+    local sc v
+    for sc in $scen; do
+      for v in $vus_list; do
+        log "$label · ${sc%.js} · ${v} VUs"
+        BENCH_VUS=$v BENCH_WARMUP=$warm BENCH_DURATION=$dur BENCH_COOLDOWN=5s \
+          cell axiam "$profile" "$sc" "$out/$label/${sc%.js}-vu$v" >/dev/null 2>&1 || true
+      done
+    done
+    # Cleartext control through the SAME edge, only for the nginx stacks.
+    if [ -n "$nginx" ]; then
+      for v in $vus_list; do
+        log "$label · plain-edge control · ${v} VUs"
+        h6_plain_cell "$out/$label/plain-jwks-vu$v" jwks_fetch.js "$v"
+      done
+    fi
+    disarm_cleanup; bench_down axiam "$profile"
+    unset BENCH_NGINX_CONF
+  }
+
+  h6_stack p0            p0-plaintext
+  h6_stack p2-native     p2-tls13
+  h6_stack p2-nginx-h2   p2-tls13 tls13.conf
+  h6_stack p2-nginx-h1   p2-tls13 tls13-h1.conf
+
+  s "## Results"
+  s
+  python3 - "$out" "$vus_list" "$scen" >> "$SUMMARY" <<'PY'
+import glob, json, os, sys
+root, vus_list, scen = sys.argv[1], sys.argv[2].split(), sys.argv[3].split()
+PROTO = {10: "1.0", 11: "1.1", 20: "2.0", 30: "3"}
+
+def read(pattern):
+    f = sorted(glob.glob(pattern, recursive=True))
+    if not f:
+        return None
+    m = json.load(open(f[0]))["metrics"]
+    if "bench_ok" not in m:
+        return None
+    p = m.get("bench_http_proto")
+    if not p:
+        proto = "—"
+    elif p["min"] == p["max"]:
+        proto = PROTO.get(int(p["min"]), "?%d" % p["min"])
+    else:
+        proto = "mixed(%s,%s)" % (PROTO.get(int(p["min"]), "?"), PROTO.get(int(p["max"]), "?"))
+    return {
+        "thr": m["bench_ok"]["rate"],
+        "p50": m["bench_op_latency_ms"]["med"],
+        "p95": m["bench_op_latency_ms"]["p(95)"],
+        "err": m.get("bench_error_rate", {}).get("value", 0.0),
+        "failed": m.get("bench_failed", {}).get("count", 0),
+        "proto": proto,
+    }
+
+def cell(label, sc, v):
+    return read(os.path.join(root, label, "%s-vu%s" % (sc, v), "**", "*.k6.json"))
+
+def plain(label, v):
+    return read(os.path.join(root, label, "plain-jwks-vu%s" % v, "*.k6.json"))
+
+LABELS = [("p0", "direct :8090, no TLS"),
+          ("p2-native", "AXIAM rustls listener"),
+          ("p2-nginx-h2", "nginx edge, http2 on"),
+          ("p2-nginx-h1", "nginx edge, http2 off")]
+
+for sc in [s[:-3] for s in scen]:
+    print("### %s\n" % sc)
+    print("| cell | what | VUs | http | thr (ops/s) | p50 (ms) | p95 (ms) | err | failed ops | Δ thr vs p0 |")
+    print("|---|---|---:|:--:|---:|---:|---:|---:|---:|---:|")
+    for v in vus_list:
+        base = cell("p0", sc, v)
+        for label, what in LABELS:
+            c = cell(label, sc, v)
+            if not c:
+                print("| %s | %s | %s | — | — | — | — | — | — | cell missing |" % (label, what, v)); continue
+            d = "baseline" if label == "p0" else (
+                "%+.1f%%" % (100 * (c["thr"] - base["thr"]) / base["thr"]) if base and base["thr"] else "n/a")
+            print("| %s | %s | %s | %s | %.0f | %.1f | %.1f | %.2f%% | %d | %s |"
+                  % (label, what, v, c["proto"], c["thr"], c["p50"], c["p95"],
+                     100 * c["err"], c["failed"], d))
+        if sc == "jwks_fetch":
+            for label, _ in (("p2-nginx-h2", ""), ("p2-nginx-h1", "")):
+                c = plain(label, v)
+                if not c:
+                    continue
+                d = ("%+.1f%%" % (100 * (c["thr"] - base["thr"]) / base["thr"])
+                     if base and base["thr"] else "n/a")
+                print("| %s (plain edge) | same nginx, NO TLS | %s | %s | %.0f | %.1f | %.1f | %.2f%% | %d | %s |"
+                      % (label, v, c["proto"], c["thr"], c["p50"], c["p95"],
+                         100 * c["err"], c["failed"], d))
+    print()
+
+print("### One-variable decompositions (jwks_fetch)\n")
+print("| comparison | isolates | VUs | Δ throughput | Δ p50 (ms) |")
+print("|---|---|---:|---:|---:|")
+for v in vus_list:
+    p0 = cell("p0", "jwks_fetch", v)
+    ph2 = cell("p2-nginx-h2", "jwks_fetch", v)
+    ph1 = cell("p2-nginx-h1", "jwks_fetch", v)
+    pl = plain("p2-nginx-h1", v) or plain("p2-nginx-h2", v)
+    nat = cell("p2-native", "jwks_fetch", v)
+    def row(name, iso, a, b):
+        if not a or not b or not b["thr"]:
+            print("| %s | %s | %s | — | — |" % (name, iso, v)); return
+        print("| %s | %s | %s | %+.1f%% | %+.2f |"
+              % (name, iso, v, 100 * (a["thr"] - b["thr"]) / b["thr"], a["p50"] - b["p50"]))
+    row("nginx-plain vs p0", "the proxy hop", pl, p0)
+    row("nginx-tls-h1 vs nginx-plain", "TLS at the edge", ph1, pl)
+    row("nginx-tls-h2 vs nginx-tls-h1", "**h2 vs h1**", ph2, ph1)
+    row("p2-native vs p0", "what the matrix reports", nat, p0)
+PY
+  s
+  s "## How to read this"
+  s "- The \`http\` column is \`bench_http_proto\` (k6 \`res.proto\`), i.e. what the"
+  s "  connection ACTUALLY negotiated. If \`p2-nginx-h1\` does not read \`1.1\` and"
+  s "  \`p2-nginx-h2\` does not read \`2.0\`, the pair is void — fix the edge, do not"
+  s "  interpret the numbers."
+  s "- \`nginx-tls-h2 vs nginx-tls-h1\` is the ONLY row in which h1-vs-h2 is the"
+  s "  single variable. Everything else in the table bundles it with a proxy hop,"
+  s "  a TLS implementation change, or both."
+  s "- \`failed ops\` must be 0 for the h1 control to be usable as evidence at all."
   finish
 }
 
@@ -993,13 +1380,14 @@ Usage: ./run-improvement-tasks.sh <task>
   g1-timeline     G1    ~25m    When does the post-seed window end? (run first)
   g1-idle         G1    ~15m    Is it time-based or traffic-based?
   g1-isolate      G1    ~10m    Does it live in the server or the datastore?
-  g1-dbdirect     G1    ~5m     Is it visible with AXIAM out of the path?
+  g1-dbdirect     G1    ~14m    Is it visible with AXIAM out of the path? (H1: now includes a post-window baseline segment)
   g2-verify       G2    ~10m    Do settle gate + rotation + meta dump work live?
   g3-batch        G3    ~90m    Clean batch A/B: does batch beat singles?
   g4-refresh      G4    ~15m    Is the refresh cell a real rotation now?
   g5-cache-sweep  G5    ~60m    Does the cache 3x survive a realistic key space?
   g6-memory       G6    ~90m    Does jemalloc fix the post-burst retention?
-  g8-tls-h1       G8    ~25m    Is HTTP/2 the TLS token-issuance penalty?
+  g8-tls-h1       G8    ~25m    Is HTTP/2 the TLS token-issuance penalty? (SUPERSEDED by h6-tls-proto)
+  h6-tls-proto    H6    ~45m    TLS/h1/h2 on UNCLAMPED endpoints, with real protocol capture
   g9-rlprod       G9    ~10m    Are rate-limited cells' metrics coherent?
   g10-sdk         G10   ~30m    Do the SDK benches emit valid records?
   pack            —     ~1m     Build the shareable archive + list summaries
@@ -1009,9 +1397,13 @@ Estimates include bring-up + seed. g1-timeline is ~55s per iteration, so
 G1_ITERS=8 gives a ~12m first look; the default 20 iterations is ~25m.
 Ctrl-C at any point tears the bench stack down before exiting.
 
-Knobs: G1_ITERS, G1_CELL_SECS, G1_VUS, G1_IDLE_MIN, G3_REPEAT, G5_KEYSPACES,
-G10_LANGS. Order that matters: g1-* before g3/g8 (they need the settle gate to
-be trustworthy), g2-verify after the G2 code lands.
+Knobs: G1_ITERS, G1_CELL_SECS, G1_VUS, G1_IDLE_MIN, G1_ISOLATE_READY_TIMEOUT,
+G1_ISOLATE_FULL_WARMUP, G1_ISOLATE_FULL_DURATION, G1_DBDIRECT_ITERS,
+G1_DBDIRECT_INTERVAL_SECS, G1_DBDIRECT_BASELINE_WAIT_SECS,
+G1_DBDIRECT_BASELINE_ITERS, G3_REPEAT, G5_KEYSPACES, G10_LANGS,
+H6_VUS, H6_DURATION, H6_WARMUP, H6_SCENARIOS. Order that
+matters: g1-* before g3/g8 (they need the settle gate to be trustworthy),
+g2-verify after the G2/H1 code lands.
 EOF
 }
 
@@ -1028,6 +1420,7 @@ case "$TASK" in
   g5-cache-sweep) task_g5_cache_sweep ;;
   g6-memory)      shift; task_g6_memory "$@" ;;
   g8-tls-h1)      task_g8_tls_h1 ;;
+  h6-tls-proto)   task_h6_tls_proto ;;
   g9-rlprod)      task_g9_rlprod ;;
   g10-sdk)        task_g10_sdk ;;
   pack)           task_pack ;;

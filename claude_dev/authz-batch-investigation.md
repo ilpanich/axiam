@@ -1,9 +1,12 @@
 # D10 — Authz batch serialization investigation
 
-**Status:** root-cause narrowed by static analysis + run-2 evidence; fix
-implemented as a config-selectable batch strategy (default flipped to
-`concurrent`). Final wall-clock confirmation is a **laptop step** (this sandbox
-has no k6 / live stack). Companion to `benchmarks/PRIVATE_BENCH_ANALYSIS.md` §4.2.
+**Status: CLOSED (H3).** Root-cause narrowed by static analysis + run-2
+evidence; fix implemented as a config-selectable batch strategy. The initial
+default (`concurrent`) was set from **contaminated** run-2 data (see the G3
+verdict below); the G3 re-measurement on the settled protocol decided
+`coalesced` as the shipped default — see "G3 verdict — CLOSED (H3)" at the
+end of this document for the closing numbers. Companion to
+`benchmarks/PRIVATE_BENCH_ANALYSIS.md` §4.2.
 
 ## The symptom (run-2, capped p0, unchanged under caps/TLS)
 
@@ -123,3 +126,55 @@ gate) is verified on the run-3 laptop matrix.
    the ~1-core ceiling (pool dispatch vs lock vs connection affinity). If it
    turns out cheap to remove, a *coalesced-and-parallel* path could beat both;
    until measured, `concurrent` is the safe, evidence-backed default.
+
+## G3 verdict — CLOSED (H3): `coalesced` ships as the default
+
+**Status: DECIDED.** The "expected laptop result" above was confirmed, and
+then some — with a twist. The run-2 numbers that motivated defaulting to
+`concurrent` were themselves measured **inside the post-seed transient**
+documented in `claude_dev/postseed-transient-investigation.md` /
+`improvement-after-g-benchmark.md` §1 (G2): a serial 1 rps settle canary
+passed ~34 s into a ~6-minute post-seed clamp that is only visible under
+concurrency, so every "first cell(s) after seed" in the G run — including
+the run-2 coalesced batch cells that looked serialized on the DB — was
+contaminated. The G3 task re-ran the A/B on the **settled** protocol
+(median-of-3, runs 2–3, gated by a warm-up cell) and both strategies came out
+beating single checks, but `coalesced` won decisively.
+
+### G3 numbers (settled cells, runs 2–3)
+
+| strategy | protocol | thr (batch ops/s) | checks/s (×5/batch) | vs singles (748/s REST) | p95 | gate (≤2 s) |
+|---|---|---|---|---|---|---|
+| **coalesced** | REST | 744 | **3 721** | **4.98×** | — | ✅ pass |
+| **coalesced** | gRPC | 866–872 | **≈4 330** | — | **74 ms** | ✅ pass |
+| concurrent | REST | 200 | 1 000 | 1.37× | — | ✅ pass |
+| concurrent | gRPC | 216 | ≈1 080 | — | 282 ms | ✅ pass |
+
+Both strategies clear the `authz_batch_grpc` 2 s p95 gate and both beat
+repeated single checks — the G3 acceptance criterion was met by both. But
+`coalesced` beats `concurrent` by **3.7×** in checks/s and gives a **3.8×**
+tighter gRPC p95 (74 ms vs 282 ms), which is the decisive signal: once the
+transient is out of the measurement, minimizing DB round-trips (3 for the
+benchmark's 5-item shape) wins over recovering per-item parallelism through
+more round-trips.
+
+### Verdict
+
+**`coalesced` ships as the default** (`crates/axiam-authz/src/config.rs`,
+H3). `concurrent` remains fully selectable via
+`AXIAM__AUTHZ__BATCH_STRATEGY=concurrent` for A/B or as a fallback — both
+strategies are byte-identical in decisions and result order, so switching
+carries zero authorization-semantics risk, exactly as designed in the D10
+fix above. Doc locations updated to agree: `config.rs` field/enum docs,
+`engine.rs` doc comments (`check_access_batch`, `evaluate_concurrent`,
+`evaluate_coalesced_cached`), the config unit test
+(`default_batch_strategy_is_coalesced`), and
+`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §6's `AXIAM__AUTHZ__BATCH_STRATEGY`
+row.
+
+This investigation is now **closed**. The remaining item from "What the
+evidence points to" above — positively identifying *why* the coalesced path
+looked pinned at ~1 DB core in run-2 — is moot for the default decision (G3
+proved that reading was a transient artifact, not a real coalesced-path
+ceiling) but is retained as follow-up #2 below out of general interest, not
+because it blocks anything.

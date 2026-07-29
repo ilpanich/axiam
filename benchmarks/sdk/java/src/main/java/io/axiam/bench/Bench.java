@@ -17,6 +17,9 @@ package io.axiam.bench;
 
 import io.axiam.sdk.AxiamClient;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -43,6 +46,26 @@ public final class Bench {
     private static final String RESOURCE_ID = env("BENCH_RESOURCE_ID", "bench-resource");
     private static final String TARGET = env("BENCH_TARGET", "axiam");
     private static final String PROFILE = env("BENCH_PROFILE", "p0-plaintext");
+    // H8 fix: HARNESS-SPEC.md documents BENCH_CA_CERT (a PEM file path) as
+    // an input every SDK bench should honor under the TLS profiles (p2),
+    // but this bench never read it — every p2 run failed at the first
+    // HTTPS call against the profile's throwaway CA. Empty under
+    // p0/plaintext (BENCH_CA_CERT unset).
+    private static final String CA_CERT_PATH = env("BENCH_CA_CERT", "");
+
+    /** {@link AxiamClient.Builder} pre-seeded with org context and — under a
+     * TLS profile — the trusted custom CA. Reads BENCH_CA_CERT lazily (not
+     * at class-init time) so an unreadable path surfaces through main()'s
+     * existing try/catch as a normal `status:"error"` record instead of an
+     * uncaught ExceptionInInitializerError crashing the JVM before any
+     * HARNESS-SPEC-conformant output is printed. */
+    private static AxiamClient.Builder newClientBuilder() throws IOException {
+        AxiamClient.Builder b = AxiamClient.builder(BASE_URL, TENANT_SLUG).orgSlug(ORG_SLUG);
+        if (!CA_CERT_PATH.isEmpty()) {
+            b = b.customCa(Files.readAllBytes(Path.of(CA_CERT_PATH)));
+        }
+        return b;
+    }
 
     private static final String[] OP_KEYS = {"login", "refresh", "check_access", "batch_check"};
 
@@ -67,7 +90,7 @@ public final class Bench {
         AxiamClient client;
         List<AxiamClient.AccessCheck> checks;
         try {
-            client = AxiamClient.builder(BASE_URL, TENANT_SLUG).orgSlug(ORG_SLUG).build();
+            client = newClientBuilder().build();
             client.login(USERNAME, PASSWORD);
             // Batch of 3 checks, all against the SAME resource id (no suffix).
             checks = new ArrayList<>();
@@ -86,7 +109,7 @@ public final class Bench {
         final List<AxiamClient.AccessCheck> sharedChecks = checks;
 
         Op login = () -> {
-            try (AxiamClient fresh = AxiamClient.builder(BASE_URL, TENANT_SLUG).orgSlug(ORG_SLUG).build()) {
+            try (AxiamClient fresh = newClientBuilder().build()) {
                 fresh.login(USERNAME, PASSWORD);
             }
         };

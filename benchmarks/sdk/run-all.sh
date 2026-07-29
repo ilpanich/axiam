@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # run-all.sh — run each SDK's bench (or just the ones named) and collect the
-# JSON records under results/sdk/<sdk>.json.
+# JSON records under results/sdk/<profile>/<sdk>.json.
+#
+# H8/E1.3: profile-scoped (not just results/sdk/<sdk>.json) so a p0 run and a
+# p2 run can coexist on disk and both show up in the same collect.py/
+# report.py table — a flat single-file-per-language layout meant "run at p0
+# AND p2" (per the E1.3 acceptance) silently clobbered the earlier profile's
+# record with the later one. collect.py's loader walks both this layout and
+# the old flat one for backward compatibility with any results/ tree from
+# before this change.
 #
 # Usage: run-all.sh [sdk1 sdk2 ...]   (default: all languages with a run.sh)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-RESULTS="${BENCH_RESULTS_DIR:-$HERE/../results}/sdk"
+RESULTS="${BENCH_RESULTS_DIR:-$HERE/../results}/sdk/${BENCH_PROFILE:-p0-plaintext}"
 mkdir -p "$RESULTS"
 
 # Source the seed env so SDK benches hit a provisioned tenant/client. Lives
@@ -19,6 +27,15 @@ if [ -f "$SEED_ENV" ]; then
 elif [ -f "$LEGACY_SEED_ENV" ]; then
   source "$LEGACY_SEED_ENV"
 fi
+
+# H8: fail fast (naming the exact missing var) rather than let a language
+# bench discover an empty/placeholder id later with a confusing error.
+for var in BENCH_RESOURCE_ID BENCH_SUBJECT_ID BENCH_TENANT_SLUG BENCH_CLIENT_ID BENCH_CLIENT_SECRET; do
+  if [ -z "${!var:-}" ]; then
+    echo "[sdk] FATAL: $var is empty after sourcing $SEED_ENV — run 'just target=${BENCH_TARGET:-axiam} bench-seed' first (H8: seed env must reach the SDK bench)." >&2
+    exit 1
+  fi
+done
 
 if [ "$#" -gt 0 ]; then
   SDKS=("$@")

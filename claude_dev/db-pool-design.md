@@ -472,3 +472,83 @@ timeout, per-handle re-signin/reconnect closing CQ-B48, and a construction-only
 repository seam (~53 one-line composition edits, repo query bodies untouched,
 `pool_size=1` provably identical to today). Correctness/robustness win is
 certain; the throughput win is F3's to measure, not this doc's to claim.
+
+---
+
+## 11. H9 verdict — pool-size default decision (2026-07-28)
+
+**Decided: default stays `pool_size = 1`. The question is closed with a
+negative/unconfirmable result, not left open.**
+
+**The pre-agreed criterion (Phase H plan §4):** one settled confirm cell
+reproduces ≥ +5% on client-credentials with nothing regressed → ship
+`pool_size = 4` as default; otherwise keep `1` and close with the negative
+result.
+
+**Why the confirm cell cannot be obtained on this host.** H2's
+investigation (`claude_dev/postseed-transient-investigation.md`, commit
+35173cc) found that on this box `POST /oauth2/token` — the exact CC
+endpoint the confirm cell needs — is wrapped by `RateLimitShared`, which
+performs one synchronous, uncached SurrealDB write in front of the handler.
+That write pins CC at **16–21 ops/s at any concurrency from 1 to 40 VUs**
+(§2 of that note), independent of seeding, uptime, storage backend, or
+`pool_size`. There is no way to run a "settled" CC cell here: the ceiling is
+architectural, not a warm-up artifact, so the criterion's precondition
+(a settled cell to compare against) is unsatisfiable on this hardware. This
+is not a deferral — H2 demonstrated the clamp is permanent and reproducible,
+not a transient that a retry or a longer soak would clear.
+
+**Why the G run's +7% now reads as noise, not signal.** Two independent
+lines of evidence say `pool_size` cannot be causing a real throughput
+change here:
+
+1. **Shared-router mechanism (D6, restated in §5.2 of the H2 note).** The
+   pinned `surrealdb` 3.2.x HTTP engine's `run_router` and its `reqwest`
+   client are behind one `Arc<inner>`; a "pooled handle" in the *current*
+   design is still N independently-authenticated `Surreal<Client>`
+   connections, but H2 measured directly: **`AXIAM__DB__POOL_SIZE=8` (up
+   from 1) changed authz throughput by 0 ops/s at both 1 VU and 20 VU**
+   (§5 table). If more independent handles bought more DB concurrency, this
+   is exactly where it would show up — a CPU-pinned, single-core-bound
+   datastore under concurrent load — and it did not.
+2. **The G box's CC cells were never proven settled.** Per §1 of the H
+   plan and G2's own finding, the settle gate as it existed during the G
+   run could not detect the post-seed clamp (serial 1 rps canary vs a
+   clamp that only appears under concurrency); "every 'first cell(s) after
+   seed' in the G run is still corrupted." The G run's CC comparison
+   (1955 pool-4 vs 1823 pool-1) was never confirmed to run outside that
+   window. A same-session, run-3-leftover, un-repeated +7% on a metric this
+   noisy, with a mechanism (§5.2) that says the knob shouldn't matter, is
+   the textbook shape of noise rather than a real effect.
+
+**Conclusion.**
+
+- **Default stays `pool_size = 1`.** Verified in code
+  (`crates/axiam-db/src/connection.rs::DbConfig::default()`): `pool_size: 1`,
+  `pool_max_in_flight: 0` (disabled/unbounded cap). This already matches the
+  decision — **no code change was needed for H9.** `pool_size = 1` remains
+  the safe-rollout, byte-for-byte-identical-to-today default per §4 of
+  this doc.
+- **The in-flight cap stays as today** (`pool_max_in_flight = 0`, disabled)
+  — H9 does not touch it; nothing in the H2 evidence bears on the semaphore
+  cap's default, only on `pool_size`.
+- **`pool_size > 1` remains a config option**, documented as a
+  correctness/robustness feature (independent re-signin per handle, §5;
+  per-handle poisoned-handle eviction, §8) — not a throughput lever. Anyone
+  who sets it gets CQ-B48's per-handle session renewal regardless of
+  whether it moves throughput on their hardware.
+- The G run's "+7% on CC only" line in
+  `improvement-after-g-benchmark.md` §1 and the sizing guidance in
+  `website/src/docs.ts` are superseded by this verdict; both are updated to
+  say `pool_size` tuning has no measured benefit rather than repeating the
+  unconfirmed +7%.
+
+**What would reopen this question:** a server-class box (not this
+CPU-quota-limited sandbox/laptop-class environment) **and** the H2 §7
+rate-limit fix landed (moving the shared rate-limit write off the
+synchronous critical path, or an `AXIAM__RATE_LIMIT__SHARED=off` escape
+hatch for single-replica deployments) — only then can a CC cell settle
+long enough, at high enough throughput, for `pool_size`'s effect (if any)
+to be distinguishable from noise. Absent both, re-running the same
+comparison on this hardware would just reproduce the same unconfirmable
+result.

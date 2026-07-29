@@ -17,6 +17,9 @@
       }
     }
   ],
+  "minimum-stability": "dev",
+  "prefer-stable": true,
+  "_minimum_stability_comment": "H8: a path repository has no tagged release, so composer resolves it as dev-<branch> (e.g. dev-claude/g-benchmark-improvements-n5mjmj) — the default 'stable' minimum-stability rejects that and composer install fails with 'does not match your minimum-stability'. prefer-stable keeps this from pulling in unrelated dev packages for any other dependency that does have stable releases.",
   "config": {
     "sort-packages": true
   }

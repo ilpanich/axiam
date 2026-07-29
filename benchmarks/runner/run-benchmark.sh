@@ -22,6 +22,19 @@ BENCH="$(cd "$HERE/.." && pwd)"
 RESULTS="${BENCH_RESULTS_DIR:-$BENCH/results}"
 SEED_DIR="${BENCH_SEED_DIR:-$BENCH/.seed}"
 
+# H6: absolutize RESULTS (relative to the CALLER's cwd, which is what a relative
+# BENCH_RESULTS_DIR means to whoever set it). k6 is invoked from a different
+# directory below, so a relative path made it write .res.csv/.host.csv/.meta.json
+# to the right place while `--summary-export` silently failed with "no such file
+# or directory" — losing the ONE artifact report.py actually reads, and leaving a
+# cell that looks present but has no k6 summary. Fail-fast on an
+# unresolvable path rather than repeating that.
+case "$RESULTS" in
+  /*) : ;;
+  *)  mkdir -p "$RESULTS" && RESULTS="$(cd "$RESULTS" && pwd)" \
+        || { echo "[run] cannot resolve BENCH_RESULTS_DIR='$RESULTS'" >&2; exit 1; } ;;
+esac
+
 TARGET=axiam
 PROFILE=p0-plaintext
 SCENARIO=all
@@ -237,126 +250,182 @@ CELL_PAUSE="${BENCH_CELL_PAUSE:-60}"
 # the plain ASCII strings embedded here: image names, kernel/cpu strings).
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-# --- G2 item 1: post-seed settle gate ---------------------------------------
+# --- H1: post-seed settle gate v2 (concurrent burst probe) ------------------
 # Run 3 found a ~5-7 min window right after `bench-seed` where the AXIAM stack
 # serves everything at ~45 req/s with SurrealDB pinned at ~1 core (~22 ms
 # serialized unit), then spontaneously recovers — see
 # claude_dev/postseed-transient-investigation.md and
 # PRIVATE_BENCH_ANALYSIS.md §1. Because the matrix always ran scenarios in the
 # same order, this window silently corrupted every "first cell after seed"
-# ever measured. Instead of trusting a fixed clock delay, this gate polls a
-# cheap, target-appropriate, already-seeded canary once per second and blocks
-# the FIRST cell of a `bench-run` invocation until the target looks settled
-# (N consecutive stable seconds) or a hard timeout is hit.
-BENCH_SETTLE="${BENCH_SETTLE:-1}"                            # 0 to skip entirely (quick manual runs)
-BENCH_SETTLE_STABLE_SECS="${BENCH_SETTLE_STABLE_SECS:-30}"    # consecutive stable seconds required
-BENCH_SETTLE_MAX_MS="${BENCH_SETTLE_MAX_MS:-100}"             # canary latency threshold
-BENCH_SETTLE_TIMEOUT_SECS="${BENCH_SETTLE_TIMEOUT_SECS:-600}" # hard cap, then warn + proceed
-SETTLE_WAIT_SECS=0     # recorded in every cell's meta.json this run produces
-SETTLE_TIMEOUT_HIT=0   # 1 -> meta.json's settle_timeout: true
+# ever measured.
+#
+# G2's original gate (`canary_probe()`/`settle_gate()`, superseded below) sent
+# ONE request per second and required BENCH_SETTLE_STABLE_SECS consecutive
+# ticks under BENCH_SETTLE_MAX_MS. Measured result: it passed in ~34s, deep
+# inside the ~6-minute clamp. The reason is structural, not a threshold bug:
+# the clamp is a CONCURRENCY ceiling (~44 ops/s observed in-window vs ~730
+# ops/s settled), not a per-request latency problem — the ~22ms serialized
+# unit IS fast at 1 request/second whether the server can sustain 44 ops/s or
+# 730 ops/s. A serial canary can never see the difference; only asking for
+# more concurrent throughput than the clamp allows can. H1 replaces it with a
+# short CONCURRENT burst probe (curl-parallel, kept out of the gate's own k6
+# usage so the gate has no k6-scenario dependency): BENCH_SETTLE_BURST_VUS
+# concurrent closed-loop workers hammer the same clamp-sensitive endpoint
+# (AXIAM: POST /api/v1/authz/check, authenticated as the seeded bench user)
+# for BENCH_SETTLE_BURST_SECS seconds and the gate requires either
+# BENCH_SETTLE_PROBE_THR ops/s or better, OR p50 latency under
+# BENCH_SETTLE_PROBE_P50_MS ms, UNDER THAT CONCURRENCY. In-window measured
+# ~44 ops/s, settled ~730-750 ops/s — the 400 ops/s default threshold sits far
+# from both, so there is no realistic false pass/fail at the boundary. See
+# "Post-seed settle gate v2" in docs/methodology.md for the full writeup.
+BENCH_SETTLE="${BENCH_SETTLE:-1}"                                # 0 to skip entirely (quick manual runs)
+BENCH_SETTLE_BURST_VUS="${BENCH_SETTLE_BURST_VUS:-20}"            # concurrent probe workers
+BENCH_SETTLE_BURST_SECS="${BENCH_SETTLE_BURST_SECS:-15}"          # seconds each probe attempt runs
+BENCH_SETTLE_PROBE_THR="${BENCH_SETTLE_PROBE_THR:-400}"           # ops/s pass threshold (OR'd with p50 below)
+BENCH_SETTLE_PROBE_P50_MS="${BENCH_SETTLE_PROBE_P50_MS:-150}"     # p50-under-load pass threshold (ms)
+BENCH_SETTLE_RETRY_SECS="${BENCH_SETTLE_RETRY_SECS:-30}"          # gap between failed probe attempts
+BENCH_SETTLE_TIMEOUT_SECS="${BENCH_SETTLE_TIMEOUT_SECS:-600}"     # hard cap, then warn + proceed
+BENCH_SETTLE_DRAIN_SECS="${BENCH_SETTLE_DRAIN_SECS:-5}"           # post-burst drain pause (see settle_gate() tail)
+# Legacy G2 tunables — no longer consulted by the v2 burst probe (kept so a
+# script exporting them doesn't fail; BENCH_SETTLE_STABLE_SECS/MAX_MS were the
+# serial-canary knobs this gate replaces).
+BENCH_SETTLE_STABLE_SECS="${BENCH_SETTLE_STABLE_SECS:-30}"
+BENCH_SETTLE_MAX_MS="${BENCH_SETTLE_MAX_MS:-100}"
+SETTLE_WAIT_SECS=0        # recorded in every cell's meta.json this run produces
+SETTLE_TIMEOUT_HIT=0      # 1 -> meta.json's settle_timeout: true
+SETTLE_PROBE_THR_USED="$BENCH_SETTLE_PROBE_THR"  # recorded in meta.json as settle_probe_thr
 
 _CANARY_JAR=""
 
-# One request against a cheap, target-appropriate, already-seeded endpoint.
-# Echoes the observed latency in whole milliseconds and returns 0 on any
-# completed HTTP response (even non-2xx — that still proves the listener is up
-# and timed); returns 1 only on a hard failure (connection refused/reset,
-# curl error) so a target that lacks/can't reach the canary endpoint never
-# fails the run — the caller just treats that tick as "no signal".
-canary_probe() {
-  local resp code time_s
-  case "$TARGET" in
-    axiam)
-      # authz-check-ish: the SAME endpoint (POST /api/v1/authz/check) whose
-      # post-seed clamp G1 documented, authenticated as the seeded bench user.
-      # Log in once (lazily) and reuse the cookie jar for every tick — a fresh
-      # login every second would itself be an expensive, different signal.
-      # Falls back to the plaintext /health liveness probe when the seed
-      # didn't provide enough to authenticate (e.g. BENCH_SKIP_OAUTH2-style
-      # partial seed) — still a real "is the listener answering" signal.
-      if [ -z "$_CANARY_JAR" ] || [ ! -s "$_CANARY_JAR" ]; then
-        _CANARY_JAR="$(mktemp)"
-        if [ -n "${BENCH_USERNAME:-}" ] && [ -n "${BENCH_PASSWORD:-}" ] && [ -n "${BENCH_ORG_SLUG:-}" ]; then
-          curl -sSk --max-time 5 -c "$_CANARY_JAR" -o /dev/null -X POST "$BASE/api/v1/auth/login" \
-            -H "Content-Type: application/json" \
-            -d "{\"org_slug\":\"${BENCH_ORG_SLUG}\",\"tenant_slug\":\"${BENCH_TENANT_SLUG:-default}\",\"username_or_email\":\"${BENCH_USERNAME}\",\"password\":\"${BENCH_PASSWORD}\"}" \
-            2>/dev/null || true
-        fi
-      fi
-      if [ -s "$_CANARY_JAR" ] && [ -n "${BENCH_RESOURCE_ID:-}" ] \
-         && awk -F'\t' '$6=="axiam_csrf"{f=1} END{exit !f}' "$_CANARY_JAR" 2>/dev/null; then
-        local csrf; csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$_CANARY_JAR")"
-        resp="$(curl -sSk --max-time 5 -b "$_CANARY_JAR" -o /dev/null -w '%{http_code} %{time_total}' \
-          -X POST "$BASE/api/v1/authz/check" -H "Content-Type: application/json" \
-          -H "X-CSRF-Token: $csrf" -d "{\"action\":\"read\",\"resource_id\":\"${BENCH_RESOURCE_ID}\"}" 2>/dev/null)" || return 1
-      else
-        resp="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code} %{time_total}' "$BASE/health" 2>/dev/null)" || return 1
-      fi
-      ;;
-    keycloak)
-      # jwks — cheap, unauthenticated, needs only the seeded realm name.
-      resp="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code} %{time_total}' \
-        "$BASE/realms/${BENCH_REALM:-bench}/protocol/openid-connect/certs" 2>/dev/null)" || return 1
-      ;;
-    zitadel)
-      # jwks — cheap, unauthenticated, no seed dependency at all.
-      resp="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code} %{time_total}' \
-        "$BASE/oauth/v2/keys" 2>/dev/null)" || return 1
-      ;;
-    *)
-      resp="$(curl -sSk --max-time 5 -o /dev/null -w '%{http_code} %{time_total}' "$BASE/health" 2>/dev/null)" || return 1
-      ;;
-  esac
-  [ -n "$resp" ] || return 1
-  code="${resp%% *}"; time_s="${resp#* }"
-  [ "$code" != "000" ] || return 1  # curl couldn't even complete the request
-  awk -v t="$time_s" 'BEGIN{printf "%.0f", t*1000}'
+# Lazily logs in once (as the seeded bench user) and reuses the cookie jar +
+# CSRF token for every probe tick thereafter — a fresh login per burst would
+# itself be an expensive, different signal from the endpoint under test.
+_ensure_axiam_session() {
+  [ -s "$_CANARY_JAR" ] && return 0
+  _CANARY_JAR="$(mktemp)"
+  if [ -n "${BENCH_USERNAME:-}" ] && [ -n "${BENCH_PASSWORD:-}" ] && [ -n "${BENCH_ORG_SLUG:-}" ]; then
+    curl -sSk --max-time 5 -c "$_CANARY_JAR" -o /dev/null -X POST "$BASE/api/v1/auth/login" \
+      -H "Content-Type: application/json" \
+      -d "{\"org_slug\":\"${BENCH_ORG_SLUG}\",\"tenant_slug\":\"${BENCH_TENANT_SLUG:-default}\",\"username_or_email\":\"${BENCH_USERNAME}\",\"password\":\"${BENCH_PASSWORD}\"}" \
+      2>/dev/null || true
+  fi
 }
 
-# Blocks until BENCH_SETTLE_STABLE_SECS consecutive canary ticks are all under
-# BENCH_SETTLE_MAX_MS, or BENCH_SETTLE_TIMEOUT_SECS elapses (then warns and
-# proceeds anyway, setting SETTLE_TIMEOUT_HIT=1). Sets SETTLE_WAIT_SECS to the
-# wall-clock seconds actually waited either way. A no-signal tick (canary
-# unreachable / target lacks the endpoint) resets the stability counter but
-# never aborts the run.
+# Runs for up to $1 seconds hammering the clamp-sensitive endpoint as fast as
+# it can (closed-loop, no think time — this is deliberately a concurrency
+# probe, not a steady-rate one) and appends one "<http_code>\t<time_total_s>"
+# line per completed request to file $2. Never errors the caller: a
+# connection failure just yields fewer/no lines, which fails the threshold
+# check in burst_probe() below rather than aborting the gate.
+_burst_worker() {
+  local secs="$1" outfile="$2" deadline
+  deadline=$(( $(date +%s) + secs ))
+  if [ "$TARGET" = "axiam" ] && [ -s "$_CANARY_JAR" ] && [ -n "${BENCH_RESOURCE_ID:-}" ] \
+     && awk -F'\t' '$6=="axiam_csrf"{f=1} END{exit !f}' "$_CANARY_JAR" 2>/dev/null; then
+    local csrf; csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$_CANARY_JAR")"
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      curl -sSk --max-time 5 -b "$_CANARY_JAR" -o /dev/null -w '%{http_code}\t%{time_total}\n' \
+        -X POST "$BASE/api/v1/authz/check" -H "Content-Type: application/json" \
+        -H "X-CSRF-Token: $csrf" -d "{\"action\":\"read\",\"resource_id\":\"${BENCH_RESOURCE_ID}\"}" \
+        2>/dev/null >> "$outfile"
+    done
+    return 0
+  fi
+  # Fallback (no seeded authz session on axiam, or a non-axiam target): burst
+  # the same cheap target-appropriate endpoint the old canary used. Still a
+  # real concurrency signal even when the clamp-specific endpoint is unusable.
+  local url="$BASE/health"
+  case "$TARGET" in
+    keycloak) url="$BASE/realms/${BENCH_REALM:-bench}/protocol/openid-connect/certs" ;;
+    zitadel)  url="$BASE/oauth/v2/keys" ;;
+  esac
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    curl -sSk --max-time 5 -o /dev/null -w '%{http_code}\t%{time_total}\n' "$url" 2>/dev/null >> "$outfile"
+  done
+}
+
+# Fires BENCH_SETTLE_BURST_VUS concurrent workers for BENCH_SETTLE_BURST_SECS
+# seconds and echoes "<ops_per_sec> <p50_ms> <n_ok>". Always returns 0 (a
+# probe that collects zero samples reports "0 999999 0", which simply fails
+# the caller's threshold check rather than erroring the gate).
+burst_probe() {
+  [ "$TARGET" = "axiam" ] && _ensure_axiam_session
+  local tmpdir; tmpdir="$(mktemp -d)"
+  local vus="$BENCH_SETTLE_BURST_VUS" secs="$BENCH_SETTLE_BURST_SECS"
+  local pids=() i t_start t_end elapsed
+  t_start=$(date +%s.%N)
+  for ((i = 0; i < vus; i++)); do
+    _burst_worker "$secs" "$tmpdir/w$i.log" &
+    pids+=($!)
+  done
+  for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  t_end=$(date +%s.%N)
+  elapsed="$(awk -v a="$t_start" -v b="$t_end" 'BEGIN{d=b-a; if(d<=0)d=0.001; printf "%.3f", d}')"
+
+  cat "$tmpdir"/w*.log 2>/dev/null > "$tmpdir/all.log" || : > "$tmpdir/all.log"
+  local n_ok ops_per_sec p50_ms
+  n_ok="$(awk -F'\t' '$1!="000" && $1!="" {c++} END{print c+0}' "$tmpdir/all.log")"
+  ops_per_sec="$(awk -v n="$n_ok" -v e="$elapsed" 'BEGIN{printf "%.1f", (e>0)?n/e:0}')"
+  p50_ms="$(awk -F'\t' '$1!="000" && $1!="" {print $2*1000}' "$tmpdir/all.log" \
+            | sort -n | awk '{a[NR]=$1} END{if(NR==0){print 999999}else{print a[int((NR+1)/2)]}}')"
+  rm -rf "$tmpdir"
+  echo "$ops_per_sec $p50_ms $n_ok"
+}
+
+# Repeats burst_probe() every BENCH_SETTLE_RETRY_SECS until it clears
+# BENCH_SETTLE_PROBE_THR ops/s OR BENCH_SETTLE_PROBE_P50_MS p50 (under
+# BENCH_SETTLE_BURST_VUS concurrency), or BENCH_SETTLE_TIMEOUT_SECS elapses
+# (then warns and proceeds anyway, setting SETTLE_TIMEOUT_HIT=1). Sets
+# SETTLE_WAIT_SECS to the wall-clock seconds actually waited either way.
 settle_gate() {
   if [ "$BENCH_SETTLE" = "0" ]; then
     echo "[run] BENCH_SETTLE=0 — skipping post-seed settle gate"
     return 0
   fi
-  echo "[run] post-seed settle gate: waiting for ${BENCH_SETTLE_STABLE_SECS}s of consecutive canary latency < ${BENCH_SETTLE_MAX_MS}ms (hard timeout ${BENCH_SETTLE_TIMEOUT_SECS}s)"
-  echo "      — see claude_dev/postseed-transient-investigation.md / PRIVATE_BENCH_ANALYSIS.md §1 (post-seed serialized-DB transient). Set BENCH_SETTLE=0 to skip."
-  local start_ts now_ts stable_count=0 lat
+  echo "[run] post-seed settle gate v2: concurrent burst probe (${BENCH_SETTLE_BURST_VUS} workers x ${BENCH_SETTLE_BURST_SECS}s), needs >= ${BENCH_SETTLE_PROBE_THR} ops/s OR p50 < ${BENCH_SETTLE_PROBE_P50_MS}ms under that concurrency; retry every ${BENCH_SETTLE_RETRY_SECS}s; hard timeout ${BENCH_SETTLE_TIMEOUT_SECS}s"
+  echo "      — a serial 1 rps canary cannot see this: the clamp is a CONCURRENCY ceiling (~44 ops/s in-window vs ~730-750 ops/s settled), not per-request latency (the ~22ms serialized unit is 'fast' at 1 rps either way). See 'Post-seed settle gate v2' in docs/methodology.md and PRIVATE_BENCH_ANALYSIS.md §1. Set BENCH_SETTLE=0 to skip."
+  local start_ts now_ts result ops p50 nok attempt=0
   start_ts=$(date +%s)
   while :; do
-    # Sleep BEFORE each probe (including the first) so N consecutive stable
-    # ticks always corresponds to N full wall-clock seconds of stability —
-    # not N-1 (a probe taken at t=0 before any sleep would otherwise let
-    # BENCH_SETTLE_STABLE_SECS=30 finish in 29s).
-    sleep 1
+    attempt=$((attempt + 1))
+    result="$(burst_probe)"
+    ops="$(awk '{print $1}' <<<"$result")"
+    p50="$(awk '{print $2}' <<<"$result")"
+    nok="$(awk '{print $3}' <<<"$result")"
     now_ts=$(date +%s)
     SETTLE_WAIT_SECS=$(( now_ts - start_ts ))
+    echo "[run] settle probe #$attempt: ${ops} ops/s, p50 ${p50}ms, n=${nok} samples (elapsed ${SETTLE_WAIT_SECS}s)"
+    if awk -v o="$ops" -v t="$BENCH_SETTLE_PROBE_THR" 'BEGIN{exit !(o>=t)}' \
+       || awk -v p="$p50" -v m="$BENCH_SETTLE_PROBE_P50_MS" 'BEGIN{exit !(p<m)}'; then
+      echo "[run] settle gate: PASSED (${ops} ops/s / p50 ${p50}ms) — proceeding after ${SETTLE_WAIT_SECS}s"
+      break
+    fi
     if [ "$SETTLE_WAIT_SECS" -ge "$BENCH_SETTLE_TIMEOUT_SECS" ]; then
       SETTLE_TIMEOUT_HIT=1
-      echo "[run] WARN: settle gate hit its ${BENCH_SETTLE_TIMEOUT_SECS}s timeout without ${BENCH_SETTLE_STABLE_SECS} consecutive stable seconds under ${BENCH_SETTLE_MAX_MS}ms — proceeding anyway (settle_timeout: true will be recorded in meta.json)" >&2
+      echo "[run] WARN: settle gate hit its ${BENCH_SETTLE_TIMEOUT_SECS}s timeout without clearing ${BENCH_SETTLE_PROBE_THR} ops/s (last probe: ${ops} ops/s, p50 ${p50}ms) — proceeding anyway (settle_timeout: true will be recorded in meta.json)" >&2
       break
     fi
-    if lat="$(canary_probe)"; then
-      if [ "$lat" -lt "$BENCH_SETTLE_MAX_MS" ]; then
-        stable_count=$((stable_count + 1))
-      else
-        stable_count=0
-      fi
-    else
-      stable_count=0
-    fi
-    if [ "$stable_count" -ge "$BENCH_SETTLE_STABLE_SECS" ]; then
-      SETTLE_WAIT_SECS=$(( $(date +%s) - start_ts ))
-      echo "[run] settle gate: stable for ${BENCH_SETTLE_STABLE_SECS}s straight — proceeding (waited ${SETTLE_WAIT_SECS}s total)"
-      break
-    fi
+    echo "[run] settle gate: not yet — retrying in ${BENCH_SETTLE_RETRY_SECS}s"
+    sleep "$BENCH_SETTLE_RETRY_SECS"
   done
   [ -z "$_CANARY_JAR" ] || rm -f "$_CANARY_JAR"
+  # H1 follow-up (found live): a burst_probe() worker that's still mid-request
+  # when its BENCH_SETTLE_BURST_SECS window ends gets killed by `wait` above
+  # without waiting for its in-flight curl to finish — under the clamp, a
+  # request queued behind the shared single DB connection
+  # (AXIAM__DB__POOL_SIZE=1) can still be executing server-side seconds after
+  # the client gave up on it. Observed live: the scenario's own setup() login
+  # — issued immediately after the LAST burst probe, whether it passed or hit
+  # BENCH_SETTLE_TIMEOUT_SECS — landed behind that straggler traffic on the
+  # same connection and came back 200 but missing its auth cookie twice in a
+  # row; a login retried moments later (once the queue had drained) always
+  # succeeded cleanly. A short drain pause here — after the LAST burst
+  # regardless of pass/timeout, before handing control to the scenario —
+  # gives any still-in-flight requests from that burst time to actually
+  # finish server-side instead of leaking into the very first request of the
+  # cell the gate was supposed to protect.
+  echo "[run] settle gate: draining ${BENCH_SETTLE_DRAIN_SECS}s for any straggler burst traffic to finish server-side before the cell starts"
+  sleep "$BENCH_SETTLE_DRAIN_SECS"
 }
 
 # --- G2 item 3: self-describing labeled passes ------------------------------
@@ -608,6 +677,7 @@ run_one() {
   "containers": $(containers_json),
   "settle_wait_secs": $SETTLE_WAIT_SECS,
   "settle_timeout": $([ "$SETTLE_TIMEOUT_HIT" = "1" ] && echo true || echo false),
+  "settle_probe_thr": $SETTLE_PROBE_THR_USED,
   "cell_order_index": $cell_order_index,
   "axiam_env": $(axiam_env_json)
 }

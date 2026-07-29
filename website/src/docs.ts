@@ -818,8 +818,8 @@ export const DOC_PAGES: DocPage[] = [
             "AXIAM__DB__POOL_SIZE",
             "1",
             "1",
-            "4 if token-issuance-heavy (+7% measured); otherwise 1",
-            "4",
+            "1 — no measured benefit; leave it alone",
+            "1",
           ],
           [
             "AXIAM__AUTH__MAX_CONCURRENT_HASHES",
@@ -836,6 +836,10 @@ export const DOC_PAGES: DocPage[] = [
             "2× server cores for read-heavy workloads",
           ],
         ],
+      },
+      {
+        type: "note",
+        text: "`AXIAM__DB__POOL_SIZE` is a connection-pool sizing knob only; do not raise it expecting a throughput win. A pre-1.0 benchmark pass reported a one-off +7% on token issuance at `pool_size=4`, but that comparison was never confirmed on a settled measurement, and follow-up testing (`claude_dev/db-pool-design.md` §11) found no throughput difference between `pool_size=1` and `pool_size=8` under load. Leave it at the default `1` unless you have your own measured evidence for your deployment; `pool_size>1` still gives you independent per-connection session renewal, which is a robustness property worth having on its own, just not a speed one.",
       },
       {
         type: "warn",

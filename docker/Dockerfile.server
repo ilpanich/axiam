@@ -31,6 +31,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
+# ---------------------------------------------------------------------------
+# H4 (executes the G6 PASS): jemalloc is the release-container default
+# allocator. Measured on the D9/G6 memory-retention experiment: default
+# glibc malloc plateaued at 376 MiB retained above baseline after a login
+# burst (peak 491 MiB) vs jemalloc's 86 MiB retained (peak 126 MiB) — a 94%
+# close of the retention gap, well past the ≥30% ship threshold, with no
+# throughput caveat recorded. See claude_dev/memory-retention-experiment.md
+# §6 for the full numbers and claude_dev/improvement-after-g-benchmark.md
+# §3 H4 for the decision.
+#
+# The crate's `jemalloc` Cargo feature (crates/axiam-server/Cargo.toml)
+# stays opt-in at the crate level — this ARG is what turns it on for the
+# shipped release image specifically, without changing `cargo build`/`cargo
+# test` defaults for local development or CI's non-image jobs.
+#
+# Escape hatch for musl/platform edge cases where tikv-jemallocator's
+# jemalloc-sys won't build or link (e.g. a future musl-based variant, or an
+# architecture jemalloc doesn't support): override with an empty value to
+# fall back to the platform allocator —
+#   docker build --build-arg CARGO_FEATURES= -f docker/Dockerfile.server .
+# — which builds with plain `cargo build --release -p axiam-server` (SAML
+# stays on via the crate's own `default = ["saml"]`; only jemalloc drops).
+ARG CARGO_FEATURES=jemalloc
+
 # Copy manifests first for better layer caching.
 # When only source code changes (not dependencies), Docker reuses the
 # dependency-download layer, which is the slowest part of a Rust build.
@@ -65,7 +89,15 @@ RUN for dir in crates/*/; do \
     done
 
 # Pre-build dependencies only. This layer is cached until Cargo.toml/lock change.
-RUN cargo build --release -p axiam-server || true
+# Must build with the same $CARGO_FEATURES as the real build below, or this
+# cache layer resolves a different dependency graph and the second `cargo
+# build` re-downloads/re-links jemalloc-sys from scratch instead of reusing it.
+RUN set -eux; \
+    if [ -n "${CARGO_FEATURES}" ]; then \
+        cargo build --release -p axiam-server --features "${CARGO_FEATURES}" || true; \
+    else \
+        cargo build --release -p axiam-server || true; \
+    fi
 
 # Now copy the real source code and proto definitions
 COPY crates/ crates/
@@ -75,7 +107,12 @@ COPY proto/  proto/
 RUN find crates/ -name "*.rs" -exec touch {} +
 
 # Build the actual server binary and strip debug symbols
-RUN cargo build --release -p axiam-server \
+RUN set -eux; \
+    if [ -n "${CARGO_FEATURES}" ]; then \
+        cargo build --release -p axiam-server --features "${CARGO_FEATURES}"; \
+    else \
+        cargo build --release -p axiam-server; \
+    fi \
     && strip target/release/axiam-server
 
 # Enumerate runtime .so dependencies for verification (Pitfall 1: distroless has no apt).

@@ -412,6 +412,24 @@ without requiring the reader to reconcile a `Counter`-rate against a
 
 ### 3.4 Remaining edit needed (NOT made — outside this task's file ownership)
 
+> **Update (H7, 2026-07-29):** this edit has since landed —
+> `authz_check_grpc.js`, `authz_batch_grpc.js`, and `userinfo_grpc.js` all
+> call `recordGrpcResult()` today (confirmed by reading each file's
+> `default()`), so `bench_throttled` is present on the gRPC cells too, per
+> §3.5's acceptance line. H7's task brief (re)stated this edit as still
+> outstanding for the **REST** side (`token_introspection.js`/
+> `authz_check_rest.js`) — but per §3.5 below, those two scenarios already go
+> through `doOp()`, which already classifies `bench_throttled`, so no source
+> edit was needed there either; H7 confirmed this live instead (a `rl=prod`
+> mini-pass, `p0-plaintext`, single source IP, 20–70 s windows):
+> `oauth2_client_credentials` 58 ok / **627 throttled** / 0 other,
+> `token_introspection` 28 ok / **726 throttled** / 0 other,
+> `authz_check_rest` 471 ok / **213 throttled** / 0 other — all three read
+> "purely rate-limited" (`other failures ≈ 0`), the exact acceptance bar
+> `run-improvement-tasks.sh`'s `g9-rlprod` table checks for. The paragraph
+> below is kept as the historical record of what this edit looked like when
+> it was still open.
+
 `recordGrpcResult()` is exported and ready, but **not wired into any
 scenario** — `authz_check_grpc.js`, `authz_batch_grpc.js`, and
 `userinfo_grpc.js` are not owned by this change (only

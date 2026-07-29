@@ -54,6 +54,8 @@ BASE="${BENCH_BASE_URL:-$SCHEME://$HOST:$PORT}"
 SERVER_CONTAINER="${SERVER_CONTAINER:-bench-axiam-server}"
 DB_CONTAINER="${DB_CONTAINER:-bench-axiam-surrealdb}"
 POLL_MS="${POLL_MS:-200}"
+# Throwaway bootstrap fixture for the localhost-only bench stack — the same
+# default seed.sh and scenarios/lib/config.js use; not a real credential.
 ADMIN_EMAIL="${BENCH_ADMIN_EMAIL:-admin@bench.dev}"
 ADMIN_PW="${BENCH_ADMIN_PASSWORD:-Bench@Admin123!}"
 ROLE_NAME="${BENCH_ROLE_NAME:-bench-reader}"

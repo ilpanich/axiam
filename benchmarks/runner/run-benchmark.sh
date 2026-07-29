@@ -22,6 +22,19 @@ BENCH="$(cd "$HERE/.." && pwd)"
 RESULTS="${BENCH_RESULTS_DIR:-$BENCH/results}"
 SEED_DIR="${BENCH_SEED_DIR:-$BENCH/.seed}"
 
+# H6: absolutize RESULTS (relative to the CALLER's cwd, which is what a relative
+# BENCH_RESULTS_DIR means to whoever set it). k6 is invoked from a different
+# directory below, so a relative path made it write .res.csv/.host.csv/.meta.json
+# to the right place while `--summary-export` silently failed with "no such file
+# or directory" — losing the ONE artifact report.py actually reads, and leaving a
+# cell that looks present but has no k6 summary. Fail-fast on an
+# unresolvable path rather than repeating that.
+case "$RESULTS" in
+  /*) : ;;
+  *)  mkdir -p "$RESULTS" && RESULTS="$(cd "$RESULTS" && pwd)" \
+        || { echo "[run] cannot resolve BENCH_RESULTS_DIR='$RESULTS'" >&2; exit 1; } ;;
+esac
+
 TARGET=axiam
 PROFILE=p0-plaintext
 SCENARIO=all

@@ -121,6 +121,16 @@ bench-up:
       else
         echo "[bench-up] rate limits: NEUTRALIZED (compose defaults ~unlimited)"
       fi
+      # H6 (fixes H2 §8.3): on an http:// baseline the server's production-correct
+      # `Secure` session cookies are unusable by k6's cookie jar, so every
+      # login-based scenario dies in setup(). Turn the attribute off for
+      # p0-plaintext ONLY — every TLS profile keeps the shipped default. An
+      # operator-set BENCH_AXIAM_COOKIE_SECURE still wins (e.g. to reproduce the
+      # broken behaviour deliberately).
+      if [ "{{profile}}" = "p0-plaintext" ]; then
+        export BENCH_AXIAM_COOKIE_SECURE="${BENCH_AXIAM_COOKIE_SECURE:-false}"
+        echo "[bench-up] p0-plaintext: AXIAM__AUTH__COOKIE_SECURE=${BENCH_AXIAM_COOKIE_SECURE} (k6's jar cannot replay Secure cookies over http://)"
+      fi
       # Default the prebuilt image tag to the workspace version so it tracks
       # releases automatically (override with BENCH_AXIAM_IMAGE).
       if [ -z "${BENCH_AXIAM_IMAGE:-}" ]; then

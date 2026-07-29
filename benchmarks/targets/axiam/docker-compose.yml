@@ -62,6 +62,20 @@ services:
       # login path. Pass-through-or-default so a plain `docker compose up` still runs.
       # 0 = auto → min(cores, 4). Set explicitly to exercise a specific value under load.
       AXIAM__AUTH__MAX_CONCURRENT_HASHES: "${AXIAM__AUTH__MAX_CONCURRENT_HASHES:-0}"
+      # --- Session-cookie Secure attribute (H6, fixes H2 §8.3) --------------------
+      # crates/axiam-auth/src/config.rs defaults cookie_secure=true, so
+      # /api/v1/auth/login sets axiam_access/axiam_csrf/axiam_refresh with
+      # `Secure`. k6's cookie jar (correctly) refuses to replay a Secure cookie
+      # over http://, so on p0-plaintext EVERY scenario that calls
+      # lib/auth.js::loginSession() — userinfo, authz_check_rest,
+      # authz_batch_rest, oauth2_password_login — died in setup() with "no
+      # axiam_access cookie", and no p0 cell for those scenarios in results/ was
+      # ever real (curl and the seed smoke-check are unaffected, which is why it
+      # went unnoticed). `just bench-up` sets this to "false" for p0-plaintext
+      # ONLY; every TLS profile keeps the production-correct default of true.
+      # This is a bench-harness accommodation for an http:// baseline, not a
+      # posture change: p2/p3 cells still exercise the shipped behaviour.
+      AXIAM__AUTH__COOKIE_SECURE: "${BENCH_AXIAM_COOKIE_SECURE:-true}"
       AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS: "${AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS:-5}"
       # --- Authz decision cache (D7) ----------------------------------------------
       # Default OFF (today's behavior). Flip ENABLED=true only for the labeled
@@ -141,8 +155,20 @@ services:
     mem_limit: ${BENCH_EDGE_MEM:-128m}
     ports:
       - "${BENCH_TLS_PORT:-8443}:8443"
+      # H6: the cleartext control listener (tls/_plain-control.inc), present
+      # only in the two p2 confs. Publishing it unconditionally is harmless for
+      # the confs that don't define an :8080 vhost — Docker will happily
+      # publish a port nothing is listening on.
+      - "${BENCH_EDGE_PLAIN_PORT:-18080}:8080"
     volumes:
       - ../../profiles/certs:/certs:ro
+      # H6: the whole tls/ dir is mounted OUTSIDE conf.d (so nginx does not
+      # auto-include every conf here) purely so each selected conf can
+      # `include /etc/nginx/bench-tls/_upstream.inc;` — one shared, keep-alive
+      # upstream definition instead of four copies that can drift. See that
+      # file for why per-request backend connections were a real measurement
+      # defect and not a style point.
+      - ./tls:/etc/nginx/bench-tls:ro
       - ./tls/${BENCH_NGINX_CONF:-tls13.conf}:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       axiam-server: { condition: service_healthy }

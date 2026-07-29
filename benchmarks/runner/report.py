@@ -97,6 +97,34 @@ def classify_fallback(fallback_count, iteration_count):
     return "cc-token-setup" if fallback_count <= threshold else "fallback-op"
 
 
+# H6: decode `bench_http_proto` (scenarios/lib/metrics.js) back to a human
+# label. The metric is a Trend of 10/11/20/30 (= HTTP/1.0, 1.1, 2.0, 3), so a
+# cell whose min and max disagree ran over MORE THAN ONE protocol and must not
+# be read as an h1 or an h2 cell at all.
+PROTO_NAMES = {10: "1.0", 11: "1.1", 20: "2.0", 30: "3"}
+
+
+def proto_label(perf):
+    """Render one cell's negotiated-protocol column.
+
+    "—"                 the scenario recorded no sample (pre-H6 results tree,
+                        a gRPC scenario that still hand-rolls its metrics, or a
+                        cell in which every request failed at the transport
+                        level before any protocol was negotiated).
+    "1.1" / "2.0"       every measured response used that protocol.
+    "mixed(1.1,2.0)"    the cell is NOT a single-protocol cell — void as a
+                        controlled h1-vs-h2 comparison.
+    "?<n>"              k6 reported a protocol string this table doesn't know.
+    """
+    if not perf.get("proto_samples"):
+        return "—"
+    lo, hi = int(round(perf["proto_min"])), int(round(perf["proto_max"]))
+    if lo == hi:
+        return PROTO_NAMES.get(lo, f"?{lo}")
+    return "mixed({},{})".format(PROTO_NAMES.get(lo, f"?{lo}"),
+                                 PROTO_NAMES.get(hi, f"?{hi}"))
+
+
 def load_k6_summary(path):
     """Extract throughput, latency percentiles, error rate from a k6 summary."""
     with open(path) as f:
@@ -159,6 +187,15 @@ def load_k6_summary(path):
         "has_grpc_status": "bench_grpc_status" in metrics,
         "grpc_status_avg": trend("bench_grpc_status", "avg"),
         "grpc_status_max": trend("bench_grpc_status", "max"),
+        # H6: negotiated wire protocol (scenarios/lib/metrics.js's
+        # bench_http_proto). k6's summary export gives a Trend only its
+        # statistics — there is no `count` key — so presence of the metric
+        # itself is the "was anything recorded" flag. Absent for any results
+        # tree predating H6, in which case proto_label() renders "—" rather
+        # than claiming a protocol the run never measured.
+        "proto_min": trend("bench_http_proto", "min"),
+        "proto_max": trend("bench_http_proto", "max"),
+        "proto_samples": 1.0 if "bench_http_proto" in metrics else 0.0,
     }
 
 
@@ -550,6 +587,16 @@ def aggregate_cell(runs):
         perf["fallback_class"] = "none"
     perf["has_grpc_status"] = any(r["perf"].get("has_grpc_status") for r in basis)
 
+    # H6: the protocol column must NOT be medianed — the question it answers is
+    # "did every request in every run of this cell use one protocol?", so take
+    # the min of mins and the max of maxes across the runs. If two runs of the
+    # same cell negotiated different protocols (e.g. one run raced a
+    # BENCH_NGINX_CONF change), the aggregated cell correctly reads "mixed".
+    proto_runs = [r["perf"] for r in basis if r["perf"].get("proto_samples")]
+    perf["proto_samples"] = 1.0 if proto_runs else 0.0
+    perf["proto_min"] = min((p["proto_min"] for p in proto_runs), default=0.0)
+    perf["proto_max"] = max((p["proto_max"] for p in proto_runs), default=0.0)
+
     thr_vals = [r["perf"]["throughput"] for r in basis]
     thr_median = perf["throughput"]
     thr_spread_pct = (((max(thr_vals) - min(thr_vals)) / 2.0) / thr_median * 100.0
@@ -678,6 +725,14 @@ def build_report(cells, multi_run=False):
         "**cpu_ms_per_request** answer *can AXIAM match competitors at lower cost?* "
         "Compare across targets at equal profile + latency.",
         "",
+        "> `http` = the wire protocol every measured response actually "
+        "negotiated (`bench_http_proto`, k6's `res.proto`), **not** what the "
+        "profile or the nginx conf was supposed to serve. `mixed(a,b)` means "
+        "the cell spanned two protocols and is void as a controlled "
+        "h1-vs-h2 comparison; `—` means the cell predates H6 or recorded no "
+        "response. Added in H6 because the G8 TLS conviction attempt could "
+        "not state which protocol its cells had used.",
+        "",
         "> `fallback` = `fallback-op` when the cell measured a fallback "
         "operation instead of the labelled logical op (e.g. Zitadel's "
         "login() falling back to client_credentials — see "
@@ -738,6 +793,7 @@ def build_report(cells, multi_run=False):
             flags.append("fallback-op")
         row = [
             c["scenario"], c["profile"], c["target"], c["rate_limits"],
+            proto_label(p),
             dash(thr, ".0f"), dash(p50, ".1f"), dash(p95, ".1f"), dash(p99, ".1f"),
             f"{p['error_rate']*100:.2f}%",
             f"{r['cpu_cores_avg']:.2f}", f"{r['mem_mib_avg']:.0f}",
@@ -753,7 +809,7 @@ def build_report(cells, multi_run=False):
             row += [f"{c.get('n_valid_runs', 0)}/{c.get('n_runs', 1)}",
                     f"±{c.get('thr_spread_pct', 0.0):.1f}%"]
         rows.append(row)
-    headers = ["scenario", "profile", "target", "rate_limits", "thr(req/s)", "p50(ms)",
+    headers = ["scenario", "profile", "target", "rate_limits", "http", "thr(req/s)", "p50(ms)",
                "p95(ms)", "p99(ms)", "err", "cpu(cores)", "mem(MiB)", "thr/core",
                "cpu_ms/req", "bottleneck", "fallback", "mhz_avg", "mhz_min/max",
                "temp_max(C)", "k6_cores", "host_flags", "valid"]
@@ -943,7 +999,8 @@ def build_report(cells, multi_run=False):
             if not base or not others:
                 continue
             lines += [f"### {tg} / {sc}", ""]
-            rows = [["p0-plaintext (base)", f"{base['perf']['throughput']:.0f}",
+            rows = [["p0-plaintext (base)", proto_label(base["perf"]),
+                     f"{base['perf']['throughput']:.0f}",
                      f"{base['perf']['p50']:.1f}", f"{base['perf']['p95']:.1f}",
                      "baseline", "baseline"]]
             for c in sorted(others, key=lambda c: PROFILE_RANK.get(c["profile"], 99)):
@@ -951,11 +1008,27 @@ def build_report(cells, multi_run=False):
                 t, p = c["perf"]["throughput"], c["perf"]["p95"]
                 d_thr = (1 - t / tb) * 100 if tb else 0.0
                 d_p95 = p - pb
-                rows.append([c["profile"], f"{t:.0f}", f"{c['perf']['p50']:.1f}", f"{p:.1f}",
+                rows.append([c["profile"], proto_label(c["perf"]),
+                             f"{t:.0f}", f"{c['perf']['p50']:.1f}", f"{p:.1f}",
                              f"{-d_thr:+.1f}%", f"{d_p95:+.1f}"])
             lines += [md_table(
-                ["profile", "thr(req/s)", "p50(ms)", "p95(ms)", "Δ-throughput", "Δ-p95(ms)"],
+                ["profile", "http", "thr(req/s)", "p50(ms)", "p95(ms)",
+                 "Δ-throughput", "Δ-p95(ms)"],
                 rows), ""]
+            # H6: a security-cost row compares p0 against p2 — but if the two
+            # cells did not run over the same wire protocol, the delta bundles
+            # "TLS" together with "h1 vs h2" and is not a TLS cost at all. Say
+            # so in the table rather than leaving the reader to notice.
+            protos = {proto_label(c["perf"]) for c in [base] + others}
+            protos.discard("—")
+            if len(protos) > 1:
+                lines += [
+                    "> **Protocol confound (H6):** the rows above did not all "
+                    "negotiate the same HTTP version (`" + ", ".join(sorted(protos))
+                    + "`). Each Δ therefore measures TLS **and** the protocol "
+                      "change together. See `claude_dev/b2-tls-h2-investigation.md`.",
+                    "",
+                ]
 
     # 4. Appendix: per-container resource breakdown (A5.3)
     lines += ["## Appendix: per-container resource breakdown", "",

@@ -17,7 +17,8 @@ __pycache__/
 # SDK bench build artifacts (each bench builds against its sibling SDK checkout)
 sdk/rust/target/
 sdk/rust/Cargo.lock
-sdk/go/go.sum
+# H8: go.sum IS committed now (tidied, pins the local `replace`'s transitive
+# deps) — see sdk/go/TODO.md. Do not re-add it here.
 sdk/java/target/
 sdk/csharp/bin/
 sdk/csharp/obj/
@@ -28,3 +29,7 @@ sdk/c/build/
 sdk/kotlin/build/
 sdk/kotlin/.gradle/
 sdk/swift/.build/
+# H8: python venv + node_modules created on demand by run.sh, not committed
+sdk/python/.venv/
+sdk/typescript/node_modules/
+sdk/typescript/package-lock.json

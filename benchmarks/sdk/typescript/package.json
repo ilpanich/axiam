@@ -1,0 +1,10 @@
+{
+  "name": "axiam-sdk-bench-typescript",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Harness-only package.json so `npm install` has somewhere to record the file: dependency on the sibling axiam-typescript-sdk checkout (H8).",
+  "dependencies": {
+    "axiam-sdk": "file:../../../../axiam-typescript-sdk"
+  }
+}

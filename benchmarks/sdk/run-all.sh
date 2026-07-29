@@ -20,6 +20,15 @@ elif [ -f "$LEGACY_SEED_ENV" ]; then
   source "$LEGACY_SEED_ENV"
 fi
 
+# H8: fail fast (naming the exact missing var) rather than let a language
+# bench discover an empty/placeholder id later with a confusing error.
+for var in BENCH_RESOURCE_ID BENCH_SUBJECT_ID BENCH_TENANT_SLUG BENCH_CLIENT_ID BENCH_CLIENT_SECRET; do
+  if [ -z "${!var:-}" ]; then
+    echo "[sdk] FATAL: $var is empty after sourcing $SEED_ENV — run 'just target=${BENCH_TARGET:-axiam} bench-seed' first (H8: seed env must reach the SDK bench)." >&2
+    exit 1
+  fi
+done
+
 if [ "$#" -gt 0 ]; then
   SDKS=("$@")
 else

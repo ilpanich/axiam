@@ -413,7 +413,31 @@ bench-matrix:
     python3 runner/report.py --results "$BASE_RESULTS_DIR"
 
 # --- SDK client benchmarks --- (pass the language as sdk=, e.g. sdk=python)
+# H8 fix: `bash sdk/<lang>/run.sh` alone never saw the seed env (only
+# sdk-bench-all did, via run-all.sh's own sourcing) — a bench invoked this way
+# got BENCH_RESOURCE_ID="" and either crashed (rust: "must be a valid UUID
+# (got \"\")") or silently hit a non-existent "bench-resource" id. Source the
+# same .seed/<target>.seed.env the k6 harness uses, and fail fast (naming the
+# exact missing var) rather than let a language-specific bench discover it
+# later with a confusing error.
 sdk-bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SEED_DIR="${BENCH_SEED_DIR:-.seed}"
+    SEED_ENV="$SEED_DIR/{{target}}.seed.env"
+    if [ -f "$SEED_ENV" ]; then
+      # shellcheck disable=SC1090
+      source "$SEED_ENV"
+    else
+      echo "[sdk-bench] WARN: no seed env at $SEED_ENV — run 'just target={{target}} bench-seed' first" >&2
+    fi
+    export BENCH_PROFILE="${BENCH_PROFILE:-{{profile}}}"
+    for var in BENCH_RESOURCE_ID BENCH_SUBJECT_ID BENCH_TENANT_SLUG BENCH_CLIENT_ID BENCH_CLIENT_SECRET; do
+      if [ -z "${!var:-}" ]; then
+        echo "[sdk-bench] FATAL: $var is empty after sourcing $SEED_ENV — re-run 'just target={{target}} bench-seed' (H8: seed env must reach the SDK bench)." >&2
+        exit 1
+      fi
+    done
     bash sdk/{{sdk}}/run.sh
 
 sdk-bench-all:

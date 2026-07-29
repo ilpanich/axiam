@@ -1,15 +1,34 @@
 module axiam-sdk-bench
 
-go 1.25
+go 1.25.0
 
 require github.com/ilpanich/axiam-go-sdk v1.0.0-alpha2
+
+require (
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
+	github.com/goccy/go-json v0.10.6 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/lestrrat-go/blackmagic v1.0.4 // indirect
+	github.com/lestrrat-go/dsig v1.2.2 // indirect
+	github.com/lestrrat-go/dsig-secp256k1 v1.0.0 // indirect
+	github.com/lestrrat-go/httpcc v1.0.1 // indirect
+	github.com/lestrrat-go/httprc/v3 v3.0.6 // indirect
+	github.com/lestrrat-go/jwx/v3 v3.1.1 // indirect
+	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
+	github.com/segmentio/asm v1.2.1 // indirect
+	github.com/valyala/fastjson v1.6.10 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	google.golang.org/grpc v1.82.1 // indirect
+)
 
 // The tagged release (v1.0.0-alpha2) may not be published to the module proxy,
 // so resolve the dependency against the sibling SDK checkout in this monorepo
 // layout instead. Path is relative to this directory
 // (benchmarks/sdk/go/ -> /home/user/axiam-go-sdk).
 //
-// No go.sum is committed here (this environment can't fetch the SDK's
-// transitive deps). Run `go mod tidy` once, with network access, before
-// running this bench for real.
+// H8: go.sum IS committed (tidied via `go mod tidy` with network access) and
+// pins the transitive deps pulled in through the `replace` above. run.sh also
+// runs `go mod tidy` defensively before `go run .`, so a go.sum drift (e.g.
+// the sibling SDK's own deps changed) self-heals instead of hard-failing with
+// "go: updates to go.mod needed; go mod tidy".
 replace github.com/ilpanich/axiam-go-sdk => ../../../../axiam-go-sdk

@@ -231,17 +231,43 @@ Caveats stated up front, because they matter for reading the absolute numbers:
   penalty *shrinks* with load rather than growing: an extra per-request cost
   only shows in throughput while there is headroom to lose.
 
+**How much of this is noise — measured, not assumed.** The cleartext control
+vhost is defined in one include file shared by both nginx confs, so it was
+measured **twice**: once on the `p2-nginx-h2` stack and once on the
+independently created `p2-nginx-h1` stack. Same conf, same load, different
+bring-up, different seed, an hour apart. It is a free repeatability check and
+it should be read before any single Δ above is believed:
+
+| VUs | plain edge, h2 stack | plain edge, h1 stack | spread |
+|---:|---:|---:|---:|
+| 10 | 3 327 | 3 350 | **+0.7%** |
+| 50 | 4 214 | 4 564 | **+8.3%** |
+| 100 | 4 437 | 4 463 | **+0.6%** |
+
+So run-to-run noise here is well under 1% at 10 and 100 VUs, but **~8% at
+50 VUs** — the level at which this 4-core host is right at its knee and
+scheduling luck matters most. Consequence, applied honestly below: the 10-VU
+column is the trustworthy one, the 100-VU column is trustworthy, and **no
+50-VU difference smaller than ~8% should be read as signal.** That retires the
+50-VU "TLS at the edge" and "h2 vs h1" numbers to "consistent with, but not
+independently established by, the 10-VU result".
+
 ### 2.3 What each comparison says
 
 **HTTP/2 vs HTTP/1.1, one variable (the last two rows of the decomposition).**
 Same nginx process, same TLS 1.3, same proxy hop, same keep-alive upstream,
 same connection count (50 VUs ⇒ 50 edge connections under **both** protocols —
 census in §2.1). The only difference is `http2 on;`. h2 costs **−19.7% / −11.0%
-/ −2.6%** at 10 / 50 / 100 VUs — real at low concurrency, converging to parity
-as the host saturates. This is a property of *nginx's* h2 implementation under
-CPU contention, not of AXIAM, and it points the opposite way from the original
-hypothesis anyway: it is h2 doing **more** work per request, not h2 starving
-workers.
+/ −2.6%** at 10 / 50 / 100 VUs. Against the noise floor just measured
+(0.7% / 8.3% / 0.6%), the 10-VU and 100-VU figures are signal and the 50-VU one
+is barely above noise — so the defensible statement is: **h2 costs about 20% at
+low concurrency and converges to near-parity as the host saturates.** This is a
+property of *nginx's* h2 implementation under CPU contention, not of AXIAM, and
+it points the opposite way from the original hypothesis anyway: it is h2 doing
+**more work per request**, not h2 starving idle workers. (A cost that vanishes
+as load rises is the signature of a fixed per-request overhead being absorbed
+by queueing — the exact opposite of a concurrency ceiling, which would bite
+*harder* with more clients.)
 
 **AXIAM's own listener is the cheapest TLS in the table.** p2-native (rustls +
 h2, in process) costs **−12.8% / −2.3% / −1.6%** on jwks and **−8.1% / −12.7%
@@ -275,14 +301,22 @@ concurrency (§2.1).
 `POST /oauth2/token`, 50 VUs, 10 s warm-up + 60 s measured, same image and
 caps as every cell above (`results/tasks/h6-tls-proto/_cc-control/`):
 
-<!--CC-CONTROL-->
+| profile | http | thr (ops/s) | p50 (ms) | p95 (ms) | failed |
+|---|:--:|---:|---:|---:|---:|
+| p0-plaintext (direct :8090) | 1.1 | 22.5 | 2210 | 2433 | 0 |
+| p2-tls13 native (rustls :8443) | 2.0 | 23.6 | 2083 | 3100 | 0 |
 
 Both clamped by the synchronous `rate_limit_bucket` write (H2 §2), which costs
-~40-50 ms here. The TLS/h2 deltas measured above are **0.3-0.5 ms per
-request**. Two orders of magnitude below the floor: the cell is not a weak
-discriminator, it is *no* discriminator. This is why H6 abandoned the plan's
-"re-run the three CC cells settled" step rather than running it and reporting a
-null.
+~40-50 ms here. Note what the p2 row actually says: **TLS 1.3 + HTTP/2 makes
+this endpoint 4.9% *faster*, not 50% slower.** That is not a discovery about
+TLS — it is noise on a cell whose throughput is set entirely by one datastore
+write. The TLS/h2 per-request deltas measured in §2.2 are **0.3-0.5 ms**;
+the floor here is ~2 100 ms of queueing on top of a ~45 ms serialized unit.
+Three orders of magnitude. The CC cell on this host is not a weak
+discriminator, it is *no* discriminator — in either direction, which is why a
+"null result" from it would have been just as worthless as G8's positive one.
+This is the measured justification for H6 abandoning the plan's "re-run the
+three CC cells settled" step instead of executing it.
 
 ---
 
@@ -386,6 +420,7 @@ competing for the same cores.
 | `benchmarks/justfile` | p0-plaintext sets `AXIAM__AUTH__COOKIE_SECURE=false` (fixes H2 §8.3 — every login-based p0 cell used to die in `setup()`) |
 | `benchmarks/run-improvement-tasks.sh` | new task `h6-tls-proto`; `g8-tls-h1` marked superseded |
 | `benchmarks/runner/h6-connection-probe.sh` | new — connection census + actix worker CPU balance |
+| `benchmarks/results/tasks/h6-tls-proto/` | raw cells: 24 measured cells + connection census + the CC clamp control (gitignored — regenerate with the task) |
 | `benchmarks/docs/methodology.md` | `bench_http_proto` documented in the metric list |
 | `docs/security-profiles.md` | ALPN/h2 sections bounded by measurement; TLS cost stated |
 | `benchmarks/PRIVATE_BENCH_ANALYSIS.md`, `PUBLIC_BENCH_ANALYSIS.md` | B2 closed; the "TLS halves token issuance" claim corrected |

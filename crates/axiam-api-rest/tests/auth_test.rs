@@ -351,6 +351,52 @@ async fn login_sets_csrf_cookie() {
     assert!(lower.contains("path=/"), "axiam_csrf must have Path=/");
 }
 
+/// H8 fix (SDK bench harness validation): CONTRACT.md §3 "Non-browser SDKs"
+/// has every non-browser AXIAM SDK (Rust, Python, Java, C#, PHP, Go) capture
+/// the CSRF token from the `X-CSRF-Token` *response header* rather than the
+/// cookie (their HTTP clients' cookie jars are typically not conveniently
+/// queryable per-cookie). Before this fix the server only ever set the
+/// `axiam_csrf` cookie and never echoed the value as a header, so every
+/// non-browser SDK's first state-changing call after login (check_access,
+/// batch_check, refresh) failed CSRF validation with no way to recover — the
+/// captured token was always `None`. This asserts the header is present and
+/// carries the exact same value as the cookie.
+#[actix_rt::test]
+async fn login_sets_csrf_token_response_header_matching_cookie() {
+    let (db, org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+            "username_or_email": "alice",
+            "password": "password12345"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let csrf_cookie_value =
+        extract_cookie_value(&resp, "axiam_csrf").expect("axiam_csrf cookie must be set on login");
+    let csrf_header_value = resp
+        .headers()
+        .get("X-CSRF-Token")
+        .expect("X-CSRF-Token response header must be set on login (CONTRACT.md §3)")
+        .to_str()
+        .expect("X-CSRF-Token header must be valid UTF-8")
+        .to_owned();
+
+    assert_eq!(
+        csrf_header_value, csrf_cookie_value,
+        "X-CSRF-Token header must carry the same value as the axiam_csrf cookie"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // CSRF middleware tests (01-01-03)
 // ---------------------------------------------------------------------------
@@ -633,6 +679,23 @@ async fn refresh_uses_cookie_returns_new_access_cookie() {
         new_access.unwrap(),
         old_access,
         "new axiam_access cookie must differ from the original (token rotation)"
+    );
+
+    // H8 fix: the rotated CSRF token must also be echoed as the
+    // X-CSRF-Token response header (CONTRACT.md §3 "Non-browser SDKs"), same
+    // as on login — see login_sets_csrf_token_response_header_matching_cookie.
+    let new_csrf_cookie = extract_cookie_value(&resp, "axiam_csrf")
+        .expect("refresh response must set a new axiam_csrf cookie");
+    let new_csrf_header = resp
+        .headers()
+        .get("X-CSRF-Token")
+        .expect("X-CSRF-Token response header must be set on refresh")
+        .to_str()
+        .expect("X-CSRF-Token header must be valid UTF-8")
+        .to_owned();
+    assert_eq!(
+        new_csrf_header, new_csrf_cookie,
+        "X-CSRF-Token header must carry the same value as the rotated axiam_csrf cookie"
     );
 
     // Response body must have expires_in but NOT access_token.

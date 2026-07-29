@@ -32,6 +32,7 @@ var opKeys = []string{"login", "refresh", "check_access", "batch_check"}
 type config struct {
 	baseURL    string
 	tenantSlug string
+	orgSlug    string
 	username   string
 	password   string
 	action     string
@@ -61,6 +62,13 @@ func loadConfig() config {
 	return config{
 		baseURL:    fmt.Sprintf("%s://%s:%s", scheme, host, port),
 		tenantSlug: env("BENCH_TENANT_SLUG", "default"),
+		// H8 fix: this was never read/wired, so every login went out with no
+		// org context — CONTRACT.md §5.1 requires org_slug on login/refresh,
+		// and every other language bench (python/typescript/rust/java/csharp/
+		// php) already passes it. Discovered when the CSRF header-echo fix
+		// (crates/axiam-api-rest) unblocked check_access enough to reach this
+		// as the next failure.
+		orgSlug:    env("BENCH_ORG_SLUG", "bench-org"),
 		username:   env("BENCH_USERNAME", "benchuser"),
 		password:   env("BENCH_PASSWORD", "Bench@User123!"),
 		action:     env("BENCH_ACTION", "read"),
@@ -158,7 +166,7 @@ type opFn func(ctx context.Context) error
 // routed through the SDK's sync.Mutex single-flight guard, so concurrent
 // callers are safe.
 func buildOps(ctx context.Context, cfg config) (map[string]opFn, error) {
-	client, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug)
+	client, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug, axiam.WithOrgSlug(cfg.orgSlug))
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +182,7 @@ func buildOps(ctx context.Context, cfg config) (map[string]opFn, error) {
 
 	ops := map[string]opFn{
 		"login": func(ctx context.Context) error {
-			fresh, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug)
+			fresh, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug, axiam.WithOrgSlug(cfg.orgSlug))
 			if err != nil {
 				return err
 			}

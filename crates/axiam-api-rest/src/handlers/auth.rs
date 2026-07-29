@@ -22,8 +22,8 @@ use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::cert_auth::CertificateAuthenticated;
 use crate::extractors::client_info::{client_ip, user_agent};
 use crate::middleware::csrf::{
-    access_cookie, clear_access_cookie, clear_csrf_cookie, clear_refresh_cookie, csrf_cookie,
-    generate_csrf_token, refresh_cookie,
+    HEADER_CSRF, access_cookie, clear_access_cookie, clear_csrf_cookie, clear_refresh_cookie,
+    csrf_cookie, generate_csrf_token, refresh_cookie,
 };
 use crate::state::AppState;
 
@@ -217,6 +217,16 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
             config.access_token_lifetime_secs,
             config.cookie_secure,
         ))
+        // CONTRACT.md §3 "Non-browser SDKs": echo the freshly-minted CSRF
+        // token as a response header too, not only as the (non-httpOnly,
+        // already JS-readable) cookie. Non-browser SDK clients (Rust,
+        // Python, Java, C#, PHP, Go) cannot conveniently read an individual
+        // cookie's value back out of their HTTP client's cookie jar, so the
+        // contract has them capture this header instead — which requires
+        // the server to actually send it. No new information is disclosed:
+        // it is the same value already visible via the non-httpOnly
+        // `axiam_csrf` cookie on this same response.
+        .insert_header((HEADER_CSRF, csrf_token.clone()))
         .json(LoginSuccessResponse {
             user: LoginUserInfo {
                 id: user.id,
@@ -474,6 +484,9 @@ pub async fn refresh<C: Connection + Clone>(
             state.auth_config.access_token_lifetime_secs,
             state.auth_config.cookie_secure,
         ))
+        // See the matching comment on the login handler above — non-browser
+        // SDKs capture the rotated CSRF token from this header.
+        .insert_header((HEADER_CSRF, csrf_token.clone()))
         .json(RefreshSuccessResponse {
             expires_in: out.expires_in,
         }))

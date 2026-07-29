@@ -42,3 +42,18 @@ directory also sources the seed env directly as a second line of defense for
 callers that invoke it without `just`. Verified: `cargo run --release` builds
 and runs cleanly with a real seeded `BENCH_RESOURCE_ID`, and fails fast with a
 clear message (not a Rust panic) when no seed env is reachable at all.
+
+## H8 fix — `BENCH_CA_CERT` not wired (p2 blocked at the first HTTPS call)
+
+`main.rs` never read `BENCH_CA_CERT` (HARNESS-SPEC.md's documented input for
+trusting a TLS profile's throwaway CA), so every p2 run failed at the first
+HTTPS call with a certificate-verification error. Fixed: `Cfg` now reads
+`BENCH_CA_CERT`, reads the PEM bytes, and `build_client` calls
+`AxiamClient::builder().with_custom_ca(pem)` when set. `run.sh` also resolves
+the (relative) path to absolute before its `cd "$HERE"`, since
+`profiles/*.env` sets it relative to `benchmarks/` and this script changes
+directory before the bench ever reads it. Verified `ok`, double-run-clean at
+both p0-plaintext and p2-tls13 against a live seeded target. This also
+required a companion fix in the sibling `axiam-rust-sdk` (the
+`REFRESH_PATH`-scoped-cookie bug — see that repo's own commit log — without
+it every `refresh()` failed regardless of TLS profile).

@@ -29,3 +29,24 @@ this environment: `mvn -f ../../../../axiam-java-sdk/pom.xml install
 directory succeeds, and `bash run.sh` prints a real `axiam.sdk-bench/v1`
 record (an honest `status: "error"` pre-seed/pre-server, `"ok"` once a seeded
 target is reachable).
+
+## H8 fix — `BENCH_CA_CERT` not wired (p0 fixed, p2 hits a separate SDK bug)
+
+`Bench.java` never read `BENCH_CA_CERT` (HARNESS-SPEC.md's documented input
+for trusting a TLS profile's throwaway CA), so every p2 run failed
+immediately with a certificate-verification error. Fixed: `newClientBuilder()`
+now reads the file and calls `AxiamClient.Builder.customCa(byte[])` when
+`BENCH_CA_CERT` is set; `run.sh` also resolves the (relative) path to
+absolute before its `cd "$HERE"`, since `profiles/*.env` sets it relative to
+`benchmarks/` and this script changes directory before the JVM ever reads it.
+
+That fix is necessary but not sufficient for p2: with the CA now trusted,
+the SDK's OkHttp client still fails with `Hostname localhost not verified`
+against a certificate that `curl --cacert profiles/certs/ca.crt` and every
+other SDK bench here (rust/go/python/php, all validated `ok` at p2) verify
+successfully — same host, same port, same certificate. This looks like a
+genuine bug in `AxiamClient`'s OkHttp/`SSLContext` wiring
+(`buildStrictSslContext`/hostname-verifier interaction), not a harness
+issue, and needs an SDK-side investigation this task's scope didn't cover
+(TLS-internals debugging, not a mechanical harness fix). p0 is unaffected
+and fully validated (`ok`, double-run-clean).

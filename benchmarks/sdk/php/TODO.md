@@ -31,6 +31,28 @@ into `vendor/axiam/axiam-sdk`, and `php bench.php` emits a real `status:
 "error"` record against a target it can't reach (as expected pre-seed) rather
 than a `pending` one.
 
+## H8 fix — CSRF token never captured after login
+
+`Session::captureCsrfTokenFromResponse()` (in the sibling `axiam-php-sdk`)
+existed as a public method but had no caller anywhere — `login()`/
+`verifyMfa()` never invoked it, so every state-changing call after login
+(`refresh()`, `checkAccess()`, `batchCheck()`) omitted `X-CSRF-Token` and got
+403 "CSRF validation failed". Fixed in the sibling repo (see its own commit
+log); required re-mirroring the path-repo here (`composer update
+axiam/axiam-sdk` or a fresh `composer install` after deleting
+`vendor/axiam/axiam-sdk`) to pick it up.
+
+## H8 fix — `BENCH_CA_CERT` not wired
+
+HARNESS-SPEC.md documents `BENCH_CA_CERT` (a CA bundle file path) as an
+input every SDK bench should honor under the TLS profiles (p2) — `bench.php`
+never read it, so every p2 run failed at the first HTTPS call. Fixed:
+`$cfg['custom_ca']` reads it and is passed as `AxiamClient`'s `$customCa`
+constructor parameter (a file path — this SDK's own docs confirm that's the
+one and only shape it accepts, unlike e.g. the Rust/Go/Java SDKs which want
+raw PEM content/bytes). Verified `ok`, double-run-clean at both
+p0-plaintext and p2-tls13 against a live seeded target.
+
 ## Notes
 - The PHP SDK is synchronous (no async client), so this bench is single-process
   and runs every iteration serially — `concurrency` is always `1` and

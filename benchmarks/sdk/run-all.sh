@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # run-all.sh — run each SDK's bench (or just the ones named) and collect the
-# JSON records under results/sdk/<sdk>.json.
+# JSON records under results/sdk/<profile>/<sdk>.json.
+#
+# H8/E1.3: profile-scoped (not just results/sdk/<sdk>.json) so a p0 run and a
+# p2 run can coexist on disk and both show up in the same collect.py/
+# report.py table — a flat single-file-per-language layout meant "run at p0
+# AND p2" (per the E1.3 acceptance) silently clobbered the earlier profile's
+# record with the later one. collect.py's loader walks both this layout and
+# the old flat one for backward compatibility with any results/ tree from
+# before this change.
 #
 # Usage: run-all.sh [sdk1 sdk2 ...]   (default: all languages with a run.sh)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-RESULTS="${BENCH_RESULTS_DIR:-$HERE/../results}/sdk"
+RESULTS="${BENCH_RESULTS_DIR:-$HERE/../results}/sdk/${BENCH_PROFILE:-p0-plaintext}"
 mkdir -p "$RESULTS"
 
 # Source the seed env so SDK benches hit a provisioned tenant/client. Lives

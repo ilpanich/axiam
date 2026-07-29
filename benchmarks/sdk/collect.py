@@ -28,14 +28,28 @@ OP_TO_SCENARIO = {
 
 
 def load_sdk_records(results):
+    """H8/E1.3: results/sdk/ holds two possible layouts —
+    results/sdk/<profile>/<lang>.json (current: run-all.sh scopes each run
+    by BENCH_PROFILE so a p0 run and a p2 run coexist instead of the later
+    one silently clobbering the earlier one's file) and the older flat
+    results/sdk/<lang>.json (kept readable for any results/ tree collected
+    before this change). Walks both."""
     sdkdir = os.path.join(results, "sdk")
     recs = []
     if not os.path.isdir(sdkdir):
         return recs
-    for fn in sorted(os.listdir(sdkdir)):
-        if fn.endswith(".json"):
+    for entry in sorted(os.listdir(sdkdir)):
+        entry_path = os.path.join(sdkdir, entry)
+        if os.path.isdir(entry_path):
+            for fn in sorted(os.listdir(entry_path)):
+                if fn.endswith(".json"):
+                    try:
+                        recs.append(json.load(open(os.path.join(entry_path, fn))))
+                    except json.JSONDecodeError:
+                        continue
+        elif entry.endswith(".json"):
             try:
-                recs.append(json.load(open(os.path.join(sdkdir, fn))))
+                recs.append(json.load(open(entry_path)))
             except json.JSONDecodeError:
                 continue
     return recs

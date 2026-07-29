@@ -368,22 +368,98 @@ but a maintainer smoke-boot is the honest confirmation (§7.2).
 > block; it is a paper trail so the decision is traceable to a named human
 > rather than left implicit.
 
-### 7.2 Needs a laptop run
+### 7.2 Laptop run — DONE (H7, 2026-07-29, `claude/g-benchmark-improvements-n5mjmj`)
 
-1. **Boot smoke test** — start the stack and confirm the
-   `Rate-limit posture active` line appears once at `info` with the expected
-   fields, under both no profile and `AXIAM__RATE_LIMIT__PROFILE=gateway`.
-2. **Re-measure the posture pass under `gateway`** in run 4: the run-3
-   `rl=prod` pass measured the defaults; there is no measured cell for the
-   preset. Expected result — the single-IP generator is no longer flattened
-   *if* the harness sends distinct `client_id`s, and is still flattened if it
-   sends one. Both outcomes are informative; the second would empirically
-   confirm §4.3.
-3. **Refresh the envelope numbers** in
-   `docs/deployment/rate-limit-sizing.md` §2 after run 4 — they are copied
-   from public §6 and labelled temporary. The doc-vs-code test does not
-   cover that prose table (it covers the posture table), so it is a manual
-   sync at run-4 time.
+**Boot smoke test:** ✅. The `ghcr.io/ilpanich/axiam/server:1.0.0-alpha19`
+image cached in this sandbox **predates the G7 rate-limit-profile feature
+entirely** — `strings` on its binary has no `RATE_LIMIT__PROFILE`, no
+`preset_applied`, no "Rate-limit posture active" — so a fresh image had to be
+built from this branch's source (`docker build -f docker/Dockerfile.server`,
+jemalloc default, no code changes) to test the preset at all. On that build,
+booting with `AXIAM__RATE_LIMIT__PROFILE=gateway` and none of the six
+machine-endpoint env vars pinned emits exactly the documented line:
+
+```json
+{"level":"INFO","fields":{"message":"Rate-limit posture active",
+ "profile":"gateway","preset_applied":true,"key_mode":"client_id",
+ "login_per_min":10,"register_per_min":5,"password_reset_per_min":3,
+ "mfa_per_min":5,"token_per_min":600,"introspect_per_min":6000,
+ "revoke_per_min":600,"authz_check_per_min":6000,
+ "grpc_authz_per_sec":1000,"operator_overrides":"none"}}
+```
+
+confirming §5.1's precedence rule end-to-end: with no operator override, the
+preset lands exactly as documented.
+
+**Harness gap found along the way (recorded, not fixed — out of file scope):**
+`benchmarks/targets/axiam/docker-compose.yml` unconditionally sets all six
+machine-endpoint env vars via `${VAR:-1000000}` (`neutralized`'s mechanism),
+which means the container **always** sees them as present
+(`std::env::var_os(name).is_some()`, `crates/axiam-api-rest/src/config/rate_limit.rs`
+`apply_profile`'s `is_set`) — so **`just … bench-up` can never actually
+exercise the `gateway`/`mesh` preset**, regardless of
+`AXIAM__RATE_LIMIT__PROFILE`, because the explicit-env-var-wins rule (§5.1)
+always finds all six vars "pinned" by the compose file's own neutralization
+default. This run worked around it by stopping the compose-managed
+`bench-axiam-server` container and starting a replacement by hand on the same
+network with the same secrets, **omitting** those six vars and setting only
+`AXIAM__RATE_LIMIT__PROFILE=gateway`. A durable fix (unowned by this task)
+would give the compose file an actual "unset" path — e.g. gate the six
+`${VAR:-1000000}` lines behind `rl=neutralized` in the `bench-up` recipe
+(mirroring how `rl=prod` already conditionally sets its own values) so
+`rl=gateway`/`rl=mesh` could exist as first-class harness modes.
+
+**Re-measured the posture pass under `gateway`:** ✅. Same box, same
+`p0-plaintext` target, one client_id (the seeded confidential OAuth2 client),
+50 VUs, `BENCH_SETTLE=0` (H2 already proved the settle gate can never pass on
+this box for `RateLimitShared` endpoints — see
+`claude_dev/postseed-transient-investigation.md`), 70 s measured window
+(warmup 5 s / duration 60 s / cooldown 5 s — long enough to exhaust the
+governor's burst allowance, unlike a short mini-pass):
+
+| scenario | `rl=prod` (ip-keyed, shipped defaults) | `AXIAM__RATE_LIMIT__PROFILE=gateway` (client_id-keyed) |
+|---|---|---|
+| `oauth2_client_credentials` (token, 20/min ip → 600/min client) | 58/685 ok (8.5%), 627 throttled (91.5%) | **1551/1605 ok (96.6%)**, 54 throttled (3.4%), 22.15 ok/s |
+| `token_introspection` (10/min ip → 6 000/min client) | 28/754 ok (3.7%), 726 throttled (96.3%) | **1669/1669 ok (100%)**, 0 throttled, 23.82 ok/s |
+| `authz_check_rest` (300/min ip → 6 000/min client) | 471/684 ok (68.9%), 213 throttled (31.1%) | **1641/1641 ok (100%)**, 0 throttled, 23.39 ok/s |
+
+Confirms §4.3's expected result in the *second* direction the plan flagged:
+this single-client_id generator is **no longer flattened** under `gateway` —
+exactly because it presents one `client_id` (one bucket), which is the
+intended-topology case the preset targets (§4.1's attacker-mintable-bucket
+caveat is about a generator that *rotates* `client_id`, not this one).
+
+**What the preset changed vs what it didn't (H2's context, restated with
+numbers):** the preset changed **keying** (ip → client_id) and **limits**
+(20/600/6000× higher per bucket), which is why 429 rates collapsed from
+91.5%/96.3%/31.1% to 3.4%/0%/0%. It did **not** touch the per-request
+synchronous `rate_limit_bucket` UPSERT `postseed-transient-investigation.md`
+names as the real ceiling: admitted throughput under `gateway` — **22.15,
+23.82, 23.39 ok/s** — lands in the *exact same* ~20–24 ops/s band H2 measured
+for these endpoints under every other posture and every other intervention
+tried (pool size, storage backend, restarts). The preset can only decide
+*whether* a request gets rejected before the handler runs; it cannot make the
+handler's own DB write cheaper. `oauth2_client_credentials`'s small residual
+3.4% throttled rate (not 0%, unlike the other two) is explained by arithmetic,
+not noise: `gateway`'s token bucket refills at 600/min = 10/s, this cell's
+achieved rate is ~23/s, so sustained load drains the burst allowance
+(-13/s net) over the 60 s window and starts rejecting near the end —
+`introspect`/`authz_check`'s much larger per-client ceilings (6 000/min =
+100/s) sit far enough above the ~20–24 ops/s physical ceiling that the
+bucket never drains at all. One side observation from the server log during
+this pass, not chased further (pre-existing `RateLimitShared` behavior, not
+a regression): under sustained 50-VU contention on one bucket key, SurrealDB
+occasionally returns a transaction-conflict error on the UPSERT, and
+`RateLimitShared` correctly fails open to the per-replica in-memory
+`governor` for that request (as documented) rather than blocking or
+double-counting.
+
+**Envelope numbers in `docs/deployment/rate-limit-sizing.md` §2:** not
+refreshed — those numbers are explicitly scoped to run-4 (H10), which has not
+run yet on this branch; refreshing them now from a single ad-hoc pass would
+contradict the doc's own "median-of-3, run-4" provenance note. The `gateway`
+numbers above are new evidence, added to this file (§7.2) and cross-linked
+from the sizing doc's §7.2 pointer below instead of overwriting §2's table.
 
 ### 7.3 Follow-ups deliberately not done here
 

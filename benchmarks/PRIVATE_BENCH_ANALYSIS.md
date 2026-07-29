@@ -165,6 +165,57 @@ KC-login-got-faster claim; publish p0 as measured (valid) and p2 as
 gate-invalid, and note the asymmetry. Worth one diagnostic run if time
 permits; not AXIAM work.
 
+#### 2.4.1 H7 diagnostic run (2026-07-29, `claude/g-benchmark-improvements-n5mjmj`) — fairness hygiene only, no KC fixes
+
+One `oauth2_password_login.js` pass each way, per the written procedure in
+`claude_dev/grpc-vs-rest-authz-analysis.md` §2 (single repro run each way,
+per that section's own acceptance bar). `BENCH_MEM` raised from the target's
+compose default (1024m) to **4096m** for this diagnostic only (env override,
+no compose file change) — see why below; `docker stats` sampled every 3 s
+throughout each measured window.
+
+| profile | result | throughput | p50 | p95 | error | KC CPU (2-core cap) | KC mem peak |
+|---|---|---:|---:|---:|---:|---|---|
+| p0-plaintext | ✅ 100% valid | **27.93 req/s** | 1.63 s | 2.28 s | 0.00% | ~195–200% (saturated) | 3.28 GiB / 4 GiB (82%) |
+| p2-tls13 | ✅ 100% valid | **13.55 req/s** (−51%) | 3.45 s | 4.00 s | 0.00% | ~197–202% (saturated) | 1.48 GiB / 4 GiB (37%) |
+
+Both cells are clean 0%-error, 100%-`checks` passes — **not gate-invalid** —
+answering procedure item 3 directly: on this box, with adequate memory
+headroom, p2 is not failing the validity gate at all; it is legitimately
+slower. That reframes the original matrix's "p0 52/s valid vs p2 23/s,
+0/3 valid": **at the target's own compose default of `BENCH_MEM=1024m`, this
+diagnostic reproduced an outright `OOMKilled: true` on `bench-keycloak` twice**
+(once at 1024m, once again at 2560m) before a 4096m cap let the container
+survive a full 50-VU sustained-login window — Keycloak 26 on Quarkus simply
+needs more headroom than the shared 1 GiB per-container default under
+sustained Argon2/PBKDF2-class hashing load. The original run's "0/3 valid"
+for p2 is therefore plausibly **OOM-driven instability**, not a TLS-specific
+gate failure — a harness sizing gap, not a Keycloak or TLS defect. (Not
+re-verified against the original run's exact `BENCH_MEM`; flagged as the
+most likely explanation, not confirmed root cause — the original run's
+containers are gone.)
+
+Procedure item 2 (isolate TLS overhead from KC's own request handling): KC's
+CPU is pegged at the **same** ~195–202% (i.e., the full 2-core cap) in
+**both** profiles, not "idle at p0, pegged at p2" — Argon2/PBKDF2 password
+hashing already saturates the CPU budget at p0 by itself. p2's TLS
+handshake/cipher cost is therefore not new, unused headroom being consumed;
+it is **additional CPU work landing on an already-fully-booked budget**,
+directly cannibalizing hashing throughput — consistent with the −51%
+measured, and a cleaner mechanism than "TLS is expensive in the abstract."
+Procedure item 1 (run-order/warm-up): only one order was run (p0 then p2,
+per the "one diagnostic run each way is sufficient" bar) — not re-tested in
+the opposite order; if the 30% budget affords it, a p2→p0 repeat would
+further separate order effects from the CPU-contention mechanism above, but
+was not required to close this item.
+
+**Verdict:** fairness hygiene closed. No AXIAM or Keycloak code was touched.
+Recommendation for any future publication of this pair: size the Keycloak
+container's memory to at least ~3.5–4 GiB before trusting *any* sustained-load
+login cell from it (current target compose default of `BENCH_MEM=1024m` is
+too small and risks silently reporting an OOM-churn number as a TLS
+penalty).
+
 ### 2.5 ✅ D11 Zitadel gRPC — fixed, but the run-2 magnitude prediction was wrong
 
 Valid 0%-error cells at last: **183/187 req/s (p0/p2), p50 233 ms**,

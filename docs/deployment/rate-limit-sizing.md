@@ -138,6 +138,30 @@ Behind a NAT/ingress also set `AXIAM__RATE_LIMIT__TRUSTED_HOPS` to the
 number of trusted proxy hops, otherwise every bucket keys on the proxy's
 IP (see [Deployment Guide § Rate limiting](README.md#rate-limiting)).
 
+### Measured: the `gateway` preset actually applied (H7, 2026-07-29)
+
+The `internet` (shipped default) posture pass in §2 above was measured; the
+preset itself wasn't, until now. One labeled laptop-class pass, single
+`client_id` generator, `p0-plaintext`:
+
+| scenario | shipped default (`ip`-keyed) | `gateway` (`client_id`-keyed) |
+|---|---:|---:|
+| `oauth2_client_credentials` | 8.5% admitted, 91.5% throttled | **96.6% admitted**, 3.4% throttled, 22.15 ops/s |
+| `token_introspection` | 3.7% admitted, 96.3% throttled | **100% admitted**, 23.82 ops/s |
+| `authz_check_rest` | 68.9% admitted, 31.1% throttled | **100% admitted**, 23.39 ops/s |
+
+**Read this as confirmation of the mechanism, not a new throughput ceiling:**
+switching key mode + raising the per-bucket limits is what stopped this
+single-`client_id` generator from being throttled — that's the preset doing
+exactly what §3 says. It did **not** raise the ~20–24 ops/s the server
+actually admits per second on these three endpoints; that number is set by a
+synchronous per-request datastore write on the critical path
+(`claude_dev/postseed-transient-investigation.md`), which every posture pays
+identically. Full numbers, the harness workaround needed to test a preset at
+all (the bench compose's `neutralized` defaults otherwise always outrank the
+preset — see precedence above), and the arithmetic behind the one non-zero
+throttled row: `claude_dev/rate-limit-posture-decision.md` §7.2.
+
 ---
 
 ## 4. Sizing by hand

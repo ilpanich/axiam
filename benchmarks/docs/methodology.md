@@ -117,6 +117,18 @@ record the last passing point.
 * **error_rate** — fraction of iterations that failed a check or returned an
   unexpected status. A run with `error_rate > BENCH_MAX_ERROR` (default 1%) is
   marked **invalid**.
+* **`bench_http_proto` → the report's `http` column** — the wire protocol every
+  measured response actually negotiated (k6's `res.proto`), recorded per
+  response by `scenarios/lib/metrics.js` as `10`/`11`/`20`/`30` = HTTP/1.0 /
+  1.1 / 2.0 / 3, and decoded by `report.py`. It is a Trend, not a counter, so a
+  cell whose min and max disagree renders as `mixed(1.1,2.0)` — such a cell
+  spanned two protocols and is **void as a controlled protocol comparison**.
+  `—` means the cell predates this metric or never got a response. Any
+  security-cost table whose rows did not all negotiate the same protocol gets
+  an explicit "protocol confound" warning, because its Δ then measures TLS and
+  the protocol change together. Added in H6 after a TLS h1-vs-h2 conviction
+  attempt turned out to have no record of which protocol its cells had used —
+  do not interpret an h1/h2 comparison whose `http` column you have not read.
 
 ### Resource (from the sampler)
 Sampled every `BENCH_SAMPLE_INTERVAL` (default 1s) over the measure stage via

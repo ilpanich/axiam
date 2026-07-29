@@ -19,6 +19,26 @@ ITER = int(os.environ.get("SDK_BENCH_ITERATIONS", "2000"))
 WARMUP = int(os.environ.get("SDK_BENCH_WARMUP", "200"))
 CONC = int(os.environ.get("SDK_BENCH_CONCURRENCY", "16"))
 
+def _read_custom_ca():
+    """H8 fix: HARNESS-SPEC.md documents BENCH_CA_CERT (a file PATH) as an
+    input every SDK bench should honor under the TLS profiles (p2), but this
+    reference bench never read it — every p2 run failed at the first HTTPS
+    call with 'certificate verify failed: unable to get local issuer
+    certificate' against the profile's throwaway CA.
+
+    AxiamClient's `custom_ca` accepts EITHER a file path or inline PEM text
+    (`_looks_like_pem()` in _session.py) when a client cert is also supplied
+    (the mTLS-context branch), but the plain server-trust-only branch
+    (`self._verify = custom_ca if custom_ca else True`, no client cert —
+    this bench's case) hands the value straight to httpx's `verify=`, which
+    only accepts a bool/SSLContext/file-path — NOT inline PEM content (that
+    raises 'File name too long' since it tries to stat() the huge string as
+    a path). Pass BENCH_CA_CERT's path through unchanged rather than reading
+    it, since this bench never sets a client cert."""
+    path = os.environ.get("BENCH_CA_CERT", "")
+    return path or None
+
+
 CFG = {
     "base_url": f"{os.environ.get('BENCH_SCHEME','http')}://"
                 f"{os.environ.get('BENCH_HOST','localhost')}:{os.environ.get('BENCH_PORT','8090')}",
@@ -28,6 +48,7 @@ CFG = {
     "password": os.environ.get("BENCH_PASSWORD", "Bench@User123!"),
     "action": os.environ.get("BENCH_ACTION", "read"),
     "resource_id": os.environ.get("BENCH_RESOURCE_ID", "bench-resource"),
+    "custom_ca": _read_custom_ca(),
 }
 
 OP_KEYS = ("login", "refresh", "check_access", "batch_check")
@@ -61,7 +82,7 @@ def build_ops():
     already-authenticated client — refresh is routed through the SDK's
     single-flight guard, so concurrent callers are safe.
     """
-    client = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"], org_slug=CFG["org_slug"])
+    client = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"], org_slug=CFG["org_slug"], custom_ca=CFG["custom_ca"])
     client.login(CFG["username"], CFG["password"])
     # Every check reuses the one seeded resource UUID: the server rejects
     # non-UUID resource_ids, so the old `${resource}-${i}` suffixing would 400.
@@ -79,7 +100,7 @@ def build_ops():
             "(see runner/seed.sh)")
 
     def do_login():
-        fresh = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"], org_slug=CFG["org_slug"])
+        fresh = AxiamClient(base_url=CFG["base_url"], tenant_slug=CFG["tenant_slug"], org_slug=CFG["org_slug"], custom_ca=CFG["custom_ca"])
         try:
             fresh.login(CFG["username"], CFG["password"])
         finally:

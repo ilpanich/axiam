@@ -37,6 +37,11 @@ type config struct {
 	password   string
 	action     string
 	resourceID string
+	// H8 fix: HARNESS-SPEC.md documents BENCH_CA_CERT (a PEM file path) as
+	// an input every SDK bench should honor under the TLS profiles (p2),
+	// but this bench never read it — every p2 run failed at the first
+	// HTTPS call against the profile's throwaway CA. Empty under p0.
+	caCertPath string
 }
 
 func env(key, def string) string {
@@ -73,6 +78,7 @@ func loadConfig() config {
 		password:   env("BENCH_PASSWORD", "Bench@User123!"),
 		action:     env("BENCH_ACTION", "read"),
 		resourceID: env("BENCH_RESOURCE_ID", "bench-resource"),
+		caCertPath: env("BENCH_CA_CERT", ""),
 	}
 }
 
@@ -166,7 +172,15 @@ type opFn func(ctx context.Context) error
 // routed through the SDK's sync.Mutex single-flight guard, so concurrent
 // callers are safe.
 func buildOps(ctx context.Context, cfg config) (map[string]opFn, error) {
-	client, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug, axiam.WithOrgSlug(cfg.orgSlug))
+	opts := []axiam.Option{axiam.WithOrgSlug(cfg.orgSlug)}
+	if cfg.caCertPath != "" {
+		pem, err := os.ReadFile(cfg.caCertPath)
+		if err != nil {
+			return nil, fmt.Errorf("BENCH_CA_CERT=%q could not be read: %w", cfg.caCertPath, err)
+		}
+		opts = append(opts, axiam.WithCustomCA(pem))
+	}
+	client, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +196,7 @@ func buildOps(ctx context.Context, cfg config) (map[string]opFn, error) {
 
 	ops := map[string]opFn{
 		"login": func(ctx context.Context) error {
-			fresh, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug, axiam.WithOrgSlug(cfg.orgSlug))
+			fresh, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug, opts...)
 			if err != nil {
 				return err
 			}

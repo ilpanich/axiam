@@ -5,6 +5,12 @@
 # run `mvn install` in ../../../../axiam-java-sdk first to populate the local ~/.m2.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# H8: resolve BENCH_CA_CERT to an absolute path before `cd "$HERE"` below —
+# profiles/*.env sets it relative to benchmarks/ (the caller's cwd), which
+# no longer resolves once this script cds into sdk/java/.
+if [ -n "${BENCH_CA_CERT:-}" ] && [ -f "$BENCH_CA_CERT" ]; then
+  export BENCH_CA_CERT="$(cd "$(dirname "$BENCH_CA_CERT")" && pwd)/$(basename "$BENCH_CA_CERT")"
+fi
 cd "$HERE"
 command -v mvn >/dev/null || { source "$HERE/../_pending.sh"; emit_pending java; exit 0; }
 

@@ -41,6 +41,13 @@ $cfg = [
     'password' => $env('BENCH_PASSWORD', 'Bench@User123!'),
     'action' => $env('BENCH_ACTION', 'read'),
     'resource_id' => $env('BENCH_RESOURCE_ID', 'bench-resource'),
+    // H8 fix: HARNESS-SPEC.md documents BENCH_CA_CERT (a PEM file path) as
+    // an input every SDK bench should honor under the TLS profiles (p2),
+    // but this bench never read it — every p2 run failed at the first
+    // HTTPS call against the profile's throwaway CA. AxiamClient's
+    // $customCa constructor param is a CA bundle FILE PATH (not inline PEM
+    // content), so pass BENCH_CA_CERT straight through unchanged.
+    'custom_ca' => $env('BENCH_CA_CERT', '') ?: null,
 ];
 
 const OP_KEYS = ['login', 'refresh', 'check_access', 'batch_check'];
@@ -121,7 +128,7 @@ function emit(string $status, array $ops, int $iterations, int $concurrency, str
  */
 function build_ops(array $cfg): array
 {
-    $client = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug'], $cfg['org_slug']);
+    $client = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug'], $cfg['org_slug'], null, $cfg['custom_ca']);
     $client->login($cfg['username'], $cfg['password']);
 
     // 3 checks, all using the SAME resource id (batch preserves input order).
@@ -133,7 +140,7 @@ function build_ops(array $cfg): array
 
     return [
         'login' => static function () use ($cfg): void {
-            $fresh = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug'], $cfg['org_slug']);
+            $fresh = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug'], $cfg['org_slug'], null, $cfg['custom_ca']);
             $fresh->login($cfg['username'], $cfg['password']);
         },
         'refresh' => static fn (): mixed => $client->refresh(),

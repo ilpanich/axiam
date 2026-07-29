@@ -4,6 +4,14 @@
 # directory, which prints exactly one axiam.sdk-bench/v1 JSON record to stdout.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# H8: BENCH_CA_CERT (profiles/*.env sets it relative to benchmarks/, e.g.
+# "profiles/certs/ca.crt") must be resolved to an absolute path BEFORE the
+# `cd "$HERE"` below, or the bench binary (which reads it with its own cwd
+# now sdk/rust/) fails with "No such file or directory" even though the
+# caller's shell could see it fine.
+if [ -n "${BENCH_CA_CERT:-}" ] && [ -f "$BENCH_CA_CERT" ]; then
+  export BENCH_CA_CERT="$(cd "$(dirname "$BENCH_CA_CERT")" && pwd)/$(basename "$BENCH_CA_CERT")"
+fi
 cd "$HERE"
 # H8: defense-in-depth if this script is invoked directly (bypassing both
 # `just sdk-bench` and `sdk-bench-all`'s run-all.sh, which already source the

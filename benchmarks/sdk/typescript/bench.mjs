@@ -10,10 +10,20 @@
 //
 // Run: node bench.mjs   (or: just sdk=typescript sdk-bench)
 
+import { readFileSync } from "node:fs";
+
 const env = (k, d) => process.env[k] ?? d;
 const ITER = Number(env("SDK_BENCH_ITERATIONS", "2000"));
 const WARMUP = Number(env("SDK_BENCH_WARMUP", "200"));
 const CONC = Number(env("SDK_BENCH_CONCURRENCY", "16"));
+
+// H8 fix: HARNESS-SPEC.md documents BENCH_CA_CERT (a PEM file path) as an
+// input every SDK bench should honor under the TLS profiles (p2), but this
+// bench never read it — every p2 run failed at the first HTTPS call against
+// the profile's throwaway CA. AxiamClientOptions.customCa wants inline PEM
+// *content*, not a path, so read the file here.
+const caCertPath = env("BENCH_CA_CERT", "");
+const customCa = caCertPath ? readFileSync(caCertPath, "utf8") : undefined;
 
 const cfg = {
   scheme: env("BENCH_SCHEME", "http"),
@@ -25,6 +35,7 @@ const cfg = {
   password: env("BENCH_PASSWORD", "Bench@User123!"),
   action: env("BENCH_ACTION", "read"),
   resourceId: env("BENCH_RESOURCE_ID", "bench-resource"),
+  customCa,
 };
 
 const OP_KEYS = ["login", "refresh", "check_access", "batch_check"];
@@ -66,7 +77,7 @@ async function buildOps() {
   const { createNodeClient } = await import("axiam-sdk/node");
   const baseUrl = `${cfg.scheme}://${cfg.host}:${cfg.port}`;
 
-  const client = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug });
+  const client = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug, customCa: cfg.customCa });
   await client.login(cfg.username, cfg.password);
 
   // Every check reuses the one seeded resource UUID: the server rejects
@@ -87,7 +98,7 @@ async function buildOps() {
 
   return {
     login: async () => {
-      const fresh = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug });
+      const fresh = createNodeClient({ baseUrl, tenantSlug: cfg.tenantSlug, orgSlug: cfg.orgSlug, customCa: cfg.customCa });
       await fresh.login(cfg.username, cfg.password);
     },
     refresh: () => client.refresh(),

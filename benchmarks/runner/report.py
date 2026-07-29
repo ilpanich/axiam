@@ -1256,6 +1256,31 @@ def build_report(cells, multi_run=False):
     return "\n".join(lines)
 
 
+def append_sdk_section(report_text, results_dir):
+    """H8/E1.3: fold sdk/collect.py's SDK-client-overhead section into the
+    main report so a single `report.py` run publishes both the server-side
+    matrix and the SDK overhead table together, instead of leaving the two
+    as separate files a reader has to know to cross-reference. Best-effort:
+    if sdk/collect.py can't be imported (e.g. this script run from outside
+    the benchmarks/ tree) or there are no SDK records yet, the main report
+    is still written unchanged — this is additive, never load-bearing for
+    the server-side report."""
+    sdk_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sdk")
+    try:
+        sys.path.insert(0, sdk_dir)
+        import collect as sdk_collect  # sdk/collect.py
+    except ImportError:
+        return report_text
+    finally:
+        if sdk_dir in sys.path:
+            sys.path.remove(sdk_dir)
+    recs = sdk_collect.load_sdk_records(results_dir)
+    if not recs:
+        return report_text
+    sdk_section = sdk_collect.build(results_dir, recs)
+    return report_text + "\n\n---\n\n" + sdk_section + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True)
@@ -1286,6 +1311,9 @@ def main():
         for c in settle_timeout_cells:
             print(f"[report]   - {c['target']}/{c['profile']}/{c['scenario']}", file=sys.stderr)
     report = build_report(cells, multi_run=multi_run)
+    # H8/E1.3: append the SDK client-overhead table (sdk/collect.py) so the
+    # published report carries both halves of the harness in one file.
+    report = append_sdk_section(report, args.results)
     out = args.out or os.path.join(args.results, "report.md")
     with open(out, "w") as f:
         f.write(report)

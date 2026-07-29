@@ -438,3 +438,31 @@ H10 run 4 + E4 last (needs H1, H3, H4; folds in H5/H6/H9 outcomes)
 
 **MVP gate:** H1–H6 (H6 may close as a documented position). H7–H9
 non-blocking. H10 required for the public page, not the server MVP.
+
+---
+
+## §6 Execution record (2026-07-29)
+
+All ten H tasks are closed. One line per task, outcome as recorded when the
+task closed:
+
+| Task | Outcome |
+|---|---|
+| H0 | Pre-merged — the plan's own branch (code + harness + this plan) merged to `main` before H1 started, per this document's header. |
+| H1 | Done — settle gate v2 (concurrent burst probe) ships; the `bench-matrix` results-dir clobber and both g1-isolate/g1-dbdirect probe faults fixed; `report.py` refuses `settle_timeout: true` cells. |
+| H2 | Root cause found — **product-relevant**. The "post-seed transient" is a permanent synchronous `RateLimitShared` datastore write in front of six endpoints, not a seeding effect; reproduced on a second host at a different (higher) unit cost; a maintainer issue is written up (`postseed-transient-investigation.md` §7.1) and not yet fixed. |
+| H3 | Shipped — `AXIAM__AUTHZ__BATCH_STRATEGY` default flipped to `coalesced` (4.98× singles on settled REST, ≈4 330 checks/s on gRPC); `concurrent` stays selectable; all four doc locations updated. |
+| H4 | Shipped — jemalloc is the release-container default allocator; closes 94% of the measured memory-retention gap with no throughput cost. |
+| H5 | Opt-in verdict — decision cache stays `false` by default. Three surfaced defects fixed first; the clean K=10 000 measurement (+32%, 1.32×) does not clear the seven-criteria ship bar (≥1.5×); recorded with full criteria table in `decision-cache-decision.md`. |
+| H6 | Closed — acquitted. HTTP/2 exonerated by direct connection-census measurement; TLS 1.3 priced at 10–13%, not 50%; the h1 control made trustworthy (nginx upstream keepalive fix); `bench_http_proto` column ships in `report.py`; the p0 `Secure`-cookie harness bug fixed along the way. The `client_credentials`-specific penalty itself stays an open question (documented, not hand-waved). |
+| H7 | Done — REST-side `bench_throttled` classifier wired (parity with gRPC/CC); `protocol-variant` comparability label ships in `report.py`; the `gateway` rate-limit preset measured live (single-client_id admitted rate 8.5%→96.6%/3.7%→100%/68.9%→100% on token/introspect/authz); the Keycloak p0-vs-p2 login asymmetry diagnosed as an OOM-sizing artifact, not a TLS defect. |
+| H8 | 6/7 validated — rust, python, typescript, go, java, php SDK benches run end-to-end against a seeded target with real `ok` records; csharp stays an honest `pending` (host toolchain not installed); the E1.3 overhead table renders from real data in `report.py`. |
+| H9 | Negative-closed. The pre-agreed confirm cell was unsatisfiable on a clamped host (needs a settled CC cell); closed on independent mechanism evidence instead (`pool_size` 1→8 moved authz throughput by 0 ops/s at 1 or 20 VUs) — default stays `pool_size=1`, no code change needed. |
+| H10 | This run — **harness validated, publishable matrix deferred to a fast-datastore host (E3/the G-box) with reasons.** A bounded, single-repeat harness-validation matrix (not median-of-3) ran on the sandbox host with `BENCH_SETTLE_TIMEOUT_SECS=120`: `report.py` correctly rendered unclamped cells as valid with the `http` protocol column populated, refused every clamped AXIAM cell loudly with `settle_timeout: true`, carried the refresh row under the `protocol-variant` label, appended the SDK section from H8's records, and showed zero `fallback-op` rows for AXIAM. `benchmarks/PUBLIC_BENCH_ANALYSIS.md` was rewritten as the fourth draft on the G-box's existing run-3 numbers (labeled by platform throughout), since the sandbox host cannot itself produce a publishable level for any `RateLimitShared`-wrapped endpoint (H2). A consistency pass reconciled `PRIVATE_BENCH_ANALYSIS.md` and `docs/methodology.md` with the H2–H9 verdicts that had not yet been folded back into either document.
+
+**Carried forward, not closed by Phase H:** the maintainer issue from H2 §7.1
+(get the shared rate-limit write off the synchronous path; fix
+`GET /api/v1/users`'s rate-limit bucket); the open `client_credentials`-vs-`token_introspection`
+TLS-penalty asymmetry from H6; the G-box recovery-cliff mechanism from H2 §6;
+a true run-4 median-of-3 matrix on a host where the shared write is cheap
+(E3); a repeated (median-of-3) SDK overhead table; the csharp SDK bench.

@@ -562,6 +562,31 @@ also first-after-seed). G1's root-cause note
 section documents the two harness countermeasures G2 added so the artifact
 can't silently corrupt a cell again, whatever the root cause turns out to be.
 
+> **UPDATE (H2, 2026-07-28): the root cause is now known, and "post-seed
+> transient" is not an accurate name for it.** `postseed-transient-investigation.md`
+> found the effect is a **permanent, per-request cost**, not a post-seed
+> warm-up: six endpoints (`POST /api/v1/authz/check`, `POST /oauth2/token`,
+> `POST /oauth2/introspect`, `POST /oauth2/revoke`, `POST /api/v1/auth/login`,
+> and — a separate bug — `GET /api/v1/users`) perform one synchronous
+> SurrealDB write (the shared rate-limit bucket `UPSERT`) before the handler
+> runs, on every request, indefinitely. What varies by host is only how
+> expensive that one write is: on the G-box (the run-3 host this section's
+> numbers above describe) it is cheap enough (~22 ms) that the endpoints
+> still clear hundreds of req/s once whatever makes it briefly pricier right
+> after a fresh seed subsides; on the H2 investigation host it costs ~40 ms
+> and **never subsides** — 16–21 ops/s at any concurrency, unaffected by
+> idle time, restarts, pool size, or even an in-memory storage backend. The
+> settle gate below is still exactly the right countermeasure (it protects
+> against exactly this shape of clamp, whatever causes it, on whatever host
+> is running), and everything in §12.1–§12.4 remains accurate to what it
+> does — but do not read "post-seed window" as implying the effect is caused
+> by seeding, or that it always clears. On a host where the write is
+> expensive, the settle gate will correctly spend its full
+> `BENCH_SETTLE_TIMEOUT_SECS` and stamp `settle_timeout: true` on every
+> session that touches one of the six endpoints — that is the gate
+> reporting a real, permanent property of that host, not a flaky probe (see
+> `postseed-transient-investigation.md` §8.1).
+
 ### 12.1 Settle gate v2 (H1) — why the serial canary was blind
 
 G2's original gate polled a **single** already-seeded canary request **once

@@ -372,6 +372,40 @@ PROTOCOL_EFFICIENCY_PAIRS = {
     ],
 }
 
+# H7/G4 residual (claude_dev/refresh-harness-diagnosis.md §6): scenarios where
+# every target's cell IS a real, non-fallback measurement of "renew an access
+# credential without re-authenticating" at the PRODUCT level, but the targets
+# do NOT all hit the same protocol-level operation — unlike fallback-op (a
+# per-iteration accident, see classify_fallback()), this is a permanent,
+# structural fact about the scenario itself, so it can't be derived from
+# bench_fallback and is instead a static per-scenario label. Distinct from
+# cc-token-setup (a one-time setup() provenance caveat) and from fallback-op
+# (the wrong op measured, excluded from head-to-head tables): a
+# protocol-variant cell measures the RIGHT (labelled) op for its own target,
+# it's just not the SAME op as its row-mates, so it stays in the table
+# (never excluded, like cc-token-setup) with a caveat naming the divergence.
+PROTOCOL_VARIANT_SCENARIOS = {"token_refresh"}
+
+# Per-scenario, per-target prose naming exactly what that target's cell
+# measures, for the caveat rendered next to PROTOCOL_VARIANT_SCENARIOS rows.
+# token_refresh: AXIAM deliberately ships no OAuth 2.1 ROPC/password grant
+# (refresh-harness-diagnosis.md §6), so its refresh cell is a SESSION refresh
+# (cookie + CSRF double-submit against axiam-auth's SessionRepository), while
+# Keycloak's/Zitadel's is the OAuth2 refresh_token grant. Both renew an access
+# credential without re-authenticating, so the row stays comparable at that
+# level, but never at the protocol level.
+PROTOCOL_VARIANT_NOTES = {
+    "token_refresh": {
+        "axiam": "session refresh (POST /api/v1/auth/refresh, cookie + CSRF "
+                 "double-submit, axiam-auth SessionRepository — no OAuth2 "
+                 "ROPC/password grant exists to seed an OAuth2 refresh token)",
+        "keycloak": "OAuth2 refresh grant (grant_type=refresh_token against "
+                    "the realm token endpoint)",
+        "zitadel": "OAuth2 refresh grant (via a Session-API-v2-seeded login; "
+                   "see the fallback flag if this cell also reads fallback-op)",
+    },
+}
+
 
 def derive(perf, res):
     thr = perf["throughput"]
@@ -791,6 +825,13 @@ def build_report(cells, multi_run=False):
         flags = list(c["host_flags"])
         if fb_class == "fallback-op":
             flags.append("fallback-op")
+        fb_label = fb_class if fb_class != "none" else "no"
+        # H7: protocol-variant is a static per-scenario label (see
+        # PROTOCOL_VARIANT_SCENARIOS above), orthogonal to bench_fallback —
+        # append rather than replace so a cell that's ALSO fallback-op (e.g.
+        # Zitadel's token_refresh) still shows both.
+        if c["scenario"] in PROTOCOL_VARIANT_SCENARIOS:
+            fb_label = (fb_label + "+protocol-variant") if fb_label != "no" else "protocol-variant"
         row = [
             c["scenario"], c["profile"], c["target"], c["rate_limits"],
             proto_label(p),
@@ -799,7 +840,7 @@ def build_report(cells, multi_run=False):
             f"{r['cpu_cores_avg']:.2f}", f"{r['mem_mib_avg']:.0f}",
             dash(thr_core, ".0f"), dash(cpu_ms, ".3f"),
             c["bottleneck"],
-            fb_class if fb_class != "none" else "no",
+            fb_label,
             f"{h['mhz_avg']:.0f}", f"{mhz_ratio:.2f}", f"{h['temp_max']:.0f}",
             f"{h['k6_cores_avg']:.2f}",
             ";".join(flags) or "-",
@@ -899,6 +940,21 @@ def build_report(cells, multi_run=False):
                     "token used to reach it was minted via client_credentials "
                     "once in setup() (comparability: cc-token-setup).", "",
                 ]
+            if sc in PROTOCOL_VARIANT_SCENARIOS:
+                notes = PROTOCOL_VARIANT_NOTES.get(sc, {})
+                desc = "; ".join(
+                    f"**{c['target']}** = {notes.get(c['target'], 'operation shape not documented')}"
+                    for c in sorted(group, key=lambda c: c["target"])
+                )
+                lines += [
+                    "> ⚠️ **comparability: protocol-variant** (kept in this "
+                    "head-to-head, never excluded — each target's cell is a "
+                    "real, correct measurement of ITS OWN op, they're just not "
+                    f"the same op): {desc}. Read this table as each target's own "
+                    "capability at renewing a credential without "
+                    "re-authenticating, never as \"target A is Nx target B\" "
+                    "(see claude_dev/refresh-harness-diagnosis.md §6).", "",
+                ]
             if len(group) < 2:
                 lines += ["_Fewer than 2 non-fallback targets — nothing to compare._", ""]
                 continue
@@ -925,6 +981,8 @@ def build_report(cells, multi_run=False):
                 d, ds, p = c["der"], c["der_server"], c["perf"]
                 marker = " 🏆" if c is best else ""
                 note = " (cc-token-setup)" if p.get("fallback_class") == "cc-token-setup" else ""
+                if sc in PROTOCOL_VARIANT_SCENARIOS:
+                    note += " (protocol-variant)"
                 rows.append([c["target"] + marker + note, f"{p['throughput']:.0f}",
                              f"{p['p50']:.1f}", f"{p['p95']:.1f}",
                              f"{d['throughput_per_core']:.0f}", f"{d['throughput_per_gib']:.0f}",

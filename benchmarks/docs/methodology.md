@@ -244,6 +244,31 @@ fallback op measures a different (usually cheaper) operation than its label,
 so ranking it against a real login/refresh would be comparing different
 things under the same name.
 
+### Comparability flags (protocol variant)
+A third comparability class, orthogonal to both of the above: some scenarios
+are structurally guaranteed to measure a **different underlying operation per
+target**, even though every cell is a real, correct, non-fallback measurement
+of the operation its own label names. Today that's `token_refresh.js`: AXIAM
+ships no OAuth 2.1 ROPC/password grant (the grant is removed in OAuth 2.1),
+so it has no way to seed an OAuth2 refresh token from a password login — its
+cell measures a **session refresh** (`POST /api/v1/auth/refresh`, cookie +
+CSRF double-submit, `axiam-auth`'s `SessionRepository`), while Keycloak's and
+Zitadel's cells measure the **OAuth2 `refresh_token` grant**. Both renew an
+access credential without re-authenticating — comparable at the product
+level — but never at the protocol level (see
+`claude_dev/refresh-harness-diagnosis.md` §6 for the full derivation).
+
+Unlike `fallback-op`, this is a **static, per-scenario property** — it can't
+be derived from `bench_fallback` (a cell can read `fallback_count: 0` and
+still be a protocol-variant cell), so `report.py` carries it as a fixed
+`PROTOCOL_VARIANT_SCENARIOS` set rather than a per-run classification. Unlike
+`fallback-op`, a protocol-variant cell is **never excluded** from head-to-head
+tables — the measured operation IS the labelled one, for every target — it is
+annotated `comparability: protocol-variant` (visible as `protocol-variant` in
+the "All results" table's `fallback` column, and as a per-target caveat in
+the "Efficiency comparison" section) so a reader sees the operations diverge
+before reading the numbers as "AXIAM is Nx Keycloak at refresh".
+
 ### Security cost (derived across profiles)
 For a fixed (target, scenario), the report computes the **relative cost** of each
 profile vs the `p0-plaintext` baseline:

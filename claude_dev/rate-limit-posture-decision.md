@@ -337,6 +337,37 @@ but a maintainer smoke-boot is the honest confirmation (§7.2).
    documentation-plus-opt-in treatment is sufficient for v1.0-beta, or open
    an issue for the bounded-keyspace fix (§7.3).
 
+> **⚠️ AWAITING MAINTAINER SIGN-OFF (added by H7, 2026-07-29)**
+>
+> This task (H7 of `claude_dev/improvement-after-g-benchmark.md`) cannot
+> obtain a human sign-off from an agent session — the three items above
+> require a judgement call about the maintainer's intended fleet sizes and
+> risk tolerance, not a measurement this branch can produce. This block
+> exists so a PR reviewer sees exactly what is being asked, in one place,
+> without having to reconstruct it from §§1–7:
+>
+> | # | What needs a decision | Default if unconfirmed |
+> |---|---|---|
+> | 1 | Do the `gateway` (600/6 000/600/6 000 per-min) and `mesh` (6 000/60 000/6 000/60 000 per-min) preset numbers match the fleet sizes you intend to support in practice? | Numbers ship as-is (already merged; no shipped *default* is affected either way — §1) |
+> | 2 | Is a documented not-really-a-limit (`mesh` authz = 60 000/min, above the measured whole-server ceiling — §7.1.2) acceptable under that profile name, or should it drop to 30 000? | Ships at 60 000/min as documented |
+> | 3 | Is the documentation-plus-opt-in treatment of the `client_id` keying bypass (§4.1 — attacker-mintable buckets) sufficient for v1.0-beta, or does it need the bounded-keyspace fix (§7.3.1) as a blocking issue instead of a follow-up? | Ships documented, unfixed, tracked as a non-blocking follow-up (§7.3.1) |
+>
+> **What is explicitly NOT being asked for sign-off here:** no shipped
+> default changed (§1, verified byte-for-byte in `cargo test`, §6) — this
+> sign-off is about the *opt-in preset's* values and posture, not about
+> anything that changes behavior for an operator who never sets
+> `AXIAM__RATE_LIMIT__PROFILE`. §7.2 (the re-measurement) is covered
+> separately below and does not block this sign-off or vice versa — the
+> re-measurement confirms the *mechanism* works as designed; this sign-off
+> is about whether the *numbers and posture* are the ones the maintainer
+> wants shipped.
+>
+> Reviewer: check one of ACCEPT / ACCEPT-WITH-CHANGES / REJECT per row above
+> (or overall) directly in the PR review, or open the follow-up issue named
+> in §7.3 if item 3 needs to become blocking. No code change is gated on this
+> block; it is a paper trail so the decision is traceable to a named human
+> rather than left implicit.
+
 ### 7.2 Needs a laptop run
 
 1. **Boot smoke test** — start the stack and confirm the

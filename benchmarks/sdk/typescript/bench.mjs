@@ -96,7 +96,15 @@ async function buildOps() {
   };
 }
 
-async function timeOp(fn) {
+// HARNESS-SPEC.md requires `refresh` to be measured at concurrency 1: every
+// SDK guards refresh() with a single-flight lock, but the underlying
+// refresh_token is single-use/rotating (opaque, server-stored, rotated on
+// every use per CLAUDE.md) — genuinely concurrent callers race on which
+// wire call wins, and the loser reusing an already-rotated token can trip
+// reuse-detection and revoke the whole session, cascading into 100% errors
+// on every op measured after refresh in the same run (H8 fix — this used to
+// pass CONC unconditionally for every op, including refresh).
+async function timeOp(fn, conc = CONC) {
   const lat = [];
   let errors = 0;
   // warm-up (uncounted)
@@ -112,7 +120,7 @@ async function timeOp(fn) {
       catch { errors++; }
     }
   }
-  await Promise.all(Array.from({ length: CONC }, worker));
+  await Promise.all(Array.from({ length: conc }, worker));
   const secs = (performance.now() - start) / 1000;
   return {
     p50_ms: pct(lat, 50), p95_ms: pct(lat, 95), p99_ms: pct(lat, 99),
@@ -137,7 +145,7 @@ async function main() {
   }
 
   const ops = {};
-  for (const k of OP_KEYS) ops[k] = await timeOp(opsFns[k]);
+  for (const k of OP_KEYS) ops[k] = await timeOp(opsFns[k], k === "refresh" ? 1 : CONC);
   emit("ok", ops, ITER, CONC, "");
 }
 

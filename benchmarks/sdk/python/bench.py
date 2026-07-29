@@ -93,7 +93,20 @@ def build_ops():
     }
 
 
-def time_op(fn):
+def time_op(fn, conc=None):
+    """Run fn WARMUP times uncounted, then ITER times measured across `conc`
+    worker threads (default CONC). HARNESS-SPEC.md requires `refresh` to be
+    measured at concurrency 1 — every SDK guards refresh() with a
+    single-flight lock keyed on the in-flight call, but under genuine
+    concurrent callers (not just N references to one already-in-flight
+    future) the underlying refresh_token is single-use/rotating (opaque,
+    server-stored, rotated on every use per CLAUDE.md); overlapping refresh
+    attempts race on which token wins, and the loser's reuse of an
+    already-rotated token can trip reuse-detection and revoke the whole
+    session — cascading into 100% errors on every subsequent check_access/
+    batch_check call for the rest of the run. H8 fix: callers must pass
+    conc=1 for the refresh op; see main()'s call site below."""
+    conc = CONC if conc is None else conc
     lat, errors = [], 0
     for _ in range(WARMUP):
         try:
@@ -110,7 +123,7 @@ def time_op(fn):
         except Exception:
             return None
 
-    with cf.ThreadPoolExecutor(max_workers=CONC) as ex:
+    with cf.ThreadPoolExecutor(max_workers=conc) as ex:
         for r in ex.map(one, range(ITER)):
             if r is None:
                 errors += 1
@@ -149,7 +162,10 @@ def main():
         emit("error", zero_ops(), 0, 0, f"server unreachable or setup failed: {exc}")
         return
 
-    ops = {k: time_op(fn) for k, fn in ops_fns.items()}
+    # refresh must run at concurrency 1 (HARNESS-SPEC.md) — see time_op's
+    # docstring for why concurrent refresh is not just "uninteresting" but
+    # actively breaks the session for every op measured after it.
+    ops = {k: time_op(fn, conc=1 if k == "refresh" else CONC) for k, fn in ops_fns.items()}
     emit("ok", ops, ITER, CONC, "")
 
 

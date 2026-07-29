@@ -406,6 +406,46 @@ PROTOCOL_VARIANT_NOTES = {
     },
 }
 
+# H10: which AXIAM scenarios can actually be affected by the settle gate's
+# clamp. The settle gate (settle_gate() in run-benchmark.sh) runs ONCE per
+# run-benchmark.sh invocation and stamps its settle_timeout verdict into
+# EVERY cell of that session (methodology.md §12.1 — "the same value across
+# every cell of one bench-run invocation, since the gate runs once per
+# invocation"). That was the right design when the transient was believed to
+# be a global post-seed effect. H2's investigation
+# (claude_dev/postseed-transient-investigation.md §2) reframed it: the clamp
+# is architecturally scoped to exactly six endpoints wrapped by
+# `RateLimitShared` (POST /api/v1/authz/check, POST /oauth2/token,
+# POST /oauth2/introspect, POST /oauth2/revoke, POST /api/v1/auth/login, and
+# GET /api/v1/users — no scenario in this harness drives that last one).
+# Blanket-refusing every cell in a clamped session — including jwks_fetch,
+# userinfo, userinfo_grpc and token_refresh, none of which touch that
+# middleware and none of which the H2 clamp map ever found slow — is a false
+# positive the harness can now avoid, since which scenarios are affected is
+# no longer a guess. Scenario -> wrapped-endpoint mapping: authz_check_rest/
+# _grpc and authz_batch_rest/_grpc -> /api/v1/authz/check (batch coalesces
+# into the same checked path); oauth2_client_credentials -> /oauth2/token;
+# token_introspection -> /oauth2/introspect; oauth2_password_login ->
+# /api/v1/auth/login. jwks_fetch (/oauth2/jwks), userinfo/userinfo_grpc
+# (/oauth2/userinfo, unwrapped) and token_refresh (/api/v1/auth/refresh, not
+# in the wrapped set per the H2 map) are deliberately absent — a
+# settle_timeout in the same session must NOT refuse them.
+CLAMP_SENSITIVE_SCENARIOS = {
+    "authz_check_rest", "authz_check_grpc",
+    "authz_batch_rest", "authz_batch_grpc",
+    "oauth2_client_credentials", "token_introspection",
+    "oauth2_password_login",
+}
+
+
+def settle_timeout_applies(meta):
+    """True only when settle_timeout:true AND this scenario is one the H2
+    clamp map actually implicates (see CLAMP_SENSITIVE_SCENARIOS above).
+    Non-AXIAM targets have no RateLimitShared-equivalent clamp documented,
+    so this only ever suppresses the refusal for AXIAM scenarios outside the
+    six-endpoint map; Keycloak/Zitadel cells are unaffected either way."""
+    return bool(meta.get("settle_timeout")) and meta.get("scenario") in CLAMP_SENSITIVE_SCENARIOS
+
 
 def derive(perf, res):
     thr = perf["throughput"]
@@ -452,7 +492,7 @@ def host_flags(meta, host):
     mhz_avg, mhz_max = host.get("mhz_avg", 0.0), host.get("mhz_max", 0.0)
     if mhz_max > 0 and mhz_avg < 0.85 * mhz_max:
         flags.append("clock_variance")
-    if meta.get("settle_timeout"):
+    if settle_timeout_applies(meta):
         flags.append("settle_timeout")
 
     containers = meta.get("containers") or []
@@ -523,7 +563,7 @@ def collect_dir(results_dir, max_error, min_samples):
                 # median/head-to-head table is exactly the G run's
                 # cross-cutting data-quality failure (PRIVATE_BENCH_ANALYSIS.md
                 # §1) this task exists to stop repeating.
-                if meta.get("settle_timeout"):
+                if settle_timeout_applies(meta):
                     reasons.append("settle_timeout: true (post-seed settle gate hit its hard "
                                     "timeout — cell may still be inside the post-seed clamp)")
                 cells.append({
@@ -669,7 +709,7 @@ def aggregate_cell(runs):
     # raw runs (not just `basis`) the same way settle_wait_secs/settle_timeout
     # themselves are recombined a few lines up — one run hitting the settle
     # timeout is enough to distrust the whole aggregated cell.
-    if meta.get("settle_timeout"):
+    if settle_timeout_applies(meta):
         reasons.append("settle_timeout: true on at least one run (post-seed settle gate hit "
                         "its hard timeout — cell may still be inside the post-seed clamp)")
 
@@ -1189,11 +1229,20 @@ def build_report(cells, multi_run=False):
             "(default 600s) without ever clearing the threshold — the run "
             "proceeded anyway (the gate never fails the harness) but the "
             "cell may still be inside the post-seed serialized-DB transient "
-            "(PRIVATE_BENCH_ANALYSIS.md §1); such cells are REFUSED (marked "
-            "invalid — see \"Excluded (invalid) cells\") as of H1, not just "
-            "flagged. For median-of-N cells, `settle_wait(s)` is the MAX "
-            "across the repeat's runs (worst case) and `timeout` is set if "
-            "ANY run's gate timed out.", "",
+            "(PRIVATE_BENCH_ANALYSIS.md §1). As of H1 a `timeout` cell was "
+            "REFUSED outright (marked invalid). **As of H10**, refusal is "
+            "narrowed to the scenarios H2's clamp map actually implicates "
+            "(`RateLimitShared`-wrapped endpoints — authz_check/_batch "
+            "rest+grpc, oauth2_client_credentials, token_introspection, "
+            "oauth2_password_login): a `timeout` this session no longer "
+            "refuses jwks_fetch, userinfo(_grpc) or token_refresh, since the "
+            "H2 investigation found those endpoints structurally immune to "
+            "the clamp regardless of what the session-wide gate probe saw "
+            "(`postseed-transient-investigation.md` §2). The `refused` "
+            "column below shows which of the two applied to THIS cell. For "
+            "median-of-N cells, `settle_wait(s)` is the MAX across the "
+            "repeat's runs (worst case) and `timeout` is set if ANY run's "
+            "gate timed out.", "",
         ]
         rows = []
         for c in sorted(settle_cells, key=lambda c: (c["scenario"], c["profile"], c["target"])):
@@ -1201,9 +1250,10 @@ def build_report(cells, multi_run=False):
                 c["scenario"], c["profile"], c["target"],
                 f"{c['meta'].get('settle_wait_secs', 0):.0f}",
                 "✓" if c["meta"].get("settle_timeout") else "·",
+                "✓" if settle_timeout_applies(c["meta"]) else "·",
             ])
         lines += [md_table(
-            ["scenario", "profile", "target", "settle_wait(s)", "timeout"],
+            ["scenario", "profile", "target", "settle_wait(s)", "timeout", "refused"],
             rows), ""]
 
     # 4d. Appendix: AXIAM env knobs / labeled passes (G2). meta.json's

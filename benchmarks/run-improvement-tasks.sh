@@ -910,7 +910,14 @@ task_g5_cache_sweep() {
   for enabled in false true; do
     export AXIAM__AUTHZ__DECISION_CACHE_ENABLED=$enabled
     arm_cleanup axiam "$prof"
-    bench_up_seed axiam
+    # The profile must reach bench_up_seed too, not just the cells: for
+    # p1/p2/p3 it is what brings up the TLS listener the cells dial (the
+    # native-TLS compose overlay for axiam, the nginx edge for the
+    # competitors) and publishes :8443. Bringing the stack up as p0 and then
+    # pointing p2 cells at :8443 gives ONE refused connection per cell and a
+    # silently empty result file — which is exactly what the first attempt at
+    # this sweep produced.
+    bench_up_seed axiam "$prof"
     BENCH_WARMUP=5s BENCH_DURATION=20s cell axiam "$prof" authz_check_rest.js \
       "$out/warmup-$enabled" >/dev/null 2>&1 || true
     for k in $ks; do

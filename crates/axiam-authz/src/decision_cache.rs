@@ -804,6 +804,80 @@ mod tests {
         );
     }
 
+    /// Memory bound, measured (plan H5 item 4): what a full cache actually
+    /// costs in RSS, isolated from any server-level noise.
+    ///
+    /// The RSS figure is only meaningful when this test runs **alone** —
+    /// `cargo test -p axiam-authz --lib
+    /// decision_cache::tests::memory_footprint_at_the_default_cap_is_bounded
+    /// -- --exact --nocapture` — because RSS never shrinks when an earlier
+    /// test frees its heap, so a shared run reports a near-zero delta against
+    /// an already-grown heap. The assertions below are order-independent; only
+    /// the printed number needs isolation. Measured 2026-07-29:
+    /// **+2 704 KiB for 10 000 entries ≈ 276 bytes/entry**.
+    #[test]
+    fn memory_footprint_at_the_default_cap_is_bounded() {
+        // Plan H5 item 4, the in-process half: the K=10 000 server-RSS column
+        // of a benchmark cannot separate the cache's own footprint from the
+        // request path's, and on a rate-limit-clamped host it never reaches a
+        // steady state at all. This measures the cache alone: RSS delta across
+        // filling one tenant to the default 10 000-entry cap, with the request
+        // objects created and dropped inside the loop so only what the cache
+        // retains is counted.
+        fn rss_kib() -> Option<u64> {
+            let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+            let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+            Some(resident_pages * 4) // 4 KiB pages on every supported target
+        }
+        let Some(before) = rss_kib() else {
+            eprintln!("skipping: /proc/self/statm unavailable on this platform");
+            return;
+        };
+
+        let cfg = DecisionCacheConfig::default();
+        let cap = cfg.max_entries_per_tenant;
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            ttl: Duration::from_secs(600),
+            ..cfg
+        });
+        let t = Uuid::new_v4();
+        let s = Uuid::new_v4();
+        for i in 0..cap {
+            cache.insert(
+                &req(t, s, Uuid::new_v4(), &format!("action-{i}")),
+                AccessDecision::Allow,
+            );
+        }
+        let after = rss_kib().expect("statm readable a second time");
+        let snap = cache.snapshot();
+        // Order-independent invariants — these are what the K=10 000 memory
+        // column was supposed to establish and could not: the cache really
+        // holds its full cap (no silent eviction), and the FIFO queue carries
+        // no duplicate slots.
+        assert_eq!(snap.entries, cap, "the cap must be genuinely held");
+        assert_eq!(
+            snap.queue_slots, cap,
+            "one queue slot per live entry, no duplicates"
+        );
+
+        let delta_kib = after.saturating_sub(before);
+        eprintln!(
+            "decision cache @ cap={cap}: RSS +{} KiB (~{} bytes/entry), \
+             entries={}, queue_slots={}",
+            delta_kib,
+            (delta_kib * 1024) / cap as u64,
+            snap.entries,
+            snap.queue_slots
+        );
+        // Loose ceiling — this is a measurement, not a micro-benchmark; it only
+        // has to refute "10 000 cached decisions cost hundreds of MiB". The
+        // observed value is ~2-4 MiB.
+        assert!(
+            delta_kib < 32 * 1024,
+            "10 000 cached decisions must not cost 32 MiB (measured {delta_kib} KiB)"
+        );
+    }
+
     /// Memory bound (plan H5 item 4): at the default cap the cache must really
     /// hold `max_entries_per_tenant` entries — a silent eviction would make the
     /// K=10 000 memory column meaningless.

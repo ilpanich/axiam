@@ -57,12 +57,20 @@ use crate::services::{
 /// Start the gRPC server with all registered services.
 ///
 /// Applies two cooperating rate-limit layers (SECHRD-03, D-01a/b/c — gap
-/// closure for 24-07): the SurrealDB-backed [`GrpcSharedRateLimitLayer`]
-/// shared-store pre-check runs FIRST (outermost), failing OPEN on any DB
-/// error to the per-replica in-memory `GovernorLayer` (per D-10) built via
-/// `grpc_authz_per_sec` from `GrpcConfig`. Both layers derive their client-IP
-/// key from the SAME `trusted_hops` value so gRPC keying stays in lockstep
-/// across the shared store and the in-memory fallback.
+/// closure for 24-07): the [`GrpcSharedRateLimitLayer`] cross-replica
+/// pre-check runs FIRST (outermost), failing OPEN to the per-replica in-memory
+/// `GovernorLayer` (per D-10) built via `grpc_authz_per_sec` from
+/// `GrpcConfig`. Both layers derive their client-IP key from the SAME
+/// `trusted_hops` value so gRPC keying stays in lockstep across the shared
+/// counter and the in-memory fallback.
+///
+/// Since the H2 performance fix the shared pre-check performs NO synchronous
+/// datastore write: it is backed by the process-wide write-behind
+/// `axiam_db::SharedRateLimitCounter`, built ONCE here (this layer is
+/// server-wide, so every gRPC call used to pay one `UPSERT`). Knobs:
+/// `AXIAM__RATE_LIMIT__SHARED` (on|off, default on) and
+/// `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` (default 1000, clamped 50..=60000) —
+/// the same two the REST listener reads.
 ///
 /// Transport limits (CQ-B20):
 /// - Max message size: 4 MiB decode / 4 MiB encode
@@ -102,6 +110,11 @@ where
     // so a rotating XFF cannot mint a fresh bucket in one layer while being
     // correctly collapsed in the other.
     let trusted_hops = trusted_hops_from_env();
+    // Built exactly ONCE per process: this constructs the write-behind
+    // `SharedRateLimitCounter` (and spawns its single background flusher on
+    // this runtime). Cloning the LAYER is fine — the counter inside is an
+    // `Arc` handle, so every clone shares the same local counts. Building a
+    // second layer would create a second, independent counter.
     let shared_rate_limit_layer = GrpcSharedRateLimitLayer::new(
         db,
         "grpc_authz",

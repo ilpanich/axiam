@@ -2,26 +2,38 @@
 //! for the gRPC path, bringing it to parity with the REST shared-store
 //! pre-check (plan 24-04).
 //!
+//! Since the H2 performance fix the layer is backed by the write-behind
+//! `axiam_db::SharedRateLimitCounter`, so cross-replica enforcement is
+//! *eventual*: a replica counts its own traffic immediately and adopts the
+//! other replicas' contributions at its next flush. These tests therefore
+//! drive `flush_once()` explicitly (via
+//! `GrpcSharedRateLimitLayer::with_counter` plus
+//! `SharedRateLimitCounter::without_flusher`) instead of sleeping on the
+//! background flusher, proving the same property deterministically.
+//!
 //! Proves:
 //! - `rate_limit_shared_store_cross_instance`: two independent
 //!   `GrpcSharedRateLimitLayer` instances ("replicas") sharing ONE SurrealDB
-//!   enforce a single combined limit — an in-memory-only baseline (per-
-//!   replica buckets) would NOT reject at this point.
+//!   enforce a single combined limit after a flush cycle — an in-memory-only
+//!   baseline (per-replica buckets) would allow `2 × LIMIT`.
 //! - `rate_limit_shared_store_peer_parity_rotating_xff`: a rotating
 //!   (attacker-controlled) single-hop `X-Forwarded-For` header does NOT mint
 //!   a fresh bucket when `trusted_hops >= hops.len()` — the shared bucket
 //!   key is derived from the verified peer address instead (D-01d parity
 //!   with the fixed REST `XForwardedForKeyExtractor`).
 //! - `rate_limit_shared_store_fails_open_on_db_error`: when the shared store
-//!   errors, the request proceeds to the inner service (no hard block,
-//!   never a rejection) — D-01b.
+//!   is unreachable, traffic keeps flowing (no hard block, no panic, no 5xx)
+//!   and the layer keeps enforcing from local counts — D-01b.
 //!
 //! Run with: cargo test -p axiam-api-grpc --test rate_limit_shared_store_test
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axiam_api_grpc::middleware::rate_limit::GrpcSharedRateLimitLayer;
+use axiam_db::repository::SurrealRateLimitBucketRepository;
+use axiam_db::{SharedRateLimitConfig, SharedRateLimitCounter};
 use http::{HeaderValue, Request, Response};
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
@@ -95,22 +107,45 @@ async fn setup_db() -> Surreal<TestDb> {
     db
 }
 
+/// One "replica": an independent write-behind counter over the supplied
+/// SurrealDB handle, with NO background flusher so the test controls exactly
+/// when convergence happens.
+fn replica_counter(db: Surreal<TestDb>) -> SharedRateLimitCounter {
+    SharedRateLimitCounter::without_flusher(
+        SharedRateLimitConfig::default(),
+        Arc::new(SurrealRateLimitBucketRepository::new(db)),
+    )
+}
+
 #[tokio::test]
 async fn rate_limit_shared_store_cross_instance() {
     let db = setup_db().await;
 
-    // Two INDEPENDENT layered services ("replicas") sharing the SAME
-    // underlying SurrealDB handle — proving the bucket is combined across
-    // replicas rather than reset per-replica.
-    let mut svc1 = GrpcSharedRateLimitLayer::new(db.clone(), "grpc_authz_cross_instance", LIMIT, 0)
-        .layer(ok_service());
-    let mut svc2 = GrpcSharedRateLimitLayer::new(db, "grpc_authz_cross_instance", LIMIT, 0)
-        .layer(ok_service());
+    // Two INDEPENDENT layered services ("replicas"), each with its OWN
+    // write-behind counter, sharing the SAME underlying SurrealDB handle —
+    // proving the bucket is combined across replicas rather than reset
+    // per-replica.
+    let counter1 = replica_counter(db.clone());
+    let counter2 = replica_counter(db);
+    let mut svc1 = GrpcSharedRateLimitLayer::with_counter(
+        counter1.clone(),
+        "grpc_authz_cross_instance",
+        LIMIT,
+        0,
+    )
+    .layer(ok_service());
+    let mut svc2 = GrpcSharedRateLimitLayer::with_counter(
+        counter2.clone(),
+        "grpc_authz_cross_instance",
+        LIMIT,
+        0,
+    )
+    .layer(ok_service());
 
     let peer: SocketAddr = "203.0.113.42:5000".parse().unwrap();
 
     // LIMIT requests split alternately across BOTH "replicas" must all
-    // succeed (the shared count climbing to exactly LIMIT).
+    // succeed (the combined count climbing to exactly LIMIT).
     for i in 0..LIMIT {
         let resp = if i % 2 == 0 {
             call(&mut svc1, request_with_peer(peer)).await
@@ -120,9 +155,19 @@ async fn rate_limit_shared_store_cross_instance() {
         assert!(!is_rejected(&resp), "request {i} should succeed");
     }
 
-    // The NEXT request on EITHER replica must be rejected — an in-memory-
-    // only per-replica baseline would instead allow LIMIT more requests on
-    // whichever replica hasn't seen traffic.
+    // One write-behind flush cycle per replica: each writes its coalesced
+    // delta and reads back the authoritative combined count.
+    counter1.flush_once().await;
+    counter2.flush_once().await;
+    // counter1 flushed before counter2's delta landed, so give it one more
+    // pass to adopt the combined count (this is the documented bounded
+    // staleness, not a lost update).
+    call(&mut svc1, request_with_peer(peer)).await;
+    counter1.flush_once().await;
+
+    // Both replicas now observe the COMBINED count and reject — an
+    // in-memory-only per-replica baseline would instead allow LIMIT more
+    // requests on whichever replica hasn't seen traffic (2 × LIMIT total).
     let resp1 = call(&mut svc1, request_with_peer(peer)).await;
     assert!(
         is_rejected(&resp1),
@@ -133,6 +178,48 @@ async fn rate_limit_shared_store_cross_instance() {
     assert!(
         is_rejected(&resp2),
         "replica 2 must observe the shared count"
+    );
+}
+
+/// The shared count really is ONE row shared by both replicas (not two
+/// independent per-replica counts), and the flusher coalesces: 6 requests
+/// across two replicas produce ONE row holding 6.
+#[tokio::test]
+async fn rate_limit_shared_store_coalesces_into_one_shared_row() {
+    let db = setup_db().await;
+
+    let counter1 = replica_counter(db.clone());
+    let counter2 = replica_counter(db.clone());
+    let endpoint = "grpc_authz_coalesce";
+    let mut svc1 = GrpcSharedRateLimitLayer::with_counter(counter1.clone(), endpoint, 100, 0)
+        .layer(ok_service());
+    let mut svc2 = GrpcSharedRateLimitLayer::with_counter(counter2.clone(), endpoint, 100, 0)
+        .layer(ok_service());
+
+    let peer: SocketAddr = "203.0.113.77:5000".parse().unwrap();
+    for _ in 0..3 {
+        assert!(!is_rejected(
+            &call(&mut svc1, request_with_peer(peer)).await
+        ));
+        assert!(!is_rejected(
+            &call(&mut svc2, request_with_peer(peer)).await
+        ));
+    }
+
+    counter1.flush_once().await;
+    counter2.flush_once().await;
+
+    // A delta-0 write reads the authoritative count back without changing it.
+    let repo = SurrealRateLimitBucketRepository::new(db);
+    let key = format!("{endpoint}:203.0.113.77");
+    let window = chrono::Utc::now();
+    let window =
+        chrono::DateTime::from_timestamp(window.timestamp() - window.timestamp().rem_euclid(60), 0)
+            .unwrap();
+    assert_eq!(
+        repo.increment_by(&key, window, 0).await.unwrap(),
+        6,
+        "6 requests across 2 replicas must land in ONE shared row as 6"
     );
 }
 
@@ -172,16 +259,44 @@ async fn rate_limit_shared_store_fails_open_on_db_error() {
     // shared store being unreachable without touching migrations.
     let broken_db = Surreal::new::<Mem>(()).await.unwrap();
 
-    // limit=0 would reject EVERY request if the shared store were reachable
-    // — proving fail-open, not merely "still under budget".
+    let counter = replica_counter(broken_db);
     let mut svc =
-        GrpcSharedRateLimitLayer::new(broken_db, "grpc_authz_fail_open", 0, 0).layer(ok_service());
+        GrpcSharedRateLimitLayer::with_counter(counter.clone(), "grpc_authz_fail_open", LIMIT, 0)
+            .layer(ok_service());
 
     let peer: SocketAddr = "198.51.100.9:1111".parse().unwrap();
-    let resp = call(&mut svc, request_with_peer(peer)).await;
 
+    // With the store unreachable, traffic within the configured limit still
+    // flows: the decision no longer depends on a datastore round trip at all
+    // (H2 fix), so there is no store error on the request path to fail open
+    // *from*.
+    for i in 0..LIMIT {
+        let resp = call(&mut svc, request_with_peer(peer)).await;
+        assert!(
+            !is_rejected(&resp),
+            "request {i} must proceed despite the unreachable shared store"
+        );
+    }
+
+    // The flusher discovers the outage. It must not panic, must not poison
+    // the counter, and must keep the layer serving: D-01b fail-open now means
+    // "cross-replica convergence pauses, local enforcement continues".
+    counter.flush_once().await;
+
+    // Still serving — a further request is evaluated against the local count
+    // (which is legitimately at the limit), never a 5xx and never a panic.
+    let resp = call(&mut svc, request_with_peer(peer)).await;
+    assert!(
+        is_rejected(&resp),
+        "the local count still enforces the configured limit while the store is down — \
+         a store outage must not become 'the limit is disabled'"
+    );
+
+    // And a DIFFERENT key is unaffected: the outage did not break the counter.
+    let other: SocketAddr = "198.51.100.10:2222".parse().unwrap();
+    let resp = call(&mut svc, request_with_peer(other)).await;
     assert!(
         !is_rejected(&resp),
-        "a broken shared store must fail OPEN (D-01b), never hard-block gRPC authz traffic"
+        "a fresh bucket must still be admitted after a flush failure"
     );
 }

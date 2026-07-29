@@ -1,28 +1,55 @@
-//! Async SurrealDB-backed shared rate-limit pre-check middleware
+//! Shared (cross-replica) rate-limit pre-check middleware
 //! (SECHRD-03 / D-01a, D-01b, D-01d).
 //!
-//! [`RateLimitShared`] runs an async windowed-CAS increment against the
-//! `rate_limit_bucket` table (`SurrealRateLimitBucketRepository`) BEFORE
-//! the existing per-replica in-memory `Governor`/`GovernorLayer`
+//! [`RateLimitShared`] consults the process-wide write-behind
+//! [`SharedRateLimitCounter`] (`axiam-db::rate_limit_counter`) BEFORE the
+//! existing per-replica in-memory `Governor`/`GovernorLayer`
 //! (`server.rs::build_governor`, kept byte-for-byte unchanged as the
 //! fail-open fallback). This closes the multi-replica HPA gap where
 //! per-replica in-memory buckets otherwise multiply the effective rate
 //! limit by the replica count.
 //!
-//! **Fail-open (D-01b, T-24-42 accepted risk):** when the shared store is
-//! unreachable (or no DB handle / no client-IP key is available), this
-//! middleware logs a `warn`-level alarm and forwards the request unchanged
-//! so the existing in-memory governor makes the decision instead. A
-//! counter-store outage must never hard-block auth traffic — this is the
-//! ONE deliberate fail-open exception in this phase; every other control
-//! fails closed.
+//! # No synchronous datastore write on the request path (H2 fix)
+//!
+//! This middleware used to `await` ONE SurrealDB `UPSERT`
+//! (`SurrealRateLimitBucketRepository::increment`) per request, before the
+//! handler ran. That single write capped every wrapped endpoint at **16–21
+//! ops/s at any concurrency from 1 to 40 VUs** (p50 ≈ 55–65 ms at 1 VU,
+//! ≈ 1 s at 20 VUs) while structurally identical unwrapped endpoints ran at
+//! 68–4 248 ops/s — the datastore attributed ~39–46 ms of each request to
+//! that one RPC, and the same UPSERT issued directly ran in 6–9 ms and
+//! scaled fine, so the ordering (not the datastore) was the ceiling. Full
+//! measurements: `claude_dev/postseed-transient-investigation.md` §2, §3, §7.
+//!
+//! The counting mechanism — and ONLY the counting mechanism — changed: the
+//! key derivation (`{endpoint}:{key_part}`, the D8 `client_id` modes, the
+//! body peek/restore), the 429 response shape and every fail-open branch
+//! behave exactly as before. [`SharedRateLimitCounter::check`] is fully
+//! synchronous (one sharded-map increment, no datastore round trip, no task
+//! spawn) and a single background flusher coalesces the accumulated
+//! increments into one datastore write per bucket per
+//! `AXIAM__RATE_LIMIT__SHARED_SYNC_MS`. Cross-replica enforcement is
+//! therefore *eventual*, with the overshoot bound stated precisely in the
+//! [`axiam_db::rate_limit_counter`] module docs; the in-memory governor still
+//! makes a full per-replica decision on the very same endpoints.
+//!
+//! **Fail-open (D-01b, T-24-42 accepted risk):** when no client-IP key can be
+//! derived, no [`AppState`] (hence no counter) is registered, or the shared
+//! layer is disabled via `AXIAM__RATE_LIMIT__SHARED=off`, this middleware
+//! forwards the request unchanged so the existing in-memory governor makes
+//! the decision instead. Store outages are now surfaced by the counter's
+//! flusher (a `warn` alarm that never includes the raw key — T-24-43) while
+//! decisions keep being served from local counts. A counter-store outage must
+//! never hard-block auth traffic — this is the ONE deliberate fail-open
+//! exception; every other control fails closed.
 //!
 //! **CRITICAL (RESEARCH Pitfall 1):** `governor::StateStore::measure_and_replace`
 //! is a *synchronous* trait method. This middleware is deliberately NOT a
 //! `StateStore` implementation and never calls `block_on`/`futures::executor::
-//! block_on` — it is a separate async Actix `Transform`/`Service` (mirroring
-//! [`crate::middleware::authz::AuthzMiddleware`]'s scaffold) that performs
-//! its own async SurrealDB round-trip, then delegates to the inner service.
+//! block_on` — it is a separate Actix `Transform`/`Service` (mirroring
+//! [`crate::middleware::authz::AuthzMiddleware`]'s scaffold). It stays async
+//! only because the D8 body peek (`req.extract::<web::Bytes>()`) is async;
+//! the rate-limit decision itself no longer awaits anything.
 
 use std::future::{Future, Ready, ready};
 use std::marker::PhantomData;
@@ -33,7 +60,6 @@ use actix_web::body::EitherBody;
 use actix_web::dev::{Payload, Service, ServiceRequest, ServiceResponse, Transform};
 use actix_web::http::header::{ContentType, RETRY_AFTER};
 use actix_web::{Error, HttpMessage, HttpResponse, web};
-use axiam_db::repository::SurrealRateLimitBucketRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
 
@@ -246,13 +272,18 @@ where
         let extractor = XForwardedForKeyExtractor::with_trusted_hops(trusted_hops());
         let ip = extractor.extract(&req).ok();
 
-        // The SurrealDB handle is read from `web::Data<AppState<C>>` (QUAL-01
-        // — was a standalone `web::Data<Surreal<C>>` registration). Its
-        // absence is treated exactly like a DB error below — fail open to
-        // the in-memory governor.
-        let db = req
+        // The process-wide write-behind counter is read from
+        // `web::Data<AppState<C>>` (QUAL-01 — was a standalone
+        // `web::Data<Surreal<C>>` registration used to build a repository per
+        // request). Its absence is treated exactly like the old missing-DB-
+        // handle case below — fail open to the in-memory governor.
+        //
+        // This is a cheap `Arc` clone of the ONE counter registered in
+        // `main.rs`, never a new counter: a per-request (or per-worker)
+        // instance would fragment the local count.
+        let counter = req
             .app_data::<web::Data<AppState<C>>>()
-            .map(|d| d.db.clone());
+            .map(|d| d.shared_rate_limit.clone());
 
         Box::pin(async move {
             // D8: for the client-identity-aware endpoints only
@@ -300,31 +331,24 @@ where
                 }
             };
 
-            let allow = match (key_part, db) {
-                (Some(key_part), Some(db)) => {
-                    let repo = SurrealRateLimitBucketRepository::new(db);
+            let allow = match (key_part, counter) {
+                (Some(key_part), Some(counter)) => {
+                    // Same bucket key as before — `{endpoint}:{key_part}` —
+                    // so an in-flight upgrade keeps counting against the same
+                    // `rate_limit_bucket` records.
                     let key = format!("{endpoint}:{key_part}");
                     let window = window_start(Utc::now());
-                    match repo.increment(&key, window).await {
-                        Ok(count) => count <= limit as u64,
-                        Err(err) => {
-                            // Fail OPEN (D-01b): a counter-store outage must
-                            // never hard-block auth traffic. T-24-43: do NOT
-                            // log the raw key (endpoint:ip/client_id) at
-                            // info+ — this warn-level alarm omits it.
-                            tracing::warn!(
-                                endpoint,
-                                error = %err,
-                                "shared rate-limit store unreachable; falling back \
-                                 to per-replica in-memory governor"
-                            );
-                            true
-                        }
-                    }
+                    // Fully synchronous: no datastore round trip on the
+                    // request path (H2 fix). Store outages are reported by
+                    // the counter's background flusher, which keeps serving
+                    // decisions from local counts (fail open, D-01b).
+                    counter.check(&key, window, limit)
                 }
-                // No key part (IP unavailable) or no DB handle available —
+                // No key part (IP unavailable) or no counter registered —
                 // fail open; the in-memory governor still makes the real
-                // decision.
+                // decision. (A counter built with
+                // `AXIAM__RATE_LIMIT__SHARED=off` also always allows, from
+                // inside `check`.)
                 _ => true,
             };
 

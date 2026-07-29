@@ -101,8 +101,9 @@ the raw report.
 | p2 | Keycloak | 346 | 104.0 | 209.1 | 167 | 173 |
 
 AXIAM issues **5.2× more tokens/s than Keycloak and 4.3× more than
-Zitadel** at plaintext and stays 2.2–2.6× ahead under TLS 1.3 (the TLS gap
-is a connection-behavior issue under investigation, §5 — not crypto cost).
+Zitadel** at plaintext and stays 2.2–2.6× ahead under TLS 1.3. The p2 gap on
+this one scenario is **not a TLS or HTTP/2 cost** — that was tested directly
+and both are exonerated; it is specific to this endpoint and still open (§5).
 
 ### Token introspection (RFC 7662)
 
@@ -255,15 +256,49 @@ traffic, not machine fleets — see §6 for what to set instead.
 
 ## 5. Weaknesses and caveats (the honest section)
 
-**TLS 1.3 still halves token issuance** (−50.5% on client_credentials;
-introspection −0.2%, userinfo −3.7%, jwks −12.5%, login ~0%). Everything
-still points at HTTP/2 single-connection multiplexing in the load path
-rather than crypto (handshake time per request ≈ 0; server and DB CPU halve
-in lockstep with throughput). The HTTP/1.1-over-TLS isolation cell we
-queued for this run was unfortunately invalidated by the §2 measurement
-artifact (it ran inside the post-seed window) — it is re-queued under the
-corrected protocol. Even with the penalty, AXIAM's TLS token numbers lead
-the field 2.2–2.6×.
+**Correction — "TLS 1.3 halves token issuance" is withdrawn, and the
+replacement explanation is not "HTTP/2" either.** Earlier drafts reported
+−50.5% on `client_credentials` at p2 (introspection −0.2%, userinfo −3.7%,
+jwks −12.5%, login ~0%) and named HTTP/2 single-connection multiplexing as
+the likely cause. A dedicated follow-up measured the transport directly, on
+endpoints that are *not* subject to the shared rate-limit write described
+below, and recorded the protocol each request actually negotiated for the
+first time. Three findings, in the order they change the picture:
+
+1. **The HTTP/2 mechanism does not occur.** The hypothesis was that all
+   concurrent clients collapse onto one HTTP/2 connection, which the server
+   pins to a single worker thread, halving a 2-core instance. Counting the
+   server's own established sockets during the cells: 10 / 50 / 100
+   concurrent clients produced **10 / 50 / 100** connections over HTTP/2,
+   and the two worker threads stayed within ~2% of each other's CPU at every
+   level. The earlier draft's own numbers already contradicted the
+   hypothesis — its p2 JWKS cell used **1.97 CPU cores**, which a
+   single-worker workload cannot do.
+2. **TLS 1.3 termination in-process is cheap, and cheaper than an edge.**
+   Against a plaintext HTTP/1.1 baseline on the same box, AXIAM's own rustls
+   listener cost **−12.8% / −2.3% / −1.6%** on JWKS and **−8.1% / −12.7% /
+   −8.5%** on userinfo at 10 / 50 / 100 clients. (The −12.5% JWKS figure
+   from the original benchmark machine reproduces on this very different
+   one — two machines agreeing.) An nginx TLS edge in front of the same
+   server cost roughly *twice* as much, most of it the extra process and
+   proxy hop rather than the crypto.
+3. **So the `client_credentials` result is endpoint-specific, not
+   transport-specific.** Four other cells in the same original matrix ran
+   the same TLS, the same HTTP/2 and the same client and lost 0.2–3.7%. A
+   transport tax that removes half of one POST and nothing from another POST
+   on the same connection is not a transport tax. The whole −50.5% is the
+   p50 rising by 28.8 ms per request, and nothing in TLS costs 28.8 ms with
+   session resumption working. The leading candidate is the same synchronous
+   rate-limit datastore write described in the next paragraph — which
+   `/oauth2/token` performs and which is known to vary by an order of
+   magnitude between hosts — but that is a hypothesis with a real objection
+   against it (`/oauth2/introspect` is wrapped by the same middleware and
+   lost 0.2%), so it is stated as open rather than concluded. The single
+   measurement that would settle it is specified in
+   `claude_dev/b2-tls-h2-investigation.md` §6 and needs a host on which the
+   token endpoint is not rate-limit-clamped.
+
+Even with the penalty, AXIAM's TLS token numbers lead the field 2.2–2.6×.
 
 **What we called a "post-seed database transient" is not post-seed, and on
 some hosts it is not transient** (§2). The follow-up investigation
@@ -432,8 +467,8 @@ fallback are labeled and **must not be charted as head-to-head**.
 | axiam / userinfo_grpc | −1.2% |
 | axiam / authz_check_rest / _grpc | +1.3% / +3.1% |
 | axiam / oauth2_password_login | −0.5% |
-| axiam / jwks_fetch | −12.5% |
-| axiam / oauth2_client_credentials | **−50.5%** (see §5) |
+| axiam / jwks_fetch | −12.5% (reproduced independently on a second machine — §5) |
+| axiam / oauth2_client_credentials | **−50.5%** — **not a TLS cost**; see §5 |
 | keycloak / oauth2_client_credentials | −1.5% |
 | keycloak / token_introspection | −7.9% |
 | keycloak / jwks_fetch | −19.2% |

@@ -203,7 +203,7 @@ override is applied.
 |-----------|------------------------------|---------------|-------|
 | p0        | plaintext HTTP/1.1           | yes           | baseline |
 | p1-tls12  | TLS 1.2                      | **no — N/A-by-policy** | AXIAM is **TLS 1.3-only natively** (per the security standards; ASVS V9.1.2). TLS 1.2 is never offered in-process; a legacy TLS 1.2 endpoint, if ever needed, is an nginx-edge concern outside AXIAM. This profile stays nginx-fronted when run. |
-| p2-tls13  | TLS 1.3 (always h2 when the client offers it) | yes (native overlay) | h1-isolation is only obtainable via the `tls13-h1.conf` edge — the native listener cannot be made h1-only (see ALPN above) |
+| p2-tls13  | TLS 1.3 (always h2 when the client offers it) | yes (native overlay) | h1-isolation is only obtainable via the `tls13-h1.conf` edge — the native listener cannot be made h1-only (see ALPN above). That edge and `tls13.conf` are a matched pair differing only in `http2 on;`, so they are the only controlled h1-vs-h2 comparison in the harness |
 | p3-mtls   | TLS 1.3 + client cert        | **yes (native overlay, D3)** | native mTLS: `docker-compose.native-mtls.yml` sets `CLIENT_AUTH=required` + `CLIENT_CA_PATH=/certs/ca.crt`; no nginx edge. Identity from the verified cert, not a header. |
 
 ### Why p1-tls12 is N/A-by-policy (not "not yet implemented")

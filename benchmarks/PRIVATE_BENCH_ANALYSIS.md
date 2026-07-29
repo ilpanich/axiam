@@ -47,6 +47,29 @@ provable thanks to A9.
 **This is the most important finding of the run and rewrites two long-standing
 conclusions (D1/D10 batch slowness, and the B2 h1 cell).**
 
+> **UPDATE (H2, 2026-07-28): this was never post-seed, and "transient" is
+> wrong too.** `claude_dev/postseed-transient-investigation.md` traced the
+> effect to a permanent, product-relevant design property: six endpoints
+> (`POST /api/v1/authz/check`, `POST /oauth2/token`, `POST /oauth2/introspect`,
+> `POST /oauth2/revoke`, `POST /api/v1/auth/login`, and — as a bug —
+> `GET /api/v1/users`) are wrapped with `RateLimitShared`, which performs one
+> synchronous SurrealDB write (the shared rate-limit bucket) before the
+> handler runs. That single round trip — not seeding, not compaction, not
+> data volume — is the "~22 ms serialized unit": it survives idle time,
+> server restarts, datastore restarts, `POOL_SIZE` changes, and even swapping
+> the storage backend to pure in-memory. Structurally identical endpoints
+> without the wrap are unaffected. §1.1–§1.4 below are kept as the *run-3*
+> observation (accurate to what run 3 saw and how the harness was built in
+> response — the settle gate + rotation in §2 of methodology.md are still
+> exactly the right countermeasure), but read "post-seed window" throughout
+> as "the window this particular host's write-cost happened to clear in
+> during run 3", not a seeding effect. On the H2 investigation host the
+> effect never clears at all (16–21 ops/s at any concurrency, indefinitely) —
+> see that document §6 for the reconciliation with run 3's recovery cliff,
+> which remains only partially explained. The G-box's "recovers after ~6 min"
+> and this host's "never recovers" are two datastores paying a different
+> price for the same synchronous write, not two different bugs.
+
 ### 1.1 The signature
 
 A window of roughly **5–7 minutes after `bench-up` + `bench-seed`** in which
@@ -277,6 +300,15 @@ Caveats for the ship-decision (G5): the bench's hit rate is optimistic
 revocation-tested. Recommendation to take to the plan: **default ON for
 v1.0-beta with TTL 5 s**, prominently documented, off-switch retained.
 
+> **UPDATE (H5, 2026-07-29): decision recorded — stays opt-in (`false`).**
+> `claude_dev/decision-cache-decision.md` walked the clean K-sweep (K=1
+> 3.0–3.15×, K=10 000 +32%, K=100 now measured) against the seven pre-agreed
+> criteria after fixing the three defects the run-3/G5 data had surfaced
+> (unbounded `order` growth, O(shard) `invalidate_subject` under a global
+> mutex, and documenting the process-local revocation bound). The flip is
+> blocked on C1/C2/C4 — see that document for the full criteria table. The
+> recommendation written here (default ON) is superseded.
+
 ### 3.3 DB pool A/B (F2/F3)
 
 `pool_size=4`: CC **1823 → 1955 (+7.2%)**; `+ max_in_flight=64` changes
@@ -288,6 +320,19 @@ rollout), document `pool_size=4` as a token-issuance-heavy tuning
 (it buys ~7% there and nothing else at this concurrency), revisit after G1
 removes the transient and an open-loop harness exists (§5.3 of run-2 doc —
 still true).
+
+> **UPDATE (H9, 2026-07-29): closed negative — default stays `pool_size=1`.**
+> The pre-agreed ≥5%-on-CC confirm cell turned out to be **unsatisfiable on
+> this host**: H2 found `POST /oauth2/token` permanently clamped to
+> 16–21 ops/s by the `RateLimitShared` write, so there is no settled CC cell
+> to confirm against here. Two independent lines of evidence say the G-box
+> G-run's "+7%" (1955 vs 1823) was noise rather than a `pool_size` effect
+> anyway: `AXIAM__DB__POOL_SIZE` 1→8 changed authz throughput by 0 ops/s at
+> both 1 and 20 VUs (H2 §5.2 — the shared-router mechanism means more pooled
+> handles buy no DB concurrency), and the G-run CC cells were never proven
+> to run outside the settle-gate-blind window in the first place. No code
+> change needed — `pool_size=1` was already the default.
+> `claude_dev/db-pool-design.md` §11 records the full verdict.
 
 ### 3.4 Native mTLS (D3) — acceptance PASSED
 
@@ -311,6 +356,15 @@ vs `--features jemalloc`), runs baseline → burst → 10-min watch per variant,
 and emits `results/d9-summary.md` with the ≥30%-gap-closure verdict. Run it
 (G6); until then AXIAM's published mem column for post-login cells stays
 inflated and the doc says so.
+
+> **UPDATE (H4/G6, 2026-07-28/29): fixed — jemalloc is the release default.**
+> The A/B ran: default malloc retained 376 MiB above baseline (peak 491);
+> jemalloc retained 86 MiB (peak 126) — **94% of the gap closed**, no
+> throughput or latency cost recorded. `crates/axiam-server` ships jemalloc
+> as the release-container default allocator as of H4 (a
+> `--no-default-features` escape hatch stays documented for musl/platform
+> edge cases). The "stays inflated" line above is stale — see
+> `claude_dev/memory-retention-experiment.md` §6 for the full numbers.
 
 ### 3.6 gRPC-vs-REST authz gap (new, now that both are clean)
 
@@ -398,6 +452,17 @@ Ranked summary:
   discovery + the one clean 852-batches/s cell as "measurement corrected,
   full re-measurement in progress". This *retracts* the draft-1/2 "batch is
   slow" caveat in the honest direction.
+  > **UPDATE (H3/G3, 2026-07-28): superseded — the re-measurement happened
+  > and the verdict shipped.** On settled cells (G3 run 2–3), `coalesced`
+  > batch REST measured **744 ops/s = 3 721 checks/s = 4.98× singles**;
+  > gRPC coalesced **866–872 ops/s ≈ 4 330 checks/s**, p95 74 ms. `coalesced`
+  > is now the shipped default (`crates/axiam-authz/src/config.rs`,
+  > `concurrent` stays selectable). Publish the G3 table as the batch
+  > verdict, not as "in progress" — see `claude_dev/authz-batch-investigation.md`
+  > for the closing data. On *this* investigation host (H2/H10) batch cells
+  > are still clamped by the `RateLimitShared` write and must be published as
+  > refused, same as every other clamped cell — that is a host limitation,
+  > not a reopening of the G3 decision.
 - Do NOT chart: AXIAM/Zitadel refresh (fallback), Zitadel/KC-p2 login
   (gate), any first-cell-after-seed number (§1), the B2 h1 cell.
 - The new "recommended production settings" section (public §6) is the

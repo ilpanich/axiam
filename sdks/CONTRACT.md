@@ -1353,12 +1353,41 @@ recorded here until one exists.
     C SDK's `single_flight_refresh` all hold the lock across the entire wire call, so there is no
     publish/vacate gap to violate at all — releasing the lock is definitionally the last step,
     which cannot precede the outcome being computed.
-  - **Not yet specifically re-audited against rule 6**: `axiam-python-sdk`'s, `axiam-kotlin-sdk`'s
-    and `axiam-swift-sdk`'s own `oidc_refresh` coalescers (distinct from the §1 guards just
-    named) were not individually inspected for rules 6a/6c/6d during this pass — only the pattern
-    that caused the Java bug (rule 6b) was checked SDK-wide, before the Go/C++/Rust bugs (6a/6c/6d)
-    were found. Recorded here rather than silently assumed conformant; a follow-up audit is
-    warranted.
+  - **Follow-up audit completed (2026-07), and it found three more violations** — the initial
+    pass had only checked the Java-shaped bug (6b) SDK-wide, before the Go/C++/Rust bugs
+    (6a/6c/6d) were known, so Python's, Kotlin's and Swift's own guards were re-audited against
+    all four rules. None was clean:
+    - **`axiam-python-sdk`** — violations on **both** the sync and async `oidc_refresh` paths.
+      Async broke 6a in exactly Go's shape (slot vacated before `set_result`/`set_exception`),
+      and reachably so, not latently: a cancelled joiner cancels the shared future, so the
+      publish step itself raised `InvalidStateError` while the slot was already empty and the
+      outcome reached nobody. Sync broke 6b by waking waiters on a boolean flag rather than the
+      attempt they joined, so a not-yet-rescheduled waiter read a *newer* burst's occupancy as
+      its own refresh still being live and was handed the newer attempt's outcome (~82% per
+      interleaving round). Async also broke 6c: a *joiner's* cancellation destroyed the live
+      leader's publication, losing an already-rotated token set.
+    - **`axiam-kotlin-sdk`** — the most damaging variant found. Acquiring a kotlinx `Mutex` is a
+      cancellable suspension point, so a cancelled leader that hit contention threw *before*
+      clearing its own slot (6c), leaving a settled-exceptionally `Deferred` parked there
+      permanently; every later caller then joined that dead burst with zero further wire calls
+      (6d). Because the wire call ran in the electing caller's own coroutine over a blocking,
+      non-interruptible OkHttp call, a `withTimeout` typically fired *after* the refresh had
+      succeeded and the server had rotated the single-use token — discarding it and leaving the
+      session unrecoverable. Three sites shared the defect, including the §1 guard, which
+      (unlike Python's/Go's/Rust's/C's) did **not** hold its lock across the wire call and so was
+      never covered by that clearing argument.
+    - **`axiam-swift-sdk`** — 6c violated (unconditional slot clear, so a lagging attempt could
+      wipe a newer leader's live entry); 6a/6b/6d hold structurally for its actor + `Task`
+      mechanism and are now asserted by test. Swift's unstructured `Task {}` not inheriting
+      caller cancellation is what spared it from Kotlin's session-destroying variant.
+
+    Fixed in [`axiam-python-sdk#23`](https://github.com/ilpanich/axiam-python-sdk/pull/23),
+    [`axiam-kotlin-sdk#8`](https://github.com/ilpanich/axiam-kotlin-sdk/pull/8) and
+    [`axiam-swift-sdk#7`](https://github.com/ilpanich/axiam-swift-sdk/pull/7). Final tally: of
+    eleven SDKs, **six** carried a genuine rule-6 violation (Java, Go, C++, Kotlin, Swift,
+    Python), one was hardened pre-emptively (Rust), and four were clean on their own merits
+    (TypeScript, PHP, C#, C) — which is the empirical case for stating these invariants
+    normatively rather than leaving them implied by rule 2.
 
 - **2026-07 (§12 cross-SDK conformance review, contract 1.5)** — **non-breaking / clarifying.**
   No new obligations, no signature changes, no vocabulary changes. Contract 1.4's §12 was
@@ -1475,6 +1504,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.5 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07*
+*Contract version: 1.6 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

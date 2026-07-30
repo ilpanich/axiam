@@ -42,9 +42,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      # Kept in step with the frontend workflows' Node version for consistency
+      # (jsdom 30 in frontend/ needs >=22; Node 20 is also past its LTS window).
+      # website/ itself has no jsdom dependency, so this bump is not strictly
+      # required here, but a mixed Node-20/22 fleet across workflows adds
+      # confusion for no benefit.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: website/package-lock.json
 

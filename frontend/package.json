@@ -4,6 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.22.2"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -41,7 +44,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
     "@vitest/coverage-v8": "^4.1.8",
-    "jsdom": "^29.1.1",
+    "jsdom": "^30.0.1",
     "oxlint": "^1.76.0",
     "postcss": "^8.5.23",
     "tailwindcss": "^4.3.2",

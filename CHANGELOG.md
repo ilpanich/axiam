@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha20] - 2026-07-30
+
+### Added
+
+- Opt-in rate-limit posture presets + TLS/h2 tuning surface (G7, G8 in progress)
+- G9 — throttle-aware metrics and the gRPC/REST authz analysis
+- G2 harness countermeasures, G4 refresh fix, G5 cache-sweep scenario
+- Per-task data-collection script for the pre-MVP plan
+- Run-3 benchmark page refresh + benchmark-derived sizing docs
+
+### Changed
+
+- Add the run-4 execution runbook
+- Bump the version marker to 1.6 and record the follow-up audit findings
+- Add §9 rule 6 — single-flight guard implementation invariants (contract 1.6)
+- Bump frontend/coverage/website-publish Node from 20 to 22
+- Bump jsonwebtoken from 10.4.0 to 11.0.0
+- Bump jsdom from 29.1.1 to 30.0.1 in /frontend
+- Use the obviously-fake password fixture convention in the users split test
+- Verify the write-behind clamp fix on a local rl-fix-local build
+- Document the write-behind shared counter and its security bound
+- Note why REST and gRPC each hold their own shared counter
+- Adapt the shared-store middleware suite to write-behind counting
+- Serve shared rate-limit decisions from the write-behind counter
+- Add write-behind SharedRateLimitCounter + increment_by
+- Mark the bench admin default in h5-revocation-check.sh as a throwaway fixture
+- H10(5): finalize §6 execution record with the validated H10 outcome
+- H10(4): report.py — settle_timeout refusal is now scenario-aware, not session-wide
+- H10(3): consistency pass — methodology.md §12 + append §6 execution record
+- H10(2): E4 — fourth public benchmark draft
+- H10(1): consistency pass — reconcile PRIVATE_BENCH_ANALYSIS.md with H2/H3/H4/H5/H9 verdicts
+- H8(5): profile-scope SDK result storage, README truthful status table, per-language TODO notes
+- H8(4): wire BENCH_CA_CERT into 5 SDK benches for p2, integrate E1.3 overhead table into report.py
+- H8(3): fix refresh-op concurrency in python/typescript benches (HARNESS-SPEC required conc=1, neither implemented it)
+- H8(2): fix server CSRF header-echo + go bench org_slug — both blocked every SDK bench end-to-end
+- H8(1): per-language SDK bench fixes — rust seed env, python venv, ts npm link, go.sum, java compile, csharp preflight, php minimum-stability
+- H7(1): confirm the REST/gRPC classifier wiring live; correct the stale G9 note
+- H7(3b,4): measure the gateway rate-limit preset live; close the Keycloak p0-vs-p2 login asymmetry
+- H7(1,3a,5): protocol-variant label, maintainer sign-off block, H4 control-build fix
+- H6(7): measure the CC clamp control instead of asserting it, and price the noise
+- H6(6): publish the B2 position — TLS priced, HTTP/2 acquitted, CC still open
+- H6(5): close B2 in the private analysis
+- H6(4): document bench_http_proto in the methodology metric list
+- H6(3): the h2 hypothesis is refuted by counting connections
+- H6(2): h6-tls-proto task + a connection/worker-affinity probe
+- H6(1): capture the negotiated HTTP protocol, and make the h1 control honest
+- H5(4,5): decision-cache verdict — default STAYS opt-in, flip blocked on C1/C2/C4
+- H5(3): automate the live-stack revocation check; run the K-sweep under TLS
+- H5(1): fix the three decision-cache defects surfaced by the G5 review
+- H9: DB-pool default decision — keep pool_size=1, close negative
+- H2: G1 endgame — the "post-seed transient" is the shared rate-limit write
+- H1: drain pause after settle gate to prevent straggler-traffic contamination
+- H4: jemalloc as the release-container default allocator (executes G6 PASS)
+- H1.5: report.py refuses cells whose meta records settle_timeout:true
+- H1.2: fix bench-matrix results-dir clobber + fail-fast task-script guard
+- H1.1: settle gate v2 — concurrent burst probe replaces serial canary
+- H3: flip authz batch strategy default to coalesced (G3 decision)
+- Phase H plan from the verified 2026-07-28 G-task results
+- Use UUIDv7 for persisted record identifiers
+- Amend CONTRACT to 1.5 from the cross-SDK §12 conformance review
+- Add CONTRACT §12 OIDC/SSO relying-party helpers (contract 1.4)
+- Add SDK OIDC/SSO relying-party helpers implementation plan
+- Correct the published client_id rate-limit guidance with its security caveat
+- G7 rate-limit posture decision record
+- G8 security-profiles update + implementation status for the pre-MVP plan
+- G8 — B2 HTTP/2 investigation and the ALPN knob fix
+- Bump base64 from 0.22.1 to 0.23.0
+- Bump the minor-patch group in /frontend with 12 updates
+- Bump actions/download-artifact from 4.3.0 to 8.0.1
+- Bump taiki-e/install-action from 2.83.2 to 2.85.2
+- Bump bufbuild/buf-action from 1.4.0 to 1.5.0
+- Bump coverallsapp/github-action from 2.3.7 to 2.3.8
+- Bump docker/login-action from 3.4.0 to 4.5.1
+- Use UUIDv7 for persisted record identifiers
+- Amend CONTRACT to 1.5 from the cross-SDK §12 conformance review
+- Add CONTRACT §12 OIDC/SSO relying-party helpers (contract 1.4)
+- Add SDK OIDC/SSO relying-party helpers implementation plan
+- Run-3 analysis, D9 experiment script, pre-MVP improvement plan
+
+### Fixed
+
+- Select jsonwebtoken 11's rust_crypto backend explicitly
+- Stop charging GET /api/v1/users to the users_create limiter
+- Make g1-dbdirect's direct SurrealDB probe actually run
+- Resolve g1-dbdirect's DB credentials from the running stack
+- Interrupt-safe teardown for every task that holds a stack
+- Unwedge the G1 tasks' telemetry sampler
+- Dial gRPC over TLS in p3-mtls; record real gRPC status
+- Resolve p3-mtls client cert path from any CWD
+
 ## [1.0.0-alpha19] - 2026-07-25
 
 ### Fixed

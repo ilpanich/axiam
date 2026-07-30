@@ -272,9 +272,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # jsdom >=30 (the vitest test environment for this project) raised its
+      # engines.node floor to ^22.22.2 || ^24.15.0 || >=26.0.0, dropping Node 20
+      # entirely. Node 20 is also past its active-LTS window, so 22 (current
+      # LTS) is the floor here rather than a one-off bump for jsdom alone.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
@@ -335,10 +339,12 @@ jobs:
           AXIAM_URL: "http://localhost:8090"
           SURREAL_URL: "http://localhost:8000"
 
+      # This job also runs `npm test` (vitest + jsdom) below, so it needs the
+      # same jsdom-30 Node floor as frontend-quality above.
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 

@@ -61,7 +61,20 @@ futures-lite = "2"
 surrealdb = "3"
 
 # Authentication & Crypto
-jsonwebtoken = "10"
+# jsonwebtoken 11 removed implicit per-optional-dependency Cargo features
+# (`dep:` syntax) — previously this crate silently piggybacked on the
+# `rust_crypto`/`aws_lc_rs` features enabled transitively via feature
+# unification with `surrealdb-core`'s (still-10.x) `jsonwebtoken` dependency.
+# Now that axiam and surrealdb-core resolve to two independent major
+# versions, that free ride is gone and the crate's own `default` feature set
+# (`use_pem` only) ships with no crypto backend at all — every `encode`/
+# `decode` call panics at runtime via `CryptoProvider::from_crate_features`.
+# We need EdDSA (primary token algorithm), RSA/PS* and ES* (federation OIDC
+# IdPs), and HMAC — all covered by the pure-Rust `rust_crypto` backend, so
+# select it explicitly. Do NOT also enable `aws_lc_rs`: jsonwebtoken only
+# auto-selects a default provider when *exactly one* of the two backend
+# features is active; enabling both re-triggers the same panic.
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 argon2 = "0.5"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 rand = "0.10"

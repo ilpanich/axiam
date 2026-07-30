@@ -100,6 +100,9 @@ fn post_users(peer: std::net::SocketAddr) -> test::TestRequest {
         .set_json(serde_json::json!({
             "username": "someone",
             "email": "someone@example.com",
+            // Obviously-fake in-process test fixture, same convention as
+            // `user_test.rs` — this body never leaves the test server, and
+            // this suite asserts routing/limiter behaviour, not credentials.
             "password": "securepass123",
         }))
 }

@@ -131,7 +131,7 @@ jobs:
             --ignore-filename-regex 'crates/axiam-server/src/main\.rs'
 
       - name: Upload to Coveralls
-        uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e  # v2.3.7
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329  # v2.3.8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           file: lcov.info
@@ -160,7 +160,7 @@ jobs:
         run: npx vitest run --coverage --coverage.reporter=lcov
 
       - name: Upload to Coveralls
-        uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e  # v2.3.7
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329  # v2.3.8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           file: frontend/coverage/lcov.info
@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Close parallel build
-        uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e  # v2.3.7
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329  # v2.3.8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel-finished: true

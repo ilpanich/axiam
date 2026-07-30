@@ -15,10 +15,10 @@ name: bench-zitadel
 
 services:
   zitadel:
-    image: ghcr.io/zitadel/zitadel:v4.15.2
+    image: ghcr.io/zitadel/zitadel:v4.16.2
     container_name: bench-zitadel
     cpus: ${BENCH_CPUS:-2}
-    mem_limit: ${BENCH_MEM:-1024m}
+    mem_limit: ${BENCH_MEM:-2048m}
     command: 'start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode ${BENCH_ZITADEL_TLS_MODE:-disabled}'
     environment:
       ZITADEL_DATABASE_POSTGRES_HOST: postgres

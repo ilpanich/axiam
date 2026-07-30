@@ -31,7 +31,7 @@ services:
       dockerfile: docker/Dockerfile.server
     container_name: bench-axiam-server
     cpus: ${BENCH_CPUS:-2}
-    mem_limit: ${BENCH_MEM:-1024m}
+    mem_limit: ${BENCH_MEM:-2048m}
     ports:
       - "${BENCH_APP_PORT:-8090}:8090"
       - "${BENCH_GRPC_PORT:-50051}:50051"

@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Identifier generation for persisted entities."><title>axiam_core::id - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module id</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_core/index.html">axiam_<wbr>core</a><span class="version">1.0.0-alpha20</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module id</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-v7-and-not-v4" title="Why v7 and not v4">Why v7 and not v4</a></li><li><a href="#when-not-to-use-this" title="When NOT to use this">When NOT to use this</a></li><li><a href="#disclosure-trade-off" title="Disclosure trade-off">Disclosure trade-off</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_core</a></div><h1>Module <span>id</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_core/id.rs.html#1-150">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Identifier generation for persisted entities.</p>
+<h2 id="why-v7-and-not-v4"><a class="doc-anchor" href="#why-v7-and-not-v4">§</a>Why v7 and not v4</h2>
+<p>Every repository in <code>axiam-db</code> writes its rows as
+<code>CREATE type::record('&lt;table&gt;', $id)</code>, where <code>$id</code> is the hyphenated string
+form of a <a href="https://docs.rs/uuid/1.24.0/uuid/struct.Uuid.html" title="struct uuid::Uuid"><code>Uuid</code></a>. SurrealDB stores records in an ordered key-value engine
+(<code>surrealkv:</code> in dev/prod compose, <code>file:</code>/RocksDB in the k8s StatefulSet),
+so the record id <em>is</em> the primary key and its ordering determines physical
+layout.</p>
+<p>With v4 the key is uniformly random, so consecutive inserts scatter across
+the whole keyspace: every insert dirties a different page, the working set
+for a write burst is the entire index rather than its tail, and LSM
+compaction rewrites overlapping ranges repeatedly. UUIDv7 (RFC 9562) puts a
+48-bit big-endian Unix-millisecond timestamp in the high bits, so ids
+generated close in time sort close together and inserts append to the tail
+of the keyspace instead of scattering.</p>
+<p>Two properties this depends on are verified by the tests below rather than
+assumed:</p>
+<ol>
+<li><strong>The string form sorts like the byte form.</strong> We store ids as
+hyphenated strings, so the ordering benefit would be lost if the textual
+encoding permuted it. Lowercase hex is order-preserving here, and the
+hyphens sit at fixed offsets, so it holds — but it is asserted, because
+the whole rationale collapses without it.</li>
+<li><strong>Ids are monotonic within a single millisecond.</strong> <code>uuid</code>’s
+<a href="https://docs.rs/uuid/1.24.0/uuid/struct.Uuid.html#method.now_v7" title="associated function uuid::Uuid::now_v7"><code>Uuid::now_v7</code></a> carries a per-millisecond counter (RFC 9562 §6.2
+“monotonic random”), so a burst of inserts inside one millisecond is
+still ordered rather than randomly permuted inside that millisecond’s
+bucket.</li>
+</ol>
+<h2 id="when-not-to-use-this"><a class="doc-anchor" href="#when-not-to-use-this">§</a>When NOT to use this</h2>
+<p><a href="fn.new_id.html" title="fn axiam_core::id::new_id"><code>new_id</code></a> must not be used for anything whose security depends on being
+unguessable — session tokens, download/cancel tokens, reset tokens,
+passwords, or any other bearer capability.</p>
+<p>v4 spends 122 bits on randomness. v7 spends 48 on the timestamp and, because
+of the monotonic counter, ids minted in the <em>same</em> millisecond share a long
+common prefix and differ only in the low counter bits. Two adjacent same-ms
+ids can therefore share ~90 of their 128 bits, which is ample for collision
+resistance but nowhere near enough for secrecy.</p>
+<p>That distinction is the rule this module encodes: <strong>v7 for identifiers, CSPRNG
+for secrets.</strong> Identifiers in AXIAM are not capabilities — every repository
+read is tenant-scoped and every route is checked by the authz engine, so
+knowing another entity’s id grants nothing. Secrets are generated separately
+(see <code>generate_cancel_token</code> in the GDPR handlers, which uses a 256-bit
+<code>rand</code> draw for exactly this reason).</p>
+<h2 id="disclosure-trade-off"><a class="doc-anchor" href="#disclosure-trade-off">§</a>Disclosure trade-off</h2>
+<p>A v7 id discloses its own creation time to anyone who can see it. For AXIAM
+entities this reveals nothing new: <code>created_at</code> is already part of the
+public representation of every entity that carries one, and JWTs already
+carry <code>iat</code> alongside the <code>jti</code>/<code>sub</code> claims.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.new_id.html" title="fn axiam_core::id::new_id">new_id</a></dt><dd>Generate the identifier for a newly created, persisted entity.</dd></dl></section></div></main></body></html>

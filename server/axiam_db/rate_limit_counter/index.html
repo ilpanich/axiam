@@ -1,0 +1,130 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Write-behind shared rate-limit counter (SECHRD-03 / D-01a, D-01b — performance fix for the H2 finding)."><title>axiam_db::rate_limit_counter - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_db" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module rate_limit_counter</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_db/index.html">axiam_<wbr>db</a><span class="version">1.0.0-alpha20</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module rate_<wbr>limit_<wbr>counter</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-replaces-and-why" title="What this replaces, and why">What this replaces, and why</a></li><li><a href="#what-the-layer-is-for-do-not-remove-it" title="What the layer is for (do not remove it)">What the layer is for (do not remove it)</a></li><li><a href="#staleness--overshoot-bound-quotable-in-the-security-docs" title="Staleness / overshoot bound (quotable in the security docs)">Staleness / overshoot bound (quotable in the security docs)</a></li><li><a href="#fail-open-posture-d-01b-t-24-42-accepted-risk" title="Fail-open posture (D-01b, T-24-42 accepted risk)">Fail-open posture (D-01b, T-24-42 accepted risk)</a></li><li><a href="#concurrency-rules-obeyed-here" title="Concurrency rules obeyed here">Concurrency rules obeyed here</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>db</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_db</a></div><h1>Module <span>rate_<wbr>limit_<wbr>counter</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_db/rate_limit_counter.rs.html#1-1346">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Write-behind shared rate-limit counter (SECHRD-03 / D-01a, D-01b —
+performance fix for the H2 finding).</p>
+<h2 id="what-this-replaces-and-why"><a class="doc-anchor" href="#what-this-replaces-and-why">§</a>What this replaces, and why</h2>
+<p>Until this module existed, both shared-store rate-limit layers
+(<code>axiam-api-rest::middleware::rate_limit_shared::RateLimitShared</code> and
+<code>axiam-api-grpc::middleware::rate_limit::GrpcSharedRateLimitLayer</code>)
+performed ONE synchronous
+<a href="../repository/struct.SurrealRateLimitBucketRepository.html#method.increment" title="method axiam_db::repository::SurrealRateLimitBucketRepository::increment"><code>SurrealRateLimitBucketRepository::increment</code></a> UPSERT against a single
+<code>rate_limit_bucket:&lt;endpoint&gt;:&lt;ip&gt;</code> record <strong>before</strong> the handler ran, on
+the request’s critical path.</p>
+<p>That write is a deliberate global hot spot: one record per
+<code>(endpoint, key)</code> pair, written by every request. Measured on
+2026-07-28 (<code>server:1.0.0-alpha19</code> + SurrealDB 3.2.3, 2 CPU / 1 GiB each,
+rate limits neutralized — full data in
+<code>claude_dev/postseed-transient-investigation.md</code> §2, §3, §7):</p>
+<ul>
+<li>The six wrapped endpoints (<code>POST /api/v1/authz/check</code>,
+<code>POST /oauth2/token</code>, <code>POST /oauth2/introspect</code>, <code>POST /oauth2/revoke</code>,
+<code>POST /api/v1/auth/login</code>, and — unintentionally, see §7 ask 1 —
+<code>GET /api/v1/users</code>) were pinned at <strong>16–21 ops/s at any concurrency
+from 1 to 40 VUs</strong>, with p50 ≈ 55–65 ms at 1 VU and ≈ 1 s at 20 VUs.</li>
+<li>Structurally identical endpoints WITHOUT the wrap ran at
+<strong>68–4 248 ops/s</strong>. The cleanest pair: <code>GET /api/v1/users</code> at 60–65 ms
+vs <code>GET /api/v1/resources</code> at 11–12 ms — same handler shape, same
+session, same datastore; the only difference was the wrap.</li>
+<li>The datastore’s own tracer attributed ~39–46 ms of each such request to
+a <strong>single</strong> RPC that only the wrapped endpoints issue; every other RPC
+in the same request was 0–6 ms. The same UPSERT issued directly
+(<code>surreal sql</code> / raw HTTP <code>/sql</code>) ran at 6–9 ms and scaled to 487 ops/s
+at 20 concurrent writers on the same hot key — so the <em>ordering</em>, not
+the datastore, was the ceiling. The ceiling is set by the slowest
+datastore write in the deployment and does not improve with
+concurrency, app replicas, or connection pooling.</li>
+</ul>
+<p><a href="struct.SharedRateLimitCounter.html" title="struct axiam_db::rate_limit_counter::SharedRateLimitCounter"><code>SharedRateLimitCounter</code></a> keeps the security purpose of the layer while
+removing that synchronous write: the per-request path is now a single
+in-process sharded-map increment (no datastore round trip, no task spawn,
+no <code>await</code>), and a background flusher coalesces the accumulated
+increments into <strong>one</strong> <a href="../repository/struct.SurrealRateLimitBucketRepository.html#method.increment_by" title="method axiam_db::repository::SurrealRateLimitBucketRepository::increment_by"><code>SurrealRateLimitBucketRepository::increment_by</code></a>
+write per <code>(key, window)</code> per sync interval.</p>
+<h2 id="what-the-layer-is-for-do-not-remove-it"><a class="doc-anchor" href="#what-the-layer-is-for-do-not-remove-it">§</a>What the layer is for (do not remove it)</h2>
+<p>The per-replica in-memory <code>governor</code>/<code>GovernorLayer</code> still runs on exactly
+the same endpoints and still makes a full per-replica decision — it is
+untouched by this module. The shared store exists for a different reason:
+with N replicas behind an HPA, N independent in-memory buckets multiply
+the effective rate limit by N. The shared counter is what makes the
+configured limit hold <em>across</em> replicas. Deleting it would silently
+restore that N× multiplication.</p>
+<h2 id="staleness--overshoot-bound-quotable-in-the-security-docs"><a class="doc-anchor" href="#staleness--overshoot-bound-quotable-in-the-security-docs">§</a>Staleness / overshoot bound (quotable in the security docs)</h2>
+<p>With write-behind, cross-replica enforcement becomes <strong>eventual</strong> rather
+than immediate. Precisely:</p>
+<blockquote>
+<p>A replica’s local view of a bucket is <code>shared_count + pending</code>, where
+<code>shared_count</code> is the authoritative store count as of that replica’s
+last successful flush and <code>pending</code> is its own unflushed increments.
+A replica therefore always counts <strong>all</strong> of its own traffic
+immediately, and <em>other</em> replicas’ traffic only as of its last flush —
+which is at most <code>sync_interval</code> old (<code>AXIAM__RATE_LIMIT__SHARED_SYNC_MS</code>,
+default 1000 ms). Consequently, for a bucket receiving aggregate
+arrival rate <code>R</code> spread over <code>replicas</code> replicas, the worst-case
+overshoot beyond the configured limit before the counts converge is
+bounded by approximately</p>
+<div class="example-wrap"><pre class="language-text"><code>(replicas - 1) × (R / replicas) × sync_interval</code></pre></div>
+<p>i.e. at most <code>(replicas − 1) × arrival_rate_per_replica × sync_interval</code>
+extra admitted requests, and <strong>zero</strong> on a single replica (where
+<code>replicas - 1 = 0</code>, so local counting is exact and this layer is as
+strict as the previous synchronous implementation). With the previous
+per-request-synchronous write the bound was zero for any replica count,
+at the cost of the ~20 ops/s per-endpoint ceiling documented above.
+Overshoot is also capped by the in-memory <code>governor</code> on the same
+endpoint, which independently enforces the limit per replica; the
+shared layer’s job is to stop the aggregate from reaching
+<code>replicas × limit</code>, and after one <code>sync_interval</code> it does.</p>
+</blockquote>
+<p>Example: limit 100/min, 4 replicas, <code>sync_interval</code> 1 s, aggregate
+arrival 40 req/s ⇒ worst case ≈ <code>3 × 10 × 1 s</code> = ~30 requests of
+overshoot inside a 60 s window before convergence (≈ 30 % of the limit,
+and shrinking linearly with <code>sync_interval</code>).</p>
+<h2 id="fail-open-posture-d-01b-t-24-42-accepted-risk"><a class="doc-anchor" href="#fail-open-posture-d-01b-t-24-42-accepted-risk">§</a>Fail-open posture (D-01b, T-24-42 accepted risk)</h2>
+<p>This layer keeps the ONE deliberate fail-open exception in the codebase;
+every other control fails closed. It allows the request and logs a
+<code>warn</code>-level alarm WITHOUT the raw bucket key (T-24-43 — the key embeds a
+client IP / <code>client_id</code>) when:</p>
+<ul>
+<li>the shared layer is disabled (<code>AXIAM__RATE_LIMIT__SHARED=off</code>),</li>
+<li>the caller has no key part (no client IP could be derived),</li>
+<li>no datastore handle / no counter is registered,</li>
+<li>the flusher’s wake channel is full or closed,</li>
+<li>the store errors during a flush.</li>
+</ul>
+<p>In the last three cases the counter <strong>keeps serving decisions from local
+counts</strong> — a store outage degrades cross-replica strictness to
+per-replica strictness (exactly the in-memory <code>governor</code>’s posture), it
+never hard-blocks auth traffic and never surfaces a 5xx.</p>
+<p>Note the one behavioral difference from the pre-write-behind layer: a
+store outage is now discovered by the <em>flusher</em>, not by the request, so a
+request is no longer blanket-allowed just because the store is down — it
+is still evaluated against the (perfectly valid) local count. A limit of
+<code>0</code> therefore denies locally even with an unreachable store, where the
+old code would have allowed. That is strictly a correctness improvement:
+“the store is unreachable” must not become “the limit is disabled”.</p>
+<h2 id="concurrency-rules-obeyed-here"><a class="doc-anchor" href="#concurrency-rules-obeyed-here">§</a>Concurrency rules obeyed here</h2>
+<ul>
+<li>State is a fixed <a href="constant.SHARD_COUNT.html" title="constant axiam_db::rate_limit_counter::SHARD_COUNT"><code>SHARD_COUNT</code></a>-way sharded map of <code>std::sync::Mutex</code>
+(NOT a tokio mutex): critical sections are a few field updates and are
+<strong>never</strong> held across an <code>await</code>. The flusher collects work under the
+lock, drops it, awaits the store, then re-locks to write back.</li>
+<li><a href="struct.SharedRateLimitCounter.html#method.check" title="method axiam_db::rate_limit_counter::SharedRateLimitCounter::check"><code>SharedRateLimitCounter::check</code></a> is fully synchronous and allocation-
+free on the hot path apart from the map probe, so it can be called from
+any executor (actix worker, tonic/tower task) without <code>block_on</code>.</li>
+<li>Poisoned mutexes are recovered from (<code>into_inner</code>) rather than
+panicking: a panic elsewhere must not take the rate limiter down.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SharedRateLimitConfig.html" title="struct axiam_db::rate_limit_counter::SharedRateLimitConfig">Shared<wbr>Rate<wbr>Limit<wbr>Config</a></dt><dd>Configuration for <a href="struct.SharedRateLimitCounter.html" title="struct axiam_db::rate_limit_counter::SharedRateLimitCounter"><code>SharedRateLimitCounter</code></a>, read once via
+<a href="struct.SharedRateLimitConfig.html#method.from_env" title="associated function axiam_db::rate_limit_counter::SharedRateLimitConfig::from_env"><code>SharedRateLimitConfig::from_env</code></a> so the REST and gRPC layers always
+behave identically.</dd><dt><a class="struct" href="struct.SharedRateLimitCounter.html" title="struct axiam_db::rate_limit_counter::SharedRateLimitCounter">Shared<wbr>Rate<wbr>Limit<wbr>Counter</a></dt><dd>Shared, write-behind rate-limit counter used by BOTH the REST
+(<code>RateLimitShared</code>) and gRPC (<code>GrpcSharedRateLimitLayer</code>) shared-store
+layers.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_SYNC_INTERVAL_MS.html" title="constant axiam_db::rate_limit_counter::DEFAULT_SYNC_INTERVAL_MS">DEFAULT_<wbr>SYNC_<wbr>INTERVAL_<wbr>MS</a></dt><dd>Default write-behind flush interval, in milliseconds
+(<code>AXIAM__RATE_LIMIT__SHARED_SYNC_MS</code>).</dd><dt><a class="constant" href="constant.DEFAULT_WINDOW_SECS.html" title="constant axiam_db::rate_limit_counter::DEFAULT_WINDOW_SECS">DEFAULT_<wbr>WINDOW_<wbr>SECS</a></dt><dd>Fixed-window length assumed by both callers’ <code>window_start()</code> helpers
+(<code>axiam-api-rest::middleware::rate_limit_shared::WINDOW_SECS</code> and
+<code>axiam-api-grpc::middleware::rate_limit::WINDOW_SECS</code>). Used ONLY to
+decide when an idle bucket is stale enough to prune — the window itself is
+always supplied by the caller, never computed here.</dd><dt><a class="constant" href="constant.MAX_SYNC_INTERVAL_MS.html" title="constant axiam_db::rate_limit_counter::MAX_SYNC_INTERVAL_MS">MAX_<wbr>SYNC_<wbr>INTERVAL_<wbr>MS</a></dt><dd>Upper clamp for <code>AXIAM__RATE_LIMIT__SHARED_SYNC_MS</code>. Above this the
+cross-replica overshoot bound (see module docs) grows past anything
+defensible for a security control.</dd><dt><a class="constant" href="constant.MIN_SYNC_INTERVAL_MS.html" title="constant axiam_db::rate_limit_counter::MIN_SYNC_INTERVAL_MS">MIN_<wbr>SYNC_<wbr>INTERVAL_<wbr>MS</a></dt><dd>Lower clamp for <code>AXIAM__RATE_LIMIT__SHARED_SYNC_MS</code>. Below this the
+flusher would approach the per-request write storm this module exists to
+remove.</dd><dt><a class="constant" href="constant.SHARD_COUNT.html" title="constant axiam_db::rate_limit_counter::SHARD_COUNT">SHARD_<wbr>COUNT</a></dt><dd>Number of independent shards in the in-process bucket map. Sized so that
+unrelated hot keys (one per rate-limited endpoint per client IP) rarely
+contend on the same <code>Mutex</code>, while keeping a flush pass to 16 cheap lock
+acquisitions.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.SharedRateLimitStore.html" title="trait axiam_db::rate_limit_counter::SharedRateLimitStore">Shared<wbr>Rate<wbr>Limit<wbr>Store</a></dt><dd>The single write primitive the write-behind flusher needs.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.StoreIncrementFuture.html" title="type axiam_db::rate_limit_counter::StoreIncrementFuture">Store<wbr>Increment<wbr>Future</a></dt><dd>Boxed future returned by <a href="trait.SharedRateLimitStore.html#tymethod.increment_by" title="method axiam_db::rate_limit_counter::SharedRateLimitStore::increment_by"><code>SharedRateLimitStore::increment_by</code></a>.</dd></dl></section></div></main></body></html>

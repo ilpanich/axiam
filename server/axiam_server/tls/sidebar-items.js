@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["build_rustls_server_config"]};
+window.SIDEBAR_ITEMS = {"constant":["ACTIX_DEFAULT_H2_CONNECTION_WINDOW","ACTIX_DEFAULT_H2_STREAM_WINDOW"],"fn":["build_rustls_server_config"],"struct":["Http2Tuning"]};

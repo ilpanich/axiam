@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_SYNC_INTERVAL_MS","DEFAULT_WINDOW_SECS","MAX_SYNC_INTERVAL_MS","MIN_SYNC_INTERVAL_MS","SHARD_COUNT"],"struct":["SharedRateLimitConfig","SharedRateLimitCounter"],"trait":["SharedRateLimitStore"],"type":["StoreIncrementFuture"]};

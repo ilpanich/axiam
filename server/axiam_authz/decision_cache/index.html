@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Per-tenant cache of effective-permission evaluations (D7)."><title>axiam_authz::decision_cache - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_authz" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module decision_cache</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_authz/index.html">axiam_<wbr>authz</a><span class="version">1.0.0-alpha19</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module decision_<wbr>cache</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-caches" title="What this caches">What this caches</a></li><li><a href="#security-property-critical--read-before-changing-invalidation" title="Security property (CRITICAL — read before changing invalidation)">Security property (CRITICAL — read before changing invalidation)</a></li><li><a href="#bounded-staleness-fallback" title="Bounded staleness fallback">Bounded staleness fallback</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>authz</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_authz</a></div><h1>Module <span>decision_<wbr>cache</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_authz/decision_cache.rs.html#1-392">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Per-tenant cache of effective-permission evaluations (D7).</p>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Per-tenant cache of effective-permission evaluations (D7)."><title>axiam_authz::decision_cache - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_authz" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module decision_cache</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_authz/index.html">axiam_<wbr>authz</a><span class="version">1.0.0-alpha20</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module decision_<wbr>cache</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-caches" title="What this caches">What this caches</a></li><li><a href="#security-property-critical--read-before-changing-invalidation" title="Security property (CRITICAL — read before changing invalidation)">Security property (CRITICAL — read before changing invalidation)</a></li><li><a href="#bounded-staleness-fallback" title="Bounded staleness fallback">Bounded staleness fallback</a></li><li><a href="#scope-of-immediate-this-cache-is-process-local-multi-replica-caveat" title="SCOPE OF “IMMEDIATE”: this cache is PROCESS-LOCAL (multi-replica caveat)">SCOPE OF “IMMEDIATE”: this cache is PROCESS-LOCAL (multi-replica caveat)</a></li><li><a href="#internal-structure-and-why" title="Internal structure (and why)">Internal structure (and why)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>authz</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_authz</a></div><h1>Module <span>decision_<wbr>cache</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_authz/decision_cache.rs.html#1-1002">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Per-tenant cache of effective-permission evaluations (D7).</p>
 <h2 id="what-this-caches"><a class="doc-anchor" href="#what-this-caches">§</a>What this caches</h2>
 <p>A <a href="struct.DecisionCache.html" title="struct axiam_authz::decision_cache::DecisionCache"><code>DecisionCache</code></a> memoizes the full <a href="../types/enum.AccessDecision.html" title="enum axiam_authz::types::AccessDecision"><code>AccessDecision</code></a> (Allow, or Deny
 <em>with its exact reason</em>) for a <code>(tenant_id, subject, resource, action, scope)</code> tuple, so a repeated check can skip the 3–4 sequential SurrealDB
@@ -32,5 +32,72 @@ that forgot to call invalidate, an out-of-band DB write), the damage is
 <code>decision_cache_ttl_secs</code> (default 5 s) before TTL eviction forces a fresh
 evaluation. The short default TTL is the belt to the invalidation hooks’
 braces.</p>
+<h2 id="scope-of-immediate-this-cache-is-process-local-multi-replica-caveat"><a class="doc-anchor" href="#scope-of-immediate-this-cache-is-process-local-multi-replica-caveat">§</a>SCOPE OF “IMMEDIATE”: this cache is PROCESS-LOCAL (multi-replica caveat)</h2>
+<p><code>axiam-server</code> builds <strong>one in-process</strong> <code>Arc&lt;DecisionCache&gt;</code> and shares it
+across the REST, gRPC and AMQP engines of <em>that process</em>. There is no
+cross-replica invalidation channel: no AMQP fan-out, no webhook, no shared
+store. Consequently:</p>
+<ul>
+<li><strong>Single replica:</strong> the invalidation hooks above make revocation
+<em>immediate</em>; the TTL is only the fallback for a missed event.</li>
+<li><strong>Two or more replicas</strong> (the Kubernetes deployment AXIAM targets): a
+revocation handled by replica A invalidates <strong>only replica A</strong>. Replicas
+B…N keep serving the pre-revocation decision from their own caches until
+their entry TTL-expires. The <strong>worst-case revocation latency for the
+deployment is therefore <code>decision_cache_ttl_secs</code> (default 5 s)</strong>, not
+zero — and it applies uniformly to <code>/api/v1/authz/check</code>, the gRPC
+<code>CheckAccess</code>, AMQP async authz <em>and</em> the internal <code>RequirePermission</code>
+guard on every admin endpoint, so an administrator’s own privileges can
+also outlive their revocation by up to the TTL on other replicas.</li>
+<li>The failure is <strong>silent</strong>: a hit is byte-identical to a miss (same
+decision, same deny reason) and the audit log records the decision, not
+its provenance. Post-incident it is not possible to tell from the logs
+whether a given allow was served from cache.</li>
+</ul>
+<p>Operators running more than one replica must either accept a ≤ TTL
+revocation window or leave the cache off. This is stated next to the default
+in <code>docs/deployment/README.md</code>, <code>docs/admin/README.md</code>, the
+<a href="../config/struct.AuthzConfig.html" title="struct axiam_authz::config::AuthzConfig"><code>crate::config::AuthzConfig</code></a> docstrings and
+<code>benchmarks/PUBLIC_BENCH_ANALYSIS.md</code>.</p>
+<h2 id="internal-structure-and-why"><a class="doc-anchor" href="#internal-structure-and-why">§</a>Internal structure (and why)</h2><div class="example-wrap"><pre class="language-text"><code>stripes: [Mutex&lt;HashMap&lt;TenantId, TenantShard&gt;&gt;; STRIPE_COUNT]   // lock striping
+                                    │
+                                    ├── entries:    HashMap&lt;Arc&lt;SubKey&gt;, Entry&gt;
+                                    ├── order:      VecDeque&lt;(seq, Arc&lt;SubKey&gt;)&gt;  // FIFO cap
+                                    └── by_subject: HashMap&lt;SubjectId, HashSet&lt;Arc&lt;SubKey&gt;&gt;&gt;</code></pre></div>
+<p>Three properties this layout buys, each fixing a defect found in the G5
+decision review (<code>claude_dev/decision-cache-decision.md</code> §2.5):</p>
+<ol>
+<li><strong><code>order</code> is bounded</strong> (§2.5 finding <em>a</em>). A TTL-expired key is removed
+from <code>entries</code> on read but its <code>order</code> slot cannot be found and removed
+in O(1); the pre-fix code therefore appended a <em>second</em> slot when the key
+was re-inserted, and only ever popped slots when <code>entries.len()</code> exceeded
+the per-tenant cap — so a working set <em>below</em> the cap grew <code>order</code>
+without limit at the miss rate. Each slot now carries the entry’s
+monotonic <code>seq</code>, which makes a superseded slot recognisable, and
+[<code>TenantShard::compact_if_needed</code>] rebuilds the queue whenever it exceeds
+<code>max(2 × entries.len(), COMPACT_FLOOR)</code>. That bounds <code>order</code> at ~2× the
+live set (and ≤ ~2× <code>max_entries_per_tenant</code>) while staying O(1)
+amortised: each compaction halves the queue, so the O(n) pass is paid at
+most once per n inserts.</li>
+<li><strong><code>invalidate_subject</code> is O(entries for that subject)</strong> (§2.5 finding
+<em>c</em>), not O(shard). The <code>by_subject</code> index gives the affected keys
+directly, so a role unassignment no longer scans up to
+<code>max_entries_per_tenant</code> entries while holding a lock the authz hot path
+needs. The index shares its keys with <code>entries</code> via <code>Arc&lt;SubKey&gt;</code>, so it
+costs one pointer per entry, not a second copy of the key.</li>
+<li><strong>Lock striping</strong>: the map of tenants is split over <code>STRIPE_COUNT</code>
+independent mutexes keyed by <code>tenant_id</code>, so one tenant’s invalidation or
+eviction no longer blocks <em>every</em> other tenant’s checks — the pre-fix
+code took a single global mutex on every <code>get</code>/<code>insert</code>. A tenant’s shard
+lives entirely within one stripe, which keeps the per-tenant FIFO cap
+exact (an intra-tenant striping would only be able to enforce the cap
+approximately). Contention <em>within</em> one tenant is therefore unchanged and
+remains the honest limit of this design: a single-tenant deployment still
+serialises its cache accesses, which is why the K-sweep in the decision
+note measures cache-ON/OFF rather than assuming a win.</li>
+</ol>
 </div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DecisionCache.html" title="struct axiam_authz::decision_cache::DecisionCache">Decision<wbr>Cache</a></dt><dd>A concurrent, per-tenant, TTL + size-bounded cache of authorization
-decisions. Cheap to clone-share behind an <code>Arc</code>.</dd><dt><a class="struct" href="struct.DecisionCacheConfig.html" title="struct axiam_authz::decision_cache::DecisionCacheConfig">Decision<wbr>Cache<wbr>Config</a></dt><dd>Runtime configuration for the decision cache.</dd></dl></section></div></main></body></html>
+decisions. Cheap to clone-share behind an <code>Arc</code>.</dd><dt><a class="struct" href="struct.DecisionCacheConfig.html" title="struct axiam_authz::decision_cache::DecisionCacheConfig">Decision<wbr>Cache<wbr>Config</a></dt><dd>Runtime configuration for the decision cache.</dd><dt><a class="struct" href="struct.DecisionCacheStats.html" title="struct axiam_authz::decision_cache::DecisionCacheStats">Decision<wbr>Cache<wbr>Stats</a></dt><dd>Observable counters for one point in time. Cheap to produce; intended for a
+periodic log line or a metrics gauge, and used by the tests that assert the
+cache really holds <code>max_entries_per_tenant</code> entries rather than silently
+evicting.</dd></dl></section></div></main></body></html>

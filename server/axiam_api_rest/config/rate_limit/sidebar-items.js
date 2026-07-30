@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["RateLimitKeyMode"],"struct":["RateLimitConfig"]};
+window.SIDEBAR_ITEMS = {"constant":["ENV_AUTHZ_CHECK_PER_MIN","ENV_INTROSPECT_PER_MIN","ENV_KEY","ENV_REVOKE_PER_MIN","ENV_TOKEN_PER_MIN"],"enum":["RateLimitKeyMode","RateLimitProfile"],"struct":["MachineLimitPreset","RateLimitConfig","RateLimitPosture"]};

@@ -6,12 +6,16 @@
 //! - Schema initialization and migrations ([`run_migrations`])
 //! - Repository implementations for `axiam-core` traits
 //! - Error types ([`DbError`])
+//! - The process-wide write-behind shared rate-limit counter
+//!   ([`SharedRateLimitCounter`]), used by BOTH the REST and gRPC
+//!   shared-store rate-limit layers
 
 mod connection;
 mod error;
 pub mod helpers;
 pub mod metrics;
 mod pool;
+pub mod rate_limit_counter;
 pub mod repository;
 mod schema;
 pub mod seeder;
@@ -20,6 +24,9 @@ pub use connection::{DbConfig, DbManager};
 pub use error::DbError;
 pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};
 pub use pool::{DbCheckout, DbPool};
+pub use rate_limit_counter::{
+    SharedRateLimitConfig, SharedRateLimitCounter, SharedRateLimitStore, StoreIncrementFuture,
+};
 pub use repository::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,

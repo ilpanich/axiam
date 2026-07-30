@@ -52,17 +52,17 @@ use axiam_auth::{
 };
 use axiam_authz::AuthzConfig;
 use axiam_db::{
-    SurrealAccountDeletionRepository, SurrealAssertionReplayRepository, SurrealAuditLogRepository,
-    SurrealAuthorizationCodeRepository, SurrealCertificateRepository, SurrealConsentRepository,
-    SurrealEmailConfigRepository, SurrealErasureProofRepository, SurrealExportJobRepository,
-    SurrealFederationConfigRepository, SurrealFederationLinkRepository,
+    SharedRateLimitCounter, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
+    SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCertificateRepository,
+    SurrealConsentRepository, SurrealEmailConfigRepository, SurrealErasureProofRepository,
+    SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
     SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebhookRepository,
+    SurrealRateLimitBucketRepository, SurrealRefreshTokenRepository, SurrealResourceRepository,
+    SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -287,6 +287,21 @@ pub struct AppState<C: Connection + Clone> {
     /// email-config routes fail closed rather than silently using a
     /// constant/zero key.
     pub email_config_repo: Option<SurrealEmailConfigRepository<C>>,
+    /// Process-wide write-behind shared rate-limit counter used by
+    /// [`crate::middleware::rate_limit_shared::RateLimitShared`]
+    /// (SECHRD-03 / D-01a; H2 performance fix).
+    ///
+    /// **MUST be one instance per process**, cloned (not rebuilt) into every
+    /// actix worker: the counter accumulates each replica's unflushed
+    /// increments in process memory, so N per-worker instances would fragment
+    /// the local count and weaken the effective limit by up to N×. Living in
+    /// `AppState` — registered exactly once as `web::Data<AppState<C>>` in
+    /// `main.rs` — is what guarantees that; the `Clone` here is the cheap
+    /// `Arc` clone, not a new counter.
+    ///
+    /// Absence of the whole `AppState` (a misconfigured harness) makes the
+    /// middleware fail open, exactly as a missing DB handle did before.
+    pub shared_rate_limit: SharedRateLimitCounter,
 
     // -- QUAL-07: hoisted per-request service constructions (13 call sites) --
     pub password_reset_service: PasswordResetServiceT<C>,
@@ -481,6 +496,15 @@ impl<C: Connection + Clone> AppState<C> {
             oauth2_jwks_cache_config: Oauth2JwksCacheConfig::default(),
             crypto_semaphore,
             email_config_repo: None,
+            // Tests get a real, env-configured counter over the same
+            // in-memory DB, so the shared-store layer behaves in tests
+            // exactly as it does in production. A test that wants
+            // deterministic convergence can replace this field with
+            // `SharedRateLimitCounter::without_flusher(..)` and drive
+            // `flush_once()` itself.
+            shared_rate_limit: SharedRateLimitCounter::from_env(Arc::new(
+                SurrealRateLimitBucketRepository::new(db.clone()),
+            )),
             password_reset_service,
             email_verification_service,
             oidc_federation_service: None,

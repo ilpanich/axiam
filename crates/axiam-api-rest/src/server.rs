@@ -396,15 +396,42 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 web::resource("/organizations/{org_id}/ca-certificates/{id}/revoke")
                     .route(web::post().to(handlers::ca_certificates::revoke::<C>)),
             )
+            // --- Users ---
+            //
+            // `/users` is deliberately registered as TWO resources, method-
+            // guarded, instead of one resource with both routes.
+            //
+            // An actix `Resource`-level `.wrap()` applies to EVERY method on
+            // that resource, so the single-resource form charged `GET /users`
+            // (an admin *list*) to the `users_create` registration bucket at
+            // `register_per_min` — 5/min per IP in the production posture, so
+            // an admin UI listing users started getting 429s after five reads
+            // a minute. It also put the shared-store rate-limit pre-check on
+            // the list path, which measured 60-65 ms vs 11-12 ms for its
+            // structurally identical siblings `GET /roles` / `GET /resources`
+            // (see `claude_dev/postseed-transient-investigation.md` §2.1, §7
+            // ask 1).
+            //
+            // Actix tries registered services in order and falls through to
+            // the next one when a resource's guards reject, so the guarded
+            // POST resource MUST come first; the unguarded `/users` below it
+            // then serves the GET (and returns the usual 405 for any other
+            // method). Regression test:
+            // `tests/users_rate_limit_split_test.rs`.
             .service(
                 web::resource("/users")
+                    .guard(actix_web::guard::Post())
                     .wrap(build_governor(rate_limit_cfg.register_per_min))
                     .wrap(RateLimitShared::<C>::new(
                         "users_create",
                         rate_limit_cfg.register_per_min,
                     ))
-                    .route(web::post().to(handlers::users::create::<C>))
-                    .route(web::get().to(handlers::users::list::<C>)),
+                    .route(web::post().to(handlers::users::create::<C>)),
+            )
+            .service(
+                // Unlimited, matching the posture of its sibling list
+                // endpoints `/roles` and `/resources`.
+                web::resource("/users").route(web::get().to(handlers::users::list::<C>)),
             )
             .service(
                 web::resource("/users/{user_id}")

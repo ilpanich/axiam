@@ -15,15 +15,21 @@
 //!   selects the rightmost trusted XFF hop, and when there are NOT enough
 //!   hops to trust, XFF is ignored entirely and the verified tonic connection
 //!   peer address is used instead (never `hops[0]` — SECHRD-03/D-01d).
-//! - [`GrpcSharedRateLimitLayer`] — an async pre-check `tower::Layer` that
-//!   reuses the plan-24-04 `SurrealRateLimitBucketRepository` shared-store
-//!   counter, run BEFORE the existing per-replica in-memory `GovernorLayer`
-//!   (kept byte-for-byte unchanged as the fail-open fallback, D-01b). This is
-//!   deliberately NOT a `governor::StateStore` impl and never calls
-//!   `block_on` — `StateStore::measure_and_replace` is a *synchronous* trait
-//!   method (RESEARCH Pitfall 1), so the shared-store check is a separate
-//!   async tower service that performs its own SurrealDB round-trip and then
-//!   delegates to the inner service.
+//! - [`GrpcSharedRateLimitLayer`] — a pre-check `tower::Layer` over the
+//!   process-wide write-behind `axiam_db::SharedRateLimitCounter` (the SAME
+//!   counter type and env knobs — `AXIAM__RATE_LIMIT__SHARED`,
+//!   `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` — the REST `RateLimitShared`
+//!   middleware uses), run BEFORE the existing per-replica in-memory
+//!   `GovernorLayer` (kept byte-for-byte unchanged as the fail-open fallback,
+//!   D-01b). This is deliberately NOT a `governor::StateStore` impl and never
+//!   calls `block_on` — `StateStore::measure_and_replace` is a *synchronous*
+//!   trait method (RESEARCH Pitfall 1).
+//!
+//!   Since the H2 performance fix this layer performs NO datastore round trip
+//!   on the request path (it used to `await` one `UPSERT` per call, and being
+//!   server-wide, *every* gRPC call paid it — see the layer's own docs for the
+//!   measurements). A single background flusher coalesces the in-memory
+//!   increments into one write per bucket per sync interval.
 //!
 //! HARD CONSTRAINT (D-01c coordination note): the `Quota::per_second(...)
 //! .burst_size(...)` throughput/quota math in [`build_grpc_governor_layer`]
@@ -36,6 +42,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use axiam_db::SharedRateLimitCounter;
 use axiam_db::repository::SurrealRateLimitBucketRepository;
 use chrono::{DateTime, Utc};
 use governor::Quota;
@@ -223,12 +230,14 @@ fn too_many_requests_response() -> Response<tonic::body::Body> {
     tonic::Status::resource_exhausted("rate limit exceeded").into_http()
 }
 
-/// Async SurrealDB-backed shared rate-limit pre-check `tower::Layer` for the
-/// gRPC path (SECHRD-03 / D-01a, D-01b, D-01c, D-01d).
+/// Shared (cross-replica) rate-limit pre-check `tower::Layer` for the gRPC
+/// path (SECHRD-03 / D-01a, D-01b, D-01c, D-01d).
 ///
-/// Reuses [`SurrealRateLimitBucketRepository::increment`] (plan 24-04) —
-/// there is no reimplemented counter here. Wire this layer BEFORE (i.e.
-/// `.layer()` it FIRST — tower's `ServiceBuilder`/`Server::builder()`
+/// Consults the process-wide write-behind [`SharedRateLimitCounter`]
+/// (`axiam-db::rate_limit_counter`) — the SAME counter type and the SAME env
+/// knobs the REST `RateLimitShared` middleware uses, so both listeners behave
+/// identically. There is no reimplemented counter here. Wire this layer BEFORE
+/// (i.e. `.layer()` it FIRST — tower's `ServiceBuilder`/`Server::builder()`
 /// executes the FIRST-added layer with the request FIRST, the opposite of
 /// actix's last-`.wrap()`-is-outermost rule) the existing
 /// [`build_grpc_governor_layer`] `GovernorLayer` on the same
@@ -241,31 +250,87 @@ fn too_many_requests_response() -> Response<tonic::body::Body> {
 ///     .add_service(authz_svc)
 /// ```
 ///
-/// **Fail-open (D-01b, T-24-73 accepted risk):** when the shared store is
-/// unreachable, or no client IP can be extracted, this layer logs a
-/// `warn`-level alarm and forwards the request unchanged so the existing
-/// in-memory governor makes the decision instead — a counter-store outage
-/// must never hard-block gRPC authz traffic.
+/// # No synchronous datastore write on the request path (H2 fix)
+///
+/// This layer used to `await` one SurrealDB `UPSERT` per call. Because it is a
+/// **server-wide** layer on the tonic listener, EVERY gRPC call paid that
+/// write — measured at ~39–46 ms of datastore-attributed latency, pinning the
+/// listener at ~20 ops/s regardless of concurrency
+/// (`claude_dev/postseed-transient-investigation.md` §1, §2, §7). It now pays
+/// only an in-memory sharded-map increment
+/// ([`SharedRateLimitCounter::check`], fully synchronous), while a single
+/// background flusher coalesces the increments into one datastore write per
+/// bucket per `AXIAM__RATE_LIMIT__SHARED_SYNC_MS`. Cross-replica enforcement
+/// is therefore eventual, with the overshoot bound stated precisely in the
+/// [`axiam_db::rate_limit_counter`] module docs; the in-memory governor still
+/// makes a full per-replica decision on the same traffic.
+///
+/// Everything else is unchanged: the same `{endpoint}:{ip}` bucket key, the
+/// same `GrpcTrustedHopsKeyExtractor` key derivation (D-01d), and the same
+/// `RESOURCE_EXHAUSTED` rejection.
+///
+/// **Fail-open (D-01b, T-24-73 accepted risk):** when no client IP can be
+/// extracted, or the shared layer is disabled via
+/// `AXIAM__RATE_LIMIT__SHARED=off`, this layer forwards the request unchanged
+/// so the existing in-memory governor makes the decision instead. Store
+/// outages are surfaced by the counter's flusher (a `warn` alarm that never
+/// includes the raw key) while decisions keep being served from local counts —
+/// a counter-store outage must never hard-block gRPC authz traffic.
 ///
 /// **CRITICAL (RESEARCH Pitfall 1):** `governor::StateStore::measure_and_replace`
 /// is a *synchronous* trait method. This layer is deliberately NOT a
-/// `StateStore` implementation and never calls `block_on` — it performs its
-/// own async SurrealDB round-trip as a plain `tower::Layer`/`Service`, then
-/// delegates to the inner service.
-pub struct GrpcSharedRateLimitLayer<C: Connection> {
-    db: Surreal<C>,
+/// `StateStore` implementation and never calls `block_on`.
+///
+/// No longer generic over the SurrealDB connection type: it holds a
+/// non-generic [`SharedRateLimitCounter`] (which owns the boxed store), which
+/// is why the `Surreal<C>` handle only appears in [`Self::new`]'s signature.
+#[derive(Clone)]
+pub struct GrpcSharedRateLimitLayer {
+    counter: SharedRateLimitCounter,
     endpoint: &'static str,
     limit: u32,
     trusted_hops: usize,
 }
 
-impl<C: Connection> GrpcSharedRateLimitLayer<C> {
+impl GrpcSharedRateLimitLayer {
+    /// Builds the layer and its process-wide write-behind counter from a
+    /// SurrealDB handle, reading `AXIAM__RATE_LIMIT__SHARED` /
+    /// `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` via
+    /// [`axiam_db::SharedRateLimitConfig::from_env`].
+    ///
+    /// Call this ONCE per process (as `start_grpc_server` does): the counter's
+    /// local counts live in the instance it creates, so building several would
+    /// fragment them. Use [`Self::with_counter`] to share one counter
+    /// explicitly.
+    ///
     /// `endpoint` MUST be unique per rate-limited gRPC surface so the shared
     /// bucket key (`"{endpoint}:{ip}"`) preserves per-surface granularity —
     /// never collapse distinct surfaces into one global bucket.
-    pub fn new(db: Surreal<C>, endpoint: &'static str, limit: u32, trusted_hops: usize) -> Self {
+    pub fn new<C: Connection>(
+        db: Surreal<C>,
+        endpoint: &'static str,
+        limit: u32,
+        trusted_hops: usize,
+    ) -> Self {
+        Self::with_counter(
+            SharedRateLimitCounter::from_env(Arc::new(SurrealRateLimitBucketRepository::new(db))),
+            endpoint,
+            limit,
+            trusted_hops,
+        )
+    }
+
+    /// Builds the layer over an EXISTING counter — for tests, and for any
+    /// deployment that wants the gRPC listener and something else to share one
+    /// counter instance.
+    pub fn with_counter(
+        counter: SharedRateLimitCounter,
+        endpoint: &'static str,
+        limit: u32,
+        trusted_hops: usize,
+    ) -> Self {
         Self {
-            db,
+            counter,
             endpoint,
             limit,
             trusted_hops,
@@ -273,38 +338,13 @@ impl<C: Connection> GrpcSharedRateLimitLayer<C> {
     }
 }
 
-// Manual `Clone` impl (NOT `#[derive(Clone)]`): `Surreal<C>` is `Clone` for
-// EVERY `C` unconditionally (it's an `Arc`-backed handle internally — see
-// `surrealdb::Surreal<C>`'s own `impl<C> Clone for Surreal<C>`, no `C: Clone`
-// bound). A derived `Clone` incorrectly adds a spurious `C: Clone` bound
-// (derive macros bound every generic type parameter that appears in a
-// field), which broke `start_grpc_server<..., C>`'s generic wiring — the
-// concrete `C` there (`surrealdb::engine::remote::http::Client`) has no
-// `Clone` impl, and forcing this layer to require one would leak into the
-// caller's generic bounds for no reason. Mirrors the REST
-// `RateLimitShared`/`RateLimitSharedService` precedent
-// (`axiam-api-rest::middleware::rate_limit_shared`).
-impl<C: Connection> Clone for GrpcSharedRateLimitLayer<C> {
-    fn clone(&self) -> Self {
-        Self {
-            db: self.db.clone(),
-            endpoint: self.endpoint,
-            limit: self.limit,
-            trusted_hops: self.trusted_hops,
-        }
-    }
-}
-
-impl<S, C> Layer<S> for GrpcSharedRateLimitLayer<C>
-where
-    C: Connection + 'static,
-{
-    type Service = GrpcSharedRateLimitService<S, C>;
+impl<S> Layer<S> for GrpcSharedRateLimitLayer {
+    type Service = GrpcSharedRateLimitService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
         GrpcSharedRateLimitService {
             inner,
-            db: self.db.clone(),
+            counter: self.counter.clone(),
             endpoint: self.endpoint,
             limit: self.limit,
             trusted_hops: self.trusted_hops,
@@ -313,30 +353,20 @@ where
 }
 
 /// Inner `tower::Service` produced by [`GrpcSharedRateLimitLayer`].
-pub struct GrpcSharedRateLimitService<S, C: Connection> {
+///
+/// `Clone` requires only `S: Clone` — [`SharedRateLimitCounter`] is an
+/// `Arc`-backed handle, so every clone (one per request, via tonic's
+/// clone-and-swap) shares the SAME counter state.
+#[derive(Clone)]
+pub struct GrpcSharedRateLimitService<S> {
     inner: S,
-    db: Surreal<C>,
+    counter: SharedRateLimitCounter,
     endpoint: &'static str,
     limit: u32,
     trusted_hops: usize,
 }
 
-// Manual `Clone` impl for the same reason as `GrpcSharedRateLimitLayer`
-// above: only `S: Clone` should be required, never `C: Clone` (`Surreal<C>`
-// clones unconditionally regardless of `C`).
-impl<S: Clone, C: Connection> Clone for GrpcSharedRateLimitService<S, C> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            db: self.db.clone(),
-            endpoint: self.endpoint,
-            limit: self.limit,
-            trusted_hops: self.trusted_hops,
-        }
-    }
-}
-
-impl<S, C> Service<Request<tonic::body::Body>> for GrpcSharedRateLimitService<S, C>
+impl<S> Service<Request<tonic::body::Body>> for GrpcSharedRateLimitService<S>
 where
     S: Service<Request<tonic::body::Body>, Response = Response<tonic::body::Body>>
         + Clone
@@ -344,7 +374,6 @@ where
         + 'static,
     S::Future: Send + 'static,
     S::Error: Send + 'static,
-    C: Connection + 'static,
 {
     type Response = Response<tonic::body::Body>;
     type Error = S::Error;
@@ -361,42 +390,35 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
-        let db = self.db.clone();
+        // Cheap `Arc` clone — every request shares the ONE process-wide
+        // counter, never a fresh one (a per-request counter would count
+        // nothing).
+        let counter = self.counter.clone();
         let endpoint = self.endpoint;
         let limit = self.limit;
         let key_extractor = GrpcTrustedHopsKeyExtractor::new(self.trusted_hops);
 
+        // The rate-limit decision itself is now synchronous and taken BEFORE
+        // the future is even created — no datastore round trip on the path of
+        // this (server-wide!) layer. The returned future only awaits the inner
+        // service.
+        let ip = key_extractor.extract(&req).ok();
+        let allow = match ip {
+            Some(ip) => {
+                // Same bucket key as before — `{endpoint}:{ip}` — so an
+                // in-flight upgrade keeps counting against the same
+                // `rate_limit_bucket` records.
+                let key = format!("{endpoint}:{ip}");
+                counter.check(&key, window_start(Utc::now()), limit)
+            }
+            // No client-IP key available — fail open; the in-memory governor
+            // still makes the real decision. (A counter built with
+            // `AXIAM__RATE_LIMIT__SHARED=off` also always allows, from inside
+            // `check`.)
+            None => true,
+        };
+
         Box::pin(async move {
-            let ip = key_extractor.extract(&req).ok();
-
-            let allow = match ip {
-                Some(ip) => {
-                    let repo = SurrealRateLimitBucketRepository::new(db);
-                    let key = format!("{endpoint}:{ip}");
-                    let window = window_start(Utc::now());
-                    match repo.increment(&key, window).await {
-                        Ok(count) => count <= limit as u64,
-                        Err(err) => {
-                            // Fail OPEN (D-01b): a counter-store outage must
-                            // never hard-block gRPC authz traffic. Do NOT
-                            // log the raw key (endpoint:ip) at info+ (mirrors
-                            // the REST T-24-43 note) — this warn-level alarm
-                            // omits it.
-                            tracing::warn!(
-                                endpoint,
-                                error = %err,
-                                "shared gRPC rate-limit store unreachable; falling back \
-                                 to per-replica in-memory governor"
-                            );
-                            true
-                        }
-                    }
-                }
-                // No client-IP key available — fail open; the in-memory
-                // governor still makes the real decision.
-                None => true,
-            };
-
             if allow {
                 inner.call(req).await
             } else {

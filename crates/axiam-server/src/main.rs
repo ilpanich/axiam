@@ -1009,6 +1009,14 @@ async fn main() -> std::io::Result<()> {
     // rate-limit pre-check can enforce the multi-replica bucket store
     // (GrpcSharedRateLimitLayer), not just the per-replica in-memory
     // governor.
+    //
+    // `start_grpc_server` builds its OWN `SharedRateLimitCounter` from this
+    // handle (see `shared_rate_limit_counter` below for the REST one). Two
+    // counters in one process is correct, not a bug: their bucket keys never
+    // overlap — the gRPC layer only ever writes `grpc_authz:<ip>`, while the
+    // REST middleware writes `<rest_endpoint>:<key_part>` — so neither can
+    // fragment the other's local count. Both read the same
+    // `AXIAM__RATE_LIMIT__SHARED*` env knobs, so they behave identically.
     let grpc_db = db_handle.clone();
     let grpc_batch_max_concurrency = config.authz.batch_max_concurrency;
     tokio::spawn(async move {
@@ -1069,6 +1077,24 @@ async fn main() -> std::io::Result<()> {
     );
     let cleanup_handle = tokio::spawn(cleanup.run());
 
+    // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared
+    // rate-limit counter for the whole process.
+    //
+    // It must be built here — outside the `HttpServer::new` worker closure —
+    // and only ever CLONED into `AppState` (a cheap `Arc` clone). The counter
+    // accumulates each replica's unflushed increments in process memory, so
+    // one instance per worker would fragment the local count and weaken the
+    // effective limit by up to the worker count. Its single background
+    // flusher is spawned here too, on this runtime.
+    //
+    // Config (identical knobs for the gRPC listener, read the same way):
+    // `AXIAM__RATE_LIMIT__SHARED` (on|off, default on) and
+    // `AXIAM__RATE_LIMIT__SHARED_SYNC_MS` (default 1000, clamped
+    // 50..=60000). No configured *limit* is affected.
+    let shared_rate_limit_counter = axiam_db::SharedRateLimitCounter::from_env(Arc::new(
+        axiam_db::SurrealRateLimitBucketRepository::new(db_handle.clone()),
+    ));
+
     // QUAL-01: single composition root — one AppState<C> built here and
     // registered once per worker below, replacing the ~49 individual
     // `.app_data(web::Data::new(...))` calls this closure used to make.
@@ -1126,6 +1152,7 @@ async fn main() -> std::io::Result<()> {
         oauth2_jwks_cache_config: config.oauth2.clone(),
         crypto_semaphore: Arc::clone(&crypto_semaphore),
         email_config_repo: email_config_repo.clone(),
+        shared_rate_limit: shared_rate_limit_counter.clone(),
         password_reset_service: password_reset_service.clone(),
         email_verification_service: email_verification_service.clone(),
         oidc_federation_service: oidc_federation_service.clone(),

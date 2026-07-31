@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{AccountDeletion, AccountDeletionStatus, CreateAccountDeletion};
 use axiam_core::repository::AccountDeletionRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{classify_write_error, parse_uuid};
 
 // ---------------------------------------------------------------------------
@@ -70,7 +71,7 @@ impl AccountDeletionRowWithId {
 // ---------------------------------------------------------------------------
 
 pub struct SurrealAccountDeletionRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealAccountDeletionRepository<C> {
@@ -82,7 +83,8 @@ impl<C: Connection> Clone for SurrealAccountDeletionRepository<C> {
 }
 
 impl<C: Connection> SurrealAccountDeletionRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 
@@ -97,6 +99,7 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
     ) -> AxiamResult<Option<AccountDeletion>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM account_deletion \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id AND status = 'pending'",
@@ -127,6 +130,7 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
     ) -> AxiamResult<Option<AccountDeletion>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM account_deletion \
                  WHERE cancel_token_hash = $hash",
@@ -206,6 +210,7 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(query)
             .bind(("user_id", user_id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
@@ -237,6 +242,7 @@ impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionReposito
         let id = new_id();
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('account_deletion', $id) SET \
                  tenant_id = $tenant_id, \
@@ -281,6 +287,7 @@ impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionReposito
     ) -> AxiamResult<Option<AccountDeletion>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM account_deletion \
                  WHERE tenant_id = $tenant_id AND cancel_token_hash = $hash",
@@ -301,6 +308,7 @@ impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionReposito
 
     async fn mark_cancelled(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "UPDATE type::record('account_deletion', $id) SET \
                  status = 'cancelled' \
@@ -317,6 +325,7 @@ impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionReposito
 
     async fn mark_completed(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "UPDATE type::record('account_deletion', $id) SET \
                  status = 'completed' \

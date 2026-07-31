@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::role::{CreateRole, Role, RoleAssignment, UpdateRole};
 use axiam_core::repository::{PaginatedResult, Pagination, RoleRepository};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, classify_write_error, parse_uuid};
 
 #[derive(Debug, SurrealValue)]
@@ -89,11 +90,12 @@ impl RoleAssignmentRow {
 /// SurrealDB implementation of the Role repository.
 #[derive(Clone)]
 pub struct SurrealRoleRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealRoleRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 
@@ -102,6 +104,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
         let tenant_str = tenant_id.to_string();
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM role \
                  WHERE tenant_id = $tenant_id AND name = $name LIMIT 1",
@@ -127,6 +130,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('role', $id) SET \
                  tenant_id = $tenant_id, \
@@ -170,6 +174,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('role', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -221,8 +226,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
             sets.join(", ")
         );
 
-        let mut builder = self
-            .db
+        let db = self.db.current();
+        let mut builder = db
             .query(&query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str));
@@ -295,6 +300,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         );
 
         self.db
+            .current()
             .query(query)
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id_str))
@@ -315,6 +321,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM role \
                  WHERE tenant_id = $tenant_id GROUP ALL",
@@ -327,6 +334,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM role \
                  WHERE tenant_id = $tenant_id \
@@ -378,6 +386,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(query)
             .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
@@ -442,6 +451,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(query)
             .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
@@ -470,6 +480,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         // Two queries: direct roles + roles inherited through group membership.
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM role \
                  WHERE tenant_id = $tenant_id \
@@ -519,6 +530,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         // Each result row contains role fields + the resource_id from the edge.
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(out.id) AS record_id, \
                         out.tenant_id AS tenant_id, \
@@ -586,6 +598,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(query)
             .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
@@ -650,6 +663,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(query)
             .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
@@ -677,6 +691,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM role \
                  WHERE tenant_id = $tenant_id \
@@ -705,6 +720,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         // naturally excludes group edges (group links never match a user id).
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT VALUE meta::id(id) FROM user \
                  WHERE tenant_id = $tenant_id \
@@ -727,6 +743,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
     async fn get_role_group_ids(&self, tenant_id: Uuid, role_id: Uuid) -> AxiamResult<Vec<Uuid>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT VALUE meta::id(id) FROM group \
                  WHERE tenant_id = $tenant_id \

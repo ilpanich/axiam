@@ -8,6 +8,10 @@
 //!   parallelism, N independent TCP pools, and independently-renewable sessions
 //!   is N separate `Surreal::new::<Http>(..) + signin` connections — exactly
 //!   what [`DbManager::connect_handle`] builds. [`DbPool`] holds N of them.
+//! * Repositories bind a LIVE [`DbHandle`] over a pool slot rather than a
+//!   `Surreal<C>` clone taken at boot, so a reconnect-loop eviction is observed
+//!   by their next query instead of pinning them to the dead connection (see
+//!   [`DbPool::handle_for_repo`] and `handle.rs`).
 //! * Each pooled handle carries its OWN proactive re-signin + reconnect loop
 //!   (the D-04/PERF-04 machinery previously applied only to the manager's
 //!   handle), so **CQ-B48 is closed**: no request can reach an un-renewed
@@ -35,21 +39,26 @@ use std::time::Duration;
 use axiam_core::error::AxiamError;
 use surrealdb::engine::remote::http::Client;
 use surrealdb::{Connection, Surreal};
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::connection::{DbConfig, DbManager, ROOT_TOKEN_DURATION};
 use crate::error::DbError;
+#[cfg(test)]
+use crate::handle::new_slot;
+use crate::handle::{DbHandle, DbSlot};
 use crate::metrics;
 
 /// One pooled handle: an independent `Surreal<C>` connection behind the same
-/// swappable `Arc<RwLock<..>>` [`DbManager`] uses (D-12, so its own reconnect
-/// loop can evict a poisoned handle), plus this handle's in-flight count
+/// swappable [`DbSlot`] [`DbManager`] uses (D-12, so its own reconnect loop can
+/// evict a poisoned handle), plus this handle's in-flight count
 /// (least-in-flight checkout input) and its two owned background tasks.
 struct PooledHandle<C: Connection> {
     /// Swappable so the per-handle reconnect loop can atomically evict a
-    /// poisoned handle (D-12) — identical to `DbManager::db`.
-    db: Arc<RwLock<Surreal<C>>>,
+    /// poisoned handle (D-12) — identical to `DbManager::db`. Repositories
+    /// bind a [`DbHandle`] over THIS slot, so an eviction is observed by their
+    /// very next query instead of leaving them on the dead connection.
+    db: DbSlot<C>,
     /// In-flight count for THIS handle — the least-in-flight selection input.
     /// Incremented by [`DbPool::checkout`], decremented when the returned
     /// [`DbCheckout`] guard drops.
@@ -76,8 +85,8 @@ pub struct DbPool<C: Connection = Client> {
     /// How long [`DbPool::checkout`] waits for a permit before returning the
     /// overload error. Only consulted when `semaphore` is `Some`.
     acquire_timeout: Duration,
-    /// Round-robin cursor for [`DbPool::handle_for_repo`] construction-time
-    /// binding (spreads repositories evenly across handles at startup).
+    /// Round-robin cursor for [`DbPool::handle_for_repo`] binding (spreads
+    /// repositories evenly across handles at startup).
     rr: AtomicUsize,
 }
 
@@ -155,22 +164,30 @@ impl<C: Connection> DbPool<C> {
         self.handles.len()
     }
 
-    /// Bind a handle to a repository at CONSTRUCTION time — the minimal-churn
-    /// repo seam (design §6, Option B). Returns an owned `Surreal<C>` bound to
-    /// one pooled handle, chosen round-robin so repositories spread evenly
-    /// across handles at startup. The repository then calls `self.db.query(..)`
-    /// exactly as before — repo bodies are untouched.
+    /// Bind a repository to one pooled handle — the minimal-churn repo seam
+    /// (design §6, Option B). Returns a **live** [`DbHandle`] over the chosen
+    /// pool slot, picked round-robin so repositories spread evenly across
+    /// handles at startup. The repository then calls
+    /// `self.db.current().query(..)`, resolving the slot per operation.
     ///
-    /// This replaces the ~48 `db.client_cloned().await` composition sites. At
-    /// `pool_size = 1` it hands out clones of the single pooled handle exactly
-    /// as `DbManager::client_cloned()` did — byte-for-byte identical routing —
-    /// the only difference being that the handle is now proactively re-signed-in
-    /// (a strict improvement over the frozen snapshot it replaces).
-    pub async fn handle_for_repo(&self) -> Surreal<C> {
+    /// Returning a live reference rather than a `Surreal<C>` **clone** is what
+    /// closes the stale-handle bug: a clone is a snapshot of whatever
+    /// connection occupied the slot at boot, so when this handle's reconnect
+    /// loop evicted a poisoned connection (~7 minutes into a sustained load
+    /// run, in the observed case) every repository stayed pinned to the dead
+    /// one and 401'd permanently until the process restarted — while
+    /// [`health_check`](Self::health_check), which probes through the slot,
+    /// still reported the pool healthy. A [`DbHandle`] follows the slot, so
+    /// the swap is picked up on the next query. See `handle.rs` for the full
+    /// account.
+    ///
+    /// Binding is still round-robin at construction time, so per-repository
+    /// handle spread across the pool is unchanged.
+    pub fn handle_for_repo(&self) -> DbHandle<C> {
         // Preserve the F1 checkout counter semantics (handles handed to repos).
         metrics::record_handle_checkout();
         let idx = self.rr.fetch_add(1, Ordering::Relaxed) % self.handles.len();
-        self.handles[idx].db.read().await.clone()
+        DbHandle::from_slot(Arc::clone(&self.handles[idx].db))
     }
 
     /// Per-operation checkout with least-in-flight handle selection and, when
@@ -194,7 +211,7 @@ impl<C: Connection> DbPool<C> {
         let idx = self.select_least_in_flight();
         let slot = &self.handles[idx];
         slot.in_flight.fetch_add(1, Ordering::Relaxed);
-        let handle = slot.db.read().await.clone();
+        let handle = (*slot.db.load_full()).clone();
 
         Ok(DbCheckout {
             handle,
@@ -226,8 +243,8 @@ impl<C: Connection> DbPool<C> {
     /// alarms rather than treating it as a transient query error.
     pub async fn health_check(&self) -> Result<(), DbError> {
         for slot in &self.handles {
-            let guard = slot.db.read().await;
-            let result = metrics::instrument_query("health_check.pool", guard.query("RETURN 1"))
+            let current = slot.db.load_full();
+            let result = metrics::instrument_query("health_check.pool", current.query("RETURN 1"))
                 .await
                 .map_err(DbManager::classify_query_error)?;
             result.check().map_err(DbManager::classify_query_error)?;
@@ -243,7 +260,7 @@ impl<C: Connection> DbPool<C> {
         let handles = raw
             .into_iter()
             .map(|db| PooledHandle {
-                db: Arc::new(RwLock::new(db)),
+                db: new_slot(db),
                 in_flight: Arc::new(AtomicUsize::new(0)),
                 refresh_handle: None,
                 reconnect_handle: None,
@@ -395,7 +412,7 @@ mod tests {
         );
 
         // handle_for_repo always hands out the single handle.
-        let _h = pool.handle_for_repo().await;
+        let _h = pool.handle_for_repo();
     }
 
     /// Least-in-flight spreads concurrent load evenly across handles and starves
@@ -505,24 +522,24 @@ mod tests {
 
         // Pre-swap: handle 0 is the "old" (poisoned) one.
         {
-            let pre = pool.handles[0].db.read().await.clone();
+            let pre = pool.handles[0].db.load_full();
             assert_eq!(read_marker(&pre).await, vec!["old-0".to_string()]);
         }
 
-        // Evict handle 0 by swapping a fresh handle in under the write guard,
-        // exactly as spawn_reconnect_loop does (`*db.write().await = fresh`).
+        // Evict handle 0 by storing a fresh handle into its slot, exactly as
+        // spawn_reconnect_loop does (`db.store(Arc::new(fresh))`).
         let fresh = new_marked("new-0").await;
-        *pool.handles[0].db.write().await = fresh;
+        pool.handles[0].db.store(Arc::new(fresh));
 
         // Handle 0 now observes ONLY the new handle...
-        let post0 = pool.handles[0].db.read().await.clone();
+        let post0 = pool.handles[0].db.load_full();
         assert_eq!(
             read_marker(&post0).await,
             vec!["new-0".to_string()],
             "the poisoned handle must never be observed after the swap (D-12)"
         );
         // ...and the sibling handle is entirely unaffected by that swap.
-        let post1 = pool.handles[1].db.read().await.clone();
+        let post1 = pool.handles[1].db.load_full();
         assert_eq!(
             read_marker(&post1).await,
             vec!["keep-1".to_string()],
@@ -588,13 +605,13 @@ mod tests {
         let pool = DbPool {
             handles: vec![
                 PooledHandle {
-                    db: Arc::new(RwLock::new(new_mem().await)),
+                    db: new_slot(new_mem().await),
                     in_flight: Arc::new(AtomicUsize::new(0)),
                     refresh_handle: Some(refresh_a),
                     reconnect_handle: Some(reconnect_a),
                 },
                 PooledHandle {
-                    db: Arc::new(RwLock::new(new_mem().await)),
+                    db: new_slot(new_mem().await),
                     in_flight: Arc::new(AtomicUsize::new(0)),
                     refresh_handle: Some(refresh_b),
                     reconnect_handle: Some(reconnect_b),
@@ -615,6 +632,84 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    /// THE regression test for the stale-handle bug (§7 of the run-4 benchmark
+    /// instructions): a repository built ONCE at boot must follow a
+    /// reconnect-loop handle swap, not stay pinned to the evicted connection.
+    ///
+    /// Before the fix, `handle_for_repo` handed out an owned `Surreal<C>`
+    /// **clone**; when the reconnect loop replaced the pooled connection, every
+    /// repository kept querying the dead one and 401'd permanently until the
+    /// process restarted — while `health_check`, which probes through the pool
+    /// slot, still reported the pool healthy.
+    ///
+    /// Two independent `kv-mem` instances stand in for the evicted and the
+    /// freshly-reconnected connection (same substitution
+    /// `poisoned_handle_evicted_per_handle_others_unaffected` makes, and for the
+    /// same reason: constructing a real `Surreal<Client>` requires a live
+    /// server). Writing through the repository AFTER the swap must land in the
+    /// new instance, and a record written before the swap must no longer be
+    /// visible — which is only true if the repository resolved the slot rather
+    /// than holding a snapshot.
+    #[tokio::test]
+    async fn repository_bound_at_boot_follows_a_later_handle_swap() {
+        use axiam_core::models::organization::CreateOrganization;
+        use axiam_core::repository::OrganizationRepository;
+
+        use crate::repository::SurrealOrganizationRepository;
+        use crate::schema::run_migrations;
+
+        async fn migrated() -> Surreal<Db> {
+            let db = new_mem().await;
+            run_migrations(&db).await.expect("run migrations");
+            db
+        }
+
+        let evicted = migrated().await;
+        let pool = DbPool::from_handles(vec![evicted], 0, Duration::from_millis(20));
+
+        // Bound ONCE, at "boot" — the repository never sees the pool again.
+        let repo = SurrealOrganizationRepository::new(pool.handle_for_repo());
+
+        repo.create(CreateOrganization {
+            name: "Before".into(),
+            slug: "before-swap".into(),
+            metadata: None,
+        })
+        .await
+        .expect("write before the swap");
+        repo.get_by_slug("before-swap")
+            .await
+            .expect("readable before the swap");
+
+        // The reconnect loop evicts the poisoned connection and installs a
+        // fresh one (`db.store(Arc::new(fresh))`, exactly as PERF-04 does).
+        pool.handles[0].db.store(Arc::new(migrated().await));
+
+        // The already-built repository must now be talking to the NEW
+        // connection: a write lands there...
+        repo.create(CreateOrganization {
+            name: "After".into(),
+            slug: "after-swap".into(),
+            metadata: None,
+        })
+        .await
+        .expect(
+            "a repository bound before the swap must keep working afterwards — \
+             this is the permanent-401 failure mode",
+        );
+        repo.get_by_slug("after-swap")
+            .await
+            .expect("post-swap write must be readable through the same repository");
+
+        // ...and the pre-swap record, which lives only in the evicted
+        // connection, is correctly no longer visible.
+        assert!(
+            repo.get_by_slug("before-swap").await.is_err(),
+            "the repository must be reading the NEW connection after the swap, \
+             not the evicted one"
+        );
+    }
+
     /// `handle_for_repo` round-robins across ALL pooled handles (not just the
     /// `pool_size = 1` case covered above) — each successive call advances
     /// the cursor and wraps back to the first handle after a full cycle.
@@ -632,8 +727,8 @@ mod tests {
 
         let mut seen = Vec::new();
         for _ in 0..7 {
-            let handle = pool.handle_for_repo().await;
-            seen.push(read_marker(&handle).await.remove(0));
+            let handle = pool.handle_for_repo();
+            seen.push(read_marker(&handle.current()).await.remove(0));
         }
         assert_eq!(
             seen,

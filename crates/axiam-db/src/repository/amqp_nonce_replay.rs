@@ -9,10 +9,11 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::repository::AmqpNonceRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::CountRow;
 
 // ---------------------------------------------------------------------------
@@ -21,7 +22,7 @@ use crate::helpers::CountRow;
 
 /// SurrealDB implementation of the AMQP nonce replay repository (NEW-4).
 pub struct SurrealAmqpNonceRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 // Manual Clone impl (not derive): avoids the spurious `C: Clone` bound that
@@ -36,7 +37,8 @@ impl<C: Connection> Clone for SurrealAmqpNonceRepository<C> {
 }
 
 impl<C: Connection> SurrealAmqpNonceRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -52,6 +54,7 @@ impl<C: Connection> AmqpNonceRepository for SurrealAmqpNonceRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('amqp_nonce_replay', $row_id) SET \
                  tenant_id = $tenant_id, \
@@ -89,6 +92,7 @@ impl<C: Connection> AmqpNonceRepository for SurrealAmqpNonceRepository<C> {
         // Count expired rows first, then delete.
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM amqp_nonce_replay \
                  WHERE expires_at < time::now() GROUP ALL",
@@ -100,6 +104,7 @@ impl<C: Connection> AmqpNonceRepository for SurrealAmqpNonceRepository<C> {
         let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         self.db
+            .current()
             .query("DELETE amqp_nonce_replay WHERE expires_at < time::now()")
             .await
             .map_err(DbError::from)?;

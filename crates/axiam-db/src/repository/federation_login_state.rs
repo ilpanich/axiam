@@ -9,11 +9,12 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::repository::{FederationLoginState, FederationLoginStateRepository};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::CountRow;
 
 // ---------------------------------------------------------------------------
@@ -40,11 +41,12 @@ struct FederationLoginStateRow {
 /// SurrealDB implementation of the federation login state repository.
 #[derive(Clone)]
 pub struct SurrealFederationLoginStateRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealFederationLoginStateRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -55,6 +57,7 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('federation_login_state', $id) SET \
                  state = $state, \
@@ -103,6 +106,7 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
         // SELECT and DELETE are no-ops and we return None.
         let mut result = self
             .db
+            .current()
             .query(
                 "BEGIN TRANSACTION; \
                  LET $row = (SELECT state, nonce, tenant_id, federation_config_id, \
@@ -155,6 +159,7 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
         // Count expired rows first, then delete.
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM federation_login_state \
                  WHERE expires_at < time::now() GROUP ALL",
@@ -166,6 +171,7 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
         let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         self.db
+            .current()
             .query("DELETE federation_login_state WHERE expires_at < time::now()")
             .await
             .map_err(DbError::from)?;

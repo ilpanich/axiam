@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::session::{CreateSession, Session};
 use axiam_core::repository::SessionRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
@@ -75,7 +76,7 @@ impl SessionRowWithId {
 
 /// SurrealDB implementation of the Session repository.
 pub struct SurrealSessionRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 // Manual Clone impl (not derive): `#[derive(Clone)]` would add a `C: Clone`
@@ -90,7 +91,8 @@ impl<C: Connection> Clone for SurrealSessionRepository<C> {
 }
 
 impl<C: Connection> SurrealSessionRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -102,6 +104,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('session', $id) SET \
                  tenant_id = $tenant_id, \
@@ -136,6 +139,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('session', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -156,6 +160,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM session \
                  WHERE tenant_id = $tenant_id AND token_hash = $token_hash",
@@ -174,6 +179,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 
     async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "DELETE type::record('session', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -193,6 +199,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
         // non-empty BEFORE image — the single-use gate for refresh rotation.
         let mut result = self
             .db
+            .current()
             .query(
                 "DELETE type::record('session', $id) \
                  WHERE tenant_id = $tenant_id RETURN BEFORE",
@@ -208,6 +215,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 
     async fn invalidate_user_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query("DELETE session WHERE tenant_id = $tenant_id AND user_id = $user_id")
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
@@ -228,6 +236,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
         // the deleted rows so we can count them.
         let mut result = self
             .db
+            .current()
             .query(
                 "DELETE session \
                  WHERE tenant_id = $tenant_id \
@@ -248,6 +257,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
     async fn list_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<Vec<Session>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM session \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id",
@@ -267,6 +277,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
         // Count expired sessions first, then delete.
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM session \
                  WHERE tenant_id = $tenant_id AND expires_at < time::now() \
@@ -279,6 +290,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
         let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         self.db
+            .current()
             .query("DELETE session WHERE tenant_id = $tenant_id AND expires_at < time::now()")
             .bind(("tenant_id", tenant_id.to_string()))
             .await

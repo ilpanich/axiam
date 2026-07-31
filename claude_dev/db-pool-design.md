@@ -552,3 +552,85 @@ long enough, at high enough throughput, for `pool_size`'s effect (if any)
 to be distinguishable from noise. Absent both, re-running the same
 comparison on this hardware would just reproduce the same unconfirmable
 result.
+
+---
+
+## 11. Post-F2 correction — the construction-time clone was a stale-handle bug
+
+**Status: fixed.** F2 shipped §6 Option B as written: `handle_for_repo()`
+returned an owned `Surreal<C>` **clone** and each repository held it for the
+process lifetime. That is where the design was wrong, and the defect is worth
+recording because the reasoning that produced it looks sound in isolation.
+
+### 11.1 What went wrong
+
+§6 justified the clone with *"at `pool_size = 1` it hands out the single pooled
+handle exactly as `client_cloned()` did — byte-for-byte identical routing."*
+True, and irrelevant: identical *routing* is not identical *lifetime*. The pool
+also introduced a per-handle reconnect loop (§5, D-12/PERF-04) whose whole job is
+to **replace** the connection in the pool slot. §6 and §5 were designed against
+each other and never reconciled:
+
+- the reconnect loop swaps the slot;
+- repositories held a clone taken from the slot at boot;
+- so a swap updated what the *pool* pointed at and left every repository pinned
+  to the **evicted** connection.
+
+Those clones share the evicted `Arc<inner>` — the dead router task and the
+`reqwest` client with the now-rejected cached token — so from the swap onward
+every repository query 401s **permanently**, until the process restarts.
+
+Two things made it hard to see:
+
+1. **Readiness reported healthy throughout.** `DbPool::health_check` (§8 item 4)
+   probes *through the pool slot*, so it observes the fresh connection. The
+   probe and the request path were reading different connections — exactly the
+   split the clone created.
+2. **The eviction test asserted the wrong subject.** §8 item 4 proved that
+   *the slot* observes only the new handle after a swap. It never asserted that
+   a handle **already handed out** does — which was the failing property.
+
+Observed in the wild ~7 minutes into a sustained load run during the rate-limit
+verification: a benchmark cell starts clean, then produces a wall of 401s with
+the server otherwise healthy, cleared instantly by `docker restart`. The matrix
+tolerated it only because it restarts the process per cell, so a single cell was
+the exposure window; a long single-cell soak was not protected at all.
+
+### 11.2 The fix
+
+`handle_for_repo()` now returns a **live** `DbHandle<C>` — the pool slot itself
+(`Arc<ArcSwap<Surreal<C>>>`), not a connection cloned out of it. Repositories
+resolve the current connection per operation via `self.db.current().query(..)`,
+so a reconnect-loop swap is observed by the very next query.
+
+- **Slot type: `ArcSwap`, not `RwLock`.** The slot is read on every DB call and
+  written essentially never. `ArcSwap::load_full` is a lock-free atomic read, so
+  the hot path takes no lock and cannot queue behind a writer — and it stays
+  **synchronous**, so resolving the handle adds no `.await` point to any query
+  path. `DbManager` and `DbPool` store the same slot type, so one swap mechanism
+  serves the manager, the pool, and every bound repository.
+- **Churn.** Repository *bodies* still hold one handle field and are otherwise
+  untouched; the change is `self.db.query(..)` → `self.db.current().query(..)`
+  at the ~245 query sites, plus 15 places where a query builder outlives its
+  statement and the resolved handle goes into a named local. Constructors take
+  `impl Into<DbHandle<C>>`, so every `kv-mem` unit test that passes a
+  `Surreal<Db>` compiles unchanged.
+- **Same reach for direct-query holders.** `AppState.db` (REST — the bootstrap
+  handler and the tenant seeder) and the gRPC layer's handle had the identical
+  defect for the identical reason, and hold a `DbHandle` now too.
+
+### 11.3 What §8's test plan should have said
+
+Item 4 ("per-handle poisoned-handle eviction") asserts a property of the pool
+slot. The property that actually protects production is one level out, and is
+now tested as `pool::tests::repository_bound_at_boot_follows_a_later_handle_swap`:
+
+> Build a repository from the pool **once**, as composition does at boot. Swap
+> the pooled connection underneath it. The already-built repository must serve
+> its next query from the new connection.
+
+That test fails against the original construction-time clone (verified by
+reverting `handle_for_repo` to the clone: the post-swap write panics), which is
+what item 4 could never have caught. The general lesson: when a component's
+lifetime is longer than the resource it holds, test the **holder** after the
+resource changes, not the resource.

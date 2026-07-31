@@ -38,7 +38,8 @@ use axiam_core::repository::{
     GroupRepository, PermissionRepository, ResourceRepository, RoleRepository, ScopeRepository,
     UserRepository,
 };
-use surrealdb::{Connection, Surreal};
+use axiam_db::DbHandle;
+use surrealdb::Connection;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 use crate::config::GrpcConfig;
@@ -86,7 +87,7 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C>(
     user_repo: U,
     auth_config: AuthConfig,
     grpc_config: &GrpcConfig,
-    db: Surreal<C>,
+    db: impl Into<DbHandle<C>>,
     batch_max_concurrency: usize,
 ) -> Result<(), tonic::transport::Error>
 where

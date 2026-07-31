@@ -7,11 +7,12 @@ use axiam_core::models::certificate::{
 };
 use axiam_core::repository::{CertificateRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
@@ -175,11 +176,12 @@ impl CertificateRowWithId {
 
 #[derive(Clone)]
 pub struct SurrealCertificateRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealCertificateRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -191,6 +193,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('certificate', $id) SET \
                  tenant_id = $tenant_id, \
@@ -235,6 +238,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             id, input.issuer_ca_id,
         );
         self.db
+            .current()
             .query(&relate_sql)
             .await
             .map_err(DbError::from)?
@@ -247,6 +251,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Certificate> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('certificate', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -275,6 +280,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
     ) -> AxiamResult<Certificate> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM certificate \
                  WHERE tenant_id = $tenant_id AND fingerprint = $fingerprint",
@@ -296,6 +302,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
     async fn revoke(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE type::record('certificate', $id) SET \
                  status = $status \
@@ -333,6 +340,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                          WHERE tenant_id = $tenant_id GROUP ALL";
         let count_result = self
             .db
+            .current()
             .query(count_sql)
             .bind(("tenant_id", tenant_id_str.clone()))
             .await
@@ -348,6 +356,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                         LIMIT $limit START $offset";
         let data_result = self
             .db
+            .current()
             .query(data_sql)
             .bind(("tenant_id", tenant_id_str))
             .bind(("limit", pagination.limit))
@@ -370,6 +379,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
     async fn get_by_fingerprint_global(&self, fingerprint: &str) -> AxiamResult<Certificate> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM certificate \
                  WHERE fingerprint = $fingerprint",
@@ -405,6 +415,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         );
         let result = self
             .db
+            .current()
             .query(&verify_sql)
             .bind(("tid", tenant_id.to_string()))
             .await
@@ -431,7 +442,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
              WHERE in = certificate:`{}`",
             cert_id,
         );
-        let result = self.db.query(&sql).await.map_err(DbError::from)?;
+        let result = self.db.current().query(&sql).await.map_err(DbError::from)?;
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;

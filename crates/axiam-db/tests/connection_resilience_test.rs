@@ -297,10 +297,11 @@ async fn pooled_handles_survive_token_expiry_without_restart() {
          kept each session alive without a process restart (CQ-B48 closed)",
     );
 
-    // Drive a repo-style bound handle past the TTL too: a handle checked out for
-    // a repository must run a query cleanly, proving the snapshot-401 is gone.
-    let bound = pool.handle_for_repo().await;
+    // Drive a repo-style bound handle past the TTL too: a handle bound for a
+    // repository must run a query cleanly, proving the snapshot-401 is gone.
+    let bound = pool.handle_for_repo();
     bound
+        .current()
         .query("RETURN 1")
         .await
         .and_then(|r| r.check())

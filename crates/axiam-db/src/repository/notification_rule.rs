@@ -7,11 +7,12 @@ use axiam_core::models::notification_rule::{
 };
 use axiam_core::repository::{NotificationRuleRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 // -------------------------------------------------------------------
@@ -96,7 +97,7 @@ impl NotificationRuleRowWithId {
 // -------------------------------------------------------------------
 
 pub struct SurrealNotificationRuleRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealNotificationRuleRepository<C> {
@@ -108,7 +109,8 @@ impl<C: Connection> Clone for SurrealNotificationRuleRepository<C> {
 }
 
 impl<C: Connection> SurrealNotificationRuleRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -120,6 +122,7 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('notification_rule', $id) \
                  SET \
@@ -152,6 +155,7 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<NotificationRule> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM notification_rule \
@@ -208,7 +212,8 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
             set_clauses.join(", ")
         );
 
-        let mut query = self.db.query(&sql);
+        let db = self.db.current();
+        let mut query = db.query(&sql);
         query = query
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()));
@@ -229,6 +234,7 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let result = self
             .db
+            .current()
             .query(
                 "DELETE type::record('notification_rule', $id) \
                  WHERE tenant_id = $tenant_id RETURN BEFORE",
@@ -261,6 +267,7 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
 
         let count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total \
                  FROM notification_rule \
@@ -276,6 +283,7 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
 
         let data_result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM notification_rule \
@@ -308,6 +316,7 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
     ) -> AxiamResult<Vec<NotificationRule>> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM notification_rule \
@@ -343,6 +352,7 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
         // array shares at least one element with the supplied list.
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM notification_rule \

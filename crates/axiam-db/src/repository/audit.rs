@@ -9,11 +9,12 @@ use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAu
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
@@ -219,11 +220,12 @@ fn apply_filter_binds<'a, C: Connection>(
 /// SurrealDB implementation of the audit log repository.
 #[derive(Clone)]
 pub struct SurrealAuditLogRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealAuditLogRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -241,6 +243,7 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('audit_log', $id) SET \
                  tenant_id = $tenant_id, \
@@ -288,7 +291,8 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         // Count query.
         let count_sql =
             format!("SELECT count() AS total FROM audit_log WHERE {where_clause} GROUP ALL");
-        let mut count_query = self.db.query(&count_sql);
+        let db = self.db.current();
+        let mut count_query = db.query(&count_sql);
         count_query = count_query.bind(("tenant_id", tenant_id_str.clone()));
         count_query = apply_filter_binds(count_query, &binds);
         let mut count_result = count_query.await.map_err(DbError::from)?;
@@ -301,7 +305,8 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
              ORDER BY timestamp DESC \
              LIMIT $limit START $offset"
         );
-        let mut data_query = self.db.query(&data_sql);
+        let db = self.db.current();
+        let mut data_query = db.query(&data_sql);
         data_query = data_query.bind(("tenant_id", tenant_id_str));
         data_query = apply_filter_binds(data_query, &binds);
         data_query = data_query.bind(("limit", pagination.limit));
@@ -375,6 +380,7 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         );
         let _ = self
             .db
+            .current()
             .query(&q1_sql)
             .bind(("nil_uuid", nil_uuid.clone()))
             .bind(("pseudonym", pseudonym.to_string()))
@@ -388,6 +394,7 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         // Query 2: null-out resource_id in entries where someone acted ON this user.
         let _ = self
             .db
+            .current()
             .query(
                 "UPDATE audit_log SET resource_id = $nil_uuid \
                  WHERE tenant_id = $tenant_id AND resource_id = $user_id",
@@ -403,6 +410,7 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         // Query 3: count entries that now have nil actor_id (as a proxy for rows updated).
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM audit_log \
                  WHERE tenant_id = $tenant_id AND actor_id = $nil_uuid GROUP ALL",
@@ -423,6 +431,7 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         let id_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
         let r = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM audit_log \
                  WHERE tenant_id = $tenant_id \

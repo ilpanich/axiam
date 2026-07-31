@@ -81,7 +81,7 @@ pub async fn create<C: Connection + Clone>(
     let tenant = state.tenant_repo.create(input).await?;
 
     // Auto-seed permissions for the new tenant so RBAC works immediately.
-    seed_permissions(&state.db, tenant.id, PERMISSION_REGISTRY)
+    seed_permissions(&state.db.current(), tenant.id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| {
             tracing::error!(

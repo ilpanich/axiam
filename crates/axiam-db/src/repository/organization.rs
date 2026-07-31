@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::organization::{CreateOrganization, Organization, UpdateOrganization};
 use axiam_core::repository::{OrganizationRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 /// DB-side row struct for queries where the UUID is already known.
@@ -51,11 +52,12 @@ impl OrganizationRowWithId {
 /// SurrealDB implementation of the Organization repository.
 #[derive(Clone)]
 pub struct SurrealOrganizationRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealOrganizationRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -71,6 +73,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('organization', $id) SET \
                  name = $name, slug = $slug, metadata = $metadata",
@@ -104,6 +107,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
 
         let mut result = self
             .db
+            .current()
             .query("SELECT * FROM type::record('organization', $id)")
             .bind(("id", id_str.clone()))
             .await
@@ -127,6 +131,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM organization WHERE slug = $slug",
@@ -161,7 +166,8 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
             sets.join(", ")
         );
 
-        let mut builder = self.db.query(&query).bind(("id", id_str.clone()));
+        let db = self.db.current();
+        let mut builder = db.query(&query).bind(("id", id_str.clone()));
 
         if let Some(name) = input.name {
             builder = builder.bind(("name", name));
@@ -194,6 +200,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
     async fn delete(&self, id: Uuid) -> AxiamResult<()> {
         let result = self
             .db
+            .current()
             .query("DELETE type::record('organization', $id) RETURN BEFORE")
             .bind(("id", id.to_string()))
             .await
@@ -216,6 +223,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
     async fn list(&self, pagination: Pagination) -> AxiamResult<PaginatedResult<Organization>> {
         let mut count_result = self
             .db
+            .current()
             .query("SELECT count() AS total FROM organization GROUP ALL")
             .await
             .map_err(DbError::from)?;
@@ -223,6 +231,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM organization \

@@ -5,11 +5,12 @@ use axiam_core::models::email_template::{EmailTemplate, SetEmailTemplate, Templa
 use axiam_core::models::settings::SettingsScope;
 use axiam_core::repository::EmailTemplateRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 
 // -----------------------------------------------------------------------
 // Row structs
@@ -75,11 +76,12 @@ impl TemplateRowWithId {
 
 #[derive(Clone)]
 pub struct SurrealEmailTemplateRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealEmailTemplateRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 
@@ -104,6 +106,7 @@ impl<C: Connection> SurrealEmailTemplateRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "UPSERT type::record('email_template', $id) SET \
                  scope = $scope, scope_id = $scope_id, \
@@ -160,6 +163,7 @@ impl<C: Connection> SurrealEmailTemplateRepository<C> {
     ) -> Result<Option<EmailTemplate>, DbError> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM email_template \
@@ -191,6 +195,7 @@ impl<C: Connection> SurrealEmailTemplateRepository<C> {
     ) -> Result<Vec<EmailTemplate>, DbError> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM email_template \
@@ -217,6 +222,7 @@ impl<C: Connection> SurrealEmailTemplateRepository<C> {
         kind: &str,
     ) -> Result<(), DbError> {
         self.db
+            .current()
             .query(
                 "DELETE email_template \
                  WHERE scope = $scope \

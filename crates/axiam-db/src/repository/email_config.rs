@@ -19,11 +19,12 @@ use axiam_core::repository::EmailConfigRepository;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
@@ -348,7 +349,7 @@ fn encrypt_provider(
 /// `AXIAM__EMAIL_ENCRYPTION_KEY` at startup. Secrets are encrypted on write
 /// and decrypted on read — never stored plaintext (D-17).
 pub struct SurrealEmailConfigRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
     key: [u8; 32],
 }
 
@@ -362,7 +363,8 @@ impl<C: Connection> Clone for SurrealEmailConfigRepository<C> {
 }
 
 impl<C: Connection> SurrealEmailConfigRepository<C> {
-    pub fn new(db: Surreal<C>, key: [u8; 32]) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>, key: [u8; 32]) -> Self {
+        let db = db.into();
         Self { db, key }
     }
 
@@ -395,6 +397,7 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
     pub async fn backfill_plaintext_secrets(&self) -> AxiamResult<u64> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM email_config \
                  WHERE (provider_kind IN ['smtp'] AND smtp_password_ciphertext = NONE) \
@@ -444,6 +447,7 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
     ) -> AxiamResult<Option<ExistingSecretColumns>> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT smtp_password_ciphertext, smtp_password_nonce, \
                         api_key_ciphertext, api_key_nonce \
@@ -466,6 +470,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
     async fn get_org_config(&self, org_id: Uuid) -> AxiamResult<Option<EmailConfig>> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM email_config \
@@ -542,6 +547,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         .to_string();
         let result = self
             .db
+            .current()
             .query(
                 "UPSERT type::record('email_config', $record_id) SET \
                  scope = 'org', \
@@ -607,6 +613,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
 
     async fn delete_org_config(&self, org_id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "DELETE FROM email_config \
                  WHERE scope = 'org' AND scope_id = $scope_id",
@@ -628,6 +635,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         // "no override — inherit everything from org."
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM email_config \
@@ -718,6 +726,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
         )
         .to_string();
         self.db
+            .current()
             .query(
                 "UPSERT type::record('email_config', $record_id) SET \
                  scope = 'tenant', \
@@ -766,6 +775,7 @@ impl<C: Connection> EmailConfigRepository for SurrealEmailConfigRepository<C> {
 
     async fn delete_tenant_override(&self, tenant_id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "DELETE FROM email_config \
                  WHERE scope = 'tenant' AND scope_id = $scope_id",

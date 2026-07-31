@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::tenant::{CreateTenant, Tenant, TenantStatus, UpdateTenant};
 use axiam_core::repository::{PaginatedResult, Pagination, TenantRepository};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 fn parse_status(s: &str) -> Result<TenantStatus, DbError> {
@@ -93,11 +94,12 @@ impl TenantRowWithId {
 /// SurrealDB implementation of the Tenant repository.
 #[derive(Clone)]
 pub struct SurrealTenantRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealTenantRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -126,6 +128,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(query)
             .bind(("id", id_str.clone()))
             .bind(("org_id", org_id_str))
@@ -151,6 +154,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query("SELECT * FROM type::record('tenant', $id)")
             .bind(("id", id_str.clone()))
             .await
@@ -168,6 +172,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM tenant \
@@ -208,7 +213,8 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
 
         let query = format!("UPDATE type::record('tenant', $id) SET {}", sets.join(", "));
 
-        let mut builder = self.db.query(&query).bind(("id", id_str.clone()));
+        let db = self.db.current();
+        let mut builder = db.query(&query).bind(("id", id_str.clone()));
 
         if let Some(name) = input.name {
             builder = builder.bind(("name", name));
@@ -236,6 +242,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
 
     async fn delete(&self, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query("DELETE type::record('tenant', $id)")
             .bind(("id", id.to_string()))
             .await
@@ -253,6 +260,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
 
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM tenant \
                  WHERE organization_id = $org_id GROUP ALL",
@@ -264,6 +272,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM tenant \

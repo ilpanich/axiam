@@ -233,7 +233,7 @@ pub async fn bootstrap<C: Connection + Clone>(
                     }));
                 }
             };
-            if !setup_token_is_valid(&state.db, &token_hash).await? {
+            if !setup_token_is_valid(&state.db.current(), &token_hash).await? {
                 return Err(AxiamApiError(AxiamError::AuthorizationDenied {
                     reason: "setup token is invalid, unknown, or already consumed".into(),
                     action: None,
@@ -289,6 +289,7 @@ pub async fn bootstrap<C: Connection + Clone>(
     //    going to be refused anyway.
     let existing_lock: Vec<BootstrapLockRow> = state
         .db
+        .current()
         .query("SELECT locked_at FROM type::record('bootstrap_lock', 'global')")
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?
@@ -334,12 +335,12 @@ pub async fn bootstrap<C: Connection + Clone>(
     let tenant_id = tenant.id;
 
     // 5. Seed permissions (idempotent).
-    seed_permissions(&state.db, tenant_id, PERMISSION_REGISTRY)
+    seed_permissions(&state.db.current(), tenant_id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
     // 6. Seed default roles and get their IDs.
-    let seed_result = seed_default_roles(&state.db, tenant_id, PERMISSION_REGISTRY)
+    let seed_result = seed_default_roles(&state.db.current(), tenant_id, PERMISSION_REGISTRY)
         .await
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
 
@@ -416,8 +417,10 @@ pub async fn bootstrap<C: Connection + Clone>(
     txn_stmts.push("COMMIT TRANSACTION".to_string());
     let txn_query = txn_stmts.join("; ");
 
-    let mut query = state
-        .db
+    // The builder is re-bound below, so it outlives this statement — hold the
+    // resolved handle in a named local rather than a temporary.
+    let db = state.db.current();
+    let mut query = db
         .query(txn_query)
         .bind(("tenant_id", tenant_id_str))
         .bind(("user_id", user_id_str.clone()))

@@ -8,11 +8,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{CreateErasureProof, ErasureProof};
 use axiam_core::repository::ErasureProofRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -31,7 +32,7 @@ struct ErasureProofRow {
 // ---------------------------------------------------------------------------
 
 pub struct SurrealErasureProofRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealErasureProofRepository<C> {
@@ -43,7 +44,8 @@ impl<C: Connection> Clone for SurrealErasureProofRepository<C> {
 }
 
 impl<C: Connection> SurrealErasureProofRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -53,6 +55,7 @@ impl<C: Connection> ErasureProofRepository for SurrealErasureProofRepository<C> 
         let id = new_id();
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('erasure_proof', $id) SET \
                  pseudonym = $pseudonym, \

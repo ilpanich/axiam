@@ -10,11 +10,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, classify_write_error, parse_uuid};
 
 /// DB-side row struct for queries where the UUID is already known.
@@ -216,7 +217,7 @@ impl UserRowWithId {
 
 /// SurrealDB implementation of the User repository.
 pub struct SurrealUserRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
     /// Optional server-side pepper for password hashing.
     pepper: Option<String>,
 }
@@ -231,11 +232,13 @@ impl<C: Connection> Clone for SurrealUserRepository<C> {
 }
 
 impl<C: Connection> SurrealUserRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db, pepper: None }
     }
 
-    pub fn with_pepper(db: Surreal<C>, pepper: String) -> Self {
+    pub fn with_pepper(db: impl Into<DbHandle<C>>, pepper: String) -> Self {
+        let db = db.into();
         Self {
             db,
             pepper: Some(pepper),
@@ -258,6 +261,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('user', $id) SET \
                  tenant_id = $tenant_id, \
@@ -300,6 +304,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('user', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -323,6 +328,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM user \
                  WHERE tenant_id = $tenant_id AND username = $username",
@@ -346,6 +352,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM user \
                  WHERE tenant_id = $tenant_id AND email = $email",
@@ -413,8 +420,8 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             sets.join(", ")
         );
 
-        let mut builder = self
-            .db
+        let db = self.db.current();
+        let mut builder = db
             .query(&query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str));
@@ -479,6 +486,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE type::record('user', $id) SET \
                  status = 'Inactive', updated_at = time::now() \
@@ -513,6 +521,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // caller observes a non-empty row set for a given step.
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id FROM \
                  (UPDATE type::record('user', $id) SET \
@@ -543,6 +552,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM user \
                  WHERE tenant_id = $tenant_id GROUP ALL",
@@ -555,6 +565,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 // SEC-043: explicit column projection — mfa_secret and
                 // totp_last_used_step are intentionally excluded so they are
@@ -604,6 +615,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let user_id_str = user_id.to_string();
         let tenant_id_str = tenant_id.to_string();
         self.db
+            .current()
             .query(
                 // SurrealDB evaluates each RHS in this SET against the
                 // pre-update document, so `failed_login_attempts` inside the IF
@@ -669,6 +681,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // tombstone value. Argon2 output is never empty, so login is permanently
         // blocked without needing to make the column nullable.
         self.db
+            .current()
             .query(
                 "UPDATE type::record('user', $id) SET \
                  email = $email_hash, \
@@ -745,6 +758,7 @@ impl<C: Connection> SurrealUserRepository<C> {
         // CREATE password_history=3, COMMIT=4.
         let result = self
             .db
+            .current()
             .query(
                 "BEGIN TRANSACTION; \
                  CREATE type::record('user', $id) SET \
@@ -813,6 +827,7 @@ impl<C: Connection> SurrealUserRepository<C> {
         scheduled_purge_at: DateTime<Utc>,
     ) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "UPDATE type::record('user', $id) SET \
                  deletion_pending = true, \
@@ -838,6 +853,7 @@ impl<C: Connection> SurrealUserRepository<C> {
     /// status back to `Active`.
     pub async fn clear_deletion_pending(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "UPDATE type::record('user', $id) SET \
                  deletion_pending = false, \
@@ -861,6 +877,7 @@ impl<C: Connection> SurrealUserRepository<C> {
     pub async fn find_due_for_purge(&self, now: DateTime<Utc>) -> AxiamResult<Vec<User>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM user \
                  WHERE deletion_pending = true \

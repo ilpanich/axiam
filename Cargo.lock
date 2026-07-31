@@ -1009,6 +1009,7 @@ name = "axiam-db"
 version = "1.0.0-alpha21"
 dependencies = [
  "aes-gcm 0.11.0",
+ "arc-swap",
  "argon2",
  "axiam-auth",
  "axiam-core",

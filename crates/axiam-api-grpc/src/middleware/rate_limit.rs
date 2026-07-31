@@ -49,7 +49,7 @@ use governor::Quota;
 use governor::clock::QuantaInstant;
 use governor::middleware::NoOpMiddleware;
 use http::{Request, Response};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tower::{Layer, Service};
 use tower_governor::{
@@ -283,7 +283,7 @@ fn too_many_requests_response() -> Response<tonic::body::Body> {
 ///
 /// No longer generic over the SurrealDB connection type: it holds a
 /// non-generic [`SharedRateLimitCounter`] (which owns the boxed store), which
-/// is why the `Surreal<C>` handle only appears in [`Self::new`]'s signature.
+/// is why the SurrealDB handle only appears in [`Self::new`]'s signature.
 #[derive(Clone)]
 pub struct GrpcSharedRateLimitLayer {
     counter: SharedRateLimitCounter,
@@ -307,7 +307,7 @@ impl GrpcSharedRateLimitLayer {
     /// bucket key (`"{endpoint}:{ip}"`) preserves per-surface granularity —
     /// never collapse distinct surfaces into one global bucket.
     pub fn new<C: Connection>(
-        db: Surreal<C>,
+        db: impl Into<axiam_db::DbHandle<C>>,
         endpoint: &'static str,
         limit: u32,
         trusted_hops: usize,

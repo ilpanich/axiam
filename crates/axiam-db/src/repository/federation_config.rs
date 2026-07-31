@@ -7,11 +7,12 @@ use axiam_core::models::federation::{
 };
 use axiam_core::repository::{FederationConfigRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
@@ -184,7 +185,7 @@ impl FederationConfigRowWithId {
 // ---------------------------------------------------------------------------
 
 pub struct SurrealFederationConfigRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealFederationConfigRepository<C> {
@@ -196,7 +197,8 @@ impl<C: Connection> Clone for SurrealFederationConfigRepository<C> {
 }
 
 impl<C: Connection> SurrealFederationConfigRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -213,6 +215,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('federation_config', $id) SET \
                  tenant_id = $tenant_id, \
@@ -254,6 +257,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<FederationConfig> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM federation_config \
@@ -328,7 +332,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             set_clauses.join(", ")
         );
 
-        let mut query = self.db.query(&sql);
+        let db = self.db.current();
+        let mut query = db.query(&sql);
         query = query
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()));
@@ -349,6 +354,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let result = self
             .db
+            .current()
             .query(
                 "DELETE type::record('federation_config', $id) \
                  WHERE tenant_id = $tenant_id RETURN BEFORE",
@@ -381,6 +387,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
 
         let count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM federation_config \
                  WHERE tenant_id = $tenant_id GROUP ALL",
@@ -399,6 +406,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         // material, so `list()` no longer hydrates those columns per row.
         let data_result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, tenant_id, provider, protocol, \
                  metadata_url, client_id, attribute_map, enabled, allowed_algorithms, \
@@ -431,6 +439,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         // This is the predicate used by the boot backfill task (D-12).
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM federation_config \
@@ -462,6 +471,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         // Per MEMORY.md: bind() requires owned Strings.
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE type::record('federation_config', $config_id) \
                  SET client_secret_nonce = $nonce, \

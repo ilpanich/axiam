@@ -7,11 +7,12 @@ use axiam_core::models::certificate::{
 };
 use axiam_core::repository::{CaCertificateRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate};
 
 // ---------------------------------------------------------------------------
@@ -139,11 +140,12 @@ impl CaCertificateRowWithId {
 
 #[derive(Clone)]
 pub struct SurrealCaCertificateRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealCaCertificateRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -155,6 +157,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('ca_certificate', $id) SET \
                  organization_id = $org_id, \
@@ -200,6 +203,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
     async fn get_by_id(&self, organization_id: Uuid, id: Uuid) -> AxiamResult<CaCertificate> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('ca_certificate', $id) \
                  WHERE organization_id = $org_id",
@@ -224,6 +228,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
     async fn revoke(&self, organization_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE type::record('ca_certificate', $id) SET \
                  status = $status \
@@ -262,6 +267,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                          WHERE organization_id = $org_id GROUP ALL";
         let count_result = self
             .db
+            .current()
             .query(count_sql)
             .bind(("org_id", org_id_str.clone()))
             .await
@@ -278,6 +284,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                         LIMIT $limit START $offset";
         let data_result = self
             .db
+            .current()
             .query(data_sql)
             .bind(("org_id", org_id_str))
             .bind(("limit", pagination.limit))
@@ -300,6 +307,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
     async fn get_by_issuer_id(&self, id: Uuid) -> AxiamResult<CaCertificate> {
         let result = self
             .db
+            .current()
             .query("SELECT * FROM type::record('ca_certificate', $id)")
             .bind(("id", id.to_string()))
             .await

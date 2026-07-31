@@ -207,6 +207,13 @@ a follow-up issue on its own. It did not affect the correctness of any
 number in §3/§4/§6 above (each was captured on a fresh boot before the
 condition recurred).
 
+> **Update — fixed.** `pool.handle_for_repo()` now returns a live `DbHandle`
+> (the pool slot itself) instead of a one-time clone, so every repository
+> resolves the current connection per query and follows a reconnect-loop swap.
+> `AppState.db` and the gRPC handle held the same boot-time clone and were
+> fixed the same way. See `db-pool-design.md` §11; regression test:
+> `pool::tests::repository_bound_at_boot_follows_a_later_handle_swap`.
+
 ## 8. Verdict
 
 **The clamp is gone on this host, for five of the six previously-wrapped

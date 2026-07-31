@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{CreateExportJob, ExportJob, ExportJobStatus};
 use axiam_core::repository::ExportJobRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, parse_uuid, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
@@ -81,7 +82,7 @@ impl ExportJobRowWithId {
 // ---------------------------------------------------------------------------
 
 pub struct SurrealExportJobRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealExportJobRepository<C> {
@@ -93,7 +94,8 @@ impl<C: Connection> Clone for SurrealExportJobRepository<C> {
 }
 
 impl<C: Connection> SurrealExportJobRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 
@@ -106,6 +108,7 @@ impl<C: Connection> SurrealExportJobRepository<C> {
     pub async fn has_pending_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<bool> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM export_job \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
@@ -130,6 +133,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
         let id = new_id();
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('export_job', $id) SET \
                  tenant_id = $tenant_id, \
@@ -171,6 +175,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
     async fn find_queued(&self) -> AxiamResult<Vec<ExportJob>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM export_job \
                  WHERE status = 'queued' ORDER BY created_at ASC",
@@ -196,6 +201,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
         expires_at: DateTime<Utc>,
     ) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "UPDATE type::record('export_job', $id) SET \
                  status = 'ready', \
@@ -225,6 +231,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
     ) -> AxiamResult<Option<ExportJob>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM export_job \
                  WHERE tenant_id = $tenant_id AND download_token_hash = $hash",
@@ -245,6 +252,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
 
     async fn mark_downloaded(&self, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query("UPDATE type::record('export_job', $id) SET status = 'downloaded'")
             .bind(("id", id.to_string()))
             .await
@@ -260,6 +268,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
         // mark_downloaded + delete sequence.
         let mut result = self
             .db
+            .current()
             .query(
                 "UPDATE type::record('export_job', $id) \
                  SET status = 'downloaded' \
@@ -279,6 +288,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
 
         // Delete the row now that it is marked downloaded.
         self.db
+            .current()
             .query("DELETE type::record('export_job', $id)")
             .bind(("id", id.to_string()))
             .await
@@ -291,6 +301,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
 
     async fn mark_failed(&self, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query("UPDATE type::record('export_job', $id) SET status = 'failed'")
             .bind(("id", id.to_string()))
             .await
@@ -302,6 +313,7 @@ impl<C: Connection> ExportJobRepository for SurrealExportJobRepository<C> {
 
     async fn delete(&self, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query("DELETE type::record('export_job', $id)")
             .bind(("id", id.to_string()))
             .await

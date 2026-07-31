@@ -139,6 +139,41 @@ just targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls" bench-mat
 # just repeat=1 targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls" bench-matrix
 ```
 
+### Rehearse the matrix first (`bench-dry-run`)
+
+A full matrix is hours long, and a break in the k6 client contract — a seeded
+client the target rejects, a p3-mtls cert k6 cannot load, a gRPC dial into a
+TLS listener, an OAuth2 cell that gets silently skipped — does not announce
+itself until that cell's turn comes round. `bench-dry-run` walks the **same**
+target × profile grid with the **same** bring-up → seed → run → tear-down path
+and the **same** scenarios, but collapses each measured window to a few
+seconds and grades every cell on whether the k6 client could connect, send its
+request and get back the answer the scenario expects:
+
+```bash
+just targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13 p3-mtls" bench-dry-run
+```
+
+It does **not** stop at the first broken cell — a failing bring-up, seed or
+scenario is recorded and the sweep carries on, so one pass gives you the whole
+fix list. Verdicts are `PASS` / `WARN` (ran, but the cell would not measure
+what it claims — e.g. a fallback op, or a sampler writing no rows) / `SKIP`
+(filtered out, with the reason) / `FAIL`. The exit status is non-zero if
+anything failed, and a table lands in `results/dry-run/SUMMARY.md` alongside
+per-cell `*.dryrun.log` files holding k6's own check breakdown.
+
+Because it deliberately skips the post-seed settle gate, a dry run measures
+inside the transient window — so it relaxes the p95 latency gate to 30s while
+keeping correctness strict (a single failed check fails the cell). **A dry run
+is never a measurement.** Its artifacts carry `"dry_run": true`, live under
+`results/dry-run/`, and are excluded from both `bench-report` and `bench-pack`.
+
+`dry=1` applies the same treatment to a single cell:
+
+```bash
+just target=axiam profile=p3-mtls dry=1 bench-run
+```
+
 See [`docs/methodology.md`](docs/methodology.md) for the rules that make a run
 comparable, and [`docs/security-profiles.md`](docs/security-profiles.md) for the
 profile definitions.

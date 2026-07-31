@@ -15,12 +15,67 @@
 #
 # Usage:
 #   run-benchmark.sh --target axiam --profile p2-tls13 [--scenario all|<file>]
+#   run-benchmark.sh --target axiam --profile p2-tls13 --dry-run
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BENCH="$(cd "$HERE/.." && pwd)"
-RESULTS="${BENCH_RESULTS_DIR:-$BENCH/results}"
 SEED_DIR="${BENCH_SEED_DIR:-$BENCH/.seed}"
+
+TARGET=axiam
+PROFILE=p0-plaintext
+SCENARIO=all
+DRY_RUN=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) TARGET="$2"; shift 2 ;;
+    --profile) PROFILE="$2"; shift 2 ;;
+    --scenario) SCENARIO="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# --- dry-run mode ----------------------------------------------------------
+# A full `bench-matrix` pass is hours long, and a break that only shows up in
+# the k6 client contract (a scenario whose setup() can't log in, a seeded
+# client the target rejects, a gRPC dial against the wrong port, a profile
+# whose certs don't load, a cell silently skipped by filter_scenarios) does not
+# announce itself until that cell's turn comes round — potentially an hour or
+# more in. Dry-run runs the EXACT same code path (same profile env, same seed
+# env, same scenario filter + rotation, same k6 invocation, same samplers,
+# same meta.json) with the measurement window collapsed to a few seconds, and
+# grades each cell on whether the k6 client could connect, send its request and
+# get the RIGHT answer back — not on how fast it was.
+#
+# What changes vs a measured run, and why:
+#   - load model shrunk to BENCH_DRY_VUS x BENCH_DRY_DURATION (2 VUs / 5s).
+#     Enough VUs to exercise the per-VU cookie jar / gRPC dial, short enough
+#     that a full matrix dry run finishes in minutes.
+#   - the p95 latency threshold is relaxed to BENCH_DRY_MAX_P95_MS (30s). A dry
+#     run deliberately skips the post-seed settle gate (below), so it measures
+#     INSIDE the transient window where p95 legitimately blows past the 2000ms
+#     production gate — failing a dry run on that would be a false alarm about
+#     the one thing a dry run is not checking. Correctness stays strict: the
+#     per-cell verdict below fails on a SINGLE failed check.
+#   - the settle gate is skipped (it can burn up to BENCH_SETTLE_TIMEOUT_SECS =
+#     600s per cell doing nothing but waiting) and the inter-cell pause is 0.
+#   - results land under results/dry-run/ by default, so a dry run never mixes
+#     5-second cells into the tree `bench-report` aggregates.
+# Every one of these is still overridable, so `BENCH_SETTLE=1 ... --dry-run`
+# remains possible when you want to rehearse the gate itself.
+if [ "$DRY_RUN" = "1" ]; then
+  export BENCH_VUS="${BENCH_DRY_VUS:-2}"
+  export BENCH_WARMUP="${BENCH_DRY_WARMUP:-2s}"
+  export BENCH_DURATION="${BENCH_DRY_DURATION:-5s}"
+  export BENCH_COOLDOWN="${BENCH_DRY_COOLDOWN:-1s}"
+  export BENCH_MAX_P95_MS="${BENCH_DRY_MAX_P95_MS:-30000}"
+  BENCH_SETTLE="${BENCH_SETTLE:-0}"
+  BENCH_CELL_PAUSE="${BENCH_CELL_PAUSE:-0}"
+  RESULTS="${BENCH_RESULTS_DIR:-$BENCH/results/dry-run}"
+else
+  RESULTS="${BENCH_RESULTS_DIR:-$BENCH/results}"
+fi
 
 # H6: absolutize RESULTS (relative to the CALLER's cwd, which is what a relative
 # BENCH_RESULTS_DIR means to whoever set it). k6 is invoked from a different
@@ -35,17 +90,20 @@ case "$RESULTS" in
         || { echo "[run] cannot resolve BENCH_RESULTS_DIR='$RESULTS'" >&2; exit 1; } ;;
 esac
 
-TARGET=axiam
-PROFILE=p0-plaintext
-SCENARIO=all
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --target) TARGET="$2"; shift 2 ;;
-    --profile) PROFILE="$2"; shift 2 ;;
-    --scenario) SCENARIO="$2"; shift 2 ;;
-    *) echo "unknown arg: $1" >&2; exit 1 ;;
-  esac
-done
+# Append-only verdict ledger for dry runs: one TSV row per scenario
+# (target, profile, scenario, verdict, detail). The justfile's `bench-dry-run`
+# points every cell at ONE file via BENCH_DRY_RUN_TSV and appends its own
+# bench-up/bench-seed rows to it, so the end-of-matrix table covers stack
+# bring-up and seeding as well as the k6 cells.
+DRY_TSV="${BENCH_DRY_RUN_TSV:-$RESULTS/dry-run.tsv}"
+DRY_FAILURES=0
+record_dry() {
+  [ "$DRY_RUN" = "1" ] || return 0
+  mkdir -p "$(dirname "$DRY_TSV")"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$TARGET" "$PROFILE" "$1" "$2" "$3" >> "$DRY_TSV"
+  [ "$2" = "FAIL" ] && DRY_FAILURES=$((DRY_FAILURES + 1))
+  return 0
+}
 
 # --- profile + seed wiring -------------------------------------------------
 # Anchor the cert dir to an ABSOLUTE path before sourcing the profile. The
@@ -85,11 +143,21 @@ fi
 # This is what makes "deliberately break the seeded Keycloak client" refuse to
 # run instead of burning a full k6 matrix on a wall of failed checks.
 SEED_OK_MARKER="$RESULTS/${TARGET}.seed.ok"
+# A dry run defaults RESULTS to results/dry-run/, but a manual `bench-seed`
+# writes its marker to the plain results/ root — so a standalone
+# `just dry=1 bench-run` after an ordinary seed would otherwise be refused for
+# a target that IS correctly seeded. Fall back to the root marker in dry-run
+# mode only (`bench-dry-run` seeds with BENCH_RESULTS_DIR already pointed at
+# the dry-run tree, so it finds the first path and never needs this).
+if [ "$DRY_RUN" = "1" ] && [ ! -f "$SEED_OK_MARKER" ] && [ -f "$BENCH/results/${TARGET}.seed.ok" ]; then
+  SEED_OK_MARKER="$BENCH/results/${TARGET}.seed.ok"
+fi
 if [ "${BENCH_SKIP_SEED_CHECK:-0}" != "1" ] && [ ! -f "$SEED_OK_MARKER" ]; then
   echo "[run] REFUSING to start: no seed-ok marker for target '$TARGET' ($SEED_OK_MARKER)." >&2
   echo "      Run 'just target=$TARGET bench-seed' first — it seeds the target AND" >&2
   echo "      smoke-checks every scenario-critical flow before writing this marker." >&2
   echo "      (Override only for debugging: BENCH_SKIP_SEED_CHECK=1.)" >&2
+  record_dry "(seed-marker)" "FAIL" "no seed-ok marker at $SEED_OK_MARKER"
   exit 1
 fi
 
@@ -136,17 +204,25 @@ skip_oauth2() {
   return 1
 }
 
+# Skips are recorded into the dry-run ledger too (as SKIP rows), not just
+# echoed: "which cells does the matrix actually intend to run" is precisely the
+# kind of thing you want confirmed up front. An OAuth2 skip in particular is
+# usually NOT intentional — it means the confidential client wasn't seeded —
+# and today that only surfaces as one line scrolling past mid-matrix.
 filter_scenarios() {
   local out=()
   for s in "${SCENARIOS[@]}"; do
     if [ "$TARGET" != "axiam" ] && [[ " $AXIAM_ONLY_SCENARIOS " == *" $s "* ]]; then
-      echo "[run] skipping $s (AXIAM-only) for target $TARGET"; continue
+      echo "[run] skipping $s (AXIAM-only) for target $TARGET"
+      record_dry "${s%.js}" "SKIP" "AXIAM-only scenario, target is $TARGET (expected)"; continue
     fi
     if [ "$TARGET" != "zitadel" ] && [[ " $ZITADEL_ONLY_SCENARIOS " == *" $s "* ]]; then
-      echo "[run] skipping $s (Zitadel-only) for target $TARGET"; continue
+      echo "[run] skipping $s (Zitadel-only) for target $TARGET"
+      record_dry "${s%.js}" "SKIP" "Zitadel-only scenario, target is $TARGET (expected)"; continue
     fi
     if [[ " $OAUTH2_SCENARIOS " == *" $s "* ]] && skip_oauth2; then
-      echo "[run] skipping $s (OAuth2 not configured — seed a client or unset BENCH_SKIP_OAUTH2)"; continue
+      echo "[run] skipping $s (OAuth2 not configured — seed a client or unset BENCH_SKIP_OAUTH2)"
+      record_dry "${s%.js}" "SKIP" "OAuth2 not configured — seed a client or unset BENCH_SKIP_OAUTH2"; continue
     fi
     out+=("$s")
   done
@@ -189,9 +265,20 @@ DUR_S="$(echo "${BENCH_DURATION:-120s}" | sed 's/s$//')"
 WARM_S="$(echo "${BENCH_WARMUP:-30s}" | sed 's/s$//')"
 SAMPLE_INTERVAL="${BENCH_SAMPLE_INTERVAL:-1}"
 
-K6_VER="$(k6 version 2>/dev/null | head -1)"
-HOST_CPUS="$(nproc 2>/dev/null || echo unknown)"
-HOST_MEM_MIB="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo unknown)"
+# Every host fact below is embedded in meta.json as a JSON *string*, so it must
+# be exactly one line. The idiom `$(cmd 2>/dev/null || echo unknown)` does NOT
+# guarantee that: a command that prints an empty line to stdout and *then*
+# fails runs the fallback too, yielding the literal two-line value
+# "\nunknown". `docker version --format …` does exactly this when the daemon is
+# unreachable — the raw newline lands mid-string and every consumer of that
+# cell's meta.json dies with "Invalid control character", report.py included.
+# Take the first non-empty line and default to "unknown" instead.
+first_line() { printf '%s' "${1-}" | tr -d '\r' | awk 'NF {print; exit}'; }
+host_fact() { local v; v="$(first_line "${1-}")"; printf '%s' "${v:-unknown}"; }
+
+K6_VER="$(host_fact "$(k6 version 2>/dev/null | head -1)")"
+HOST_CPUS="$(host_fact "$(nproc 2>/dev/null)")"
+HOST_MEM_MIB="$(host_fact "$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)")"
 
 # Rate-limit posture, read from the RUNNING server container so meta.json records
 # what actually ran (not what someone intended). Prefer the AXIAM_BENCH_RL_POSTURE
@@ -225,11 +312,10 @@ echo "[run] rate-limit posture: $RL_POSTURE"
 BUILD_REF="$(git -C "$BENCH/.." rev-parse HEAD 2>/dev/null || echo unknown)"
 
 # Host facts that don't change across scenarios in this run — gathered once.
-HOST_KERNEL="$(uname -r 2>/dev/null || echo unknown)"
-DOCKER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
-CPU_MODEL="$(awk -F: '/model name/ {gsub(/^ +/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
-[ -n "$CPU_MODEL" ] || CPU_MODEL="unknown"
-CPU_GOVERNOR="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+HOST_KERNEL="$(host_fact "$(uname -r 2>/dev/null)")"
+DOCKER_VERSION="$(host_fact "$(docker version --format '{{.Server.Version}}' 2>/dev/null)")"
+CPU_MODEL="$(host_fact "$(awk -F: '/model name/ {gsub(/^ +/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null)")"
+CPU_GOVERNOR="$(host_fact "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)")"
 BATCH_SIZE="${BENCH_BATCH_SIZE:-5}"
 
 # C3: warn (never fail) when the governor isn't 'performance' — on laptop
@@ -246,9 +332,16 @@ fi
 # starts — set BENCH_CELL_PAUSE=0 to disable.
 CELL_PAUSE="${BENCH_CELL_PAUSE:-60}"
 
-# Naive JSON string escaping (backslash + double-quote only — sufficient for
-# the plain ASCII strings embedded here: image names, kernel/cpu strings).
-json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+# JSON string escaping for the plain ASCII strings embedded here: image names,
+# kernel/cpu strings, and the AXIAM__* env dump. Backslash and double-quote
+# first, then the control characters that would otherwise be emitted raw inside
+# a JSON string and make the whole meta.json unparseable — newline especially,
+# since axiam_env_json() feeds this arbitrary container env values.
+json_escape() {
+  printf '%s' "${1-}" \
+    | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g' \
+    | awk 'NR>1 { printf "\\n" } { printf "%s", $0 }'
+}
 
 # --- H1: post-seed settle gate v2 (concurrent burst probe) ------------------
 # Run 3 found a ~5-7 min window right after `bench-seed` where the AXIAM stack
@@ -603,6 +696,86 @@ containers_json() {
   echo -n "]"
 }
 
+# --- dry-run verdict --------------------------------------------------------
+# Grades one cell's k6 summary on CLIENT CORRECTNESS only: did the scenario's
+# setup() succeed, did the VUs actually send requests, and did every response
+# match what the scenario expected. Deliberately says nothing about throughput
+# or latency — see the dry-run block at the top for why a 5-second unsettled
+# window is not a performance measurement.
+#
+# Reads the same `--summary-export` JSON report.py consumes, so the checks are
+# the harness's own metrics (lib/metrics.js), which every scenario feeds
+# through doOp() or recordGrpcResult():
+#   bench_ok       successful logical operations
+#   bench_failed   failed ones (a non-expected HTTP status / non-OK gRPC code)
+#   bench_fallback iterations that measured a FALLBACK op rather than the
+#                  labelled one (e.g. a userinfo setup() that could not mint a
+#                  real user token and silently used client_credentials). A
+#                  measured run only annotates these in the report; for a dry
+#                  run it is a first-class warning, since it means the cell
+#                  will not produce the comparison you think it will.
+#   bench_throttled 429 / RESOURCE_EXHAUSTED — surfaced by name because "the
+#                  rate-limit posture is wrong for this run" looks identical to
+#                  a broken client unless you can see it.
+# Prints "<VERDICT>\t<detail>" and always exits 0 — a verdict is data, not an
+# error condition for the caller's `set -e`.
+dry_verdict() {
+  local summary="$1" k6rc="$2" rescsv="$3"
+  python3 - "$summary" "$k6rc" "$rescsv" <<'PY' 2>/dev/null || echo -e "FAIL\tcould not evaluate the k6 summary (python3 missing or summary unreadable)"
+import json, os, sys
+
+summary, k6rc, rescsv = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+
+def out(verdict, detail):
+    print("%s\t%s" % (verdict, detail))
+    sys.exit(0)
+
+if not os.path.exists(summary) or os.path.getsize(summary) == 0:
+    out("FAIL", "k6 wrote no summary (exit %d) — it died before/at init: bad "
+                "scenario options, unreadable certs, or a setup() that threw" % k6rc)
+try:
+    with open(summary) as fh:
+        metrics = (json.load(fh) or {}).get("metrics", {}) or {}
+except Exception as exc:
+    out("FAIL", "unparseable k6 summary (exit %d): %s" % (k6rc, exc))
+
+def count(name):
+    return int((metrics.get(name) or {}).get("count", 0) or 0)
+
+checks = metrics.get("checks") or {}
+passes, fails = int(checks.get("passes", 0) or 0), int(checks.get("fails", 0) or 0)
+ok, failed = count("bench_ok"), count("bench_failed")
+fallback, throttled = count("bench_fallback"), count("bench_throttled")
+p95 = (metrics.get("bench_op_latency_ms") or {}).get("p(95)")
+p95s = "p95=%.0fms" % p95 if isinstance(p95, (int, float)) else "p95=n/a"
+
+if ok == 0 and passes == 0:
+    out("FAIL", "no operation completed at all (exit %d, %d failed) — the k6 "
+                "client could not reach the target or every response was rejected"
+                % (k6rc, failed))
+if failed or fails:
+    detail = "%d/%d operations failed" % (failed or fails, (failed or fails) + ok)
+    if throttled:
+        detail += " (%d rate-limited: 429/RESOURCE_EXHAUSTED — check the rl= posture)" % throttled
+    out("FAIL", detail + " — see the .dryrun.log for k6's check breakdown")
+if fallback:
+    out("WARN", "ok=%d but %d iteration(s) measured a FALLBACK op (bench_fallback) "
+                "— this cell will not measure the operation it is labelled with" % (ok, fallback))
+# The samplers write one CSV row per second of the measure window; an empty one
+# means the cell would produce no resource data in the real matrix (typically
+# resource/sampler.sh not executable, or docker stats unavailable).
+if os.path.exists(rescsv):
+    with open(rescsv) as fh:
+        rows = sum(1 for _ in fh)
+    if rows < 2:
+        out("WARN", "ok=%d, %s, but the resource sampler wrote no rows — the "
+                    "matrix would record no container CPU/mem for this cell" % (ok, p95s))
+else:
+    out("WARN", "ok=%d, %s, but no resource CSV was written" % (ok, p95s))
+out("PASS", "ok=%d, %s" % (ok, p95s))
+PY
+}
+
 run_one() {
   local scenario="$1"
   local cell_order_index="${2:-1}"
@@ -629,11 +802,22 @@ run_one() {
   local host_sampler_pid=$!
 
   # Run k6. summary-export gives end-of-test aggregated metrics as JSON.
+  # A dry run additionally tees k6's own output to <scenario>.dryrun.log, so a
+  # failing cell's verdict can point at k6's check breakdown / setup() stack
+  # trace instead of asking you to re-run to see it.
+  local k6rc dry_log="$outdir/$name.dryrun.log"
   set +e
-  ( cd "$BENCH/scenarios" && BENCH_PROTO_ROOT="$BENCH/../proto" \
-      BENCH_ZITADEL_PROTO_ROOT="$BENCH/scenarios/proto/zitadel" \
-      k6 run --quiet --summary-export "$k6sum" "$scenario" )
-  local k6rc=$?
+  if [ "$DRY_RUN" = "1" ]; then
+    ( cd "$BENCH/scenarios" && BENCH_PROTO_ROOT="$BENCH/../proto" \
+        BENCH_ZITADEL_PROTO_ROOT="$BENCH/scenarios/proto/zitadel" \
+        k6 run --quiet --summary-export "$k6sum" "$scenario" ) 2>&1 | tee "$dry_log"
+    k6rc=${PIPESTATUS[0]}
+  else
+    ( cd "$BENCH/scenarios" && BENCH_PROTO_ROOT="$BENCH/../proto" \
+        BENCH_ZITADEL_PROTO_ROOT="$BENCH/scenarios/proto/zitadel" \
+        k6 run --quiet --summary-export "$k6sum" "$scenario" )
+    k6rc=$?
+  fi
   set -e
   wait "$sampler_pid" 2>/dev/null || true
   wait "$host_sampler_pid" 2>/dev/null || true
@@ -679,10 +863,19 @@ run_one() {
   "settle_timeout": $([ "$SETTLE_TIMEOUT_HIT" = "1" ] && echo true || echo false),
   "settle_probe_thr": $SETTLE_PROBE_THR_USED,
   "cell_order_index": $cell_order_index,
+  "dry_run": $([ "$DRY_RUN" = "1" ] && echo true || echo false),
   "axiam_env": $(axiam_env_json)
 }
 EOF
   echo "[run] wrote $k6sum, $rescsv, $hostcsv, $meta"
+
+  if [ "$DRY_RUN" = "1" ]; then
+    local verdict detail line
+    line="$(dry_verdict "$k6sum" "$k6rc" "$rescsv")"
+    verdict="${line%%$'\t'*}"; detail="${line#*$'\t'}"
+    echo "[dry] $name: $verdict — $detail"
+    record_dry "$name" "$verdict" "$detail"
+  fi
 }
 
 SCENARIO_COUNT=${#SCENARIOS[@]}
@@ -705,5 +898,25 @@ for s in "${SCENARIOS[@]}"; do
     sleep "$CELL_PAUSE"
   fi
 done
+
+if [ "$DRY_RUN" = "1" ]; then
+  echo
+  echo "[dry] === $TARGET / $PROFILE — $SCENARIO_COUNT scenario(s) exercised ==="
+  awk -F'\t' -v t="$TARGET" -v p="$PROFILE" \
+    '$1==t && $2==p {printf "  %-6s %-28s %s\n", $4, $3, $5}' "$DRY_TSV" 2>/dev/null || true
+  if [ "$SCENARIO_COUNT" -eq 0 ]; then
+    # Every scenario was filtered out. The real matrix would "succeed" here and
+    # silently produce an empty cell set — worth failing a dry run over.
+    echo "[dry] NO scenario ran for $TARGET / $PROFILE — every one was filtered out (see the SKIP rows above)."
+    record_dry "(no-scenarios)" "FAIL" "every scenario was filtered out for this target/profile"
+    exit 1
+  fi
+  if [ "$DRY_FAILURES" -gt 0 ]; then
+    echo "[dry] $DRY_FAILURES cell(s) FAILED — the real matrix would break here. Logs: $RESULTS/$TARGET/$PROFILE/*.dryrun.log"
+    exit 1
+  fi
+  echo "[dry] all cells for $TARGET / $PROFILE passed the client contract."
+  exit 0
+fi
 
 echo "[run] done. Aggregate with: python3 $HERE/report.py --results $RESULTS"

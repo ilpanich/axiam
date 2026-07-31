@@ -532,6 +532,17 @@ def collect_dir(results_dir, max_error, min_samples):
                 if not fn.endswith(".meta.json"):
                     continue
                 meta = json.load(open(os.path.join(pdir, fn)))
+                # Dry-run cells (run-benchmark.sh --dry-run / `just dry=1
+                # bench-run`) rehearse the harness over a ~5-second window with
+                # the post-seed settle gate deliberately skipped — a client
+                # smoke test, never a measurement. They normally live under
+                # results/dry-run/, one level deeper than this walk reaches, but
+                # an operator who points BENCH_RESULTS_DIR at the shared tree
+                # would otherwise have them silently medianed in with real
+                # cells. The flag is authoritative; the directory is just the
+                # default.
+                if meta.get("dry_run"):
+                    continue
                 k6_name = meta.get("k6_summary_file")
                 if not k6_name:
                     continue

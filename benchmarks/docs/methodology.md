@@ -756,3 +756,69 @@ them as plain environment variables, e.g.:
 BENCH_SETTLE_BURST_VUS=30 BENCH_SETTLE_PROBE_THR=500 \
   just target=axiam profile=p0-plaintext bench-run
 ```
+
+## 13. Dry runs — rehearsing the matrix (`bench-dry-run`)
+
+A full `bench-matrix` is hours long, and most of what breaks it is not a
+performance problem but a **client-contract** problem: a seeded confidential
+client the target rejects, a p3-mtls client certificate k6 cannot open, a gRPC
+scenario dialling plaintext into a TLS listener, a scenario silently filtered
+out because OAuth2 was never configured. None of these announce themselves
+until that cell's turn comes round — potentially an hour or more into a run
+that then has to be restarted from the top.
+
+A **dry run** rehearses the matrix in minutes. It is deliberately the *same*
+code path, not a simplified one: same profile env, same seed env, same
+`filter_scenarios` + cell-order rotation, same `k6 run` invocation, same
+resource/host samplers, same `meta.json`. Only the measured window shrinks, and
+only the *grading* changes:
+
+```bash
+just targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13 p3-mtls" bench-dry-run
+just target=axiam profile=p3-mtls dry=1 bench-run     # a single cell
+```
+
+### What a dry run asserts
+
+Each cell is graded from the same `--summary-export` JSON `report.py` reads,
+against the harness's own metrics (`scenarios/lib/metrics.js`):
+
+| Verdict | Meaning |
+|---|---|
+| `PASS` | Every operation completed with the status the scenario expected. |
+| `WARN` | It ran, but the cell would not measure what it claims — `bench_fallback > 0` (a fallback op was measured instead of the labelled one), or the resource sampler wrote no rows (the real matrix would record no container CPU/mem for this cell). |
+| `SKIP` | Filtered out before running, with the reason. An `AXIAM-only`/`Zitadel-only` skip is expected; an **OAuth2 skip is usually not** — it means the confidential client was never seeded. |
+| `FAIL` | k6 wrote no summary (it died at init — bad options, unreadable certs, a `setup()` that threw), or no operation completed at all, or any operation failed. Rate-limit rejections (429 / `RESOURCE_EXHAUSTED`) are called out by name, since a wrong `rl=` posture looks identical to a broken client. |
+
+Bring-up and seeding are graded too: a target that never becomes ready, or a
+`bench-seed` whose post-seed smoke checks fail, is recorded as a `FAIL` row for
+that cell. Unlike `bench-matrix`, the sweep does **not** abort on the first
+failure — one pass produces the whole fix list. The exit status is non-zero if
+anything failed.
+
+### What a dry run is not
+
+A dry run is **never a measurement**. It skips the post-seed settle gate (§12),
+so it measures squarely inside the transient window where p95 legitimately
+blows past the 2000 ms production gate — failing on that would be a false alarm
+about the one property a dry run does not check. So the latency gate is relaxed
+to `BENCH_DRY_MAX_P95_MS` while *correctness* stays strict: one failed check
+fails the cell.
+
+Its artifacts are therefore fenced off three ways: they carry `"dry_run": true`
+in `meta.json`, they default to `results/dry-run/`, and both `report.py` (which
+skips any cell whose meta carries the flag) and `just bench-pack` (which prunes
+the whole subtree) exclude them.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BENCH_DRY_VUS` | `2` | VUs per dry-run cell — enough to exercise the per-VU cookie jar / gRPC dial. |
+| `BENCH_DRY_WARMUP` | `2s` | Ramp stage. |
+| `BENCH_DRY_DURATION` | `5s` | Measured stage. |
+| `BENCH_DRY_COOLDOWN` | `1s` | Drain stage. |
+| `BENCH_DRY_MAX_P95_MS` | `30000` | Relaxed p95 threshold — see above. |
+| `BENCH_DRY_RUN_TSV` | `<results>/dry-run.tsv` | Verdict ledger; `bench-dry-run` points every cell at one file and renders `SUMMARY.md` from it. |
+
+`BENCH_SETTLE` and `BENCH_CELL_PAUSE` default to `0` in a dry run but are still
+honoured if set, so `BENCH_SETTLE=1 ... bench-dry-run` can rehearse the gate
+itself.

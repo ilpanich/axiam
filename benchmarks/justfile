@@ -11,6 +11,11 @@
 #   just target=axiam profile=p2-tls13 bench-run
 #   just bench-report
 #   just targets="axiam keycloak" profiles="p0-plaintext p2-tls13 p3-mtls" bench-matrix
+#
+# Before committing hours to a matrix, rehearse it in minutes — same cells, same
+# bring-up/seed/run/tear-down path, measurement window collapsed to seconds:
+#
+#   just targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13" bench-dry-run
 
 set shell := ["bash", "-uc"]
 
@@ -49,6 +54,15 @@ dbcaps := "capped"
 # every metric per cell across the valid runs. Set repeat=1 for a quick single
 # pass (still lands under results/run-1/).
 repeat := "3"
+# dry=1 turns `bench-run` into a DRY RUN: the same profile env, seed env,
+# scenario filter and k6 invocation as a real cell, but with the measured
+# window collapsed to a few seconds and the verdict based on whether the k6
+# client could connect, send its request and get the expected answer — not on
+# how fast it was. Results land under results/dry-run/ so they never mix into
+# what `bench-report` aggregates. `bench-dry-run` (below) applies this across
+# the whole target x profile matrix. See runner/run-benchmark.sh's `--dry-run`
+# block for the exact knobs (BENCH_DRY_VUS / BENCH_DRY_DURATION / ...).
+dry := "0"
 
 # Generate throwaway TLS/mTLS certs for the security profiles (idempotent).
 bench-certs:
@@ -335,7 +349,15 @@ bench-seed:
 # (1). BENCH_SETTLE_STABLE_SECS/BENCH_SETTLE_MAX_MS were the superseded serial-
 # canary knobs and are no longer consulted.
 bench-run:
-    bash runner/run-benchmark.sh --target {{target}} --profile {{profile}} --scenario {{scenario}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DRY_ARG=""
+    if [ "{{dry}}" = "1" ]; then
+      DRY_ARG="--dry-run"
+    elif [ "{{dry}}" != "0" ]; then
+      echo "[bench-run] unknown dry='{{dry}}' (use dry=0 or dry=1)" >&2; exit 1
+    fi
+    bash runner/run-benchmark.sh --target {{target}} --profile {{profile}} --scenario {{scenario}} $DRY_ARG
 
 # Tear a target down (and its volumes).
 bench-down:
@@ -412,6 +434,97 @@ bench-matrix:
     # must not spill its report.md into the shared results/ root either.
     python3 runner/report.py --results "$BASE_RESULTS_DIR"
 
+# Rehearse the whole matrix in minutes instead of hours.
+#
+# Walks the SAME target x profile grid as `bench-matrix`, doing the SAME
+# bench-up -> bench-seed -> bench-run -> bench-down for each cell, but with
+# `dry=1`: every scenario still runs — real profile env, real seed env, real
+# k6 client, real samplers — with the measured window collapsed to a few
+# seconds. Each cell is graded on the CLIENT CONTRACT (did k6 connect, send its
+# request, and get back the answer the scenario expects) rather than on
+# throughput, so an hour-deep break — a Keycloak realm that seeds but rejects
+# the client, a Zitadel that comes up too slowly, a p3-mtls cert k6 can't load,
+# a gRPC dial into a TLS listener, an OAuth2 cell that would be silently
+# skipped — surfaces before you commit to the real run.
+#
+# Unlike `bench-matrix` this does NOT stop at the first broken cell: a failing
+# bring-up, seed or scenario is recorded and the sweep carries on, so one pass
+# gives you the full list of what to fix. Exits non-zero if anything failed.
+#
+# `repeat` is deliberately ignored (a rehearsal has nothing to median), and
+# results go to results/dry-run/ so `bench-report`/`bench-pack` never see them.
+#
+#   just targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13 p3-mtls" bench-dry-run
+#
+# Knobs (env, not `just` vars): BENCH_DRY_VUS (2), BENCH_DRY_DURATION (5s),
+# BENCH_DRY_WARMUP (2s), BENCH_DRY_COOLDOWN (1s), BENCH_DRY_MAX_P95_MS (30000).
+bench-dry-run:
+    #!/usr/bin/env bash
+    # NOT `set -e`: a broken cell is the OUTPUT of a dry run, not a reason to
+    # abandon the remaining ones.
+    set -uo pipefail
+    BASE_RESULTS_DIR="${BENCH_RESULTS_DIR:-$PWD/results/dry-run}"
+    mkdir -p "$BASE_RESULTS_DIR"
+    export BENCH_RESULTS_DIR="$BASE_RESULTS_DIR"
+    # One ledger for the whole sweep: run-benchmark.sh appends its per-scenario
+    # verdicts here, and the bring-up/seed failures below go in the same file so
+    # the closing table covers every stage, not just the k6 cells.
+    export BENCH_DRY_RUN_TSV="$BASE_RESULTS_DIR/dry-run.tsv"
+    : > "$BENCH_DRY_RUN_TSV"
+    started=$(date +%s)
+    note() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$BENCH_DRY_RUN_TSV"; }
+
+    for t in {{targets}}; do
+      for p in {{profiles}}; do
+        echo "=== dry-run: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
+        if ! just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up; then
+          note "$t" "$p" "(bench-up)" FAIL "stack never came up / never became ready — see the compose ps+logs dumped above"
+          just target=$t bench-down >/dev/null 2>&1 || true
+          continue
+        fi
+        if ! just target=$t profile=$p bench-seed; then
+          note "$t" "$p" "(bench-seed)" FAIL "seeding or its post-seed smoke checks failed — this is the failure that would abort the real matrix"
+          just target=$t bench-down >/dev/null 2>&1 || true
+          continue
+        fi
+        just target=$t profile=$p dry=1 bench-run || true
+        just target=$t bench-down || \
+          note "$t" "$p" "(bench-down)" WARN "teardown failed — a leftover container/volume can break the NEXT cell's port pre-flight"
+      done
+    done
+
+    elapsed=$(( $(date +%s) - started ))
+    {
+      echo "# Benchmark dry run"
+      echo
+      echo "Rehearsed \`targets={{targets}}\` x \`profiles={{profiles}}\` in $((elapsed / 60))m $((elapsed % 60))s."
+      echo "Verdicts grade the k6 client contract (connect / request / expected response), not performance."
+      echo
+      echo "| Verdict | Target | Profile | Scenario | Detail |"
+      echo "|---|---|---|---|---|"
+      awk -F'\t' '{ printf "| %s | %s | %s | `%s` | %s |\n", $4, $1, $2, $3, $5 }' "$BENCH_DRY_RUN_TSV"
+    } > "$BASE_RESULTS_DIR/SUMMARY.md"
+
+    echo
+    echo "──────────── DRY RUN SUMMARY ────────────"
+    awk -F'\t' '{ printf "  %-5s %-9s %-13s %-26s %s\n", $4, $1, $2, $3, $5 }' "$BENCH_DRY_RUN_TSV"
+    echo
+    awk -F'\t' '
+      { n[$4]++ }
+      END { printf "  %d PASS, %d WARN, %d SKIP, %d FAIL\n", n["PASS"], n["WARN"], n["SKIP"], n["FAIL"] }
+    ' "$BENCH_DRY_RUN_TSV"
+    echo "  elapsed: $((elapsed / 60))m $((elapsed % 60))s — wrote $BASE_RESULTS_DIR/SUMMARY.md"
+    # Flag-then-END, not `{exit 0}`: an awk `exit` inside a rule still runs the
+    # END block, so `$4=="FAIL"{exit 0} END{exit 1}' would always report clean.
+    if awk -F'\t' '$4=="FAIL"{f=1} END{exit !f}' "$BENCH_DRY_RUN_TSV"; then
+      echo
+      echo "  Do NOT start the real matrix yet — the cells above marked FAIL would break it."
+      echo "  Per-cell k6 output: $BASE_RESULTS_DIR/<target>/<profile>/<scenario>.dryrun.log"
+      exit 1
+    fi
+    echo
+    echo "  All cells satisfied the client contract. Safe to run: just targets=\"{{targets}}\" profiles=\"{{profiles}}\" bench-matrix"
+
 # --- SDK client benchmarks --- (pass the language as sdk=, e.g. sdk=python)
 # H8 fix: `bash sdk/<lang>/run.sh` alone never saw the seed env (only
 # sdk-bench-all did, via run-all.sh's own sourcing) — a bench invoked this way
@@ -460,8 +573,14 @@ bench-pack:
     OUT="results-$(date +%Y-%m-%d).tar.xz"
     FILELIST="$(mktemp)"
     trap 'rm -f "$FILELIST"' EXIT
-    find results \( -name '*.k6.json' -o -name '*.res.csv' -o -name '*.host.csv' \
-      -o -name '*.meta.json' -o -name 'report.md' \) -type f > "$FILELIST"
+    # -path results/dry-run -prune: a dry run writes real-looking artifacts
+    # (k6 summaries, res/host CSVs, meta.json) for 5-second unsettled windows.
+    # They are diagnostics, never measurements, so they must not reach a shared
+    # archive — meta.json carries "dry_run": true, but pruning the whole subtree
+    # is the guarantee that does not depend on anyone reading that field.
+    find results -path results/dry-run -prune -o \
+      \( -name '*.k6.json' -o -name '*.res.csv' -o -name '*.host.csv' \
+      -o -name '*.meta.json' -o -name 'report.md' \) -type f -print > "$FILELIST"
     if [ ! -s "$FILELIST" ]; then
       echo "[bench-pack] nothing to pack — run a benchmark + 'just bench-report' first" >&2
       exit 1

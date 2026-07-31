@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Benchmark dry-run mode (`just bench-dry-run`, `just dry=1 bench-run`) — rehearses the
+  whole target × profile matrix over the same bring-up/seed/run/tear-down path in minutes,
+  grading each cell on the k6 client contract (connect, request, expected response) instead
+  of on performance, so a break surfaces before an hours-long matrix commits to it
+
+### Fixed
+
+- `meta.json` could be written as invalid JSON when a host fact spanned two lines — a
+  `docker version` against an unreachable daemon prints an empty line and *then* fails, so
+  the `|| echo unknown` fallback produced a literal newline mid-string and took `report.py`
+  down with an "Invalid control character" for the whole run
+
 ## [1.0.0-alpha21] - 2026-07-30
 
 ### Changed

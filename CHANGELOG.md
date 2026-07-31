@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha22] - 2026-07-31
+
+### Added
+
+- Add a dry-run mode to rehearse the matrix in minutes
+- Raised RAM resources in benchmarks to improve Keycloak performance (Axiam and Zitadel performs well even with 1024m)
+
+### Fixed
+
+- Hold a live pool reference in repositories, not a boot-time clone
+
 ## [Unreleased]
 
 ### Added

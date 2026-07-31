@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::scope::{CreateScope, Scope, UpdateScope};
 use axiam_core::repository::ScopeRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::take_first_or_not_found;
 
 #[derive(Debug, SurrealValue)]
@@ -56,11 +57,12 @@ impl ScopeRowWithId {
 /// SurrealDB implementation of the Scope repository.
 #[derive(Clone)]
 pub struct SurrealScopeRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealScopeRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -74,6 +76,7 @@ impl<C: Connection> ScopeRepository for SurrealScopeRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('scope', $id) SET \
                  tenant_id = $tenant_id, \
@@ -116,6 +119,7 @@ impl<C: Connection> ScopeRepository for SurrealScopeRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('scope', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -163,8 +167,8 @@ impl<C: Connection> ScopeRepository for SurrealScopeRepository<C> {
             sets.join(", ")
         );
 
-        let mut builder = self
-            .db
+        let db = self.db.current();
+        let mut builder = db
             .query(&query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str));
@@ -202,6 +206,7 @@ impl<C: Connection> ScopeRepository for SurrealScopeRepository<C> {
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "DELETE type::record('scope', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -224,6 +229,7 @@ impl<C: Connection> ScopeRepository for SurrealScopeRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM scope \
                  WHERE tenant_id = $tenant_id AND resource_id = $resource_id \

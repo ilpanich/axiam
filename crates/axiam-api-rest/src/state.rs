@@ -51,6 +51,7 @@ use axiam_auth::{
     AuthService, EmailVerificationService, MfaMethodService, PasswordResetService, WebauthnService,
 };
 use axiam_authz::AuthzConfig;
+use axiam_db::DbHandle;
 use axiam_db::{
     SharedRateLimitCounter, SurrealAccountDeletionRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCertificateRepository,
@@ -74,7 +75,7 @@ use axiam_oauth2::jwks_cache::{
 };
 use axiam_oauth2::token::TokenService;
 use axiam_pki::{CaService, CertService, DeviceAuthService, PgpService};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use tokio::sync::Semaphore;
 
 use crate::extractors::auth::SessionValidator;
@@ -218,7 +219,11 @@ pub type SamlFederationServiceT<C> = SamlFederationService<
 pub struct AppState<C: Connection + Clone> {
     pub authz_config: AuthzConfig,
     pub auth_config: AuthConfig,
-    pub db: Surreal<C>,
+    /// LIVE reference to the pooled SurrealDB connection (NOT a boot-time
+    /// clone): handlers that query directly — `/api/v1/admin/bootstrap`, the
+    /// tenant seeder — must follow a reconnect-loop handle swap just as the
+    /// repositories do, or they permanently 401 after an eviction.
+    pub db: DbHandle<C>,
     pub health_checker: Arc<dyn HealthChecker>,
     pub audit_repo: SurrealAuditLogRepository<C>,
     pub org_repo: SurrealOrganizationRepository<C>,
@@ -359,7 +364,8 @@ impl<C: Connection + Clone> AppState<C> {
     /// let mut state = AppState::for_test(db.clone(), auth_config.clone());
     /// state.email_encryption_key = Some(TEST_KEY);
     /// ```
-    pub fn for_test(db: Surreal<C>, auth_config: AuthConfig) -> Self {
+    pub fn for_test(db: impl Into<DbHandle<C>>, auth_config: AuthConfig) -> Self {
+        let db: DbHandle<C> = db.into();
         // B1: resolve the hash-gate permit count from config (0 = auto → min(cores, 4)).
         let crypto_semaphore =
             Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));

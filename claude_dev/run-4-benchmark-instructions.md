@@ -259,35 +259,50 @@ pre-fix) and these narrative points:
 
 ---
 
-## §7 Known hazard — read this before a long run
+## §7 Former hazard — the stale-DB-handle bug (FIXED)
 
-**A stale-DB-handle bug can silently kill a long run**, and it is **not fixed**.
+**This section previously said a stale-DB-handle bug could silently kill a long
+run and was not fixed. It is fixed now** — option 3 below was taken. Long
+single-cell soaks no longer need babysitting for this failure mode.
 
-Every repository is built once at boot from a one-time `pool.handle_for_repo()`
-clone rather than a live reference. When the DB pool's proactive-reconnect loop
-swaps in a fresh connection — observed **~7 minutes into a sustained load run**
-— every long-lived handle goes stale and the affected paths **401 permanently
-until the process restarts**. A plain `docker restart` of the server clears it
-instantly.
+**What it was.** Every repository was built once at boot from a one-time
+`pool.handle_for_repo()` **clone** rather than a live reference. When the DB
+pool's reconnect loop swapped in a fresh connection — observed **~7 minutes into
+a sustained load run** — every long-lived handle went stale and the affected
+paths **401'd permanently until the process restarted**. A plain
+`docker restart` of the server cleared it instantly. Readiness did not catch it:
+`health_check` probes through the pool slot, so it saw the *fresh* connection
+and reported healthy while every repository was talking to the dead one.
 
-This was found during the rate-limit verification and is filed as a follow-up
-in the rate-limit PR; it is unrelated to rate limiting itself.
+Found during the rate-limit verification; unrelated to rate limiting itself.
 
-**What it looks like:** a cell that starts fine and then produces a wall of
+**What it looked like:** a cell that started fine and then produced a wall of
 401s / `bench_failed` for the rest of the run, with the server otherwise
 healthy.
 
-**Mitigations, cheapest first:**
+**The fix.** `handle_for_repo()` now returns a live `DbHandle` — the pool slot
+itself — and repositories resolve the current connection per query, so a
+reconnect-loop swap is observed on the very next query instead of pinning them
+to the evicted connection. `AppState.db` (the REST bootstrap handler and tenant
+seeder) and the gRPC layer's handle held the same boot-time clone and were fixed
+the same way. Covered by
+`pool::tests::repository_bound_at_boot_follows_a_later_handle_swap`, which
+fails against the old clone. See `db-pool-design.md` §11 for the full account.
+
+**If you are running an image built before that fix**, the original mitigations
+still apply:
 
 1. **Watch for it.** If a cell's error rate jumps to ~100% mid-run, this is the
    first thing to suspect. Restart the server container and re-run that cell.
 2. **Restart between repeats.** The matrix already does `bench-up` /
    `bench-down` per target/profile per repeat, which resets the process — so a
    *single cell* is the exposure window, not the whole run. That is why the
-   matrix is relatively robust to this and a long single-cell soak is not.
-3. **Fix it first** if you would rather not babysit. It is a contained change
-   (hold a live pool reference in the repositories instead of a boot-time
-   clone), and it would also remove the last reason to distrust a long soak.
+   matrix was relatively robust to this and a long single-cell soak was not.
+
+**Confirm the fix is in the image you are benchmarking** the same way you would
+for any other fix: build from a commit that contains it. A cell that goes to
+~100% 401s mid-run against a post-fix image is *not* this bug — diagnose it
+fresh rather than reaching for the restart.
 
 ---
 

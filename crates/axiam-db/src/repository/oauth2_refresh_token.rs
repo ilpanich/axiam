@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{CreateRefreshToken, RefreshToken};
 use axiam_core::repository::RefreshTokenRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
@@ -67,7 +68,7 @@ impl RefreshTokenRowWithId {
 
 /// SurrealDB implementation of the RefreshToken repository.
 pub struct SurrealRefreshTokenRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 // Manual Clone impl (not derive): avoids the spurious `C: Clone` bound that
@@ -81,7 +82,8 @@ impl<C: Connection> Clone for SurrealRefreshTokenRepository<C> {
 }
 
 impl<C: Connection> SurrealRefreshTokenRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -95,6 +97,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('oauth2_refresh_token', $id) SET \
                  tenant_id = $tenant_id, \
@@ -155,6 +158,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT *, meta::id(id) AS record_id \
                  FROM oauth2_refresh_token \
@@ -190,6 +194,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         // concurrent use.
         let mut result = self
             .db
+            .current()
             .query(
                 "UPDATE oauth2_refresh_token SET revoked = true \
                  WHERE tenant_id = $tenant_id \
@@ -220,6 +225,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         // RETURN AFTER gives us the updated rows for counting.
         let mut result = self
             .db
+            .current()
             .query(
                 "UPDATE oauth2_refresh_token SET revoked = true \
                  WHERE tenant_id = $tenant_id \
@@ -242,6 +248,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
 
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE oauth2_refresh_token SET revoked = true \
                  WHERE tenant_id = $tenant_id \
@@ -262,6 +269,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
     async fn delete_expired(&self) -> AxiamResult<u64> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM oauth2_refresh_token \
                  WHERE expires_at < time::now() OR revoked = true \
@@ -274,6 +282,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         let count = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         self.db
+            .current()
             .query(
                 "DELETE FROM oauth2_refresh_token \
                  WHERE expires_at < time::now() OR revoked = true",

@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stale DB handles after a reconnect: every repository was built at boot from a one-time
+  `pool.handle_for_repo()` **clone** of the pooled SurrealDB connection, so when the pool's
+  reconnect loop evicted a poisoned connection (observed ~7 minutes into a sustained load
+  run) every repository stayed pinned to the dead one and returned 401 permanently until
+  the process restarted — while `/ready`, which probes through the pool slot, still
+  reported healthy. Repositories now hold a live `DbHandle` over the pool slot and resolve
+  the current connection per query, so a swap is picked up on the very next query. The REST
+  `AppState.db` (bootstrap handler, tenant seeder) and the gRPC layer's handle held the same
+  boot-time clone and were fixed the same way
 - `meta.json` could be written as invalid JSON when a host fact spanned two lines — a
   `docker version` against an unreachable daemon prints an empty line and *then* fails, so
   the `|| echo unknown` fallback produced a literal newline mid-string and took `report.py`

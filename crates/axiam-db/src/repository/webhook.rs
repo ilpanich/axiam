@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::webhook::{CreateWebhook, RetryPolicy, UpdateWebhook, Webhook};
 use axiam_core::repository::{PaginatedResult, Pagination, WebhookRepository};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
@@ -98,11 +99,12 @@ impl WebhookRowWithId {
 
 #[derive(Clone)]
 pub struct SurrealWebhookRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealWebhookRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -113,6 +115,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
         let retry = input.retry_policy.unwrap_or_default();
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('webhook', $id) SET \
                  tenant_id = $tenant_id, \
@@ -148,6 +151,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Webhook> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM webhook \
                  WHERE meta::id(id) = $id AND tenant_id = $tenant_id",
@@ -214,7 +218,8 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
             set_clauses.join(", ")
         );
 
-        let mut query = self.db.query(&sql);
+        let db = self.db.current();
+        let mut query = db.query(&sql);
         query = query
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()));
@@ -235,6 +240,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let result = self
             .db
+            .current()
             .query(
                 "DELETE type::record('webhook', $id) \
                  WHERE tenant_id = $tenant_id RETURN BEFORE",
@@ -267,6 +273,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
 
         let count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM webhook \
                  WHERE tenant_id = $tenant_id GROUP ALL",
@@ -281,6 +288,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
 
         let data_result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM webhook \
                  WHERE tenant_id = $tenant_id \
@@ -308,6 +316,7 @@ impl<C: Connection> WebhookRepository for SurrealWebhookRepository<C> {
     async fn get_by_event(&self, tenant_id: Uuid, event_type: &str) -> AxiamResult<Vec<Webhook>> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM webhook \
                  WHERE tenant_id = $tenant_id \

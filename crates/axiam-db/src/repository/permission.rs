@@ -8,11 +8,12 @@ use axiam_core::models::permission::{
 use axiam_core::repository::{PaginatedResult, Pagination, PermissionRepository};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
@@ -128,11 +129,12 @@ impl PermissionGrantRow {
 /// SurrealDB implementation of the Permission repository.
 #[derive(Clone)]
 pub struct SurrealPermissionRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealPermissionRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -145,6 +147,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('permission', $id) SET \
                  tenant_id = $tenant_id, \
@@ -182,6 +185,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('permission', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -231,8 +235,8 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             sets.join(", ")
         );
 
-        let mut builder = self
-            .db
+        let db = self.db.current();
+        let mut builder = db
             .query(&query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str));
@@ -284,6 +288,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         );
 
         self.db
+            .current()
             .query(query)
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id.to_string()))
@@ -304,6 +309,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM permission \
                  WHERE tenant_id = $tenant_id GROUP ALL",
@@ -315,6 +321,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM permission \
                  WHERE tenant_id = $tenant_id \
@@ -359,6 +366,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(query)
             .bind(("tid", tenant_id.to_string()))
             .await
@@ -402,6 +410,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(query)
             .bind(("tid", tenant_id.to_string()))
             .await
@@ -432,6 +441,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM permission \
                  WHERE tenant_id = $tenant_id \
@@ -479,6 +489,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
                  permission:`{perm_id_str}` SET scope_ids = NONE;"
             );
             self.db
+                .current()
                 .query(query)
                 .bind(("tid", tenant_id.to_string()))
                 .await
@@ -498,6 +509,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
                  permission:`{perm_id_str}` SET scope_ids = $scope_ids;"
             );
             self.db
+                .current()
                 .query(query)
                 .bind(("tid", tenant_id.to_string()))
                 .bind(("scope_ids", scope_strs))
@@ -533,6 +545,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT \
                      meta::id(out.id) AS record_id, \
@@ -580,6 +593,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         // query.
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT \
                      meta::id(in) AS role_id, \

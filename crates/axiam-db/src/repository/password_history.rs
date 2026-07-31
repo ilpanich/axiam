@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry};
 use axiam_core::repository::PasswordHistoryRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 
 // -----------------------------------------------------------------------
 // Row structs
@@ -56,7 +57,7 @@ impl PasswordHistoryRowWithId {
 // -----------------------------------------------------------------------
 
 pub struct SurrealPasswordHistoryRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealPasswordHistoryRepository<C> {
@@ -68,7 +69,8 @@ impl<C: Connection> Clone for SurrealPasswordHistoryRepository<C> {
 }
 
 impl<C: Connection> SurrealPasswordHistoryRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -80,6 +82,7 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('password_history', $id) SET \
                  tenant_id = $tenant_id, \
@@ -120,6 +123,7 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
     ) -> AxiamResult<Vec<PasswordHistoryEntry>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM password_history \
@@ -149,6 +153,7 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
         if keep_count == 0 {
             let mut result = self
                 .db
+                .current()
                 .query(
                     "DELETE password_history \
                      WHERE tenant_id = $tenant_id \
@@ -170,6 +175,7 @@ impl<C: Connection> PasswordHistoryRepository for SurrealPasswordHistoryReposito
         // concurrently will have a newer timestamp and be retained.
         let mut result = self
             .db
+            .current()
             .query(
                 "DELETE password_history \
                  WHERE tenant_id = $tenant_id \

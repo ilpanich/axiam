@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::resource::{CreateResource, Resource, UpdateResource};
 use axiam_core::repository::{PaginatedResult, Pagination, ResourceRepository};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
@@ -85,11 +86,12 @@ const MAX_ANCESTOR_DEPTH: usize = 50;
 /// SurrealDB implementation of the Resource repository.
 #[derive(Clone)]
 pub struct SurrealResourceRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealResourceRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -120,6 +122,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
@@ -145,6 +148,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('resource', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -251,8 +255,8 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .map(|opt| opt.map(|u| u.to_string()))
             .unwrap_or(None);
 
-        let mut builder = self
-            .db
+        let db = self.db.current();
+        let mut builder = db
             .query(&query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str));
@@ -332,6 +336,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(query)
             .bind(("id", id_str.clone()))
             .bind(("resource_id", id_str))
@@ -375,6 +380,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM resource \
                  WHERE tenant_id = $tenant_id GROUP ALL",
@@ -386,6 +392,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM resource \
                  WHERE tenant_id = $tenant_id \
@@ -414,6 +421,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM resource \
                  WHERE tenant_id = $tenant_id AND parent_id = $parent_id",
@@ -463,6 +471,7 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(query)
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id_str))

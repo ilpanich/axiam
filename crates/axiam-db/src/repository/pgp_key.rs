@@ -7,11 +7,12 @@ use axiam_core::models::pgp_key::{
 };
 use axiam_core::repository::{PaginatedResult, Pagination, PgpKeyRepository};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
@@ -147,11 +148,12 @@ impl PgpKeyRowWithId {
 
 #[derive(Clone)]
 pub struct SurrealPgpKeyRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealPgpKeyRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -161,6 +163,7 @@ impl<C: Connection> PgpKeyRepository for SurrealPgpKeyRepository<C> {
         let id = new_id();
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('pgp_key', $id) SET \
                  tenant_id = $tenant_id, \
@@ -201,6 +204,7 @@ impl<C: Connection> PgpKeyRepository for SurrealPgpKeyRepository<C> {
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<PgpKey> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM pgp_key \
                  WHERE meta::id(id) = $id AND tenant_id = $tenant_id",
@@ -222,6 +226,7 @@ impl<C: Connection> PgpKeyRepository for SurrealPgpKeyRepository<C> {
     async fn get_signing_key(&self, tenant_id: Uuid) -> AxiamResult<PgpKey> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM pgp_key \
                  WHERE tenant_id = $tenant_id \
@@ -246,6 +251,7 @@ impl<C: Connection> PgpKeyRepository for SurrealPgpKeyRepository<C> {
     async fn revoke(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE type::record('pgp_key', $id) SET \
                  status = $status \
@@ -283,6 +289,7 @@ impl<C: Connection> PgpKeyRepository for SurrealPgpKeyRepository<C> {
                          WHERE tenant_id = $tenant_id GROUP ALL";
         let count_result = self
             .db
+            .current()
             .query(count_sql)
             .bind(("tenant_id", tenant_id_str.clone()))
             .await
@@ -298,6 +305,7 @@ impl<C: Connection> PgpKeyRepository for SurrealPgpKeyRepository<C> {
                         LIMIT $limit START $offset";
         let data_result = self
             .db
+            .current()
             .query(data_sql)
             .bind(("tenant_id", tenant_id_str))
             .bind(("limit", pagination.limit))

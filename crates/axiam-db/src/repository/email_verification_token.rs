@@ -7,11 +7,12 @@ use axiam_core::models::email_verification::{
 };
 use axiam_core::repository::EmailVerificationTokenRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
@@ -75,7 +76,7 @@ impl TokenRowWithId {
 
 /// SurrealDB implementation of the email verification token repository.
 pub struct SurrealEmailVerificationTokenRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealEmailVerificationTokenRepository<C> {
@@ -87,7 +88,8 @@ impl<C: Connection> Clone for SurrealEmailVerificationTokenRepository<C> {
 }
 
 impl<C: Connection> SurrealEmailVerificationTokenRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -104,6 +106,7 @@ impl<C: Connection> EmailVerificationTokenRepository
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('email_verification_token', $id) SET \
                  tenant_id = $tenant_id, \
@@ -137,6 +140,7 @@ impl<C: Connection> EmailVerificationTokenRepository
     ) -> AxiamResult<EmailVerificationToken> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM email_verification_token \
@@ -173,6 +177,7 @@ impl<C: Connection> EmailVerificationTokenRepository
         // consume and return the full record with its ID.
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE email_verification_token SET \
                  consumed_at = time::now() \
@@ -226,6 +231,7 @@ impl<C: Connection> EmailVerificationTokenRepository
 
         let result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total \
                  FROM email_verification_token \
@@ -251,6 +257,7 @@ impl<C: Connection> EmailVerificationTokenRepository
     async fn delete_expired(&self) -> AxiamResult<u64> {
         let result = self
             .db
+            .current()
             .query(
                 "DELETE FROM email_verification_token \
                  WHERE expires_at < time::now() \

@@ -9,10 +9,11 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::repository::AssertionReplayRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::CountRow;
 
 // ---------------------------------------------------------------------------
@@ -21,7 +22,7 @@ use crate::helpers::CountRow;
 
 /// SurrealDB implementation of the SAML assertion replay repository.
 pub struct SurrealAssertionReplayRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 // Manual Clone impl (not derive): avoids the spurious `C: Clone` bound that
@@ -35,7 +36,8 @@ impl<C: Connection> Clone for SurrealAssertionReplayRepository<C> {
 }
 
 impl<C: Connection> SurrealAssertionReplayRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -52,6 +54,7 @@ impl<C: Connection> AssertionReplayRepository for SurrealAssertionReplayReposito
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('saml_assertion_replay', $row_id) SET \
                  tenant_id = $tenant_id, \
@@ -89,6 +92,7 @@ impl<C: Connection> AssertionReplayRepository for SurrealAssertionReplayReposito
         // Count expired rows first, then delete.
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM saml_assertion_replay \
                  WHERE expires_at < time::now() GROUP ALL",
@@ -100,6 +104,7 @@ impl<C: Connection> AssertionReplayRepository for SurrealAssertionReplayReposito
         let total = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         self.db
+            .current()
             .query("DELETE saml_assertion_replay WHERE expires_at < time::now()")
             .await
             .map_err(DbError::from)?;

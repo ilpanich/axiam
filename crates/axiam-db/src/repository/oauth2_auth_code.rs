@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{AuthorizationCode, CreateAuthorizationCode};
 use axiam_core::repository::AuthorizationCodeRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
@@ -74,11 +75,12 @@ impl AuthCodeRowWithId {
 /// SurrealDB implementation of the AuthorizationCode repository.
 #[derive(Clone)]
 pub struct SurrealAuthorizationCodeRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealAuthorizationCodeRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -90,6 +92,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('oauth2_auth_code', $id) SET \
                  tenant_id = $tenant_id, \
@@ -159,6 +162,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
 
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM oauth2_auth_code \
@@ -207,6 +211,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
         // code-burning attacks.
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM \
                  (UPDATE oauth2_auth_code SET used = true \
@@ -241,6 +246,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
     async fn delete_expired(&self) -> AxiamResult<u64> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM oauth2_auth_code \
                  WHERE expires_at < time::now() OR used = true GROUP ALL",
@@ -252,6 +258,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
         let count = count_rows.first().map(|r| r.total).unwrap_or(0);
 
         self.db
+            .current()
             .query(
                 "DELETE FROM oauth2_auth_code \
                  WHERE expires_at < time::now() OR used = true",

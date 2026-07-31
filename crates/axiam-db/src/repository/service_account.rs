@@ -10,11 +10,12 @@ use axiam_core::repository::{PaginatedResult, Pagination, ServiceAccountReposito
 use chrono::{DateTime, Utc};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 /// Generate a random client ID with the `sa_` prefix (32 hex chars).
@@ -106,11 +107,12 @@ impl ServiceAccountRowWithId {
 /// SurrealDB implementation of the ServiceAccount repository.
 #[derive(Clone)]
 pub struct SurrealServiceAccountRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealServiceAccountRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -127,6 +129,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('service_account', $id) SET \
                  tenant_id = $tenant_id, \
@@ -175,6 +178,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('service_account', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -212,6 +216,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM service_account \
                  WHERE tenant_id = $tenant_id AND client_id = $client_id",
@@ -258,8 +263,8 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
             sets.join(", ")
         );
 
-        let mut builder = self
-            .db
+        let db = self.db.current();
+        let mut builder = db
             .query(&query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str));
@@ -317,6 +322,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
         );
 
         self.db
+            .current()
             .query(query)
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id.to_string()))
@@ -337,6 +343,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
 
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM service_account \
                  WHERE tenant_id = $tenant_id GROUP ALL",
@@ -348,6 +355,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM service_account \
                  WHERE tenant_id = $tenant_id \
@@ -378,6 +386,7 @@ impl<C: Connection> ServiceAccountRepository for SurrealServiceAccountRepository
 
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE type::record('service_account', $id) SET \
                  client_secret_hash = $secret_hash, \

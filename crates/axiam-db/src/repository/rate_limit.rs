@@ -12,10 +12,11 @@
 //! global bucket.
 
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 
 /// Row shape returned by the windowed-CAS `UPSERT ... RETURN AFTER` query —
 /// only `count` is needed by the caller.
@@ -27,11 +28,12 @@ struct RateLimitBucketRow {
 /// SurrealDB-backed shared rate-limit bucket counter.
 #[derive(Clone)]
 pub struct SurrealRateLimitBucketRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealRateLimitBucketRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 
@@ -93,6 +95,7 @@ impl<C: Connection> SurrealRateLimitBucketRepository<C> {
     ) -> Result<u64, DbError> {
         let result = self
             .db
+            .current()
             .query(
                 "UPSERT type::record('rate_limit_bucket', $key) SET \
                  count = IF window_start = NONE OR window_start < $window_start \

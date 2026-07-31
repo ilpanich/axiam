@@ -1,6 +1,7 @@
 //! SurrealDB implementation of [`SettingsRepository`].
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::settings::{
     CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
@@ -10,7 +11,7 @@ use axiam_core::models::settings::{
 };
 use axiam_core::repository::SettingsRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
@@ -193,11 +194,12 @@ WHERE scope = $scope AND scope_id = $scope_id";
 /// SurrealDB implementation of the settings repository.
 #[derive(Clone)]
 pub struct SurrealSettingsRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealSettingsRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 
@@ -299,6 +301,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
     async fn lookup_org_id(&self, tenant_id: Uuid) -> Result<Uuid, DbError> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT organization_id FROM tenant \
                  WHERE meta::id(id) = $tenant_id",
@@ -325,6 +328,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
     ) -> Result<Option<SecuritySettings>, DbError> {
         let mut result = self
             .db
+            .current()
             .query(SELECT_WITH_ID)
             .bind(("scope", scope.to_string()))
             .bind(("scope_id", scope_id.to_string()))
@@ -347,6 +351,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
     ) -> Result<Option<(SecuritySettings, Option<String>)>, DbError> {
         let mut result = self
             .db
+            .current()
             .query(SELECT_WITH_ID)
             .bind(("scope", scope.to_string()))
             .bind(("scope_id", scope_id.to_string()))
@@ -398,7 +403,8 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         );
 
         let bindings = self.bind_settings(settings, overrides_json);
-        let mut builder = self.db.query(&query).bind(("id", id_str.clone()));
+        let db = self.db.current();
+        let mut builder = db.query(&query).bind(("id", id_str.clone()));
         for (name, value) in bindings {
             builder = match value {
                 BindValue::Str(v) => builder.bind((name, v)),
@@ -598,6 +604,7 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
 
     async fn delete_tenant_override(&self, tenant_id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "DELETE security_settings WHERE scope = 'tenant' \
                  AND scope_id = $scope_id",

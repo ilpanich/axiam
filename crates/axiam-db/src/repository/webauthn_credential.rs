@@ -7,11 +7,12 @@ use axiam_core::models::webauthn_credential::{
 };
 use axiam_core::repository::WebauthnCredentialRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
@@ -94,12 +95,13 @@ impl WebauthnCredentialRowWithId {
 /// SurrealDB implementation of the WebAuthn credential repository.
 #[derive(Clone)]
 pub struct SurrealWebauthnCredentialRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealWebauthnCredentialRepository<C> {
     /// Create a new repository backed by the given SurrealDB client.
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -111,6 +113,7 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('webauthn_credential', $id) SET \
                  tenant_id = $tenant_id, \
@@ -148,6 +151,7 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('webauthn_credential', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -170,6 +174,7 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
     ) -> AxiamResult<Vec<WebauthnCredential>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM webauthn_credential \
@@ -190,6 +195,7 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
 
     async fn update_last_used(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "UPDATE type::record('webauthn_credential', $id) SET \
                  last_used_at = time::now() \
@@ -205,6 +211,7 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.db
+            .current()
             .query(
                 "DELETE type::record('webauthn_credential', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -220,6 +227,7 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
     async fn count_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM webauthn_credential \
                  WHERE tenant_id = $tenant_id \

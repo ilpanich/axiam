@@ -59,6 +59,10 @@ futures-lite = "2"
 
 # Database
 surrealdb = "3"
+# Lock-free atomic swap of the pooled SurrealDB connection: the DB pool slot is
+# read on every query and written only by a reconnect, so readers must never
+# take a lock or queue behind the (essentially never) writer.
+arc-swap = "1"
 
 # Authentication & Crypto
 # jsonwebtoken 11 removed implicit per-optional-dependency Cargo features

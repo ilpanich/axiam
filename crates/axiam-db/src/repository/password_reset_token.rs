@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::password_reset::{CreatePasswordResetToken, PasswordResetToken};
 use axiam_core::repository::PasswordResetTokenRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found};
 
 #[derive(Debug, SurrealValue)]
@@ -73,7 +74,7 @@ impl TokenRowWithId {
 
 /// SurrealDB implementation of the password reset token repository.
 pub struct SurrealPasswordResetTokenRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealPasswordResetTokenRepository<C> {
@@ -85,7 +86,8 @@ impl<C: Connection> Clone for SurrealPasswordResetTokenRepository<C> {
 }
 
 impl<C: Connection> SurrealPasswordResetTokenRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -97,6 +99,7 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('password_reset_token', $id) SET \
                  tenant_id = $tenant_id, \
@@ -130,6 +133,7 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
     ) -> AxiamResult<PasswordResetToken> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM password_reset_token \
@@ -160,6 +164,7 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
     async fn consume(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<PasswordResetToken> {
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE password_reset_token SET \
                  consumed_at = time::now() \
@@ -213,6 +218,7 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
 
         let result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total \
                  FROM password_reset_token \
@@ -238,6 +244,7 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
     async fn delete_expired(&self) -> AxiamResult<u64> {
         let result = self
             .db
+            .current()
             .query(
                 "DELETE FROM password_reset_token \
                  WHERE expires_at < time::now() \
@@ -261,6 +268,7 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
         // rate-limit enforcement.
         let result = self
             .db
+            .current()
             .query(
                 "UPDATE password_reset_token \
                  SET consumed_at = time::now() \

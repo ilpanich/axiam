@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::federation::{CreateFederationLink, FederationLink};
 use axiam_core::repository::FederationLinkRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{parse_uuid, take_first_or_not_found};
 
 // ---------------------------------------------------------------------------
@@ -79,7 +80,7 @@ impl FederationLinkRowWithId {
 // ---------------------------------------------------------------------------
 
 pub struct SurrealFederationLinkRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealFederationLinkRepository<C> {
@@ -91,7 +92,8 @@ impl<C: Connection> Clone for SurrealFederationLinkRepository<C> {
 }
 
 impl<C: Connection> SurrealFederationLinkRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -102,6 +104,7 @@ impl<C: Connection> FederationLinkRepository for SurrealFederationLinkRepository
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('federation_link', $id) SET \
                  tenant_id = $tenant_id, \
@@ -140,6 +143,7 @@ impl<C: Connection> FederationLinkRepository for SurrealFederationLinkRepository
     ) -> AxiamResult<FederationLink> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM federation_link \
@@ -175,6 +179,7 @@ impl<C: Connection> FederationLinkRepository for SurrealFederationLinkRepository
     ) -> AxiamResult<Vec<FederationLink>> {
         let result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM federation_link \
@@ -199,6 +204,7 @@ impl<C: Connection> FederationLinkRepository for SurrealFederationLinkRepository
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let result = self
             .db
+            .current()
             .query(
                 "DELETE type::record('federation_link', $id) \
                  WHERE tenant_id = $tenant_id RETURN BEFORE",

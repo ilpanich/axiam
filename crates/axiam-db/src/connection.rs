@@ -33,13 +33,17 @@
 //! ## Session lifecycle (CQ-B48 closed by the DbPool, F2)
 //!
 //! Repositories no longer hold frozen `client_cloned()` snapshots. They bind a
-//! handle from [`crate::DbPool`], which holds N INDEPENDENT `Surreal<Client>`
-//! handles (not clones), each with its OWN proactive re-signin and reconnect
-//! loop — the same D-04/PERF-04 machinery this module implements, now spawned
-//! once per pooled handle instead of only for the manager's single handle.
+//! LIVE [`crate::DbHandle`] over a slot of [`crate::DbPool`], which holds N
+//! INDEPENDENT `Surreal<Client>` handles (not clones), each with its OWN
+//! proactive re-signin and reconnect loop — the same D-04/PERF-04 machinery
+//! this module implements, now spawned once per pooled handle instead of only
+//! for the manager's single handle.
 //! Every session a request can reach therefore belongs to a pooled handle that
 //! is kept authenticated inside the root-token TTL and rebuilt on
-//! expiry/poison, so the former restart-only ~4-week outage is gone. The
+//! expiry/poison, so the former restart-only ~4-week outage is gone. Binding a
+//! live handle rather than a clone is what makes that rebuild actually reach
+//! the repositories: a clone would keep them on the connection the reconnect
+//! loop just evicted (see `handle.rs`). The
 //! deliberately-un-renewed startup-snapshot `health_probe` that used to alarm
 //! on that gap is removed; readiness is now established by [`crate::DbPool`]
 //! probing its pooled handles (see [`DbManager::connect_handle`], the shared
@@ -48,7 +52,8 @@
 //! ## Reconnect loop, full-jitter backoff, poisoned-handle eviction (PERF-04)
 //!
 //! [`DbManager`]'s own handle is held behind a swappable
-//! `Arc<tokio::sync::RwLock<Surreal<Client>>>` (D-12). A background task
+//! [`crate::DbHandle`] slot — an `Arc<ArcSwap<Surreal<Client>>>` (D-12), read
+//! lock-free on the query hot path. A background task
 //! ([`DbManager::spawn_reconnect_loop`]) polls health through the current
 //! handle and, on [`DbError::Unhealthy`], runs a bounded retry loop using
 //! [`reconnect_backoff_delay`]'s full-jitter exponential backoff (D-10/D-13 —
@@ -69,11 +74,11 @@ use surrealdb::Surreal;
 use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
 use surrealdb::types::NotAllowedError;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::error::DbError;
+use crate::handle::{DbSlot, new_slot};
 use crate::metrics;
 
 /// Cadence at which [`spawn_reconnect_loop`]'s background task polls
@@ -212,13 +217,14 @@ fn re_signin_interval_for(ttl: Duration, fraction: f64) -> Duration {
 /// Manages a connection to SurrealDB over the stateless HTTP engine.
 pub struct DbManager {
     /// SurrealDB client handle (HTTP engine), behind a swappable
-    /// `RwLock` (PERF-04, D-12) so the reconnect loop can atomically replace
+    /// [`DbSlot`] (PERF-04, D-12) so the reconnect loop can atomically replace
     /// a poisoned/broken handle with a freshly-authenticated one — the old
     /// handle is dropped on swap and never recycled or returned to any
     /// caller again. `Arc`-shared (not cloned) with the proactive re-signin
-    /// and reconnect-loop tasks so all sides observe/refresh the SAME
-    /// current handle (see module docs, Pitfall 2).
-    db: Arc<RwLock<Surreal<Client>>>,
+    /// and reconnect-loop tasks — and with every [`crate::DbHandle`] bound to
+    /// it — so all sides observe/refresh the SAME current handle (see module
+    /// docs, Pitfall 2).
+    db: DbSlot<Client>,
     /// Handle to the background proactive re-signin task (D-03/D-04),
     /// owned so it is explicitly droppable/abortable rather than a
     /// fire-and-forget detached task.
@@ -297,8 +303,7 @@ impl DbManager {
     pub(crate) async fn connect_handle(
         config: &DbConfig,
         ttl: Duration,
-    ) -> Result<(Arc<RwLock<Surreal<Client>>>, JoinHandle<()>, JoinHandle<()>), surrealdb::Error>
-    {
+    ) -> Result<(DbSlot<Client>, JoinHandle<()>, JoinHandle<()>), surrealdb::Error> {
         let db = Surreal::new::<Http>(&config.url).await?;
         db.signin(Root {
             username: config.username.clone(),
@@ -309,7 +314,7 @@ impl DbManager {
             .use_db(&config.database)
             .await?;
 
-        let db = Arc::new(RwLock::new(db));
+        let db = new_slot(db);
         let refresh_handle = Self::spawn_proactive_resignin(Arc::clone(&db), config, ttl);
         let reconnect_handle = Self::spawn_reconnect_loop(Arc::clone(&db), config.clone());
         Ok((db, refresh_handle, reconnect_handle))
@@ -372,7 +377,7 @@ impl DbManager {
     /// (the reactive "missed window" safety net, [`DbManager::reconnect`],
     /// is a separate mechanism).
     fn spawn_proactive_resignin(
-        db: Arc<RwLock<Surreal<Client>>>,
+        db: DbSlot<Client>,
         config: &DbConfig,
         ttl: Duration,
     ) -> JoinHandle<()> {
@@ -385,11 +390,11 @@ impl DbManager {
                 tokio::time::sleep(interval).await;
                 // Re-signin only mutates the SAME handle's server-side auth
                 // state via a request (`&self`) — it does not need to swap
-                // the handle itself, so a read lock is sufficient here. The
-                // reconnect loop (spawn_reconnect_loop) is the ONLY task that
-                // ever takes a write lock to replace the handle (D-12).
-                let guard = db.read().await;
-                match guard
+                // the handle itself, so loading the current handle is enough
+                // here. The reconnect loop (spawn_reconnect_loop) is the ONLY
+                // task that ever stores a replacement handle (D-12).
+                let current = db.load_full();
+                match current
                     .signin(Root {
                         username: username.clone(),
                         password: password.clone(),
@@ -441,7 +446,7 @@ impl DbManager {
     /// health through the current handle, and on
     /// `DbError::Unhealthy` runs a bounded, full-jitter exponential-backoff
     /// retry loop calling [`DbManager::reconnect`]. On success, the old
-    /// handle is atomically replaced under the `RwLock` write guard (D-12 —
+    /// handle is atomically stored into the slot (D-12 —
     /// the poisoned handle is dropped right there and never recycled or
     /// returned to any caller again) and health polling resumes at the
     /// normal cadence.
@@ -453,14 +458,14 @@ impl DbManager {
     /// or crash-loops (D-11). A later successful reconnect at that cadence
     /// still swaps the handle and flips health back to `Ok` with no process
     /// restart.
-    fn spawn_reconnect_loop(db: Arc<RwLock<Surreal<Client>>>, config: DbConfig) -> JoinHandle<()> {
+    fn spawn_reconnect_loop(db: DbSlot<Client>, config: DbConfig) -> JoinHandle<()> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
 
                 let is_unhealthy = {
-                    let guard = db.read().await;
-                    let outcome = guard
+                    let current = db.load_full();
+                    let outcome = current
                         .query("RETURN 1")
                         .await
                         .map_err(Self::classify_query_error)
@@ -489,7 +494,7 @@ impl DbManager {
 
                     match Self::reconnect(&config).await {
                         Ok(fresh) => {
-                            *db.write().await = fresh;
+                            db.store(Arc::new(fresh));
                             info!(attempt, "DbManager reconnect succeeded — handle swapped");
                             reconnected = true;
                             break;
@@ -514,7 +519,7 @@ impl DbManager {
                     tokio::time::sleep(Duration::from_millis(config.reconnect_ceiling_ms)).await;
                     match Self::reconnect(&config).await {
                         Ok(fresh) => {
-                            *db.write().await = fresh;
+                            db.store(Arc::new(fresh));
                             info!(
                                 "DbManager reconnect succeeded after exhaustion — handle \
                                  swapped, resuming normal health polling"
@@ -534,24 +539,27 @@ impl DbManager {
     }
 
     /// Returns an owned clone of the CURRENT SurrealDB client handle, read
-    /// through the swappable `RwLock` (D-12, PERF-04). Async because
-    /// obtaining the current handle requires taking the read lock — a
-    /// successful reconnect-loop swap is observed by the very next call.
+    /// through the swappable slot (D-12, PERF-04) — a successful
+    /// reconnect-loop swap is observed by the very next call. Kept `async`
+    /// for call-site compatibility; the slot read itself is lock-free.
     ///
     /// Callers may further `.clone()` the returned value to obtain an
     /// additional handle sharing this handle's `Arc<inner>` (same router +
     /// `reqwest` client). Production composition no longer uses this to fan out
     /// repositories — that path is now [`crate::DbPool::handle_for_repo`], which
-    /// hands out INDEPENDENT, renewable pooled handles (see the module-doc
-    /// "Session lifecycle" section). This accessor is retained for the
-    /// single-handle [`DbManager`] and its resilience tests.
+    /// hands out INDEPENDENT, renewable pooled handles as LIVE
+    /// [`crate::DbHandle`] references (see the module-doc "Session lifecycle"
+    /// section). This accessor is retained for the single-handle
+    /// [`DbManager`] and its resilience tests. Note the value it returns is a
+    /// SNAPSHOT: it does not follow later swaps, which is why repositories
+    /// bind a [`crate::DbHandle`] instead.
     pub async fn client_cloned(&self) -> Surreal<Client> {
         // F1 instrumentation (zero behavior change): count how many handles are
         // handed out. Under the current single-router architecture every clone
         // shares the SAME dispatcher/`reqwest::Client`, so this counter directly
         // quantifies the single-funnel fan-in the F2 pool will replace.
         metrics::record_handle_checkout();
-        self.db.read().await.clone()
+        (*self.db.load_full()).clone()
     }
 
     /// Verify the database connection is alive and queries succeed.
@@ -566,16 +574,16 @@ impl DbManager {
     /// credentials — D-05) classifies distinctly as [`DbError::Unhealthy`]
     /// rather than a bare query error, so the readiness probe alarms.
     ///
-    /// Reads the CURRENT handle through the swappable `RwLock` (D-12,
+    /// Reads the CURRENT handle through the swappable slot (D-12,
     /// PERF-04) — a successful reconnect-loop swap flips this back to `Ok`
     /// without a process restart.
     pub async fn health_check(&self) -> Result<(), DbError> {
-        let guard = self.db.read().await;
+        let current = self.db.load_full();
         // F1 instrumentation (zero behavior change): the health probe is a real
         // query through the `axiam-db` boundary, so route it through the
         // in-flight gauge + latency wrapper. `instrument_query` is a transparent
         // passthrough — it awaits exactly this future and returns its output.
-        let result = metrics::instrument_query("health_check.manager", guard.query("RETURN 1"))
+        let result = metrics::instrument_query("health_check.manager", current.query("RETURN 1"))
             .await
             .map_err(Self::classify_query_error)?;
         // Surface any statement-level error (HTTP returns 200 even on SQL error).
@@ -678,16 +686,15 @@ mod tests {
         );
     }
 
-    /// D-12 proof: after a `RwLock` write-swap replaces the handle, a reader
+    /// D-12 proof: after a slot store replaces the handle, a reader
     /// observes ONLY the new handle — the old (poisoned) handle is never
     /// recycled or returned again.
     ///
     /// Constructing a real `Surreal<Client>` (HTTP engine) always performs a
     /// live network health-check at connect time (see
     /// `engine::remote::http::native::create_client`), so this test proves
-    /// the swap/eviction MECHANISM — the exact `Arc<RwLock<Surreal<C>>>`
-    /// read/write-guard pattern [`DbManager`] and [`spawn_reconnect_loop`]
-    /// use — against the embedded `kv-mem` engine instead, per
+    /// the swap/eviction MECHANISM — the exact [`DbSlot`] load/store
+    /// pattern [`DbManager`] and [`spawn_reconnect_loop`] use — against the embedded `kv-mem` engine instead, per
     /// 27-RESEARCH.md Open Question 3 ("treat poisoned-connection testing
     /// primarily as a unit-level proof of the swap/eviction, not a real
     /// network-fault simulation"). Two independent in-memory instances stand
@@ -718,23 +725,23 @@ mod tests {
         }
 
         let old_db = new_marked_db("old-poisoned").await;
-        let handle = Arc::new(RwLock::new(old_db));
+        let handle = new_slot(old_db);
 
         // Pre-swap: the current handle is observably the "old" one.
         {
-            let pre_swap = handle.read().await.clone();
+            let pre_swap = handle.load_full();
             let values = read_marker_values(&pre_swap).await;
             assert_eq!(values, vec!["old-poisoned".to_string()]);
         }
 
-        // Simulate a successful reconnect: build a fresh handle and swap it
-        // in under the write guard, exactly as spawn_reconnect_loop does
-        // (`*db.write().await = fresh`) — the old handle is dropped here.
+        // Simulate a successful reconnect: build a fresh handle and store it
+        // into the slot, exactly as spawn_reconnect_loop does
+        // (`db.store(Arc::new(fresh))`) — the old handle is dropped here.
         let new_db = new_marked_db("new-fresh").await;
-        *handle.write().await = new_db;
+        handle.store(Arc::new(new_db));
 
         // Post-swap: every subsequent reader observes ONLY the new handle.
-        let post_swap = handle.read().await.clone();
+        let post_swap = handle.load_full();
         let values = read_marker_values(&post_swap).await;
         assert_eq!(
             values,

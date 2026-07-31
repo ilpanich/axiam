@@ -5,11 +5,12 @@ use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{Consent, CreateConsent};
 use axiam_core::repository::ConsentRepository;
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -64,7 +65,7 @@ impl ConsentRowWithId {
 // ---------------------------------------------------------------------------
 
 pub struct SurrealConsentRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> Clone for SurrealConsentRepository<C> {
@@ -76,7 +77,8 @@ impl<C: Connection> Clone for SurrealConsentRepository<C> {
 }
 
 impl<C: Connection> SurrealConsentRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -86,6 +88,7 @@ impl<C: Connection> ConsentRepository for SurrealConsentRepository<C> {
         let id = new_id();
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('consent', $id) SET \
                  tenant_id = $tenant_id, \
@@ -131,6 +134,7 @@ impl<C: Connection> ConsentRepository for SurrealConsentRepository<C> {
     async fn list_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<Vec<Consent>> {
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM consent \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \

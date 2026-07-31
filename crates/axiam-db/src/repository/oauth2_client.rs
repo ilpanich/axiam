@@ -6,11 +6,12 @@ use axiam_core::models::oauth2_client::{CreateOAuth2Client, OAuth2Client, Update
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
 use rand::RngExt;
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 
 /// Generate a random client ID with the `oa_` prefix (32 hex chars).
@@ -78,11 +79,12 @@ impl OAuth2ClientRowWithId {
 /// SurrealDB implementation of the OAuth2Client repository.
 #[derive(Clone)]
 pub struct SurrealOAuth2ClientRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealOAuth2ClientRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -99,6 +101,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('oauth2_client', $id) SET \
                  tenant_id = $tenant_id, \
@@ -151,6 +154,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('oauth2_client', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -189,6 +193,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM oauth2_client \
                  WHERE tenant_id = $tenant_id AND client_id = $client_id",
@@ -238,8 +243,8 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             sets.join(", ")
         );
 
-        let mut builder = self
-            .db
+        let db = self.db.current();
+        let mut builder = db
             .query(&query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str));
@@ -286,6 +291,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         let id_str = id.to_string();
 
         self.db
+            .current()
             .query(
                 "DELETE type::record('oauth2_client', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -307,6 +313,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
 
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM oauth2_client \
                  WHERE tenant_id = $tenant_id GROUP ALL",
@@ -318,6 +325,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM oauth2_client \
                  WHERE tenant_id = $tenant_id \

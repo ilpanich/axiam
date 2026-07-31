@@ -6,11 +6,12 @@ use axiam_core::models::group::{CreateGroup, Group, UpdateGroup};
 use axiam_core::models::user::{User, UserStatus};
 use axiam_core::repository::{GroupRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::handle::DbHandle;
 use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
 /// DB-side row struct for queries where the UUID is already known.
@@ -119,11 +120,12 @@ impl MemberRow {
 /// SurrealDB implementation of the Group repository.
 #[derive(Clone)]
 pub struct SurrealGroupRepository<C: Connection> {
-    db: Surreal<C>,
+    db: DbHandle<C>,
 }
 
 impl<C: Connection> SurrealGroupRepository<C> {
-    pub fn new(db: Surreal<C>) -> Self {
+    pub fn new(db: impl Into<DbHandle<C>>) -> Self {
+        let db = db.into();
         Self { db }
     }
 }
@@ -140,6 +142,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
 
         let result = self
             .db
+            .current()
             .query(
                 "CREATE type::record('group', $id) SET \
                  tenant_id = $tenant_id, \
@@ -181,6 +184,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT * FROM type::record('group', $id) \
                  WHERE tenant_id = $tenant_id",
@@ -229,8 +233,8 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             sets.join(", ")
         );
 
-        let mut builder = self
-            .db
+        let db = self.db.current();
+        let mut builder = db
             .query(&query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str));
@@ -287,6 +291,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         );
 
         self.db
+            .current()
             .query(query)
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id_str))
@@ -307,6 +312,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
 
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM group \
                  WHERE tenant_id = $tenant_id GROUP ALL",
@@ -318,6 +324,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM group \
                  WHERE tenant_id = $tenant_id \
@@ -348,6 +355,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         // Verify both user and group belong to the same tenant.
         let mut check = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM user \
                  WHERE id = type::record('user', $user_id) \
@@ -383,7 +391,12 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         // Create the membership edge.
         let query = format!("RELATE user:`{user_id_str}` -> member_of -> group:`{group_id_str}`;");
 
-        let result = self.db.query(query).await.map_err(DbError::from)?;
+        let result = self
+            .db
+            .current()
+            .query(query)
+            .await
+            .map_err(DbError::from)?;
 
         // QUAL-03/D-09: a RELATE's per-statement failure (e.g. a duplicate
         // membership violating idx_member_of_unique) only surfaces via
@@ -413,6 +426,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         // with a foreign user+group id pair could sever another tenant's
         // membership. `.check()` surfaces per-statement failures.
         self.db
+            .current()
             .query(
                 "DELETE member_of WHERE \
                  in = type::record('user', $user_id) AND \
@@ -442,6 +456,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         // Count total members.
         let mut count_result = self
             .db
+            .current()
             .query(
                 "SELECT count() AS total FROM member_of \
                  WHERE out = type::record('group', $group_id) GROUP ALL",
@@ -454,6 +469,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         // Fetch member users via the edge.
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM user \
                  WHERE tenant_id = $tenant_id \
@@ -487,6 +503,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
 
         let mut result = self
             .db
+            .current()
             .query(
                 "SELECT meta::id(id) AS record_id, * FROM group \
                  WHERE tenant_id = $tenant_id \

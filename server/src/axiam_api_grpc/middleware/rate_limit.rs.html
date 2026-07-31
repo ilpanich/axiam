@@ -49,7 +49,7 @@
 <a href=#49 id=49 data-nosnippet>49</a><span class="kw">use </span>governor::clock::QuantaInstant;
 <a href=#50 id=50 data-nosnippet>50</a><span class="kw">use </span>governor::middleware::NoOpMiddleware;
 <a href=#51 id=51 data-nosnippet>51</a><span class="kw">use </span>http::{Request, Response};
-<a href=#52 id=52 data-nosnippet>52</a><span class="kw">use </span>surrealdb::{Connection, Surreal};
+<a href=#52 id=52 data-nosnippet>52</a><span class="kw">use </span>surrealdb::Connection;
 <a href=#53 id=53 data-nosnippet>53</a><span class="kw">use </span>tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 <a href=#54 id=54 data-nosnippet>54</a><span class="kw">use </span>tower::{Layer, Service};
 <a href=#55 id=55 data-nosnippet>55</a><span class="kw">use </span>tower_governor::{
@@ -283,7 +283,7 @@
 <a href=#283 id=283 data-nosnippet>283</a>///
 <a href=#284 id=284 data-nosnippet>284</a>/// No longer generic over the SurrealDB connection type: it holds a
 <a href=#285 id=285 data-nosnippet>285</a>/// non-generic [`SharedRateLimitCounter`] (which owns the boxed store), which
-<a href=#286 id=286 data-nosnippet>286</a>/// is why the `Surreal&lt;C&gt;` handle only appears in [`Self::new`]'s signature.
+<a href=#286 id=286 data-nosnippet>286</a>/// is why the SurrealDB handle only appears in [`Self::new`]'s signature.
 <a href=#287 id=287 data-nosnippet>287</a></span><span class="attr">#[derive(Clone)]
 <a href=#288 id=288 data-nosnippet>288</a></span><span class="kw">pub struct </span>GrpcSharedRateLimitLayer {
 <a href=#289 id=289 data-nosnippet>289</a>    counter: SharedRateLimitCounter,
@@ -307,7 +307,7 @@
 <a href=#307 id=307 data-nosnippet>307</a>    /// bucket key (`"{endpoint}:{ip}"`) preserves per-surface granularity —
 <a href=#308 id=308 data-nosnippet>308</a>    /// never collapse distinct surfaces into one global bucket.
 <a href=#309 id=309 data-nosnippet>309</a>    </span><span class="kw">pub fn </span>new&lt;C: Connection&gt;(
-<a href=#310 id=310 data-nosnippet>310</a>        db: Surreal&lt;C&gt;,
+<a href=#310 id=310 data-nosnippet>310</a>        db: <span class="kw">impl </span>Into&lt;axiam_db::DbHandle&lt;C&gt;&gt;,
 <a href=#311 id=311 data-nosnippet>311</a>        endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
 <a href=#312 id=312 data-nosnippet>312</a>        limit: u32,
 <a href=#313 id=313 data-nosnippet>313</a>        trusted_hops: usize,

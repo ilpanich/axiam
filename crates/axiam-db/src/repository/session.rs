@@ -9,9 +9,12 @@ use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
+use std::sync::Arc;
+
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found};
+use crate::session_validation_cache::SessionValidationCache;
 
 #[derive(Debug, SurrealValue)]
 struct SessionRow {
@@ -77,6 +80,9 @@ impl SessionRowWithId {
 /// SurrealDB implementation of the Session repository.
 pub struct SurrealSessionRepository<C: Connection> {
     db: DbHandle<C>,
+    /// I6: optional short-TTL validity cache. `None` (the default) makes every
+    /// method below byte-identical to the pre-I6 behaviour.
+    validation_cache: Option<Arc<SessionValidationCache>>,
 }
 
 // Manual Clone impl (not derive): `#[derive(Clone)]` would add a `C: Clone`
@@ -86,6 +92,10 @@ impl<C: Connection> Clone for SurrealSessionRepository<C> {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
+            // Clones share the same cache: `axiam-server` clones this repository
+            // into several services, and they must agree on what has been
+            // revoked.
+            validation_cache: self.validation_cache.clone(),
         }
     }
 }
@@ -93,7 +103,60 @@ impl<C: Connection> Clone for SurrealSessionRepository<C> {
 impl<C: Connection> SurrealSessionRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
-        Self { db }
+        Self {
+            db,
+            validation_cache: None,
+        }
+    }
+
+    /// Attach a [`SessionValidationCache`] (I6).
+    ///
+    /// Only [`Self::is_session_active_checked`] reads the cache; every delete path in
+    /// this file writes to it. Attaching a cache therefore cannot desynchronise
+    /// it from the rows this repository owns — see the invalidation contract in
+    /// [`crate::session_validation_cache`].
+    pub fn with_validation_cache(mut self, cache: Arc<SessionValidationCache>) -> Self {
+        self.validation_cache = Some(cache);
+        self
+    }
+
+    /// The attached validity cache, if any.
+    pub fn validation_cache(&self) -> Option<&Arc<SessionValidationCache>> {
+        self.validation_cache.as_ref()
+    }
+
+    /// Is the session behind an access token's `jti` still usable? (D-15 /
+    /// REQ-7.)
+    ///
+    /// Named `_checked` rather than `is_session_active` so it can never be
+    /// confused with `axiam_api_rest::SessionValidator::is_session_active`,
+    /// which delegates here — an accidental name collision there would recurse
+    /// forever.
+    ///
+    /// This is the per-request session-revocation check every authenticated
+    /// REST request performs. Without a cache attached it is exactly
+    /// `get_by_id(..).is_ok() && expires_at > now` — one SurrealDB read per
+    /// request. With one attached, a repeat check inside the TTL is answered in
+    /// process.
+    ///
+    /// Negative answers are never cached (see the module docs), so a revoked or
+    /// unknown session always costs a read and can never be resurrected.
+    pub async fn is_session_active_checked(&self, tenant_id: Uuid, session_id: Uuid) -> bool {
+        if let Some(cache) = &self.validation_cache
+            && cache.get(tenant_id, session_id) == Some(true)
+        {
+            return true;
+        }
+
+        match self.get_by_id(tenant_id, session_id).await {
+            Ok(session) if session.expires_at > Utc::now() => {
+                if let Some(cache) = &self.validation_cache {
+                    cache.insert_valid(tenant_id, session_id, session.user_id, session.expires_at);
+                }
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -189,6 +252,13 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .await
             .map_err(DbError::from)?;
 
+        // I6: drop the validity entry in the same call that removes the row, so
+        // a logout can never be outlived by a cached "still valid" answer on
+        // this replica.
+        if let Some(cache) = &self.validation_cache {
+            cache.invalidate(tenant_id, id);
+        }
+
         Ok(())
     }
 
@@ -210,6 +280,11 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(DbError::from)?;
 
         let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
+        // I6: invalidate unconditionally — whether or not this caller won the
+        // single-use race, the row is gone once any caller consumed it.
+        if let Some(cache) = &self.validation_cache {
+            cache.invalidate(tenant_id, id);
+        }
         Ok(!deleted.is_empty())
     }
 
@@ -221,6 +296,11 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .bind(("user_id", user_id.to_string()))
             .await
             .map_err(DbError::from)?;
+
+        // I6: every session of this user just disappeared.
+        if let Some(cache) = &self.validation_cache {
+            cache.invalidate_user(tenant_id, user_id, None);
+        }
 
         Ok(())
     }
@@ -251,6 +331,10 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(DbError::from)?;
 
         let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
+        // I6: same set, minus the session the caller deliberately kept.
+        if let Some(cache) = &self.validation_cache {
+            cache.invalidate_user(tenant_id, user_id, Some(current_session_id));
+        }
         Ok(deleted.len() as u64)
     }
 
@@ -295,6 +379,15 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .bind(("tenant_id", tenant_id.to_string()))
             .await
             .map_err(DbError::from)?;
+
+        // I6: this deletes by predicate, not by id, so the cache cannot know
+        // which entries went. Dropping the whole tenant is the conservative
+        // choice; entries for expired sessions could not have been served
+        // anyway (`get` re-checks `expires_at`), so this only costs a few
+        // avoidable re-reads on a periodic janitor run.
+        if let Some(cache) = &self.validation_cache {
+            cache.invalidate_tenant(tenant_id);
+        }
 
         Ok(total)
     }

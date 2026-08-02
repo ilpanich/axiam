@@ -466,6 +466,32 @@ async fn main() -> std::io::Result<()> {
     let scope_repo = SurrealScopeRepository::new(pool.handle_for_repo());
     let service_account_repo = SurrealServiceAccountRepository::new(pool.handle_for_repo());
     let session_repo = SurrealSessionRepository::new(pool.handle_for_repo());
+    // I6: optional short-TTL session-validation cache. Opt-in via
+    // `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` (0 = off, the default);
+    // every session-deleting path in the repository invalidates it, so on a
+    // single replica revocation stays immediate and the TTL only bounds
+    // cross-replica staleness — the same contract as the D7 decision cache.
+    let session_repo = match config.auth.session_validation_cache_ttl_secs {
+        0 => {
+            tracing::info!(
+                "session-validation cache disabled (every authenticated request \
+                 re-reads its session row); enable with \
+                 AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS"
+            );
+            session_repo
+        }
+        ttl_secs => {
+            let cache = Arc::new(axiam_db::SessionValidationCache::new(
+                std::time::Duration::from_secs(ttl_secs),
+            ));
+            tracing::warn!(
+                ttl_secs,
+                "session-validation cache ENABLED (I6) — a session revoked on \
+                 another replica may remain acceptable here for up to ttl_secs"
+            );
+            session_repo.with_validation_cache(cache)
+        }
+    };
     // REQ-7 / D-15: per-request session-validity check so revoked sessions'
     // access tokens are rejected immediately (the AuthenticatedUser extractor
     // consults this on every authenticated request).
@@ -1263,6 +1289,21 @@ async fn main() -> std::io::Result<()> {
     if let Some(size) = h2_tuning.initial_connection_window_size {
         http_server = http_server.h2_initial_connection_window_size(size);
     }
+
+    // I5: set TCP_NODELAY explicitly on accepted connections. actix-web leaves
+    // this unset by default, which means "do not touch the socket option" — so
+    // Nagle's algorithm stayed enabled on the REST listener while the gRPC
+    // listener (tonic, `tcp_nodelay: true` by default) has always had it off.
+    // Nagle interacting with Linux's 40 ms delayed-ACK timer is the leading
+    // explanation for the flat ~43 ms TLS client-credentials plateau observed
+    // in benchmark run 4. `AXIAM__SERVER__TCP_NODELAY=false` restores the
+    // previous behaviour so run 5 can A/B it.
+    let tcp_nodelay = config.server.tcp_nodelay;
+    http_server = http_server.tcp_nodelay(tcp_nodelay);
+    tracing::info!(
+        tcp_nodelay,
+        "TCP_NODELAY configured on the REST listener (I5)"
+    );
 
     // Bind plaintext (proxy-terminated TLS, the default) or, when
     // `server.tls.enabled`, bind with rustls restricted to TLS 1.3 (F-04 /

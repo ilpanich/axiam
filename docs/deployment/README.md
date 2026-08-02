@@ -250,6 +250,61 @@ the per-mutation invalidation table are in the
 > `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false` unless a ≤ TTL revocation window
 > is an accepted risk.
 
+## Session-validation cache (optional, I6)
+
+Access tokens are stateless JWTs, so every authenticated request re-reads the
+`session` row behind the token's `jti` to confirm the session has not been
+revoked (D-15 / REQ-7). That is **one SurrealDB read per authenticated
+request** — including on `POST /api/v1/authz/check`, and it is *not* covered by
+the authorization decision cache above. It is the reason enabling the decision
+cache lifted gRPC authorization checks 13× but REST checks only 5% in benchmark
+run 4: the two caches cover different round-trips, and the gRPC surface never
+had this one (its interceptor validates the JWT signature and stops).
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` | TTL in seconds for a *positive* session-validity answer. Default `0` = **disabled** (every request reads). Suggested starting value when enabling: `5`, matching the decision cache. |
+
+What the cache stores and does not store:
+
+* Only **positive** answers. A missing or revoked session is never cached, so a
+  freshly-created session works immediately and a revoked one can never be
+  resurrected by a stale negative.
+* Entries carry the session row's own `expires_at` and are rejected exactly on
+  time — **session expiry is never extended by this cache**, whatever the TTL.
+* Every session-deleting method on the repository (`invalidate`, `consume`,
+  `invalidate_user_sessions`, `invalidate_user_sessions_except`,
+  `cleanup_expired`) drops the affected entries in the same call. There is no
+  second code path that can delete a session row, so the invalidation cannot be
+  forgotten by a future change.
+
+> **⚠ Multi-replica caveat — identical to the decision cache.** The cache and
+> its invalidation are **process-local**. On a single replica a logout or
+> password change takes effect immediately. With two or more replicas, a
+> session revoked on replica A stays acceptable on replicas B…N for up to
+> `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`. Keep it at `0` in the
+> multi-replica `k8s/` manifests unless that window is an accepted risk — and
+> if you have already accepted the decision cache's window, accept this one at
+> the same value, not a longer one.
+
+## TCP_NODELAY on the REST listener (I5)
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__SERVER__TCP_NODELAY` | Set `TCP_NODELAY` (disable Nagle's algorithm) on accepted REST connections. Default `true`. |
+
+actix-web does not set this socket option unless asked, so before AXIAM set it
+explicitly the REST listener ran with Nagle **enabled** while the gRPC listener
+(tonic, which defaults it on) did not. Nagle only costs anything when a
+response reaches the socket as more than one write and the last write is a
+partial segment — the kernel then holds that fragment until the peer
+acknowledges the previous one, and Linux's delayed-ACK timer is 40 ms. That is
+the leading explanation for the flat ~43 ms per-request floor benchmark run 4
+measured on the TLS client-credentials endpoint with nothing saturated.
+
+`false` restores the previous behaviour and exists so the effect can be
+A/B-measured. There is no security implication either way.
+
 ## Rate limiting
 
 Every authentication/OAuth2 endpoint is rate-limited (see

@@ -16,7 +16,6 @@ use axiam_auth::token::{
     AUD_M2M, AUD_USER, CachedUserIdentity, ValidatedClaims, validate_access_token,
 };
 use axiam_core::error::AxiamError;
-use axiam_core::repository::SessionRepository;
 use axiam_db::SurrealSessionRepository;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -50,12 +49,12 @@ impl<C: Connection> SessionValidator for SurrealSessionRepository<C> {
         tenant_id: Uuid,
         session_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            match self.get_by_id(tenant_id, session_id).await {
-                Ok(session) => session.expires_at > chrono::Utc::now(),
-                Err(_) => false,
-            }
-        })
+        // I6: delegate to the repository, which answers from its optional
+        // short-TTL validity cache when one is attached and otherwise performs
+        // exactly the read this used to inline. Keeping the logic there is what
+        // guarantees the cache is invalidated by the same methods that delete
+        // the rows — see `axiam_db::session_validation_cache`.
+        Box::pin(self.is_session_active_checked(tenant_id, session_id))
     }
 }
 
@@ -389,6 +388,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             hibp_breaker_cooldown_secs: 30,
             max_concurrent_hashes: 0,
             hash_acquire_timeout_secs: 5,
+            session_validation_cache_ttl_secs: 0,
         }
     }
 

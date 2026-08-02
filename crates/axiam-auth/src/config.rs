@@ -120,6 +120,36 @@ pub struct AuthConfig {
     /// tail latency. Default: 5. Override via
     /// `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS`.
     pub hash_acquire_timeout_secs: u64,
+    /// I6: TTL, in seconds, of the process-local **session-validation cache**.
+    ///
+    /// `0` (the default) disables the cache entirely — every authenticated
+    /// request performs its own SurrealDB read to confirm the session behind the
+    /// access token's `jti` still exists (D-15 / REQ-7). A non-zero value lets
+    /// repeated requests inside the window reuse the last positive answer.
+    ///
+    /// Override via `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`.
+    ///
+    /// # What it buys and what it costs
+    ///
+    /// The read it removes is the reason the D7 decision cache helped gRPC
+    /// authorization checks 13.1× but REST checks only 5% in benchmark run 4:
+    /// the decision cache elides the *authorization* round-trips, this one
+    /// elides the *authentication* round-trip, and the gRPC surface never had
+    /// the latter.
+    ///
+    /// The cost is a bounded revocation window. Every session-deleting path in
+    /// `SurrealSessionRepository` invalidates the cache in the same call, so on
+    /// a **single replica** a logout takes effect immediately. Across **two or
+    /// more replicas** there is no invalidation channel, so a session revoked on
+    /// replica A stays acceptable on replicas B…N for at most this many
+    /// seconds — the same trade-off, and the same reasoning, as
+    /// `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Session *expiry* is not
+    /// affected: cached entries carry the row's own `expires_at` and are
+    /// rejected exactly on time regardless of the TTL.
+    ///
+    /// Suggested starting point when enabling: `5`, matching the decision
+    /// cache's default.
+    pub session_validation_cache_ttl_secs: u64,
 }
 
 impl AuthConfig {
@@ -205,6 +235,8 @@ impl Default for AuthConfig {
             // B1: 0 = auto → min(available_parallelism, 4) at construction.
             max_concurrent_hashes: 0,
             hash_acquire_timeout_secs: 5,
+            // I6: opt-in. 0 = no session-validation cache (today's behaviour).
+            session_validation_cache_ttl_secs: 0,
         }
     }
 }

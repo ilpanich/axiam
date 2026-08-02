@@ -9,7 +9,7 @@ use axiam_core::repository::{PaginatedResult, Pagination, PermissionRepository};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use surrealdb::Connection;
-use surrealdb_types::SurrealValue;
+use surrealdb_types::{RecordId, SurrealValue};
 use uuid::Uuid;
 
 use crate::error::DbError;
@@ -584,13 +584,28 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         }
 
         let tenant_id_str = tenant_id.to_string();
-        let role_id_strs: Vec<String> = role_ids.iter().map(|id| id.to_string()).collect();
+
+        // I7(a) — the predicate MUST compare the raw `in` field against record
+        // ids, never `meta::id(in)`.
+        //
+        // Wrapping the indexed field in a function call makes the predicate
+        // opaque to the planner: SurrealDB reports
+        // `TableScan { pre_decode_filter: "no (unsupported predicate)" }` and
+        // walks **every** `grants` edge in the database — i.e. every
+        // role→permission grant of every tenant — on every authorization check.
+        // Comparing `in` directly lets the `(in, out)` composite index
+        // `idx_grants_unique` (schema v19) serve it as an `IndexScan`.
+        // `crates/axiam-db/tests/authz_query_plan_test.rs` pins both plans.
+        let role_records: Vec<RecordId> = role_ids
+            .iter()
+            .map(|id| RecordId::new("role", id.to_string()))
+            .collect();
 
         // Batched mirror of get_role_permission_grants: one query for every
-        // applicable role. `meta::id(in)` yields the owning role's UUID so the
-        // flattened rows can be regrouped per role. Tenant scoping is enforced on
-        // the permission endpoint (out.tenant_id), identical to the single-role
-        // query.
+        // applicable role. `meta::id(in)` in the *projection* is fine (it is not
+        // a filter) and yields the owning role's UUID so the flattened rows can
+        // be regrouped per role. Tenant scoping is enforced on the permission
+        // endpoint (out.tenant_id), identical to the single-role query.
         let mut result = self
             .db
             .current()
@@ -605,10 +620,10 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
                      out.updated_at AS updated_at, \
                      scope_ids \
                  FROM grants \
-                 WHERE meta::id(in) IN $role_ids \
+                 WHERE in IN $role_records \
                  AND out.tenant_id = $tenant_id",
             )
-            .bind(("role_ids", role_id_strs))
+            .bind(("role_records", role_records))
             .bind(("tenant_id", tenant_id_str))
             .await
             .map_err(DbError::from)?;

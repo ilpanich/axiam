@@ -67,6 +67,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole target × profile matrix over the same bring-up/seed/run/tear-down path in minutes,
   grading each cell on the k6 client contract (connect, request, expected response) instead
   of on performance, so a break surfaces before an hours-long matrix commits to it
+- Optional **session-validation cache** (I6), `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`
+  (default `0` = off). Every authenticated REST request re-reads the `session` row behind
+  the access token's `jti` to enforce D-15 revocation; that read is not covered by the
+  authorization decision cache, which is why turning the decision cache on lifted gRPC
+  authorization checks 13.1x but REST checks only 5% in benchmark run 4 — the gRPC
+  interceptor has no equivalent read. The cache stores **positive answers only**, carries
+  each session's own `expires_at` (so expiry is never extended), and is invalidated by every
+  session-deleting method on the repository, so on a single replica a logout still takes
+  effect immediately. Multi-replica deployments inherit the same bounded-staleness caveat as
+  the decision cache and should leave it off or match its TTL
+- `AXIAM__SERVER__TCP_NODELAY` (default `true`, I5) — actix-web leaves `TCP_NODELAY` unset
+  unless asked, so the REST listener ran with Nagle's algorithm enabled while the gRPC
+  listener (tonic, which defaults it on) did not. Set `false` to restore the previous
+  behaviour for A/B measurement
+- Per-stage timing instrumentation on the OAuth2 client-credentials path (I5) —
+  `client_lookup_us`, `secret_verify_us`, `tenant_lookup_us`, `token_mint_us`,
+  `handler_total_us` on the `oauth2.client_credentials` span, plus `exchange_us`,
+  `serialize_us` and `response_body_bytes` from the token endpoint, re-emitted as DEBUG
+  events on `target: "axiam::perf"`. Measurement is unconditional (five `Instant::now()`
+  reads, well under 0.1% of the handler) and only reporting is gated by the tracing level
+- `crates/axiam-db/tests/authz_query_plan_test.rs` — `EXPLAIN`-based query-plan pins for
+  the authorization hot path, so a rewrite that reintroduces a table scan fails in CI rather
+  than in production. Includes witness tests proving the removed forms really did scan
+- [`docs/deployment/authz-read-path.md`](docs/deployment/authz-read-path.md) — what one
+  authorization check costs against SurrealDB, which cache removes which round-trip, and a
+  design note on read-replica topology for authorization reads (analysis only; not
+  implemented)
 
 ### Changed
 
@@ -84,6 +111,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Two **full table scans on the authorization hot path** (I7). Every uncached authorization
+  check — REST, gRPC and AMQP alike — walked the whole `grants` table (every role-to-permission
+  grant of every tenant) and the whole `has_role` table (every role assignment of every user
+  of every tenant), because both predicates were written in forms the SurrealDB planner
+  cannot serve from an index: `WHERE meta::id(in) IN $role_ids` wraps the indexed field in a
+  function call, and `WHERE in IN (SELECT VALUE out FROM member_of WHERE ...)` leaves a
+  correlated sub-select on the right-hand side. `EXPLAIN` reported
+  `TableScan { pre_decode_filter: "no (unsupported predicate)" }` for both. They now compare
+  against bound record ids and a pre-resolved `LET` binding respectively and plan as
+  `IndexScan` over the existing `idx_grants_unique` / `idx_has_role_unique` composite indexes
+  — no schema change, identical rows returned. The cost was invisible on a small seed and
+  grew with total database size, which is consistent with SurrealDB showing up as the
+  product's throughput ceiling in benchmark run 4
 - gRPC rate limits were enforced at **1/60th of the configured rate** (I1). The gRPC
   ceiling is per second, but the cross-replica shared pre-check runs the same fixed
   60-second window as the REST limiter and was handed the per-second number verbatim; since

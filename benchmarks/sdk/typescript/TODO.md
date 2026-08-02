@@ -39,3 +39,26 @@ install + `tsup`) if its `dist/` is missing, then `npm install`s it here as a
 ```
 cd benchmarks && just sdk=typescript sdk-bench
 ```
+
+## p3-mtls (CONTRACT.md §6.1) — bench wired, SDK still blocked
+
+`readClientIdentity()` reads `BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY` (file
+paths) and passes them as `clientCert`/`clientKey` PEM strings to every
+`createNodeClient(...)` this bench builds. Phase A of
+`just sdk-bench-test typescript` passes: a half-configured pair produces the
+contractual `status:"error"` record naming both variables.
+
+**Phase B still fails**, for exactly the reason documented above: the Node ESM
+bundle's `require`-shim throws `Dynamic require of "https" is not supported`
+before any handshake, so `customCa` and `clientCert` are both unusable. That is
+an SDK-side fix (see the H8 status section) — the harness side is complete. The
+test lists `typescript` in its `KNOWN_BLOCKED` set so this does not fail the
+run; drop it from that list (or run `STRICT=1 just sdk-bench-test`) once the
+SDK fix lands, and this should go green with no bench change.
+
+A second, unrelated staleness bug was fixed while wiring this: `run.sh` only
+built the sibling SDK when its `dist/` was *missing*, never when it was merely
+*older than* `src/`. Since npm resolves the `file:` dependency to a symlink,
+the bench ran a bundle built 2026-07-12 against sources from 2026-07-18 — which
+predated `org_slug` in the login body and produced
+`Validation error: must provide org_id or org_slug`.

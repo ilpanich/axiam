@@ -57,3 +57,40 @@ p0-plaintext and p2-tls13 against a live seeded target.
 - The PHP SDK is synchronous (no async client), so this bench is single-process
   and runs every iteration serially — `concurrency` is always `1` and
   `SDK_BENCH_CONCURRENCY` is ignored.
+
+## p3-mtls (CONTRACT.md §6.1) — wired and verified
+
+`build_ops()` reads `BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY` **once** (not per
+`login` iteration) and passes them as the `$clientCert`/`$clientKey`
+constructor arguments through a single `$newClient` factory used by both
+construction sites.
+
+Note the asymmetry in the SDK's own signature, which the bench has to respect:
+`$customCa` is a CA-bundle **file path** (Guzzle `verify`), while
+`$clientCert`/`$clientKey` are PEM **strings** (Guzzle `cert`/`ssl_key`, which
+the SDK materialises into `0600` temp files internally). All three env vars are
+paths, so only the latter two are read.
+
+The pair is all-or-nothing (§6.1 rule 1), and both the validation and the file
+reads happen inside `build_ops()` so a misconfiguration surfaces as the
+contractual `status:"error"` record.
+
+### ext-sockets
+
+`run.sh` now detects the case where `sockets.so` exists but is commented out in
+`php.ini` — the default on Arch and some other distros — and loads it for the
+run only (`php -d extension=sockets`). Without it `composer install` refuses to
+resolve at all, because the SDK depends on php-amqplib which declares
+`ext-sockets`, and this bench degraded to a `pending` record despite php,
+composer and the SDK all being present. Nothing here opens a socket through it
+(the four measured ops are REST-only and the SDK gates AMQP behind
+`extension_loaded()`); it satisfies composer's platform check. Uncomment
+`extension=sockets` in your `php.ini` to make it permanent.
+
+```
+cd benchmarks && just target=axiam profile=p3-mtls sdk=php sdk-bench
+just sdk-bench-test php     # proves the cert reaches the wire, no stack needed
+```
+
+Verified: phase A (half-configured pair -> `status:"error"` naming both vars)
+and phase B (stub mTLS server observes `CN=bench-client`) both pass.

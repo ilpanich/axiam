@@ -48,6 +48,13 @@ $cfg = [
     // $customCa constructor param is a CA bundle FILE PATH (not inline PEM
     // content), so pass BENCH_CA_CERT straight through unchanged.
     'custom_ca' => $env('BENCH_CA_CERT', '') ?: null,
+    // p3-mtls client identity (CONTRACT.md §6.1). HARNESS-SPEC.md documents
+    // BENCH_CLIENT_CERT/BENCH_CLIENT_KEY as file PATHS, but AxiamClient's
+    // $clientCert/$clientKey params want PEM CONTENT (unlike $customCa above,
+    // which is a path — Guzzle's `verify` takes a bundle path while `cert`/
+    // `ssl_key` take material), so these are read in new_client() below.
+    'client_cert_path' => $env('BENCH_CLIENT_CERT', '') ?: null,
+    'client_key_path' => $env('BENCH_CLIENT_KEY', '') ?: null,
 ];
 
 const OP_KEYS = ['login', 'refresh', 'check_access', 'batch_check'];
@@ -128,7 +135,50 @@ function emit(string $status, array $ops, int $iterations, int $concurrency, str
  */
 function build_ops(array $cfg): array
 {
-    $client = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug'], $cfg['org_slug'], null, $cfg['custom_ca']);
+    // §6.1 client identity, read ONCE here (not per `login` iteration) and
+    // shared by every client this bench builds. The pair is all-or-nothing:
+    // the SDK throws InvalidArgumentException on a half-configured identity
+    // too, but failing here names the env var the operator actually got
+    // wrong. Both null on p0/p1/p2, which leaves the SDK's default
+    // bearer-cookie behaviour untouched (§6.1 rule 5).
+    $certPath = $cfg['client_cert_path'];
+    $keyPath = $cfg['client_key_path'];
+    if (($certPath === null) !== ($keyPath === null)) {
+        throw new \RuntimeException(sprintf(
+            'BENCH_CLIENT_CERT="%s" and BENCH_CLIENT_KEY="%s" must be set together — mTLS needs both (CONTRACT.md §6.1 rule 1)',
+            (string) $certPath,
+            (string) $keyPath,
+        ));
+    }
+    $clientCert = null;
+    $clientKey = null;
+    if ($certPath !== null) {
+        $clientCert = @file_get_contents($certPath);
+        if ($clientCert === false) {
+            throw new \RuntimeException(sprintf('BENCH_CLIENT_CERT="%s" could not be read', $certPath));
+        }
+        $clientKey = @file_get_contents($keyPath);
+        if ($clientKey === false) {
+            throw new \RuntimeException(sprintf('BENCH_CLIENT_KEY="%s" could not be read', $keyPath));
+        }
+    }
+
+    // Single construction site, so the TLS wiring cannot drift between the
+    // shared client and the fresh one `login` builds per iteration —
+    // configuring only the shared client would pass three ops and fail
+    // `login` at the handshake, which reads like a server problem rather than
+    // a harness one.
+    $newClient = static fn (): \Axiam\Sdk\AxiamClient => new \Axiam\Sdk\AxiamClient(
+        $cfg['base_url'],
+        $cfg['tenant_slug'],
+        $cfg['org_slug'],
+        null,
+        $cfg['custom_ca'],
+        $clientCert,
+        $clientKey,
+    );
+
+    $client = $newClient();
     $client->login($cfg['username'], $cfg['password']);
 
     // 3 checks, all using the SAME resource id (batch preserves input order).
@@ -139,8 +189,8 @@ function build_ops(array $cfg): array
     }
 
     return [
-        'login' => static function () use ($cfg): void {
-            $fresh = new \Axiam\Sdk\AxiamClient($cfg['base_url'], $cfg['tenant_slug'], $cfg['org_slug'], null, $cfg['custom_ca']);
+        'login' => static function () use ($cfg, $newClient): void {
+            $fresh = $newClient();
             $fresh->login($cfg['username'], $cfg['password']);
         },
         'refresh' => static fn (): mixed => $client->refresh(),

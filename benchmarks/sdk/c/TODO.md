@@ -27,11 +27,28 @@ CONTRACT.md §1 ops — `axiam_login`, `axiam_refresh`, `axiam_check_access`,
 - `run.sh` degrades to a `pending` record if `cmake`/a C compiler is missing,
   or if the configure/build step fails for any reason (e.g. the sibling SDK
   checkout, or its libcurl/OpenSSL dev headers, are missing).
-- Per HARNESS-SPEC.md, `BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY`/`BENCH_CA_CERT`
-  are **not** wired here (p3-mtls is out of SDK-bench scope, exercised by the
-  k6 scenarios instead) — matching the python/typescript/go/rust reference
-  benches, none of which wire them either, even though the C SDK itself does
-  expose a client-cert option (CONTRACT §6.1).
+- `BENCH_CA_CERT` / `BENCH_CLIENT_CERT` / `BENCH_CLIENT_KEY` are wired, as in
+  every other language bench. The env vars carry file PATHS (HARNESS-SPEC.md)
+  while the C SDK's setters take PEM *content*
+  (`axiam_client_config_set_custom_ca` / `..._set_client_cert`), so `cfg_load`
+  reads the files once and `apply_tls()` applies them at BOTH client
+  construction sites — the shared client and the short-lived one each `login`
+  iteration builds — so the identity cannot drift between them.
+  `run.sh` sources `../_tlspaths.sh` to absolutize the paths before it `cd`s
+  into this directory.
+
+  This paragraph previously claimed the opposite ("**not** wired here…
+  matching the python/typescript/go/rust reference benches, none of which wire
+  them either"). That was stale on both counts: those four benches had all
+  been wired, and the resulting gap made C the only bench that could not reach
+  a TLS profile at all — every p2-tls13 and p3-mtls run died at the handshake
+  with libcurl's "SSL peer certificate or SSH remote key was not OK", because
+  the throwaway server cert is signed by a private CA in no system trust
+  store. `sdk/test-client-cert-wiring.sh` now covers `c` so this cannot
+  regress silently.
+- A bad TLS input is reported as the harness' contractual `status: "error"`
+  record naming the env var at fault — an unreadable path, a non-PEM file, or
+  a half-configured §6.1 identity (cert without key or vice versa).
 
 ## Requirements
 - CMake ≥ 3.16, a C11 compiler (gcc/clang).

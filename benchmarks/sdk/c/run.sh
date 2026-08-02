@@ -12,6 +12,12 @@
 # record (not a crash) if the target is unreachable or login fails.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Resolve the TLS input paths (BENCH_CA_CERT and, for p3-mtls,
+# BENCH_CLIENT_CERT/BENCH_CLIENT_KEY) to absolute paths before `cd "$HERE"`
+# below — profiles/*.env sets them relative to benchmarks/ (the caller's cwd),
+# which no longer resolves once this script cds into sdk/c/.
+# shellcheck disable=SC1091
+source "$HERE/../_tlspaths.sh"; absolutize_tls_paths
 cd "$HERE"
 
 pending() {

@@ -81,7 +81,31 @@ struct Config {
     std::optional<std::string> ca_pem;
     std::optional<std::string> client_cert_pem;
     std::optional<std::string> client_key_pem;
+    // Non-empty when a TLS input is unusable. build_ops() rethrows it inside
+    // main()'s try, so it reaches the operator as the harness' contractual
+    // status:"error" record — load_config() itself must not throw, because it
+    // is called OUTSIDE that try and an escaping exception would terminate
+    // with no record at all.
+    std::string setup_error;
 };
+
+// Resolve one PATH-valued TLS env var to PEM content, recording a message
+// that names the env var if it cannot be read. An unreadable path used to
+// collapse to std::nullopt here, silently downgrading the run to "no client
+// certificate configured" — which under p3-mtls surfaces as an unexplained
+// handshake rejection rather than as the configuration error it is.
+std::optional<std::string> load_pem(const char* var, std::string& setup_error) {
+    const std::string path = env_str(var, "");
+    if (path.empty()) return std::nullopt;
+    std::optional<std::string> pem = read_file(path);
+    if (!pem || pem->empty()) {
+        if (setup_error.empty()) {
+            setup_error = std::string(var) + "=\"" + path + "\" could not be read (or is empty)";
+        }
+        return std::nullopt;
+    }
+    return pem;
+}
 
 Config load_config() {
     Config c;
@@ -95,9 +119,23 @@ Config load_config() {
     c.password = env_str("BENCH_PASSWORD", "Bench@User123!");
     c.action = env_str("BENCH_ACTION", "read");
     c.resource_id = env_str("BENCH_RESOURCE_ID", "bench-resource");
-    c.ca_pem = read_file(env_str("BENCH_CA_CERT", ""));
-    c.client_cert_pem = read_file(env_str("BENCH_CLIENT_CERT", ""));
-    c.client_key_pem = read_file(env_str("BENCH_CLIENT_KEY", ""));
+    c.ca_pem = load_pem("BENCH_CA_CERT", c.setup_error);
+    c.client_cert_pem = load_pem("BENCH_CLIENT_CERT", c.setup_error);
+    c.client_key_pem = load_pem("BENCH_CLIENT_KEY", c.setup_error);
+
+    // CONTRACT.md §6.1 rule 1: the mTLS identity is all-or-nothing. This used
+    // to fall through make_client's `if (cert && key)` and silently drop the
+    // half-configured identity, so a typo in one of the two vars produced a
+    // handshake rejection that named neither. Report it naming BOTH vars —
+    // sdk/test-client-cert-wiring.sh's phase A asserts exactly this for every
+    // language.
+    if (c.setup_error.empty() &&
+        c.client_cert_pem.has_value() != c.client_key_pem.has_value()) {
+        c.setup_error =
+            "BENCH_CLIENT_CERT and BENCH_CLIENT_KEY must be set together (cert=\"" +
+            env_str("BENCH_CLIENT_CERT", "") + "\", key=\"" + env_str("BENCH_CLIENT_KEY", "") +
+            "\") — mTLS needs both (CONTRACT.md §6.1 rule 1)";
+    }
     return c;
 }
 
@@ -281,6 +319,10 @@ OpResult time_op(const OpFn& fn, int iter, int warmup, int conc) {
 // single-flight refresh guard), so concurrent calls through copies of it are
 // safe.
 std::vector<std::pair<std::string, OpFn>> build_ops(const Config& cfg) {
+    // Surface an unusable TLS input before touching the network: main() calls
+    // this from inside its try, so it becomes a status:"error" record naming
+    // the env var at fault instead of a handshake failure that names nothing.
+    if (!cfg.setup_error.empty()) throw std::runtime_error(cfg.setup_error);
     axiam::Client client = make_client(cfg);
     axiam::LoginResult login = client.login(cfg.username, cfg.password);
     if (login.mfa_required) {

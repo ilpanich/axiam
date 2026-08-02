@@ -143,12 +143,36 @@ the bench user — so `check_access(read, BENCH_RESOURCE_ID)` returns `allowed=t
 The server rejects a non-UUID `resource_id` (400), so a bench that batches checks
 must reuse this UUID, not synthesize per-index ids.
 
-**Security-profile limitation.** No AXIAM SDK currently exposes an mTLS
-client-certificate option (only a custom-CA-for-server-verification escape hatch),
-so the SDK benches run the p0–p2 profiles only; the `p3-mtls` profile is exercised
-by the k6 protocol scenarios (`scenarios/lib/config.js` `tlsAuth`), not by the SDK
-harness. `BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY` therefore apply to the k6
-scenarios, not to SDK benches, until the SDKs grow a client-cert option.
+**Security profiles — all four are in scope.** Every SDK now exposes both a
+custom-CA option (CONTRACT.md §6) and an mTLS client-certificate option
+(§6.1), and every language bench wires all three TLS inputs, so the SDK
+harness runs p0 through p3 exactly as the k6 scenarios do.
+
+Both `BENCH_CA_CERT` and the `BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY` pair are
+file **paths**; several SDKs' APIs take PEM *content* instead, in which case
+the bench reads the file itself. Requirements for every bench:
+
+- Apply the TLS material at **every** client construction site. The `login` op
+  builds a fresh client per iteration; a client built without the identity
+  fails the p3 handshake while the shared client succeeds, which shows up as
+  `login`-only errors rather than as the configuration bug it is.
+- Treat a half-configured identity (cert without key, or vice versa) as a
+  setup failure: emit the `status: "error"` record naming **both** env vars
+  (§6.1 rule 1). Silently downgrading to an anonymous connection produces a
+  handshake rejection that names nothing.
+- Treat an unreadable or non-PEM path the same way, naming the env var.
+- If the bench `cd`s before opening these files, absolutize them first by
+  sourcing `sdk/_tlspaths.sh` — `profiles/*.env` sets them relative to the
+  benchmarks root.
+
+`sdk/test-client-cert-wiring.sh` (`just sdk-bench-test`) enforces all of this
+for every language against a stub server that requires a client certificate;
+it needs no AXIAM stack. Run it after touching any bench's TLS wiring.
+
+This section previously stated the opposite — that no SDK exposed a
+client-cert option and that the SDK benches therefore covered p0–p2 only. It
+outlived the SDKs by long enough that a bench written to it (`sdk/c`) shipped
+with no TLS wiring at all and failed every p2/p3 run.
 
 ## Output (stdout, single JSON object) — the stable contract
 

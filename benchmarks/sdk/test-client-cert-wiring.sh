@@ -41,12 +41,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 BENCH="$(cd "$HERE/.." && pwd)"
 CERTS="${BENCH_CERTS_DIR:-$BENCH/profiles/certs}"
 
-# The languages whose benches read BENCH_CLIENT_CERT/BENCH_CLIENT_KEY. c/cpp/
-# swift implement it too but are not listed here: their benches predate this
-# test and have their own build requirements (cmake, a Swift toolchain) — add
-# them once those are part of the expected setup. A language whose toolchain
-# is missing reports SKIP, never FAIL, so listing one is safe either way.
-ALL_SDKS=(csharp go java kotlin php python rust typescript)
+# Every language bench, without exception. c/cpp/swift were held out of this
+# list on the grounds that they "implement it too" and merely had extra build
+# requirements (cmake, a Swift toolchain) — but a language absent from the
+# gate is a language whose wiring nobody checks, and the C bench in fact read
+# NONE of the three TLS env vars at all: it failed every p2-tls13 and p3-mtls
+# run with libcurl's "SSL peer certificate or SSH remote key was not OK" while
+# this test reported the suite green. Their toolchains are present in the
+# normal setup, and a language whose toolchain is missing reports SKIP rather
+# than FAIL, so listing one is safe either way.
+ALL_SDKS=(c cpp csharp go java kotlin php python rust swift typescript)
 if [ "$#" -gt 0 ]; then SDKS=("$@"); else SDKS=("${ALL_SDKS[@]}"); fi
 
 # Languages blocked by a defect OUTSIDE this harness. Their phase-B failure is

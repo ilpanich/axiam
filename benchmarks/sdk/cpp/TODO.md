@@ -27,11 +27,13 @@ stdout (see `../HARNESS-SPEC.md`).
   pattern in `../go/main.go`).
 - Optional `BENCH_CA_CERT` / `BENCH_CLIENT_CERT` / `BENCH_CLIENT_KEY` (PEM
   file paths) are read and wired into `Client::Builder::with_custom_ca()` /
-  `with_client_cert()` when set — the C++ SDK is the one SDK that exposes a
-  client-cert mTLS option (CONTRACT §6.1), so this bench can additionally
-  exercise `p3-mtls` where the other SDK benches cannot (see
-  `../HARNESS-SPEC.md` "Security-profile limitation"). Unset by default; the
-  bench runs fine against p0/p1/p2 without them.
+  `with_client_cert()` when set (CONTRACT §6.1), so this bench drives
+  `p3-mtls` — as every other language bench now does; the claim that C++ was
+  "the one SDK that exposes a client-cert option" is long stale. Unset by
+  default; the bench runs fine against p0/p1 without them. An unreadable path
+  or a half-configured identity is reported as a `status: "error"` record
+  naming the env var(s) at fault rather than silently downgrading to an
+  anonymous connection.
 - On setup failure (server down / bad creds / MFA-enabled bench user /
   missing seed grant / non-UUID `BENCH_RESOURCE_ID`) it emits a zeroed
   `status: "error"` record and exits 0.

@@ -180,7 +180,19 @@ func loadPEM(_ path: String?) throws -> Data? {
 }
 
 func loadClientCertificate(certPath: String?, keyPath: String?) throws -> ClientCertificate? {
-    guard let certPath, let keyPath else { return nil }
+    if certPath == nil && keyPath == nil { return nil }
+    // CONTRACT.md §6.1 rule 1: the mTLS identity is all-or-nothing. The
+    // previous `guard let certPath, let keyPath else { return nil }` treated a
+    // half-configured pair as "no mTLS", so a typo in one of the two vars
+    // silently produced an anonymous handshake — refused by the p3 listener
+    // with an error naming neither var. Fail here instead, naming BOTH
+    // (sdk/test-client-cert-wiring.sh's phase A asserts this for every language).
+    guard let certPath, let keyPath else {
+        throw BenchSetupError(
+            "BENCH_CLIENT_CERT and BENCH_CLIENT_KEY must be set together "
+                + "(cert=\"\(certPath ?? "")\", key=\"\(keyPath ?? "")\") "
+                + "— mTLS needs both (CONTRACT.md §6.1 rule 1)")
+    }
     let certificate = try Data(contentsOf: URL(fileURLWithPath: certPath))
     let privateKey = try Data(contentsOf: URL(fileURLWithPath: keyPath))
     return .pem(certificate: certificate, privateKey: privateKey)

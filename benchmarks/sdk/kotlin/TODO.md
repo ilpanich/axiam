@@ -18,9 +18,13 @@ The Kotlin bench glue is wired to the real SDK (`io.github.ilpanich:axiam-sdk-ko
   `includeBuild` block.
 - **Run:** `./gradlew -q --console=plain run` (this is what `run.sh` execs), or from the
   benchmarks root: `just sdk=kotlin sdk-bench`.
-- **mTLS (p3-mtls):** out of SDK-harness scope for now — see HARNESS-SPEC.md's
-  "Security-profile limitation" (no AXIAM SDK bench currently drives the mTLS profile,
-  even though the Kotlin SDK itself exposes `clientCertificate(...)` per CONTRACT §6.1).
+- **mTLS (p3-mtls):** wired. `Bench.kt` reads `BENCH_CA_CERT` /
+  `BENCH_CLIENT_CERT` / `BENCH_CLIENT_KEY` and threads them into
+  `clientCertificate(...)` per CONTRACT §6.1, at every client construction site.
+  Verified by `just sdk-bench-test` against a stub server that requires a
+  client certificate. (This bullet used to say mTLS was out of SDK-harness
+  scope, citing a HARNESS-SPEC.md note that has since been corrected — all
+  eleven benches drive p3.)
 - **Degradation:** `run.sh` falls back to `../_pending.sh`'s `emit_pending kotlin` if `java`
   or the gradle wrapper is missing, or if the Gradle build fails (e.g. Maven Central / Gradle
   Plugin Portal egress is blocked in a sandboxed environment — the code is still correct and

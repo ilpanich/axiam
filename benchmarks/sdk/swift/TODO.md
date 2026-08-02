@@ -22,10 +22,11 @@ product `AxiamSDK`). It times the four canonical CONTRACT.md §1 ops (`login`, `
 Swift is one of the SDKs that shipped a §6.1 client-certificate mTLS option
 (`AxiamConfig(..., clientCertificate: .pem(certificate:privateKey:))`), so the bench reads
 `BENCH_CA_CERT` / `BENCH_CLIENT_CERT` / `BENCH_CLIENT_KEY` (file paths, per
-`../../docs/security-profiles.md`) and threads them into `AxiamConfig` when present. This is
-ahead of `../HARNESS-SPEC.md`'s current "no SDK exposes mTLS" note, which predates the
-Swift/Kotlin/C/C++ SDKs' addition of §6.1 — update that note when the other language benches
-catch up.
+`../../docs/security-profiles.md`) and threads them into `AxiamConfig` when present. All
+eleven language benches now do this, and `../HARNESS-SPEC.md`'s stale "no SDK exposes mTLS"
+note has been replaced with the requirements they are held to; `just sdk-bench-test` enforces
+them. A half-configured identity (cert without key, or vice versa) is a `status: "error"`
+record naming both env vars — it used to be silently treated as "no mTLS".
 
 ## Running
 - `cd benchmarks && just sdk=swift sdk-bench`

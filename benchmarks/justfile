@@ -248,8 +248,30 @@ bench-up:
     # already in use" (or, for a port docker doesn't publish, the readiness gate
     # just times out after 180s). Common culprit: a dev service (e.g. sage-gui)
     # holding 8443, the default BENCH_TLS_PORT.
+    #
+    # The holder being THIS target's own stack is not a conflict: `docker
+    # compose up` stops the old container before rebinding, so recreating it
+    # under a different overlay works fine. Refusing there made switching
+    # profiles impossible without a manual `bench-down` — and since the same
+    # guard fires on the p0 -> p2/p3 move, the operator's natural next step was
+    # to bench the new profile against the OLD listener, which is precisely
+    # the failure `sdk/_preflight.sh` now catches on the other side.
+    # The compose project name (docker's `label=com.docker.compose.project`)
+    # comes from the compose file's top-level `name:` key — read it from there
+    # rather than hardcoding, so a rename cannot silently turn this check into
+    # a no-op that resurrects the old refuse-to-switch behaviour.
+    COMPOSE_PROJECT="$(sed -n 's/^name:[[:space:]]*//p' "$COMPOSE" | head -1)"
+    COMPOSE_PROJECT="${COMPOSE_PROJECT:-bench-{{target}}}"
+    port_held_by_own_stack() {
+      docker ps --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+        --format '{{{{.Ports}}}}' 2>/dev/null | grep -q ":$1->"
+    }
     check_port() {
       if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2>/dev/null; then
+        if port_held_by_own_stack "$1"; then
+          echo "[bench-up] port $1 ($2) is held by this target's own running stack — recreating it."
+          return 0
+        fi
         echo "[bench-up] port $1 ($2) is already in use on 127.0.0.1." >&2
         echo "           Free it, or override the port, e.g.:" >&2
         echo "             BENCH_TLS_PORT=18443 just target={{target}} profile={{profile}} bench-up" >&2
@@ -567,6 +589,9 @@ sdk-bench:
         exit 1
       fi
     done
+    export BENCH_TARGET="{{target}}"
+    # shellcheck disable=SC1091
+    source sdk/_preflight.sh; preflight_target || exit 1
     echo "[sdk-bench] {{sdk}} @ {{profile}} -> ${BENCH_SCHEME}://${BENCH_HOST:-localhost}:${BENCH_PORT} (records under results/sdk/{{profile}}/)"
     bash sdk/{{sdk}}/run.sh
 
@@ -584,6 +609,10 @@ sdk-bench-all:
     if [ "{{profile}}" = "p3-mtls" ]; then
       echo "[sdk-bench-all] p3-mtls: every bench presents profiles/certs/client.crt (CONTRACT.md §6.1). Verify the wiring without a live stack: just sdk-bench-test" >&2
     fi
+    # One connect attempt before eleven benches spend ~20 minutes producing
+    # eleven differently-worded copies of the same "server unreachable".
+    # shellcheck disable=SC1091
+    source sdk/_preflight.sh; preflight_target || exit 1
     echo "[sdk-bench-all] {{target}} @ {{profile}} -> ${BENCH_SCHEME}://${BENCH_HOST:-localhost}:${BENCH_PORT} (records under ${BENCH_RESULTS_DIR:-results}/sdk/{{profile}}/)"
     bash sdk/run-all.sh
     python3 sdk/collect.py --results "${BENCH_RESULTS_DIR:-results}"

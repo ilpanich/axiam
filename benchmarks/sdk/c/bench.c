@@ -51,11 +51,83 @@ typedef struct {
     char resource_id[128];
     char target[64];
     char profile[64];
+    /* TLS inputs (HARNESS-SPEC.md). The env vars hold file PATHS; the C SDK's
+     * config setters want PEM *content* (axiam/config.h), so cfg_load reads
+     * the files here once and keeps the bytes for the lifetime of the run.
+     * NULL means "not configured for this profile" — p0/p1 leave all three
+     * unset and the wiring below is then a no-op. */
+    char *ca_pem;
+    char *client_cert_pem;
+    char *client_key_pem;
+    /* Non-empty when the TLS inputs are unusable (unreadable file, or a
+     * half-configured §6.1 identity). main() turns this into the harness'
+     * contractual status:"error" record instead of failing later with an
+     * opaque handshake message. */
+    char setup_error[512];
 } cfg_t;
 
 static const char *getenv_or(const char *key, const char *fallback) {
     const char *v = getenv(key);
     return (v && v[0]) ? v : fallback;
+}
+
+/* Read a whole file into a NUL-terminated heap buffer. Returns NULL on any
+ * failure; *why is filled with a short reason the caller can quote. */
+static char *read_file_alloc(const char *path, const char **why) {
+    FILE *fh = fopen(path, "rb");
+    if (!fh) {
+        *why = "could not be opened";
+        return NULL;
+    }
+    char *buf = NULL;
+    size_t len = 0, cap = 0;
+    for (;;) {
+        if (len + 4096 + 1 > cap) {
+            size_t next = cap ? cap * 2 : 8192;
+            char *grown = (char *)realloc(buf, next);
+            if (!grown) {
+                free(buf);
+                fclose(fh);
+                *why = "out of memory while reading";
+                return NULL;
+            }
+            buf = grown;
+            cap = next;
+        }
+        size_t n = fread(buf + len, 1, 4096, fh);
+        len += n;
+        if (n < 4096) break;
+    }
+    int failed = ferror(fh);
+    fclose(fh);
+    if (failed) {
+        free(buf);
+        *why = "could not be read";
+        return NULL;
+    }
+    if (!buf || len == 0) {
+        free(buf);
+        *why = "is empty";
+        return NULL;
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* Resolve one PATH-valued TLS env var to PEM content. Returns 0 on success
+ * (out may be left NULL when the var is unset — not an error), non-zero after
+ * writing a message naming the env var into cfg->setup_error. */
+static int cfg_load_pem(cfg_t *cfg, const char *var, char **out) {
+    const char *path = getenv_or(var, "");
+    if (!path[0]) return 0;
+    const char *why = "could not be read";
+    char *pem = read_file_alloc(path, &why);
+    if (!pem) {
+        snprintf(cfg->setup_error, sizeof(cfg->setup_error), "%s=\"%s\" %s", var, path, why);
+        return 1;
+    }
+    *out = pem;
+    return 0;
 }
 
 static long getenv_long(const char *key, long fallback) {
@@ -80,6 +152,56 @@ static void cfg_load(cfg_t *cfg) {
     snprintf(cfg->resource_id, sizeof(cfg->resource_id), "%s", getenv_or("BENCH_RESOURCE_ID", "bench-resource"));
     snprintf(cfg->target, sizeof(cfg->target), "%s", getenv_or("BENCH_TARGET", "axiam"));
     snprintf(cfg->profile, sizeof(cfg->profile), "%s", getenv_or("BENCH_PROFILE", "p0-plaintext"));
+
+    /* TLS inputs. Without these the bench cannot reach any https:// profile:
+     * the throwaway server cert is signed by the profile's private CA, which
+     * is in no system trust store, so every p2/p3 run died at the handshake
+     * with libcurl's "SSL peer certificate or SSH remote key was not OK" —
+     * and under p3 the listener additionally REQUIRES a client certificate
+     * (AXIAM__SERVER__TLS__CLIENT_AUTH=required), so a bench that presents
+     * none is refused before any HTTP request exists. */
+    if (cfg_load_pem(cfg, "BENCH_CA_CERT", &cfg->ca_pem)) return;
+    if (cfg_load_pem(cfg, "BENCH_CLIENT_CERT", &cfg->client_cert_pem)) return;
+    if (cfg_load_pem(cfg, "BENCH_CLIENT_KEY", &cfg->client_key_pem)) return;
+
+    /* CONTRACT.md §6.1 rule 1: the mTLS identity is all-or-nothing. Reject a
+     * half-configured pair here, naming BOTH env vars, rather than let the
+     * SDK reject it later with a message that does not say which one the
+     * operator got wrong (this is what sdk/test-client-cert-wiring.sh's
+     * phase A asserts for every language). */
+    if (!cfg->client_cert_pem != !cfg->client_key_pem) {
+        snprintf(cfg->setup_error, sizeof(cfg->setup_error),
+                 "BENCH_CLIENT_CERT and BENCH_CLIENT_KEY must be set together (cert=\"%s\", "
+                 "key=\"%s\") — mTLS needs both (CONTRACT.md §6.1 rule 1)",
+                 getenv_or("BENCH_CLIENT_CERT", ""), getenv_or("BENCH_CLIENT_KEY", ""));
+    }
+}
+
+static void cfg_dispose(cfg_t *cfg) {
+    free(cfg->ca_pem);
+    free(cfg->client_cert_pem);
+    free(cfg->client_key_pem);
+    cfg->ca_pem = cfg->client_cert_pem = cfg->client_key_pem = NULL;
+}
+
+/* Apply the profile's TLS material to a freshly-allocated client config.
+ * Single site so the shared client and the short-lived ones `login` builds
+ * per iteration cannot drift apart — under p3-mtls a client built without the
+ * identity fails the handshake, which would surface as `login` errors only.
+ * Returns 0 on success; on failure writes the reason into `err_out`. */
+static int apply_tls(axiam_client_config_t *c, const cfg_t *cfg, char *err_out, size_t err_sz) {
+    if (cfg->ca_pem && axiam_client_config_set_custom_ca(c, cfg->ca_pem) != AXIAM_OK) {
+        if (err_out) snprintf(err_out, err_sz, "BENCH_CA_CERT is not valid PEM (CONTRACT.md §6)");
+        return 1;
+    }
+    if (cfg->client_cert_pem && cfg->client_key_pem &&
+        axiam_client_config_set_client_cert(c, cfg->client_cert_pem, cfg->client_key_pem) != AXIAM_OK) {
+        if (err_out)
+            snprintf(err_out, err_sz,
+                     "BENCH_CLIENT_CERT/BENCH_CLIENT_KEY are not valid PEM (CONTRACT.md §6.1)");
+        return 1;
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -178,6 +300,10 @@ static int op_login(void *ctxp) {
     axiam_client_config_set_base_url(c, cfg->base_url);
     axiam_client_config_set_tenant_slug(c, cfg->tenant_slug);
     axiam_client_config_set_org_slug(c, cfg->org_slug);
+    if (apply_tls(c, cfg, NULL, 0) != 0) {
+        axiam_client_config_free(c);
+        return 1;
+    }
 
     axiam_error_t err;
     axiam_client_t *client = axiam_client_new(c, &err);
@@ -299,7 +425,18 @@ static void emit_error(const cfg_t *cfg, const char *notes) {
 
 int main(void) {
     cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
     cfg_load(&cfg);
+
+    /* An unusable TLS input is a setup failure, not a benchmark result: emit
+     * the contractual status:"error" record naming the env var at fault
+     * (HARNESS-SPEC.md) rather than proceeding into a handshake that can only
+     * fail with a message that does not identify the cause. */
+    if (cfg.setup_error[0]) {
+        emit_error(&cfg, cfg.setup_error);
+        cfg_dispose(&cfg);
+        return 0;
+    }
 
     int iterations = (int)getenv_long("SDK_BENCH_ITERATIONS", 2000);
     int warmup = (int)getenv_long("SDK_BENCH_WARMUP", 200);
@@ -320,6 +457,15 @@ int main(void) {
     axiam_client_config_set_base_url(shared_cfg, cfg.base_url);
     axiam_client_config_set_tenant_slug(shared_cfg, cfg.tenant_slug);
     axiam_client_config_set_org_slug(shared_cfg, cfg.org_slug);
+    {
+        char tls_err[512] = {0};
+        if (apply_tls(shared_cfg, &cfg, tls_err, sizeof(tls_err)) != 0) {
+            axiam_client_config_free(shared_cfg);
+            emit_error(&cfg, tls_err);
+            cfg_dispose(&cfg);
+            return 0;
+        }
+    }
 
     axiam_error_t err;
     axiam_client_t *client = axiam_client_new(shared_cfg, &err);
@@ -340,6 +486,7 @@ int main(void) {
         axiam_login_result_dispose(&login);
         axiam_client_free(client);
         emit_error(&cfg, notes);
+        cfg_dispose(&cfg);
         return 0;
     }
     axiam_login_result_dispose(&login);
@@ -360,6 +507,7 @@ int main(void) {
                  "resource/role/grant (see runner/seed.sh)", cfg.action, cfg.resource_id);
         axiam_client_free(client);
         emit_error(&cfg, notes);
+        cfg_dispose(&cfg);
         return 0;
     }
 
@@ -386,5 +534,6 @@ int main(void) {
                 "serial loop (concurrency=1) for all four ops, not just refresh — "
                 "see HARNESS-SPEC.md's allowance for a simple C harness; "
                 "SDK_BENCH_CONCURRENCY was read but not applied");
+    cfg_dispose(&cfg);
     return 0;
 }

@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
 	"sort"
@@ -226,9 +227,32 @@ func buildOps(ctx context.Context, cfg config) (map[string]opFn, error) {
 		checks[i] = axiam.AccessCheck{Action: cfg.action, ResourceID: cfg.resourceID}
 	}
 
+	// The `login` op builds and discards a client per iteration, and the SDK
+	// exposes no Close(): buildHTTPClient CLONES whatever transport it is
+	// given (so CloseIdleConnections on our copy would close an unused pool),
+	// and each client therefore ends the iteration owning a live keep-alive
+	// connection that nothing reaps until IdleConnTimeout (90s) expires.
+	// Under p0 that merely wastes sockets, but under p2/p3 every one of them
+	// is a held-open TLS session on a CPU-capped server: 2200 iterations at
+	// concurrency 16 drove handshake latency past net/http's 10s
+	// TLSHandshakeTimeout and produced a reproducible 224 `login` errors on
+	// BOTH TLS profiles (0 at p0) — measured as failures of AXIAM rather than
+	// of this harness.
+	//
+	// Login is a single request (login.go), so the connection can never be
+	// reused anyway: disabling keep-alives makes it close with the response,
+	// which is what "discard the client" is supposed to mean. This is the Go
+	// equivalent of python's `fresh.close()` / the C bench's
+	// axiam_client_free(). Transport.Clone preserves DisableKeepAlives, so it
+	// survives the SDK's clone.
+	loginTransport := http.DefaultTransport.(*http.Transport).Clone()
+	loginTransport.DisableKeepAlives = true
+	loginOpts := append(append([]axiam.Option{}, opts...),
+		axiam.WithHTTPClient(&http.Client{Transport: loginTransport}))
+
 	ops := map[string]opFn{
 		"login": func(ctx context.Context) error {
-			fresh, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug, opts...)
+			fresh, err := axiam.NewClient(cfg.baseURL, cfg.tenantSlug, loginOpts...)
 			if err != nil {
 				return err
 			}
@@ -261,7 +285,9 @@ func timeOp(ctx context.Context, fn opFn, iter, warmup, conc int) opResult {
 	var errs int64
 	for i := 0; i < warmup; i++ {
 		if err := fn(ctx); err != nil {
-			atomic.AddInt64(&errs, 1)
+			if n := atomic.AddInt64(&errs, 1); n <= 3 {
+				fmt.Fprintf(os.Stderr, "[go] op error #%d (warm-up): %v\n", n, err)
+			}
 		}
 	}
 
@@ -282,7 +308,14 @@ func timeOp(ctx context.Context, fn opFn, iter, warmup, conc int) opResult {
 			}
 			t0 := time.Now()
 			if err := fn(ctx); err != nil {
-				atomic.AddInt64(&errs, 1)
+				// Report the first few verbatim on stderr (run-all.sh files it
+				// under results/sdk/<profile>/go.log). The JSON record only
+				// carries a COUNT, and a bare "login: 224 errors" is not
+				// actionable — the p2/p3 handshake-timeout regression this
+				// guards against was invisible for exactly that reason.
+				if n := atomic.AddInt64(&errs, 1); n <= 3 {
+					fmt.Fprintf(os.Stderr, "[go] op error #%d: %v\n", n, err)
+				}
 				continue
 			}
 			ms := float64(time.Since(t0).Nanoseconds()) / 1e6

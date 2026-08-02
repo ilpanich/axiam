@@ -92,6 +92,11 @@ export interface BenchScenario {
   bars: BenchBar[];
   /** One-line, measured-tone takeaway shown under the chart. */
   takeaway: string;
+  /**
+   * Optional comparability warning shown as a chip next to the title — used
+   * where the cells are not a like-for-like race (e.g. protocol-variant).
+   */
+  note?: string;
 }
 
 /**
@@ -104,4 +109,16 @@ export interface BenchEfficiencyRow {
   perCore: [string, string, string];
   /** CPU-milliseconds per request (lower is better). */
   cpuMs: [string, string, string];
+}
+
+/**
+ * One scenario's resource-usage measurement across the three targets, in
+ * `[AXIAM, Keycloak, Zitadel]` order. `null` means the target has no valid
+ * cell for that scenario (e.g. Zitadel's excluded refresh flow).
+ */
+export interface BenchResourceRow {
+  scenario: string;
+  values: [number, number | null, number | null];
+  /** Optional footnote marker appended to the scenario label. */
+  marker?: string;
 }

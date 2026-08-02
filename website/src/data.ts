@@ -4,6 +4,7 @@ import type {
   Phase,
   BenchScenario,
   BenchEfficiencyRow,
+  BenchResourceRow,
 } from "./types";
 
 /**
@@ -760,11 +761,12 @@ export const PHASES: Phase[] = [
 
 /**
  * Benchmark scenarios, transcribed from
- * `benchmarks/PUBLIC_BENCH_ANALYSIS.md` (third draft, run 3 of 2026-07-25/26,
- * AXIAM 1.0.0-alpha19 pulled release image vs Keycloak 26.7.0 vs Zitadel
- * v4.15.2). All figures are the p0-plaintext profile from the capped matrix
- * (§3/§7), **median of 3 runs** (per-cell throughput spread ±0.1–2.8%). Only
- * valid, comparable cells are charted.
+ * `benchmarks/PUBLIC_BENCH_ANALYSIS.md` (fifth draft, run 4 of 2026-08-01/02,
+ * AXIAM post-fix build vs Keycloak 26.7.0 vs Zitadel v4.15.2) — the first
+ * matrix measured after the shared rate-limit write-behind fix. All figures
+ * are the p0-plaintext profile from the capped matrix (§1/§8), **median of 3
+ * runs** (per-cell throughput spread ±0.2–2.8% on AXIAM cells). Only valid
+ * cells are charted; comparability labels are carried onto the chart.
  */
 export const BENCH_SCENARIOS: BenchScenario[] = [
   {
@@ -772,48 +774,59 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     title: "Machine-to-machine token issuance",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 1823, display: "1,823", axiam: true },
-      { target: "Zitadel", value: 423, display: "423" },
-      { target: "Keycloak", value: 351, display: "351" },
+      { target: "AXIAM", value: 2727, display: "2,727", axiam: true },
+      { target: "Zitadel", value: 425, display: "425" },
+      { target: "Keycloak", value: 354, display: "354" },
     ],
     takeaway:
-      "AXIAM issues 4.3× more tokens/s than Zitadel and 5.2× more than Keycloak, at a p99 of 36 ms — reproduced within ±0.1% across three runs on the pinned release image.",
+      "AXIAM issues 7.7× more tokens/s than Keycloak and 6.4× more than Zitadel — up from 5.2×/4.3× in run 3, entirely from removing the synchronous rate-limit write (+50% on this endpoint). Reproduced within ±0.4% across three runs.",
   },
   {
     id: "introspection",
     title: "Token introspection (RFC 7662)",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 2230, display: "2,230", axiam: true },
-      { target: "Keycloak", value: 1908, display: "1,908" },
-      { target: "Zitadel", value: 910, display: "910" },
+      { target: "AXIAM", value: 4387, display: "4,387", axiam: true },
+      { target: "Keycloak", value: 1860, display: "1,860" },
+      { target: "Zitadel", value: 932, display: "932" },
     ],
     takeaway:
-      "The closest head-to-head: AXIAM leads Keycloak by 1.17× (2.45× vs Zitadel) with a 3× better p95 (27 vs 82 ms) and zero TLS penalty (−0.2%).",
+      "Run 3's closest head-to-head is no longer close: +97% post-fix puts AXIAM at 2.4× Keycloak and 4.7× Zitadel, with a 1.7× better p95 (48 vs 82 ms) and a near-zero TLS penalty (−1.6%).",
   },
   {
     id: "jwks",
     title: "JWKS fetch (RFC 7517)",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 27784, display: "27,784", axiam: true },
-      { target: "Keycloak", value: 3764, display: "3,764" },
-      { target: "Zitadel", value: 2071, display: "2,071" },
+      { target: "AXIAM", value: 26371, display: "26,371", axiam: true },
+      { target: "Keycloak", value: 4565, display: "4,565" },
+      { target: "Zitadel", value: 2096, display: "2,096" },
     ],
     takeaway:
-      "A 7–13× gap — and AXIAM's server sat under its CPU cap while the load generator neared its own limit, so its true ceiling is higher still.",
+      "A 5.8–12.6× gap — and still limited by the load generator rather than by AXIAM: k6 itself burned ~5 CPU cores while the AXIAM server sat at 1.6 of its 2, so the true ceiling is higher.",
   },
   {
     id: "userinfo",
-    title: "OIDC userinfo",
+    title: "OIDC userinfo — REST",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 5008, display: "5,008", axiam: true },
-      { target: "Keycloak", value: 3742, display: "3,742" },
-      { target: "Zitadel", value: 943, display: "943" },
+      { target: "AXIAM", value: 4547, display: "4,547", axiam: true },
+      { target: "Keycloak", value: 3783, display: "3,783" },
+      { target: "Zitadel", value: 1000, display: "1,000" },
     ],
     takeaway:
-      "AXIAM leads throughput (1.34× Keycloak, 5.3× Zitadel) while its database is saturated — with the DB uncapped it reaches 7,457 req/s. On whole-stack CPU per request Keycloak edges it here; on server-only CPU AXIAM's server is 2.1× cheaper.",
+      "AXIAM leads 1.2× Keycloak and 4.5× Zitadel while its database is pegged — uncapped to 4 DB cores the same cell reaches 7,215 req/s. On whole-stack req/s-per-core Keycloak wins this cell; on server-only CPU per request AXIAM is 2.1× cheaper. Both are published.",
+  },
+  {
+    id: "userinfo_grpc",
+    title: "OIDC userinfo — gRPC",
+    unit: "throughput · requests/s · plaintext · median of 3",
+    bars: [
+      { target: "AXIAM", value: 12665, display: "12,665", axiam: true },
+      { target: "Zitadel", value: 180, display: "180" },
+    ],
+    takeaway:
+      "The biggest single change in this run: 12,665 identity reads/s at a 6 ms p95 — 2.8× AXIAM's own REST path and 3.3× Keycloak's best number — where run 3 measured 3,294/s (every gRPC call used to pay the rate-limit write). Zitadel's own gRPC userinfo measured 180–185/s on the same harness, 82% below its REST cell; Keycloak exposes no gRPC equivalent.",
   },
   {
     id: "password_login",
@@ -821,16 +834,29 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
       { target: "AXIAM", value: 69, display: "69", axiam: true },
-      { target: "Keycloak", value: 52, display: "52" },
-      { target: "Zitadel", value: 2.0, display: "2.0" },
+      { target: "Keycloak", value: 44, display: "(44)" },
+      { target: "Zitadel", value: 2.0, display: "(2)" },
     ],
     takeaway:
-      "Keycloak's plaintext login cell is valid for the first time (52 req/s) — and AXIAM still leads at 69 req/s with a 774 ms p95, the only target under the 2 s gate at both TLS profiles. Hash configuration dominates this cell — Zitadel's default bcrypt cost is simply very expensive.",
+      "AXIAM is the only target valid at both profiles — 69 req/s at a 774 ms p95, on ≤ 140 MiB of server memory. Parenthesized numbers failed our own validity gate and are shown only for transparency: Keycloak completed 1 of 3 runs cleanly even at the raised 2 GiB cap (it wants ~3.5–4 GiB under sustained hashing; next run gives it exactly that, labeled), and Zitadel's default bcrypt cost puts it at ~22 s p50.",
+    note: "2 of 3 targets excluded by the validity gate",
+  },
+  {
+    id: "token_refresh",
+    title: "Session / token refresh",
+    unit: "throughput · requests/s · plaintext · median of 3",
+    bars: [
+      { target: "AXIAM", value: 839, display: "839", axiam: true },
+      { target: "Keycloak", value: 377, display: "377" },
+    ],
+    takeaway:
+      "Informational, not a like-for-like race: AXIAM has no ROPC/password grant by design, so its cell measures session-cookie refresh (CSRF double-submit, single-use rotation) while Keycloak's measures the OAuth2 refresh-token grant. Both are real, both rotate; new this run is that AXIAM's cell is a full median-of-3 (run 3 had a single confirm run). Zitadel needs an offline_access flow the harness doesn't implement.",
+    note: "protocol-variant — two different protocols doing a related job",
   },
 ];
 
 /**
- * Whole-stack efficiency, head-to-head (p0-plaintext, median-of-3).
+ * Whole-stack efficiency, head-to-head (p0-plaintext, median-of-3, run 4).
  * `req/s per core` is higher-is-better; `cpu·ms/req` is lower-is-better.
  * AXIAM's figures still carry its audit broker and, on some cells, a
  * saturated database inside them — which is why Keycloak edges it on the
@@ -838,32 +864,79 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
  * there; both breakdowns are published in the raw report).
  */
 export const BENCH_EFFICIENCY: BenchEfficiencyRow[] = [
-  { scenario: "Client credentials", perCore: ["637", "170", "115"], cpuMs: ["1.57", "5.89", "8.69"] },
-  { scenario: "Token introspection", perCore: ["907", "807", "248"], cpuMs: ["1.10", "1.24", "4.04"] },
-  { scenario: "JWKS fetch", perCore: ["16,850", "1,881", "698"], cpuMs: ["0.059", "0.53", "1.43"] },
-  { scenario: "OIDC userinfo", perCore: ["1,452", "1,873", "333"], cpuMs: ["0.69", "0.53", "3.00"] },
+  { scenario: "Client credentials", perCore: ["835", "171", "122"], cpuMs: ["1.20", "5.84", "8.20"] },
+  { scenario: "Token introspection", perCore: ["1,288", "786", "250"], cpuMs: ["0.78", "1.27", "4.00"] },
+  { scenario: "JWKS fetch", perCore: ["16,184", "2,278", "703"], cpuMs: ["0.06", "0.44", "1.42"] },
+  { scenario: "OIDC userinfo", perCore: ["1,376", "1,891", "348"], cpuMs: ["0.73", "0.53", "2.88"] },
 ];
 
 /**
  * AXIAM-only authorization decisions (no head-to-head — Keycloak and Zitadel
  * expose no equivalent endpoint). Each check is a full RBAC evaluation against
  * live data. Values are p0-plaintext throughput (requests/s, median-of-3; the
- * cache-ON rows are a labeled single-run sensitivity pass). The former batch
- * bars are withdrawn: run 3 found a measurement-order artifact that had
- * corrupted every batch cell (see the page's honesty section).
+ * cache-ON rows are a labeled best-case sensitivity pass, not the default).
  */
 export const BENCH_AUTHZ: BenchScenario = {
   id: "authz",
   title: "Authorization decisions (AXIAM-only)",
   unit: "throughput · requests/s · plaintext",
   bars: [
-    { target: "REST · single", value: 737, display: "737", axiam: true },
-    { target: "gRPC · single", value: 603, display: "603", axiam: true },
-    { target: "REST · cache ON", value: 2322, display: "2,322", axiam: true },
-    { target: "gRPC · cache ON", value: 1822, display: "1,822", axiam: true },
+    { target: "REST · single", value: 753, display: "753", axiam: true },
+    { target: "gRPC · single", value: 887, display: "887", axiam: true },
+    { target: "REST · cache ON", value: 791, display: "791", axiam: true },
+    { target: "gRPC · cache ON", value: 11598, display: "11,598", axiam: true },
   ],
   takeaway:
-    "Single checks run at database saturation (~740/s on a 2-core DB; 1,013/s with 4 DB cores). Enabling the optional decision cache triples them on the same hardware. Batch numbers are withdrawn pending re-measurement — a measurement-order artifact corrupted every previous batch cell, and the one clean cell so far measured 852 batches/s (≈4,260 checks/s), i.e. batch outperforming singles as designed.",
+    "gRPC now leads REST by 18% at half the p50 — run 3 had gRPC 18% behind, and that whole deficit was the rate-limit write. Both single-check paths are database-saturated at the 2-core DB cap and scale to 1,434 / 1,678 req/s with 4 DB cores. The optional decision cache is charted at its best case: 13.1× on gRPC at a favorable keyspace, but only +5% on REST, where per-request session-cookie validation (a database read the cache deliberately doesn't cover) becomes the limiter. It stays off by default; the realistic-keyspace measurement is +32%. Batch: the shipped `coalesced` default measured 744 batch ops/s = 3,721 checks/s (4.98× singles) — carried from run 3, because this run's batch cells accidentally exercised the non-default `concurrent` strategy.",
 };
+
+/**
+ * Resource usage during the tests (run 4 §5) — p0-plaintext, median-of-3,
+ * every server container capped identically at 2 CPUs / 2,048 MiB.
+ * Values are `[AXIAM, Keycloak, Zitadel]`.
+ */
+
+/** Per-server peak RSS in MiB, by scenario. */
+export const BENCH_MEMORY_PEAK: BenchResourceRow[] = [
+  { scenario: "JWKS fetch", values: [98, 973, 163] },
+  { scenario: "Client credentials", values: [106, 979, 147] },
+  { scenario: "Token introspection", values: [104, 795, 161] },
+  { scenario: "Token refresh", values: [106, 804, null] },
+  { scenario: "OIDC userinfo", values: [105, 806, 162] },
+  { scenario: "Password login", values: [140, 796, 131], marker: "*" },
+];
+
+/** Worst-case server RSS observed anywhere in the run, in MiB. */
+export const BENCH_MEMORY_WORST: BenchResourceRow = {
+  scenario: "Worst case, whole run",
+  values: [172, 1070, 216],
+};
+
+/** The identical per-server container memory cap, in MiB. */
+export const BENCH_MEMORY_CAP = 2048;
+
+/** Whole-stack memory range (server + database + broker), in MiB. */
+export const BENCH_STACK_MEMORY: [string, string, string][] = [
+  ["AXIAM", "415–590 MiB", "server + SurrealDB + RabbitMQ"],
+  ["Keycloak", "814–1,129 MiB", "server + PostgreSQL"],
+  ["Zitadel", "293–443 MiB", "server + PostgreSQL"],
+];
+
+/** CPU-milliseconds per request, whole stack unless noted (lower is better). */
+export const BENCH_CPU_PER_REQ: BenchResourceRow[] = [
+  { scenario: "Client credentials", values: [1.2, 5.84, 8.2] },
+  { scenario: "Token introspection", values: [0.78, 1.27, 4.0] },
+  { scenario: "JWKS fetch", values: [0.06, 0.44, 1.42] },
+  { scenario: "OIDC userinfo", values: [0.73, 0.53, 2.88] },
+  { scenario: "OIDC userinfo (server only)", values: [0.25, 0.53, 0.86] },
+];
+
+/** Requests per second per GiB of whole-stack RAM (higher is better). */
+export const BENCH_RPS_PER_GIB: BenchResourceRow[] = [
+  { scenario: "Client credentials", values: [5988, 338, 1218] },
+  { scenario: "Token introspection", values: [8709, 1939, 2199] },
+  { scenario: "OIDC userinfo", values: [8948, 3999, 2312] },
+  { scenario: "JWKS fetch", values: [60723, 5741, 7330] },
+];
 
 export const GITHUB_URL = "https://github.com/ilpanich/axiam";

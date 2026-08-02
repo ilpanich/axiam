@@ -390,6 +390,20 @@ SETTLE_PROBE_THR_USED="$BENCH_SETTLE_PROBE_THR"  # recorded in meta.json as sett
 
 _CANARY_JAR=""
 
+# p3-mtls: the server REQUIRES a verified client cert on the REST surface, so
+# every probe request needs one exactly like seed.sh's `_CURL_MTLS` and k6's
+# `tlsAuth`. Without it the TLS handshake is rejected before any HTTP request
+# exists: curl writes `000` for http_code, burst_probe() counts zero OK
+# samples, and the gate reports "0.0 ops/s, p50 999999ms, n=0" every attempt
+# until it burns the full BENCH_SETTLE_TIMEOUT_SECS — a hang that looks like a
+# never-clearing clamp but is really an auth-layer failure. BENCH_CLIENT_CERT/
+# KEY come from the profile env sourced above, already absolutized via
+# BENCH_CERTS_DIR. Empty for p0/p1/p2, where the array expands to nothing.
+_SETTLE_CURL_MTLS=()
+if [ -n "${BENCH_CLIENT_CERT:-}" ] && [ -n "${BENCH_CLIENT_KEY:-}" ]; then
+  _SETTLE_CURL_MTLS=(--cert "$BENCH_CLIENT_CERT" --key "$BENCH_CLIENT_KEY")
+fi
+
 # Lazily logs in once (as the seeded bench user) and reuses the cookie jar +
 # CSRF token for every probe tick thereafter — a fresh login per burst would
 # itself be an expensive, different signal from the endpoint under test.
@@ -397,7 +411,7 @@ _ensure_axiam_session() {
   [ -s "$_CANARY_JAR" ] && return 0
   _CANARY_JAR="$(mktemp)"
   if [ -n "${BENCH_USERNAME:-}" ] && [ -n "${BENCH_PASSWORD:-}" ] && [ -n "${BENCH_ORG_SLUG:-}" ]; then
-    curl -sSk --max-time 5 -c "$_CANARY_JAR" -o /dev/null -X POST "$BASE/api/v1/auth/login" \
+    curl -sSk --max-time 5 "${_SETTLE_CURL_MTLS[@]}" -c "$_CANARY_JAR" -o /dev/null -X POST "$BASE/api/v1/auth/login" \
       -H "Content-Type: application/json" \
       -d "{\"org_slug\":\"${BENCH_ORG_SLUG}\",\"tenant_slug\":\"${BENCH_TENANT_SLUG:-default}\",\"username_or_email\":\"${BENCH_USERNAME}\",\"password\":\"${BENCH_PASSWORD}\"}" \
       2>/dev/null || true
@@ -417,7 +431,7 @@ _burst_worker() {
      && awk -F'\t' '$6=="axiam_csrf"{f=1} END{exit !f}' "$_CANARY_JAR" 2>/dev/null; then
     local csrf; csrf="$(awk -F'\t' '$6=="axiam_csrf"{v=$7} END{print v}' "$_CANARY_JAR")"
     while [ "$(date +%s)" -lt "$deadline" ]; do
-      curl -sSk --max-time 5 -b "$_CANARY_JAR" -o /dev/null -w '%{http_code}\t%{time_total}\n' \
+      curl -sSk --max-time 5 "${_SETTLE_CURL_MTLS[@]}" -b "$_CANARY_JAR" -o /dev/null -w '%{http_code}\t%{time_total}\n' \
         -X POST "$BASE/api/v1/authz/check" -H "Content-Type: application/json" \
         -H "X-CSRF-Token: $csrf" -d "{\"action\":\"read\",\"resource_id\":\"${BENCH_RESOURCE_ID}\"}" \
         2>/dev/null >> "$outfile"
@@ -433,7 +447,7 @@ _burst_worker() {
     zitadel)  url="$BASE/oauth/v2/keys" ;;
   esac
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    curl -sSk --max-time 5 -o /dev/null -w '%{http_code}\t%{time_total}\n' "$url" 2>/dev/null >> "$outfile"
+    curl -sSk --max-time 5 "${_SETTLE_CURL_MTLS[@]}" -o /dev/null -w '%{http_code}\t%{time_total}\n' "$url" 2>/dev/null >> "$outfile"
   done
 }
 
@@ -477,7 +491,7 @@ settle_gate() {
   fi
   echo "[run] post-seed settle gate v2: concurrent burst probe (${BENCH_SETTLE_BURST_VUS} workers x ${BENCH_SETTLE_BURST_SECS}s), needs >= ${BENCH_SETTLE_PROBE_THR} ops/s OR p50 < ${BENCH_SETTLE_PROBE_P50_MS}ms under that concurrency; retry every ${BENCH_SETTLE_RETRY_SECS}s; hard timeout ${BENCH_SETTLE_TIMEOUT_SECS}s"
   echo "      — a serial 1 rps canary cannot see this: the clamp is a CONCURRENCY ceiling (~44 ops/s in-window vs ~730-750 ops/s settled), not per-request latency (the ~22ms serialized unit is 'fast' at 1 rps either way). See 'Post-seed settle gate v2' in docs/methodology.md and PRIVATE_BENCH_ANALYSIS.md §1. Set BENCH_SETTLE=0 to skip."
-  local start_ts now_ts result ops p50 nok attempt=0
+  local start_ts now_ts result ops p50 nok attempt=0 zero_streak=0
   start_ts=$(date +%s)
   while :; do
     attempt=$((attempt + 1))
@@ -488,6 +502,25 @@ settle_gate() {
     now_ts=$(date +%s)
     SETTLE_WAIT_SECS=$(( now_ts - start_ts ))
     echo "[run] settle probe #$attempt: ${ops} ops/s, p50 ${p50}ms, n=${nok} samples (elapsed ${SETTLE_WAIT_SECS}s)"
+    # A probe that completes ZERO requests is not a slow server — it is a
+    # broken probe (TLS handshake refused, wrong port/scheme, missing client
+    # cert, server down). "0.0 ops/s, n=0" is indistinguishable from a
+    # never-clearing clamp in the pass/fail check below, so without this the
+    # gate silently burns the whole BENCH_SETTLE_TIMEOUT_SECS on a condition
+    # no amount of waiting can fix. Bail out after two consecutive empty
+    # probes and print the actual transport error curl reports.
+    if [ "${nok:-0}" -eq 0 ]; then
+      zero_streak=$((zero_streak + 1))
+      if [ "$zero_streak" -ge 2 ]; then
+        SETTLE_TIMEOUT_HIT=1
+        echo "[run] WARN: settle probe completed ZERO requests twice in a row — the probe cannot reach $BASE at all (this is a connectivity/auth failure, not the post-seed clamp; waiting longer will not help). Diagnostic:" >&2
+        curl -sSk --max-time 5 "${_SETTLE_CURL_MTLS[@]}" -o /dev/null -w '      http_code=%{http_code} tls=%{ssl_verify_result}\n' "$BASE/health" 2>&1 | sed 's/^/      /' >&2
+        echo "[run] WARN: giving up on the gate after ${SETTLE_WAIT_SECS}s and proceeding (settle_timeout: true in meta.json) — the cell itself will fail loudly if the target really is unreachable." >&2
+        break
+      fi
+    else
+      zero_streak=0
+    fi
     if awk -v o="$ops" -v t="$BENCH_SETTLE_PROBE_THR" 'BEGIN{exit !(o>=t)}' \
        || awk -v p="$p50" -v m="$BENCH_SETTLE_PROBE_P50_MS" 'BEGIN{exit !(p<m)}'; then
       echo "[run] settle gate: PASSED (${ops} ops/s / p50 ${p50}ms) — proceeding after ${SETTLE_WAIT_SECS}s"

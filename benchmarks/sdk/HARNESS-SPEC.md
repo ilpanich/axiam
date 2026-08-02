@@ -69,9 +69,67 @@ BENCH_ACTION          (default "read")      # action for check_access/batch_chec
 BENCH_RESOURCE_ID     (seeded resource UUID) # subject of the authz checks
 BENCH_SUBJECT_ID      (seeded user UUID)      # the bench user's id
 BENCH_CA_CERT         # custom CA for server verification under TLS profiles
+BENCH_CLIENT_CERT     # PEM client-certificate chain, p3-mtls only (CONTRACT.md §6.1)
+BENCH_CLIENT_KEY      # its PEM private key,          p3-mtls only (CONTRACT.md §6.1)
 SDK_BENCH_ITERATIONS  (default 2000)
 SDK_BENCH_WARMUP      (default 200)
 SDK_BENCH_CONCURRENCY (default 16)
+```
+
+### TLS inputs
+
+All three TLS inputs are **file PATHS**, not inline PEM. Several SDKs' APIs
+want PEM *content* (`AxiamClient(client_cert=…)` in Python, `clientCert` in
+TypeScript, `WithClientCertificate([]byte, []byte)` in Go, …) — reading the
+file is the bench's job, not the operator's.
+
+`BENCH_CLIENT_CERT`/`BENCH_CLIENT_KEY` are **all-or-nothing**: a bench given
+exactly one of the two MUST emit a `status:"error"` record naming *both*
+variables (CONTRACT.md §6.1 rule 1) rather than crash or silently continue
+without an identity. Both unset (p0/p1/p2) leaves the SDK's default
+bearer-cookie behaviour untouched (§6.1 rule 5 — mTLS is opt-in).
+
+Every client a bench constructs must carry the identity — including the fresh,
+throwaway client the `login` op builds per iteration. A bench that configures
+only its long-lived client passes three ops and fails `login` at the handshake,
+which reads like a server problem rather than a harness one.
+
+Wired in: c, cpp, go, java, kotlin, python, rust, swift, typescript.
+Not yet wired: **csharp, php** (their toolchains are absent on the reference
+host, so the wiring cannot be verified there — the `justfile`'s p3 recipe warns
+about them by name).
+
+`sdk/test-client-cert-wiring.sh` proves this end-to-end without a live AXIAM
+stack: it runs each bench against a stub HTTPS server that requires a client
+certificate and asserts the server observed `CN=bench-client` on the wire.
+
+#### Example: a p3-mtls SDK pass
+
+`bench-up`/`bench-seed`/`sdk-bench-all` all take `profile=`, and the recipes
+source `profiles/p3-mtls.env`, which is what sets the three TLS paths — there
+is nothing to export by hand:
+
+```bash
+R=$PWD/results/p3-sdk
+BENCH_RESULTS_DIR=$R just target=axiam profile=p3-mtls bench-up bench-seed
+BENCH_RESULTS_DIR=$R BENCH_VUS=16 just target=axiam profile=p3-mtls bench-run
+BENCH_RESULTS_DIR=$R SDK_BENCH_CONCURRENCY=16 \
+  just target=axiam profile=p3-mtls sdk-bench-all      # -> $R/sdk/p3-mtls/
+```
+
+One language only, same wiring:
+
+```bash
+just target=axiam profile=p3-mtls sdk=rust sdk-bench
+```
+
+Driving a bench directly (no `just`) means supplying the profile env yourself —
+the paths must be **absolute** or resolvable from your cwd, since most `run.sh`
+scripts `cd` into their own directory (`sdk/_tlspaths.sh` absolutises them):
+
+```bash
+set -a; . profiles/p3-mtls.env; . .seed/axiam.seed.env; set +a
+BENCH_CERTS_DIR=$PWD/profiles/certs bash sdk/go/run.sh
 ```
 
 SDK clients authenticate with `tenant_slug` (`BENCH_TENANT_SLUG`, default

@@ -533,9 +533,26 @@ bench-dry-run:
 # same .seed/<target>.seed.env the k6 harness uses, and fail fast (naming the
 # exact missing var) rather than let a language-specific bench discover it
 # later with a confusing error.
+#
+# Profile wiring (fix): neither recipe used to source profiles/<profile>.env,
+# so every SDK bench saw the cross-profile defaults from its own `env()`
+# fallbacks — http://localhost:8090, no CA — no matter what `profile=` said.
+# `just profile=p2-tls13 sdk-bench-all` therefore measured PLAINTEXT and, since
+# run-all.sh keys its output dir on BENCH_PROFILE (unset → "p0-plaintext"),
+# filed the records under results/sdk/p0-plaintext/. The label and the wire
+# were consistently wrong together, which is why it looked like only a pathing
+# bug. Sourcing the profile env fixes both at once: BENCH_SCHEME/HOST/PORT
+# point the benches at the right listener and BENCH_PROFILE labels + scopes the
+# output. BENCH_CERTS_DIR is absolutized first (same reason as
+# run-benchmark.sh: the profile derives BENCH_CA_CERT/CLIENT_CERT from it, and
+# some benches chdir before opening them).
 sdk-bench:
     #!/usr/bin/env bash
     set -euo pipefail
+    export BENCH_CERTS_DIR="${BENCH_CERTS_DIR:-$PWD/profiles/certs}"
+    # shellcheck disable=SC1090
+    source profiles/{{profile}}.env
+    export BENCH_PROFILE="{{profile}}"
     SEED_DIR="${BENCH_SEED_DIR:-.seed}"
     SEED_ENV="$SEED_DIR/{{target}}.seed.env"
     if [ -f "$SEED_ENV" ]; then
@@ -544,18 +561,46 @@ sdk-bench:
     else
       echo "[sdk-bench] WARN: no seed env at $SEED_ENV — run 'just target={{target}} bench-seed' first" >&2
     fi
-    export BENCH_PROFILE="${BENCH_PROFILE:-{{profile}}}"
     for var in BENCH_RESOURCE_ID BENCH_SUBJECT_ID BENCH_TENANT_SLUG BENCH_CLIENT_ID BENCH_CLIENT_SECRET; do
       if [ -z "${!var:-}" ]; then
         echo "[sdk-bench] FATAL: $var is empty after sourcing $SEED_ENV — re-run 'just target={{target}} bench-seed' (H8: seed env must reach the SDK bench)." >&2
         exit 1
       fi
     done
+    echo "[sdk-bench] {{sdk}} @ {{profile}} -> ${BENCH_SCHEME}://${BENCH_HOST:-localhost}:${BENCH_PORT} (records under results/sdk/{{profile}}/)"
     bash sdk/{{sdk}}/run.sh
 
 sdk-bench-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export BENCH_CERTS_DIR="${BENCH_CERTS_DIR:-$PWD/profiles/certs}"
+    # shellcheck disable=SC1090
+    source profiles/{{profile}}.env
+    export BENCH_PROFILE="{{profile}}"
+    export BENCH_TARGET="{{target}}"
+    # p3-mtls needs a client cert on every request (CONTRACT.md §6.1). Wired
+    # in c/cpp/go/java/kotlin/python/rust/swift/typescript; csharp and php read
+    # BENCH_CA_CERT but not BENCH_CLIENT_CERT/KEY yet, so they fail at the
+    # handshake. Name them up front rather than let them look like an outage.
+    if [ "{{profile}}" = "p3-mtls" ]; then
+      echo "[sdk-bench-all] NOTE: p3-mtls presents a client certificate (CONTRACT.md §6.1). The csharp and php benches do not read BENCH_CLIENT_CERT/KEY yet and will report 'server unreachable' — every other language is wired. Verify the wiring without a live stack: just sdk-bench-test" >&2
+    fi
+    echo "[sdk-bench-all] {{target}} @ {{profile}} -> ${BENCH_SCHEME}://${BENCH_HOST:-localhost}:${BENCH_PORT} (records under ${BENCH_RESULTS_DIR:-results}/sdk/{{profile}}/)"
     bash sdk/run-all.sh
-    python3 sdk/collect.py --results results
+    python3 sdk/collect.py --results "${BENCH_RESULTS_DIR:-results}"
+
+# Verify every language bench presents its p3-mtls client certificate
+# (CONTRACT.md §6.1) — no AXIAM stack, no seed, no containers required: the
+# test stands up a stub HTTPS server that DEMANDS a client cert and asserts
+# each bench was seen presenting CN=bench-client on the wire. Run it after
+# touching any bench's TLS wiring, and before trusting a p3 SDK pass.
+#
+#   just sdk-bench-test                 # every wired language
+#   just sdk-bench-test python          # one language (args pass through)
+#   STRICT=1 just sdk-bench-test        # known upstream blockers fail too
+sdk-bench-test *languages:
+    bash runner/gen-certs.sh
+    bash sdk/test-client-cert-wiring.sh {{languages}}
 
 # Remove all run artifacts (keeps the dir).
 bench-clean:

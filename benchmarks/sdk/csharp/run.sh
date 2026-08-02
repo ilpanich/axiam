@@ -4,6 +4,12 @@
 # emits an axiam.sdk-bench/v1 record to stdout.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Resolve the TLS input paths (BENCH_CA_CERT and, for p3-mtls,
+# BENCH_CLIENT_CERT/BENCH_CLIENT_KEY) to absolute paths: profiles/*.env sets
+# them relative to benchmarks/, but `dotnet run --project` launches the app
+# with its working directory set to the project directory, not the caller's.
+# shellcheck disable=SC1091
+source "$HERE/../_tlspaths.sh"; absolutize_tls_paths
 # H8: dotnet is not installed on this host. Print the exact install commands
 # (see csharp/TODO.md "Installing the .NET SDK") to stderr so a maintainer
 # copy-pastes them, then degrade to an honest `pending` record rather than
